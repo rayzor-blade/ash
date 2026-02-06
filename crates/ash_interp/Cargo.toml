@@ -1,0 +1,11 @@
+[package]
+name = "ash_interp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "HashLink bytecode interpreter for ASH VM"
+
+[dependencies]
+ash = { path = "../ash" }
+anyhow = { workspace = true }

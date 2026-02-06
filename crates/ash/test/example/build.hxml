@@ -1,0 +1,5 @@
+-cp ./src
+--dce full
+-D dump
+-m Main
+--hl bin/test.hl

@@ -1,0 +1,35 @@
+[package]
+name = "ash"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "ASH Virtual Machine for HashLink Bytecode"
+keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
+
+[dependencies]
+inkwell = {workspace=true}
+anyhow = {workspace=true}
+flexstr = {workspace=true}
+num_enum = {workspace=true}
+hlbc = {git="https://github.com/Gui-Yom/hlbc", version = "0.8.0"}
+libloading = "0.8.5"
+once_cell = {workspace=true}
+tempfile = "3.2"
+memchr = "2.7.4"
+byteorder = {workspace=true}
+ash_macro = {workspace=true}
+libc = "0.2.158"
+
+[[bin]]
+name = "ash" 
+path = "src/main.rs" 
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = false
+
+[package.metadata.bundle]
+

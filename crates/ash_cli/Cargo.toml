@@ -1,0 +1,13 @@
+[package]
+name = "ash_cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
+
+[dependencies]
+ash = { path = "../ash" }
+ash_interp = { path = "../ash_interp" }
+anyhow = { workspace = true }
+inkwell = { workspace = true }

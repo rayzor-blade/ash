@@ -20,7 +20,7 @@ impl<'ctx> JITModule<'ctx> {
         let global_value = if hl_type_obj.global_value != 0 {
             let index = hl_type_obj.global_value as usize - 1;
             if let Some(global) = self.globals.get(&index) {
-                global.as_pointer_value()
+                *global
             } else {
                 return Err(anyhow!("Global value not found for index: {}", index));
             }

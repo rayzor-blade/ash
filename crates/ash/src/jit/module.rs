@@ -55,10 +55,16 @@ pub struct JITModule<'ctx> {
     pub(crate) int_globals: Vec<GlobalValue<'ctx>>,
     pub(crate) float_globals: Vec<GlobalValue<'ctx>>,
     pub(crate) string_globals: Vec<GlobalValue<'ctx>>,
-    pub(crate) globals: HashMap<usize, GlobalValue<'ctx>>,
+    /// C-side globals: inttoptr constants pointing into globals_data.
+    /// Both JIT code and native stdlib access the same memory.
+    pub(crate) globals: HashMap<usize, PointerValue<'ctx>>,
+    /// Backing memory for globals — shared between JIT and native code.
+    pub(crate) globals_data: Vec<*mut c_void>,
     pub(crate) pending_compilations: Vec<usize>,
     pub(crate) c_ptr_to_type_index: HashMap<usize, usize>,
     pub(crate) hl_type_struct_type: Option<StructType<'ctx>>,
+    /// Function pointer table indexed by findex, used by hl_module_context.
+    pub(crate) functions_ptrs: Vec<*mut c_void>,
 }
 
 impl<'ctx> JITModule<'ctx> {
@@ -94,9 +100,11 @@ impl<'ctx> JITModule<'ctx> {
             type_info_globals: HashMap::new(),
             pending_compilations: Vec::new(),
             globals: HashMap::new(),
+            globals_data: Vec::new(),
             c_ptr_to_type_index: HashMap::new(),
             func_types: Vec::new(),
             hl_type_struct_type: None,
+            functions_ptrs: Vec::new(),
         };
 
         module.string_globals = module
@@ -105,17 +113,23 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let value = module.context.const_string(s.as_bytes(), false);
-                let value = module.module.add_global(
+                // Convert UTF-8 string to UTF-16 (HashLink uses UTF-16 internally)
+                let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect(); // null-terminated
+                let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+                let string_val = module.context.const_string(&utf16_bytes, false);
+                let global = module.module.add_global(
                     module
                         .context
                         .i8_type()
-                        .array_type(s.as_bytes().len() as u32),
+                        .array_type(utf16_bytes.len() as u32),
                     None,
                     &format!("String_{}", i),
                 );
-                value.set_constant(true);
-                value
+                global.set_initializer(&string_val);
+                global.set_constant(true);
+                // Ensure 2-byte alignment for UTF-16
+                global.set_alignment(2);
+                global
             })
             .collect();
 
@@ -125,14 +139,15 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let value = module.context.i32_type().const_int(*v as u64, false);
-                let value = module.module.add_global(
+                let int_val = module.context.i32_type().const_int(*v as u64, false);
+                let global = module.module.add_global(
                     module.context.i32_type(),
                     None,
                     &format!("Int_{}", i),
                 );
-                value.set_constant(true);
-                value
+                global.set_initializer(&int_val);
+                global.set_constant(true);
+                global
             })
             .collect();
 
@@ -142,14 +157,15 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let value = module.context.f32_type().const_float(*v as f64);
-                let value = module.module.add_global(
-                    module.context.i32_type(),
+                let float_val = module.context.f64_type().const_float(*v);
+                let global = module.module.add_global(
+                    module.context.f64_type(),
                     None,
                     &format!("Float_{}", i),
                 );
-                value.set_constant(true);
-                value
+                global.set_initializer(&float_val);
+                global.set_constant(true);
+                global
             })
             .collect();
 
@@ -171,54 +187,19 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub fn initialize_globals(&mut self) -> Result<()> {
-        for (index, global_type) in self.bytecode.globals.clone().iter().enumerate() {
-            let llvm_type = self.get_or_create_any_type(global_type.0)?;
+        let nglobals = self.bytecode.globals.len();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
 
-            // Convert AnyTypeEnum to BasicTypeEnum
-            let basic_type = match llvm_type {
-                AnyTypeEnum::IntType(t) => BasicTypeEnum::IntType(t),
-                AnyTypeEnum::FloatType(t) => BasicTypeEnum::FloatType(t),
-                AnyTypeEnum::PointerType(t) => BasicTypeEnum::PointerType(t),
-                AnyTypeEnum::StructType(t) => BasicTypeEnum::StructType(t),
-                AnyTypeEnum::ArrayType(t) => BasicTypeEnum::ArrayType(t),
-                AnyTypeEnum::VectorType(t) => BasicTypeEnum::VectorType(t),
-                AnyTypeEnum::FunctionType(_) => {
-                    return Err(anyhow!(
-                        "Function type not supported as global for index {}",
-                        index
-                    ))
-                }
-                AnyTypeEnum::VoidType(_) => {
-                    return Err(anyhow!(
-                        "Void type not supported as global for index {}",
-                        index
-                    ))
-                }
-            };
+        // Allocate C-side memory for all globals (pointer-sized slots, zeroed).
+        // Both JIT code and native stdlib will access this same memory.
+        self.globals_data = vec![std::ptr::null_mut(); nglobals];
 
-            // Create a global variable with the appropriate type
-            let global_value = self.module.add_global(
-                basic_type,
-                Some(AddressSpace::default()),
-                &format!("global_{}", index),
-            );
-
-            // Initialize the global to null/zero
-            let zero_value: BasicValueEnum<'ctx> = match basic_type {
-                BasicTypeEnum::IntType(t) => t.const_zero().as_basic_value_enum(),
-                BasicTypeEnum::FloatType(t) => t.const_zero().as_basic_value_enum(),
-                BasicTypeEnum::PointerType(t) => t.const_null().as_basic_value_enum(),
-                BasicTypeEnum::StructType(t) => t.const_zero().as_basic_value_enum(),
-                BasicTypeEnum::ArrayType(t) => t.const_zero().as_basic_value_enum(),
-                BasicTypeEnum::VectorType(t) => t.const_zero().as_basic_value_enum(),
-            };
-
-            global_value.set_initializer(&zero_value);
-
-            // println!("{}", global_value.print_to_string().to_string());
-
-            // Add the global to our HashMap
-            self.globals.insert(index, global_value);
+        for (index, _global_type) in self.bytecode.globals.clone().iter().enumerate() {
+            // Create an inttoptr constant pointing to the C-side slot
+            let slot_addr = unsafe { self.globals_data.as_ptr().add(index) } as u64;
+            let addr_int = self.context.i64_type().const_int(slot_addr, false);
+            let slot_ptr = addr_int.const_to_pointer(ptr_type);
+            self.globals.insert(index, slot_ptr);
         }
 
         Ok(())
@@ -243,6 +224,13 @@ impl<'ctx> JITModule<'ctx> {
         let funs_len = funs.len();
 
         self.func_types = vec![std::ptr::null_mut(); funs_len + native_len];
+
+        // Pre-allocate functions_ptrs — will be filled with actual addresses before execution
+        let max_findex = std::cmp::max(
+            funs.iter().map(|f| f.findex as usize).max().unwrap_or(0),
+            natives.iter().map(|n| n.findex as usize).max().unwrap_or(0),
+        ) + 1;
+        self.functions_ptrs = vec![std::ptr::null_mut(); max_findex];
 
         let cache: Rc<RefCell<HashMap<usize, *mut hl_type>>> =
             Rc::new(RefCell::new(HashMap::new()));
@@ -340,7 +328,8 @@ impl<'ctx> JITModule<'ctx> {
                     let obj = type_.obj.as_ref().expect("Expected to get object type");
                     let global_value_index = obj.global_value.wrapping_sub(1) as usize;
                     for proto in &obj.proto {
-                        if let Some(f) = self.findexes.get_mut(&(proto.findex as usize)) {
+                        let pfindex = proto.findex as usize;
+                        if let Some(f) = self.findexes.get_mut(&pfindex) {
                             match f {
                                 FuncPtr::Fun(fun) => fun.field_name = Some(proto.name.clone()),
                                 _ => {}
@@ -357,7 +346,7 @@ impl<'ctx> JITModule<'ctx> {
                         let t = native_type.read();
                         (*t.__bindgen_anon_1.obj).m = Box::into_raw(Box::new(hl_module_context {
                             alloc: unsafe { mem::zeroed() },
-                            functions_ptrs: std::ptr::null_mut(),
+                            functions_ptrs: self.functions_ptrs.as_mut_ptr() as *mut *mut c_void,
                             functions_types: self.func_types.as_mut_ptr(),
                         }));
                         let obj = t.__bindgen_anon_1.obj.read();
@@ -388,6 +377,9 @@ impl<'ctx> JITModule<'ctx> {
                                     _ => {}
                                 }
                             }
+
+                            // Note: binding functions will be populated in functions_ptrs
+                            // during setup_functions_ptrs (if compiled).
                         }
                     }
 
@@ -471,89 +463,138 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    fn init_constants(&mut self) -> Result<()> {
-        let constants = self.bytecode.constants.clone();
-        let len = constants.len();
-        for (i, constant) in constants.iter().enumerate() {
-            let type_ref = self
-                .bytecode
-                .globals
-                .get(constant.global as usize)
-                .expect("Expected to get global type ref");
-            let type_ = self.types_.get(type_ref.0).expect("Expected to get type");
-            match type_.kind {
-                hl_type_kind_HOBJ | hl_type_kind_HABSTRACT => {
-                    let obj = type_.obj.as_ref().expect("Expected to get object type");
-                    for (j, idx) in constant.fields.iter().enumerate() {
-                        let field_type_ref = (&obj.fields[j]).type_.clone();
-                        let field_type = &self.types_[field_type_ref.0];
-                        match field_type.kind {
-                            hl_type_kind_HI32 => {
-                                let int = *&self.bytecode.ints[*idx as usize];
-                                let global_value = self
-                                    .globals
-                                    .get_mut(&(constant.global as usize))
-                                    .expect("Expected to get global value");
+    /// Materialize bytecode constants into globals_data.
+    /// Constants are pre-allocated objects (typically String literals) stored in globals.
+    /// Each constant specifies a global index and field values to populate.
+    /// Must be called AFTER setup_functions_ptrs (needs native function addresses).
+    pub(crate) fn init_constants(&mut self) -> Result<()> {
+        if self.bytecode.constants.is_empty() {
+            return Ok(());
+        }
 
-                                global_value.set_initializer(
-                                    &self.context.i32_type().const_int(int as u64, false),
-                                );
-                                global_value.set_constant(true);
-                            }
-                            hl_type_kind_HBOOL => {
-                                let global_value = self
-                                    .globals
-                                    .get_mut(&(constant.global as usize))
-                                    .expect("Expected to get global value");
+        // Build type_index -> c_type_ptr mapping from c_ptr_to_type_index
+        let type_to_c_ptr: HashMap<usize, *mut hl_type> = self
+            .c_ptr_to_type_index
+            .iter()
+            .map(|(&ptr, &idx)| (idx, ptr as *mut hl_type))
+            .collect();
 
-                                global_value.set_initializer(
-                                    &self.context.bool_type().const_int(*idx as u64, false),
-                                );
-                                global_value.set_constant(true);
-                            }
-                            hl_type_kind_HF64 => {
-                                let float = *&self.bytecode.floats[*idx as usize];
-                                let global_value = self
-                                    .globals
-                                    .get_mut(&(constant.global as usize))
-                                    .expect("Expected to get global value");
+        // Resolve native functions we need
+        type FnAllocObj = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
+        type FnGetObjRt = unsafe extern "C" fn(*mut hl_type) -> *mut hl_runtime_obj;
 
-                                global_value
-                                    .set_initializer(&self.context.f64_type().const_float(float));
-                                global_value.set_constant(true);
-                            }
-                            hl_type_kind_HBYTES => {
-                                let string = &self.bytecode.strings[*idx as usize].clone();
-                                let global_value = self
-                                    .globals
-                                    .get_mut(&(constant.global as usize))
-                                    .expect("Expected to get global value");
+        let fn_alloc_obj: FnAllocObj = unsafe {
+            let ptr = self
+                .native_function_resolver
+                .resolve_function("std", "hlp_alloc_obj")
+                .map_err(|e| anyhow!("Cannot resolve hlp_alloc_obj: {}", e))?;
+            std::mem::transmute(ptr)
+        };
+        let fn_get_obj_rt: FnGetObjRt = unsafe {
+            let ptr = self
+                .native_function_resolver
+                .resolve_function("std", "hlp_get_obj_rt")
+                .map_err(|e| anyhow!("Cannot resolve hlp_get_obj_rt: {}", e))?;
+            std::mem::transmute(ptr)
+        };
 
-                                global_value.set_initializer(
-                                    &self.context.const_string(string.as_bytes(), false),
-                                );
-                                global_value.set_constant(true);
-                            }
-                            hl_type_kind_HTYPE => {
-                                let type_ = self
-                                    .initialized_type_cache
-                                    .get(&(*idx as usize))
-                                    .expect("Expected to get an initialized type");
-                                let global_value = self
-                                    .globals
-                                    .get_mut(&(constant.global as usize))
-                                    .expect("Expected to get global value");
+        let bytecode = self.bytecode.clone();
 
-                                global_value.set_initializer(type_);
-                                global_value.set_constant(true);
+        for constant in &bytecode.constants {
+            let global_idx = constant.global as usize;
+            if global_idx >= bytecode.globals.len() || global_idx >= self.globals_data.len() {
+                continue;
+            }
+
+            let type_idx = bytecode.globals[global_idx].0;
+            let hl_type_rust = &bytecode.types[type_idx];
+
+            let c_type_ptr = match type_to_c_ptr.get(&type_idx) {
+                Some(&ptr) => ptr,
+                None => continue,
+            };
+
+            if c_type_ptr.is_null() {
+                continue;
+            }
+
+            let kind = hl_type_rust.kind;
+
+            if kind == hl_type_kind_HOBJ || kind == hl_type_kind_HSTRUCT {
+                let obj_data = match hl_type_rust.obj.as_ref() {
+                    Some(o) => o,
+                    None => continue,
+                };
+
+                // Allocate the object
+                let obj_ptr = unsafe { fn_alloc_obj(c_type_ptr) };
+                if obj_ptr.is_null() {
+                    continue;
+                }
+
+                // Store in globals_data
+                self.globals_data[global_idx] = obj_ptr as *mut c_void;
+
+                // Also update global_value in hl_type_obj so stdlib can find it
+                unsafe {
+                    let obj = (*c_type_ptr).__bindgen_anon_1.obj;
+                    if !obj.is_null() && !(*obj).global_value.is_null() {
+                        *(*obj).global_value = obj_ptr as *mut c_void;
+                    }
+                }
+
+                // Get runtime object for field offsets
+                let rt = unsafe { fn_get_obj_rt(c_type_ptr) };
+                if rt.is_null() || constant.fields.is_empty() {
+                    continue;
+                }
+
+                // Calculate field start offset (skip parent fields)
+                let start = unsafe { (*rt).nfields as usize - obj_data.fields.len() };
+
+                // Fill in constant fields
+                for (j, &field_value) in constant.fields.iter().enumerate() {
+                    if j >= obj_data.fields.len() {
+                        break;
+                    }
+
+                    let field_type_idx = obj_data.fields[j].type_.0;
+                    let field_kind = bytecode.types[field_type_idx].kind;
+
+                    let field_offset = unsafe { *(*rt).fields_indexes.add(j + start) };
+                    let field_addr =
+                        unsafe { (obj_ptr as *mut u8).add(field_offset as usize) };
+
+                    match field_kind {
+                        hl_type_kind_HBYTES => {
+                            // field_value is a string index → convert to UTF-16
+                            let str_idx = field_value as usize;
+                            if str_idx < bytecode.strings.len() {
+                                let s = &bytecode.strings[str_idx];
+                                let mut utf16: Vec<u16> = s.encode_utf16().collect();
+                                utf16.push(0); // null terminator
+                                let ptr = utf16.as_ptr();
+                                std::mem::forget(utf16);
+                                unsafe {
+                                    *(field_addr as *mut *const u16) = ptr;
+                                }
                             }
-                            _ => {}
+                        }
+                        hl_type_kind_HI32 | hl_type_kind_HBOOL => {
+                            unsafe {
+                                *(field_addr as *mut i32) = field_value;
+                            }
+                        }
+                        _ => {
+                            unsafe {
+                                *(field_addr as *mut i32) = field_value;
+                            }
                         }
                     }
                 }
-                _ => return Err(anyhow!("Invalid constant")),
             }
         }
+
         Ok(())
     }
 
@@ -796,26 +837,11 @@ impl<'ctx> JITModule<'ctx> {
 
     fn handle_null_type(
         &self,
-        null: &TypeRef,
+        _null: &TypeRef,
     ) -> std::result::Result<AnyTypeEnum<'ctx>, anyhow::Error> {
-        let inner_type = self
-            .type_cache
-            .get(&null.0)
-            .expect("Expected to get underlying Null type parameter");
-        let null_type = &self.bytecode.types[null.0];
-        let name = format!(
-            "haxe.Null<{}>",
-            self.get_type_name_by_index(
-                null_type
-                    .tparam
-                    .as_ref()
-                    .expect("expect to get type parameter")
-                    .0
-            )
-        );
-        let null_type = self.context.opaque_struct_type(&name);
-        null_type.set_body(&[inner_type.into_pointer_type().into()], false);
-        Ok(null_type.as_any_type_enum())
+        // Null types are always heap-allocated (nullable pointer wrappers)
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        Ok(ptr_type.as_any_type_enum())
     }
 
     fn handle_enum_type(

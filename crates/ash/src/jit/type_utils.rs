@@ -67,7 +67,16 @@ impl<'ctx> JITModule<'ctx> {
                         fields: self.convert_fields_to_c(&obj.fields, Rc::clone(&cache))?,
                         proto: self.convert_proto_to_c(&obj.proto)?,
                         bindings: self.convert_bindings_to_c(&obj.bindings),
-                        global_value: obj.global_value as *mut *mut c_void,
+                        global_value: if obj.global_value > 0 {
+                            let gv_idx = (obj.global_value - 1) as usize;
+                            if gv_idx < self.globals_data.len() {
+                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                            } else {
+                                ptr::null_mut()
+                            }
+                        } else {
+                            ptr::null_mut()
+                        },
                         m: ptr::null_mut(),
                         rt: ptr::null_mut(),
                     });
@@ -109,7 +118,16 @@ impl<'ctx> JITModule<'ctx> {
                 if let Some(ref tenum) = hl_type.tenum {
                     let c_enum = Box::new(hl_type_enum {
                         name: CString::new(tenum.name.as_str())?.into_raw() as *const u16,
-                        global_value: tenum.global_value as *mut *mut c_void,
+                        global_value: if tenum.global_value > 0 {
+                            let gv_idx = (tenum.global_value - 1) as usize;
+                            if gv_idx < self.globals_data.len() {
+                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                            } else {
+                                ptr::null_mut()
+                            }
+                        } else {
+                            ptr::null_mut()
+                        },
                         nconstructs: tenum.constructs.len() as i32,
                         constructs: self.convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
                     });
@@ -293,7 +311,16 @@ impl<'ctx> JITModule<'ctx> {
                         fields: self.convert_fields_to_c(&obj.fields, Rc::clone(&cache))?,
                         proto: self.convert_proto_to_c(&obj.proto)?,
                         bindings: self.convert_bindings_to_c(&obj.bindings),
-                        global_value: obj.global_value as *mut *mut c_void,
+                        global_value: if obj.global_value > 0 {
+                            let gv_idx = (obj.global_value - 1) as usize;
+                            if gv_idx < self.globals_data.len() {
+                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                            } else {
+                                ptr::null_mut()
+                            }
+                        } else {
+                            ptr::null_mut()
+                        },
                         m: ptr::null_mut(),
                         rt: ptr::null_mut(),
                     });
@@ -333,7 +360,16 @@ impl<'ctx> JITModule<'ctx> {
                 if let Some(ref tenum) = rust_type.tenum {
                     let c_enum = Box::new(hl_type_enum {
                         name: CString::new(tenum.name.as_str())?.into_raw() as *const u16,
-                        global_value: tenum.global_value as *mut *mut c_void,
+                        global_value: if tenum.global_value > 0 {
+                            let gv_idx = (tenum.global_value - 1) as usize;
+                            if gv_idx < self.globals_data.len() {
+                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                            } else {
+                                ptr::null_mut()
+                            }
+                        } else {
+                            ptr::null_mut()
+                        },
                         nconstructs: tenum.constructs.len() as i32,
                         constructs: self.convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
                     });

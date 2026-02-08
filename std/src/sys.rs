@@ -21,6 +21,8 @@ pub unsafe extern "C" fn hlp_sys_print(msg: *const vbyte) {
     let slice = std::slice::from_raw_parts(p, len);
     let s = String::from_utf16_lossy(slice);
     print!("{}", s);
+    use std::io::Write;
+    std::io::stdout().flush().ok();
 }
 
 

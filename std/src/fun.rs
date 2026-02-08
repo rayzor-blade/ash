@@ -237,7 +237,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
         t,
         fun,
         hasValue: 1,
-        value: ptr::null_mut(),
+        value: ptr,
         stackCount: 0,
     });
 

@@ -1854,6 +1854,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- SafeCast: for now, just copy the pointer (runtime check deferred) ---
             Opcode::SafeCast { dst, src } => {
+                // Simple copy for now — full hlp_value_cast deferred
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize],
                     registers[src.0 as usize],
@@ -1864,6 +1865,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- ToVirtual: copy pointer (virtual wrapping deferred) ---
             Opcode::ToVirtual { dst, src } => {
+                // Simple copy for now — full hlp_dyn_castp deferred
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize],
                     registers[src.0 as usize],
@@ -2151,51 +2153,235 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
 
-            // --- Enum opcodes (stubs) ---
-            Opcode::MakeEnum { dst, construct: _, args: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            // --- Enum opcodes ---
+            Opcode::EnumAlloc { dst, construct } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let type_index = f.regs[dst.0 as usize].0;
+                let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
+
+                let alloc_enum = self.declare_native("hlp_alloc_enum",
+                    &[ptr_type.into(), i32_type.into()], Some(ptr_type.into()));
+                let construct_val = i32_type.const_int(construct.0 as u64, false);
+                let result = self.builder.build_call(alloc_enum,
+                    &[type_ptr.into(), construct_val.into()], "enum_alloc")?;
+                self.builder.build_store(registers[dst.0 as usize],
+                    result.try_as_basic_value().left().unwrap())?;
             }
-            Opcode::EnumAlloc { dst, construct: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            Opcode::MakeEnum { dst, construct, args } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let i8_type = self.context.i8_type();
+                let type_index = f.regs[dst.0 as usize].0;
+                let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
+
+                // Allocate the enum
+                let alloc_enum = self.declare_native("hlp_alloc_enum",
+                    &[ptr_type.into(), i32_type.into()], Some(ptr_type.into()));
+                let construct_val = i32_type.const_int(construct.0 as u64, false);
+                let venum_ptr = self.builder.build_call(alloc_enum,
+                    &[type_ptr.into(), construct_val.into()], "make_enum")?
+                    .try_as_basic_value().left().unwrap().into_pointer_value();
+
+                // Write each arg at its pre-computed offset
+                let tenum = self.types_[type_index].tenum.as_ref()
+                    .ok_or_else(|| anyhow!("MakeEnum: type {} is not an enum", type_index))?;
+                let construct_info = &tenum.constructs[construct.0];
+
+                for (j, arg) in args.iter().enumerate() {
+                    let arg_val = self.builder.build_load(
+                        reg_types[arg.0 as usize], registers[arg.0 as usize],
+                        &format!("make_enum_arg_{}", j))?;
+                    let offset = construct_info.offsets[j] as u64;
+                    let param_ptr = unsafe {
+                        self.builder.build_gep(i8_type, venum_ptr,
+                            &[self.context.i64_type().const_int(offset, false)],
+                            &format!("make_enum_param_{}", j))?
+                    };
+                    self.builder.build_store(param_ptr, arg_val)?;
+                }
+
+                self.builder.build_store(registers[dst.0 as usize], venum_ptr)?;
             }
-            Opcode::EnumIndex { dst, value: _ } => {
-                self.builder.build_store(
-                    registers[dst.0 as usize],
-                    self.context.i32_type().const_zero(),
-                )?;
+            Opcode::EnumIndex { dst, value } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let venum_ptr = self.builder.build_load(ptr_type, registers[value.0 as usize], "enumidx_ptr")?.into_pointer_value();
+                // venum.index is i32 at offset 8
+                let index_gep = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), venum_ptr,
+                        &[self.context.i64_type().const_int(8, false)], "enumidx_gep")?
+                };
+                let index_val = self.builder.build_load(self.context.i32_type(), index_gep, "enumidx_val")?;
+                self.builder.build_store(registers[dst.0 as usize], index_val)?;
             }
-            Opcode::EnumField { dst, value: _, construct: _, field: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            Opcode::EnumField { dst, value, construct, field } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let venum_ptr = self.builder.build_load(ptr_type, registers[value.0 as usize], "enumfield_ptr")?.into_pointer_value();
+
+                let value_type_idx = f.regs[value.0 as usize].0;
+                let tenum = self.types_[value_type_idx].tenum.as_ref()
+                    .ok_or_else(|| anyhow!("EnumField: type {} is not an enum", value_type_idx))?;
+                let construct_info = &tenum.constructs[construct.0];
+                let offset = construct_info.offsets[field.0] as u64;
+
+                let param_ptr = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), venum_ptr,
+                        &[self.context.i64_type().const_int(offset, false)], "enumfield_gep")?
+                };
+                let val = self.builder.build_load(reg_types[dst.0 as usize], param_ptr, "enumfield_val")?;
+                self.builder.build_store(registers[dst.0 as usize], val)?;
             }
-            Opcode::SetEnumField { value: _, field: _, src: _ } => {
-                // Stubbed
+            Opcode::SetEnumField { value, field, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let venum_ptr = self.builder.build_load(ptr_type, registers[value.0 as usize], "setenumfield_ptr")?.into_pointer_value();
+                let src_val = self.builder.build_load(reg_types[src.0 as usize], registers[src.0 as usize], "setenumfield_val")?;
+
+                // Scan backwards to find the preceding EnumAlloc targeting the same register
+                let value_type_idx = f.regs[value.0 as usize].0;
+                let tenum = self.types_[value_type_idx].tenum.as_ref()
+                    .ok_or_else(|| anyhow!("SetEnumField: type {} is not an enum", value_type_idx))?;
+
+                // Find construct index from preceding opcodes
+                let mut construct_idx = 0usize; // default to 0
+                for prev_i in (0..i).rev() {
+                    match &f.ops[prev_i] {
+                        Opcode::EnumAlloc { dst, construct } if dst.0 == value.0 => {
+                            construct_idx = construct.0;
+                            break;
+                        }
+                        Opcode::MakeEnum { dst, construct, .. } if dst.0 == value.0 => {
+                            construct_idx = construct.0;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                let construct_info = &tenum.constructs[construct_idx];
+                let offset = construct_info.offsets[field.0] as u64;
+                let param_ptr = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), venum_ptr,
+                        &[self.context.i64_type().const_int(offset, false)], "setenumfield_gep")?
+                };
+                self.builder.build_store(param_ptr, src_val)?;
             }
 
-            // --- Memory access stubs ---
-            Opcode::GetI8 { dst, bytes: _, index: _ } => {
-                self.builder.build_store(registers[dst.0 as usize], self.context.i32_type().const_zero())?;
+            // --- Memory access ---
+            Opcode::GetI8 { dst, bytes, index } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "geti8_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "geti8_idx")?.into_int_value();
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "geti8_addr")? };
+                let val = self.builder.build_load(self.context.i8_type(), addr, "geti8_val")?.into_int_value();
+                let ext = self.builder.build_int_s_extend(val, self.context.i32_type(), "geti8_sext")?;
+                self.builder.build_store(registers[dst.0 as usize], ext)?;
             }
-            Opcode::GetI16 { dst, bytes: _, index: _ } => {
-                self.builder.build_store(registers[dst.0 as usize], self.context.i32_type().const_zero())?;
+            Opcode::GetI16 { dst, bytes, index } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "geti16_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "geti16_idx")?.into_int_value();
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "geti16_addr")? };
+                let val = self.builder.build_load(self.context.i16_type(), addr, "geti16_val")?.into_int_value();
+                let ext = self.builder.build_int_s_extend(val, self.context.i32_type(), "geti16_sext")?;
+                self.builder.build_store(registers[dst.0 as usize], ext)?;
             }
-            Opcode::GetMem { dst, bytes: _, index: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            Opcode::GetMem { dst, bytes, index } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "getmem_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "getmem_idx")?.into_int_value();
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "getmem_addr")? };
+                let val = self.builder.build_load(reg_types[dst.0 as usize], addr, "getmem_val")?;
+                self.builder.build_store(registers[dst.0 as usize], val)?;
             }
-            Opcode::SetI8 { bytes: _, index: _, src: _ } => {}
-            Opcode::SetI16 { bytes: _, index: _, src: _ } => {}
-            Opcode::SetMem { bytes: _, index: _, src: _ } => {}
-            Opcode::SetArray { array: _, index: _, src: _ } => {}
-            Opcode::ArraySize { dst, array: _ } => {
-                self.builder.build_store(registers[dst.0 as usize], self.context.i32_type().const_zero())?;
+            Opcode::SetI8 { bytes, index, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "seti8_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "seti8_idx")?.into_int_value();
+                let src_val = self.builder.build_load(reg_types[src.0 as usize], registers[src.0 as usize], "seti8_src")?.into_int_value();
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "seti8_addr")? };
+                let trunc = self.builder.build_int_truncate(src_val, self.context.i8_type(), "seti8_trunc")?;
+                self.builder.build_store(addr, trunc)?;
+            }
+            Opcode::SetI16 { bytes, index, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "seti16_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "seti16_idx")?.into_int_value();
+                let src_val = self.builder.build_load(reg_types[src.0 as usize], registers[src.0 as usize], "seti16_src")?.into_int_value();
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "seti16_addr")? };
+                let trunc = self.builder.build_int_truncate(src_val, self.context.i16_type(), "seti16_trunc")?;
+                self.builder.build_store(addr, trunc)?;
+            }
+            Opcode::SetMem { bytes, index, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[bytes.0 as usize], "setmem_base")?.into_pointer_value();
+                let idx = self.builder.build_load(self.context.i32_type(), registers[index.0 as usize], "setmem_idx")?.into_int_value();
+                let src_val = self.builder.build_load(reg_types[src.0 as usize], registers[src.0 as usize], "setmem_src")?;
+                let addr = unsafe { self.builder.build_gep(self.context.i8_type(), base, &[idx], "setmem_addr")? };
+                self.builder.build_store(addr, src_val)?;
             }
 
-            // --- GetTID ---
-            Opcode::GetTID { dst, src: _ } => {
-                self.builder.build_store(registers[dst.0 as usize], self.context.i32_type().const_zero())?;
+            // --- Array operations ---
+            Opcode::SetArray { array, index, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let i8_type = self.context.i8_type();
+
+                let arr = self.builder.build_load(ptr_type, registers[array.0 as usize], "setarr_ptr")?.into_pointer_value();
+                let idx = self.builder.build_load(i32_type, registers[index.0 as usize], "setarr_idx")?.into_int_value();
+                let src_val = self.builder.build_load(reg_types[src.0 as usize], registers[src.0 as usize], "setarr_val")?;
+
+                // Data starts at offset 24 (sizeof(varray))
+                let data_ptr = unsafe {
+                    self.builder.build_gep(i8_type, arr,
+                        &[self.context.i64_type().const_int(24, false)], "setarr_data")?
+                };
+
+                // Element size from source type kind
+                let src_type_idx = f.regs[src.0 as usize].0;
+                let src_kind = self.types_[src_type_idx].kind;
+                let elem_size: u64 = match src_kind {
+                    hl_type_kind_HUI8 => 1,
+                    hl_type_kind_HUI16 | hl_type_kind_HBOOL => 2,
+                    hl_type_kind_HI32 | hl_type_kind_HF32 => 4,
+                    hl_type_kind_HI64 | hl_type_kind_HF64 => 8,
+                    _ => 8, // All pointer types = 8
+                };
+
+                let elem_size_val = i32_type.const_int(elem_size, false);
+                let byte_offset = self.builder.build_int_mul(idx, elem_size_val, "setarr_offset")?;
+                let slot = unsafe { self.builder.build_gep(i8_type, data_ptr, &[byte_offset], "setarr_slot")? };
+                self.builder.build_store(slot, src_val)?;
+            }
+            Opcode::ArraySize { dst, array } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let arr = self.builder.build_load(ptr_type, registers[array.0 as usize], "arrsize_ptr")?.into_pointer_value();
+                // varray.size is at offset 16
+                let size_gep = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), arr,
+                        &[self.context.i64_type().const_int(16, false)], "arrsize_gep")?
+                };
+                let size = self.builder.build_load(self.context.i32_type(), size_gep, "arrsize_val")?;
+                self.builder.build_store(registers[dst.0 as usize], size)?;
+            }
+
+            // --- GetTID: get type kind ---
+            Opcode::GetTID { dst, src } => {
+                let src_val = self.builder.build_load(
+                    reg_types[src.0 as usize], registers[src.0 as usize], "gettid_src")?;
+                if src_val.is_pointer_value() {
+                    // Runtime: load obj->t (offset 0), then t->kind (offset 0)
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let obj = src_val.into_pointer_value();
+                    let t_ptr = self.builder.build_load(ptr_type, obj, "gettid_type")?.into_pointer_value();
+                    let kind = self.builder.build_load(self.context.i32_type(), t_ptr, "gettid_kind")?;
+                    self.builder.build_store(registers[dst.0 as usize], kind)?;
+                } else {
+                    // Compile-time: type kind is known
+                    let type_idx = f.regs[src.0 as usize].0;
+                    let kind = self.types_[type_idx].kind;
+                    let kind_val = self.context.i32_type().const_int(kind as u64, false);
+                    self.builder.build_store(registers[dst.0 as usize], kind_val)?;
+                }
             }
 
             // --- Assert: unreachable ---
@@ -2205,9 +2391,26 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- Prefetch / Asm / RefData / RefOffset: stubs ---
             Opcode::Prefetch { .. } | Opcode::Asm { .. } => {}
-            Opcode::RefData { dst, src: _ } | Opcode::RefOffset { dst, reg: _, offset: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            // --- RefData: extract value pointer from vdynamic (offset 8) ---
+            Opcode::RefData { dst, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let obj = self.builder.build_load(ptr_type, registers[src.0 as usize], "refdata_src")?.into_pointer_value();
+                let data_gep = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), obj,
+                        &[self.context.i64_type().const_int(8, false)], "refdata_gep")?
+                };
+                let data = self.builder.build_load(ptr_type, data_gep, "refdata_val")?;
+                self.builder.build_store(registers[dst.0 as usize], data)?;
+            }
+            // --- RefOffset: pointer + byte offset ---
+            Opcode::RefOffset { dst, reg, offset } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self.builder.build_load(ptr_type, registers[reg.0 as usize], "refoff_base")?.into_pointer_value();
+                let off = self.builder.build_load(self.context.i32_type(), registers[offset.0 as usize], "refoff_off")?.into_int_value();
+                let result = unsafe {
+                    self.builder.build_gep(self.context.i8_type(), base, &[off], "refoff_result")?
+                };
+                self.builder.build_store(registers[dst.0 as usize], result)?;
             }
 
             _ => return Err(anyhow!("Opcode {:?} not yet implemented in JIT", op)),

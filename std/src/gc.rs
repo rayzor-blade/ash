@@ -39,7 +39,8 @@ pub struct ImmixAllocator {
     roots: Rc<RefCell<RootSet>>,
     pub(crate) current_exception: Option<Box<HLException>>,
     pub(crate) exception_handler: Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
-    pub (crate)  current_trap: RefCell<*mut TrapContext>,
+    pub(crate) current_trap: RefCell<*mut TrapContext>,
+    pub(crate) exc_value: RefCell<*mut vdynamic>,
 }
 
 impl ImmixAllocator {
@@ -74,6 +75,7 @@ impl ImmixAllocator {
             current_exception: None,
             exception_handler: None,
             current_trap: RefCell::new(std::ptr::null_mut()),
+            exc_value: RefCell::new(std::ptr::null_mut()),
         }
     }
 

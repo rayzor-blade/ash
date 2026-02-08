@@ -1874,17 +1874,68 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_store(registers[dst.0 as usize], src_val)?;
             }
 
-            // --- Trap / EndTrap: no-op stubs for now (exception handling deferred) ---
-            Opcode::Trap { exc: _, offset } => {
-                // Jump to handler block on exception (stubbed: never traps)
-                let _ = offset;
-            }
-            Opcode::EndTrap { exc: _ } => {
-                // Remove trap context (stubbed: no-op)
+            // --- Trap: setjmp-based exception handling ---
+            Opcode::Trap { exc, offset } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+
+                // 1. Call hlp_setup_trap_jit() → returns *mut c_int (jmp_buf pointer)
+                let setup = self.declare_native("hlp_setup_trap_jit", &[], Some(ptr_type.into()));
+                let buf_ptr = self.builder.build_call(setup, &[], "trap_buf")?
+                    .try_as_basic_value().left().unwrap().into_pointer_value();
+
+                // 2. Call _setjmp(buf_ptr) via indirect call (system function, not in stdlib)
+                let setjmp_addr = crate::hl::_setjmp as usize as u64;
+                let setjmp_ptr = self.context.i64_type().const_int(setjmp_addr, false)
+                    .const_to_pointer(ptr_type);
+                let setjmp_fn_type = i32_type.fn_type(&[ptr_type.into()], false);
+                let setjmp_result = self.builder.build_indirect_call(
+                    setjmp_fn_type, setjmp_ptr, &[buf_ptr.into()], "setjmp_ret"
+                )?.try_as_basic_value().left().unwrap().into_int_value();
+
+                // 3. Branch: 0 → normal (protected code), non-zero → handler
+                let is_exception = self.builder.build_int_compare(
+                    IntPredicate::NE, setjmp_result, i32_type.const_zero(), "is_exc")?;
+
+                let handler_block = opcode_blocks[(i as i32 + 1 + *offset) as usize];
+                let normal_block = opcode_blocks[i + 1];
+
+                // Create handler_entry block to load exc value before jumping to handler
+                let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                let handler_entry = self.context.append_basic_block(function, &format!("trap_handler_{}", i));
+
+                self.builder.build_conditional_branch(is_exception, handler_entry, normal_block)?;
+
+                // Emit handler entry: load exc value into exc register, then branch to handler
+                self.builder.position_at_end(handler_entry);
+                let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
+                let exc_val = self.builder.build_call(get_exc, &[], "exc_val")?
+                    .try_as_basic_value().left().unwrap();
+                self.builder.build_store(registers[exc.0 as usize], exc_val)?;
+                self.builder.build_unconditional_branch(handler_block)?;
             }
 
-            // --- Throw / Rethrow: emit unreachable for now ---
-            Opcode::Throw { exc: _ } | Opcode::Rethrow { exc: _ } => {
+            // --- EndTrap: remove trap context ---
+            Opcode::EndTrap { exc: _ } => {
+                let remove = self.declare_native("hlp_remove_trap_jit", &[], None);
+                self.builder.build_call(remove, &[], "")?;
+            }
+
+            // --- Throw: call hlp_throw (diverging) ---
+            Opcode::Throw { exc } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let exc_val = self.builder.build_load(ptr_type, registers[exc.0 as usize], "throw_val")?;
+                let throw_fn = self.declare_native("hlp_throw", &[ptr_type.into()], None);
+                self.builder.build_call(throw_fn, &[exc_val.into()], "")?;
+                self.builder.build_unreachable()?;
+            }
+
+            // --- Rethrow: same as Throw ---
+            Opcode::Rethrow { exc } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let exc_val = self.builder.build_load(ptr_type, registers[exc.0 as usize], "rethrow_val")?;
+                let throw_fn = self.declare_native("hlp_throw", &[ptr_type.into()], None);
+                self.builder.build_call(throw_fn, &[exc_val.into()], "")?;
                 self.builder.build_unreachable()?;
             }
 

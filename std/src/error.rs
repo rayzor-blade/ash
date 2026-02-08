@@ -10,7 +10,12 @@ use crate::types::hl_aptr;
 use anyhow::Result;
 use std::fmt::{self, Formatter};
 use std::mem;
+use std::os::raw::c_int;
 use std::panic;
+
+extern "C" {
+    fn _longjmp(buf: *mut c_int, val: c_int) -> !;
+}
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -72,6 +77,8 @@ impl std::fmt::Debug for VDynamicException {
 unsafe impl Send for VDynamicException {}
 
 pub struct TrapContext {
+    pub buf: [c_int; 48],
+    pub has_jmpbuf: bool,
     pub prev: *mut TrapContext,
     pub exception_value: Option<VDynamicException>,
     pub caught: bool,
@@ -80,6 +87,8 @@ pub struct TrapContext {
 impl TrapContext {
     pub fn new() -> Self {
         TrapContext {
+            buf: [0; 48],
+            has_jmpbuf: false,
             prev: std::ptr::null_mut(),
             exception_value: None,
             caught: false,
@@ -231,8 +240,40 @@ pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
-    let gc = GC.get_mut().expect("expeted to call GC");
-    gc.throw(VDynamicException(Box::from_raw(v)))
+    let gc = GC.get_mut().expect("expected GC");
+    let current = *gc.current_trap.borrow();
+
+    if !current.is_null() && (*current).has_jmpbuf {
+        // JIT path: store exception, pop trap, longjmp back to setjmp site
+        *gc.exc_value.borrow_mut() = v;
+        let buf_ptr = (*current).buf.as_mut_ptr();
+        *gc.current_trap.borrow_mut() = (*current).prev;
+        let _ = Box::from_raw(current);
+        _longjmp(buf_ptr, 1);
+    } else {
+        // Interpreter path: use Rust panic
+        gc.throw(VDynamicException(Box::from_raw(v)));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_int {
+    let gc = GC.get_mut().expect("expected GC");
+    let trap = gc.setup_trap();
+    (*trap).has_jmpbuf = true;
+    (*trap).buf.as_mut_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_remove_trap_jit() {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.remove_trap();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
+    let gc = GC.get_mut().expect("expected GC");
+    *gc.exc_value.borrow()
 }
 
 #[no_mangle]

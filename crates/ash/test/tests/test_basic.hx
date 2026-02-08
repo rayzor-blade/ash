@@ -26,10 +26,19 @@ class Main {
         }
     }
 
+    static function testStringConcat() {
+        var a = 10;
+        var b = 3;
+        Sys.println("add: " + (a + b));
+        Sys.println("sub: " + (a - b));
+        Sys.println("mul: " + (a * b));
+    }
+
     static function main() {
         testPrint();
         testCondition();
         testLoop();
+        testStringConcat();
         Sys.println("done");
     }
 }

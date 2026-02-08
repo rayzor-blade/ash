@@ -608,13 +608,21 @@ impl<'ctx> JITModule<'ctx> {
                             }
                         }
                         hl_type_kind_HI32 | hl_type_kind_HBOOL => {
+                            // field_value is an index into the ints table
+                            let int_val = bytecode.ints.get(field_value as usize)
+                                .copied()
+                                .unwrap_or(field_value);
                             unsafe {
-                                *(field_addr as *mut i32) = field_value;
+                                *(field_addr as *mut i32) = int_val;
                             }
                         }
                         _ => {
+                            // For other types, try ints table lookup too
+                            let int_val = bytecode.ints.get(field_value as usize)
+                                .copied()
+                                .unwrap_or(field_value);
                             unsafe {
-                                *(field_addr as *mut i32) = field_value;
+                                *(field_addr as *mut i32) = int_val;
                             }
                         }
                     }

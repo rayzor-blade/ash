@@ -304,7 +304,7 @@ pub unsafe extern "C" fn hlp_buffer_addr(
         }
         hl_type_kind_HF64 => {
             let value = *(data as *mut f64);
-            let s = str_to_uchar_ptr(&format!("{:.17e}", value));
+            let s = str_to_uchar_ptr(&format!("{}", value));
             hlp_buffer_str(b, s);
         }
         hl_type_kind_HBYTES => {
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             return;
         }
         hl_type_kind_HF64 => {
-            let _str = format!("{:.17e}", (*v).v.d);
+            let _str = format!("{}", (*v).v.d);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);

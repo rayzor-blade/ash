@@ -280,9 +280,12 @@ impl HLInterpreter {
                             }
                         }
                         _ => {
-                            // Primitive value - store directly as i32
+                            // field_value is an index into ints table for HI32/HBOOL
+                            let int_val = bytecode.ints.get(field_value as usize)
+                                .copied()
+                                .unwrap_or(field_value);
                             unsafe {
-                                *(field_addr as *mut i32) = field_value;
+                                *(field_addr as *mut i32) = int_val;
                             }
                         }
                     }

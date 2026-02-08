@@ -53,21 +53,33 @@ pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos:i32) -> usize {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_itos(i:c_int, len:*mut c_int) -> *const hl::vbyte {
-    let i_s = format!("{:.17e}", i);
-
-    *len = 1;
-
-    i_s.as_ptr()
+pub unsafe extern "C" fn hlp_itos(i: c_int, len: *mut c_int) -> *const hl::vbyte {
+    let s = format!("{}", i);
+    let utf16: Vec<u16> = s.encode_utf16().collect();
+    let k = utf16.len() as c_int;
+    *len = k;
+    let result = crate::bytes::hlp_alloc_bytes((k + 1) * 2) as *mut u16;
+    ptr::copy_nonoverlapping(utf16.as_ptr(), result, k as usize);
+    *result.add(k as usize) = 0; // null terminator
+    result as *const hl::vbyte
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_ftos(i:c_double, len:*mut c_int) -> *const hl::vbyte {
-    let i_s = format!("{}", i);
-
-    *len = 1;
-
-    i_s.as_ptr()
+pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vbyte {
+    let s = if d.is_nan() {
+        "nan".to_string()
+    } else if d.is_infinite() {
+        if d > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+    } else {
+        format!("{}", d)
+    };
+    let utf16: Vec<u16> = s.encode_utf16().collect();
+    let k = utf16.len() as c_int;
+    *len = k;
+    let result = crate::bytes::hlp_alloc_bytes((k + 1) * 2) as *mut u16;
+    ptr::copy_nonoverlapping(utf16.as_ptr(), result, k as usize);
+    *result.add(k as usize) = 0; // null terminator
+    result as *const hl::vbyte
 }
 
 

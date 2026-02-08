@@ -26,6 +26,15 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
+/// Compute HashLink field hash at compile time (same algorithm as hlp_hash_gen)
+fn hl_hash_utf8(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for c in s.encode_utf16() {
+        h = h.wrapping_mul(223).wrapping_add(c as i32);
+    }
+    h.wrapping_rem(0x1FFFFF7B)
+}
+
 #[to_llvm]
 unsafe extern "C" {
     fn hlp_get_dynset(d: *mut vdynamic, hfield: i32) -> *mut c_void;
@@ -1556,7 +1565,6 @@ impl<'ctx> JITModule<'ctx> {
             // --- ToDyn ---
             Opcode::ToDyn { dst, src } => {
                 let src_type_idx = f.regs[src.0 as usize].0;
-                let src_type = &self.types_[src_type_idx];
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize],
                     registers[src.0 as usize],
@@ -1566,9 +1574,27 @@ impl<'ctx> JITModule<'ctx> {
                 if src_val.is_pointer_value() {
                     self.builder.build_store(registers[dst.0 as usize], src_val)?;
                 } else {
-                    // For primitives, store value in dst register directly
-                    // Full boxing via hlp_make_dyn will be added in Phase 3
-                    self.builder.build_store(registers[dst.0 as usize], src_val)?;
+                    // Primitives: alloca temp, store value, call hlp_make_dyn(&temp, type_ptr)
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let temp = self.builder.build_alloca(reg_types[src.0 as usize], "todyn_temp")?;
+                    self.builder.build_store(temp, src_val)?;
+
+                    let type_ptr = self.get_initialized_type(src_type_idx)?
+                        .into_pointer_value();
+                    let make_dyn = self.declare_native(
+                        "hlp_make_dyn",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let result = self.builder.build_call(
+                        make_dyn,
+                        &[temp.into(), type_ptr.into()],
+                        "todyn",
+                    )?;
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        result.try_as_basic_value().left().unwrap(),
+                    )?;
                 }
             }
 
@@ -1896,37 +1922,233 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_store(ptr, val)?;
             }
 
-            // --- InstanceClosure: store function pointer (binding deferred) ---
-            Opcode::InstanceClosure { dst, fun, obj: _ } => {
-                let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
-                let fn_ptr = function.as_global_value().as_pointer_value();
-                self.builder.build_store(registers[dst.0 as usize], fn_ptr)?;
+            // --- InstanceClosure: allocate closure binding obj as first arg ---
+            Opcode::InstanceClosure { dst, fun, obj } => {
+                let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
                 if is_placeholder {
                     self.add_pending_compilation(fun.0);
                 }
+
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let findex = fun.0 as usize;
+
+                // Load function address from functions_ptrs[findex]
+                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_ptr = self.context.i64_type().const_int(fun_addr_slot, false)
+                    .const_to_pointer(ptr_type);
+                let fun_addr = self.builder.build_load(ptr_type, fun_addr_ptr, "inst_closure_fun")?
+                    .into_pointer_value();
+
+                // Get closure type via hlp_get_closure_type(func_type)
+                // This removes the first param (bound obj's type) from the fn signature
+                let func_type_ptr = self.func_types[findex] as u64;
+                let func_type_const = self.context.i64_type().const_int(func_type_ptr, false)
+                    .const_to_pointer(ptr_type);
+                let get_closure_type = self.declare_native("hlp_get_closure_type",
+                    &[ptr_type.into()], Some(ptr_type.into()));
+                let closure_type = self.builder.build_call(get_closure_type,
+                    &[func_type_const.into()], "closure_type")?
+                    .try_as_basic_value().left().unwrap();
+
+                // Load bound object
+                let obj_val = self.builder.build_load(ptr_type, registers[obj.0 as usize], "inst_obj")?;
+
+                // Call hlp_alloc_closure_ptr(closure_type, fun_addr, obj_ptr)
+                let alloc = self.declare_native("hlp_alloc_closure_ptr",
+                    &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                    Some(ptr_type.into()));
+                let closure = self.builder.build_call(alloc,
+                    &[closure_type.into(), fun_addr.into(), obj_val.into()],
+                    "inst_closure")?.try_as_basic_value().left().unwrap();
+                self.builder.build_store(registers[dst.0 as usize], closure)?;
             }
 
-            // --- VirtualClosure: store function pointer (virtual dispatch deferred) ---
-            Opcode::VirtualClosure { dst, obj: _, field: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            // --- VirtualClosure: resolve proto method, create bound closure ---
+            Opcode::VirtualClosure { dst, obj, field } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let obj_type_idx = f.regs[obj.0 as usize].0;
+                let obj_type_info = self.types_[obj_type_idx].clone();
+
+                // Resolve findex from proto table at compile time
+                let findex = if let Some(ref obj_data) = obj_type_info.obj {
+                    obj_data.proto[field.0 as usize].findex as usize
+                } else {
+                    return Err(anyhow!("VirtualClosure: obj register type has no proto table"));
+                };
+
+                let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
+                if is_placeholder {
+                    self.add_pending_compilation(findex);
+                }
+
+                // Load obj pointer
+                let obj_val = self.builder.build_load(ptr_type, registers[obj.0 as usize], "vclos_obj")?;
+
+                // Load function address from functions_ptrs[findex]
+                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_ptr = self.context.i64_type().const_int(fun_addr_slot, false)
+                    .const_to_pointer(ptr_type);
+                let fun_addr = self.builder.build_load(ptr_type, fun_addr_ptr, "vclos_fun")?
+                    .into_pointer_value();
+
+                // Get closure type via hlp_get_closure_type(func_type)
+                let func_type_ptr = self.func_types[findex] as u64;
+                let func_type_const = self.context.i64_type().const_int(func_type_ptr, false)
+                    .const_to_pointer(ptr_type);
+                let get_closure_type = self.declare_native("hlp_get_closure_type",
+                    &[ptr_type.into()], Some(ptr_type.into()));
+                let closure_type = self.builder.build_call(get_closure_type,
+                    &[func_type_const.into()], "vclos_type")?
+                    .try_as_basic_value().left().unwrap();
+
+                // Call hlp_alloc_closure_ptr(closure_type, fun_addr, obj_ptr)
+                let alloc = self.declare_native("hlp_alloc_closure_ptr",
+                    &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                    Some(ptr_type.into()));
+                let closure = self.builder.build_call(alloc,
+                    &[closure_type.into(), fun_addr.into(), obj_val.into()],
+                    "vclos")?.try_as_basic_value().left().unwrap();
+                self.builder.build_store(registers[dst.0 as usize], closure)?;
             }
 
-            // --- DynGet: dynamic field access (stub: store null) ---
-            Opcode::DynGet { dst, obj: _, field: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            // --- DynGet: dynamic field access (stub) ---
+            Opcode::DynGet { dst, obj, field } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let i64_type = self.context.i64_type();
+
+                let obj_val = self.builder.build_load(ptr_type, registers[obj.0 as usize], "dynget_obj")?;
+                let field_name = &self.bytecode.strings[field.0].clone();
+                let hfield = hl_hash_utf8(field_name);
+                let hfield_val = i32_type.const_int(hfield as u64, true);
+
+                let dst_type_idx = f.regs[dst.0 as usize].0;
+                let dst_kind = self.types_[dst_type_idx].kind;
+
+                match dst_kind {
+                    hl_type_kind_HF64 => {
+                        let getter = self.declare_native("hlp_dyn_getd",
+                            &[ptr_type.into(), i32_type.into()],
+                            Some(self.context.f64_type().into()));
+                        let result = self.builder.build_call(getter,
+                            &[obj_val.into(), hfield_val.into()], "dynget_d")?;
+                        self.builder.build_store(registers[dst.0 as usize],
+                            result.try_as_basic_value().left().unwrap())?;
+                    }
+                    hl_type_kind_HF32 => {
+                        let getter = self.declare_native("hlp_dyn_getf",
+                            &[ptr_type.into(), i32_type.into()],
+                            Some(self.context.f32_type().into()));
+                        let result = self.builder.build_call(getter,
+                            &[obj_val.into(), hfield_val.into()], "dynget_f")?;
+                        self.builder.build_store(registers[dst.0 as usize],
+                            result.try_as_basic_value().left().unwrap())?;
+                    }
+                    hl_type_kind_HI64 => {
+                        let getter = self.declare_native("hlp_dyn_geti64",
+                            &[ptr_type.into(), i32_type.into()],
+                            Some(i64_type.into()));
+                        let result = self.builder.build_call(getter,
+                            &[obj_val.into(), hfield_val.into()], "dynget_i64")?;
+                        self.builder.build_store(registers[dst.0 as usize],
+                            result.try_as_basic_value().left().unwrap())?;
+                    }
+                    hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                        let type_ptr = self.get_initialized_type(dst_type_idx)?
+                            .into_pointer_value();
+                        let getter = self.declare_native("hlp_dyn_geti",
+                            &[ptr_type.into(), i32_type.into(), ptr_type.into()],
+                            Some(i32_type.into()));
+                        let result = self.builder.build_call(getter,
+                            &[obj_val.into(), hfield_val.into(), type_ptr.into()], "dynget_i")?;
+                        self.builder.build_store(registers[dst.0 as usize],
+                            result.try_as_basic_value().left().unwrap())?;
+                    }
+                    _ => {
+                        // Pointer types: hlp_dyn_getp(obj, hfield, dst_type)
+                        let type_ptr = self.get_initialized_type(dst_type_idx)?
+                            .into_pointer_value();
+                        let getter = self.declare_native("hlp_dyn_getp",
+                            &[ptr_type.into(), i32_type.into(), ptr_type.into()],
+                            Some(ptr_type.into()));
+                        let result = self.builder.build_call(getter,
+                            &[obj_val.into(), hfield_val.into(), type_ptr.into()], "dynget_p")?;
+                        self.builder.build_store(registers[dst.0 as usize],
+                            result.try_as_basic_value().left().unwrap())?;
+                    }
+                }
             }
 
-            // --- DynSet: dynamic field set (stub: no-op) ---
-            Opcode::DynSet { obj: _, field: _, src: _ } => {
-                // Stubbed for Phase 1
+            // --- DynSet: dynamic field set ---
+            Opcode::DynSet { obj, field, src } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+
+                let obj_val = self.builder.build_load(ptr_type, registers[obj.0 as usize], "dynset_obj")?;
+                let field_name = &self.bytecode.strings[field.0].clone();
+                let hfield = hl_hash_utf8(field_name);
+                let hfield_val = i32_type.const_int(hfield as u64, true);
+
+                let src_type_idx = f.regs[src.0 as usize].0;
+                let src_kind = self.types_[src_type_idx].kind;
+                let src_val = self.builder.build_load(
+                    reg_types[src.0 as usize], registers[src.0 as usize], "dynset_src")?;
+
+                match src_kind {
+                    hl_type_kind_HF64 => {
+                        let setter = self.declare_native("hlp_dyn_setd",
+                            &[ptr_type.into(), i32_type.into(), self.context.f64_type().into()],
+                            None);
+                        self.builder.build_call(setter,
+                            &[obj_val.into(), hfield_val.into(), src_val.into()], "dynset_d")?;
+                    }
+                    hl_type_kind_HF32 => {
+                        let setter = self.declare_native("hlp_dyn_setf",
+                            &[ptr_type.into(), i32_type.into(), self.context.f32_type().into()],
+                            None);
+                        self.builder.build_call(setter,
+                            &[obj_val.into(), hfield_val.into(), src_val.into()], "dynset_f")?;
+                    }
+                    hl_type_kind_HI64 => {
+                        let setter = self.declare_native("hlp_dyn_seti64",
+                            &[ptr_type.into(), i32_type.into(), self.context.i64_type().into()],
+                            None);
+                        self.builder.build_call(setter,
+                            &[obj_val.into(), hfield_val.into(), src_val.into()], "dynset_i64")?;
+                    }
+                    hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                        let type_ptr = self.get_initialized_type(src_type_idx)?
+                            .into_pointer_value();
+                        let setter = self.declare_native("hlp_dyn_seti",
+                            &[ptr_type.into(), i32_type.into(), ptr_type.into(), i32_type.into()],
+                            None);
+                        self.builder.build_call(setter,
+                            &[obj_val.into(), hfield_val.into(), type_ptr.into(), src_val.into()], "dynset_i")?;
+                    }
+                    _ => {
+                        // Pointer types: hlp_dyn_setp(obj, hfield, type, value)
+                        let type_ptr = self.get_initialized_type(src_type_idx)?
+                            .into_pointer_value();
+                        let setter = self.declare_native("hlp_dyn_setp",
+                            &[ptr_type.into(), i32_type.into(), ptr_type.into(), ptr_type.into()],
+                            None);
+                        self.builder.build_call(setter,
+                            &[obj_val.into(), hfield_val.into(), type_ptr.into(), src_val.into()], "dynset_p")?;
+                    }
+                }
             }
 
             // --- Bytes: load bytes constant ---
-            Opcode::Bytes { dst, ptr: _ } => {
-                let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
-                self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+            Opcode::Bytes { dst, ptr } => {
+                if let Some(bytes_global) = self.get_bytes_global(ptr.0) {
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        bytes_global.as_pointer_value(),
+                    )?;
+                } else {
+                    let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+                    self.builder.build_store(registers[dst.0 as usize], null_ptr)?;
+                }
             }
 
             // --- Enum opcodes (stubs) ---

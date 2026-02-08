@@ -55,6 +55,7 @@ pub struct JITModule<'ctx> {
     pub(crate) int_globals: Vec<GlobalValue<'ctx>>,
     pub(crate) float_globals: Vec<GlobalValue<'ctx>>,
     pub(crate) string_globals: Vec<GlobalValue<'ctx>>,
+    pub(crate) bytes_globals: Vec<GlobalValue<'ctx>>,
     /// C-side globals: inttoptr constants pointing into globals_data.
     /// Both JIT code and native stdlib access the same memory.
     pub(crate) globals: HashMap<usize, PointerValue<'ctx>>,
@@ -97,6 +98,7 @@ impl<'ctx> JITModule<'ctx> {
             int_globals: Vec::new(),
             float_globals: Vec::new(),
             string_globals: Vec::new(),
+            bytes_globals: Vec::new(),
             type_info_globals: HashMap::new(),
             pending_compilations: Vec::new(),
             globals: HashMap::new(),
@@ -164,6 +166,31 @@ impl<'ctx> JITModule<'ctx> {
                     &format!("Float_{}", i),
                 );
                 global.set_initializer(&float_val);
+                global.set_constant(true);
+                global
+            })
+            .collect();
+
+        module.bytes_globals = module
+            .bytecode
+            .bytes_pos
+            .iter()
+            .enumerate()
+            .map(|(i, &pos)| {
+                let end = module
+                    .bytecode
+                    .bytes_pos
+                    .get(i + 1)
+                    .copied()
+                    .unwrap_or(module.bytecode.bytes_data.len());
+                let slice = &module.bytecode.bytes_data[pos..end];
+                let val = module.context.const_string(slice, false);
+                let global = module.module.add_global(
+                    module.context.i8_type().array_type(slice.len() as u32),
+                    None,
+                    &format!("Bytes_{}", i),
+                );
+                global.set_initializer(&val);
                 global.set_constant(true);
                 global
             })
@@ -1145,6 +1172,10 @@ impl<'ctx> JITModule<'ctx> {
 
     pub fn get_string_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
         self.string_globals.get(index).cloned()
+    }
+
+    pub fn get_bytes_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
+        self.bytes_globals.get(index).cloned()
     }
 
     pub fn struct_value_to_pointer(

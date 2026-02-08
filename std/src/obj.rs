@@ -527,7 +527,7 @@ pub unsafe extern "C" fn hlp_lookup_find_index(
     hash: i32,
 ) -> i32 {
     if l.is_null() || size <= 0 {
-        return -1;
+        return 0;
     }
 
     let mut low = 0;

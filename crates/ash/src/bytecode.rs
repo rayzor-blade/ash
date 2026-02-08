@@ -191,7 +191,9 @@ impl BytecodeDecoder {
         // println!("Floats {:?}", self.decoded.floats.len());
         self.decoded.strings = self.read_strings(r)?;
         // println!("Strings {:?}", self.decoded.strings.len());
-        self.decoded.bytes_pos = self.read_bytes(r)?;
+        let (bytes_pos, bytes_data) = self.read_bytes(r)?;
+        self.decoded.bytes_pos = bytes_pos;
+        self.decoded.bytes_data = bytes_data;
         // println!("Bytes {:?}", self.decoded.bytes_pos.len());
         // println!("Has debug {}", self.has_debug);
         if self.has_debug {
@@ -271,9 +273,9 @@ impl BytecodeDecoder {
         Ok(str_to_uchar_ptr(string))
     }
 
-    fn read_bytes(&mut self, r: &mut impl BufRead) -> Result<Vec<usize>, std::io::Error> {
+    fn read_bytes(&mut self, r: &mut impl BufRead) -> Result<(Vec<usize>, Vec<u8>), std::io::Error> {
         if self.version < 5 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let size = r.read_i32::<LittleEndian>()? as usize;
@@ -286,7 +288,7 @@ impl BytecodeDecoder {
             let pos = self.read_var_u(r)? as usize;
             bytes_pos.push(pos);
         }
-        Ok(bytes_pos)
+        Ok((bytes_pos, data))
     }
 
     fn read_types(&mut self, r: &mut impl BufRead) -> Result<Vec<HLType>, std::io::Error> {
@@ -1191,6 +1193,7 @@ pub struct DecodedBytecode {
     pub floats: Vec<f64>,
     pub strings: Vec<String>,
     pub bytes_pos: Vec<usize>,
+    pub bytes_data: Vec<u8>,
     pub types: Vec<HLType>,
     pub globals: Vec<TypeRef>,
     pub natives: Vec<HLNative>,

@@ -246,10 +246,12 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     if !current.is_null() && (*current).has_jmpbuf {
         // JIT path: store exception, pop trap, longjmp back to setjmp site
         *gc.exc_value.borrow_mut() = v;
-        let buf_ptr = (*current).buf.as_mut_ptr();
+        // Copy jmp_buf to stack BEFORE freeing the TrapContext — longjmp reads from it
+        let mut buf_copy: [c_int; 48] = [0; 48];
+        buf_copy.copy_from_slice(&(*current).buf);
         *gc.current_trap.borrow_mut() = (*current).prev;
         let _ = Box::from_raw(current);
-        _longjmp(buf_ptr, 1);
+        _longjmp(buf_copy.as_mut_ptr(), 1);
     } else {
         // Interpreter path: use Rust panic
         gc.throw(VDynamicException(Box::from_raw(v)));

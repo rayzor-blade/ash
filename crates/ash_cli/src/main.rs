@@ -16,8 +16,8 @@ fn main() {
 fn run() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    let hl_path = if args.len() > 1 && !args[1].starts_with("--") {
-        PathBuf::from(&args[1])
+    let hl_path = if let Some(path) = args.iter().find(|a| !a.starts_with("--") && a.ends_with(".hl")) {
+        PathBuf::from(path)
     } else {
         // Default to test file for development
         let mut cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

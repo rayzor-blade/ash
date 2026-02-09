@@ -217,7 +217,7 @@ impl<'ctx> JITModule<'ctx> {
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
             // Run AIR optimization passes on bytecode before LLVM emission
-            let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O1);
+            let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
             let num_regs = f.regs.len();
             let eliminated = pass_manager.run(&mut f.ops, num_regs);
             if eliminated > 0 {
@@ -280,7 +280,7 @@ impl<'ctx> JITModule<'ctx> {
             FuncPtr::Fun(f) => {
                 // Run AIR optimization passes
                 let mut f = f.clone();
-                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O1);
+                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
                 let num_regs = f.regs.len();
                 let eliminated = pass_manager.run(&mut f.ops, num_regs);
                 if eliminated > 0 {

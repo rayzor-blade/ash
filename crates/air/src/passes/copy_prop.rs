@@ -8,7 +8,7 @@ pub struct CopyPropPass;
 
 /// Substitute register `from` with `to` in all read positions of an opcode.
 /// Returns true if any substitution was made.
-fn substitute_reads(op: &mut Opcode, from: Reg, to: Reg) -> bool {
+pub fn substitute_reads(op: &mut Opcode, from: Reg, to: Reg) -> bool {
     let mut changed = false;
 
     macro_rules! sub {

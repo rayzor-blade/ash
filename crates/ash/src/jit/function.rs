@@ -215,7 +215,15 @@ impl<'ctx> JITModule<'ctx> {
             .ok_or_else(|| anyhow!("Function not found at index {}", index))?
             .clone();
 
-        if let FuncPtr::Fun(f) = fun_ptr {
+        if let FuncPtr::Fun(mut f) = fun_ptr {
+            // Run AIR optimization passes on bytecode before LLVM emission
+            let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O1);
+            let num_regs = f.regs.len();
+            let eliminated = pass_manager.run(&mut f.ops, num_regs);
+            if eliminated > 0 {
+                eprintln!("AIR: eliminated {} opcodes in {}", eliminated, f.name());
+            }
+
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
                 *func
@@ -270,13 +278,22 @@ impl<'ctx> JITModule<'ctx> {
 
         match fun_ptr {
             FuncPtr::Fun(f) => {
-                let function = self.create_function_declaration(f)?;
+                // Run AIR optimization passes
+                let mut f = f.clone();
+                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O1);
+                let num_regs = f.regs.len();
+                let eliminated = pass_manager.run(&mut f.ops, num_regs);
+                if eliminated > 0 {
+                    eprintln!("AIR: eliminated {} opcodes in {}", eliminated, f.name());
+                }
+
+                let function = self.create_function_declaration(&f)?;
                 let basic_block = self.context.append_basic_block(function, "entry");
                 self.builder.position_at_end(basic_block);
 
-                let (registers, reg_types) = self.allocate_registers(f)?;
-                self.load_function_arguments(f, &function, &registers)?;
-                self.translate_opcodes(f, &registers, &reg_types)?;
+                let (registers, reg_types) = self.allocate_registers(&f)?;
+                self.load_function_arguments(&f, &function, &registers)?;
+                self.translate_opcodes(&f, &registers, &reg_types)?;
 
                 if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
                     let ret_type = function.get_type().get_return_type();

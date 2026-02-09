@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
-description = "AIR - ASH Immediate Respresentation"
-keywords = ["IR", "JIT", "Compiler"]
+description = "AIR - ASH Intermediate Representation (bytecode optimizer)"
+keywords = ["IR", "JIT", "Compiler", "Optimizer"]
 
 [dependencies]
-inkwell = {workspace=true}
 anyhow = {workspace=true}

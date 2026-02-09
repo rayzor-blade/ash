@@ -19,6 +19,7 @@ tempfile = "3.2"
 memchr = "2.7.4"
 byteorder = {workspace=true}
 ash_macro = {workspace=true}
+air = { path = "../air" }
 libc = "0.2.158"
 
 [[bin]]

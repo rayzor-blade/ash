@@ -1,8 +1,5 @@
-pub mod air;
-pub mod function;
-pub mod object;
-pub mod numbers;
-pub mod control;
-pub mod pointers;
-
-pub mod prelude;
+pub mod opcodes;
+pub mod opcode_info;
+pub mod cfg;
+pub mod pass;
+pub mod passes;

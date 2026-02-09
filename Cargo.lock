@@ -16,7 +16,6 @@ name = "air"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "inkwell",
 ]
 
 [[package]]
@@ -44,6 +43,7 @@ checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
 name = "ash"
 version = "0.1.0"
 dependencies = [
+ "air",
  "anyhow",
  "ash_macro",
  "byteorder",

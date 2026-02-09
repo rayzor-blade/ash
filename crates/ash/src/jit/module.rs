@@ -705,39 +705,35 @@ impl<'ctx> JITModule<'ctx> {
                 Ok(hl_type_struct.into())
             }
             hl_type_kind_HREF | hl_type_kind_HPACKED => {
-                if let Some(referenced_type) = self
-                    .type_cache
-                    .get(&ty.tparam.as_ref().expect("Expected type parameter").0)
-                {
-                    Ok(match referenced_type {
-                        AnyTypeEnum::ArrayType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::FloatType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::FunctionType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::IntType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::PointerType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::StructType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::VectorType(t) => {
-                            t.ptr_type(inkwell::AddressSpace::default()).into()
-                        }
-                        AnyTypeEnum::VoidType(t) => {
-                            self.context.ptr_type(AddressSpace::default()).into()
-                        }
-                    })
-                } else {
-                    Err(anyhow!("Referenced type not found in cache"))
-                }
+                let tparam_idx = ty.tparam.as_ref().expect("Expected type parameter").0;
+                // Recursively ensure the referenced type is converted first
+                let referenced_type = self.get_or_create_any_type(tparam_idx)?;
+                Ok(match referenced_type {
+                    AnyTypeEnum::ArrayType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::FloatType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::FunctionType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::IntType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::PointerType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::StructType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::VectorType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
+                    AnyTypeEnum::VoidType(_) => {
+                        self.context.ptr_type(AddressSpace::default()).into()
+                    }
+                })
             }
             hl_type_kind_HVIRTUAL => {
                 let v = ty.virt.as_ref().expect("Expected to get virtual type");

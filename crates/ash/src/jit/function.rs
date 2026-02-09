@@ -510,12 +510,12 @@ impl<'ctx> JITModule<'ctx> {
                         .as_any_value_enum()
                         .into_int_value()
                         .as_basic_value_enum(),
-                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => self
-                        .builder
-                        .build_float_add(a_val.into_float_value(), b_val.into_float_value(), "add")?
-                        .as_any_value_enum()
-                        .into_float_value()
-                        .as_basic_value_enum(),
+                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => {
+                        let fv = self.builder
+                            .build_float_add(a_val.into_float_value(), b_val.into_float_value(), "add")?;
+                        if let Some(inst) = fv.as_instruction() { inst.set_fast_math_flags(1 << 5); }
+                        fv.as_basic_value_enum()
+                    }
                     _ => return Err(anyhow!("Unsupported types for Add operation")),
                 };
                 self.builder.build_store(registers[dst.0 as usize], result);
@@ -539,10 +539,12 @@ impl<'ctx> JITModule<'ctx> {
                         .builder
                         .build_int_sub(a_val.into_int_value(), b_val.into_int_value(), "sub")?
                         .as_basic_value_enum(),
-                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => self
-                        .builder
-                        .build_float_sub(a_val.into_float_value(), b_val.into_float_value(), "sub")?
-                        .as_basic_value_enum(),
+                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => {
+                        let fv = self.builder
+                            .build_float_sub(a_val.into_float_value(), b_val.into_float_value(), "sub")?;
+                        if let Some(inst) = fv.as_instruction() { inst.set_fast_math_flags(1 << 5); }
+                        fv.as_basic_value_enum()
+                    }
                     _ => return Err(anyhow!("Unsupported types for Sub operation")),
                 };
                 self.builder.build_store(registers[dst.0 as usize], result);
@@ -566,10 +568,12 @@ impl<'ctx> JITModule<'ctx> {
                         .builder
                         .build_int_mul(a_val.into_int_value(), b_val.into_int_value(), "mul")?
                         .as_basic_value_enum(),
-                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => self
-                        .builder
-                        .build_float_mul(a_val.into_float_value(), b_val.into_float_value(), "mul")?
-                        .as_basic_value_enum(),
+                    (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => {
+                        let fv = self.builder
+                            .build_float_mul(a_val.into_float_value(), b_val.into_float_value(), "mul")?;
+                        if let Some(inst) = fv.as_instruction() { inst.set_fast_math_flags(1 << 5); }
+                        fv.as_basic_value_enum()
+                    }
                     _ => return Err(anyhow!("Unsupported types for Mul operation")),
                 };
                 self.builder.build_store(registers[dst.0 as usize], result);
@@ -1335,8 +1339,11 @@ impl<'ctx> JITModule<'ctx> {
                     match (av.get_type().as_any_type_enum(), bv.get_type().as_any_type_enum()) {
                         (AnyTypeEnum::IntType(_), AnyTypeEnum::IntType(_)) =>
                             Ok(b.build_int_signed_div(av.into_int_value(), bv.into_int_value(), "sdiv")?.as_basic_value_enum()),
-                        (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) =>
-                            Ok(b.build_float_div(av.into_float_value(), bv.into_float_value(), "sdiv")?.as_basic_value_enum()),
+                        (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => {
+                            let fv = b.build_float_div(av.into_float_value(), bv.into_float_value(), "sdiv")?;
+                            if let Some(inst) = fv.as_instruction() { inst.set_fast_math_flags(1 << 5); }
+                            Ok(fv.as_basic_value_enum())
+                        }
                         _ => Err(anyhow!("Unsupported types for SDiv")),
                     }
                 })?;
@@ -1355,8 +1362,11 @@ impl<'ctx> JITModule<'ctx> {
                     match (av.get_type().as_any_type_enum(), bv.get_type().as_any_type_enum()) {
                         (AnyTypeEnum::IntType(_), AnyTypeEnum::IntType(_)) =>
                             Ok(b.build_int_signed_rem(av.into_int_value(), bv.into_int_value(), "smod")?.as_basic_value_enum()),
-                        (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) =>
-                            Ok(b.build_float_rem(av.into_float_value(), bv.into_float_value(), "smod")?.as_basic_value_enum()),
+                        (AnyTypeEnum::FloatType(_), AnyTypeEnum::FloatType(_)) => {
+                            let fv = b.build_float_rem(av.into_float_value(), bv.into_float_value(), "smod")?;
+                            if let Some(inst) = fv.as_instruction() { inst.set_fast_math_flags(1 << 5); }
+                            Ok(fv.as_basic_value_enum())
+                        }
                         _ => Err(anyhow!("Unsupported types for SMod")),
                     }
                 })?;
@@ -1884,9 +1894,14 @@ impl<'ctx> JITModule<'ctx> {
                 let setjmp_ptr = self.context.i64_type().const_int(setjmp_addr, false)
                     .const_to_pointer(ptr_type);
                 let setjmp_fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-                let setjmp_result = self.builder.build_indirect_call(
+                let setjmp_call = self.builder.build_indirect_call(
                     setjmp_fn_type, setjmp_ptr, &[buf_ptr.into()], "setjmp_ret"
-                )?.try_as_basic_value().left().unwrap().into_int_value();
+                )?;
+                // Mark as returns_twice so LLVM doesn't misoptimize around setjmp at O3
+                let rt_kind = inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
+                let rt_attr = self.context.create_enum_attribute(rt_kind, 0);
+                setjmp_call.add_attribute(inkwell::attributes::AttributeLoc::Function, rt_attr);
+                let setjmp_result = setjmp_call.try_as_basic_value().left().unwrap().into_int_value();
 
                 // 3. Branch: 0 → normal (protected code), non-zero → handler
                 let is_exception = self.builder.build_int_compare(

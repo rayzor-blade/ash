@@ -76,7 +76,7 @@ impl<'ctx> JITModule<'ctx> {
 
         let module = context.create_module("Hashlink");
         let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::None)
+            .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Failed to initialize execution engine");
 
         let native_function_resolver = NativeFunctionResolver::new();

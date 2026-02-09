@@ -11,3 +11,4 @@ ash = { path = "../ash" }
 ash_interp = { path = "../ash_interp" }
 anyhow = { workspace = true }
 inkwell = { workspace = true }
+clap = { workspace = true }

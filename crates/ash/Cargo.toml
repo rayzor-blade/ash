@@ -21,6 +21,7 @@ byteorder = {workspace=true}
 ash_macro = {workspace=true}
 air = { path = "../air" }
 libc = "0.2.158"
+clap = { workspace = true }
 
 [[bin]]
 name = "ash" 

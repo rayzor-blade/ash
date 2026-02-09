@@ -77,17 +77,16 @@ cargo run -p ash -- path/to/program.hl
 Executes a `.hl` file with a choice of execution backend.
 
 ```
-ash_cli [--interp | --jit] [<file.hl>]
+ash_cli [OPTIONS] [<file.hl>]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--interp` | Run using the bytecode interpreter |
-| `--jit` | Run using the JIT compiler (currently falls back to interpreter) |
-| *(none)* | Hybrid mode (defaults to interpreter) |
+| Option | Values | Description |
+|--------|--------|-------------|
+| `--mode` | `interp`, `jit`, `hybrid` | Execution mode (default: `interp`) |
 
 ```bash
-cargo run -p ash_cli -- --interp path/to/program.hl
+cargo run -p ash_cli -- path/to/program.hl
+cargo run -p ash_cli -- --mode interp path/to/program.hl
 ```
 
 ## Crates

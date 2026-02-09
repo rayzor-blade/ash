@@ -200,6 +200,13 @@ impl<'ctx> JITModule<'ctx> {
             .initialize_globals()
             .expect("Failed to initialize globals");
 
+        // Discover and load external HDLL libraries
+        let search_dir = path.parent().unwrap_or(Path::new("."));
+        module
+            .native_function_resolver
+            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
+            .expect("Failed to discover HDLL libraries");
+
         module
             .init_natives()
             .expect("Failed to initialize native functions");

@@ -1,10 +1,11 @@
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Once;
 use tempfile::TempDir;
 use anyhow::{anyhow, Result};
 use std::ffi::c_void;
-use crate::types::Str;
+use crate::types::{HLNative, Str};
 use std::path::Path;
 
 
@@ -54,11 +55,9 @@ pub struct NativeLibraryManager {
 
 impl NativeLibraryManager {
     pub fn new() -> Self {
-        let mut manager = NativeLibraryManager {
+        NativeLibraryManager {
             libraries: HashMap::new(),
-        };
-
-        manager
+        }
     }
 
     fn load_library(&mut self, name: &str, path: &Path) -> Result<()> {
@@ -68,10 +67,11 @@ impl NativeLibraryManager {
     }
 
     fn get_library(&self, name: &str) -> Option<&Library> {
-        if name == "std" || name == "?std" {
+        let clean = name.strip_prefix('?').unwrap_or(name);
+        if clean == "std" {
             unsafe { return STD_LIBRARY.as_ref() }
         }
-        self.libraries.get(&Str::from(name))
+        self.libraries.get(&Str::from(clean))
     }
 }
 
@@ -81,14 +81,63 @@ pub struct NativeFunctionResolver {
 
 impl NativeFunctionResolver {
     pub fn new() -> Self {
-        let mut library_manager = NativeLibraryManager::new();
+        let library_manager = NativeLibraryManager::new();
         NativeFunctionResolver { library_manager }
     }
+
     pub fn load_library(&mut self, name: &str, path: &Path) -> Result<()> {
         self.library_manager.load_library(name, path)
     }
 
+    /// Discover and load external HDLL libraries referenced by bytecode natives.
+    /// Searches for .hdll files in the given directory.
+    pub fn discover_and_load_libraries(
+        &mut self,
+        search_dir: &Path,
+        natives: &[HLNative],
+    ) -> Result<()> {
+        let mut libs: HashSet<String> = HashSet::new();
+        for native in natives {
+            let clean = native.lib.strip_prefix('?').unwrap_or(&native.lib);
+            if clean != "std" {
+                libs.insert(clean.to_string());
+            }
+        }
+
+        for lib_name in &libs {
+            let candidates = [
+                search_dir.join(format!("{}.hdll", lib_name)),
+                search_dir.join(format!("lib{}.dylib", lib_name)),
+                search_dir.join(format!("{}.dylib", lib_name)),
+            ];
+            let mut found = false;
+            for candidate in &candidates {
+                if candidate.exists() {
+                    eprintln!("[ash] Loading HDLL: {} from {:?}", lib_name, candidate);
+                    self.library_manager.load_library(lib_name, candidate)?;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                // Check if library was optional (had ? prefix)
+                let is_optional = natives.iter().any(|n| n.lib.starts_with('?') && {
+                    let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
+                    clean == lib_name
+                });
+                if is_optional {
+                    eprintln!("[ash] Optional library '{}' not found, skipping", lib_name);
+                } else {
+                    return Err(anyhow!("Required library '{}' not found in {:?}", lib_name, search_dir));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn resolve_function(&self, library_name: &str, function_name: &str) -> Result<*mut c_void> {
+        let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
         let library = self
             .library_manager
             .get_library(library_name)
@@ -96,7 +145,19 @@ impl NativeFunctionResolver {
 
         unsafe {
             let symbol: Symbol<*mut c_void> = library.get(function_name.as_bytes())?;
-            Ok(*symbol)
+
+            if clean_lib == "std" {
+                // ash_std uses direct exports (Rust #[no_mangle])
+                Ok(*symbol)
+            } else {
+                // HDLLs use DEFINE_PRIM resolver protocol:
+                // hlp_xxx is a resolver: fn(*mut *const c_char) -> *mut c_void
+                type ResolverFn = unsafe extern "C" fn(*mut *const std::ffi::c_char) -> *mut c_void;
+                let resolver: ResolverFn = std::mem::transmute(*symbol);
+                let mut sign: *const std::ffi::c_char = std::ptr::null();
+                let actual_fn = resolver(&mut sign);
+                Ok(actual_fn)
+            }
         }
     }
 }

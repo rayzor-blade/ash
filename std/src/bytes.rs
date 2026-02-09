@@ -13,12 +13,14 @@ pub unsafe extern "C" fn hlp_bytes_blit(
     spos: c_int,
     len: c_int,
 ) {
-    // Convert C types to Rust types
-    let dst_slice = std::slice::from_raw_parts_mut(dst.add(dpos as usize) as *mut u8, len as usize);
-    let src_slice = std::slice::from_raw_parts(src.add(spos as usize) as *const u8, len as usize);
-
-    // Perform the byte copy
-    dst_slice.copy_from_slice(src_slice);
+    if len <= 0 || dst.is_null() || src.is_null() {
+        return;
+    }
+    std::ptr::copy_nonoverlapping(
+        src.add(spos as usize) as *const u8,
+        dst.add(dpos as usize) as *mut u8,
+        len as usize,
+    );
 }
 
 #[no_mangle]

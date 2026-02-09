@@ -1268,8 +1268,8 @@ impl HLInterpreter {
                     let pc = frame.pc;
                     let fname = func.name();
                     // Show surrounding opcodes for debugging context
-                    let start = pc.saturating_sub(4);
-                    let end = (pc + 2).min(func.ops.len());
+                    let start = 0;
+                    let end = func.ops.len().min(120);
                     let context: Vec<String> = (start..end)
                         .map(|i| {
                             let marker = if i == pc { ">>>" } else { "   " };

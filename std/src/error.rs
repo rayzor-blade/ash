@@ -203,15 +203,7 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
         let frame_count = stack_trace.frames.len();
 
         // Allocate a varray to hold the stack frames
-        let array_type = &mut hl_type {
-            kind: hl_type_kind_HBYTES,
-            __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                obj: std::ptr::null_mut(),
-            },
-            vobj_proto: std::ptr::null_mut(),
-            mark_bits: std::ptr::null_mut(),
-        };
-        let varray_ptr: *mut varray = hlp_alloc_array(array_type, frame_count as i32);
+        let varray_ptr: *mut varray = hlp_alloc_array(crate::types::hlt_bytes(), frame_count as i32);
 
         // Fill the array with stack frame information
         for (i, frame) in stack_trace.frames.iter().enumerate() {
@@ -287,14 +279,7 @@ pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
         .unwrap()
         .as_ptr() as *mut vdynamic;
     (*d).v.bytes = msg as *mut u8;
-    (*d).t = &mut hl_type {
-        kind: hl_type_kind_HBYTES,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: std::ptr::null_mut(),
-        },
-        vobj_proto: std::ptr::null_mut(),
-        mark_bits: std::ptr::null_mut(),
-    };
+    (*d).t = crate::types::hlt_bytes();
 
     hlp_throw(d)
 }

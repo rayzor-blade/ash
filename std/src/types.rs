@@ -1,12 +1,53 @@
-use std::{ffi::c_void, mem, ptr};
+use std::{ffi::c_void, mem, ptr, sync::OnceLock};
 
 use crate::{
     array::hlp_alloc_array,
     gc::{hlp_mark_size, hlp_zalloc, GC},
     hl::{
-        self, hl_module_context, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HENUM, hl_type_kind_HOBJ, hl_type_kind_HSTRUCT, varray, vbyte, vdynamic, venum
+        self, hl_module_context, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT,
+        hl_type_kind_HARRAY, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
+        hl_type_kind_HENUM, hl_type_kind_HOBJ, hl_type_kind_HSTRUCT, varray, vbyte, vdynamic,
+        venum,
     },
 };
+
+/// Returns a persistent `*mut hl_type` for a given type kind.
+/// Uses `Box::leak` so the pointer is valid for the program's lifetime.
+/// Used to avoid storing stack-local `hl_type` pointers into heap-allocated objects.
+fn persistent_type(kind: u32) -> *mut hl_type {
+    Box::leak(Box::new(hl_type {
+        kind,
+        __bindgen_anon_1: hl_type__bindgen_ty_1 {
+            obj: ptr::null_mut(),
+        },
+        vobj_proto: ptr::null_mut(),
+        mark_bits: ptr::null_mut(),
+    }))
+}
+
+/// Persistent type singleton for HDYNOBJ.
+pub fn hlt_dynobj() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl_type_kind_HDYNOBJ) as usize) as *mut hl_type
+}
+
+/// Persistent type singleton for HARRAY.
+pub fn hlt_array() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl_type_kind_HARRAY) as usize) as *mut hl_type
+}
+
+/// Persistent type singleton for HBYTES.
+pub fn hlt_bytes() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl_type_kind_HBYTES) as usize) as *mut hl_type
+}
+
+/// Persistent type singleton for HDYN.
+pub fn hlt_dyn() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl_type_kind_HDYN) as usize) as *mut hl_type
+}
 
 pub static TSTR: [&'static str; 22] = [
     "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "array",

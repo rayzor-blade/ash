@@ -25,6 +25,7 @@ pub mod error;
 pub mod cast;
 pub mod fun;
 pub mod date;
+pub mod math;
 #[macro_use]
 pub mod debugger;
 pub (crate) mod ucs2;

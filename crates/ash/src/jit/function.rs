@@ -1187,40 +1187,35 @@ impl<'ctx> JITModule<'ctx> {
                 );
             }
             Opcode::GetArray { dst, array, index } => {
-                // Load the array pointer
-                let array_ptr = self.builder.build_load(
-                    reg_types[array.0 as usize],
-                    registers[array.0 as usize],
-                    "array_ptr",
-                )?;
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let i8_type = self.context.i8_type();
 
-                // Load the index
-                let index_val = self.builder.build_load(
-                    reg_types[index.0 as usize],
-                    registers[index.0 as usize],
-                    "index_val",
-                )?;
+                let arr = self.builder.build_load(ptr_type, registers[array.0 as usize], "getarr_ptr")?.into_pointer_value();
+                let idx = self.builder.build_load(i32_type, registers[index.0 as usize], "getarr_idx")?.into_int_value();
 
-                // Get the element pointer
-                let element_ptr = unsafe {
-                    self.builder.build_gep(
-                        reg_types[array.0 as usize],
-                        registers[array.0 as usize],
-                        &[index_val.into_int_value()],
-                        "element_ptr",
-                    )?
+                // Data starts at offset 24 (sizeof(varray))
+                let data_ptr = unsafe {
+                    self.builder.build_gep(i8_type, arr,
+                        &[self.context.i64_type().const_int(24, false)], "getarr_data")?
                 };
 
-                // Load the element
-                let element_val = self.builder.build_load(
-                    element_ptr.get_type(),
-                    element_ptr,
-                    "element_val",
-                )?;
+                // Element size from destination type kind
+                let dst_type_idx = f.regs[dst.0 as usize].0;
+                let dst_kind = self.types_[dst_type_idx].kind;
+                let elem_size: u64 = match dst_kind {
+                    hl_type_kind_HUI8 => 1,
+                    hl_type_kind_HUI16 | hl_type_kind_HBOOL => 2,
+                    hl_type_kind_HI32 | hl_type_kind_HF32 => 4,
+                    hl_type_kind_HI64 | hl_type_kind_HF64 => 8,
+                    _ => 8, // All pointer types = 8
+                };
 
-                // Store the element in the destination register
-                self.builder
-                    .build_store(registers[dst.0 as usize], element_val)?;
+                let elem_size_val = i32_type.const_int(elem_size, false);
+                let byte_offset = self.builder.build_int_mul(idx, elem_size_val, "getarr_offset")?;
+                let slot = unsafe { self.builder.build_gep(i8_type, data_ptr, &[byte_offset], "getarr_slot")? };
+                let element_val = self.builder.build_load(reg_types[dst.0 as usize], slot, "getarr_val")?;
+                self.builder.build_store(registers[dst.0 as usize], element_val)?;
             }
 
             // --- Control flow: Label, Nop ---
@@ -2707,6 +2702,27 @@ impl<'ctx> JITModule<'ctx> {
         // Populate functions_ptrs with actual function addresses from the JIT.
         // This must happen after compilation so the execution engine has allocated code.
         self.setup_functions_ptrs()?;
+
+        // Register GC roots BEFORE init_constants (which allocates and might trigger GC)
+        unsafe {
+            type FnSetGlobals = unsafe extern "C" fn(*const *mut std::ffi::c_void, usize);
+            let set_globals: FnSetGlobals = std::mem::transmute(
+                self.native_function_resolver
+                    .resolve_function("std", "hlp_gc_set_globals")
+                    .map_err(|e| anyhow!("Cannot resolve hlp_gc_set_globals: {}", e))?,
+            );
+            set_globals(self.globals_data.as_ptr(), self.globals_data.len());
+
+            type FnSetStackTop = unsafe extern "C" fn(usize);
+            let set_stack_top: FnSetStackTop = std::mem::transmute(
+                self.native_function_resolver
+                    .resolve_function("std", "hlp_gc_set_stack_top")
+                    .map_err(|e| anyhow!("Cannot resolve hlp_gc_set_stack_top: {}", e))?,
+            );
+            let stack_top: usize;
+            core::arch::asm!("mov {}, sp", out(reg) stack_top);
+            set_stack_top(stack_top);
+        }
 
         // Materialize bytecode constants (pre-initialized globals like string literals)
         self.init_constants()?;

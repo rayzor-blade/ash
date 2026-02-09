@@ -14,30 +14,6 @@ pub unsafe extern "C" fn hlp_array_type(a: *mut varray) -> *mut hl_type {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut varray {
-    let mut empty_array: varray = varray {
-        t: &mut hl_type {
-            kind: hl_type_kind_HARRAY,
-            __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                obj: std::ptr::null_mut(),
-            },
-            vobj_proto: std::ptr::null_mut(),
-            mark_bits: std::ptr::null_mut(),
-        },
-        at: &mut hl_type {
-            kind: hl_type_kind_HDYN,
-            __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                obj: std::ptr::null_mut(),
-            },
-            vobj_proto: std::ptr::null_mut(),
-            mark_bits: std::ptr::null_mut(),
-        },
-        size: 0,
-        __pad: 0,
-    };
-    if size == 0 && (*at).kind == hl_type_kind_HDYN {
-        return &mut empty_array;
-    }
-
     if size < 0 {
         hlp_error("Invalid array size".as_ptr() as *const uchar);
     }
@@ -57,14 +33,7 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
         .expect("Failed to allocate array")
         .as_ptr() as *mut varray;
 
-    (*a).t = &mut hl_type {
-        kind: hl_type_kind_HARRAY,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: std::ptr::null_mut(),
-        },
-        vobj_proto: std::ptr::null_mut(),
-        mark_bits: std::ptr::null_mut(),
-    };
+    (*a).t = crate::types::hlt_array();
     (*a).at = at;
     (*a).size = size;
 

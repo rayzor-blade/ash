@@ -378,15 +378,17 @@ pub unsafe extern "C" fn hlp_hbset(
         c = hl_freelist_get(&mut (*m).lfree);
     }
     m.set_entry(c as usize, hash, key);
+    // nexts[c] = cells[ckey] (old head of chain), then cells[ckey] = c
     if (*m).maxentries < _MLIMIT {
         let src = ((*m).cells as *const i8).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut i8).wrapping_add(c as usize);
-
         ptr::write(dst, ptr::read(src));
+        ptr::write(((*m).cells as *mut i8).wrapping_add(ckey as usize), c as i8);
     } else {
         let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
         ptr::write(dst, ptr::read(src));
+        ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c as i32);
     }
     (*(*m).values.wrapping_add(c as usize)).value = value;
     (*m).nentries += 1;
@@ -475,11 +477,9 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         (*m).ncells = ncells;
         (*m).nentries = 0;
         ptr::write_bytes((*m).cells, 0xFF, ncells as usize * ksize);
-        ptr::write_bytes(
-            (*m).values,
-            0,
-            nentries as usize * mem::size_of::<hl::hl_hb_value>(),
-        );
+        // Zero the values array — count is in ELEMENTS, not bytes
+        // (write_bytes multiplies by size_of::<T>() internally)
+        ptr::write_bytes((*m).values, 0, nentries as usize);
         hl_freelist_init(&mut (*m).lfree);
         hl_freelist_add_range(&mut (*m).lfree, 0, (*m).maxentries);
         for i in 0..old.ncells {

@@ -361,22 +361,8 @@ pub unsafe extern "C" fn hlp_dyn_call(
     }
 
     let mut tmp: TmpArray = mem::zeroed();
-    tmp.a.t =  &mut hl_type {
-        kind: hl_type_kind_HARRAY,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-    tmp.a.at = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    tmp.a.t = crate::types::hlt_array();
+    tmp.a.at = crate::types::hlt_dyn();
     tmp.a.size = nargs;
 
     let mut ctmp: vclosure = mem::zeroed();

@@ -1452,14 +1452,7 @@ pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
     ptr::write(
         obj,
         vdynobj {
-            t: &mut hl_type {
-                kind: hl_type_kind_HDYNOBJ,
-                __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                    virt: ptr::null_mut(),
-                },
-                vobj_proto: ptr::null_mut(),
-                mark_bits: ptr::null_mut(),
-            }, // This should be set to the correct type later
+            t: crate::types::hlt_dynobj(),
             lookup: ptr::null_mut(),
             raw_data: ptr::null_mut(),
             values: ptr::null_mut(),

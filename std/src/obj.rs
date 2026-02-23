@@ -398,36 +398,26 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
             // println!("Failed to acquire read lock");
         }
 
-        // If we're here, we need to write to the cache
+        // If we're here, we need to write to the cache (sorted insertion)
         if let Ok(mut cache) = HL_CACHE.write() {
-            // print_cache_state(&cache, "Write lock acquired");
-
             if cache.data.is_null() || cache.size >= cache.capacity {
                 if !grow_cache(&mut cache) {
-                    // println!("Failed to grow cache, returning computed hash");
                     return h;
                 }
             }
 
             let new_name = ustrdup(oname);
             if !new_name.is_null() {
-                let insert_pos = cache.size;
-                // println!("Inserting new entry at position {}", insert_pos);
-                ptr::write(
-                    cache.data.add(insert_pos),
-                    hl_field_lookup {
-                        field_index: 0,
-                        hashed_name: h,
-                        t: new_name as *mut hl_type,
-                    },
+                // Use sorted insertion (hlp_lookup_insert) so binary search works
+                hlp_lookup_insert(
+                    cache.data,
+                    cache.size as i32,
+                    h,
+                    new_name as *mut hl_type,
+                    0,
                 );
                 cache.size += 1;
-                // print_cache_state(&cache, "After insertion");
-            } else {
-                // println!("Failed to duplicate string, not inserting");
             }
-        } else {
-            // println!("Failed to acquire write lock");
         }
     }
 
@@ -550,7 +540,7 @@ pub unsafe extern "C" fn hlp_lookup_find_index(
 #[no_mangle]
 pub unsafe extern "C" fn hlp_field_name(hash: c_int) -> *mut vbyte {
     if let Ok(cache) = HL_CACHE.read() {
-        let l = hlp_lookup_find(cache.data, HL_CACHE_COUNT, hash);
+        let l = hlp_lookup_find(cache.data, cache.size as i32, hash);
         if !l.is_null() {
             return (*l).t as *mut vbyte;
         }
@@ -615,7 +605,8 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             for i in 0..(*o).nproto as usize {
                 let p = (*o).proto.add(i);
                 if (*p).pindex >= 0 {
-                    *fptr.add((*p).pindex as usize) = *(*m).functions_ptrs.add((*p).findex as usize);
+                    let faddr = *(*m).functions_ptrs.add((*p).findex as usize);
+                    *fptr.add((*p).pindex as usize) = faddr;
                 }
             }
         }
@@ -829,6 +820,9 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
+    let kind = (*ot).kind;
+    if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {
+    }
     let o = (*ot).__bindgen_anon_1.obj;
     let m = (*o).m;
 
@@ -2209,12 +2203,14 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
         mark_bits: ptr::null_mut(),
     };
 
-    match std::mem::transmute::<u32, hl_type_kind>((*(*obj).t).kind) {
+    let result = match std::mem::transmute::<u32, hl_type_kind>((*(*obj).t).kind) {
         hl_type_kind_HOBJ | hl_type_kind_HVIRTUAL | hl_type_kind_HDYNOBJ | hl_type_kind_HSTRUCT => {
             hlp_dyn_getp(obj, hfield, _hlt_dyn) as *mut vdynamic
         }
         _ => ptr::null_mut(),
-    }
+    };
+
+    result
 }
 
 #[no_mangle]
@@ -2312,6 +2308,158 @@ pub unsafe extern "C" fn hlp_obj_delete_field(obj: *mut vdynamic, hfield: i32) -
         }
         _ => false,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hash(name: *mut vbyte) -> i32 {
+    hlp_hash_gen(name as *const uchar, true)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
+    use crate::{array::hlp_alloc_array, types::{hlt_bytes, hl_aptr}};
+
+    if obj.is_null() {
+        return ptr::null_mut();
+    }
+    match (*(*obj).t).kind {
+        hl_type_kind_HDYNOBJ => {
+            let o = obj as *mut vdynobj;
+            let nf = (*o).nfields;
+            let a = hlp_alloc_array(hlt_bytes(), nf);
+            for i in 0..nf as usize {
+                let f = (*o).lookup.add(i);
+                let order = hlp_dynobj_order(f) as usize;
+                *(hl_aptr::<*mut vbyte>(a)).add(order) = hlp_field_name((*f).hashed_name);
+            }
+            a
+        }
+        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+            let mut tobj = (*(*obj).t).__bindgen_anon_1.obj;
+            if tobj.is_null() {
+                return ptr::null_mut();
+            }
+            let rt = (*tobj).rt;
+            if rt.is_null() {
+                return ptr::null_mut();
+            }
+            let a = hlp_alloc_array(hlt_bytes(), (*rt).nfields);
+            let mut p = 0usize;
+            loop {
+                for i in 0..(*tobj).nfields as usize {
+                    let f = (*tobj).fields.add(i);
+                    let name = (*f).name;
+                    if name.is_null() || *name == 0 {
+                        (*a).size -= 1;
+                        continue;
+                    }
+                    *(hl_aptr::<*mut vbyte>(a)).add(p) = name as *mut vbyte;
+                    p += 1;
+                }
+                let sup = (*tobj).super_;
+                if sup.is_null() {
+                    break;
+                }
+                tobj = (*sup).__bindgen_anon_1.obj;
+            }
+            a
+        }
+        hl_type_kind_HVIRTUAL => {
+            let v = obj as *mut vvirtual;
+            if !(*v).value.is_null() {
+                return hlp_obj_fields((*v).value);
+            }
+            let virt = (*(*v).t).__bindgen_anon_1.virt;
+            let a = hlp_alloc_array(hlt_bytes(), (*virt).nfields);
+            for i in 0..(*virt).nfields as usize {
+                *(hl_aptr::<*mut vbyte>(a)).add(i) = (*(*virt).fields.add(i)).name as *mut vbyte;
+            }
+            a
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varray {
+    use crate::{array::hlp_alloc_array, types::{hlt_bytes, hl_aptr}};
+
+    if t.is_null() {
+        return ptr::null_mut();
+    }
+
+    if (*t).kind == hl_type_kind_HVIRTUAL {
+        let virt = (*t).__bindgen_anon_1.virt;
+        let a = hlp_alloc_array(hlt_bytes(), (*virt).nfields);
+        for i in 0..(*virt).nfields as usize {
+            *(hl_aptr::<*const uchar>(a)).add(i) = (*(*virt).fields.add(i)).name;
+        }
+        return a;
+    }
+
+    if (*t).kind != hl_type_kind_HOBJ && (*t).kind != hl_type_kind_HSTRUCT {
+        return ptr::null_mut();
+    }
+
+    let mut o = (*t).__bindgen_anon_1.obj;
+    if o.is_null() {
+        return ptr::null_mut();
+    }
+
+    // Count methods (proto entries with pindex < 0)
+    let mut mcount = 0;
+    let mut oc = o;
+    loop {
+        for i in 0..(*oc).nproto as usize {
+            let p = (*oc).proto.add(i);
+            if (*p).pindex < 0 {
+                mcount += 1;
+            }
+        }
+        let sup = (*oc).super_;
+        if sup.is_null() {
+            break;
+        }
+        oc = (*sup).__bindgen_anon_1.obj;
+    }
+
+    let rt = hlp_get_obj_rt(t);
+    if rt.is_null() {
+        return ptr::null_mut();
+    }
+    let total = mcount + (*rt).nproto + (*rt).nfields;
+    let a = hlp_alloc_array(hlt_bytes(), total);
+    let mut out = 0usize;
+    let mut current_rt = rt;
+
+    o = (*t).__bindgen_anon_1.obj;
+    loop {
+        let pproto = if !(*current_rt).parent.is_null() {
+            (*(*current_rt).parent).nproto
+        } else {
+            0
+        };
+        for i in 0..(*o).nproto as usize {
+            let p = (*o).proto.add(i);
+            if (*p).pindex < 0 || (*p).pindex >= pproto {
+                *(hl_aptr::<*const uchar>(a)).add(out) = (*p).name;
+                out += 1;
+            }
+        }
+        for i in 0..(*o).nfields as usize {
+            let f = (*o).fields.add(i);
+            *(hl_aptr::<*const uchar>(a)).add(out) = (*f).name;
+            out += 1;
+        }
+        let sup = (*o).super_;
+        if sup.is_null() {
+            break;
+        }
+        o = (*sup).__bindgen_anon_1.obj;
+        current_rt = (*o).rt;
+    }
+
+    a
 }
 
 #[no_mangle]

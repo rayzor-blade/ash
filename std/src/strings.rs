@@ -1,6 +1,6 @@
 use std::{ffi::c_double, os::raw::c_int, ptr};
 
-use crate::{buffer::{hlp_alloc_buffer, hlp_buffer_content, hlp_buffer_val}, hl::{self, hl_type_kind_HF64, hl_type_kind_HI32, uchar, vbyte, vdynamic}, unicase::*};
+use crate::{buffer::{hlp_alloc_buffer, hlp_buffer_content, hlp_buffer_val}, cast::hlp_make_dyn, hl::{self, hl_type_kind_HF64, hl_type_kind_HI32, uchar, vbyte, vdynamic}, unicase::*};
 
 
 pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
@@ -46,10 +46,11 @@ pub unsafe extern "C" fn hlp_utf16_length(s: *const hl::uchar) -> usize {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos:i32) -> usize {
     if s.is_null() {
-        return 0; 
+        return 0;
     }
 
-    hlp_utf16_length(s.wrapping_add(pos as usize))
+    let len = hlp_utf16_length(s.wrapping_add(pos as usize));
+    len
 }
 
 #[no_mangle]
@@ -294,6 +295,151 @@ pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -
 
     *out.offset(len as isize) = 0;
     out as *mut vbyte
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_parse_int(
+    bytes: *mut vbyte,
+    pos: c_int,
+    len: c_int,
+) -> *mut vdynamic {
+    if bytes.is_null() {
+        return ptr::null_mut();
+    }
+    let c = (bytes as *const uchar).wrapping_add(pos as usize);
+    let mut p = c;
+
+    // Skip whitespace
+    while *p != 0 && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16) {
+        p = p.add(1);
+    }
+
+    if *p == 0 {
+        return ptr::null_mut();
+    }
+
+    let sign = *p;
+    let is_signed = sign == b'-' as u16 || sign == b'+' as u16;
+
+    // Check for hex prefix (0x or 0X, optionally with sign)
+    let hex_start = if is_signed { p.add(1) } else { p };
+    let remaining = if is_signed { len - (p.offset_from(c) as i32) - 1 } else { len - (p.offset_from(c) as i32) };
+    let is_hex = remaining >= 2 && *hex_start == b'0' as u16 && (*hex_start.add(1) == b'x' as u16 || *hex_start.add(1) == b'X' as u16);
+
+    let mut h: i32;
+    if is_hex {
+        h = 0;
+        let mut hp = if is_signed { p.add(3) } else { p.add(2) };
+        let mut found_digit = false;
+        while *hp != 0 {
+            let k = *hp;
+            if k >= b'0' as u16 && k <= b'9' as u16 {
+                h = (h << 4) | (k - b'0' as u16) as i32;
+                found_digit = true;
+            } else if k >= b'A' as u16 && k <= b'F' as u16 {
+                h = (h << 4) | ((k - b'A' as u16) as i32 + 10);
+                found_digit = true;
+            } else if k >= b'a' as u16 && k <= b'f' as u16 {
+                h = (h << 4) | ((k - b'a' as u16) as i32 + 10);
+                found_digit = true;
+            } else {
+                break;
+            }
+            hp = hp.add(1);
+        }
+        if !found_digit {
+            return ptr::null_mut();
+        }
+        if sign == b'-' as u16 {
+            h = -h;
+        }
+    } else {
+        // Decimal parsing
+        let mut dp = p;
+        let negative = *dp == b'-' as u16;
+        if *dp == b'-' as u16 || *dp == b'+' as u16 {
+            dp = dp.add(1);
+        }
+        if *dp == 0 || *dp < b'0' as u16 || *dp > b'9' as u16 {
+            return ptr::null_mut();
+        }
+        h = 0;
+        while *dp >= b'0' as u16 && *dp <= b'9' as u16 {
+            h = h.wrapping_mul(10).wrapping_add((*dp - b'0' as u16) as i32);
+            dp = dp.add(1);
+        }
+        if negative {
+            h = -h;
+        }
+    }
+
+    let t = crate::types::hlt_i32();
+    hlp_make_dyn(&h as *const i32 as *mut std::ffi::c_void, t)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_parse_float(
+    bytes: *mut vbyte,
+    pos: c_int,
+    _len: c_int,
+) -> c_double {
+    if bytes.is_null() {
+        return f64::NAN;
+    }
+    let mut p = (bytes as *const uchar).wrapping_add(pos as usize);
+
+    // Skip whitespace
+    while *p != 0 && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16) {
+        p = p.add(1);
+    }
+
+    if *p == 0 {
+        return f64::NAN;
+    }
+
+    // Convert the uchar (UTF-16) to a Rust string for parsing
+    let mut chars = Vec::new();
+    let start = p;
+    while *p != 0 {
+        chars.push(*p);
+        p = p.add(1);
+    }
+
+    let s = String::from_utf16_lossy(&chars);
+    let trimmed = s.trim();
+    match trimmed.parse::<f64>() {
+        Ok(d) => d,
+        Err(_) => {
+            // Try parsing just the numeric prefix
+            let mut end = 0;
+            let bytes = trimmed.as_bytes();
+            if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
+                end += 1;
+            }
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'.' {
+                end += 1;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+            }
+            if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+                end += 1;
+                if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
+                    end += 1;
+                }
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+            }
+            if end == 0 || (end == 1 && (bytes[0] == b'-' || bytes[0] == b'+')) {
+                return f64::NAN;
+            }
+            trimmed[..end].parse::<f64>().unwrap_or(f64::NAN)
+        }
+    }
 }
 
 #[no_mangle]

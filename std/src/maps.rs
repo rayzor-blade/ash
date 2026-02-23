@@ -501,7 +501,150 @@ unsafe fn get_key(m: *mut hl::hl_hb_map, c: i32) -> *mut hl::uchar {
     (*((*m).values.add(c as usize))).key
 }
 
-// #[no_mangle]
-// pub unsafe extern "C" fn hlp_hb_get(m:*mut hl::hl_hb_map, key:*mut hl::uchar) -> *mut hl::vdynamic  {
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbget(
+    m: *mut hl::hl_hb_map,
+    key: *mut hl::uchar,
+) -> *mut hl::vdynamic {
+    use hl_hb::HbMap;
 
-// }
+    if m.is_null() || (*m).values.is_null() {
+        return ptr::null_mut();
+    }
+    let hash = hl_hb::hb_hash(key);
+    let ckey = hash % (*m).ncells as u32;
+    let mut c = m.m_index(ckey);
+    while c >= 0 {
+        if m.match_entry(c as usize, hash, key) {
+            return (*(*m).values.add(c as usize)).value;
+        }
+        c = m.m_next(c as u32);
+    }
+    ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbexists(
+    m: *mut hl::hl_hb_map,
+    key: *mut hl::uchar,
+) -> bool {
+    use hl_hb::HbMap;
+
+    if m.is_null() || (*m).values.is_null() {
+        return false;
+    }
+    let hash = hl_hb::hb_hash(key);
+    let ckey = hash % (*m).ncells as u32;
+    let mut c = m.m_index(ckey);
+    while c >= 0 {
+        if m.match_entry(c as usize, hash, key) {
+            return true;
+        }
+        c = m.m_next(c as u32);
+    }
+    false
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbremove(
+    mut m: *mut hl::hl_hb_map,
+    key: *mut hl::uchar,
+) -> bool {
+    use hl_hb::HbMap;
+
+    if m.is_null() || (*m).values.is_null() {
+        return false;
+    }
+    let hash = hl_hb::hb_hash(key);
+    let ckey = hash % (*m).ncells as u32;
+    let mut c = m.m_index(ckey);
+    let mut prev: i32 = -1;
+    while c >= 0 {
+        if m.match_entry(c as usize, hash, key) {
+            // Unlink from chain
+            let next = m.m_next(c as u32);
+            if prev < 0 {
+                // Head of chain: cells[ckey] = next
+                if (*m).maxentries < _MLIMIT {
+                    ptr::write(
+                        ((*m).cells as *mut i8).wrapping_add(ckey as usize),
+                        next as i8,
+                    );
+                } else {
+                    ptr::write(
+                        ((*m).cells as *mut i32).wrapping_add(ckey as usize),
+                        next,
+                    );
+                }
+            } else {
+                // Middle/end of chain: nexts[prev] = next
+                if (*m).maxentries < _MLIMIT {
+                    ptr::write(
+                        ((*m).nexts as *mut i8).wrapping_add(prev as usize),
+                        next as i8,
+                    );
+                } else {
+                    ptr::write(
+                        ((*m).nexts as *mut i32).wrapping_add(prev as usize),
+                        next,
+                    );
+                }
+            }
+            m.erase_entry(c as usize);
+            hl_freelist_add(&mut (*m).lfree, c);
+            (*m).nentries -= 1;
+            return true;
+        }
+        prev = c;
+        c = m.m_next(c as u32);
+    }
+    false
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbkeys(m: *mut hl::hl_hb_map) -> *mut hl::varray {
+    let count = if m.is_null() { 0 } else { (*m).nentries };
+    let a = crate::array::hlp_alloc_array(crate::types::hlt_bytes(), count);
+    if m.is_null() || count == 0 {
+        return a;
+    }
+    let mut p = 0;
+    for i in 0..(*m).ncells {
+        let mut c = if (*m).maxentries < _MLIMIT {
+            *((*m).cells as *const i8).add(i as usize) as i32
+        } else {
+            *((*m).cells as *const i32).add(i as usize)
+        };
+        while c >= 0 {
+            let key = (*(*m).values.add(c as usize)).key;
+            *(crate::types::hl_aptr::<*mut hl::vbyte>(a)).add(p) = key as *mut hl::vbyte;
+            p += 1;
+            c = m.m_next(c as u32);
+        }
+    }
+    a
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray {
+    let count = if m.is_null() { 0 } else { (*m).nentries };
+    let a = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), count);
+    if m.is_null() || count == 0 {
+        return a;
+    }
+    let mut p = 0;
+    for i in 0..(*m).ncells {
+        let mut c = if (*m).maxentries < _MLIMIT {
+            *((*m).cells as *const i8).add(i as usize) as i32
+        } else {
+            *((*m).cells as *const i32).add(i as usize)
+        };
+        while c >= 0 {
+            let val = (*(*m).values.add(c as usize)).value;
+            *(crate::types::hl_aptr::<*mut hl::vdynamic>(a)).add(p) = val;
+            p += 1;
+            c = m.m_next(c as u32);
+        }
+    }
+    a
+}

@@ -49,6 +49,12 @@ pub fn hlt_dyn() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl_type_kind_HDYN) as usize) as *mut hl_type
 }
 
+/// Persistent type singleton for HI32.
+pub fn hlt_i32() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HI32) as usize) as *mut hl_type
+}
+
 pub static TSTR: [&'static str; 22] = [
     "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "array",
     "type", "null", "null", "dynobj", "null", "null", "null", "null", "null", "null",

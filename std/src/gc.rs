@@ -364,7 +364,7 @@ impl ImmixAllocator {
         self.sweep();
         let freed = self.heap.free_blocks.len();
         let retained = self.heap.used_blocks.len();
-        eprintln!("[GC] collected: freed={freed} retained={retained} (was {used_before} used)");
+        // eprintln!("[GC] collected: freed={freed} retained={retained} (was {used_before} used)");
 
         self.heap.alloc_count = 0;
         // Reset so next allocation picks a fresh free block
@@ -694,6 +694,14 @@ impl ImmixAllocator {
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_register_root(ptr: *mut hl::vdynamic) {
+    if ptr.is_null() {
+        return;
+    }
+    let gc = GC.get_mut().expect("Expected to get GC");
+    gc.register_persistent(ptr);
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {

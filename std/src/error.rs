@@ -222,12 +222,14 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_exception_stack_raw(arr: *mut varray) -> i32 {
-    unimplemented!()
+    // Stub: return 0 entries (no stack trace available)
+    0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
-    unimplemented!()
+    // Stub: return 0 entries (no call stack available)
+    0
 }
 
 #[no_mangle]

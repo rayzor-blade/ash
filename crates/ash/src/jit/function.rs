@@ -15,8 +15,8 @@ use crate::hl::{
     hl_type,
     hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
     hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HOBJ,
-    hl_type_kind_HSTRUCT, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL,
-    hl_type_kind_HVOID, vdynamic, hl_runtime_obj, hl_obj_field, vdynobj, vvirtual
+    hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
+    hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, hl_runtime_obj, hl_obj_field, vdynobj, vvirtual
 };
 use crate::opcodes::Opcode;
 use crate::types::{HLNative, HLTypeFun, Str};
@@ -44,6 +44,7 @@ unsafe extern "C" {
     fn hlp_alloc_dynobj() -> *mut vdynobj;
     fn hlp_alloc_virtual(t: *mut hl_type) -> *mut vvirtual;
 }
+
 
 
 /// Reference to a function or a native object
@@ -219,10 +220,7 @@ impl<'ctx> JITModule<'ctx> {
             // Run AIR optimization passes on bytecode before LLVM emission
             let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
             let num_regs = f.regs.len();
-            let eliminated = pass_manager.run(&mut f.ops, num_regs);
-            if eliminated > 0 {
-                eprintln!("AIR: eliminated {} opcodes in {}", eliminated, f.name());
-            }
+            let _eliminated = pass_manager.run(&mut f.ops, num_regs);
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
@@ -238,6 +236,7 @@ impl<'ctx> JITModule<'ctx> {
 
             let (registers, reg_types) = self.allocate_registers(&f)?;
             self.load_function_arguments(&f, &function, &registers)?;
+
             self.translate_opcodes(&f, &registers, &reg_types)?;
 
             if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
@@ -282,10 +281,7 @@ impl<'ctx> JITModule<'ctx> {
                 let mut f = f.clone();
                 let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
                 let num_regs = f.regs.len();
-                let eliminated = pass_manager.run(&mut f.ops, num_regs);
-                if eliminated > 0 {
-                    eprintln!("AIR: eliminated {} opcodes in {}", eliminated, f.name());
-                }
+                let _eliminated = pass_manager.run(&mut f.ops, num_regs);
 
                 let function = self.create_function_declaration(&f)?;
                 let basic_block = self.context.append_basic_block(function, "entry");
@@ -755,20 +751,21 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_unconditional_branch(target)?;
             }
             Opcode::GetType { dst, src } => {
-                // Load the source value
+                // GetType reads the runtime hl_type* from the value's ->t field (offset 0)
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize],
                     registers[src.0 as usize],
-                    "src_val",
+                    "gettype_src",
                 )?;
-
-                // Get the type index of the source value
-                let type_index = f.regs.clone()[src.0 as usize].0;
-
-                let typ: BasicValueEnum<'ctx> = self.get_initialized_type(type_index)?;
-
-                // Store the type info in the destination register
-                self.builder.build_store(registers[dst.0 as usize], typ);
+                let obj_ptr = src_val.into_pointer_value();
+                // obj->t is the first field (offset 0) of vdynamic/vobj, a pointer to hl_type
+                let t_ptr = self.builder.build_load(
+                    ptr_type,
+                    obj_ptr,
+                    "gettype_t",
+                )?.into_pointer_value();
+                self.builder.build_store(registers[dst.0 as usize], t_ptr)?;
             }
 
             Opcode::Type { dst, ty } => {
@@ -887,11 +884,18 @@ impl<'ctx> JITModule<'ctx> {
                                 "field_offset_ptr",
                             )?
                         };
-                        let field_offset = self.builder.build_load(
+                        let field_offset_i32 = self.builder.build_load(
                             self.context.i32_type(),
                             field_offset_ptr,
-                            "field_offset",
+                            "field_offset_i32",
                         )?.into_int_value();
+
+                        // Zero-extend to i64 for proper pointer arithmetic on 64-bit
+                        let field_offset = self.builder.build_int_z_extend(
+                            field_offset_i32,
+                            self.context.i64_type(),
+                            "field_offset",
+                        )?;
 
                         // Compute field pointer: (i8*)obj + field_offset
                         let field_ptr = unsafe {
@@ -973,9 +977,8 @@ impl<'ctx> JITModule<'ctx> {
                         self.builder.build_store(field_value_ptr.into_pointer_value(), src_val)?;
                         self.builder.build_unconditional_branch(cont_block)?;
 
-                        // Field doesn't exist: hl_dyn_set(o,hash(field),vt,v)
+                        // Field doesn't exist: box value + call hlp_obj_set_field
                         self.builder.position_at_end(else_block);
-                        let hl_dyn_set = self.declare_native("hlp_get_dynset", &[self.context.ptr_type(AddressSpace::default()).into(), self.context.i32_type().into()], Some(self.context.ptr_type(AddressSpace::default()).into()));
                         let hashed_name = obj_type_.virt.as_ref()
                             .map(|v| v.fields.get(field.0).map(|f| f.hashed_name).unwrap_or(0))
                             .unwrap_or(0);
@@ -983,9 +986,36 @@ impl<'ctx> JITModule<'ctx> {
                             .context
                             .i32_type()
                             .const_int(hashed_name as u64, false);
+                        let src_type_idx = f.regs[src.0 as usize].0;
+                        let src_kind = self.types_[src_type_idx].kind;
+
+                        // Box the value to a vdynamic* via hlp_make_dyn
+                        let boxed_val = if src_kind == hl_type_kind_HI32 || src_kind == hl_type_kind_HBOOL
+                            || src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16
+                            || src_kind == hl_type_kind_HF32 || src_kind == hl_type_kind_HF64
+                            || src_kind == hl_type_kind_HI64
+                        {
+                            // Store value to a temp alloca, pass its address
+                            let tmp = self.builder.build_alloca(reg_types[src.0 as usize], "tmp_box")?;
+                            self.builder.build_store(tmp, src_val)?;
+                            let type_ptr_val = self.get_initialized_type(src_type_idx)?
+                                .into_pointer_value();
+                            let make_dyn = self.declare_native("hlp_make_dyn",
+                                &[ptr_type.into(), ptr_type.into()],
+                                Some(ptr_type.into()));
+                            self.builder.build_call(make_dyn,
+                                &[tmp.into(), type_ptr_val.into()], "boxed_val")?
+                                .try_as_basic_value().left().unwrap().into_pointer_value()
+                        } else {
+                            src_val.into_pointer_value()
+                        };
+
+                        let obj_set_field = self.declare_native("hlp_obj_set_field", &[
+                            ptr_type.into(), self.context.i32_type().into(), ptr_type.into(),
+                        ], None);
                         self.builder.build_call(
-                            hl_dyn_set,
-                            &[obj_val.into(), field_hash.into(), src_val.into()],
+                            obj_set_field,
+                            &[obj_val.into(), field_hash.into(), boxed_val.into()],
                             "dyn_set_result",
                         )?;
                         self.builder.build_unconditional_branch(cont_block)?;
@@ -1043,11 +1073,18 @@ impl<'ctx> JITModule<'ctx> {
                                 "field_offset_ptr",
                             )?
                         };
-                        let field_offset = self.builder.build_load(
+                        let field_offset_i32 = self.builder.build_load(
                             self.context.i32_type(),
                             field_offset_ptr,
-                            "field_offset",
+                            "field_offset_i32",
                         )?.into_int_value();
+
+                        // Zero-extend to i64 for proper pointer arithmetic on 64-bit
+                        let field_offset = self.builder.build_int_z_extend(
+                            field_offset_i32,
+                            self.context.i64_type(),
+                            "field_offset",
+                        )?;
 
                         // Compute field pointer: (i8*)obj + field_offset
                         let field_ptr = unsafe {
@@ -1066,6 +1103,7 @@ impl<'ctx> JITModule<'ctx> {
                             field_ptr,
                             "field_val",
                         )?;
+
                         self.builder
                             .build_store(registers[dst.0 as usize], field_val)?;
                     }
@@ -1337,7 +1375,7 @@ impl<'ctx> JITModule<'ctx> {
                     registers[reg.0 as usize],
                     "switch_val",
                 )?.into_int_value();
-                let default_target = opcode_blocks[(i as i32 + 1 + *end) as usize];
+                let default_target = opcode_blocks[i + 1];
                 let cases: Vec<(inkwell::values::IntValue<'ctx>, BasicBlock<'ctx>)> = offsets
                     .iter()
                     .enumerate()
@@ -1524,32 +1562,109 @@ impl<'ctx> JITModule<'ctx> {
                 self.translate_opcode(f, &rewritten, registers, reg_types, i, opcode_blocks)?;
             }
 
-            // --- CallMethod (compile-time proto resolution) ---
+            // --- CallMethod (compile-time proto resolution, runtime vtable for virtuals) ---
             Opcode::CallMethod { dst, field, args } => {
-                // Resolve method at compile time from the object's type proto table
                 let obj_type_idx = f.regs[args[0].0 as usize].0;
                 let obj_type = &self.types_[obj_type_idx];
-                let findex = obj_type.obj.as_ref()
-                    .and_then(|obj| obj.proto.get(field.0).map(|p| p.findex as usize))
-                    .ok_or_else(|| anyhow!("CallMethod: cannot resolve proto field {} on type {}", field.0, obj_type_idx))?;
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
 
-                let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
-                let arg_vals: Vec<BasicMetadataValueEnum> = args
-                    .iter()
-                    .map(|arg| {
-                        self.builder.build_load(
-                            reg_types[arg.0 as usize],
-                            registers[arg.0 as usize],
-                            "arg_val",
-                        ).unwrap().into()
-                    })
-                    .collect();
-                let result = self.builder.build_call(function, &arg_vals, "call_method")?;
-                if let Some(ret_val) = result.try_as_basic_value().left() {
-                    self.builder.build_store(registers[dst.0 as usize], ret_val)?;
-                }
-                if is_placeholder {
-                    self.add_pending_compilation(findex);
+                if let Some(findex) = obj_type.obj.as_ref()
+                    .and_then(|obj| obj.proto.get(field.0).map(|p| p.findex as usize))
+                {
+                    // Compile-time resolution for HOBJ/HSTRUCT
+                    let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
+                    // Truncate args to match the target function's actual parameter count.
+                    // Bytecode CallMethod may include extra args beyond what the function expects
+                    // (e.g., getter `get_length` takes only `this` but bytecode has extra args).
+                    let expected_params = function.count_params() as usize;
+                    let actual_args = &args[..expected_params.min(args.len())];
+                    let arg_vals: Vec<BasicMetadataValueEnum> = actual_args
+                        .iter()
+                        .map(|arg| {
+                            self.builder.build_load(
+                                reg_types[arg.0 as usize],
+                                registers[arg.0 as usize],
+                                "arg_val",
+                            ).unwrap().into()
+                        })
+                        .collect();
+                    let result = self.builder.build_call(function, &arg_vals, "call_method")?;
+                    if let Some(ret_val) = result.try_as_basic_value().left() {
+                        self.builder.build_store(registers[dst.0 as usize], ret_val)?;
+                    }
+                    if is_placeholder {
+                        self.add_pending_compilation(findex);
+                    }
+                } else {
+                    // Runtime dispatch via hl_runtime_obj.methods table
+                    let obj_val = self.builder.build_load(
+                        ptr_type, registers[args[0].0 as usize], "vobj"
+                    )?.into_pointer_value();
+
+                    // Load hl_type* from obj (offset 0)
+                    let obj_type_ptr = self.builder.build_load(
+                        ptr_type, obj_val, "obj_type"
+                    )?.into_pointer_value();
+
+                    // Call hlp_get_obj_rt to get hl_runtime_obj*
+                    let hl_get_obj_rt = self.declare_native(
+                        "hlp_get_obj_rt",
+                        &[ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let rt_obj = self.builder
+                        .build_call(hl_get_obj_rt, &[obj_type_ptr.into()], "rt_obj")?
+                        .try_as_basic_value().left().unwrap().into_pointer_value();
+
+                    // Load methods pointer from hl_runtime_obj (offset 32)
+                    let methods_gep = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(), rt_obj,
+                            &[self.context.i64_type().const_int(32, false)],
+                            "methods_gep",
+                        )?
+                    };
+                    let methods_ptr = self.builder.build_load(ptr_type, methods_gep, "methods")?
+                        .into_pointer_value();
+
+                    // Load function pointer from methods[field]
+                    let fn_ptr_gep = unsafe {
+                        self.builder.build_gep(
+                            ptr_type, methods_ptr,
+                            &[self.context.i32_type().const_int(field.0 as u64, false)],
+                            "fn_ptr_gep",
+                        )?
+                    };
+                    let fn_ptr = self.builder.build_load(ptr_type, fn_ptr_gep, "fn_ptr")?
+                        .into_pointer_value();
+
+                    // Build args and function type
+                    let arg_vals: Vec<BasicMetadataValueEnum> = args
+                        .iter()
+                        .map(|arg| {
+                            self.builder.build_load(
+                                reg_types[arg.0 as usize],
+                                registers[arg.0 as usize],
+                                "arg_val",
+                            ).unwrap().into()
+                        })
+                        .collect();
+
+                    let arg_types: Vec<BasicMetadataTypeEnum> = args.iter()
+                        .map(|arg| reg_types[arg.0 as usize].into())
+                        .collect();
+
+                    let dst_kind = self.types_[f.regs[dst.0 as usize].0].kind;
+                    let fn_type = if dst_kind == hl_type_kind_HVOID {
+                        self.context.void_type().fn_type(&arg_types, false)
+                    } else {
+                        reg_types[dst.0 as usize].fn_type(&arg_types, false)
+                    };
+
+                    let result = self.builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "vcall")?;
+                    if let Some(ret_val) = result.try_as_basic_value().left() {
+                        self.builder.build_store(registers[dst.0 as usize], ret_val)?;
+                    }
                 }
             }
             // --- CallThis (same as CallMethod but this = reg 0) ---
@@ -1561,14 +1676,16 @@ impl<'ctx> JITModule<'ctx> {
                     .ok_or_else(|| anyhow!("CallThis: cannot resolve proto field {} on type {}", field.0, obj_type_idx))?;
 
                 let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
-                // Prepend reg 0 (this) to args
-                let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
+                let expected_params = function.count_params() as usize;
+                // Prepend reg 0 (this) to args, truncate to match target param count
+                let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(expected_params);
                 arg_vals.push(self.builder.build_load(
                     reg_types[0],
                     registers[0],
                     "this_val",
                 )?.into());
-                for arg in args {
+                let extra_count = (expected_params.saturating_sub(1)).min(args.len());
+                for arg in &args[..extra_count] {
                     arg_vals.push(self.builder.build_load(
                         reg_types[arg.0 as usize],
                         registers[arg.0 as usize],
@@ -2446,13 +2563,20 @@ impl<'ctx> JITModule<'ctx> {
             Opcode::GetTID { dst, src } => {
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize], registers[src.0 as usize], "gettid_src")?;
+                let src_type_kind = self.types_[f.regs[src.0 as usize].0].kind;
                 if src_val.is_pointer_value() {
-                    // Runtime: load obj->t (offset 0), then t->kind (offset 0)
-                    let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let obj = src_val.into_pointer_value();
-                    let t_ptr = self.builder.build_load(ptr_type, obj, "gettid_type")?.into_pointer_value();
-                    let kind = self.builder.build_load(self.context.i32_type(), t_ptr, "gettid_kind")?;
-                    self.builder.build_store(registers[dst.0 as usize], kind)?;
+                    if src_type_kind == hl_type_kind_HTYPE {
+                        // Source is hl_type* — kind is directly at offset 0
+                        let kind = self.builder.build_load(self.context.i32_type(), obj, "gettid_kind")?;
+                        self.builder.build_store(registers[dst.0 as usize], kind)?;
+                    } else {
+                        // Source is an object — load obj->t (offset 0), then t->kind (offset 0)
+                        let ptr_type = self.context.ptr_type(AddressSpace::default());
+                        let t_ptr = self.builder.build_load(ptr_type, obj, "gettid_type")?.into_pointer_value();
+                        let kind = self.builder.build_load(self.context.i32_type(), t_ptr, "gettid_kind")?;
+                        self.builder.build_store(registers[dst.0 as usize], kind)?;
+                    }
                 } else {
                     // Compile-time: type kind is known
                     let type_idx = f.regs[src.0 as usize].0;
@@ -2759,6 +2883,9 @@ impl<'ctx> JITModule<'ctx> {
         // Materialize bytecode constants (pre-initialized globals like string literals)
         self.init_constants()?;
 
+        // Pre-allocate class descriptors for HOBJ globals not populated by init_constants
+        self.init_class_descriptors()?;
+
         unsafe {
             self.execution_engine.run_function(function, &[]);
         };
@@ -2777,12 +2904,10 @@ impl<'ctx> JITModule<'ctx> {
             })
             .collect();
 
-        let mut count = 0;
         for (findex, name) in &func_entries {
             if let Ok(addr) = self.execution_engine.get_function_address(name) {
                 if addr != 0 && *findex < self.functions_ptrs.len() {
                     self.functions_ptrs[*findex] = addr as *mut c_void;
-                    count += 1;
                 }
             }
         }

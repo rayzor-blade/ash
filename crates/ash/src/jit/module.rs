@@ -20,7 +20,6 @@ use std::cell::RefCell;
 use std::collections::btree_map::IntoValues;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
-use std::io::{stderr, Write};
 use std::mem;
 use std::ops::Add;
 use std::path::Path;
@@ -516,12 +515,20 @@ impl<'ctx> JITModule<'ctx> {
         // Resolve native functions we need
         type FnAllocObj = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
         type FnGetObjRt = unsafe extern "C" fn(*mut hl_type) -> *mut hl_runtime_obj;
+        type FnGcRegisterRoot = unsafe extern "C" fn(*mut vdynamic);
 
         let fn_alloc_obj: FnAllocObj = unsafe {
             let ptr = self
                 .native_function_resolver
                 .resolve_function("std", "hlp_alloc_obj")
                 .map_err(|e| anyhow!("Cannot resolve hlp_alloc_obj: {}", e))?;
+            std::mem::transmute(ptr)
+        };
+        let fn_gc_register_root: FnGcRegisterRoot = unsafe {
+            let ptr = self
+                .native_function_resolver
+                .resolve_function("std", "hlp_gc_register_root")
+                .map_err(|e| anyhow!("Cannot resolve hlp_gc_register_root: {}", e))?;
             std::mem::transmute(ptr)
         };
         let fn_get_obj_rt: FnGetObjRt = unsafe {
@@ -542,7 +549,6 @@ impl<'ctx> JITModule<'ctx> {
 
             let type_idx = bytecode.globals[global_idx].0;
             let hl_type_rust = &bytecode.types[type_idx];
-
             let c_type_ptr = match type_to_c_ptr.get(&type_idx) {
                 Some(&ptr) => ptr,
                 None => continue,
@@ -566,16 +572,15 @@ impl<'ctx> JITModule<'ctx> {
                     continue;
                 }
 
-                // Store in globals_data
+                // Store in globals_data and register as GC root
                 self.globals_data[global_idx] = obj_ptr as *mut c_void;
+                unsafe { fn_gc_register_root(obj_ptr) };
 
-                // Also update global_value in hl_type_obj so stdlib can find it
-                unsafe {
-                    let obj = (*c_type_ptr).__bindgen_anon_1.obj;
-                    if !obj.is_null() && !(*obj).global_value.is_null() {
-                        *(*obj).global_value = obj_ptr as *mut c_void;
-                    }
-                }
+                // NOTE: Do NOT update the type's global_value slot here.
+                // The global_value pointer for type T points to where T's class
+                // descriptor lives (e.g., String's global_value -> globals_data[2]).
+                // Writing each constant's obj_ptr there would overwrite the class
+                // descriptor slot with the last String literal object.
 
                 // Get runtime object for field offsets
                 let rt = unsafe { fn_get_obj_rt(c_type_ptr) };
@@ -587,6 +592,7 @@ impl<'ctx> JITModule<'ctx> {
                 let start = unsafe { (*rt).nfields as usize - obj_data.fields.len() };
 
                 // Fill in constant fields
+                let type_name = &obj_data.name;
                 for (j, &field_value) in constant.fields.iter().enumerate() {
                     if j >= obj_data.fields.len() {
                         break;
@@ -633,6 +639,114 @@ impl<'ctx> JITModule<'ctx> {
                             }
                         }
                     }
+                }
+
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Pre-allocate class descriptors for types with global_value > 0.
+    /// In HashLink, each HOBJ type with a non-zero global_value stores its class
+    /// descriptor at that global slot. The init() bytecode function creates and
+    /// populates these via New+SetGlobal, but the type's global_value pointer must
+    /// be wired so that runtime code (like type casting) can find the descriptor.
+    /// We only allocate here for types whose bytecode global_value is non-zero AND
+    /// whose global slot is still empty after init_constants.
+    pub(crate) fn init_class_descriptors(&mut self) -> Result<()> {
+        let type_to_c_ptr: HashMap<usize, *mut hl_type> = self
+            .c_ptr_to_type_index
+            .iter()
+            .map(|(&ptr, &idx)| (idx, ptr as *mut hl_type))
+            .collect();
+
+        type FnAllocObj = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
+        type FnGetObjRt = unsafe extern "C" fn(*mut hl_type) -> *mut hl_runtime_obj;
+        let fn_alloc_obj: FnAllocObj = unsafe {
+            let ptr = self
+                .native_function_resolver
+                .resolve_function("std", "hlp_alloc_obj")
+                .map_err(|e| anyhow!("Cannot resolve hlp_alloc_obj: {}", e))?;
+            std::mem::transmute(ptr)
+        };
+        let fn_get_obj_rt: FnGetObjRt = unsafe {
+            let ptr = self
+                .native_function_resolver
+                .resolve_function("std", "hlp_get_obj_rt")
+                .map_err(|e| anyhow!("Cannot resolve hlp_get_obj_rt: {}", e))?;
+            std::mem::transmute(ptr)
+        };
+
+        // For each type with bytecode global_value > 0, allocate a class descriptor
+        // at the designated global slot using the GLOBAL's declared type.
+        // The global_value is 1-based: value N means global slot N-1.
+        let bytecode = self.bytecode.clone();
+        for (type_idx, type_) in bytecode.types.iter().enumerate() {
+            if type_.kind != hl_type_kind_HOBJ && type_.kind != hl_type_kind_HSTRUCT {
+                continue;
+            }
+            let obj = match type_.obj.as_ref() {
+                Some(o) => o,
+                None => continue,
+            };
+            if obj.global_value == 0 {
+                continue;
+            }
+            let gv_idx = (obj.global_value - 1) as usize;
+            if gv_idx >= self.globals_data.len() {
+                continue;
+            }
+            // Skip if already populated by init_constants
+            if !self.globals_data[gv_idx].is_null() {
+                continue;
+            }
+
+            // Use the global slot's declared type for allocation, not the source type
+            let global_type_idx = bytecode.globals[gv_idx].0;
+            let c_type_ptr = match type_to_c_ptr.get(&global_type_idx) {
+                Some(&ptr) if !ptr.is_null() => ptr,
+                _ => continue,
+            };
+
+            let obj_ptr = unsafe { fn_alloc_obj(c_type_ptr) };
+            if obj_ptr.is_null() {
+                continue;
+            }
+
+            self.globals_data[gv_idx] = obj_ptr as *mut c_void;
+
+            // Set the __type__ field of the class descriptor.
+            // Class descriptors inherit from hl.BaseType which has __type__ as field[0].
+            // The __type__ field should point to the source type's hl_type*.
+            // We need the runtime obj to get the correct field offset.
+            let rt = unsafe { fn_get_obj_rt(c_type_ptr) };
+            if !rt.is_null() {
+                let src_c_type_ptr = match type_to_c_ptr.get(&type_idx) {
+                    Some(&ptr) if !ptr.is_null() => ptr,
+                    _ => continue,
+                };
+                // __type__ is the first field inherited from hl.BaseType
+                // Its fields_indexes[0] gives the byte offset
+                let nfields = unsafe { (*rt).nfields };
+                if nfields > 0 {
+                    let type_field_offset = unsafe { *(*rt).fields_indexes.add(0) } as usize;
+                    unsafe {
+                        let field_addr = (obj_ptr as *mut u8).add(type_field_offset);
+                        *(field_addr as *mut *mut hl_type) = src_c_type_ptr;
+                    }
+                }
+            }
+
+            // Also update the SOURCE type's global_value pointer
+            let src_c_type_ptr = match type_to_c_ptr.get(&type_idx) {
+                Some(&ptr) if !ptr.is_null() => ptr,
+                _ => continue,
+            };
+            unsafe {
+                let c_obj = (*src_c_type_ptr).__bindgen_anon_1.obj;
+                if !c_obj.is_null() && !(*c_obj).global_value.is_null() {
+                    *(*c_obj).global_value = obj_ptr as *mut c_void;
                 }
             }
         }

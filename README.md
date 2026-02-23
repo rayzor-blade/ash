@@ -1,3 +1,7 @@
+<p align="center">
+<img style="display: block;" src="ash.png" alt="Rayzor Blade Logo" width="250"/>
+</p>
+
 # ASH
 
 A HashLink Virtual Machine rewritten in Rust, targeting ARM64/Apple M-series.

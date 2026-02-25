@@ -14,7 +14,8 @@ use super::module::JITModule;
 use crate::hl::{
     hl_type,
     hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
-    hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HOBJ,
+    hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL,
+    hl_type_kind_HOBJ,
     hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
     hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, hl_runtime_obj, hl_obj_field, vdynobj, vvirtual
 };
@@ -1991,15 +1992,72 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.position_at_end(call_done_bb);
             }
 
-            // --- SafeCast: for now, just copy the pointer (runtime check deferred) ---
+            // --- SafeCast: unbox HNULL(T)/HDYN -> primitive T, otherwise copy ---
             Opcode::SafeCast { dst, src } => {
-                // Simple copy for now — full hlp_value_cast deferred
-                let src_val = self.builder.build_load(
-                    reg_types[src.0 as usize],
-                    registers[src.0 as usize],
-                    "safecast_src",
-                )?;
-                self.builder.build_store(registers[dst.0 as usize], src_val)?;
+                let src_type_idx = f.regs[src.0 as usize].0;
+                let dst_type_idx = f.regs[dst.0 as usize].0;
+                let src_kind = self.types_[src_type_idx].kind;
+                let dst_kind = self.types_[dst_type_idx].kind;
+
+                // Unboxing needed when casting from a heap-boxed type (HNULL/HDYN)
+                // to a primitive type. The primitive value lives at offset 8 inside
+                // the vdynamic struct (the `v` union field).
+                let needs_unbox = (src_kind == hl_type_kind_HNULL || src_kind == hl_type_kind_HDYN)
+                    && matches!(dst_kind,
+                        k if k == hl_type_kind_HBOOL || k == hl_type_kind_HI32
+                            || k == hl_type_kind_HF64 || k == hl_type_kind_HF32
+                            || k == hl_type_kind_HI64 || k == hl_type_kind_HUI8
+                            || k == hl_type_kind_HUI16);
+
+                if needs_unbox {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let src_ptr = self.builder.build_load(
+                        ptr_type,
+                        registers[src.0 as usize],
+                        "safecast_src",
+                    )?.into_pointer_value();
+
+                    let is_null = self.builder.build_is_null(src_ptr, "safecast_null")?;
+
+                    let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                    let null_bb = self.context.append_basic_block(function, "safecast_null_path");
+                    let unbox_bb = self.context.append_basic_block(function, "safecast_unbox");
+                    let done_bb = self.context.append_basic_block(function, "safecast_done");
+
+                    self.builder.build_conditional_branch(is_null, null_bb, unbox_bb)?;
+
+                    // Unbox path: load value at offset 8 (the v union in vdynamic)
+                    self.builder.position_at_end(unbox_bb);
+                    let dst_llvm_type = reg_types[dst.0 as usize];
+                    let vdyn_struct = self.context.struct_type(&[
+                        ptr_type.into(),                     // t: *mut hl_type (offset 0)
+                        self.context.i64_type().into(),      // v: union (offset 8)
+                    ], false);
+                    let val_ptr = self.builder.build_struct_gep(
+                        vdyn_struct, src_ptr, 1, "safecast_val_ptr",
+                    )?;
+                    let unboxed = self.builder.build_load(
+                        dst_llvm_type, val_ptr, "safecast_unboxed",
+                    )?;
+                    self.builder.build_store(registers[dst.0 as usize], unboxed)?;
+                    self.builder.build_unconditional_branch(done_bb)?;
+
+                    // Null path: store default value (0/false/0.0)
+                    self.builder.position_at_end(null_bb);
+                    let default_val = dst_llvm_type.const_zero();
+                    self.builder.build_store(registers[dst.0 as usize], default_val)?;
+                    self.builder.build_unconditional_branch(done_bb)?;
+
+                    self.builder.position_at_end(done_bb);
+                } else {
+                    // Same type or non-primitive: simple copy
+                    let src_val = self.builder.build_load(
+                        reg_types[src.0 as usize],
+                        registers[src.0 as usize],
+                        "safecast_src",
+                    )?;
+                    self.builder.build_store(registers[dst.0 as usize], src_val)?;
+                }
             }
 
             // --- ToVirtual: copy pointer (virtual wrapping deferred) ---

@@ -218,6 +218,11 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
+            // Debug: print iterator-related function opcodes
+            // Debug: print all compiled function names
+            {
+                eprintln!("[JIT compile] findex={} name={:?} reg0={:?}", f.findex, f.field_name, f.regs.first());
+            }
             // Run AIR optimization passes on bytecode before LLVM emission
             let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
             let num_regs = f.regs.len();
@@ -1569,7 +1574,128 @@ impl<'ctx> JITModule<'ctx> {
                 let obj_type = &self.types_[obj_type_idx];
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
 
-                if let Some(findex) = obj_type.obj.as_ref()
+                if obj_type.kind == hl_type_kind_HVIRTUAL {
+                    // HVIRTUAL dispatch: load function pointer from vfields[field]
+                    let vvirt = self.builder.build_load(
+                        ptr_type, registers[args[0].0 as usize], "vvirt"
+                    )?.into_pointer_value();
+
+                    // Load value (underlying object) from vvirtual offset 8
+                    let value_gep = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(), vvirt,
+                            &[self.context.i64_type().const_int(8, false)],
+                            "vvirt_value_gep",
+                        )?
+                    };
+                    let value = self.builder.build_load(
+                        ptr_type, value_gep, "vvirt_value"
+                    )?.into_pointer_value();
+
+                    // Load vfields[field] from vvirtual offset 24 + field*8
+                    let vfield_offset = 24 + field.0 as u64 * 8;
+                    let vfield_gep = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(), vvirt,
+                            &[self.context.i64_type().const_int(vfield_offset, false)],
+                            "vfield_gep",
+                        )?
+                    };
+                    let fn_ptr = self.builder.build_load(
+                        ptr_type, vfield_gep, "vfield_fn"
+                    )?.into_pointer_value();
+
+                    // Check if vfield is null (type mismatch — need dynamic fallback)
+                    let is_null = self.builder.build_is_null(fn_ptr, "vfield_null")?;
+                    let function = self.builder.get_insert_block().unwrap().get_parent().unwrap();
+                    let direct_block = self.context.append_basic_block(function, "vcall_direct");
+                    let fallback_block = self.context.append_basic_block(function, "vcall_fallback");
+                    let merge_block = self.context.append_basic_block(function, "vcall_merge");
+                    self.builder.build_conditional_branch(is_null, fallback_block, direct_block)?;
+
+                    // --- Direct path: vfield is resolved, call directly ---
+                    self.builder.position_at_end(direct_block);
+                    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+                    arg_vals.push(value.into());
+                    for arg in &args[1..] {
+                        arg_vals.push(
+                            self.builder.build_load(
+                                reg_types[arg.0 as usize],
+                                registers[arg.0 as usize],
+                                "arg_val",
+                            )?.into()
+                        );
+                    }
+                    let mut arg_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(args.len());
+                    arg_types.push(ptr_type.into());
+                    for arg in &args[1..] {
+                        arg_types.push(reg_types[arg.0 as usize].into());
+                    }
+                    let dst_kind = self.types_[f.regs[dst.0 as usize].0].kind;
+                    let fn_type = if dst_kind == hl_type_kind_HVOID {
+                        self.context.void_type().fn_type(&arg_types, false)
+                    } else {
+                        reg_types[dst.0 as usize].fn_type(&arg_types, false)
+                    };
+                    let direct_result = self.builder.build_indirect_call(fn_type, fn_ptr, &arg_vals, "vcall_virt")?;
+                    if let Some(ret_val) = direct_result.try_as_basic_value().left() {
+                        self.builder.build_store(registers[dst.0 as usize], ret_val)?;
+                    }
+                    self.builder.build_unconditional_branch(merge_block)?;
+
+                    // --- Fallback path: vfield is null, use dynamic dispatch helper ---
+                    self.builder.position_at_end(fallback_block);
+                    // Call hlp_vcall_virtual_0(vvirt, field) -> vdynamic*
+                    // Then unbox the result to the destination register type
+                    let i32_type = self.context.i32_type();
+                    let helper = self.declare_native(
+                        "hlp_vcall_virtual_0",
+                        &[ptr_type.into(), i32_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let field_val = i32_type.const_int(field.0 as u64, false);
+                    let dyn_result = self.builder.build_call(
+                        helper, &[vvirt.into(), field_val.into()], "vcall_dyn"
+                    )?.try_as_basic_value().left().unwrap().into_pointer_value();
+                    // Unbox vdynamic to destination type
+                    match dst_kind {
+                        k if k == hl_type_kind_HI32 || k == hl_type_kind_HBOOL => {
+                            // Load i32 from vdynamic.v (offset 8)
+                            let v_gep = unsafe {
+                                self.builder.build_gep(
+                                    self.context.i8_type(), dyn_result,
+                                    &[self.context.i64_type().const_int(8, false)],
+                                    "dyn_v_gep",
+                                )?
+                            };
+                            let unboxed = self.builder.build_load(
+                                i32_type, v_gep, "unboxed_i32"
+                            )?;
+                            self.builder.build_store(registers[dst.0 as usize], unboxed)?;
+                        }
+                        k if k == hl_type_kind_HF64 => {
+                            let v_gep = unsafe {
+                                self.builder.build_gep(
+                                    self.context.i8_type(), dyn_result,
+                                    &[self.context.i64_type().const_int(8, false)],
+                                    "dyn_v_gep",
+                                )?
+                            };
+                            let unboxed = self.builder.build_load(
+                                self.context.f64_type(), v_gep, "unboxed_f64"
+                            )?;
+                            self.builder.build_store(registers[dst.0 as usize], unboxed)?;
+                        }
+                        _ => {
+                            // Pointer types: use the vdynamic* directly
+                            self.builder.build_store(registers[dst.0 as usize], dyn_result)?;
+                        }
+                    }
+                    self.builder.build_unconditional_branch(merge_block)?;
+
+                    // Continue at merge
+                    self.builder.position_at_end(merge_block);
+                } else if let Some(findex) = obj_type.obj.as_ref()
                     .and_then(|obj| obj.proto.get(field.0).map(|p| p.findex as usize))
                 {
                     // Compile-time resolution for HOBJ/HSTRUCT
@@ -2060,15 +2186,43 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
 
-            // --- ToVirtual: copy pointer (virtual wrapping deferred) ---
+            // --- ToVirtual: wrap object in a vvirtual with resolved field/method pointers ---
             Opcode::ToVirtual { dst, src } => {
-                // Simple copy for now — full hlp_dyn_castp deferred
-                let src_val = self.builder.build_load(
-                    reg_types[src.0 as usize],
-                    registers[src.0 as usize],
-                    "tovirt_src",
-                )?;
-                self.builder.build_store(registers[dst.0 as usize], src_val)?;
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let dst_type_idx = f.regs[dst.0 as usize].0;
+                let dst_kind = self.types_[dst_type_idx].kind;
+
+                if dst_kind == hl_type_kind_HVIRTUAL {
+                    // Get the full C-side hl_type pointer for the virtual type
+                    let vt_ptr = self.get_initialized_type(dst_type_idx)?
+                        .into_pointer_value();
+                    let src_val = self.builder.build_load(
+                        ptr_type, registers[src.0 as usize], "tovirt_src",
+                    )?.into_pointer_value();
+
+                    let hl_to_virtual = self.declare_native(
+                        "hl_to_virtual",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let result = self.builder.build_call(
+                        hl_to_virtual,
+                        &[vt_ptr.into(), src_val.into()],
+                        "tovirt",
+                    )?;
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        result.try_as_basic_value().left().unwrap(),
+                    )?;
+                } else {
+                    // Non-virtual dst: simple pointer copy
+                    let src_val = self.builder.build_load(
+                        reg_types[src.0 as usize],
+                        registers[src.0 as usize],
+                        "tovirt_src",
+                    )?;
+                    self.builder.build_store(registers[dst.0 as usize], src_val)?;
+                }
             }
 
             // --- Trap: setjmp-based exception handling ---

@@ -202,6 +202,7 @@ impl BytecodeDecoder {
         }
 
         self.decoded.types = self.read_types(r)?;
+        Self::compute_enum_offsets(&mut self.decoded.types);
         // println!("Types {:?}", self.decoded.types.len());
         self.decoded.globals = self.read_globals(r)?;
         // println!("Globals {:?}", self.decoded.globals.len());
@@ -296,6 +297,51 @@ impl BytecodeDecoder {
         (0..self.ntypes).map(|_| self.read_type(r)).collect()
     }
 
+    /// Compute field offsets for all HENUM constructs.
+    ///
+    /// The HashLink bytecode does NOT store per-field offsets. They are computed at
+    /// load time from the type of each parameter, matching the venum memory layout:
+    ///   offset 0: hl_type* t      (8 bytes)
+    ///   offset 8: i32 index       (4 bytes)
+    ///   offset 12: pad            (4 bytes)  → header = 16 bytes
+    ///   offset 16...: params, each aligned to its natural alignment
+    fn compute_enum_offsets(types: &mut Vec<HLType>) {
+        // Build a lookup: type_index → (size, alignment) for fast access.
+        // Must snapshot before mutating, so collect kinds first.
+        let kinds: Vec<u32> = types.iter().map(|t| t.kind).collect();
+
+        for t in types.iter_mut() {
+            if let Some(ref mut tenum) = t.tenum {
+                for construct in tenum.constructs.iter_mut() {
+                    // venum header: hl_type*(8) + int index(4) + pad(4) = 16 bytes
+                    let mut offset: usize = 16;
+                    for (i, param_ref) in construct.params.iter().enumerate() {
+                        let kind = kinds.get(param_ref.0).copied().unwrap_or(0);
+                        let (size, align) = Self::type_size_align(kind);
+                        // Align to this type's natural alignment
+                        offset = (offset + align - 1) & !(align - 1);
+                        construct.offsets[i] = offset as i32;
+                        offset += size;
+                    }
+                    // Compute total size (rounded up to pointer alignment)
+                    construct.size = ((offset + 7) & !7) as i32;
+                }
+            }
+        }
+    }
+
+    /// Returns (size_bytes, alignment_bytes) for a given HL type kind.
+    fn type_size_align(kind: u32) -> (usize, usize) {
+        use crate::hl::*;
+        match kind {
+            hl_type_kind_HBOOL | hl_type_kind_HUI8 => (1, 1),
+            hl_type_kind_HUI16 => (2, 2),
+            hl_type_kind_HI32 | hl_type_kind_HF32 => (4, 4),
+            // HI64, HF64, and all pointer-like types (HOBJ, HDYN, HFUN, HBYTES, etc.)
+            _ => (8, 8),
+        }
+    }
+
     fn get_type(&mut self, r: &mut impl BufRead) -> Result<TypeRef, std::io::Error> {
         let pos = self.read_var_int(r)? as usize;
         if pos < 0 || pos >= self.ntypes as usize {
@@ -362,12 +408,14 @@ impl BytecodeDecoder {
                         String::from_utf16_lossy(self.read_string(r)?.into_boxed_slice().as_ref());
                     let nparams = self.read_var_u(r)? as i32;
                     let mut _params = Vec::with_capacity(nparams as usize);
-                    let mut _offsets = vec![0; nparams as usize];
-                    for j in 0..nparams as usize {
+                    let mut _offsets = Vec::with_capacity(nparams as usize);
+                    // HashLink format: for each param, only a type ref (no offset in bytecode).
+                    // Offsets are computed after all types are loaded.
+                    for _j in 0..nparams as usize {
                         let param = self.get_type(r)?;
-                        _params.insert(j, param);
+                        _params.push(param);
+                        _offsets.push(0); // placeholder; filled in by compute_enum_offsets()
                     }
-
                     construct.params = _params;
                     construct.offsets = _offsets;
                 }

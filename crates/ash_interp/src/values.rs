@@ -74,7 +74,13 @@ impl NanBoxedValue {
 
     #[inline(always)]
     pub fn from_f64(v: f64) -> Self {
-        Self(v.to_bits())
+        // Quiet NaN payloads (0x7FF8...) overlap our boxed-tag space.
+        // Canonicalize NaN to a signaling-NaN bit pattern outside NAN_TAG.
+        if v.is_nan() {
+            Self(0x7FF0_0000_0000_0001)
+        } else {
+            Self(v.to_bits())
+        }
     }
 
     #[inline(always)]

@@ -247,8 +247,10 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
         let _ = Box::from_raw(current);
         _longjmp(buf_copy.as_mut_ptr(), 1);
     } else {
-        // Interpreter path: use Rust panic
-        gc.throw(VDynamicException(Box::from_raw(v)));
+        // No active setjmp trap: this is an uncaught native exception.
+        *gc.exc_value.borrow_mut() = v;
+        eprintln!("hlp_throw called without active trap; aborting");
+        std::process::abort();
     }
 }
 
@@ -270,6 +272,12 @@ pub unsafe extern "C" fn hlp_remove_trap_jit() {
 pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
     let gc = GC.get_mut().expect("expected GC");
     *gc.exc_value.borrow()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_clear_exc_value() {
+    let gc = GC.get_mut().expect("expected GC");
+    *gc.exc_value.borrow_mut() = std::ptr::null_mut();
 }
 
 #[no_mangle]

@@ -199,7 +199,7 @@ impl BoyerMooreHorspool {
 
         while match_base < limit {
             let mut match_size = 0;
-            while match_size < pattern.len() && 
+            while match_size < pattern.len() &&
                   block[match_base + match_size] == pattern[match_size] {
                 match_size += 1;
             }
@@ -208,14 +208,15 @@ impl BoyerMooreHorspool {
                 return Some(match_base);
             }
 
-            match_base += self.shift[block[min(match_base + pattern.len(), block.len() - 1)] as usize];
+            // Standard BMH: shift based on the last character of the current window
+            match_base += self.shift[block[match_base + pattern.len() - 1] as usize];
         }
 
         None
     }
 
     fn prepare_shift_table(&mut self, pattern: &[u8]) {
-        self.shift.fill(pattern.len() + 1);
+        self.shift.fill(pattern.len());
 
         for (i, &byte) in pattern.iter().enumerate().take(pattern.len() - 1) {
             self.shift[byte as usize] = pattern.len() - i - 1;

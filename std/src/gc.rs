@@ -1,5 +1,6 @@
 use crate::error::{HLException, TrapContext, VDynamicException};
 use crate::hl::{self, hl_type, hl_type_obj, vclosure, vdynamic, HL_WSIZE};
+use crate::types::hlp_type_size;
 use std::cell::{Cell, RefCell};
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
@@ -38,6 +39,7 @@ struct RootSet {
     globals: Vec<*mut hl::vdynamic>,
     stack_roots: Vec<*mut hl::vdynamic>,
     persistent_roots: HashSet<*mut hl::vdynamic>,
+    scan_ranges: Vec<(usize, usize)>,
 }
 
 pub struct ImmixAllocator {
@@ -83,6 +85,7 @@ impl ImmixAllocator {
                 globals: Vec::new(),
                 stack_roots: Vec::new(),
                 persistent_roots: HashSet::new(),
+                scan_ranges: Vec::new(),
             })),
             current_exception: None,
             exception_handler: None,
@@ -403,6 +406,7 @@ impl ImmixAllocator {
                 all_newly_marked.extend(self.mark_allocation_at_line(line));
             }
         }
+        let scan_ranges = root_set.scan_ranges.clone();
         drop(root_set);
 
         // Conservative scan of globals_data
@@ -411,6 +415,18 @@ impl ImmixAllocator {
             let end = start + count * 8;
             let newly_marked = self.conservative_scan_range(start, end);
             all_newly_marked.extend(newly_marked);
+        }
+
+        // Conservative scan of interpreter-provided ranges
+        for (start, size) in scan_ranges {
+            if size == 0 {
+                continue;
+            }
+            let end = start.saturating_add(size);
+            if end > start {
+                let newly_marked = self.conservative_scan_range(start, end);
+                all_newly_marked.extend(newly_marked);
+            }
         }
 
         // Conservative scan of thread stack
@@ -592,12 +608,19 @@ impl ImmixAllocator {
                     let array_ptr = vd.v.ptr as *mut hl::varray;
                     if !array_ptr.is_null() {
                         self.mark_object((*array_ptr).t);
-                        // Mark array elements
-                        let size = (*array_ptr).size;
-                        for i in 0..size {
-                            let element_ptr = (*array_ptr).at.add(i as usize);
-                            self.mark_vdynamic(element_ptr as *mut hl::vdynamic);
+                        if !(*array_ptr).at.is_null() {
+                            self.mark_object((*array_ptr).at);
                         }
+                        // Mark the full varray allocation (header + data payload).
+                        // Child pointers inside data will be discovered by conservative_trace.
+                        let size = (*array_ptr).size.max(0) as usize;
+                        let esize = if (*array_ptr).at.is_null() {
+                            HL_WSIZE as usize
+                        } else {
+                            hlp_type_size((*array_ptr).at).max(0) as usize
+                        };
+                        let total = mem::size_of::<hl::varray>() + size * esize;
+                        self.mark_memory(array_ptr as *mut u8, total);
                     }
                 }
                 // Add more cases for other types as needed
@@ -653,6 +676,17 @@ impl ImmixAllocator {
 
     pub fn unregister_persistent(&mut self, ptr: *mut hl::vdynamic) {
         self.roots.borrow_mut().persistent_roots.remove(&ptr);
+    }
+
+    pub fn clear_scan_ranges(&mut self) {
+        self.roots.borrow_mut().scan_ranges.clear();
+    }
+
+    pub fn add_scan_range(&mut self, ptr: *const c_void, size: usize) {
+        if ptr.is_null() || size == 0 {
+            return;
+        }
+        self.roots.borrow_mut().scan_ranges.push((ptr as usize, size));
     }
 
 
@@ -754,4 +788,18 @@ pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
 pub unsafe extern "C" fn hlp_gc_set_globals(ptr: *const *mut c_void, count: usize) {
     let gc = GC.get_mut().expect("expected GC");
     gc.globals_range = Some((ptr, count));
+}
+
+/// Clear interpreter-provided conservative scan ranges.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.clear_scan_ranges();
+}
+
+/// Add an interpreter-provided conservative scan range.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.add_scan_range(ptr, size);
 }

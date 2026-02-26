@@ -1589,10 +1589,16 @@ pub unsafe extern "C" fn hlp_dyn_getp(
     }
 }
 
-pub unsafe fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtual {
+#[no_mangle]
+pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtual {
     if obj.is_null() {
         return ptr::null_mut();
     }
+    if (*obj).t.is_null() {
+        return ptr::null_mut();
+    }
+    let obj_kind = (*(*obj).t).kind;
+    let vt_nfields = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields;
 
     #[cfg(debug_assertions)]
     {
@@ -1667,19 +1673,20 @@ pub unsafe fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtu
             (*v).value = obj as *mut _;
             (*v).next = ptr::null_mut();
 
-            for i in 0..(*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize {
+            let nf = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize;
+            for i in 0..nf {
+                let virt_field = (*vt)
+                    .__bindgen_anon_1
+                    .virt
+                    .as_ref()
+                    .unwrap()
+                    .fields
+                    .add(i)
+                    .as_ref()
+                    .unwrap();
                 let f = obj_resolve_field(
                     (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap(),
-                    (*vt)
-                        .__bindgen_anon_1
-                        .virt
-                        .as_ref()
-                        .unwrap()
-                        .fields
-                        .add(i)
-                        .as_ref()
-                        .unwrap()
-                        .hashed_name,
+                    virt_field.hashed_name,
                 );
                 if !f.is_null() && (*f).field_index < 0 {
                     let ft = (*vt)
@@ -1718,10 +1725,9 @@ pub unsafe fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtu
                     };
                     tmp.__bindgen_anon_1.fun = &mut tf;
                     if hlp_safe_cast(&mut tmp, ft) {
-                        *(hl_vfields(v).add(i)) =
-                            *(*(*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt)
-                                .methods
-                                .wrapping_add((-(*f).field_index - 1) as usize);
+                        let method_idx = (-(*f).field_index - 1) as usize;
+                        let rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
+                        *(hl_vfields(v).add(i)) = *(*rt).methods.wrapping_add(method_idx);
                     } else {
                         *(hl_vfields(v).add(i)) = ptr::null_mut();
                     }
@@ -1871,6 +1877,51 @@ pub unsafe fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> *mut vvirtu
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynamic {
     (*((*v).v.ptr as *mut vvirtual)).value
+}
+
+/// Runtime helper for virtual method dispatch when vfields[field] is NULL.
+/// Resolves the method from the underlying object's vtable, calls it (with only
+/// the `this` arg — nargs=0 methods like hasNext/next), and returns the result
+/// as a vdynamic* (boxed). The JIT unboxes as needed.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_vcall_virtual_0(
+    virt: *mut vvirtual,
+    field: i32,
+) -> *mut vdynamic {
+    let obj = (*virt).value;
+    let vt = (*virt).t;
+    let hfield = (*vt)
+        .__bindgen_anon_1
+        .virt
+        .as_ref()
+        .unwrap()
+        .fields
+        .add(field as usize)
+        .as_ref()
+        .unwrap()
+        .hashed_name;
+
+    // Resolve the method from the underlying object
+    let obj_type = (*obj).t;
+    let rt = (*obj_type).__bindgen_anon_1.obj.as_ref().unwrap().rt;
+    let f = obj_resolve_field((*obj_type).__bindgen_anon_1.obj.as_ref().unwrap(), hfield);
+    if f.is_null() || (*f).field_index >= 0 {
+        return ptr::null_mut();
+    }
+
+    let method_idx = (-(*f).field_index - 1) as usize;
+    let method_ptr: *mut std::ffi::c_void = *(*rt).methods.wrapping_add(method_idx);
+
+    // Call the method with this=obj, no other args
+    // The method signature is fn(this: *obj) -> result
+    let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
+        std::mem::transmute(method_ptr);
+    let result = method_fn(obj);
+    eprintln!("[hlp_vcall_virtual_0] field={}, method_ptr={:p}, result={:p}", field, method_ptr, result);
+    if !result.is_null() {
+        eprintln!("[hlp_vcall_virtual_0] result.t.kind={}, result.v.i={}", (*(*result).t).kind, (*result).v.i);
+    }
+    result
 }
 
 unsafe fn should_recast(t: *mut hl_type, vt: *mut hl_type) -> bool {

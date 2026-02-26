@@ -5,7 +5,8 @@ use crate::{buffer::{hlp_alloc_buffer, hlp_buffer_content, hlp_buffer_val}, cast
 
 pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
     // Convert the &str to a UTF-16 vector
-    let utf16: Vec<u16> = s.encode_utf16().collect();
+    let mut utf16: Vec<u16> = s.encode_utf16().collect();
+    utf16.push(0);
     
     // Leak the vector to create a &'static [u16]
     let static_slice: &'static [u16] = Box::leak(utf16.into_boxed_slice());

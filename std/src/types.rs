@@ -190,8 +190,21 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
     if (*to).kind == hl::hl_type_kind_HDYN {
         return hlp_is_dynamic(t);
     }
-    if (*t).kind != (*to).kind {
-        return false;
+    // HNULL<T> is castable to T and vice versa
+    if (*t).kind == hl::hl_type_kind_HNULL {
+        return hlp_safe_cast((*t).__bindgen_anon_1.tparam, to);
+    }
+    if (*to).kind == hl::hl_type_kind_HNULL {
+        return hlp_safe_cast(t, (*to).__bindgen_anon_1.tparam);
+    }
+    // HFUN and HMETHOD are interchangeable for safe casting
+    let t_kind = (*t).kind;
+    let to_kind = (*to).kind;
+    if t_kind != to_kind {
+        let fun_kinds = [hl::hl_type_kind_HFUN, hl::hl_type_kind_HMETHOD];
+        if !(fun_kinds.contains(&t_kind) && fun_kinds.contains(&to_kind)) {
+            return false;
+        }
     }
     match (*t).kind {
         hl::hl_type_kind_HVIRTUAL => {
@@ -371,16 +384,8 @@ pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut ven
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varray {
-    let _hlt_bytes: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HBYTES,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-
-    let array = hlp_alloc_array(_hlt_bytes, (*(*t).__bindgen_anon_1.tenum).nconstructs);
+    // Use persistent hlt_bytes() so the at pointer does not dangle after return
+    let array = hlp_alloc_array(hlt_bytes(), (*(*t).__bindgen_anon_1.tenum).nconstructs);
 
     for i in 0..(*(*t).__bindgen_anon_1.tenum).nconstructs as usize {
         *(hl_aptr::<*mut vbyte>(array).add(i)) =
@@ -392,18 +397,9 @@ pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varra
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_enum_values(t: *mut hl::hl_type) -> *mut varray {
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-
     let tenum = (*t).__bindgen_anon_1.tenum;
     let nconstructs = (*tenum).nconstructs;
-    let array = hlp_alloc_array(_hlt_dyn, nconstructs);
+    let array = hlp_alloc_array(hlt_dyn(), nconstructs);
 
     for i in 0..nconstructs as usize {
         let e = hlp_alloc_enum(t, i as i32);

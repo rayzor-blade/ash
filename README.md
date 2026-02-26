@@ -133,8 +133,8 @@ cargo test -p air
 | `test_gc` | GC pressure test with 1000 allocations |
 | `test_array_push` | Array creation and element access |
 | `test_divtest` | Floating-point division edge cases |
-| `test_mandelbrot` | Full Mandelbrot set (checksum: 112798587) |
-| `test_mandelbrot_small` | Smaller Mandelbrot variant (checksum: 22825041) |
+| `test_mandelbrot` | Full Mandelbrot set (checksum: 112790102) |
+| `test_mandelbrot_small` | Smaller Mandelbrot variant (checksum: 22816350) |
 | `test_hdll` | External HDLL loading with DEFINE_PRIM |
 
 ## Writing an HDLL

@@ -36,10 +36,13 @@ jobs:
             cmake \
             git \
             libmbedtls-dev \
+            libsdl2-dev \
             libpng-dev \
+            zlib1g-dev \
             libturbojpeg0-dev \
             libvorbis-dev \
-            libopenal-dev
+            libopenal-dev \
+            libuv1-dev
           git clone --depth 1 --branch "${HASHLINK_VERSION}" https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink
           make -C /tmp/hashlink -j"$(nproc)"
           sudo make -C /tmp/hashlink install

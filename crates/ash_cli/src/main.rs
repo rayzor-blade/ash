@@ -31,6 +31,10 @@ struct Cli {
     /// Optional static opcode-size gate before promotion (0 disables, call-count only)
     #[arg(long, default_value_t = 0)]
     jit_min_ops: usize,
+
+    /// Suppress non-program output (useful for parity testing)
+    #[arg(long, default_value_t = false)]
+    quiet: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -72,7 +76,9 @@ fn run() -> Result<()> {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
-            eprintln!("Interpreter returned: {:?}", result);
+            if !cli.quiet {
+                eprintln!("Interpreter returned: {:?}", result);
+            }
         }
         Mode::Hybrid => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
@@ -98,13 +104,19 @@ fn run() -> Result<()> {
                     );
                 }
             }
-            eprintln!("Interpreter returned: {:?}", result);
+            if !cli.quiet {
+                eprintln!("Interpreter returned: {:?}", result);
+            }
         }
         Mode::Jit => {
-            eprintln!("JIT-only mode not yet fully implemented, falling back to interpreter");
+            if !cli.quiet {
+                eprintln!("JIT-only mode not yet fully implemented, falling back to interpreter");
+            }
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
-            eprintln!("Interpreter returned: {:?}", result);
+            if !cli.quiet {
+                eprintln!("Interpreter returned: {:?}", result);
+            }
         }
     }
 

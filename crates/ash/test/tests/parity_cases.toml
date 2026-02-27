@@ -1,0 +1,376 @@
+schema_version = 1
+
+[[case]]
+name = "TestStdlib"
+main = "TestStdlib"
+hl = "test_stdlib.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestJsonParse"
+main = "TestJsonParse"
+hl = "test_jsonparse.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "json_ws"
+
+[[case]]
+name = "TestJsonMin"
+main = "TestJsonMin"
+hl = "test_jsonmin.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "json_ws"
+
+[[case]]
+name = "TestJsonMin2"
+main = "TestJsonMin2"
+hl = "test_jsonmin2.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "json_ws"
+
+[[case]]
+name = "TestJsonMin3"
+main = "TestJsonMin3"
+hl = "test_jsonmin3.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "json_ws"
+
+[[case]]
+name = "TestStdStringTools"
+main = "TestStdStringTools"
+hl = "test_std_stringtools.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestStdBytes"
+main = "TestStdBytes"
+hl = "test_std_bytes.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestStdReflectType"
+main = "TestStdReflectType"
+hl = "test_std_reflect_type.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestStdDate"
+main = "TestStdDate"
+hl = "test_std_date.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestStdEReg"
+main = "TestStdEReg"
+hl = "test_std_ereg.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureOO"
+main = "TestFeatureOO"
+hl = "test_feature_oo.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureEnumsPattern"
+main = "TestFeatureEnumsPattern"
+hl = "test_feature_enums_pattern.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureGenerics"
+main = "TestFeatureGenerics"
+hl = "test_feature_generics.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureAbstracts"
+main = "TestFeatureAbstracts"
+hl = "test_feature_abstracts.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureIterators"
+main = "TestFeatureIterators"
+hl = "test_feature_iterators.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureTypedefAnon"
+main = "TestFeatureTypedefAnon"
+hl = "test_feature_typedef_anon.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestFeatureNullCasts"
+main = "TestFeatureNullCasts"
+hl = "test_feature_null_casts.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestTieredHotLoop"
+main = "TestTieredHotLoop"
+hl = "test_tiered_hotloop.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "MandelbrotSmall"
+main = "MandelbrotSmall"
+hl = "test_mandelbrot_small.hl"
+slow = false
+timeout_secs = 120
+expectation = "checksum"
+normalize = "default"
+
+[[case]]
+name = "Mandelbrot"
+main = "Mandelbrot"
+hl = "test_mandelbrot.hl"
+slow = true
+timeout_secs = 240
+expectation = "checksum"
+normalize = "default"
+
+[[case]]
+name = "DivTest"
+main = "DivTest"
+hl = "test_divtest.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestExcMsg"
+main = "TestExcMsg"
+hl = "test_excmsg.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestIndexOf"
+main = "TestIndexOf"
+hl = "test_indexof.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMapDebug"
+main = "TestMapDebug"
+hl = "test_mapdebug.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMapDebug2"
+main = "TestMapDebug2"
+hl = "test_mapdebug2.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMapDebug3"
+main = "TestMapDebug3"
+hl = "test_mapdebug3.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMapIter"
+main = "TestMapIter"
+hl = "test_mapiter.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMapSimple"
+main = "TestMapSimple"
+hl = "test_map_simple.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMinBuf"
+main = "TestMinBuf"
+hl = "test_minbuf.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMinBuf2"
+main = "TestMinBuf2"
+hl = "test_minbuf2.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMinBuf3"
+main = "TestMinBuf3"
+hl = "test_minbuf3.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMinJoin"
+main = "TestMinJoin"
+hl = "test_minjoin.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestMinMap"
+main = "TestMinMap"
+hl = "test_minmap.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
+name = "TestStdArrayOps"
+main = "TestStdArrayOps"
+hl = "test_std_array_ops.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+# Legacy precompiled modules in lowercase filenames using class Main are not
+# directly compilable with current Haxe naming rules. Keep them in corpus via
+# precompiled .hl files and skip haxe --interp sanity run.
+[[case]]
+name = "test_array_push"
+main = ""
+hl = "test_array_push.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false
+
+[[case]]
+name = "test_basic"
+main = ""
+hl = "test_basic.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false
+
+[[case]]
+name = "test_closures"
+main = ""
+hl = "test_closures.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false
+
+[[case]]
+name = "test_dynamic"
+main = ""
+hl = "test_dynamic.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false
+
+[[case]]
+name = "test_exceptions"
+main = ""
+hl = "test_exceptions.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false
+
+[[case]]
+name = "test_gc"
+main = ""
+hl = "test_gc.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+compile = false
+sanity_interp = false

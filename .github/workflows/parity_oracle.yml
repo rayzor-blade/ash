@@ -1,0 +1,74 @@
+name: parity_oracle
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_slow:
+        description: "Include slow parity cases (Mandelbrot)"
+        required: false
+        default: "false"
+  push:
+    branches:
+      - main
+
+jobs:
+  build-oracle:
+    runs-on: ubuntu-22.04
+    env:
+      HAXE_VERSION: "4.3.4"
+      HASHLINK_VERSION: "1.14"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install HashLink (pinned)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            libmbedtls-dev \
+            libpng-dev \
+            libturbojpeg0-dev \
+            libvorbis-dev \
+            libopenal-dev
+          git clone --depth 1 --branch "${HASHLINK_VERSION}" https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink
+          make -C /tmp/hashlink -j"$(nproc)"
+          sudo make -C /tmp/hashlink install
+          sudo ldconfig
+          hl --version
+
+      - name: Generate parity oracle bundle
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            ./scripts/generate_parity_oracle.py --repo-root . --out-dir target/parity-oracle --include-slow
+          elif [[ "${{ github.event.inputs.include_slow || 'false' }}" == "true" ]]; then
+            ./scripts/generate_parity_oracle.py --repo-root . --out-dir target/parity-oracle --include-slow
+          else
+            ./scripts/generate_parity_oracle.py --repo-root . --out-dir target/parity-oracle
+          fi
+
+      - name: Upload commit-scoped oracle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-oracle-${{ github.sha }}
+          path: target/parity-oracle
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload rolling main oracle artifact
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-oracle-main-latest
+          path: target/parity-oracle
+          if-no-files-found: error
+          retention-days: 14

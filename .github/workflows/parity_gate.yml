@@ -1,0 +1,115 @@
+name: parity_gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 6 * * *"
+
+jobs:
+  parity-interp:
+    runs-on: ubuntu-22.04
+    env:
+      HAXE_VERSION: "4.3.4"
+      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      ASH_PARITY_REQUIRE_ORACLE: "1"
+      ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install LLVM 18 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev clang-18 lld-18
+
+      - name: Download parity oracle from main
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: parity_oracle.yml
+          branch: main
+          name: parity-oracle-main-latest
+          path: target/parity-oracle
+          if_no_artifact_found: fail
+
+      - name: Run parity matrix (interp)
+        run: cargo test -p ash_cli --test parity_matrix parity_matrix_interp -- --nocapture
+
+  parity-hybrid:
+    runs-on: ubuntu-22.04
+    env:
+      HAXE_VERSION: "4.3.4"
+      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      ASH_PARITY_REQUIRE_ORACLE: "1"
+      ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install LLVM 18 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev clang-18 lld-18
+
+      - name: Download parity oracle from main
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: parity_oracle.yml
+          branch: main
+          name: parity-oracle-main-latest
+          path: target/parity-oracle
+          if_no_artifact_found: fail
+
+      - name: Run parity matrix (hybrid default)
+        run: cargo test -p ash_cli --test parity_matrix parity_matrix_hybrid_default -- --nocapture
+
+      - name: Run parity matrix (hybrid promotion-heavy)
+        run: cargo test -p ash_cli --test parity_matrix parity_matrix_hybrid_promotion_heavy -- --nocapture
+
+  parity-nightly-slow:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    env:
+      HAXE_VERSION: "4.3.4"
+      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      ASH_PARITY_REQUIRE_ORACLE: "1"
+      ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
+      ASH_PARITY_INCLUDE_SLOW: "1"
+      ASH_PARITY_SLOW_TIMEOUT_SECS: "360"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install LLVM 18 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev clang-18 lld-18
+
+      - name: Download parity oracle from main
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: parity_oracle.yml
+          branch: main
+          name: parity-oracle-main-latest
+          path: target/parity-oracle
+          if_no_artifact_found: fail
+
+      - name: Run parity matrix (slow nightly)
+        run: cargo test -p ash_cli --test parity_matrix -- --nocapture

@@ -9,3 +9,4 @@ description = "HashLink bytecode interpreter for ASH VM"
 [dependencies]
 ash = { path = "../ash" }
 anyhow = { workspace = true }
+inkwell = { workspace = true }

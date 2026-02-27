@@ -10,7 +10,7 @@ use inkwell::values::{
 };
 use inkwell::{basic_block::BasicBlock, builder::Builder, AddressSpace, IntPredicate, FloatPredicate};
 
-use super::module::JITModule;
+use super::module::{CompiledFunctionMeta, JITModule};
 use crate::hl::{
     hl_type,
     hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
@@ -120,7 +120,11 @@ impl<'ctx> JITModule<'ctx> {
         index: usize,
     ) -> Result<(FunctionValue<'ctx>, bool)> {
         if let Some(f_v) = self.func_cache.get(&index) {
-            return Ok((*f_v, false));
+            let is_placeholder = f_v.count_basic_blocks() == 0
+                || f_v
+                    .get_first_basic_block()
+                    .map_or(true, |bb| bb.get_first_instruction().is_none());
+            return Ok((*f_v, is_placeholder));
         }
 
         let fun_ptr = self
@@ -202,6 +206,23 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    fn compile_pending_functions_strict(&mut self) -> Result<()> {
+        while let Some(index) = self.pending_compilations.pop() {
+            self.compile_function(index)?;
+            let f = self
+                .func_cache
+                .get(&index)
+                .ok_or_else(|| anyhow!("Pending function {} missing from cache after compile", index))?;
+            if !f.verify(false) {
+                return Err(anyhow!(
+                    "Strict promotion failed: function {} did not verify",
+                    index
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn compile_function(&mut self, index: usize) -> Result<()> {
         // Skip if already compiled (has entry block with instructions)
         if let Some(func) = self.func_cache.get(&index) {
@@ -218,11 +239,6 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
-            // Debug: print iterator-related function opcodes
-            // Debug: print all compiled function names
-            {
-                eprintln!("[JIT compile] findex={} name={:?} reg0={:?}", f.findex, f.field_name, f.regs.first());
-            }
             // Run AIR optimization passes on bytecode before LLVM emission
             let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
             let num_regs = f.regs.len();
@@ -270,6 +286,74 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         Ok(())
+    }
+
+    pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
+        // Promotion currently targets bytecode functions only.
+        if !self.findexes.contains_key(&findex) {
+            return Err(anyhow!("Strict promotion failed: unknown findex {}", findex));
+        }
+
+        let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
+        if is_placeholder {
+            self.add_pending_compilation(findex);
+        }
+
+        self.compile_pending_functions_strict()?;
+        self.compile_function(findex)?;
+        self.compile_pending_functions_strict()?;
+        let function = *self
+            .func_cache
+            .get(&findex)
+            .ok_or_else(|| anyhow!("Strict promotion failed: function {} missing from cache", findex))?;
+        if !function.verify(false) {
+            return Err(anyhow!(
+                "Strict promotion failed: function {} did not verify",
+                findex
+            ));
+        }
+
+        let name = function
+            .get_name()
+            .to_str()
+            .map_err(|_| anyhow!("Strict promotion failed: invalid symbol name for {}", findex))?;
+        let fn_addr = self
+            .execution_engine
+            .get_function_address(name)
+            .map_err(|e| anyhow!("Strict promotion failed: get_function_address({}) -> {}", name, e))?;
+        if fn_addr == 0 {
+            return Err(anyhow!(
+                "Strict promotion failed: zero function address for {}",
+                findex
+            ));
+        }
+        self.install_function_address(findex, fn_addr as *mut c_void);
+
+        // Resolve arg/return kinds from bytecode signature.
+        let fidx = self
+            .bytecode
+            .functions
+            .iter()
+            .position(|f| f.findex as usize == findex)
+            .ok_or_else(|| anyhow!("Strict promotion failed: {} is not a bytecode function", findex))?;
+        let f = &self.bytecode.functions[fidx];
+        let tf = self.bytecode.types[f.type_.0]
+            .fun
+            .as_ref()
+            .ok_or_else(|| anyhow!("Strict promotion failed: missing function type for {}", findex))?;
+        let arg_kinds = tf
+            .args
+            .iter()
+            .map(|a| self.bytecode.types[a.0].kind)
+            .collect::<Vec<_>>();
+        let ret_kind = self.bytecode.types[tf.ret.0].kind;
+
+        Ok(CompiledFunctionMeta {
+            findex,
+            fn_addr,
+            arg_kinds,
+            ret_kind,
+        })
     }
 
     pub(crate) fn create_function_value(&mut self, index: usize) -> Result<FunctionValue<'ctx>> {
@@ -3119,12 +3203,28 @@ impl<'ctx> JITModule<'ctx> {
         for (findex, name) in &func_entries {
             if let Ok(addr) = self.execution_engine.get_function_address(name) {
                 if addr != 0 && *findex < self.functions_ptrs.len() {
-                    self.functions_ptrs[*findex] = addr as *mut c_void;
+                    self.install_function_address(*findex, addr as *mut c_void);
                 }
             }
         }
 
         Ok(())
+    }
+
+    pub(crate) fn install_function_address(&mut self, findex: usize, addr: *mut c_void) {
+        if findex < self.functions_ptrs.len() {
+            self.functions_ptrs[findex] = addr;
+        }
+        if let Some(shared) = &self.shared_runtime {
+            if !shared.module_ctx.is_null() {
+                unsafe {
+                    let ptrs = (*shared.module_ctx).functions_ptrs;
+                    if !ptrs.is_null() {
+                        *ptrs.add(findex) = addr;
+                    }
+                }
+            }
+        }
     }
 }
 

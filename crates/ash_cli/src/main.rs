@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ash::bytecode::BytecodeDecoder;
 use ash::native_lib::{init_std_library, NativeFunctionResolver};
-use ash_interp::interpreter::HLInterpreter;
+use ash_interp::interpreter::{HLInterpreter, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process;
@@ -15,6 +15,22 @@ struct Cli {
     /// Execution mode
     #[arg(long, value_enum, default_value_t = Mode::Interp)]
     mode: Mode,
+
+    /// Hot-call threshold for JIT promotion in hybrid mode
+    #[arg(long, default_value_t = 100)]
+    jit_threshold: u64,
+
+    /// Enable tiered runtime promotion logs
+    #[arg(long, default_value_t = false)]
+    jit_log: bool,
+
+    /// Max argument count for promoted calls
+    #[arg(long, default_value_t = 8)]
+    jit_max_args: usize,
+
+    /// Minimum opcode count before a function is promotion-eligible
+    #[arg(long, default_value_t = 16)]
+    jit_min_ops: usize,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -53,9 +69,35 @@ fn run() -> Result<()> {
     let native_resolver = NativeFunctionResolver::new();
 
     match cli.mode {
-        Mode::Interp | Mode::Hybrid => {
+        Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
+            eprintln!("Interpreter returned: {:?}", result);
+        }
+        Mode::Hybrid => {
+            let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
+            let cfg = TieredConfig {
+                enabled: true,
+                jit_threshold: cli.jit_threshold,
+                max_jit_args: cli.jit_max_args,
+                min_ops_for_promotion: cli.jit_min_ops,
+                log_promotions: cli.jit_log,
+                strict_mode: true,
+            };
+            interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
+            let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
+            if let Some(stats) = interpreter.tiered_stats() {
+                if cli.jit_log {
+                    eprintln!(
+                        "[tiered] attempted={} succeeded={} failed={} compiled_calls={} fallbacks={}",
+                        stats.attempted_promotions,
+                        stats.successful_promotions,
+                        stats.failed_promotions,
+                        stats.compiled_calls,
+                        stats.fallback_calls
+                    );
+                }
+            }
             eprintln!("Interpreter returned: {:?}", result);
         }
         Mode::Jit => {

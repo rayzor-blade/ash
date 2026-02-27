@@ -1,14 +1,19 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::ffi::CStr;
+use std::path::Path;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 use anyhow::{anyhow, Result};
 
 use ash::bytecode::DecodedBytecode;
 use ash::c_types::CTypeFactory;
 use ash::hl_bindings::{self as hl, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT, _vclosure};
+use ash::jit::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
 use ash::native_lib::NativeFunctionResolver;
 use ash::opcodes::{Opcode, Reg};
 use ash::types::{HLFunction, ValueTypeKind};
+use inkwell::context::Context;
 
 use crate::frame::InterpreterFrame;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp, NanBoxedValue};
@@ -96,6 +101,61 @@ impl std::fmt::Display for HLExceptionPropagation {
 
 impl std::error::Error for HLExceptionPropagation {}
 
+#[derive(Debug, Clone)]
+pub struct TieredConfig {
+    pub enabled: bool,
+    pub jit_threshold: u64,
+    pub max_jit_args: usize,
+    pub min_ops_for_promotion: usize,
+    pub log_promotions: bool,
+    pub strict_mode: bool,
+}
+
+impl Default for TieredConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            jit_threshold: 100,
+            max_jit_args: 8,
+            min_ops_for_promotion: 16,
+            log_promotions: false,
+            strict_mode: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TieredStats {
+    pub attempted_promotions: u64,
+    pub successful_promotions: u64,
+    pub failed_promotions: u64,
+    pub compiled_calls: u64,
+    pub fallback_calls: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledFunctionEntry {
+    fn_addr: usize,
+    arg_kinds: Vec<u32>,
+    ret_kind: u32,
+}
+
+#[derive(Debug)]
+struct PromotionResult {
+    findex: usize,
+    result: std::result::Result<CompiledFunctionMeta, String>,
+}
+
+struct TieredRuntime {
+    config: TieredConfig,
+    compiled: HashMap<usize, CompiledFunctionEntry>,
+    blacklist: HashMap<usize, String>,
+    queued: HashSet<usize>,
+    worker_tx: Sender<usize>,
+    worker_rx: Receiver<PromotionResult>,
+    stats: TieredStats,
+}
+
 /// Hybrid HashLink bytecode interpreter with JIT promotion support.
 ///
 /// Executes HL bytecode directly using a register-based architecture
@@ -174,6 +234,12 @@ pub struct HLInterpreter {
     fn_gc_clear_scan_roots: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_add_scan_root
     fn_gc_add_scan_root: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_gc_set_stack_top
+    fn_gc_set_stack_top: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_gc_set_globals
+    fn_gc_set_globals: *mut c_void,
+    /// Whether GC globals/stack top were initialized for this interpreter.
+    gc_runtime_initialized: bool,
     /// Scratch space for decoded raw pointer roots (from NaN-boxed registers).
     gc_root_ptrs: Vec<usize>,
     /// Cache of UTF-16 null-terminated strings (string index → leaked pointer)
@@ -183,6 +249,8 @@ pub struct HLInterpreter {
     virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
     /// Hash-keyed fallback storage for HVIRTUAL dynamic field access via hl.Api/Reflect.
     virtual_hash_fields: HashMap<(usize, i32), NanBoxedValue>,
+    /// Optional tiered runtime (hybrid mode).
+    tiered_runtime: Option<TieredRuntime>,
 }
 
 impl HLInterpreter {
@@ -285,6 +353,12 @@ impl HLInterpreter {
         let fn_gc_add_scan_root = native_resolver
             .resolve_function("std", "hlp_gc_add_scan_root")
             .unwrap_or(std::ptr::null_mut());
+        let fn_gc_set_stack_top = native_resolver
+            .resolve_function("std", "hlp_gc_set_stack_top")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_gc_set_globals = native_resolver
+            .resolve_function("std", "hlp_gc_set_globals")
+            .unwrap_or(std::ptr::null_mut());
         HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
@@ -322,11 +396,128 @@ impl HLInterpreter {
             fn_type_name,
             fn_gc_clear_scan_roots,
             fn_gc_add_scan_root,
+            fn_gc_set_stack_top,
+            fn_gc_set_globals,
+            gc_runtime_initialized: false,
             gc_root_ptrs: Vec::new(),
             utf16_strings: HashMap::new(),
             virtual_fields: HashMap::new(),
             virtual_hash_fields: HashMap::new(),
+            tiered_runtime: None,
         }
+    }
+
+    pub fn enable_tiered(
+        &mut self,
+        hl_path: &Path,
+        _native_resolver: &NativeFunctionResolver,
+        mut config: TieredConfig,
+    ) -> Result<()> {
+        config.enabled = true;
+        self.jit_threshold = config.jit_threshold;
+
+        let log_promotions = config.log_promotions;
+        let hl_path = hl_path.to_path_buf();
+        let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
+        let shared = SharedRuntimeHandles {
+            globals_data_ptr,
+            nglobals,
+            c_types: self.c_type_factory.as_slice().to_vec(),
+            module_ctx: self.c_type_factory.module_ctx(),
+        };
+        let (worker_tx, worker_req_rx) = mpsc::channel::<usize>();
+        let (worker_res_tx, worker_rx) = mpsc::channel::<PromotionResult>();
+
+        let _ = thread::Builder::new()
+            .name("ash-jit-worker".to_string())
+            .spawn(move || {
+                let mut module: Option<JITModule<'static>> = None;
+                for findex in worker_req_rx {
+                    if module.is_none() {
+                        let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || {
+                                let context = Box::leak(Box::new(Context::create()));
+                                JITModule::new_with_shared_runtime(context, &hl_path, shared.clone())
+                            },
+                        ));
+                        match init_result {
+                            Ok(m) => {
+                                if log_promotions {
+                                    eprintln!("[tiered] initialized shared JIT module");
+                                }
+                                module = Some(m);
+                            }
+                            Err(_) => {
+                                let _ = worker_res_tx.send(PromotionResult {
+                                    findex,
+                                    result: Err("tiered worker init panicked".to_string()),
+                                });
+                                continue;
+                            }
+                        }
+                    }
+
+                    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || {
+                            module
+                                .as_mut()
+                                .expect("JIT module should be initialized")
+                                .promote_function_strict(findex)
+                        },
+                    ));
+                    let result = match compile_result {
+                        Ok(Ok(meta)) => Ok(meta),
+                        Ok(Err(e)) => Err(e.to_string()),
+                        Err(_) => Err("promotion panicked".to_string()),
+                    };
+                    let _ = worker_res_tx.send(PromotionResult { findex, result });
+                }
+                // LLVM objects may throw foreign exceptions during drop on some platforms.
+                // Leak the JIT module on worker shutdown to keep process termination stable.
+                if let Some(m) = module.take() {
+                    std::mem::forget(m);
+                }
+            });
+
+        self.tiered_runtime = Some(TieredRuntime {
+            config,
+            compiled: HashMap::new(),
+            blacklist: HashMap::new(),
+            queued: HashSet::new(),
+            worker_tx,
+            worker_rx,
+            stats: TieredStats::default(),
+        });
+        Ok(())
+    }
+
+    pub fn tiered_stats(&self) -> Option<&TieredStats> {
+        self.tiered_runtime.as_ref().map(|t| &t.stats)
+    }
+
+    fn ensure_gc_runtime_initialized(&mut self) {
+        if self.gc_runtime_initialized {
+            return;
+        }
+        if self.fn_gc_set_globals.is_null() || self.fn_gc_set_stack_top.is_null() {
+            return;
+        }
+        let (globals_ptr, globals_len) = self.c_type_factory.globals_data();
+        if globals_ptr.is_null() {
+            return;
+        }
+        type FnSetGlobals = unsafe extern "C" fn(*const *mut c_void, usize);
+        type FnSetStackTop = unsafe extern "C" fn(usize);
+        let set_globals: FnSetGlobals = unsafe { std::mem::transmute(self.fn_gc_set_globals) };
+        let set_stack_top: FnSetStackTop =
+            unsafe { std::mem::transmute(self.fn_gc_set_stack_top) };
+        unsafe {
+            set_globals(globals_ptr as *const *mut c_void, globals_len);
+            let stack_top: usize;
+            core::arch::asm!("mov {}, sp", out(reg) stack_top);
+            set_stack_top(stack_top);
+        }
+        self.gc_runtime_initialized = true;
     }
 
     /// Publish interpreter register memory as conservative GC scan ranges.
@@ -897,6 +1088,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,
     ) -> Result<NanBoxedValue> {
+        self.ensure_gc_runtime_initialized();
         // Initialize constants (pre-populated globals) before running
         self.init_constants(bytecode, native_resolver)?;
 
@@ -1101,14 +1293,57 @@ impl HLInterpreter {
         findex: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
+        self.ensure_gc_runtime_initialized();
+
         // Track call count for JIT promotion
         let call_count = {
             let count = self.call_counts.entry(findex).or_insert(0);
             *count += 1;
             *count
         };
-        if call_count == self.jit_threshold {
+        let threshold = self
+            .tiered_runtime
+            .as_ref()
+            .map(|t| t.config.jit_threshold)
+            .unwrap_or(self.jit_threshold);
+        if call_count == threshold {
             self.jit_candidates.push(findex);
+        }
+        self.poll_tiered_results();
+
+        // Hybrid tiered call path for bytecode functions.
+        if self.findex_to_func.contains_key(&findex) {
+            let mut compiled_entry = self
+                .tiered_runtime
+                .as_ref()
+                .and_then(|t| t.compiled.get(&findex).cloned());
+
+            if compiled_entry.is_none()
+                && self.should_attempt_tiered_promotion(bytecode, findex, args, call_count)
+            {
+                self.queue_tiered_promotion(findex);
+                compiled_entry = self
+                    .tiered_runtime
+                    .as_ref()
+                    .and_then(|t| t.compiled.get(&findex).cloned());
+            }
+
+            if let Some(entry) = compiled_entry {
+                match self.call_compiled_function(findex, &entry, args) {
+                    Ok(v) => {
+                        if let Some(tiered) = self.tiered_runtime.as_mut() {
+                            tiered.stats.compiled_calls += 1;
+                        }
+                        return Ok(v);
+                    }
+                    Err(e) => {
+                        self.record_tiered_fallback(
+                            findex,
+                            format!("compiled invoke failed: {}", e),
+                        );
+                    }
+                }
+            }
         }
 
         // Check if it's a bytecode function or native
@@ -1119,6 +1354,394 @@ impl HLInterpreter {
         } else {
             Err(anyhow!("Function findex {} not found", findex))
         }
+    }
+
+    fn should_attempt_tiered_promotion(
+        &self,
+        bytecode: &DecodedBytecode,
+        findex: usize,
+        args: &[NanBoxedValue],
+        call_count: u64,
+    ) -> bool {
+        let Some(tiered) = self.tiered_runtime.as_ref() else {
+            return false;
+        };
+        let log_promotions = tiered.config.log_promotions;
+        let log_this_check = log_promotions && call_count == tiered.config.jit_threshold;
+        let log_skip = |reason: &str| {
+            if log_this_check {
+                eprintln!("[tiered] skip findex={} reason={}", findex, reason);
+            }
+        };
+        if !tiered.config.enabled || !tiered.config.strict_mode {
+            log_skip("disabled_or_non_strict");
+            return false;
+        }
+        if tiered.blacklist.contains_key(&findex) || tiered.compiled.contains_key(&findex) {
+            log_skip("already_blacklisted_or_compiled");
+            return false;
+        }
+        if tiered.queued.contains(&findex) {
+            log_skip("already_queued");
+            return false;
+        }
+        if args.len() > tiered.config.max_jit_args {
+            log_skip("arg_count_over_limit");
+            return false;
+        }
+        let Some(&func_idx) = self.findex_to_func.get(&findex) else {
+            log_skip("not_bytecode_function");
+            return false;
+        };
+        let func = &bytecode.functions[func_idx];
+        let func_name = func.name();
+        if func_name == "init"
+            || func_name == "main"
+            || func_name == "__constructor__"
+            || func_name.starts_with("__")
+        {
+            log_skip("name_blacklisted");
+            return false;
+        }
+        if func.ops.len() < tiered.config.min_ops_for_promotion {
+            log_skip("op_count_below_min");
+            return false;
+        }
+        if let Some(bad) = func
+            .ops
+            .iter()
+            .find(|op| !Self::is_v1_tierable_opcode(op))
+        {
+            if log_this_check {
+                eprintln!(
+                    "[tiered] skip findex={} reason=unsupported_opcode op={:?}",
+                    findex, bad
+                );
+            }
+            return false;
+        }
+        if call_count < tiered.config.jit_threshold {
+            log_skip("below_threshold");
+            return false;
+        }
+        true
+    }
+
+    fn is_v1_tierable_opcode(op: &Opcode) -> bool {
+        matches!(
+            op,
+            Opcode::Nop
+                | Opcode::Label
+                | Opcode::Mov { .. }
+                | Opcode::Int { .. }
+                | Opcode::Float { .. }
+                | Opcode::Bool { .. }
+                | Opcode::Null { .. }
+                | Opcode::Add { .. }
+                | Opcode::Sub { .. }
+                | Opcode::Mul { .. }
+                | Opcode::SDiv { .. }
+                | Opcode::UDiv { .. }
+                | Opcode::SMod { .. }
+                | Opcode::UMod { .. }
+                | Opcode::Shl { .. }
+                | Opcode::SShr { .. }
+                | Opcode::UShr { .. }
+                | Opcode::And { .. }
+                | Opcode::Or { .. }
+                | Opcode::Xor { .. }
+                | Opcode::Neg { .. }
+                | Opcode::Not { .. }
+                | Opcode::Incr { .. }
+                | Opcode::Decr { .. }
+                | Opcode::JEq { .. }
+                | Opcode::JNotEq { .. }
+                | Opcode::JSGte { .. }
+                | Opcode::JSGt { .. }
+                | Opcode::JSLte { .. }
+                | Opcode::JSLt { .. }
+                | Opcode::JUGte { .. }
+                | Opcode::JULt { .. }
+                | Opcode::JNotLt { .. }
+                | Opcode::JNotGte { .. }
+                | Opcode::JTrue { .. }
+                | Opcode::JFalse { .. }
+                | Opcode::JNull { .. }
+                | Opcode::JNotNull { .. }
+                | Opcode::JAlways { .. }
+                | Opcode::Ret { .. }
+        )
+    }
+
+    fn queue_tiered_promotion(&mut self, findex: usize) {
+        let Some(tiered) = self.tiered_runtime.as_mut() else {
+            return;
+        };
+        if tiered.blacklist.contains_key(&findex)
+            || tiered.compiled.contains_key(&findex)
+            || tiered.queued.contains(&findex)
+        {
+            return;
+        }
+        tiered.stats.attempted_promotions += 1;
+        if tiered.worker_tx.send(findex).is_ok() {
+            tiered.queued.insert(findex);
+            if tiered.config.log_promotions {
+                eprintln!("[tiered] queued findex={}", findex);
+            }
+        } else {
+            tiered.stats.failed_promotions += 1;
+            tiered.config.enabled = false;
+            let reason = "tiered worker channel closed".to_string();
+            tiered.blacklist.insert(findex, reason.clone());
+            if tiered.config.log_promotions {
+                eprintln!("[tiered] disabling tiered runtime: {}", reason);
+            }
+        }
+    }
+
+    fn poll_tiered_results(&mut self) {
+        let mut disconnected = false;
+        loop {
+            let msg = {
+                let Some(tiered) = self.tiered_runtime.as_mut() else {
+                    return;
+                };
+                match tiered.worker_rx.try_recv() {
+                    Ok(msg) => Some(msg),
+                    Err(TryRecvError::Empty) => None,
+                    Err(TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        None
+                    }
+                }
+            };
+
+            let Some(PromotionResult { findex, result }) = msg else {
+                break;
+            };
+
+            if let Some(tiered) = self.tiered_runtime.as_mut() {
+                tiered.queued.remove(&findex);
+                match result {
+                    Ok(CompiledFunctionMeta {
+                        findex: _,
+                        fn_addr,
+                        arg_kinds,
+                        ret_kind,
+                    }) => {
+                        let entry = CompiledFunctionEntry {
+                            fn_addr,
+                            arg_kinds,
+                            ret_kind,
+                        };
+                        tiered.compiled.insert(findex, entry);
+                        tiered.stats.successful_promotions += 1;
+                        if tiered.config.log_promotions {
+                            eprintln!("[tiered] promoted findex={} addr=0x{:x}", findex, fn_addr);
+                        }
+                    }
+                    Err(reason) => {
+                        tiered.stats.failed_promotions += 1;
+                        tiered.blacklist.insert(findex, reason.clone());
+                        if tiered.config.log_promotions {
+                            eprintln!("[tiered] blacklist findex={} reason={}", findex, reason);
+                        }
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            if let Some(tiered) = self.tiered_runtime.as_mut() {
+                tiered.config.enabled = false;
+                if tiered.config.log_promotions {
+                    eprintln!("[tiered] worker disconnected; disabling tiered runtime");
+                }
+            }
+        }
+    }
+
+    fn record_tiered_fallback(&mut self, findex: usize, reason: String) {
+        if let Some(tiered) = self.tiered_runtime.as_mut() {
+            tiered.stats.fallback_calls += 1;
+            tiered.compiled.remove(&findex);
+            tiered.blacklist.insert(findex, reason.clone());
+            if tiered.config.log_promotions {
+                eprintln!("[tiered] fallback findex={} reason={}", findex, reason);
+            }
+        }
+    }
+
+    fn call_compiled_function(
+        &mut self,
+        findex: usize,
+        entry: &CompiledFunctionEntry,
+        args: &[NanBoxedValue],
+    ) -> Result<NanBoxedValue> {
+        if args.len() > 8 {
+            return Err(anyhow!(
+                "Compiled call {} has {} args (max 8)",
+                findex,
+                args.len()
+            ));
+        }
+
+        self.sync_gc_scan_roots();
+
+        let func_ptr = entry.fn_addr as *mut c_void;
+        let arg_kinds = &entry.arg_kinds;
+        let ret_kind = entry.ret_kind;
+
+        let is_float_kind = |k: u32| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
+        let ret_is_float = is_float_kind(ret_kind);
+        let float_mask: u32 = arg_kinds.iter().enumerate().fold(0u32, |acc, (i, &k)| {
+            if is_float_kind(k) {
+                acc | (1 << i)
+            } else {
+                acc
+            }
+        });
+
+        let extract_arg = |idx: usize| -> i64 {
+            let kind = if idx < arg_kinds.len() {
+                arg_kinds[idx]
+            } else {
+                0
+            };
+            self.value_to_i64(args[idx], kind)
+        };
+
+        let fn_setup_trap = self.fn_setup_trap_jit;
+        let fn_remove_trap = self.fn_remove_trap_jit;
+        let fn_get_exc = self.fn_get_exc_value;
+        let fn_clear_exc = self.fn_clear_exc_value;
+        let mut trap_installed = false;
+        if !fn_setup_trap.is_null() {
+            type FnSetupTrap = unsafe extern "C" fn() -> *mut i32;
+            let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
+            let jmp_buf = unsafe { setup() };
+            if !jmp_buf.is_null() {
+                trap_installed = true;
+                let jumped = unsafe { hl::_setjmp(jmp_buf) };
+                if jumped != 0 {
+                    if !fn_get_exc.is_null() {
+                        type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
+                        let exc_ptr = unsafe {
+                            (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))()
+                        };
+                        if !exc_ptr.is_null() {
+                            if !fn_clear_exc.is_null() {
+                                type FnClearExc = unsafe extern "C" fn();
+                                unsafe {
+                                    (std::mem::transmute::<*mut c_void, FnClearExc>(
+                                        fn_clear_exc,
+                                    ))()
+                                };
+                            }
+                            return Err(anyhow::Error::new(self.format_hl_exception(
+                                NanBoxedValue::from_ptr(exc_ptr as usize),
+                            )));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "Compiled call longjmp without exception: findex {}",
+                        findex
+                    ));
+                }
+            }
+        }
+
+        let dispatch_res: Result<i64> = if ret_is_float || float_mask != 0 {
+            self.dispatch_float_native(func_ptr, args, arg_kinds, float_mask, ret_is_float)
+        } else {
+            Ok(unsafe {
+                match args.len() {
+                    0 => {
+                        let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
+                        f()
+                    }
+                    1 => {
+                        let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
+                        f(extract_arg(0))
+                    }
+                    2 => {
+                        let f: unsafe extern "C" fn(i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(extract_arg(0), extract_arg(1))
+                    }
+                    3 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(extract_arg(0), extract_arg(1), extract_arg(2))
+                    }
+                    4 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(extract_arg(0), extract_arg(1), extract_arg(2), extract_arg(3))
+                    }
+                    5 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                        )
+                    }
+                    6 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                        )
+                    }
+                    7 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                        )
+                    }
+                    8 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                        )
+                    }
+                    _ => 0i64,
+                }
+            })
+        };
+
+        if trap_installed && !fn_remove_trap.is_null() {
+            type FnRemoveTrap = unsafe extern "C" fn();
+            unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+        }
+
+        let raw_result = dispatch_res?;
+        Ok(self.wrap_native_result(raw_result, ret_kind))
     }
 
     /// Execute a HashLink bytecode function.

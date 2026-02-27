@@ -1,6 +1,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,17 @@ fn run(mut cmd: Command) -> Output {
 struct RunResult {
     output: Output,
     timed_out: bool,
+}
+
+#[derive(Clone, Copy)]
+enum AshMode {
+    Interp,
+    Hybrid {
+        jit_threshold: u64,
+        jit_max_args: usize,
+        jit_min_ops: usize,
+        jit_log: bool,
+    },
 }
 
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> RunResult {
@@ -115,9 +127,37 @@ fn run_haxe_interp(tests_dir: &Path, main: &str) -> Output {
     run(cmd)
 }
 
-fn run_ash_interp(ash_cli: &Path, hl_path: &Path, timeout: Option<Duration>) -> RunResult {
+fn run_ash(
+    ash_cli: &Path,
+    hl_path: &Path,
+    mode: AshMode,
+    timeout: Option<Duration>,
+) -> RunResult {
     let mut cmd = Command::new(ash_cli);
-    cmd.arg("--mode").arg("interp").arg(hl_path);
+    match mode {
+        AshMode::Interp => {
+            cmd.arg("--mode").arg("interp");
+        }
+        AshMode::Hybrid {
+            jit_threshold,
+            jit_max_args,
+            jit_min_ops,
+            jit_log,
+        } => {
+            cmd.arg("--mode")
+                .arg("hybrid")
+                .arg("--jit-threshold")
+                .arg(jit_threshold.to_string())
+                .arg("--jit-max-args")
+                .arg(jit_max_args.to_string())
+                .arg("--jit-min-ops")
+                .arg(jit_min_ops.to_string());
+            if jit_log {
+                cmd.arg("--jit-log");
+            }
+        }
+    }
+    cmd.arg(hl_path);
     if let Some(timeout) = timeout {
         run_with_timeout(cmd, timeout)
     } else {
@@ -125,6 +165,93 @@ fn run_ash_interp(ash_cli: &Path, hl_path: &Path, timeout: Option<Duration>) -> 
             output: run(cmd),
             timed_out: false,
         }
+    }
+}
+
+fn run_matrix(mode: AshMode) {
+    let mode_name = match mode {
+        AshMode::Interp => "interp",
+        AshMode::Hybrid { .. } => "hybrid",
+    };
+
+    let tests_dir = tests_dir();
+    let ash_cli = ash_cli_bin();
+    assert!(ash_cli.exists(), "ash_cli binary not found at {}", ash_cli.display());
+
+    let include_slow = std::env::var("ASH_STDLIB_INCLUDE_SLOW")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let slow_timeout_secs = std::env::var("ASH_STDLIB_SLOW_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(120);
+
+    let mut unexpected = Vec::new();
+
+    for case in default_cases() {
+        if case.slow && !include_slow {
+            continue;
+        }
+
+        let compile = compile_haxe_main(&tests_dir, case.main, case.hl);
+        if !compile.status.success() {
+            unexpected.push(format!(
+                "[COMPILE FAIL][{}] {} -> {}\n{}",
+                mode_name,
+                case.main,
+                case.hl,
+                render_output(&compile)
+            ));
+            continue;
+        }
+
+        let baseline = run_haxe_interp(&tests_dir, case.main);
+        if !baseline.status.success() {
+            unexpected.push(format!(
+                "[BASELINE FAIL][{}] haxe --interp {}\n{}",
+                mode_name,
+                case.main,
+                render_output(&baseline)
+            ));
+            continue;
+        }
+
+        let hl_path = tests_dir.join(case.hl);
+        let timeout = if case.slow {
+            Some(Duration::from_secs(slow_timeout_secs))
+        } else {
+            None
+        };
+        let ash_run = run_ash(&ash_cli, &hl_path, mode, timeout);
+        if ash_run.timed_out {
+            unexpected.push(format!(
+                "[ASH TIMEOUT][{}] {} ({}) exceeded {}s",
+                mode_name, case.main, case.hl, slow_timeout_secs
+            ));
+            continue;
+        }
+        let ash_output = ash_run.output;
+        match case.expectation {
+            AshExpectation::Pass => {
+                if !ash_output.status.success() {
+                    unexpected.push(format!(
+                        "[ASH FAIL][{}] {} ({}) expected pass\n{}",
+                        mode_name,
+                        case.main,
+                        case.hl,
+                        render_output(&ash_output)
+                    ));
+                }
+            }
+        }
+    }
+
+    if !unexpected.is_empty() {
+        let mut msg = format!("stdlib_matrix_{} had unexpected results:\n", mode_name);
+        for item in &unexpected {
+            let _ = writeln!(&mut msg, "\n{}", item);
+        }
+        panic!("{}", msg);
     }
 }
 
@@ -221,6 +348,12 @@ fn default_cases() -> Vec<Case> {
             slow: false,
         },
         Case {
+            main: "TestTieredHotLoop",
+            hl: "test_tiered_hotloop.hl",
+            expectation: AshExpectation::Pass,
+            slow: false,
+        },
+        Case {
             main: "Mandelbrot",
             hl: "test_mandelbrot.hl",
             expectation: AshExpectation::Pass,
@@ -229,82 +362,87 @@ fn default_cases() -> Vec<Case> {
     ]
 }
 
+fn matrix_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn lock_matrix() -> std::sync::MutexGuard<'static, ()> {
+    match matrix_lock().lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[test]
 fn stdlib_matrix_interp() {
+    let _guard = lock_matrix();
+    run_matrix(AshMode::Interp);
+}
+
+#[test]
+fn stdlib_matrix_hybrid() {
+    let _guard = lock_matrix();
+    run_matrix(AshMode::Hybrid {
+        jit_threshold: 5,
+        jit_max_args: 8,
+        jit_min_ops: 16,
+        jit_log: false,
+    });
+}
+
+fn parse_metric(stderr: &str, key: &str) -> Option<u64> {
+    let needle = format!("{}=", key);
+    stderr
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix(&needle))
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+#[test]
+fn hybrid_promotions_observable() {
+    let _guard = lock_matrix();
     let tests_dir = tests_dir();
     let ash_cli = ash_cli_bin();
-    assert!(ash_cli.exists(), "ash_cli binary not found at {}", ash_cli.display());
+    let case_main = "TestTieredHotLoop";
+    let case_hl = "test_tiered_hotloop.hl";
 
-    let include_slow = std::env::var("ASH_STDLIB_INCLUDE_SLOW")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let slow_timeout_secs = std::env::var("ASH_STDLIB_SLOW_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(120);
+    let compile = compile_haxe_main(&tests_dir, case_main, case_hl);
+    assert!(
+        compile.status.success(),
+        "failed to compile hybrid observability case:\n{}",
+        render_output(&compile)
+    );
 
-    let mut unexpected = Vec::new();
+    let hl_path = tests_dir.join(case_hl);
+    let run = run_ash(
+        &ash_cli,
+        &hl_path,
+        AshMode::Hybrid {
+            jit_threshold: 1,
+            jit_max_args: 8,
+            jit_min_ops: 1,
+            jit_log: true,
+        },
+        Some(Duration::from_secs(120)),
+    );
+    assert!(!run.timed_out, "hybrid observability run timed out");
+    assert!(
+        run.output.status.success(),
+        "hybrid observability run failed:\n{}",
+        render_output(&run.output)
+    );
 
-    for case in default_cases() {
-        if case.slow && !include_slow {
-            continue;
-        }
-
-        let compile = compile_haxe_main(&tests_dir, case.main, case.hl);
-        if !compile.status.success() {
-            unexpected.push(format!(
-                "[COMPILE FAIL] {} -> {}\n{}",
-                case.main,
-                case.hl,
-                render_output(&compile)
-            ));
-            continue;
-        }
-
-        let baseline = run_haxe_interp(&tests_dir, case.main);
-        if !baseline.status.success() {
-            unexpected.push(format!(
-                "[BASELINE FAIL] haxe --interp {}\n{}",
-                case.main,
-                render_output(&baseline)
-            ));
-            continue;
-        }
-
-        let hl_path = tests_dir.join(case.hl);
-        let timeout = if case.slow {
-            Some(Duration::from_secs(slow_timeout_secs))
-        } else {
-            None
-        };
-        let ash_run = run_ash_interp(&ash_cli, &hl_path, timeout);
-        if ash_run.timed_out {
-            unexpected.push(format!(
-                "[ASH TIMEOUT] {} ({}) exceeded {}s",
-                case.main, case.hl, slow_timeout_secs
-            ));
-            continue;
-        }
-        let ash_output = ash_run.output;
-        match case.expectation {
-            AshExpectation::Pass => {
-                if !ash_output.status.success() {
-                    unexpected.push(format!(
-                        "[ASH FAIL] {} ({}) expected pass\n{}",
-                        case.main,
-                        case.hl,
-                        render_output(&ash_output)
-                    ));
-                }
-            }
-        }
-    }
-
-    if !unexpected.is_empty() {
-        let mut msg = String::from("stdlib_matrix_interp had unexpected results:\n");
-        for item in &unexpected {
-            let _ = writeln!(&mut msg, "\n{}", item);
-        }
-        panic!("{}", msg);
-    }
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    let attempted = parse_metric(&stderr, "attempted").unwrap_or(0);
+    let succeeded = parse_metric(&stderr, "succeeded").unwrap_or(0);
+    let compiled_calls = parse_metric(&stderr, "compiled_calls").unwrap_or(0);
+    assert!(
+        attempted > 0 && succeeded > 0 && compiled_calls > 0,
+        "expected visible hybrid promotions, got attempted={} succeeded={} compiled_calls={}\nstderr:\n{}",
+        attempted,
+        succeeded,
+        compiled_calls,
+        stderr
+    );
 }

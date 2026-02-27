@@ -37,6 +37,27 @@ extern "C" {
     fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut hl_obj_field;
 }
 
+#[derive(Debug, Clone)]
+pub struct SharedRuntimeHandles {
+    pub globals_data_ptr: *mut *mut c_void,
+    pub nglobals: usize,
+    pub c_types: Vec<*mut hl_type>,
+    pub module_ctx: *mut hl_module_context,
+}
+
+// SharedRuntimeHandles carries runtime pointers that are process-global for an HL module
+// and are read by the background JIT worker. Synchronization remains the caller's responsibility.
+unsafe impl Send for SharedRuntimeHandles {}
+unsafe impl Sync for SharedRuntimeHandles {}
+
+#[derive(Debug, Clone)]
+pub struct CompiledFunctionMeta {
+    pub findex: usize,
+    pub fn_addr: usize,
+    pub arg_kinds: Vec<u32>,
+    pub ret_kind: u32,
+}
+
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
     pub(crate) module: Module<'ctx>,
@@ -65,6 +86,7 @@ pub struct JITModule<'ctx> {
     pub(crate) hl_type_struct_type: Option<StructType<'ctx>>,
     /// Function pointer table indexed by findex, used by hl_module_context.
     pub(crate) functions_ptrs: Vec<*mut c_void>,
+    pub(crate) shared_runtime: Option<SharedRuntimeHandles>,
 }
 
 impl<'ctx> JITModule<'ctx> {
@@ -106,6 +128,7 @@ impl<'ctx> JITModule<'ctx> {
             func_types: Vec::new(),
             hl_type_struct_type: None,
             functions_ptrs: Vec::new(),
+            shared_runtime: None,
         };
 
         module.string_globals = module
@@ -217,6 +240,58 @@ impl<'ctx> JITModule<'ctx> {
             .expect("Failed to initialize constants");
 
         module
+    }
+
+    pub fn new_with_shared_runtime(
+        context: &'ctx Context,
+        path: &Path,
+        shared: SharedRuntimeHandles,
+    ) -> Self {
+        let mut module = Self::new(context, path);
+        module.shared_runtime = Some(shared.clone());
+        module.apply_shared_runtime_overrides(&shared);
+        module
+    }
+
+    fn apply_shared_runtime_overrides(&mut self, shared: &SharedRuntimeHandles) {
+        // Rewire global slot pointers to interpreter-owned globals_data.
+        self.globals.clear();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        for index in 0..shared.nglobals {
+            let slot_addr = unsafe { shared.globals_data_ptr.add(index) } as u64;
+            let addr_int = self.context.i64_type().const_int(slot_addr, false);
+            let slot_ptr = addr_int.const_to_pointer(ptr_type);
+            self.globals.insert(index, slot_ptr);
+        }
+
+        // Rewire type identity cache to interpreter-owned hl_type pointers.
+        self.initialized_type_cache.clear();
+        self.c_ptr_to_type_index.clear();
+        for (i, &c_type_ptr) in shared.c_types.iter().enumerate() {
+            if c_type_ptr.is_null() {
+                continue;
+            }
+            self.c_ptr_to_type_index.insert(c_type_ptr as usize, i);
+            let ptr_as_int = self.context.i64_type().const_int(c_type_ptr as u64, false);
+            let ptr_to_type = ptr_as_int.const_to_pointer(ptr_type);
+            self.initialized_type_cache.insert(i, ptr_to_type.into());
+        }
+
+        // Mirror shared function pointer/type tables when module context is available.
+        if !shared.module_ctx.is_null() {
+            unsafe {
+                let fptrs = (*shared.module_ctx).functions_ptrs;
+                let ftypes = (*shared.module_ctx).functions_types;
+                for i in 0..self.functions_ptrs.len() {
+                    if !fptrs.is_null() {
+                        self.functions_ptrs[i] = *fptrs.add(i);
+                    }
+                    if i < self.func_types.len() && !ftypes.is_null() {
+                        self.func_types[i] = *ftypes.add(i);
+                    }
+                }
+            }
+        }
     }
 
     pub fn initialize_globals(&mut self) -> Result<()> {

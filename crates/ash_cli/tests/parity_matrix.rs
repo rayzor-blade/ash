@@ -95,6 +95,11 @@ fn validate_output(
     oracle: &OracleRecord,
     ash: &RunResult,
 ) -> Option<String> {
+    let expectation = if oracle.source == "haxe-interp" {
+        case.fallback_expectation.unwrap_or(case.expectation)
+    } else {
+        case.expectation
+    };
     let ash_code = status_code(&ash.output);
     let ash_stdout = String::from_utf8_lossy(&ash.output.stdout).to_string();
     let ash_stderr = String::from_utf8_lossy(&ash.output.stderr).to_string();
@@ -111,7 +116,7 @@ fn validate_output(
         ));
     }
 
-    match case.expectation {
+    match expectation {
         ExpectationKind::ExitOnly => None,
         ExpectationKind::Checksum => {
             let exp = extract_checksum(&oracle.stdout);

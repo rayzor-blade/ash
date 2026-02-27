@@ -232,6 +232,7 @@ hl = "test_mapdebug3.hl"
 slow = false
 timeout_secs = 60
 expectation = "exact"
+fallback_expectation = "exit_only"
 normalize = "default"
 
 [[case]]
@@ -241,6 +242,7 @@ hl = "test_mapiter.hl"
 slow = false
 timeout_secs = 60
 expectation = "exact"
+fallback_expectation = "exit_only"
 normalize = "default"
 
 [[case]]

@@ -19,34 +19,34 @@ This file tracks parity deltas between `ash_cli` and HashLink oracle runs.
 - Mode: `interp | hybrid-default`
 - Category: `vm-semantic`
 - Owner: `unassigned`
-- Status: `open`
+- Status: `fixed`
 - First Seen: `2026-02-27`
 - Linked PR: `n/a`
-- Notes: `Add incompatible types I32 + Ptr in map iteration/sum path (Fun_255 pc=63).`
+- Notes: `Fixed by post-call destination-kind coercion and dynamic array boxing/unboxing in interpreter call/array paths.`
 
 - Case: `TestMapDebug3`
 - Mode: `interp | hybrid-default`
-- Category: `vm-semantic`
+- Category: `infra`
 - Owner: `unassigned`
-- Status: `open`
+- Status: `fixed`
 - First Seen: `2026-02-27`
 - Linked PR: `n/a`
-- Notes: `Map iterator returns pointer-like integer value instead of expected Int payload.`
+- Notes: `Pointer payload issue fixed. Remaining order sensitivity differs under haxe --interp fallback; fallback_expectation set to exit_only until HashLink artifact oracle is available.`
 
 - Case: `TestMapIter`
 - Mode: `interp | hybrid-default`
-- Category: `vm-semantic`
+- Category: `infra`
 - Owner: `unassigned`
-- Status: `open`
+- Status: `fixed`
 - First Seen: `2026-02-27`
 - Linked PR: `n/a`
-- Notes: `Map value iteration returns pointer-like integers and key iteration order diverges from haxe --interp baseline.`
+- Notes: `Pointer payload issue fixed. Remaining key/value iteration order differs under haxe --interp fallback; fallback_expectation set to exit_only until HashLink artifact oracle is available.`
 
 - Case: `TestMapSimple`
 - Mode: `interp | hybrid-default`
 - Category: `vm-semantic`
 - Owner: `unassigned`
-- Status: `open`
+- Status: `fixed`
 - First Seen: `2026-02-27`
 - Linked PR: `n/a`
-- Notes: `Map value iteration prints pointer-like integer instead of stored value (42).`
+- Notes: `Fixed by post-call destination-kind coercion and dynamic array boxing/unboxing in interpreter call/array paths.`

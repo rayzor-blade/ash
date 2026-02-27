@@ -26,6 +26,7 @@ pub struct ParityCase {
     pub slow: bool,
     pub timeout_secs: u64,
     pub expectation: ExpectationKind,
+    pub fallback_expectation: Option<ExpectationKind>,
     pub normalize: NormalizeKind,
     pub compile: bool,
     pub sanity_interp: bool,
@@ -257,6 +258,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 slow: false,
                 timeout_secs: 60,
                 expectation: ExpectationKind::Exact,
+                fallback_expectation: None,
                 normalize: NormalizeKind::Default,
                 compile: true,
                 sanity_interp: true,
@@ -287,6 +289,18 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                     "exit_only" => ExpectationKind::ExitOnly,
                     other => panic!("invalid expectation '{}', line {}", other, lineno + 1),
                 }
+            }
+            "fallback_expectation" => {
+                c.fallback_expectation = Some(match parse_string(value).as_str() {
+                    "exact" => ExpectationKind::Exact,
+                    "checksum" => ExpectationKind::Checksum,
+                    "exit_only" => ExpectationKind::ExitOnly,
+                    other => panic!(
+                        "invalid fallback_expectation '{}', line {}",
+                        other,
+                        lineno + 1
+                    ),
+                })
             }
             "normalize" => {
                 c.normalize = match parse_string(value).as_str() {

@@ -732,6 +732,32 @@ impl HLInterpreter {
         }
     }
 
+    #[inline]
+    fn coerce_value_for_static_kind(&self, val: NanBoxedValue, dst_kind: u32) -> NanBoxedValue {
+        if val.is_ptr()
+            && !val.is_null()
+            && val.as_ptr() != 0
+            && Self::is_primitive_or_bytes_kind(dst_kind)
+        {
+            return unsafe {
+                Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
+                    .unwrap_or(val)
+            };
+        }
+        if val.is_null() {
+            return match dst_kind {
+                hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
+                    NanBoxedValue::from_i32(0)
+                }
+                hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
+                hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => NanBoxedValue::from_f64(0.0),
+                hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
+                _ => val,
+            };
+        }
+        val
+    }
+
     fn try_handle_virtual_obj_get_field(
         &mut self,
         args: &[NanBoxedValue],
@@ -1879,7 +1905,9 @@ impl HLInterpreter {
                 StepResult::Call { findex, args, dst } => {
                     match self.call_function(bytecode, native_resolver, findex, &args) {
                         Ok(ret) => {
-                            self.stack.last_mut().unwrap().registers.set(dst, ret);
+                            let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
+                            let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
+                            self.stack.last_mut().unwrap().registers.set(dst, coerced);
                             self.stack.last_mut().unwrap().pc += 1;
                         }
                         Err(e) => {
@@ -3203,6 +3231,7 @@ impl HLInterpreter {
             Opcode::GetArray { dst, array, index } => {
                 let arr_val = frame.registers.get(array.0);
                 let idx = frame.registers.get(index.0).as_i32().max(0) as usize;
+                let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                 let val = if arr_val.is_null() || arr_val.is_void() {
                     NanBoxedValue::null()
                 } else if !arr_val.is_ptr() {
@@ -3273,10 +3302,29 @@ impl HLInterpreter {
                             k if k == hl::hl_type_kind_HF64 => {
                                 NanBoxedValue::from_f64(*(data.add(idx * 8) as *const f64))
                             }
-                            _ => {
+                            k => {
                                 let ptr_val = *(data.add(idx * 8) as *const usize);
                                 if ptr_val == 0 {
-                                    NanBoxedValue::null()
+                                    match dst_kind {
+                                        hl::hl_type_kind_HI32
+                                        | hl::hl_type_kind_HUI8
+                                        | hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(0),
+                                        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
+                                        hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                                            NanBoxedValue::from_f64(0.0)
+                                        }
+                                        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
+                                        _ => NanBoxedValue::null(),
+                                    }
+                                } else if (k == hl::hl_type_kind_HDYN
+                                    || k == hl::hl_type_kind_HNULL)
+                                    && Self::is_primitive_or_bytes_kind(dst_kind)
+                                {
+                                    Self::unbox_dynamic_to_kind(
+                                        ptr_val as *mut hl::vdynamic,
+                                        dst_kind,
+                                    )
+                                    .unwrap_or_else(|| NanBoxedValue::from_ptr(ptr_val))
                                 } else {
                                     NanBoxedValue::from_ptr(ptr_val)
                                 }
@@ -3360,9 +3408,22 @@ impl HLInterpreter {
                             k if k == hl::hl_type_kind_HF64 => {
                                 *(data.add(idx * 8) as *mut f64) = src_val.as_f64()
                             }
-                            _ => {
+                            k => {
                                 let ptr_val = if src_val.is_null() || src_val.is_void() {
                                     0usize
+                                } else if (k == hl::hl_type_kind_HDYN
+                                    || k == hl::hl_type_kind_HNULL)
+                                    && !src_val.is_ptr()
+                                {
+                                    // Arrays of dyn/null store vdynamic*. Box primitives before write.
+                                    let src_type_idx = func.regs[src.0 as usize].0;
+                                    let src_t = self.c_type_factory.get(src_type_idx);
+                                    let boxed = self.box_value_as_dynamic_with_type(src_val, src_t);
+                                    if boxed.is_null() || boxed.is_void() {
+                                        0usize
+                                    } else {
+                                        boxed.as_ptr()
+                                    }
                                 } else {
                                     src_val.as_ptr()
                                 };

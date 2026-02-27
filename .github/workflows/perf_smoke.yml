@@ -20,6 +20,7 @@ jobs:
     env:
       HAXE_VERSION: "4.3.4"
       LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
     steps:
       - uses: actions/checkout@v4
 

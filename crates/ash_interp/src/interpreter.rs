@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::ffi::CStr;
 use anyhow::{anyhow, Result};
 
 use ash::bytecode::DecodedBytecode;
@@ -29,6 +30,9 @@ type FnDynSetI64 = unsafe extern "C" fn(*mut c_void, i32, i64);
 type FnDynSetI = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, i32);
 type FnDynSetP = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, *mut c_void);
 type FnHashGen = unsafe extern "C" fn(*const u16, bool) -> i32;
+type FnObjGetField = unsafe extern "C" fn(*mut hl::vdynamic, i32) -> *mut hl::vdynamic;
+type FnValueToString = unsafe extern "C" fn(*mut hl::vdynamic, *mut i32) -> *const hl::vbyte;
+type FnTypeName = unsafe extern "C" fn(*const hl::hl_type) -> *mut hl::vbyte;
 
 /// Resolve/calculate a HashLink field hash from a bytecode string index.
 /// Uses std's hlp_hash_gen when available so field names are cached for reflection/JSON.
@@ -74,12 +78,19 @@ enum StepResult {
 
 /// Carries a thrown HL exception value up through the Rust call stack.
 /// Distinguishable from other errors so callers can catch it via downcast.
-#[derive(Debug, Clone, Copy)]
-struct HLExceptionPropagation(NanBoxedValue);
+#[derive(Debug, Clone)]
+struct HLExceptionPropagation {
+    value: NanBoxedValue,
+    message: Option<String>,
+}
 
 impl std::fmt::Display for HLExceptionPropagation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "HL exception: {:?}", self.0)
+        if let Some(msg) = &self.message {
+            write!(f, "HL exception: {}", msg)
+        } else {
+            write!(f, "HL exception: {:?}", self.value)
+        }
     }
 }
 
@@ -121,6 +132,8 @@ pub struct HLInterpreter {
     fn_alloc_dynobj: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_virtual
     fn_alloc_virtual: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_alloc_closure_void
+    fn_alloc_closure_void: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_getd
     fn_dyn_getd: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_getf
@@ -151,6 +164,12 @@ pub struct HLInterpreter {
     fn_get_exc_value: *mut c_void,
     /// Resolved stdlib function pointer: hlp_clear_exc_value (clears exc_value after recovery)
     fn_clear_exc_value: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_obj_get_field (reads dynamic object fields)
+    fn_obj_get_field: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_value_to_string (for readable exception messages)
+    fn_value_to_string: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_type_name (runtime type name lookup)
+    fn_type_name: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_clear_scan_roots
     fn_gc_clear_scan_roots: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_add_scan_root
@@ -160,6 +179,10 @@ pub struct HLInterpreter {
     /// Cache of UTF-16 null-terminated strings (string index → leaked pointer)
     /// HashLink uses UTF-16 internally; bytecode strings are stored as UTF-8 in Rust.
     utf16_strings: HashMap<usize, *const u16>,
+    /// Fallback storage for HVIRTUAL fields when runtime virtual indexes are unavailable.
+    virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
+    /// Hash-keyed fallback storage for HVIRTUAL dynamic field access via hl.Api/Reflect.
+    virtual_hash_fields: HashMap<(usize, i32), NanBoxedValue>,
 }
 
 impl HLInterpreter {
@@ -198,6 +221,9 @@ impl HLInterpreter {
             .unwrap_or(std::ptr::null_mut());
         let fn_alloc_virtual = native_resolver
             .resolve_function("std", "hlp_alloc_virtual")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_alloc_closure_void = native_resolver
+            .resolve_function("std", "hlp_alloc_closure_void")
             .unwrap_or(std::ptr::null_mut());
         let fn_dyn_getd = native_resolver
             .resolve_function("std", "hlp_dyn_getd")
@@ -244,6 +270,15 @@ impl HLInterpreter {
         let fn_clear_exc_value = native_resolver
             .resolve_function("std", "hlp_clear_exc_value")
             .unwrap_or(std::ptr::null_mut());
+        let fn_obj_get_field = native_resolver
+            .resolve_function("std", "hlp_obj_get_field")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_value_to_string = native_resolver
+            .resolve_function("std", "hlp_value_to_string")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_type_name = native_resolver
+            .resolve_function("std", "hlp_type_name")
+            .unwrap_or(std::ptr::null_mut());
         let fn_gc_clear_scan_roots = native_resolver
             .resolve_function("std", "hlp_gc_clear_scan_roots")
             .unwrap_or(std::ptr::null_mut());
@@ -266,6 +301,7 @@ impl HLInterpreter {
             fn_alloc_enum,
             fn_alloc_dynobj,
             fn_alloc_virtual,
+            fn_alloc_closure_void,
             fn_dyn_getd,
             fn_dyn_getf,
             fn_dyn_geti64,
@@ -281,10 +317,15 @@ impl HLInterpreter {
             fn_remove_trap_jit,
             fn_get_exc_value,
             fn_clear_exc_value,
+            fn_obj_get_field,
+            fn_value_to_string,
+            fn_type_name,
             fn_gc_clear_scan_roots,
             fn_gc_add_scan_root,
             gc_root_ptrs: Vec::new(),
             utf16_strings: HashMap::new(),
+            virtual_fields: HashMap::new(),
+            virtual_hash_fields: HashMap::new(),
         }
     }
 
@@ -312,6 +353,528 @@ impl HLInterpreter {
             let size = self.gc_root_ptrs.len() * std::mem::size_of::<usize>();
             unsafe { add(ptr, size) };
         }
+    }
+
+    fn decode_utf16_chars(ptr: *const u16, len: i32) -> String {
+        if ptr.is_null() || len <= 0 {
+            return String::new();
+        }
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        String::from_utf16_lossy(slice)
+    }
+
+    fn value_to_string(&self, dyn_ptr: *mut hl::vdynamic) -> Option<String> {
+        if self.fn_value_to_string.is_null() || dyn_ptr.is_null() {
+            return None;
+        }
+        let f: FnValueToString = unsafe { std::mem::transmute(self.fn_value_to_string) };
+        let mut len: i32 = 0;
+        let out = unsafe { f(dyn_ptr, &mut len as *mut i32) };
+        if out.is_null() || len <= 0 {
+            None
+        } else {
+            Some(Self::decode_utf16_chars(out as *const u16, len))
+        }
+    }
+
+    fn hash_literal_name(&self, name: &str) -> i32 {
+        let mut utf16: Vec<u16> = name.encode_utf16().collect();
+        utf16.push(0);
+        if !self.fn_hash_gen.is_null() {
+            let f: FnHashGen = unsafe { std::mem::transmute(self.fn_hash_gen) };
+            return unsafe { f(utf16.as_ptr(), true) };
+        }
+        let mut h: i32 = 0;
+        for c in &utf16[..utf16.len() - 1] {
+            h = h.wrapping_mul(223).wrapping_add(*c as i32);
+        }
+        h.wrapping_rem(0x1FFFFF7B)
+    }
+
+    fn resolve_typed_field_hash(
+        bytecode: &DecodedBytecode,
+        obj_type_idx: usize,
+        field_idx: usize,
+    ) -> Option<i32> {
+        let ty = bytecode.types.get(obj_type_idx)?;
+        if let Some(obj) = ty.obj.as_ref() {
+            if let Some(f) = obj.fields.get(field_idx) {
+                if f.hashed_name != 0 {
+                    return Some(f.hashed_name);
+                }
+            }
+        }
+        if let Some(virt) = ty.virt.as_ref() {
+            if let Some(f) = virt.fields.get(field_idx) {
+                if f.hashed_name != 0 {
+                    return Some(f.hashed_name);
+                }
+            }
+        }
+        None
+    }
+
+    unsafe fn resolve_virtual_field_offset(c_type_ptr: *mut c_void, field_idx: usize) -> Option<usize> {
+        if c_type_ptr.is_null() {
+            return None;
+        }
+        let t = c_type_ptr as *mut hl_type;
+        if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
+            return None;
+        }
+        let virt = (*t).__bindgen_anon_1.virt;
+        if virt.is_null() || (*virt).indexes.is_null() || field_idx >= (*virt).nfields as usize {
+            return None;
+        }
+        let off = *(*virt).indexes.add(field_idx);
+        if off < 0 {
+            None
+        } else {
+            Some(off as usize)
+        }
+    }
+
+    unsafe fn resolve_virtual_field_index_and_type(
+        obj_ptr: *mut c_void,
+        hfield: i32,
+    ) -> Option<(usize, *mut hl_type)> {
+        if obj_ptr.is_null() {
+            return None;
+        }
+        let t = *(obj_ptr as *const *mut hl_type);
+        if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
+            return None;
+        }
+        let virt = (*t).__bindgen_anon_1.virt;
+        if virt.is_null() || (*virt).fields.is_null() {
+            return None;
+        }
+        for i in 0..(*virt).nfields as usize {
+            let f = &*(*virt).fields.add(i);
+            if f.hashed_name == hfield {
+                return Some((i, f.t));
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn is_primitive_or_bytes_kind(kind: u32) -> bool {
+        matches!(
+            kind,
+            hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+                | hl::hl_type_kind_HI64
+                | hl::hl_type_kind_HF32
+                | hl::hl_type_kind_HF64
+                | hl::hl_type_kind_HBOOL
+                | hl::hl_type_kind_HBYTES
+        )
+    }
+
+    #[inline]
+    fn is_numeric_or_bool_kind(kind: u32) -> bool {
+        matches!(
+            kind,
+            hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+                | hl::hl_type_kind_HI64
+                | hl::hl_type_kind_HF32
+                | hl::hl_type_kind_HF64
+                | hl::hl_type_kind_HBOOL
+        )
+    }
+
+    fn box_value_as_dynamic_with_type(
+        &self,
+        val: NanBoxedValue,
+        field_t: *mut hl_type,
+    ) -> NanBoxedValue {
+        if val.is_null() || val.is_void() {
+            return NanBoxedValue::null();
+        }
+        if field_t.is_null() {
+            return if val.is_ptr() {
+                NanBoxedValue::from_ptr(val.as_ptr())
+            } else {
+                NanBoxedValue::null()
+            };
+        }
+        let kind = unsafe { (*field_t).kind };
+        if !Self::is_primitive_or_bytes_kind(kind) {
+            return NanBoxedValue::from_ptr(val.as_ptr());
+        }
+        if self.fn_make_dyn.is_null() {
+            return val;
+        }
+        let mut data: i64 = match kind {
+            hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
+                val.as_i32() as i64
+            }
+            hl::hl_type_kind_HI64 => val.as_i64_lossy(),
+            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => val.as_f64().to_bits() as i64,
+            hl::hl_type_kind_HBOOL => {
+                if val.as_bool() {
+                    1
+                } else {
+                    0
+                }
+            }
+            hl::hl_type_kind_HBYTES => val.as_ptr() as i64,
+            _ => val.as_ptr() as i64,
+        };
+        let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            unsafe { std::mem::transmute(self.fn_make_dyn) };
+        let dyn_ptr = unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, field_t as *mut c_void) };
+        if dyn_ptr.is_null() {
+            NanBoxedValue::null()
+        } else {
+            NanBoxedValue::from_ptr(dyn_ptr as usize)
+        }
+    }
+
+    fn try_handle_virtual_obj_get_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+        if args.len() < 2 {
+            return Some(NanBoxedValue::null());
+        }
+        let obj = args[0];
+        if obj.is_null() || obj.is_void() {
+            return Some(NanBoxedValue::null());
+        }
+        let obj_ptr = obj.as_ptr();
+        if obj_ptr == 0 {
+            return Some(NanBoxedValue::null());
+        }
+        let hfield = args[1].as_i32();
+        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none() && unsafe {
+            let t = *(obj_ptr as *const *mut hl_type);
+            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+        } {
+            return None;
+        }
+        let (val, field_t) = unsafe {
+            match meta {
+                Some((idx, ft)) => {
+                    let v = self
+                        .virtual_fields
+                        .get(&(obj_ptr, idx))
+                        .copied()
+                        .or_else(|| self.virtual_hash_fields.get(&(obj_ptr, hfield)).copied())
+                        .unwrap_or_else(NanBoxedValue::null);
+                    (v, ft)
+                }
+                None => {
+                    let v = self
+                        .virtual_hash_fields
+                        .get(&(obj_ptr, hfield))
+                        .copied()
+                        .unwrap_or_else(NanBoxedValue::null);
+                    (v, std::ptr::null_mut())
+                }
+            }
+        };
+        if val.is_null() || val.is_void() {
+            return Some(NanBoxedValue::null());
+        }
+        if val.is_ptr() {
+            return Some(NanBoxedValue::from_ptr(val.as_ptr()));
+        }
+        Some(self.box_value_as_dynamic_with_type(val, field_t))
+    }
+
+    fn try_handle_virtual_obj_set_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+        if args.len() < 3 {
+            return Some(NanBoxedValue::void());
+        }
+        let obj = args[0];
+        if obj.is_null() || obj.is_void() {
+            return Some(NanBoxedValue::void());
+        }
+        let obj_ptr = obj.as_ptr();
+        if obj_ptr == 0 {
+            return Some(NanBoxedValue::void());
+        }
+        let hfield = args[1].as_i32();
+        let src_val = args[2];
+        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none() && unsafe {
+            let t = *(obj_ptr as *const *mut hl_type);
+            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+        } {
+            return None;
+        }
+
+        match meta {
+            Some((idx, field_t)) => {
+                let stored = if src_val.is_null() || src_val.is_void() {
+                    NanBoxedValue::null()
+                } else {
+                    let kind = unsafe { (*field_t).kind };
+                    if Self::is_primitive_or_bytes_kind(kind) && src_val.is_ptr() {
+                        unsafe {
+                            Self::unbox_dynamic_to_kind(src_val.as_ptr() as *mut hl::vdynamic, kind)
+                                .unwrap_or(src_val)
+                        }
+                    } else {
+                        src_val
+                    }
+                };
+                self.virtual_fields.insert((obj_ptr, idx), stored);
+                self.virtual_hash_fields.insert((obj_ptr, hfield), stored);
+            }
+            None => {
+                self.virtual_hash_fields.insert((obj_ptr, hfield), src_val);
+            }
+        }
+        Some(NanBoxedValue::void())
+    }
+
+    fn try_handle_virtual_obj_has_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+        if args.len() < 2 {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let obj = args[0];
+        if obj.is_null() || obj.is_void() {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let obj_ptr = obj.as_ptr();
+        if obj_ptr == 0 {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let hfield = args[1].as_i32();
+        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none() && unsafe {
+            let t = *(obj_ptr as *const *mut hl_type);
+            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+        } {
+            return None;
+        }
+        let found = match meta {
+            Some((idx, _)) => {
+                self.virtual_fields.contains_key(&(obj_ptr, idx))
+                    || self.virtual_hash_fields.contains_key(&(obj_ptr, hfield))
+            }
+            None => self.virtual_hash_fields.contains_key(&(obj_ptr, hfield)),
+        };
+        Some(NanBoxedValue::from_bool(found))
+    }
+
+    fn try_handle_virtual_obj_delete_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+        if args.len() < 2 {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let obj = args[0];
+        if obj.is_null() || obj.is_void() {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let obj_ptr = obj.as_ptr();
+        if obj_ptr == 0 {
+            return Some(NanBoxedValue::from_bool(false));
+        }
+        let hfield = args[1].as_i32();
+        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none() && unsafe {
+            let t = *(obj_ptr as *const *mut hl_type);
+            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+        } {
+            return None;
+        }
+        let removed = match meta {
+            Some((idx, _)) => {
+                self.virtual_fields.remove(&(obj_ptr, idx)).is_some()
+                    || self.virtual_hash_fields.remove(&(obj_ptr, hfield)).is_some()
+            }
+            None => self.virtual_hash_fields.remove(&(obj_ptr, hfield)).is_some(),
+        };
+        Some(NanBoxedValue::from_bool(removed))
+    }
+
+    fn dyn_get_field_by_hash(
+        obj_ptr: *mut c_void,
+        hfield: i32,
+        dst_kind: u32,
+        dst_type_ptr: *mut c_void,
+        fn_dyn_getd: *mut c_void,
+        fn_dyn_getf: *mut c_void,
+        fn_dyn_geti64: *mut c_void,
+        fn_dyn_geti: *mut c_void,
+        fn_dyn_getp: *mut c_void,
+    ) -> NanBoxedValue {
+        match dst_kind {
+            hl::hl_type_kind_HF64 => {
+                if fn_dyn_getd.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let f: FnDynGetD = unsafe { std::mem::transmute(fn_dyn_getd) };
+                    NanBoxedValue::from_f64(unsafe { f(obj_ptr, hfield) })
+                }
+            }
+            hl::hl_type_kind_HF32 => {
+                if fn_dyn_getf.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let f: FnDynGetF = unsafe { std::mem::transmute(fn_dyn_getf) };
+                    NanBoxedValue::from_f64(unsafe { f(obj_ptr, hfield) as f64 })
+                }
+            }
+            hl::hl_type_kind_HI64 => {
+                if fn_dyn_geti64.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let f: FnDynGetI64 = unsafe { std::mem::transmute(fn_dyn_geti64) };
+                    NanBoxedValue::from_i64(unsafe { f(obj_ptr, hfield) })
+                }
+            }
+            hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16 => {
+                if fn_dyn_geti.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let f: FnDynGetI = unsafe { std::mem::transmute(fn_dyn_geti) };
+                    let i = unsafe { f(obj_ptr, hfield, dst_type_ptr) };
+                    if dst_kind == hl::hl_type_kind_HBOOL {
+                        NanBoxedValue::from_bool(i != 0)
+                    } else {
+                        NanBoxedValue::from_i32(i)
+                    }
+                }
+            }
+            _ => {
+                if fn_dyn_getp.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let f: FnDynGetP = unsafe { std::mem::transmute(fn_dyn_getp) };
+                    let p = unsafe { f(obj_ptr, hfield, dst_type_ptr) };
+                    if p.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(p as usize)
+                    }
+                }
+            }
+        }
+    }
+
+    fn dyn_set_field_by_hash(
+        obj_ptr: *mut c_void,
+        hfield: i32,
+        src_val: NanBoxedValue,
+        src_kind: u32,
+        src_type_ptr: *mut c_void,
+        fn_dyn_setd: *mut c_void,
+        fn_dyn_setf: *mut c_void,
+        fn_dyn_seti64: *mut c_void,
+        fn_dyn_seti: *mut c_void,
+        fn_dyn_setp: *mut c_void,
+    ) {
+        match src_kind {
+            hl::hl_type_kind_HF64 => {
+                if !fn_dyn_setd.is_null() {
+                    let f: FnDynSetD = unsafe { std::mem::transmute(fn_dyn_setd) };
+                    unsafe { f(obj_ptr, hfield, src_val.as_f64()) };
+                }
+            }
+            hl::hl_type_kind_HF32 => {
+                if !fn_dyn_setf.is_null() {
+                    let f: FnDynSetF = unsafe { std::mem::transmute(fn_dyn_setf) };
+                    unsafe { f(obj_ptr, hfield, src_val.as_f64() as f32) };
+                }
+            }
+            hl::hl_type_kind_HI64 => {
+                if !fn_dyn_seti64.is_null() {
+                    let f: FnDynSetI64 = unsafe { std::mem::transmute(fn_dyn_seti64) };
+                    unsafe { f(obj_ptr, hfield, src_val.as_i64_lossy()) };
+                }
+            }
+            hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16 => {
+                if !fn_dyn_seti.is_null() {
+                    let f: FnDynSetI = unsafe { std::mem::transmute(fn_dyn_seti) };
+                    let i = if src_kind == hl::hl_type_kind_HBOOL {
+                        if src_val.as_bool() { 1 } else { 0 }
+                    } else {
+                        src_val.as_i32()
+                    };
+                    unsafe { f(obj_ptr, hfield, src_type_ptr, i) };
+                }
+            }
+            _ => {
+                if !fn_dyn_setp.is_null() {
+                    let f: FnDynSetP = unsafe { std::mem::transmute(fn_dyn_setp) };
+                    let p = if src_val.is_null() || src_val.is_void() {
+                        std::ptr::null_mut()
+                    } else {
+                        src_val.as_ptr() as *mut c_void
+                    };
+                    unsafe { f(obj_ptr, hfield, src_type_ptr, p) };
+                }
+            }
+        }
+    }
+
+    fn dynamic_type_name(&self, d: *mut hl::vdynamic) -> Option<String> {
+        if d.is_null() || self.fn_type_name.is_null() {
+            return None;
+        }
+        let t = unsafe { (*d).t };
+        if t.is_null() {
+            return None;
+        }
+        let f: FnTypeName = unsafe { std::mem::transmute(self.fn_type_name) };
+        let name_ptr = unsafe { f(t as *const hl::hl_type) };
+        if name_ptr.is_null() {
+            return None;
+        }
+        let s = unsafe { CStr::from_ptr(name_ptr as *const i8) };
+        Some(s.to_string_lossy().into_owned())
+    }
+
+    fn format_hl_exception(&self, val: NanBoxedValue) -> HLExceptionPropagation {
+        let msg = if val.is_null() || val.is_void() {
+            None
+        } else {
+            let dyn_ptr = val.as_ptr() as *mut hl::vdynamic;
+            let base = self.value_to_string(dyn_ptr);
+            if !self.fn_obj_get_field.is_null() {
+                let get_field: FnObjGetField = unsafe { std::mem::transmute(self.fn_obj_get_field) };
+                let mut extracted: Option<String> = None;
+                for field_name in ["__exceptionMessage", "message"] {
+                    let h = self.hash_literal_name(field_name);
+                    let msg_dyn = unsafe { get_field(dyn_ptr, h) };
+                    if let Some(inner) = self.value_to_string(msg_dyn) {
+                        if !inner.is_empty() && inner != "null" {
+                            extracted = Some(inner);
+                            break;
+                        }
+                    }
+                }
+                if let Some(inner) = extracted {
+                    if let Some(base) = base.as_ref() {
+                        if !inner.is_empty() && inner != *base {
+                            Some(format!("{}: {}", base, inner))
+                        } else {
+                            Some(base.clone())
+                        }
+                    } else if !inner.is_empty() {
+                        Some(inner)
+                    } else {
+                        base
+                    }
+                } else {
+                    base
+                }
+            } else {
+                base
+            }
+        };
+        HLExceptionPropagation { value: val, message: msg }
     }
 
     /// Intern a bytecode string as null-terminated UTF-16 and return a stable pointer.
@@ -614,6 +1177,9 @@ impl HLInterpreter {
             }
 
             let op = func.ops[pc].clone();
+            if std::env::var("ASH_TRACE_ASSERT").is_ok() {
+                eprintln!("[TRACE] f{} {} pc={} op={:?}", func_idx, func.name(), pc, op);
+            }
             let result = self.execute_opcode(bytecode, &op, func_idx)?;
 
             match result {
@@ -640,7 +1206,7 @@ impl HLInterpreter {
                         }
                         Err(e) => {
                             if let Some(hl_exc) = e.downcast_ref::<HLExceptionPropagation>() {
-                                let exc_val = hl_exc.0;
+                                let exc_val = hl_exc.value;
                                 let frame = self.stack.last_mut().unwrap();
                                 if let Some((target_pc, exc_reg)) = frame.trap_stack.pop() {
                                     frame.registers.set(exc_reg, exc_val);
@@ -1069,18 +1635,26 @@ impl HLInterpreter {
                 let findex = if closure_val.is_func() {
                     closure_val.as_func_index()
                 } else {
-                    // It's a pointer to a _vclosure struct
-                    let cl_ptr = closure_val.as_ptr() as *const _vclosure;
-                    unsafe {
-                        let fun_ptr = (*cl_ptr).fun;
-                        // Extract findex from stub pointer (findex+1)
-                        let fi = (fun_ptr as usize).wrapping_sub(1);
-                        // If the closure has a bound value, prepend it as the first arg
-                        if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
-                            let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
-                            arg_vals.insert(0, bound);
+                    let raw = closure_val.as_ptr();
+                    if self.findex_to_func.contains_key(&raw) || self.findex_to_native.contains_key(&raw) {
+                        raw
+                    } else {
+                        // It's a pointer to a _vclosure struct
+                        let cl_ptr = raw as *const _vclosure;
+                        if cl_ptr.is_null() || (cl_ptr as usize) % std::mem::align_of::<_vclosure>() != 0 {
+                            return Err(anyhow!("CallClosure invalid closure value: {:?}", closure_val));
                         }
-                        fi
+                        unsafe {
+                            let fun_ptr = (*cl_ptr).fun;
+                            // Extract findex from stub pointer (findex+1)
+                            let fi = (fun_ptr as usize).wrapping_sub(1);
+                            // If the closure has a bound value, prepend it as the first arg
+                            if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
+                                let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
+                                arg_vals.insert(0, bound);
+                            }
+                            fi
+                        }
                     }
                 };
 
@@ -1093,10 +1667,49 @@ impl HLInterpreter {
 
             // ===== Closures =====
             Opcode::StaticClosure { dst, fun } => {
-                // Store the function index as a TAG_FUNC value (no capture)
+                // Materialize a real vclosure* so std natives such as
+                // hl.Api.noClosure / Reflect.callMethod can consume it.
+                let findex = fun.0;
+                let type_idx = if let Some(&fidx) = self.findex_to_func.get(&findex) {
+                    bytecode.functions[fidx].type_.0
+                } else if let Some(&nidx) = self.findex_to_native.get(&findex) {
+                    bytecode.natives[nidx].type_.0
+                } else {
+                    usize::MAX
+                };
+
+                if type_idx != usize::MAX && !self.fn_alloc_closure_void.is_null() {
+                    type FnAllocClosureVoid =
+                        unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut _vclosure;
+                    let f: FnAllocClosureVoid =
+                        unsafe { std::mem::transmute(self.fn_alloc_closure_void) };
+                    let tptr = self.c_type_factory.get(type_idx) as *mut c_void;
+                    let closure =
+                        unsafe { f(tptr, (findex + 1) as *mut c_void) };
+                    if !closure.is_null() {
+                        if std::env::var("ASH_DBG_CLOSURE").is_ok() {
+                            eprintln!(
+                                "[STATICCLOSURE] findex={} type_idx={} -> {:p}",
+                                findex, type_idx, closure
+                            );
+                        }
+                        frame
+                            .registers
+                            .set(dst.0, NanBoxedValue::from_ptr(closure as usize));
+                        return Ok(StepResult::Continue);
+                    }
+                }
+
+                // Fallback to interpreter-local representation.
+                if std::env::var("ASH_DBG_CLOSURE").is_ok() {
+                    eprintln!(
+                        "[STATICCLOSURE-FALLBACK] findex={} type_idx={} alloc_fn={:p}",
+                        findex, type_idx, self.fn_alloc_closure_void
+                    );
+                }
                 frame
                     .registers
-                    .set(dst.0, NanBoxedValue::from_func_index(fun.0));
+                    .set(dst.0, NanBoxedValue::from_func_index(findex));
             }
             Opcode::InstanceClosure { dst, fun, obj } => {
                 // Create a heap-allocated _vclosure with the bound object.
@@ -1209,62 +1822,288 @@ impl HLInterpreter {
             // ===== Fields =====
             Opcode::Field { dst, obj, field } => {
                 // Extract c_type info before borrowing frame mutably
-                let obj_kind = bytecode.types[func.regs[obj.0 as usize].0].kind;
-                let obj_c_type = self.c_type_factory.get(func.regs[obj.0 as usize].0) as *mut c_void;
+                let obj_type_idx = func.regs[obj.0 as usize].0;
+                let obj_kind = bytecode.types[obj_type_idx].kind;
+                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
                 let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(obj.0);
+                if std::env::var("ASH_DBG_FIELD").is_ok() {
+                    eprintln!(
+                        "[FIELD] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} obj={:?}",
+                        func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, obj_val
+                    );
+                }
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
-                } else {
+                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let val = unsafe {
                         Self::read_obj_field(obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt)
                     };
+                    if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        eprintln!(
+                            "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
+                            func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
+                        );
+                    }
                     frame.registers.set(dst.0, val);
+                } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+                    if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                        let obj_ptr = obj_val.as_ptr() as *mut u8;
+                        let addr = unsafe { obj_ptr.add(offset) };
+                        let val = unsafe { Self::read_value_at(addr, dst_kind) };
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
+                                func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
+                            );
+                        }
+                        frame.registers.set(dst.0, val);
+                    } else {
+                        let key = (obj_val.as_ptr(), field.0);
+                        let val = self
+                            .virtual_fields
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(NanBoxedValue::null);
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
+                                func_idx, frame.pc, obj_type_idx, field.0, val
+                            );
+                        }
+                        frame.registers.set(dst.0, val);
+                    }
+                } else if let Some(hfield) =
+                    Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                {
+                    let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                    let dst_type_idx = func.regs[dst.0 as usize].0;
+                    let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                    let out = Self::dyn_get_field_by_hash(
+                        obj_ptr,
+                        hfield,
+                        dst_kind,
+                        dst_type_ptr,
+                        self.fn_dyn_getd,
+                        self.fn_dyn_getf,
+                        self.fn_dyn_geti64,
+                        self.fn_dyn_geti,
+                        self.fn_dyn_getp,
+                    );
+                    frame.registers.set(dst.0, out);
+                } else {
+                    frame.registers.set(dst.0, NanBoxedValue::null());
                 }
             }
             Opcode::GetThis { dst, field } => {
-                let obj_kind = bytecode.types[func.regs[0].0].kind;
-                let obj_c_type = self.c_type_factory.get(func.regs[0].0) as *mut c_void;
+                let obj_type_idx = func.regs[0].0;
+                let obj_kind = bytecode.types[obj_type_idx].kind;
+                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
                 let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(0); // reg 0 is 'this'
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
-                } else {
+                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let val = unsafe {
                         Self::read_obj_field(obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt)
                     };
+                    if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        eprintln!(
+                            "[GETTHIS-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
+                            func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
+                        );
+                    }
                     frame.registers.set(dst.0, val);
+                } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+                    if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                        let obj_ptr = obj_val.as_ptr() as *mut u8;
+                        let addr = unsafe { obj_ptr.add(offset) };
+                        let val = unsafe { Self::read_value_at(addr, dst_kind) };
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[GETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
+                                func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
+                            );
+                        }
+                        frame.registers.set(dst.0, val);
+                    } else {
+                        let key = (obj_val.as_ptr(), field.0);
+                        let val = self
+                            .virtual_fields
+                            .get(&key)
+                            .copied()
+                            .unwrap_or_else(NanBoxedValue::null);
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[GETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
+                                func_idx, frame.pc, obj_type_idx, field.0, val
+                            );
+                        }
+                        frame.registers.set(dst.0, val);
+                    }
+                } else if let Some(hfield) =
+                    Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                {
+                    let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                    let dst_type_idx = func.regs[dst.0 as usize].0;
+                    let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                    let out = Self::dyn_get_field_by_hash(
+                        obj_ptr,
+                        hfield,
+                        dst_kind,
+                        dst_type_ptr,
+                        self.fn_dyn_getd,
+                        self.fn_dyn_getf,
+                        self.fn_dyn_geti64,
+                        self.fn_dyn_geti,
+                        self.fn_dyn_getp,
+                    );
+                    frame.registers.set(dst.0, out);
+                } else {
+                    frame.registers.set(dst.0, NanBoxedValue::null());
                 }
             }
             Opcode::SetField { obj, field, src } => {
-                let obj_kind = bytecode.types[func.regs[obj.0 as usize].0].kind;
-                let obj_c_type = self.c_type_factory.get(func.regs[obj.0 as usize].0) as *mut c_void;
-                let src_kind = bytecode.types[func.regs[src.0 as usize].0].kind;
+                let obj_type_idx = func.regs[obj.0 as usize].0;
+                let obj_kind = bytecode.types[obj_type_idx].kind;
+                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
+                let src_type_idx = func.regs[src.0 as usize].0;
+                let src_kind = bytecode.types[src_type_idx].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(obj.0);
+                if std::env::var("ASH_DBG_FIELD").is_ok() {
+                    eprintln!(
+                        "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
+                        func_idx,
+                        frame.pc,
+                        obj_type_idx,
+                        obj_kind,
+                        field.0,
+                        src_type_idx,
+                        src_kind,
+                        obj_val,
+                        frame.registers.get(src.0)
+                    );
+                }
                 if !obj_val.is_null() && !obj_val.is_void() {
-                    let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let src_val = frame.registers.get(src.0);
-                    unsafe {
-                        Self::write_obj_field(obj_ptr, field.0, src_kind, src_val, obj_c_type, obj_kind, get_rt);
+                    if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+                        let obj_ptr = obj_val.as_ptr() as *mut u8;
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
+                                func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
+                            );
+                        }
+                        unsafe {
+                            Self::write_obj_field(
+                                obj_ptr, field.0, src_kind, src_val, obj_c_type, obj_kind, get_rt,
+                            );
+                        }
+                    } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+                        if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                            let obj_ptr = obj_val.as_ptr() as *mut u8;
+                            let addr = unsafe { obj_ptr.add(offset) };
+                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                                eprintln!(
+                                    "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
+                                    func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
+                                );
+                            }
+                            unsafe { Self::write_value_at(addr, src_kind, src_val) };
+                        } else {
+                            self.virtual_fields.insert((obj_val.as_ptr(), field.0), src_val);
+                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                                eprintln!(
+                                    "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
+                                    func_idx, frame.pc, obj_type_idx, field.0, src_val
+                                );
+                            }
+                        }
+                    } else if let Some(hfield) =
+                        Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                    {
+                        let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                        let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                        Self::dyn_set_field_by_hash(
+                            obj_ptr,
+                            hfield,
+                            src_val,
+                            src_kind,
+                            src_type_ptr,
+                            self.fn_dyn_setd,
+                            self.fn_dyn_setf,
+                            self.fn_dyn_seti64,
+                            self.fn_dyn_seti,
+                            self.fn_dyn_setp,
+                        );
                     }
                 }
             }
             Opcode::SetThis { field, src } => {
-                let obj_kind = bytecode.types[func.regs[0].0].kind;
-                let obj_c_type = self.c_type_factory.get(func.regs[0].0) as *mut c_void;
-                let src_kind = bytecode.types[func.regs[src.0 as usize].0].kind;
+                let obj_type_idx = func.regs[0].0;
+                let obj_kind = bytecode.types[obj_type_idx].kind;
+                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
+                let src_type_idx = func.regs[src.0 as usize].0;
+                let src_kind = bytecode.types[src_type_idx].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(0); // reg 0 is 'this'
                 if !obj_val.is_null() && !obj_val.is_void() {
-                    let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let src_val = frame.registers.get(src.0);
-                    unsafe {
-                        Self::write_obj_field(obj_ptr, field.0, src_kind, src_val, obj_c_type, obj_kind, get_rt);
+                    if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+                        let obj_ptr = obj_val.as_ptr() as *mut u8;
+                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            eprintln!(
+                                "[SETTHIS-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
+                                func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
+                            );
+                        }
+                        unsafe {
+                            Self::write_obj_field(
+                                obj_ptr, field.0, src_kind, src_val, obj_c_type, obj_kind, get_rt,
+                            );
+                        }
+                    } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+                        if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                            let obj_ptr = obj_val.as_ptr() as *mut u8;
+                            let addr = unsafe { obj_ptr.add(offset) };
+                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                                eprintln!(
+                                    "[SETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
+                                    func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
+                                );
+                            }
+                            unsafe { Self::write_value_at(addr, src_kind, src_val) };
+                        } else {
+                            self.virtual_fields.insert((obj_val.as_ptr(), field.0), src_val);
+                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                                eprintln!(
+                                    "[SETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
+                                    func_idx, frame.pc, obj_type_idx, field.0, src_val
+                                );
+                            }
+                        }
+                    } else if let Some(hfield) =
+                        Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                    {
+                        let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                        let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                        Self::dyn_set_field_by_hash(
+                            obj_ptr,
+                            hfield,
+                            src_val,
+                            src_kind,
+                            src_type_ptr,
+                            self.fn_dyn_setd,
+                            self.fn_dyn_setf,
+                            self.fn_dyn_seti64,
+                            self.fn_dyn_seti,
+                            self.fn_dyn_setp,
+                        );
                     }
                 }
             }
@@ -1274,67 +2113,38 @@ impl HLInterpreter {
                     frame.registers.set(dst.0, NanBoxedValue::null());
                 } else {
                     let hfield = hash_field_name(bytecode, field.0, fn_hash_gen)?;
+                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                        let fname = bytecode
+                            .strings
+                            .get(field.0)
+                            .map(String::as_str)
+                            .unwrap_or("<oob>");
+                        eprintln!(
+                            "[DYNGET] f{} pc={} obj={:?} field={} name={} hash={}",
+                            func_idx, frame.pc, obj_val, field.0, fname, hfield
+                        );
+                    }
                     let obj_ptr = obj_val.as_ptr() as *mut c_void;
                     let dst_type_idx = func.regs[dst.0 as usize].0;
                     let dst_kind = bytecode.types[dst_type_idx].kind;
                     let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-
-                    let out = match dst_kind {
-                        hl::hl_type_kind_HF64 => {
-                            if self.fn_dyn_getd.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                let f: FnDynGetD = unsafe { std::mem::transmute(self.fn_dyn_getd) };
-                                NanBoxedValue::from_f64(unsafe { f(obj_ptr, hfield) })
-                            }
-                        }
-                        hl::hl_type_kind_HF32 => {
-                            if self.fn_dyn_getf.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                let f: FnDynGetF = unsafe { std::mem::transmute(self.fn_dyn_getf) };
-                                NanBoxedValue::from_f64(unsafe { f(obj_ptr, hfield) as f64 })
-                            }
-                        }
-                        hl::hl_type_kind_HI64 => {
-                            if self.fn_dyn_geti64.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                let f: FnDynGetI64 =
-                                    unsafe { std::mem::transmute(self.fn_dyn_geti64) };
-                                NanBoxedValue::from_i64(unsafe { f(obj_ptr, hfield) })
-                            }
-                        }
-                        hl::hl_type_kind_HI32
-                        | hl::hl_type_kind_HBOOL
-                        | hl::hl_type_kind_HUI8
-                        | hl::hl_type_kind_HUI16 => {
-                            if self.fn_dyn_geti.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                let f: FnDynGetI = unsafe { std::mem::transmute(self.fn_dyn_geti) };
-                                let i = unsafe { f(obj_ptr, hfield, dst_type_ptr) };
-                                if dst_kind == hl::hl_type_kind_HBOOL {
-                                    NanBoxedValue::from_bool(i != 0)
-                                } else {
-                                    NanBoxedValue::from_i32(i)
-                                }
-                            }
-                        }
-                        _ => {
-                            if self.fn_dyn_getp.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                let f: FnDynGetP = unsafe { std::mem::transmute(self.fn_dyn_getp) };
-                                let p = unsafe { f(obj_ptr, hfield, dst_type_ptr) };
-                                if p.is_null() {
-                                    NanBoxedValue::null()
-                                } else {
-                                    NanBoxedValue::from_ptr(p as usize)
-                                }
-                            }
-                        }
-                    };
+                    let out = Self::dyn_get_field_by_hash(
+                        obj_ptr,
+                        hfield,
+                        dst_kind,
+                        dst_type_ptr,
+                        self.fn_dyn_getd,
+                        self.fn_dyn_getf,
+                        self.fn_dyn_geti64,
+                        self.fn_dyn_geti,
+                        self.fn_dyn_getp,
+                    );
+                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                        eprintln!(
+                            "[DYNGET] f{} pc={} dst_kind={} -> {:?}",
+                            func_idx, frame.pc, dst_kind, out
+                        );
+                    }
                     frame.registers.set(dst.0, out);
                 }
             }
@@ -1348,58 +2158,30 @@ impl HLInterpreter {
                     let src_val = frame.registers.get(src.0);
                     let src_type_idx = func.regs[src.0 as usize].0;
                     let src_kind = bytecode.types[src_type_idx].kind;
-                    let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-
-                    match src_kind {
-                        hl::hl_type_kind_HF64 => {
-                            if !self.fn_dyn_setd.is_null() {
-                                let f: FnDynSetD =
-                                    unsafe { std::mem::transmute(self.fn_dyn_setd) };
-                                unsafe { f(obj_ptr, hfield, src_val.as_f64()) };
-                            }
-                        }
-                        hl::hl_type_kind_HF32 => {
-                            if !self.fn_dyn_setf.is_null() {
-                                let f: FnDynSetF =
-                                    unsafe { std::mem::transmute(self.fn_dyn_setf) };
-                                unsafe { f(obj_ptr, hfield, src_val.as_f64() as f32) };
-                            }
-                        }
-                        hl::hl_type_kind_HI64 => {
-                            if !self.fn_dyn_seti64.is_null() {
-                                let f: FnDynSetI64 =
-                                    unsafe { std::mem::transmute(self.fn_dyn_seti64) };
-                                unsafe { f(obj_ptr, hfield, src_val.as_i64_lossy()) };
-                            }
-                        }
-                        hl::hl_type_kind_HI32
-                        | hl::hl_type_kind_HBOOL
-                        | hl::hl_type_kind_HUI8
-                        | hl::hl_type_kind_HUI16 => {
-                            if !self.fn_dyn_seti.is_null() {
-                                let f: FnDynSetI =
-                                    unsafe { std::mem::transmute(self.fn_dyn_seti) };
-                                let i = if src_kind == hl::hl_type_kind_HBOOL {
-                                    if src_val.as_bool() { 1 } else { 0 }
-                                } else {
-                                    src_val.as_i32()
-                                };
-                                unsafe { f(obj_ptr, hfield, src_type_ptr, i) };
-                            }
-                        }
-                        _ => {
-                            if !self.fn_dyn_setp.is_null() {
-                                let f: FnDynSetP =
-                                    unsafe { std::mem::transmute(self.fn_dyn_setp) };
-                                let p = if src_val.is_null() || src_val.is_void() {
-                                    std::ptr::null_mut()
-                                } else {
-                                    src_val.as_ptr() as *mut c_void
-                                };
-                                unsafe { f(obj_ptr, hfield, src_type_ptr, p) };
-                            }
-                        }
+                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                        let fname = bytecode
+                            .strings
+                            .get(field.0)
+                            .map(String::as_str)
+                            .unwrap_or("<oob>");
+                        eprintln!(
+                            "[DYNSET] f{} pc={} obj={:?} field={} name={} hash={} src_ty={} src_kind={} src={:?}",
+                            func_idx, frame.pc, obj_val, field.0, fname, hfield, src_type_idx, src_kind, src_val
+                        );
                     }
+                    let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                    Self::dyn_set_field_by_hash(
+                        obj_ptr,
+                        hfield,
+                        src_val,
+                        src_kind,
+                        src_type_ptr,
+                        self.fn_dyn_setd,
+                        self.fn_dyn_setf,
+                        self.fn_dyn_seti64,
+                        self.fn_dyn_seti,
+                        self.fn_dyn_setp,
+                    );
                 }
             }
 
@@ -1429,54 +2211,54 @@ impl HLInterpreter {
                 }
             }
             Opcode::JSLt { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::SLt) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLt) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JSGte { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::SGte) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SGte) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JSGt { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::SGt) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SGt) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JSLte { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::SLte) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLte) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JULt { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::ULt) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::ULt) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JUGte { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::UGte) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::UGte) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JNotLt { a, b, offset } => {
                 // JNotLt is equivalent to JGte (signed)
-                if self.compare_regs(a.0, b.0, CmpOp::SGte) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SGte) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JNotGte { a, b, offset } => {
                 // JNotGte is equivalent to JLt (signed)
-                if self.compare_regs(a.0, b.0, CmpOp::SLt) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLt) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JEq { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::Eq) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::Eq) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JNotEq { a, b, offset } => {
-                if self.compare_regs(a.0, b.0, CmpOp::NotEq) {
+                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::NotEq) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
@@ -1526,7 +2308,7 @@ impl HLInterpreter {
                 let src_kind = bytecode.types[type_ref.0].kind;
                 let val = frame.registers.get(src.0);
 
-                let type_ptr: usize = if val.is_ptr() && !val.is_null() {
+                let type_ptr: usize = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
                     match src_kind {
                         hl::hl_type_kind_HDYN
                         | hl::hl_type_kind_HOBJ
@@ -1551,7 +2333,7 @@ impl HLInterpreter {
                 // src should hold an hl_type* (result of GetType).
                 // hl_type.kind is a u32 at offset 0.
                 let val = frame.registers.get(src.0);
-                let kind = if val.is_ptr() && !val.is_null() {
+                let kind = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
                     unsafe { *(val.as_ptr() as *const u32) as i32 }
                 } else {
                     // Fallback to static type kind
@@ -1643,34 +2425,22 @@ impl HLInterpreter {
                 let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                 // When casting a vdynamic* to a primitive type, extract the value
                 // from the vdynamic (layout: t=0..7, v=8..15).
-                let result = if val.is_ptr() && !val.is_null() {
-                    let base = val.as_ptr() as *const u8;
+                let result = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
                     unsafe {
-                        match dst_kind {
-                            hl::hl_type_kind_HI32
-                            | hl::hl_type_kind_HUI8
-                            | hl::hl_type_kind_HUI16 => {
-                                let i = base.add(8).cast::<i32>().read_unaligned();
-                                NanBoxedValue::from_i32(i)
-                            }
-                            hl::hl_type_kind_HI64 => {
-                                let i = base.add(8).cast::<i64>().read_unaligned();
-                                NanBoxedValue::from_i64(i)
-                            }
-                            hl::hl_type_kind_HF32 => {
-                                let f = base.add(8).cast::<f32>().read_unaligned();
-                                NanBoxedValue::from_f64(f as f64)
-                            }
-                            hl::hl_type_kind_HF64 => {
-                                let f = base.add(8).cast::<f64>().read_unaligned();
-                                NanBoxedValue::from_f64(f)
-                            }
-                            hl::hl_type_kind_HBOOL => {
-                                let b = base.add(8).cast::<u8>().read();
-                                NanBoxedValue::from_bool(b != 0)
-                            }
-                            _ => val, // pointer/object types: pass through
+                        Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
+                            .unwrap_or(val)
+                    }
+                } else if val.is_null() {
+                    match dst_kind {
+                        hl::hl_type_kind_HI32
+                        | hl::hl_type_kind_HUI8
+                        | hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(0),
+                        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
+                        hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                            NanBoxedValue::from_f64(0.0)
                         }
+                        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
+                        _ => val,
                     }
                 } else {
                     val
@@ -2128,7 +2898,7 @@ impl HLInterpreter {
                     frame.registers.set(exc_reg, val);
                     return Ok(StepResult::JumpAbs(target_pc));
                 } else {
-                    return Err(anyhow::Error::new(HLExceptionPropagation(val)));
+                    return Err(anyhow::Error::new(self.format_hl_exception(val)));
                 }
             }
             Opcode::Rethrow { exc } => {
@@ -2137,7 +2907,7 @@ impl HLInterpreter {
                     frame.registers.set(exc_reg, val);
                     return Ok(StepResult::JumpAbs(target_pc));
                 } else {
-                    return Err(anyhow::Error::new(HLExceptionPropagation(val)));
+                    return Err(anyhow::Error::new(self.format_hl_exception(val)));
                 }
             }
             Opcode::NullCheck { reg } => {
@@ -2219,11 +2989,547 @@ impl HLInterpreter {
     }
 
     /// Helper: compare two register values.
-    fn compare_regs(&self, a: u32, b: u32, op: CmpOp) -> bool {
+    fn compare_regs(&self, bytecode: &DecodedBytecode, func_idx: usize, a: u32, b: u32, op: CmpOp) -> bool {
         let frame = self.stack.last().unwrap();
         let va = frame.registers.get(a);
         let vb = frame.registers.get(b);
-        va.compare(vb, op).unwrap_or(false)
+        let func = &bytecode.functions[func_idx];
+        let ak = bytecode.types[func.regs[a as usize].0].kind;
+        let bk = bytecode.types[func.regs[b as usize].0].kind;
+        if let Some(result) = unsafe {
+            self.try_compare_nullable_operands(bytecode, func, a as usize, va, ak, b as usize, vb, bk, op)
+        } {
+            if std::env::var("ASH_TRACE_EQ").is_ok() {
+                eprintln!(
+                    "[CMP-HNULL] f{} op={:?} ak={} bk={} va={:?} vb={:?} -> {}",
+                    func_idx, op, ak, bk, va, vb, result
+                );
+            }
+            return result;
+        }
+        if op == CmpOp::Eq || op == CmpOp::NotEq {
+            if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
+                let pa = if va.is_null() || va.is_void() {
+                    std::ptr::null()
+                } else {
+                    va.as_ptr() as *const u16
+                };
+                let pb = if vb.is_null() || vb.is_void() {
+                    std::ptr::null()
+                } else {
+                    vb.as_ptr() as *const u16
+                };
+                let eq = unsafe { Self::utf16z_eq(pa, pb) };
+                if std::env::var("ASH_TRACE_EQ").is_ok() {
+                    eprintln!("[CMP] f{} op={:?} ak={} bk={} (bytes) -> {}", func_idx, op, ak, bk, eq);
+                }
+                return if op == CmpOp::Eq { eq } else { !eq };
+            }
+            if ak == hl::hl_type_kind_HOBJ && bk == hl::hl_type_kind_HOBJ {
+                let pa = if va.is_null() || va.is_void() {
+                    std::ptr::null_mut()
+                } else {
+                    va.as_ptr() as *mut hl::vdynamic
+                };
+                let pb = if vb.is_null() || vb.is_void() {
+                    std::ptr::null_mut()
+                } else {
+                    vb.as_ptr() as *mut hl::vdynamic
+                };
+                if !pa.is_null() && !pb.is_null() {
+                    let ta_name = self.dynamic_type_name(pa);
+                    let tb_name = self.dynamic_type_name(pb);
+                    if std::env::var("ASH_TRACE_EQ").is_ok() {
+                        eprintln!(
+                            "[CMP-OBJ] f{} op={:?} ta={:?} tb={:?} pa={:#x} pb={:#x}",
+                            func_idx,
+                            op,
+                            ta_name,
+                            tb_name,
+                            va.as_ptr(),
+                            vb.as_ptr()
+                        );
+                    }
+                    if ta_name == tb_name
+                        && matches!(ta_name.as_deref(), Some("String") | Some("S"))
+                    {
+                        let sa = unsafe { self.try_extract_string_object_raw(va.as_ptr() as *mut c_void) };
+                        let sb = unsafe { self.try_extract_string_object_raw(vb.as_ptr() as *mut c_void) };
+                        if std::env::var("ASH_TRACE_EQ").is_ok() {
+                            eprintln!(
+                                "[CMP-OBJ] f{} string-extract sa={} sb={}",
+                                func_idx,
+                                sa.is_some(),
+                                sb.is_some()
+                            );
+                        }
+                        if let (Some((ab, al)), Some((bb, bl))) = (sa, sb) {
+                            let eq = al == bl && unsafe { Self::utf16_len_eq(ab, bb, al as usize) };
+                            if std::env::var("ASH_TRACE_EQ").is_ok() {
+                                eprintln!(
+                                    "[CMP] f{} op={:?} ak={} bk={} (string-obj) -> {}",
+                                    func_idx, op, ak, bk, eq
+                                );
+                            }
+                            return if op == CmpOp::Eq { eq } else { !eq };
+                        }
+                    }
+                }
+            }
+            if ak == hl::hl_type_kind_HDYN && bk == hl::hl_type_kind_HDYN {
+                let pa = if va.is_null() || va.is_void() {
+                    std::ptr::null_mut()
+                } else {
+                    va.as_ptr() as *mut hl::vdynamic
+                };
+                let pb = if vb.is_null() || vb.is_void() {
+                    std::ptr::null_mut()
+                } else {
+                    vb.as_ptr() as *mut hl::vdynamic
+                };
+                let eq = unsafe { self.dynamic_eq(pa, pb) };
+                if std::env::var("ASH_TRACE_EQ").is_ok() {
+                    eprintln!("[CMP] f{} op={:?} ak={} bk={} (dyn) -> {}", func_idx, op, ak, bk, eq);
+                    if !eq {
+                        let ka_dyn = if pa.is_null() || unsafe { (*pa).t.is_null() } {
+                            0
+                        } else {
+                            unsafe { (*(*pa).t).kind }
+                        };
+                        let kb_dyn = if pb.is_null() || unsafe { (*pb).t.is_null() } {
+                            0
+                        } else {
+                            unsafe { (*(*pb).t).kind }
+                        };
+                        eprintln!(
+                            "[CMP_DYN] ka_dyn={} kb_dyn={} ta={:?} tb={:?} sa={:?} sb={:?}",
+                            ka_dyn,
+                            kb_dyn,
+                            self.dynamic_type_name(pa),
+                            self.dynamic_type_name(pb),
+                            self.value_to_string(pa),
+                            self.value_to_string(pb)
+                        );
+                    }
+                }
+                return if op == CmpOp::Eq { eq } else { !eq };
+            }
+        }
+        let result = va.compare(vb, op).unwrap_or(false);
+        if std::env::var("ASH_TRACE_EQ").is_ok() && (op == CmpOp::Eq || op == CmpOp::NotEq) {
+            eprintln!(
+                "[CMP] f{} op={:?} ak={} bk={} va={:?} vb={:?} -> {}",
+                func_idx, op, ak, bk, va, vb, result
+            );
+        }
+        result
+    }
+
+    unsafe fn try_compare_nullable_operands(
+        &self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        a_idx: usize,
+        va: NanBoxedValue,
+        ak: u32,
+        b_idx: usize,
+        vb: NanBoxedValue,
+        bk: u32,
+        op: CmpOp,
+    ) -> Option<bool> {
+        if ak != hl::hl_type_kind_HNULL && bk != hl::hl_type_kind_HNULL {
+            return None;
+        }
+
+        let (av, ak_eff) =
+            self.normalize_nullable_compare_operand(bytecode, func, a_idx, ak, va)?;
+        let (bv, bk_eff) =
+            self.normalize_nullable_compare_operand(bytecode, func, b_idx, bk, vb)?;
+
+        if av.is_none() || bv.is_none() {
+            let eq = av.is_none() && bv.is_none();
+            return Some(match op {
+                CmpOp::Eq => eq,
+                CmpOp::NotEq => !eq,
+                _ => false,
+            });
+        }
+
+        let av = av.unwrap();
+        let bv = bv.unwrap();
+        if let Some(result) = Self::compare_numeric_values(av, ak_eff, bv, bk_eff, op) {
+            return Some(result);
+        }
+
+        if op == CmpOp::Eq || op == CmpOp::NotEq {
+            if let Some(result) = av.compare(bv, op) {
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
+    unsafe fn normalize_nullable_compare_operand(
+        &self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        reg_idx: usize,
+        reg_kind: u32,
+        val: NanBoxedValue,
+    ) -> Option<(Option<NanBoxedValue>, u32)> {
+        if reg_kind != hl::hl_type_kind_HNULL {
+            return Some((Some(val), reg_kind));
+        }
+        if val.is_null() || val.is_void() || (val.is_ptr() && val.as_ptr() == 0) {
+            return Some((None, reg_kind));
+        }
+        if !val.is_ptr() {
+            return Some((Some(val), reg_kind));
+        }
+
+        let reg_type_idx = match func.regs.get(reg_idx) {
+            Some(r) => r.0,
+            None => return Some((Some(val), reg_kind)),
+        };
+        let reg_type = match bytecode.types.get(reg_type_idx) {
+            Some(t) => t,
+            None => return Some((Some(val), reg_kind)),
+        };
+        let tparam_idx = match reg_type.tparam.as_ref() {
+            Some(tp) => tp.0,
+            None => return Some((Some(val), reg_kind)),
+        };
+        let inner_kind = match bytecode.types.get(tparam_idx) {
+            Some(t) => t.kind,
+            None => return Some((Some(val), reg_kind)),
+        };
+
+        if !Self::is_primitive_or_bytes_kind(inner_kind) {
+            return Some((Some(val), reg_kind));
+        }
+
+        let d = val.as_ptr() as *mut hl::vdynamic;
+        if d.is_null() {
+            return Some((None, inner_kind));
+        }
+        if let Some(unboxed) = Self::unbox_dynamic_to_kind(d, inner_kind) {
+            if unboxed.is_null() || unboxed.is_void() {
+                return Some((None, inner_kind));
+            }
+            return Some((Some(unboxed), inner_kind));
+        }
+
+        Some((Some(val), reg_kind))
+    }
+
+    fn compare_numeric_values(
+        av: NanBoxedValue,
+        ak: u32,
+        bv: NanBoxedValue,
+        bk: u32,
+        op: CmpOp,
+    ) -> Option<bool> {
+        if !Self::is_numeric_or_bool_kind(ak) || !Self::is_numeric_or_bool_kind(bk) {
+            return None;
+        }
+
+        let has_float = ak == hl::hl_type_kind_HF32
+            || ak == hl::hl_type_kind_HF64
+            || bk == hl::hl_type_kind_HF32
+            || bk == hl::hl_type_kind_HF64;
+
+        if has_float {
+            let l = Self::numeric_as_f64(av, ak)?;
+            let r = Self::numeric_as_f64(bv, bk)?;
+            return Some(match op {
+                CmpOp::SLt | CmpOp::ULt => l < r,
+                CmpOp::SGte | CmpOp::UGte => l >= r,
+                CmpOp::SGt => l > r,
+                CmpOp::SLte => l <= r,
+                CmpOp::Eq => l == r,
+                CmpOp::NotEq => l != r,
+            });
+        }
+
+        match op {
+            CmpOp::ULt | CmpOp::UGte => {
+                let l = Self::numeric_as_u64(av, ak)?;
+                let r = Self::numeric_as_u64(bv, bk)?;
+                Some(match op {
+                    CmpOp::ULt => l < r,
+                    CmpOp::UGte => l >= r,
+                    _ => unreachable!(),
+                })
+            }
+            CmpOp::SLt | CmpOp::SGte | CmpOp::SGt | CmpOp::SLte | CmpOp::Eq | CmpOp::NotEq => {
+                let l = Self::numeric_as_i64(av, ak)?;
+                let r = Self::numeric_as_i64(bv, bk)?;
+                Some(match op {
+                    CmpOp::SLt => l < r,
+                    CmpOp::SGte => l >= r,
+                    CmpOp::SGt => l > r,
+                    CmpOp::SLte => l <= r,
+                    CmpOp::Eq => l == r,
+                    CmpOp::NotEq => l != r,
+                    _ => unreachable!(),
+                })
+            }
+        }
+    }
+
+    fn numeric_as_f64(v: NanBoxedValue, kind: u32) -> Option<f64> {
+        match kind {
+            k if k == hl::hl_type_kind_HI32 => Some(v.as_i32() as f64),
+            k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as f64),
+            k if k == hl::hl_type_kind_HUI16 => Some((v.as_i32() as u16) as f64),
+            k if k == hl::hl_type_kind_HI64 => Some(v.as_i64_lossy() as f64),
+            k if k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64 => Some(v.as_f64()),
+            k if k == hl::hl_type_kind_HBOOL => Some(if v.as_bool() { 1.0 } else { 0.0 }),
+            _ => None,
+        }
+    }
+
+    fn numeric_as_i64(v: NanBoxedValue, kind: u32) -> Option<i64> {
+        match kind {
+            k if k == hl::hl_type_kind_HI32 => Some(v.as_i32() as i64),
+            k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as i64),
+            k if k == hl::hl_type_kind_HUI16 => Some((v.as_i32() as u16) as i64),
+            k if k == hl::hl_type_kind_HI64 => Some(v.as_i64_lossy()),
+            k if k == hl::hl_type_kind_HBOOL => Some(if v.as_bool() { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+
+    fn numeric_as_u64(v: NanBoxedValue, kind: u32) -> Option<u64> {
+        match kind {
+            k if k == hl::hl_type_kind_HI32 => Some((v.as_i32() as u32) as u64),
+            k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as u64),
+            k if k == hl::hl_type_kind_HUI16 => Some((v.as_i32() as u16) as u64),
+            k if k == hl::hl_type_kind_HI64 => Some(v.as_i64_lossy() as u64),
+            k if k == hl::hl_type_kind_HBOOL => Some(if v.as_bool() { 1 } else { 0 }),
+            _ => None,
+        }
+    }
+
+    unsafe fn utf16z_eq(a: *const u16, b: *const u16) -> bool {
+        if a == b {
+            return true;
+        }
+        if a.is_null() || b.is_null() {
+            return false;
+        }
+        let mut i = 0usize;
+        loop {
+            let ca = *a.add(i);
+            let cb = *b.add(i);
+            if ca != cb {
+                return false;
+            }
+            if ca == 0 {
+                return true;
+            }
+            i += 1;
+        }
+    }
+
+    unsafe fn utf16_len_eq(a: *const u16, b: *const u16, len: usize) -> bool {
+        if a.is_null() || b.is_null() {
+            return false;
+        }
+        for i in 0..len {
+            if *a.add(i) != *b.add(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    unsafe fn try_extract_string_object(&self, d: *mut hl::vdynamic) -> Option<(*const u16, i32)> {
+        if d.is_null() || self.fn_obj_get_field.is_null() {
+            return None;
+        }
+        let get_field: FnObjGetField = std::mem::transmute(self.fn_obj_get_field);
+        let h_len = self.hash_literal_name("length");
+        let h_bytes = self.hash_literal_name("bytes");
+        let len_dyn = get_field(d, h_len);
+        let bytes_dyn = get_field(d, h_bytes);
+        if len_dyn.is_null() || bytes_dyn.is_null() {
+            return None;
+        }
+        if (*len_dyn).t.is_null() || (*bytes_dyn).t.is_null() {
+            return None;
+        }
+        if (*(*len_dyn).t).kind != hl::hl_type_kind_HI32 {
+            return None;
+        }
+        if (*(*bytes_dyn).t).kind != hl::hl_type_kind_HBYTES {
+            return None;
+        }
+        let len = (*len_dyn).v.i;
+        let bytes = (*bytes_dyn).v.bytes as *const u16;
+        if len < 0 || bytes.is_null() {
+            return None;
+        }
+        Some((bytes, len))
+    }
+
+    unsafe fn try_extract_string_object_raw(&self, obj_ptr: *mut c_void) -> Option<(*const u16, i32)> {
+        if obj_ptr.is_null() || self.fn_get_obj_rt.is_null() {
+            return None;
+        }
+        let type_ptr = *(obj_ptr as *const *mut hl::hl_type);
+        if type_ptr.is_null() || (*type_ptr).kind != hl::hl_type_kind_HOBJ {
+            return None;
+        }
+        let bytes_val = Self::read_obj_field(
+            obj_ptr as *mut u8,
+            0,
+            hl::hl_type_kind_HBYTES,
+            type_ptr as *mut c_void,
+            hl::hl_type_kind_HOBJ,
+            self.fn_get_obj_rt,
+        );
+        let len_val = Self::read_obj_field(
+            obj_ptr as *mut u8,
+            1,
+            hl::hl_type_kind_HI32,
+            type_ptr as *mut c_void,
+            hl::hl_type_kind_HOBJ,
+            self.fn_get_obj_rt,
+        );
+        if bytes_val.is_null() || len_val.is_null() || len_val.is_void() {
+            return None;
+        }
+        let bytes = bytes_val.as_ptr() as *const u16;
+        let len = len_val.as_i32();
+        if bytes.is_null() || len < 0 {
+            return None;
+        }
+        Some((bytes, len))
+    }
+
+    unsafe fn dynamic_eq(&self, a: *mut hl::vdynamic, b: *mut hl::vdynamic) -> bool {
+        if a == b {
+            return true;
+        }
+        if a.is_null() || b.is_null() {
+            return false;
+        }
+        let ta = (*a).t;
+        let tb = (*b).t;
+        if ta.is_null() || tb.is_null() {
+            return false;
+        }
+        let ka = (*ta).kind;
+        let kb = (*tb).kind;
+        if ka == kb {
+            return match ka {
+                k if k == hl::hl_type_kind_HI32 => (*a).v.i == (*b).v.i,
+                k if k == hl::hl_type_kind_HUI8 => (*a).v.ui8 == (*b).v.ui8,
+                k if k == hl::hl_type_kind_HUI16 => (*a).v.ui16 == (*b).v.ui16,
+                k if k == hl::hl_type_kind_HI64 => (*a).v.i64_ == (*b).v.i64_,
+                k if k == hl::hl_type_kind_HF32 => (*a).v.f == (*b).v.f,
+                k if k == hl::hl_type_kind_HF64 => (*a).v.d == (*b).v.d,
+                k if k == hl::hl_type_kind_HBOOL => (*a).v.b == (*b).v.b,
+                k if k == hl::hl_type_kind_HBYTES => {
+                    Self::utf16z_eq((*a).v.bytes as *const u16, (*b).v.bytes as *const u16)
+                }
+                _ => {
+                    if ka == hl::hl_type_kind_HOBJ {
+                        let ta_name = self.dynamic_type_name(a);
+                        let tb_name = self.dynamic_type_name(b);
+                        if ta_name == tb_name
+                            && matches!(ta_name.as_deref(), Some("String") | Some("S"))
+                        {
+                            if let (Some(sa), Some(sb)) =
+                                (self.value_to_string(a), self.value_to_string(b))
+                            {
+                                return sa == sb;
+                            }
+                        }
+                        let sa = self.try_extract_string_object(a);
+                        let sb = self.try_extract_string_object(b);
+                        if let (Some((ab, al)), Some((bb, bl))) = (sa, sb) {
+                            return al == bl && Self::utf16_len_eq(ab, bb, al as usize);
+                        }
+                    }
+                    (*a).v.ptr == (*b).v.ptr
+                }
+            };
+        }
+        // Cross-kind numeric equality (e.g. Int dynamic vs Float dynamic)
+        let a_num = match ka {
+            k if k == hl::hl_type_kind_HI32 => Some((*a).v.i as f64),
+            k if k == hl::hl_type_kind_HUI8 => Some((*a).v.ui8 as f64),
+            k if k == hl::hl_type_kind_HUI16 => Some((*a).v.ui16 as f64),
+            k if k == hl::hl_type_kind_HI64 => Some((*a).v.i64_ as f64),
+            k if k == hl::hl_type_kind_HF32 => Some((*a).v.f as f64),
+            k if k == hl::hl_type_kind_HF64 => Some((*a).v.d),
+            _ => None,
+        };
+        let b_num = match kb {
+            k if k == hl::hl_type_kind_HI32 => Some((*b).v.i as f64),
+            k if k == hl::hl_type_kind_HUI8 => Some((*b).v.ui8 as f64),
+            k if k == hl::hl_type_kind_HUI16 => Some((*b).v.ui16 as f64),
+            k if k == hl::hl_type_kind_HI64 => Some((*b).v.i64_ as f64),
+            k if k == hl::hl_type_kind_HF32 => Some((*b).v.f as f64),
+            k if k == hl::hl_type_kind_HF64 => Some((*b).v.d),
+            _ => None,
+        };
+        match (a_num, b_num) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        }
+    }
+
+    unsafe fn unbox_dynamic_to_kind(d: *mut hl::vdynamic, dst_kind: u32) -> Option<NanBoxedValue> {
+        if d.is_null() || (*d).t.is_null() {
+            return None;
+        }
+        let sk = (*(*d).t).kind;
+        let as_i64 = match sk {
+            hl::hl_type_kind_HI32 => Some((*d).v.i as i64),
+            hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as i64),
+            hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as i64),
+            hl::hl_type_kind_HI64 => Some((*d).v.i64_),
+            hl::hl_type_kind_HF32 => Some((*d).v.f as i64),
+            hl::hl_type_kind_HF64 => Some((*d).v.d as i64),
+            hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1 } else { 0 }),
+            _ => None,
+        };
+        let as_f64 = match sk {
+            hl::hl_type_kind_HI32 => Some((*d).v.i as f64),
+            hl::hl_type_kind_HUI8 => Some((*d).v.ui8 as f64),
+            hl::hl_type_kind_HUI16 => Some((*d).v.ui16 as f64),
+            hl::hl_type_kind_HI64 => Some((*d).v.i64_ as f64),
+            hl::hl_type_kind_HF32 => Some((*d).v.f as f64),
+            hl::hl_type_kind_HF64 => Some((*d).v.d),
+            hl::hl_type_kind_HBOOL => Some(if (*d).v.b { 1.0 } else { 0.0 }),
+            _ => None,
+        };
+        match dst_kind {
+            hl::hl_type_kind_HI32 => as_i64.map(|v| NanBoxedValue::from_i32(v as i32)),
+            hl::hl_type_kind_HUI8 => {
+                as_i64.map(|v| NanBoxedValue::from_i32((v as u8) as i32))
+            }
+            hl::hl_type_kind_HUI16 => {
+                as_i64.map(|v| NanBoxedValue::from_i32((v as u16) as i32))
+            }
+            hl::hl_type_kind_HI64 => as_i64.map(NanBoxedValue::from_i64),
+            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                as_f64.map(NanBoxedValue::from_f64)
+            }
+            hl::hl_type_kind_HBOOL => as_i64.map(|v| NanBoxedValue::from_bool(v != 0)),
+            hl::hl_type_kind_HBYTES => {
+                if sk == hl::hl_type_kind_HBYTES {
+                    Some(NanBoxedValue::from_bytes_ptr((*d).v.bytes as usize))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Call a native function via FFI.
@@ -2236,6 +3542,70 @@ impl HLInterpreter {
     ) -> Result<NanBoxedValue> {
         let native = &bytecode.natives[native_idx];
         let func_name = format!("hlp_{}", native.name);
+        let debug_native = std::env::var("ASH_DBG_NATIVE").is_ok();
+        if debug_native
+            && (native.name.contains("compare")
+                || native.name.contains("eq")
+                || native.name.contains("trim")
+                || native.name.contains("date"))
+        {
+            eprintln!(
+                "[NATIVE] {} args={} vals={:?}",
+                func_name,
+                args.len(),
+                args
+            );
+        }
+        let debug_dyn = std::env::var("ASH_DBG_DYN").is_ok();
+        if debug_dyn
+            && (native.name == "hash"
+                || native.name == "obj_get_field"
+                || native.name == "obj_set_field"
+                || native.name == "obj_has_field"
+                || native.name == "obj_delete_field"
+                || native.name == "no_closure"
+                || native.name == "get_closure_value"
+                || native.name == "call_method")
+        {
+            eprintln!(
+                "[NATIVE-DYN] {} args={} vals={:?}",
+                func_name, args.len(), args
+            );
+            if (native.name == "obj_get_field"
+                || native.name == "obj_set_field"
+                || native.name == "obj_has_field"
+                || native.name == "obj_delete_field"
+                || native.name == "no_closure"
+                || native.name == "get_closure_value"
+                || native.name == "call_method")
+                && !args.is_empty()
+                && args[0].is_ptr()
+                && args[0].as_ptr() != 0
+            {
+                let d = args[0].as_ptr() as *mut hl::vdynamic;
+                unsafe {
+                    if !d.is_null() && !(*d).t.is_null() {
+                        eprintln!(
+                            "[NATIVE-DYN] {} obj_kind={} obj_t={:p}",
+                            func_name,
+                            (*(*d).t).kind,
+                            (*d).t
+                        );
+                    }
+                    if native.name == "obj_set_field" && args.len() >= 3 && args[2].is_ptr() && args[2].as_ptr() != 0 {
+                        let v = args[2].as_ptr() as *mut hl::vdynamic;
+                        if !v.is_null() && !(*v).t.is_null() {
+                            eprintln!(
+                                "[NATIVE-DYN] {} val_kind={} val_t={:p}",
+                                func_name,
+                                (*(*v).t).kind,
+                                (*v).t
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Intercept sort natives: they call back into bytecode closures via C function pointers,
         // which doesn't work in interpreter mode. Implement sorting here instead.
@@ -2243,6 +3613,33 @@ impl HLInterpreter {
             "bsort_i32" => return self.sort_bytes_i32(bytecode, native_resolver, args),
             "bsort_f64" => return self.sort_bytes_f64(bytecode, native_resolver, args),
             "bsort_i64" => return self.sort_bytes_i64(bytecode, native_resolver, args),
+            "call_method" => {
+                if let Some(v) = self.try_handle_call_method_native(bytecode, native_resolver, args)? {
+                    return Ok(v);
+                }
+            }
+            // Virtual object field operations are intercepted so interpreter-side
+            // HVIRTUAL fallback storage stays consistent with Reflect/hl.Api calls.
+            "obj_get_field" => {
+                if let Some(v) = self.try_handle_virtual_obj_get_field(args) {
+                    return Ok(v);
+                }
+            }
+            "obj_set_field" => {
+                if let Some(v) = self.try_handle_virtual_obj_set_field(args) {
+                    return Ok(v);
+                }
+            }
+            "obj_has_field" => {
+                if let Some(v) = self.try_handle_virtual_obj_has_field(args) {
+                    return Ok(v);
+                }
+            }
+            "obj_delete_field" => {
+                if let Some(v) = self.try_handle_virtual_obj_delete_field(args) {
+                    return Ok(v);
+                }
+            }
             _ => {}
         }
 
@@ -2264,6 +3661,20 @@ impl HLInterpreter {
             .iter()
             .map(|a| bytecode.types[a.0].kind)
             .collect();
+        if debug_dyn
+            && (native.name == "obj_get_field"
+                || native.name == "obj_set_field"
+                || native.name == "obj_has_field"
+                || native.name == "obj_delete_field"
+                || native.name == "no_closure"
+                || native.name == "get_closure_value"
+                || native.name == "call_method")
+        {
+            eprintln!(
+                "[NATIVE-DYN] {} arg_kinds={:?} ret_kind={}",
+                func_name, arg_kinds, ret_kind
+            );
+        }
 
         // Check if any argument or return type involves floats.
         // On ARM64, floats use separate FP registers (d0-d7) vs integer registers (x0-x7),
@@ -2295,7 +3706,7 @@ impl HLInterpreter {
         };
 
 
-        if args.len() > 7 {
+        if args.len() > 8 {
             return Err(anyhow!("Native call with {} args not yet supported", args.len()));
         }
 
@@ -2325,7 +3736,7 @@ impl HLInterpreter {
                                     (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(HLExceptionPropagation(
+                            return Err(anyhow::Error::new(self.format_hl_exception(
                                 NanBoxedValue::from_ptr(exc_ptr as usize),
                             )));
                         }
@@ -2396,6 +3807,20 @@ impl HLInterpreter {
                         extract_arg(6),
                     )
                 }
+                8 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                        extract_arg(4),
+                        extract_arg(5),
+                        extract_arg(6),
+                        extract_arg(7),
+                    )
+                }
                 _ => 0i64, // arg count is pre-validated above
             }
         };
@@ -2406,7 +3831,44 @@ impl HLInterpreter {
         }
 
         // Wrap return value using the correct NanBoxedValue type
-        Ok(self.wrap_native_result(raw_result, ret_kind))
+        let wrapped = self.wrap_native_result(raw_result, ret_kind);
+        if debug_native
+            && (native.name.contains("compare")
+                || native.name.contains("eq")
+                || native.name.contains("trim")
+                || native.name.contains("date"))
+        {
+            eprintln!("[NATIVE] {} -> raw={} wrapped={:?}", func_name, raw_result, wrapped);
+        }
+        if debug_dyn
+            && (native.name == "hash"
+                || native.name == "obj_get_field"
+                || native.name == "obj_set_field"
+                || native.name == "obj_has_field"
+                || native.name == "obj_delete_field"
+                || native.name == "no_closure"
+                || native.name == "get_closure_value"
+                || native.name == "call_method")
+        {
+            eprintln!(
+                "[NATIVE-DYN] {} -> raw={} wrapped={:?}",
+                func_name, raw_result, wrapped
+            );
+            if wrapped.is_ptr() && wrapped.as_ptr() != 0 {
+                let d = wrapped.as_ptr() as *mut hl::vdynamic;
+                unsafe {
+                    if !d.is_null() && !(*d).t.is_null() {
+                        eprintln!(
+                            "[NATIVE-DYN] {} result_kind={} result_t={:p}",
+                            func_name,
+                            (*(*d).t).kind,
+                            (*d).t
+                        );
+                    }
+                }
+            }
+        }
+        Ok(wrapped)
     }
 
     /// Dispatch a native call that involves float arguments or float return value.
@@ -2452,6 +3914,174 @@ impl HLInterpreter {
             full_args.insert(0, v);
         }
         self.call_function(bytecode, native_resolver, findex, &full_args)
+    }
+
+    fn dynamic_to_value_for_kind(&self, d: *mut hl::vdynamic, dst_kind: u32) -> NanBoxedValue {
+        if d.is_null() {
+            return NanBoxedValue::null();
+        }
+        if dst_kind == hl::hl_type_kind_HDYN {
+            return NanBoxedValue::from_ptr(d as usize);
+        }
+        let sk = unsafe {
+            if (*d).t.is_null() {
+                return NanBoxedValue::null();
+            }
+            (*(*d).t).kind
+        };
+        if Self::is_primitive_or_bytes_kind(dst_kind) {
+            return unsafe { Self::unbox_dynamic_to_kind(d, dst_kind) }
+                .unwrap_or(NanBoxedValue::null());
+        }
+        if sk == dst_kind {
+            match sk {
+                hl::hl_type_kind_HOBJ
+                | hl::hl_type_kind_HSTRUCT
+                | hl::hl_type_kind_HARRAY
+                | hl::hl_type_kind_HFUN
+                | hl::hl_type_kind_HVIRTUAL
+                | hl::hl_type_kind_HDYNOBJ
+                | hl::hl_type_kind_HENUM => {
+                    return NanBoxedValue::from_ptr(d as usize);
+                }
+                hl::hl_type_kind_HBYTES => {
+                    let p = unsafe { (*d).v.bytes } as usize;
+                    return if p == 0 {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(p)
+                    };
+                }
+                _ => {
+                    let p = unsafe { (*d).v.ptr } as usize;
+                    return if p == 0 {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(p)
+                    };
+                }
+            }
+        }
+        if sk == hl::hl_type_kind_HBYTES {
+            let p = unsafe { (*d).v.bytes } as usize;
+            return if p == 0 {
+                NanBoxedValue::null()
+            } else {
+                NanBoxedValue::from_ptr(p)
+            };
+        }
+        let p = unsafe { (*d).v.ptr } as usize;
+        if p == 0 {
+            NanBoxedValue::null()
+        } else {
+            NanBoxedValue::from_ptr(p)
+        }
+    }
+
+    fn closure_arg_kinds_and_ret_type(
+        &self,
+        bytecode: &DecodedBytecode,
+        findex: usize,
+    ) -> Option<(Vec<u32>, usize)> {
+        if let Some(&fidx) = self.findex_to_func.get(&findex) {
+            let t_idx = bytecode.functions[fidx].type_.0;
+            let tf = bytecode.types[t_idx].fun.as_ref()?;
+            let arg_kinds = tf
+                .args
+                .iter()
+                .map(|a| bytecode.types[a.0].kind)
+                .collect::<Vec<_>>();
+            return Some((arg_kinds, tf.ret.0));
+        }
+        if let Some(&nidx) = self.findex_to_native.get(&findex) {
+            let t_idx = bytecode.natives[nidx].type_.0;
+            let tf = bytecode.types[t_idx].fun.as_ref()?;
+            let arg_kinds = tf
+                .args
+                .iter()
+                .map(|a| bytecode.types[a.0].kind)
+                .collect::<Vec<_>>();
+            return Some((arg_kinds, tf.ret.0));
+        }
+        None
+    }
+
+    fn try_handle_call_method_native(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        args: &[NanBoxedValue],
+    ) -> Result<Option<NanBoxedValue>> {
+        let dbg = std::env::var("ASH_DBG_DYN").is_ok();
+        if args.len() < 2 || args[0].is_null() || args[0].is_void() || args[1].is_null() || args[1].is_void() {
+            return Ok(Some(NanBoxedValue::null()));
+        }
+
+        let closure_val = args[0];
+        let varray_ptr = args[1].as_ptr() as *const hl::varray;
+        if varray_ptr.is_null() {
+            return Ok(Some(NanBoxedValue::null()));
+        }
+
+        let (findex, bound) = self.closure_findex_and_value(closure_val);
+        let (arg_kinds, ret_type_idx) = self
+            .closure_arg_kinds_and_ret_type(bytecode, findex)
+            .unwrap_or((Vec::new(), 0));
+        let arg_shift = if bound.is_some() { 1usize } else { 0usize };
+        if dbg {
+            eprintln!(
+                "[CALL_METHOD] findex={} bound={} arg_kinds={:?} ret_type_idx={}",
+                findex,
+                bound.is_some(),
+                arg_kinds,
+                ret_type_idx
+            );
+        }
+
+        let argc = unsafe { (*varray_ptr).size.max(0) as usize };
+        let data_ptr = unsafe {
+            (varray_ptr as *const u8).add(std::mem::size_of::<hl::varray>())
+                as *const *mut hl::vdynamic
+        };
+
+        let mut call_args = Vec::with_capacity(argc);
+        for i in 0..argc {
+            let dyn_arg = unsafe { *data_ptr.add(i) };
+            let expected_kind = arg_kinds
+                .get(i + arg_shift)
+                .copied()
+                .unwrap_or(hl::hl_type_kind_HDYN);
+            let v = self.dynamic_to_value_for_kind(dyn_arg, expected_kind);
+            if dbg {
+                let sk = unsafe {
+                    if dyn_arg.is_null() || (*dyn_arg).t.is_null() {
+                        0
+                    } else {
+                        (*(*dyn_arg).t).kind
+                    }
+                };
+                eprintln!(
+                    "[CALL_METHOD] arg{} dyn={:p} sk={} expect={} -> {:?}",
+                    i, dyn_arg, sk, expected_kind, v
+                );
+            }
+            call_args.push(v);
+        }
+
+        let ret = self.call_closure_val(bytecode, native_resolver, closure_val, call_args)?;
+        if dbg {
+            eprintln!("[CALL_METHOD] raw_ret={:?}", ret);
+        }
+        let out = if ret.is_void() {
+            NanBoxedValue::null()
+        } else {
+            let ret_t = self.c_type_factory.get(ret_type_idx) as *mut hl_type;
+            self.box_value_as_dynamic_with_type(ret, ret_t)
+        };
+        if dbg {
+            eprintln!("[CALL_METHOD] out={:?}", out);
+        }
+        Ok(Some(out))
     }
 
     /// Interpreter-side implementation of bsort_i32 that uses the interpreter's
@@ -2655,7 +4285,18 @@ impl HLInterpreter {
 
         let raw: i64 = unsafe {
             match (args.len(), ret_is_float, float_mask) {
+                // --- 0 args ---
+                (0, true, 0b0) => {
+                    // () -> f64
+                    let f: unsafe extern "C" fn() -> f64 = std::mem::transmute(func_ptr);
+                    f().to_bits() as i64
+                }
                 // --- 1 arg ---
+                (1, true, 0b0) => {
+                    // (i64) -> f64  e.g. date_get_time(t:Int)
+                    let f: unsafe extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
+                    f(gi(0)).to_bits() as i64
+                }
                 (1, true, 0b1) => {
                     // (f64) -> f64  e.g. math_sqrt, math_abs, math_floor, ...
                     let f: unsafe extern "C" fn(f64) -> f64 = std::mem::transmute(func_ptr);
@@ -2691,6 +4332,11 @@ impl HLInterpreter {
                     // (f64, f64) -> f64  e.g. math_pow, math_atan2
                     let f: unsafe extern "C" fn(f64, f64) -> f64 = std::mem::transmute(func_ptr);
                     f(gf(0), gf(1)).to_bits() as i64
+                }
+                (2, true, 0b00) => {
+                    // (i64, i64) -> f64
+                    let f: unsafe extern "C" fn(i64, i64) -> f64 = std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1)).to_bits() as i64
                 }
                 (2, false, 0b11) => {
                     // (f64, f64) -> i64

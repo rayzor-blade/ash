@@ -13,9 +13,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::slice;
 
-use super::module::JITModule; 
-
-
+use super::module::JITModule;
 
 impl<'ctx> JITModule<'ctx> {
     pub(crate) fn convert_to_c_type(
@@ -59,7 +57,7 @@ impl<'ctx> JITModule<'ctx> {
                             self.convert_to_c_type(
                                 super_type.0.clone(),
                                 &self.types_[super_type.0].clone(),
-                                Rc::clone(&cache)
+                                Rc::clone(&cache),
                             )?
                         } else {
                             ptr::null_mut()
@@ -70,7 +68,9 @@ impl<'ctx> JITModule<'ctx> {
                         global_value: if obj.global_value > 0 {
                             let gv_idx = (obj.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
-                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                                unsafe {
+                                    self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
+                                }
                             } else {
                                 ptr::null_mut()
                             }
@@ -90,16 +90,18 @@ impl<'ctx> JITModule<'ctx> {
                         ret: self.convert_to_c_type(
                             fun.ret.0.clone(),
                             &self.types_[fun.ret.0].clone(),
-                            Rc::clone(&cache)
+                            Rc::clone(&cache),
                         )?,
                         nargs: fun.args.len() as i32,
-                         parent: if let Some(parent) = &fun.parent{
+                        parent: if let Some(parent) = &fun.parent {
                             self.convert_to_c_type(
                                 parent.0.clone(),
                                 &self.types_[parent.0].clone(),
-                                Rc::clone(&cache)
+                                Rc::clone(&cache),
                             )?
-                        }else {ptr::null_mut()},
+                        } else {
+                            ptr::null_mut()
+                        },
                         closure_type: hl_type_fun__bindgen_ty_1 {
                             kind: 0,
                             p: ptr::null_mut(),
@@ -121,7 +123,9 @@ impl<'ctx> JITModule<'ctx> {
                         global_value: if tenum.global_value > 0 {
                             let gv_idx = (tenum.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
-                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                                unsafe {
+                                    self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
+                                }
                             } else {
                                 ptr::null_mut()
                             }
@@ -129,7 +133,8 @@ impl<'ctx> JITModule<'ctx> {
                             ptr::null_mut()
                         },
                         nconstructs: tenum.constructs.len() as i32,
-                        constructs: self.convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
+                        constructs: self
+                            .convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
                     });
                     c_type.__bindgen_anon_1.tenum = Box::into_raw(c_enum);
                 }
@@ -153,7 +158,10 @@ impl<'ctx> JITModule<'ctx> {
         Ok(t)
     }
 
-    pub(crate) fn get_module_context(&mut self, cache: Rc<RefCell<HashMap<usize, *mut hl_type>>>) -> Result<*mut hl_module_context> {
+    pub(crate) fn get_module_context(
+        &mut self,
+        cache: Rc<RefCell<HashMap<usize, *mut hl_type>>>,
+    ) -> Result<*mut hl_module_context> {
         let mut context = hl_module_context {
             alloc: unsafe { mem::zeroed() },
             functions_ptrs: std::ptr::null_mut(),
@@ -171,16 +179,13 @@ impl<'ctx> JITModule<'ctx> {
     pub(crate) fn convert_fields_to_c(
         &mut self,
         fields: &[HLObjField],
-        cache: Rc<RefCell<HashMap<usize, *mut hl_type>>>
+        cache: Rc<RefCell<HashMap<usize, *mut hl_type>>>,
     ) -> Result<*mut hl_obj_field> {
         let mut c_fields = Vec::with_capacity(fields.len());
         for field in fields {
             let c_field = hl_obj_field {
                 name: CString::new(field.name.as_str())?.into_raw() as *const u16,
-                t: self.convert_type_ref_to_c_cached(
-                    &field.type_.clone(),
-                    Rc::clone(&cache)
-                )?,
+                t: self.convert_type_ref_to_c_cached(&field.type_.clone(), Rc::clone(&cache))?,
                 hashed_name: field.hashed_name,
             };
             c_fields.push(c_field);
@@ -254,7 +259,7 @@ impl<'ctx> JITModule<'ctx> {
         Ok(ptr)
     }
 
-    pub (crate) fn convert_type_ref_to_c_cached(
+    pub(crate) fn convert_type_ref_to_c_cached(
         &mut self,
         type_ref: &TypeRef,
         cache: Rc<RefCell<HashMap<usize, *mut hl_type>>>,
@@ -303,7 +308,7 @@ impl<'ctx> JITModule<'ctx> {
                         super_: if let Some(ref super_type) = obj.super_ {
                             self.convert_type_ref_to_c_cached(
                                 &super_type.clone(),
-                                Rc::clone(&cache)
+                                Rc::clone(&cache),
                             )?
                         } else {
                             ptr::null_mut()
@@ -314,7 +319,9 @@ impl<'ctx> JITModule<'ctx> {
                         global_value: if obj.global_value > 0 {
                             let gv_idx = (obj.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
-                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                                unsafe {
+                                    self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
+                                }
                             } else {
                                 ptr::null_mut()
                             }
@@ -331,17 +338,14 @@ impl<'ctx> JITModule<'ctx> {
                 if let Some(ref fun) = rust_type.fun {
                     let c_fun = Box::new(hl_type_fun {
                         args: self.convert_type_refs_to_c(&fun.args, Rc::clone(&cache))?,
-                        ret: self.convert_type_ref_to_c_cached(
-                            &fun.ret.clone(),
-                            Rc::clone(&cache)
-                        )?,
+                        ret: self
+                            .convert_type_ref_to_c_cached(&fun.ret.clone(), Rc::clone(&cache))?,
                         nargs: fun.args.len() as i32,
-                        parent: if let Some(parent) = &fun.parent{
-                            self.convert_type_ref_to_c_cached(
-                                &parent.clone(),
-                                Rc::clone(&cache)
-                            )?
-                        }else {ptr::null_mut()},
+                        parent: if let Some(parent) = &fun.parent {
+                            self.convert_type_ref_to_c_cached(&parent.clone(), Rc::clone(&cache))?
+                        } else {
+                            ptr::null_mut()
+                        },
                         closure_type: hl_type_fun__bindgen_ty_1 {
                             kind: 0,
                             p: ptr::null_mut(),
@@ -363,7 +367,9 @@ impl<'ctx> JITModule<'ctx> {
                         global_value: if tenum.global_value > 0 {
                             let gv_idx = (tenum.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
-                                unsafe { self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void }
+                                unsafe {
+                                    self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
+                                }
                             } else {
                                 ptr::null_mut()
                             }
@@ -371,7 +377,8 @@ impl<'ctx> JITModule<'ctx> {
                             ptr::null_mut()
                         },
                         nconstructs: tenum.constructs.len() as i32,
-                        constructs: self.convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
+                        constructs: self
+                            .convert_constructs_to_c(&tenum.constructs, Rc::clone(&cache))?,
                     });
                     c_type.__bindgen_anon_1.tenum = Box::into_raw(c_enum);
                 }
@@ -393,7 +400,7 @@ impl<'ctx> JITModule<'ctx> {
                     c_type.__bindgen_anon_1.tparam = self.convert_to_c_type(
                         tparam.0.clone(),
                         &self.types_[tparam.0].clone(),
-                        Rc::clone(&cache)
+                        Rc::clone(&cache),
                     )?
                 }
             }
@@ -405,7 +412,8 @@ impl<'ctx> JITModule<'ctx> {
             *placeholder = c_type;
         }
 
-        self.c_ptr_to_type_index.insert(placeholder as usize, type_ref.0);
+        self.c_ptr_to_type_index
+            .insert(placeholder as usize, type_ref.0);
 
         Ok(placeholder)
     }
@@ -634,21 +642,17 @@ impl<'ctx> JITModule<'ctx> {
         Ok(rust_fun.clone())
     }
 
-    unsafe fn update_hl_type_enum(
-        &mut self,
-        c_enum: &hl_type_enum,
-    ) -> Result<HLTypeEnum> {
-        let mut rust_enum = HLTypeEnum::default(); 
-        rust_enum.name = CString::from_raw(c_enum.name as *mut c_char).to_string_lossy().to_string();
+    unsafe fn update_hl_type_enum(&mut self, c_enum: &hl_type_enum) -> Result<HLTypeEnum> {
+        let mut rust_enum = HLTypeEnum::default();
+        rust_enum.name = CString::from_raw(c_enum.name as *mut c_char)
+            .to_string_lossy()
+            .to_string();
         rust_enum.constructs = self.update_constructs(c_enum.constructs, c_enum.nconstructs)?;
         rust_enum.global_value = c_enum.global_value as u32;
         Ok(rust_enum.clone())
     }
 
-    unsafe fn update_hl_type_virtual(
-        &mut self,
-        c_virt: &hl_type_virtual,
-    ) -> Result<HLTypeVirtual> {
+    unsafe fn update_hl_type_virtual(&mut self, c_virt: &hl_type_virtual) -> Result<HLTypeVirtual> {
         let mut rust_virt = HLTypeVirtual::default(); //rust_virt.get_or_insert_with(Default::default);
         rust_virt.fields = self.update_fields(c_virt.fields, c_virt.nfields)?;
         rust_virt.data_size = c_virt.dataSize as usize;
@@ -725,7 +729,9 @@ impl<'ctx> JITModule<'ctx> {
         for i in 0..nconstructs {
             let c_construct = &*c_constructs.offset(i as isize);
             constructs.push(HLEnumConstruct {
-                name: CString::from_raw(c_construct.name as *mut c_char).to_str()?.to_string(),
+                name: CString::from_raw(c_construct.name as *mut c_char)
+                    .to_str()?
+                    .to_string(),
                 params: self.update_type_refs(c_construct.params, c_construct.nparams)?,
                 size: c_construct.size,
                 hasptr: c_construct.hasptr,

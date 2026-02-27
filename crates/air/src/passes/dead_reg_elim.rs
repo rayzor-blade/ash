@@ -1,17 +1,21 @@
 use crate::cfg::CFG;
-use crate::opcodes::Opcode;
 use crate::opcode_info;
+use crate::opcodes::Opcode;
 use crate::pass::Pass;
 use std::collections::HashSet;
 
 pub struct DeadRegElimPass;
 
 impl Pass for DeadRegElimPass {
-    fn name(&self) -> &str { "dead_reg_elim" }
+    fn name(&self) -> &str {
+        "dead_reg_elim"
+    }
 
     fn run(&self, ops: &mut Vec<Opcode>, _num_regs: usize, cfg: &CFG) -> usize {
         let num_blocks = cfg.blocks.len();
-        if num_blocks == 0 { return 0; }
+        if num_blocks == 0 {
+            return 0;
+        }
 
         // Compute live-in sets for each block via backward fixed-point iteration.
         // live_in[block] = registers live at the entry of the block.
@@ -108,8 +112,14 @@ mod tests {
     #[test]
     fn test_dead_write_eliminated() {
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(5) },   // dead: overwritten at op1
-            Opcode::Int { dst: Reg(0), ptr: RefInt(10) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(5),
+            }, // dead: overwritten at op1
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(10),
+            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -123,8 +133,15 @@ mod tests {
     #[test]
     fn test_live_write_kept() {
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(5) },
-            Opcode::Add { dst: Reg(1), a: Reg(0), b: Reg(0) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(5),
+            },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(0),
+                b: Reg(0),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);
@@ -136,8 +153,14 @@ mod tests {
     #[test]
     fn test_call_not_eliminated_even_if_dead() {
         let mut ops = vec![
-            Opcode::Call0 { dst: Reg(0), fun: RefFun(0) },  // has side effects
-            Opcode::Int { dst: Reg(0), ptr: RefInt(5) },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(0),
+            }, // has side effects
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(5),
+            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -149,8 +172,14 @@ mod tests {
     #[test]
     fn test_unused_register_eliminated() {
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(5) },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(10) },  // r1 never read
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(5),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(10),
+            }, // r1 never read
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);

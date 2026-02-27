@@ -203,7 +203,8 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
         let frame_count = stack_trace.frames.len();
 
         // Allocate a varray to hold the stack frames
-        let varray_ptr: *mut varray = hlp_alloc_array(crate::types::hlt_bytes(), frame_count as i32);
+        let varray_ptr: *mut varray =
+            hlp_alloc_array(crate::types::hlt_bytes(), frame_count as i32);
 
         // Fill the array with stack frame information
         for (i, frame) in stack_trace.frames.iter().enumerate() {

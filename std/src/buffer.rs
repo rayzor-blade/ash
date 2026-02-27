@@ -1,6 +1,13 @@
 use crate::gc::GC;
 use crate::hl::{
-    self, _stringitem, hl_buffer, hl_type, hl_type_kind, hl_type_kind_HABSTRACT, hl_type_kind_HARRAY, hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYNOBJ, hl_type_kind_HENUM, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HMETHOD, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HPACKED, hl_type_kind_HREF, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, stringitem, tlist, uchar, varray, vclosure, vdynamic, vdynamic__bindgen_ty_1, vdynobj, venum, vlist, vvirtual, HL_DYNOBJ_INDEX_MASK, HL_DYNOBJ_INDEX_SHIFT
+    self, _stringitem, hl_buffer, hl_type, hl_type_kind, hl_type_kind_HABSTRACT,
+    hl_type_kind_HARRAY, hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYNOBJ,
+    hl_type_kind_HENUM, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32,
+    hl_type_kind_HI64, hl_type_kind_HMETHOD, hl_type_kind_HNULL, hl_type_kind_HOBJ,
+    hl_type_kind_HPACKED, hl_type_kind_HREF, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE,
+    hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, stringitem,
+    tlist, uchar, varray, vclosure, vdynamic, vdynamic__bindgen_ty_1, vdynobj, venum, vlist,
+    vvirtual, HL_DYNOBJ_INDEX_MASK, HL_DYNOBJ_INDEX_SHIFT,
 };
 use crate::obj::{hlp_field_name, hlp_get_obj_proto, hlp_hash_gen, hlp_lookup_find};
 use crate::strings::{hlp_utf16_length, str_to_uchar_ptr};
@@ -747,8 +754,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
     }
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn hlp_buffer_val(b:*mut hl_buffer, v: *mut vdynamic) {
-    return hlp_buffer_rec(b, v, std::ptr::null_mut())
+pub unsafe extern "C" fn hlp_buffer_val(b: *mut hl_buffer, v: *mut vdynamic) {
+    return hlp_buffer_rec(b, v, std::ptr::null_mut());
 }

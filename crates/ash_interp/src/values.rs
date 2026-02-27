@@ -225,15 +225,21 @@ impl NanBoxedValue {
                 IntBinOp::Sub => l.wrapping_sub(r),
                 IntBinOp::Mul => l.wrapping_mul(r),
                 IntBinOp::SDiv => {
-                    if r == 0 { return None; }
+                    if r == 0 {
+                        return None;
+                    }
                     l.wrapping_div(r)
                 }
                 IntBinOp::UDiv => {
-                    if r == 0 { return None; }
+                    if r == 0 {
+                        return None;
+                    }
                     ((l as u32).wrapping_div(r as u32)) as i32
                 }
                 IntBinOp::SMod => {
-                    if r == 0 { return None; }
+                    if r == 0 {
+                        return None;
+                    }
                     l.wrapping_rem(r)
                 }
                 IntBinOp::Shl => l.wrapping_shl(r as u32),

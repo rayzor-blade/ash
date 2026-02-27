@@ -1,13 +1,15 @@
 use crate::cfg::CFG;
-use crate::opcodes::Opcode;
 use crate::opcode_info;
+use crate::opcodes::Opcode;
 use crate::pass::Pass;
 use std::collections::HashSet;
 
 pub struct NullCheckElimPass;
 
 impl Pass for NullCheckElimPass {
-    fn name(&self) -> &str { "null_check_elim" }
+    fn name(&self) -> &str {
+        "null_check_elim"
+    }
 
     fn run(&self, ops: &mut Vec<Opcode>, _num_regs: usize, cfg: &CFG) -> usize {
         let mut eliminated = 0;
@@ -17,7 +19,9 @@ impl Pass for NullCheckElimPass {
         // This is a simple fixed-point iteration.
 
         let num_blocks = cfg.blocks.len();
-        if num_blocks == 0 { return 0; }
+        if num_blocks == 0 {
+            return 0;
+        }
 
         // State: set of register indices known non-null at block exit
         let mut block_exit_nonnull: Vec<HashSet<u32>> = vec![HashSet::new(); num_blocks];
@@ -38,7 +42,10 @@ impl Pass for NullCheckElimPass {
                     let first = *iter.next().unwrap();
                     let mut set = block_exit_nonnull[first].clone();
                     for &pred in iter {
-                        set = set.intersection(&block_exit_nonnull[pred]).copied().collect();
+                        set = set
+                            .intersection(&block_exit_nonnull[pred])
+                            .copied()
+                            .collect();
                     }
                     set
                 };
@@ -54,7 +61,8 @@ impl Pass for NullCheckElimPass {
 
                     // Opcodes that produce known non-null results
                     match op {
-                        Opcode::New { dst } | Opcode::EnumAlloc { dst, .. }
+                        Opcode::New { dst }
+                        | Opcode::EnumAlloc { dst, .. }
                         | Opcode::MakeEnum { dst, .. }
                         | Opcode::StaticClosure { dst, .. }
                         | Opcode::InstanceClosure { dst, .. }
@@ -94,7 +102,10 @@ impl Pass for NullCheckElimPass {
                 let first = *iter.next().unwrap();
                 let mut set = block_exit_nonnull[first].clone();
                 for &pred in iter {
-                    set = set.intersection(&block_exit_nonnull[pred]).copied().collect();
+                    set = set
+                        .intersection(&block_exit_nonnull[pred])
+                        .copied()
+                        .collect();
                 }
                 set
             };
@@ -117,7 +128,8 @@ impl Pass for NullCheckElimPass {
                 }
 
                 match &ops[i] {
-                    Opcode::New { dst } | Opcode::EnumAlloc { dst, .. }
+                    Opcode::New { dst }
+                    | Opcode::EnumAlloc { dst, .. }
                     | Opcode::MakeEnum { dst, .. }
                     | Opcode::StaticClosure { dst, .. }
                     | Opcode::InstanceClosure { dst, .. }
@@ -146,8 +158,12 @@ mod tests {
     fn test_redundant_nullcheck_eliminated() {
         let mut ops = vec![
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::Field { dst: Reg(1), obj: Reg(0), field: RefField(0) },
-            Opcode::NullCheck { reg: Reg(0) },  // redundant
+            Opcode::Field {
+                dst: Reg(1),
+                obj: Reg(0),
+                field: RefField(0),
+            },
+            Opcode::NullCheck { reg: Reg(0) }, // redundant
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);
@@ -162,7 +178,7 @@ mod tests {
     fn test_nullcheck_after_new_eliminated() {
         let mut ops = vec![
             Opcode::New { dst: Reg(0) },
-            Opcode::NullCheck { reg: Reg(0) },  // redundant: New always non-null
+            Opcode::NullCheck { reg: Reg(0) }, // redundant: New always non-null
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -176,8 +192,11 @@ mod tests {
     fn test_nullcheck_after_overwrite_kept() {
         let mut ops = vec![
             Opcode::NullCheck { reg: Reg(0) },
-            Opcode::Mov { dst: Reg(0), src: Reg(1) },  // overwrites r0
-            Opcode::NullCheck { reg: Reg(0) },  // NOT redundant: r0 was overwritten
+            Opcode::Mov {
+                dst: Reg(0),
+                src: Reg(1),
+            }, // overwrites r0
+            Opcode::NullCheck { reg: Reg(0) }, // NOT redundant: r0 was overwritten
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);

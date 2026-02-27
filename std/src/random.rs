@@ -1,7 +1,9 @@
 use std::{ffi::c_int, mem, ptr::NonNull};
 
-use crate::{gc::{ImmixAllocator, GC}, hl};
-
+use crate::{
+    gc::{ImmixAllocator, GC},
+    hl,
+};
 
 impl ImmixAllocator {
     fn allocate_rnd(&mut self) -> Option<NonNull<hl::rnd>> {
@@ -29,7 +31,6 @@ impl ImmixAllocator {
     }
 }
 
-
 pub static MAG01: &[::std::os::raw::c_ulong] = &[
     0x0, 0x8ebfd028, // magic, don't change
 ];
@@ -44,7 +45,9 @@ pub static INIT_SEEDS: &[::std::os::raw::c_ulong] = &[
 #[no_mangle]
 pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
     let allocator = GC.get_mut().expect("expected to get garbage collector");
-    let allocated_rnd = allocator.allocate_rnd().expect("could not allocate hl::rnd");
+    let allocated_rnd = allocator
+        .allocate_rnd()
+        .expect("could not allocate hl::rnd");
     allocator.mark_rnd(allocated_rnd.as_ptr());
     allocated_rnd.as_ptr()
 }
@@ -53,13 +56,13 @@ pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
     let r = hlp_rnd_alloc();
     let pid = std::process::id();
     let now = std::time::SystemTime::now();
-    let elapsed  = now.elapsed().expect("expected to get elapsed system time");
-    let time:u32 = (elapsed.as_secs() as u32 * 1000000 * elapsed.as_micros() as u32).into();
+    let elapsed = now.elapsed().expect("expected to get elapsed system time");
+    let time: u32 = (elapsed.as_secs() as u32 * 1000000 * elapsed.as_micros() as u32).into();
     hlp_rnd_set_seed(r, (time ^ (pid | (pid << 16))) as i32);
     r
 }
 #[no_mangle]
-pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s:c_int) {
+pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
     if r.is_null() {
         return;
     }

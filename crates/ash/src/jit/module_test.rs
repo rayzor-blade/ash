@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-use std::str::FromStr;
 use super::module::*;
 use anyhow::{anyhow, Result};
 use inkwell::context::Context;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 #[test]
 fn test_init_module() -> Result<()> {

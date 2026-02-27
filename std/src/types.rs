@@ -348,6 +348,19 @@ pub extern "C" fn hlp_type_get_global(t: *mut hl::hl_type) -> *mut hl::vdynamic 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
+    if t.is_null() {
+        return 0;
+    }
+    if (*t).kind == hl::hl_type_kind_HFUN {
+        if let Some(fun) = (*t).__bindgen_anon_1.fun.as_ref() {
+            return fun.nargs;
+        }
+    }
+    0
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
     let gc = GC.get_mut().expect("Expected to get GC");
 
@@ -388,8 +401,7 @@ pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varra
     let array = hlp_alloc_array(hlt_bytes(), (*(*t).__bindgen_anon_1.tenum).nconstructs);
 
     for i in 0..(*(*t).__bindgen_anon_1.tenum).nconstructs as usize {
-        *(hl_aptr::<*mut vbyte>(array).add(i)) =
-            (*(*t).__bindgen_anon_1.tenum).name as *mut vbyte;
+        *(hl_aptr::<*mut vbyte>(array).add(i)) = (*(*t).__bindgen_anon_1.tenum).name as *mut vbyte;
     }
 
     array
@@ -410,10 +422,14 @@ pub unsafe extern "C" fn hlp_type_enum_values(t: *mut hl::hl_type) -> *mut varra
 }
 
 #[no_mangle]
-pub extern "C" fn hlp_mem_compact(_d:*mut vdynamic, _exclude: *mut varray, _flags:*const i32, _out_count:*mut i32) -> *mut vdynamic {
+pub extern "C" fn hlp_mem_compact(
+    _d: *mut vdynamic,
+    _exclude: *mut varray,
+    _flags: *const i32,
+    _out_count: *mut i32,
+) -> *mut vdynamic {
     unimplemented!()
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_context) {
@@ -423,11 +439,13 @@ pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_cont
     }
 
     let mut mark_size = 0;
-    let constructs = std::slice::from_raw_parts_mut((*tenum).constructs, (*tenum).nconstructs as usize);
+    let constructs =
+        std::slice::from_raw_parts_mut((*tenum).constructs, (*tenum).nconstructs as usize);
 
     for (i, c) in constructs.iter_mut().enumerate() {
         c.hasptr = false;
-        c.size = std::mem::size_of::<*mut std::os::raw::c_void>() as i32 + std::mem::size_of::<i32>() as i32; // t + index
+        c.size = std::mem::size_of::<*mut std::os::raw::c_void>() as i32
+            + std::mem::size_of::<i32>() as i32; // t + index
 
         let params = std::slice::from_raw_parts_mut(c.params, c.nparams as usize);
         let offsets = std::slice::from_raw_parts_mut(c.offsets, c.nparams as usize);
@@ -442,14 +460,15 @@ pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_cont
         }
 
         if c.hasptr {
-            let max_pos = i as i32 * std::mem::size_of::<i32>() as i32 + hlp_mark_size(c.size - (HL_WSIZE * 2) as i32);
+            let max_pos = i as i32 * std::mem::size_of::<i32>() as i32
+                + hlp_mark_size(c.size - (HL_WSIZE * 2) as i32);
             if max_pos > mark_size {
                 mark_size = max_pos;
             }
         }
     }
 
-    let mark = hlp_zalloc( mark_size) as *mut u32;
+    let mark = hlp_zalloc(mark_size) as *mut u32;
     if mark.is_null() {
         return;
     }

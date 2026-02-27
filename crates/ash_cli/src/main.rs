@@ -28,8 +28,8 @@ struct Cli {
     #[arg(long, default_value_t = 8)]
     jit_max_args: usize,
 
-    /// Minimum opcode count before a function is promotion-eligible
-    #[arg(long, default_value_t = 16)]
+    /// Optional static opcode-size gate before promotion (0 disables, call-count only)
+    #[arg(long, default_value_t = 0)]
     jit_min_ops: usize,
 }
 

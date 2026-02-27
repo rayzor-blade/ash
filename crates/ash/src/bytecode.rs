@@ -1,5 +1,8 @@
 use crate::hl::{self, *};
-use crate::opcodes::{JumpOffset, Opcode, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun, RefGlobal, RefInt, RefString, RefType, Reg};
+use crate::opcodes::{
+    JumpOffset, Opcode, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun, RefGlobal, RefInt,
+    RefString, RefType, Reg,
+};
 use crate::types::{
     HLConstant, HLEnumConstruct, HLFunction, HLNative, HLObjField, HLObjProto, HLType, HLTypeEnum,
     HLTypeFun, HLTypeObj, HLTypeVirtual, TypeRef, ValueTypeKind, OP_NARGS,
@@ -274,7 +277,10 @@ impl BytecodeDecoder {
         Ok(str_to_uchar_ptr(string))
     }
 
-    fn read_bytes(&mut self, r: &mut impl BufRead) -> Result<(Vec<usize>, Vec<u8>), std::io::Error> {
+    fn read_bytes(
+        &mut self,
+        r: &mut impl BufRead,
+    ) -> Result<(Vec<usize>, Vec<u8>), std::io::Error> {
         if self.version < 5 {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -773,16 +779,14 @@ impl BytecodeDecoder {
                 fun: RefFun(p2 as usize),
                 arg0: Reg(p3 as u32),
             },
-            hl_op_OCall2 => {
-                Opcode::Call2 {
-                    dst: Reg(p1 as u32),
-                    fun: RefFun(p2 as usize),
-                    arg0: Reg(p3 as u32),
-                    arg1: Reg(extras[0] as u32),
-                }
-            }
+            hl_op_OCall2 => Opcode::Call2 {
+                dst: Reg(p1 as u32),
+                fun: RefFun(p2 as usize),
+                arg0: Reg(p3 as u32),
+                arg1: Reg(extras[0] as u32),
+            },
             hl_op_OCall3 => {
-               let code = Opcode::Call3 {
+                let code = Opcode::Call3 {
                     dst: Reg(p1 as u32),
                     fun: RefFun(p2 as usize),
                     arg0: Reg(p3 as u32),
@@ -796,16 +800,14 @@ impl BytecodeDecoder {
 
                 code
             }
-            hl_op_OCall4 => {
-                Opcode::Call4 {
-                    dst: Reg(p1 as u32),
-                    fun: RefFun(p2 as usize),
-                    arg0: Reg(p3 as u32),
-                    arg1: Reg(extras[0] as u32),
-                    arg2: Reg(extras[1] as u32),
-                    arg3: Reg(extras[2] as u32),
-                }
-            }
+            hl_op_OCall4 => Opcode::Call4 {
+                dst: Reg(p1 as u32),
+                fun: RefFun(p2 as usize),
+                arg0: Reg(p3 as u32),
+                arg1: Reg(extras[0] as u32),
+                arg2: Reg(extras[1] as u32),
+                arg3: Reg(extras[2] as u32),
+            },
             hl_op_OCallN => {
                 let mut args = Vec::new();
                 for i in 0..p3 as usize {
@@ -1118,14 +1120,12 @@ impl BytecodeDecoder {
                 dst: Reg(p1 as u32),
                 value: Reg(p2 as u32),
             },
-            hl_op_OEnumField => {
-                Opcode::EnumField {
-                    dst: Reg(p1 as u32),
-                    value: Reg(p2 as u32),
-                    construct: RefEnumConstruct(p3 as usize),
-                    field: RefField(extras[0] as usize),
-                }
-            }
+            hl_op_OEnumField => Opcode::EnumField {
+                dst: Reg(p1 as u32),
+                value: Reg(p2 as u32),
+                construct: RefEnumConstruct(p3 as usize),
+                field: RefField(extras[0] as usize),
+            },
             hl_op_OSetEnumField => Opcode::SetEnumField {
                 value: Reg(p1 as u32),
                 field: RefField(p2 as usize),

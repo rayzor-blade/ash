@@ -84,7 +84,7 @@ impl<'ctx> AshModule<'ctx> {
     pub fn initialize(&mut self) -> Result<()> {
         // Preload std library
         init_std_library()?;
-        
+
         // Store ints as global variables
         self.int_globals = self
             .bytecode
@@ -875,7 +875,7 @@ mod tests {
     fn test_ash_module() -> Result<()> {
         let context = Context::create();
         let mut libraries = HashMap::new();
-     
+
         let mut ash_module = AshModule::new(&context, "test_module");
 
         let mut cwd = PathBuf::from_str(env!("CARGO_MANIFEST_DIR"))?;
@@ -894,7 +894,7 @@ mod tests {
         //
 
         ash_module.print_llvm_ir();
-     
+
         if let Some(main) = ash_module
             .function_values
             .get(&ash_module.bytecode.entrypoint.0)

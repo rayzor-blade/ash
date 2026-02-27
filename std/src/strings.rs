@@ -1,16 +1,20 @@
 use std::{ffi::c_double, os::raw::c_int, ptr};
 
-use crate::{buffer::{hlp_alloc_buffer, hlp_buffer_content, hlp_buffer_val}, cast::hlp_make_dyn, hl::{self, hl_type_kind_HF64, hl_type_kind_HI32, uchar, vbyte, vdynamic}, unicase::*};
-
+use crate::{
+    buffer::{hlp_alloc_buffer, hlp_buffer_content, hlp_buffer_val},
+    cast::hlp_make_dyn,
+    hl::{self, hl_type_kind_HF64, hl_type_kind_HI32, uchar, vbyte, vdynamic},
+    unicase::*,
+};
 
 pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
     // Convert the &str to a UTF-16 vector
     let mut utf16: Vec<u16> = s.encode_utf16().collect();
     utf16.push(0);
-    
+
     // Leak the vector to create a &'static [u16]
     let static_slice: &'static [u16] = Box::leak(utf16.into_boxed_slice());
-    
+
     // Get a pointer to the start of the slice
     static_slice.as_ptr()
 }
@@ -45,7 +49,7 @@ pub unsafe extern "C" fn hlp_utf16_length(s: *const hl::uchar) -> usize {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos:i32) -> usize {
+pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos: i32) -> usize {
     if s.is_null() {
         return 0;
     }
@@ -71,7 +75,11 @@ pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vb
     let s = if d.is_nan() {
         "nan".to_string()
     } else if d.is_infinite() {
-        if d > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+        if d > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        }
     } else {
         format!("{}", d)
     };
@@ -84,9 +92,12 @@ pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vb
     result as *const hl::vbyte
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn hlp_utf8_to_utf16(str: *const hl::vbyte, pos: i32, size: *mut i32) -> *mut uchar {
+pub unsafe extern "C" fn hlp_utf8_to_utf16(
+    str: *const hl::vbyte,
+    pos: i32,
+    size: *mut i32,
+) -> *mut uchar {
     if str.is_null() || size.is_null() {
         return ptr::null_mut();
     }
@@ -133,11 +144,16 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(str: *const hl::vbyte, pos: i32, size
             *result.offset(j) = c as uchar;
             i += 2;
         } else if c < 0xF0 {
-            c = ((c & 0x1F) << 12) | (((*str.offset(i + 1) as u32) & 0x3F) << 6) | ((*str.offset(i + 2) as u32) & 0x3F);
+            c = ((c & 0x1F) << 12)
+                | (((*str.offset(i + 1) as u32) & 0x3F) << 6)
+                | ((*str.offset(i + 2) as u32) & 0x3F);
             *result.offset(j) = c as uchar;
             i += 3;
         } else {
-            c = ((c & 0x0F) << 18) | (((*str.offset(i + 1) as u32) & 0x3F) << 12) | (((*str.offset(i + 2) as u32) & 0x3F) << 6) | ((*str.offset(i + 3) as u32) & 0x3F);
+            c = ((c & 0x0F) << 18)
+                | (((*str.offset(i + 1) as u32) & 0x3F) << 12)
+                | (((*str.offset(i + 2) as u32) & 0x3F) << 6)
+                | ((*str.offset(i + 3) as u32) & 0x3F);
             c -= 0x10000;
             *result.offset(j) = (0xD800 | (c >> 10)) as uchar;
             j += 1;
@@ -156,9 +172,12 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(str: *const hl::vbyte, pos: i32, size
     result
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn hlp_utf16_to_utf8(str: *const vbyte, len: i32, size: *mut i32) -> *mut vbyte {
+pub unsafe extern "C" fn hlp_utf16_to_utf8(
+    str: *const vbyte,
+    len: i32,
+    size: *mut i32,
+) -> *mut vbyte {
     if str.is_null() || size.is_null() {
         return ptr::null_mut();
     }
@@ -243,14 +262,11 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(str: *const vbyte, len: i32, size: *m
     result
 }
 
-
-
-
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
     let out = crate::bytes::hlp_alloc_bytes(len + 1) as *mut uchar;
-    
+
     if out.is_null() {
         return ptr::null_mut();
     }
@@ -275,8 +291,8 @@ pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
-    let out = crate::bytes::hlp_alloc_bytes(len+1) as *mut uchar;
-    
+    let out = crate::bytes::hlp_alloc_bytes(len + 1) as *mut uchar;
+
     if out.is_null() {
         return ptr::null_mut();
     }
@@ -299,11 +315,7 @@ pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_parse_int(
-    bytes: *mut vbyte,
-    pos: c_int,
-    len: c_int,
-) -> *mut vdynamic {
+pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int) -> *mut vdynamic {
     if bytes.is_null() {
         return ptr::null_mut();
     }
@@ -311,7 +323,9 @@ pub unsafe extern "C" fn hlp_parse_int(
     let mut p = c;
 
     // Skip whitespace
-    while *p != 0 && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16) {
+    while *p != 0
+        && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16)
+    {
         p = p.add(1);
     }
 
@@ -324,8 +338,14 @@ pub unsafe extern "C" fn hlp_parse_int(
 
     // Check for hex prefix (0x or 0X, optionally with sign)
     let hex_start = if is_signed { p.add(1) } else { p };
-    let remaining = if is_signed { len - (p.offset_from(c) as i32) - 1 } else { len - (p.offset_from(c) as i32) };
-    let is_hex = remaining >= 2 && *hex_start == b'0' as u16 && (*hex_start.add(1) == b'x' as u16 || *hex_start.add(1) == b'X' as u16);
+    let remaining = if is_signed {
+        len - (p.offset_from(c) as i32) - 1
+    } else {
+        len - (p.offset_from(c) as i32)
+    };
+    let is_hex = remaining >= 2
+        && *hex_start == b'0' as u16
+        && (*hex_start.add(1) == b'x' as u16 || *hex_start.add(1) == b'X' as u16);
 
     let mut h: i32;
     if is_hex {
@@ -379,18 +399,16 @@ pub unsafe extern "C" fn hlp_parse_int(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_parse_float(
-    bytes: *mut vbyte,
-    pos: c_int,
-    _len: c_int,
-) -> c_double {
+pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_int) -> c_double {
     if bytes.is_null() {
         return f64::NAN;
     }
     let mut p = (bytes as *const uchar).wrapping_add(pos as usize);
 
     // Skip whitespace
-    while *p != 0 && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16) {
+    while *p != 0
+        && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16)
+    {
         p = p.add(1);
     }
 
@@ -444,26 +462,25 @@ pub unsafe extern "C" fn hlp_parse_float(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn  hlp_value_to_string( d:*mut vdynamic, len:*mut c_int ) -> *const vbyte {
-	if d.is_null()  {
-		*len = 4;
-		return str_to_uchar_ptr("null") as *mut vbyte;
-	}
+pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) -> *const vbyte {
+    if d.is_null() {
+        *len = 4;
+        return str_to_uchar_ptr("null") as *mut vbyte;
+    }
     let t = (*d).t;
+    if t.is_null() {
+        *len = 4;
+        return str_to_uchar_ptr("null") as *mut vbyte;
+    }
     let kind = (*t).kind;
     match kind {
-        hl_type_kind_HI32 => {
-            return hlp_itos((*d).v.i, len)
-        }
-        hl_type_kind_HF64 => {
-            return hlp_ftos((*d).v.d, len)
-        }
-        _=>{
-                let b = hlp_alloc_buffer();
-                hlp_buffer_val(b, d);
-                let result = hlp_buffer_content(b,len) as *mut vbyte;
-                return result;
-
+        hl_type_kind_HI32 => return hlp_itos((*d).v.i, len),
+        hl_type_kind_HF64 => return hlp_ftos((*d).v.d, len),
+        _ => {
+            let b = hlp_alloc_buffer();
+            hlp_buffer_val(b, d);
+            let result = hlp_buffer_content(b, len) as *mut vbyte;
+            return result;
         }
     }
 }

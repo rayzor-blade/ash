@@ -1,15 +1,17 @@
-use std::collections::HashMap;
+use super::copy_prop::substitute_reads;
 use crate::cfg::CFG;
 use crate::dominance::DominatorTree;
-use crate::opcodes::{Opcode, Reg};
 use crate::opcode_info;
+use crate::opcodes::{Opcode, Reg};
 use crate::ssa::SSAForm;
-use super::copy_prop::substitute_reads;
+use std::collections::HashMap;
 
 pub struct SSACopyPropPass;
 
 impl SSACopyPropPass {
-    pub fn name(&self) -> &str { "ssa_copy_prop" }
+    pub fn name(&self) -> &str {
+        "ssa_copy_prop"
+    }
 
     pub fn run_ssa(
         &self,
@@ -52,7 +54,9 @@ impl SSACopyPropPass {
             let mut current = r;
             let mut steps = 0;
             while let Some(&src) = copy_of.get(&current) {
-                if src == current || steps > 100 { break; }
+                if src == current || steps > 100 {
+                    break;
+                }
                 current = src;
                 steps += 1;
             }
@@ -62,7 +66,9 @@ impl SSACopyPropPass {
         // Replace all reads in opcodes
         let mut eliminated = 0;
         for i in 0..ops.len() {
-            if matches!(ops[i], Opcode::Nop) { continue; }
+            if matches!(ops[i], Opcode::Nop) {
+                continue;
+            }
 
             let reads = opcode_info::reads(&ops[i]);
             for r in reads {
@@ -104,9 +110,16 @@ mod tests {
         // Block 1: Add(r2, r1, r1), Ret(r2)
         // In SSA, Mov creates a copy. Global copy prop should substitute r1→r0 in Add.
         let mut ops = vec![
-            Opcode::Mov { dst: Reg(1), src: Reg(0) },
+            Opcode::Mov {
+                dst: Reg(1),
+                src: Reg(0),
+            },
             Opcode::JAlways { offset: 0 },
-            Opcode::Add { dst: Reg(2), a: Reg(1), b: Reg(1) },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(1),
+                b: Reg(1),
+            },
             Opcode::Ret { ret: Reg(2) },
         ];
         let cfg = CFG::build(&ops);
@@ -130,8 +143,14 @@ mod tests {
     fn test_copy_chain_resolved() {
         // r1 = r0, r2 = r1 → chain resolves to r0
         let mut ops = vec![
-            Opcode::Mov { dst: Reg(1), src: Reg(0) },
-            Opcode::Mov { dst: Reg(2), src: Reg(1) },  // chain: r2 → r1 → r0
+            Opcode::Mov {
+                dst: Reg(1),
+                src: Reg(0),
+            },
+            Opcode::Mov {
+                dst: Reg(2),
+                src: Reg(1),
+            }, // chain: r2 → r1 → r0
             Opcode::Ret { ret: Reg(2) },
         ];
         let cfg = CFG::build(&ops);

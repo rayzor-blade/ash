@@ -8,31 +8,25 @@
 #[macro_use]
 pub mod macros;
 
-
-
-pub mod gc;
-pub mod hl;
-pub mod types;
-pub mod obj;
-pub mod maps;
-pub mod strings;
-pub mod random;
-pub mod bytes;
 pub mod array;
 pub mod buffer;
-pub mod sys;
-pub mod error;
+pub mod bytes;
 pub mod cast;
-pub mod fun;
 pub mod date;
+pub mod error;
+pub mod fun;
+pub mod gc;
+pub mod hl;
+pub mod maps;
 pub mod math;
+pub mod obj;
+pub mod random;
+pub mod regexp;
+pub mod strings;
+pub mod sys;
+pub mod types;
 #[macro_use]
 pub mod debugger;
-pub (crate) mod ucs2;
-pub (crate) mod unicase;
-pub (crate) mod sort;
-
-
-
-
-
+pub(crate) mod sort;
+pub(crate) mod ucs2;
+pub(crate) mod unicase;

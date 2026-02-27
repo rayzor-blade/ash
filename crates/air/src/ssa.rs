@@ -1,8 +1,8 @@
-use std::collections::HashSet;
 use crate::cfg::{BlockId, CFG};
 use crate::dominance::DominatorTree;
-use crate::opcodes::{Opcode, Reg};
 use crate::opcode_info;
+use crate::opcodes::{Opcode, Reg};
+use std::collections::HashSet;
 
 /// A phi node at a block entry: dst = phi(sources).
 #[derive(Debug, Clone)]
@@ -45,8 +45,12 @@ impl SSAForm {
         let mut pinned = HashSet::new();
         for op in ops.iter() {
             match op {
-                Opcode::Incr { dst } | Opcode::Decr { dst } => { pinned.insert(dst.0); }
-                Opcode::Ref { src, .. } => { pinned.insert(src.0); }
+                Opcode::Incr { dst } | Opcode::Decr { dst } => {
+                    pinned.insert(dst.0);
+                }
+                Opcode::Ref { src, .. } => {
+                    pinned.insert(src.0);
+                }
                 _ => {}
             }
         }
@@ -75,8 +79,12 @@ impl SSAForm {
         let mut phis: Vec<Vec<PhiNode>> = vec![vec![]; n_blocks];
 
         for v in 0..num_regs {
-            if pinned.contains(&(v as u32)) { continue; }
-            if def_blocks[v].is_empty() { continue; }
+            if pinned.contains(&(v as u32)) {
+                continue;
+            }
+            if def_blocks[v].is_empty() {
+                continue;
+            }
 
             let mut worklist: Vec<BlockId> = def_blocks[v].iter().copied().collect();
             let mut has_phi: HashSet<BlockId> = HashSet::new();
@@ -216,90 +224,225 @@ fn rename_reads(op: &mut Opcode, stacks: &[Vec<Reg>], pinned: &HashSet<u32>) {
     }
 
     match op {
-        Opcode::Mov { src, .. } => { ren!(src); }
-        Opcode::Add { a, b, .. } | Opcode::Sub { a, b, .. } | Opcode::Mul { a, b, .. }
-        | Opcode::SDiv { a, b, .. } | Opcode::UDiv { a, b, .. }
-        | Opcode::SMod { a, b, .. } | Opcode::UMod { a, b, .. }
-        | Opcode::Shl { a, b, .. } | Opcode::SShr { a, b, .. } | Opcode::UShr { a, b, .. }
-        | Opcode::And { a, b, .. } | Opcode::Or { a, b, .. } | Opcode::Xor { a, b, .. } => {
-            ren!(a); ren!(b);
+        Opcode::Mov { src, .. } => {
+            ren!(src);
         }
-        Opcode::Neg { src, .. } | Opcode::Not { src, .. } => { ren!(src); }
+        Opcode::Add { a, b, .. }
+        | Opcode::Sub { a, b, .. }
+        | Opcode::Mul { a, b, .. }
+        | Opcode::SDiv { a, b, .. }
+        | Opcode::UDiv { a, b, .. }
+        | Opcode::SMod { a, b, .. }
+        | Opcode::UMod { a, b, .. }
+        | Opcode::Shl { a, b, .. }
+        | Opcode::SShr { a, b, .. }
+        | Opcode::UShr { a, b, .. }
+        | Opcode::And { a, b, .. }
+        | Opcode::Or { a, b, .. }
+        | Opcode::Xor { a, b, .. } => {
+            ren!(a);
+            ren!(b);
+        }
+        Opcode::Neg { src, .. } | Opcode::Not { src, .. } => {
+            ren!(src);
+        }
         // Incr/Decr are pinned — skip
         Opcode::Incr { .. } | Opcode::Decr { .. } => {}
 
-        Opcode::Call1 { arg0, .. } => { ren!(arg0); }
-        Opcode::Call2 { arg0, arg1, .. } => { ren!(arg0); ren!(arg1); }
-        Opcode::Call3 { arg0, arg1, arg2, .. } => { ren!(arg0); ren!(arg1); ren!(arg2); }
-        Opcode::Call4 { arg0, arg1, arg2, arg3, .. } => { ren!(arg0); ren!(arg1); ren!(arg2); ren!(arg3); }
-        Opcode::CallN { args, .. } | Opcode::CallMethod { args, .. }
+        Opcode::Call1 { arg0, .. } => {
+            ren!(arg0);
+        }
+        Opcode::Call2 { arg0, arg1, .. } => {
+            ren!(arg0);
+            ren!(arg1);
+        }
+        Opcode::Call3 {
+            arg0, arg1, arg2, ..
+        } => {
+            ren!(arg0);
+            ren!(arg1);
+            ren!(arg2);
+        }
+        Opcode::Call4 {
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            ..
+        } => {
+            ren!(arg0);
+            ren!(arg1);
+            ren!(arg2);
+            ren!(arg3);
+        }
+        Opcode::CallN { args, .. }
+        | Opcode::CallMethod { args, .. }
         | Opcode::CallThis { args, .. } => {
-            for a in args.iter_mut() { ren!(a); }
+            for a in args.iter_mut() {
+                ren!(a);
+            }
         }
         Opcode::CallClosure { fun, args, .. } => {
             ren!(fun);
-            for a in args.iter_mut() { ren!(a); }
+            for a in args.iter_mut() {
+                ren!(a);
+            }
         }
 
-        Opcode::InstanceClosure { obj, .. } => { ren!(obj); }
-        Opcode::VirtualClosure { obj, field, .. } => { ren!(obj); ren!(field); }
-
-        Opcode::SetGlobal { src, .. } => { ren!(src); }
-        Opcode::Field { obj, .. } => { ren!(obj); }
-        Opcode::SetField { obj, src, .. } => { ren!(obj); ren!(src); }
-        Opcode::SetThis { src, .. } => { ren!(src); }
-        Opcode::DynGet { obj, .. } => { ren!(obj); }
-        Opcode::DynSet { obj, src, .. } => { ren!(obj); ren!(src); }
-
-        Opcode::JTrue { cond, .. } | Opcode::JFalse { cond, .. } => { ren!(cond); }
-        Opcode::JNull { reg, .. } | Opcode::JNotNull { reg, .. } => { ren!(reg); }
-        Opcode::JSLt { a, b, .. } | Opcode::JSGte { a, b, .. }
-        | Opcode::JSGt { a, b, .. } | Opcode::JSLte { a, b, .. }
-        | Opcode::JULt { a, b, .. } | Opcode::JUGte { a, b, .. }
-        | Opcode::JNotLt { a, b, .. } | Opcode::JNotGte { a, b, .. }
-        | Opcode::JEq { a, b, .. } | Opcode::JNotEq { a, b, .. } => {
-            ren!(a); ren!(b);
+        Opcode::InstanceClosure { obj, .. } => {
+            ren!(obj);
+        }
+        Opcode::VirtualClosure { obj, field, .. } => {
+            ren!(obj);
+            ren!(field);
         }
 
-        Opcode::ToDyn { src, .. } | Opcode::ToSFloat { src, .. }
-        | Opcode::ToUFloat { src, .. } | Opcode::ToInt { src, .. }
-        | Opcode::SafeCast { src, .. } | Opcode::UnsafeCast { src, .. }
-        | Opcode::ToVirtual { src, .. } => { ren!(src); }
-
-        Opcode::Ret { ret } => { ren!(ret); }
-        Opcode::Throw { exc } | Opcode::Rethrow { exc } => { ren!(exc); }
-        Opcode::Switch { reg, .. } => { ren!(reg); }
-        Opcode::NullCheck { reg } => { ren!(reg); }
-
-        Opcode::GetI8 { bytes, index, .. } | Opcode::GetI16 { bytes, index, .. }
-        | Opcode::GetMem { bytes, index, .. } | Opcode::GetArray { array: bytes, index, .. } => {
-            ren!(bytes); ren!(index);
+        Opcode::SetGlobal { src, .. } => {
+            ren!(src);
         }
-        Opcode::SetI8 { bytes, index, src } | Opcode::SetI16 { bytes, index, src }
-        | Opcode::SetMem { bytes, index, src } | Opcode::SetArray { array: bytes, index, src } => {
-            ren!(bytes); ren!(index); ren!(src);
+        Opcode::Field { obj, .. } => {
+            ren!(obj);
+        }
+        Opcode::SetField { obj, src, .. } => {
+            ren!(obj);
+            ren!(src);
+        }
+        Opcode::SetThis { src, .. } => {
+            ren!(src);
+        }
+        Opcode::DynGet { obj, .. } => {
+            ren!(obj);
+        }
+        Opcode::DynSet { obj, src, .. } => {
+            ren!(obj);
+            ren!(src);
         }
 
-        Opcode::ArraySize { array, .. } => { ren!(array); }
-        Opcode::GetType { src, .. } | Opcode::GetTID { src, .. } => { ren!(src); }
-        Opcode::Ref { src, .. } | Opcode::Unref { src, .. } => { ren!(src); }
-        Opcode::Setref { dst, value } => { ren!(dst); ren!(value); }
+        Opcode::JTrue { cond, .. } | Opcode::JFalse { cond, .. } => {
+            ren!(cond);
+        }
+        Opcode::JNull { reg, .. } | Opcode::JNotNull { reg, .. } => {
+            ren!(reg);
+        }
+        Opcode::JSLt { a, b, .. }
+        | Opcode::JSGte { a, b, .. }
+        | Opcode::JSGt { a, b, .. }
+        | Opcode::JSLte { a, b, .. }
+        | Opcode::JULt { a, b, .. }
+        | Opcode::JUGte { a, b, .. }
+        | Opcode::JNotLt { a, b, .. }
+        | Opcode::JNotGte { a, b, .. }
+        | Opcode::JEq { a, b, .. }
+        | Opcode::JNotEq { a, b, .. } => {
+            ren!(a);
+            ren!(b);
+        }
 
-        Opcode::MakeEnum { args, .. } => { for a in args.iter_mut() { ren!(a); } }
-        Opcode::EnumIndex { value, .. } | Opcode::EnumField { value, .. } => { ren!(value); }
-        Opcode::SetEnumField { value, src, .. } => { ren!(value); ren!(src); }
+        Opcode::ToDyn { src, .. }
+        | Opcode::ToSFloat { src, .. }
+        | Opcode::ToUFloat { src, .. }
+        | Opcode::ToInt { src, .. }
+        | Opcode::SafeCast { src, .. }
+        | Opcode::UnsafeCast { src, .. }
+        | Opcode::ToVirtual { src, .. } => {
+            ren!(src);
+        }
 
-        Opcode::RefData { src, .. } => { ren!(src); }
-        Opcode::RefOffset { reg, offset, .. } => { ren!(reg); ren!(offset); }
-        Opcode::Prefetch { value, .. } => { ren!(value); }
+        Opcode::Ret { ret } => {
+            ren!(ret);
+        }
+        Opcode::Throw { exc } | Opcode::Rethrow { exc } => {
+            ren!(exc);
+        }
+        Opcode::Switch { reg, .. } => {
+            ren!(reg);
+        }
+        Opcode::NullCheck { reg } => {
+            ren!(reg);
+        }
 
-        Opcode::Int { .. } | Opcode::Float { .. } | Opcode::Bool { .. }
-        | Opcode::Bytes { .. } | Opcode::String { .. } | Opcode::Null { .. }
-        | Opcode::Call0 { .. } | Opcode::StaticClosure { .. }
-        | Opcode::GetGlobal { .. } | Opcode::GetThis { .. }
-        | Opcode::JAlways { .. } | Opcode::Label | Opcode::New { .. }
-        | Opcode::Type { .. } | Opcode::EnumAlloc { .. } | Opcode::Assert
-        | Opcode::Nop | Opcode::Asm { .. } | Opcode::Trap { .. } | Opcode::EndTrap { .. } => {}
+        Opcode::GetI8 { bytes, index, .. }
+        | Opcode::GetI16 { bytes, index, .. }
+        | Opcode::GetMem { bytes, index, .. }
+        | Opcode::GetArray {
+            array: bytes,
+            index,
+            ..
+        } => {
+            ren!(bytes);
+            ren!(index);
+        }
+        Opcode::SetI8 { bytes, index, src }
+        | Opcode::SetI16 { bytes, index, src }
+        | Opcode::SetMem { bytes, index, src }
+        | Opcode::SetArray {
+            array: bytes,
+            index,
+            src,
+        } => {
+            ren!(bytes);
+            ren!(index);
+            ren!(src);
+        }
+
+        Opcode::ArraySize { array, .. } => {
+            ren!(array);
+        }
+        Opcode::GetType { src, .. } | Opcode::GetTID { src, .. } => {
+            ren!(src);
+        }
+        Opcode::Ref { src, .. } | Opcode::Unref { src, .. } => {
+            ren!(src);
+        }
+        Opcode::Setref { dst, value } => {
+            ren!(dst);
+            ren!(value);
+        }
+
+        Opcode::MakeEnum { args, .. } => {
+            for a in args.iter_mut() {
+                ren!(a);
+            }
+        }
+        Opcode::EnumIndex { value, .. } | Opcode::EnumField { value, .. } => {
+            ren!(value);
+        }
+        Opcode::SetEnumField { value, src, .. } => {
+            ren!(value);
+            ren!(src);
+        }
+
+        Opcode::RefData { src, .. } => {
+            ren!(src);
+        }
+        Opcode::RefOffset { reg, offset, .. } => {
+            ren!(reg);
+            ren!(offset);
+        }
+        Opcode::Prefetch { value, .. } => {
+            ren!(value);
+        }
+
+        Opcode::Int { .. }
+        | Opcode::Float { .. }
+        | Opcode::Bool { .. }
+        | Opcode::Bytes { .. }
+        | Opcode::String { .. }
+        | Opcode::Null { .. }
+        | Opcode::Call0 { .. }
+        | Opcode::StaticClosure { .. }
+        | Opcode::GetGlobal { .. }
+        | Opcode::GetThis { .. }
+        | Opcode::JAlways { .. }
+        | Opcode::Label
+        | Opcode::New { .. }
+        | Opcode::Type { .. }
+        | Opcode::EnumAlloc { .. }
+        | Opcode::Assert
+        | Opcode::Nop
+        | Opcode::Asm { .. }
+        | Opcode::Trap { .. }
+        | Opcode::EndTrap { .. } => {}
     }
 }
 
@@ -313,7 +456,9 @@ fn rename_writes(
 ) {
     let written = opcode_info::writes(op);
     for w in written {
-        if pinned.contains(&w.0) { continue; }
+        if pinned.contains(&w.0) {
+            continue;
+        }
         // Create new SSA version
         let base = w.0;
         let ssa_id = *next_ssa_reg;
@@ -330,41 +475,81 @@ fn rename_writes(
 /// Set the write register of an opcode from `old` to `new_reg`.
 fn set_write(op: &mut Opcode, old: Reg, new_reg: Reg) {
     macro_rules! sw {
-        ($r:expr) => { if *$r == old { *$r = new_reg; } };
+        ($r:expr) => {
+            if *$r == old {
+                *$r = new_reg;
+            }
+        };
     }
 
     match op {
-        Opcode::Mov { dst, .. } | Opcode::Int { dst, .. } | Opcode::Float { dst, .. }
-        | Opcode::Bool { dst, .. } | Opcode::Bytes { dst, .. } | Opcode::String { dst, .. }
-        | Opcode::Null { dst } | Opcode::Add { dst, .. } | Opcode::Sub { dst, .. }
-        | Opcode::Mul { dst, .. } | Opcode::SDiv { dst, .. } | Opcode::UDiv { dst, .. }
-        | Opcode::SMod { dst, .. } | Opcode::UMod { dst, .. }
-        | Opcode::Shl { dst, .. } | Opcode::SShr { dst, .. } | Opcode::UShr { dst, .. }
-        | Opcode::And { dst, .. } | Opcode::Or { dst, .. } | Opcode::Xor { dst, .. }
-        | Opcode::Neg { dst, .. } | Opcode::Not { dst, .. }
-        | Opcode::Call0 { dst, .. } | Opcode::Call1 { dst, .. } | Opcode::Call2 { dst, .. }
-        | Opcode::Call3 { dst, .. } | Opcode::Call4 { dst, .. } | Opcode::CallN { dst, .. }
-        | Opcode::CallMethod { dst, .. } | Opcode::CallThis { dst, .. }
+        Opcode::Mov { dst, .. }
+        | Opcode::Int { dst, .. }
+        | Opcode::Float { dst, .. }
+        | Opcode::Bool { dst, .. }
+        | Opcode::Bytes { dst, .. }
+        | Opcode::String { dst, .. }
+        | Opcode::Null { dst }
+        | Opcode::Add { dst, .. }
+        | Opcode::Sub { dst, .. }
+        | Opcode::Mul { dst, .. }
+        | Opcode::SDiv { dst, .. }
+        | Opcode::UDiv { dst, .. }
+        | Opcode::SMod { dst, .. }
+        | Opcode::UMod { dst, .. }
+        | Opcode::Shl { dst, .. }
+        | Opcode::SShr { dst, .. }
+        | Opcode::UShr { dst, .. }
+        | Opcode::And { dst, .. }
+        | Opcode::Or { dst, .. }
+        | Opcode::Xor { dst, .. }
+        | Opcode::Neg { dst, .. }
+        | Opcode::Not { dst, .. }
+        | Opcode::Call0 { dst, .. }
+        | Opcode::Call1 { dst, .. }
+        | Opcode::Call2 { dst, .. }
+        | Opcode::Call3 { dst, .. }
+        | Opcode::Call4 { dst, .. }
+        | Opcode::CallN { dst, .. }
+        | Opcode::CallMethod { dst, .. }
+        | Opcode::CallThis { dst, .. }
         | Opcode::CallClosure { dst, .. }
-        | Opcode::StaticClosure { dst, .. } | Opcode::InstanceClosure { dst, .. }
+        | Opcode::StaticClosure { dst, .. }
+        | Opcode::InstanceClosure { dst, .. }
         | Opcode::VirtualClosure { dst, .. }
-        | Opcode::GetGlobal { dst, .. } | Opcode::Field { dst, .. }
-        | Opcode::GetThis { dst, .. } | Opcode::DynGet { dst, .. }
-        | Opcode::ToDyn { dst, .. } | Opcode::ToSFloat { dst, .. }
-        | Opcode::ToUFloat { dst, .. } | Opcode::ToInt { dst, .. }
-        | Opcode::SafeCast { dst, .. } | Opcode::UnsafeCast { dst, .. }
+        | Opcode::GetGlobal { dst, .. }
+        | Opcode::Field { dst, .. }
+        | Opcode::GetThis { dst, .. }
+        | Opcode::DynGet { dst, .. }
+        | Opcode::ToDyn { dst, .. }
+        | Opcode::ToSFloat { dst, .. }
+        | Opcode::ToUFloat { dst, .. }
+        | Opcode::ToInt { dst, .. }
+        | Opcode::SafeCast { dst, .. }
+        | Opcode::UnsafeCast { dst, .. }
         | Opcode::ToVirtual { dst, .. }
-        | Opcode::New { dst } | Opcode::ArraySize { dst, .. }
-        | Opcode::Type { dst, .. } | Opcode::GetType { dst, .. } | Opcode::GetTID { dst, .. }
-        | Opcode::Ref { dst, .. } | Opcode::Unref { dst, .. }
-        | Opcode::MakeEnum { dst, .. } | Opcode::EnumAlloc { dst, .. }
-        | Opcode::EnumIndex { dst, .. } | Opcode::EnumField { dst, .. }
-        | Opcode::RefData { dst, .. } | Opcode::RefOffset { dst, .. }
-        | Opcode::GetI8 { dst, .. } | Opcode::GetI16 { dst, .. }
-        | Opcode::GetMem { dst, .. } | Opcode::GetArray { dst, .. } => {
+        | Opcode::New { dst }
+        | Opcode::ArraySize { dst, .. }
+        | Opcode::Type { dst, .. }
+        | Opcode::GetType { dst, .. }
+        | Opcode::GetTID { dst, .. }
+        | Opcode::Ref { dst, .. }
+        | Opcode::Unref { dst, .. }
+        | Opcode::MakeEnum { dst, .. }
+        | Opcode::EnumAlloc { dst, .. }
+        | Opcode::EnumIndex { dst, .. }
+        | Opcode::EnumField { dst, .. }
+        | Opcode::RefData { dst, .. }
+        | Opcode::RefOffset { dst, .. }
+        | Opcode::GetI8 { dst, .. }
+        | Opcode::GetI16 { dst, .. }
+        | Opcode::GetMem { dst, .. }
+        | Opcode::GetArray { dst, .. } => {
             sw!(dst);
         }
-        Opcode::Trap { exc, .. } => { sw!(exc); }
+        Opcode::Trap { exc, .. } => {
+            sw!(exc);
+        }
         // Incr/Decr pinned, everything else has no write
         _ => {}
     }
@@ -381,102 +566,280 @@ fn rename_to_base(op: &mut Opcode, base_reg_map: &[u32]) {
     }
 
     match op {
-        Opcode::Mov { dst, src } => { to_base!(dst); to_base!(src); }
-        Opcode::Int { dst, .. } | Opcode::Float { dst, .. }
-        | Opcode::Bool { dst, .. } | Opcode::Bytes { dst, .. }
-        | Opcode::String { dst, .. } | Opcode::Null { dst } => { to_base!(dst); }
-
-        Opcode::Add { dst, a, b } | Opcode::Sub { dst, a, b } | Opcode::Mul { dst, a, b }
-        | Opcode::SDiv { dst, a, b } | Opcode::UDiv { dst, a, b }
-        | Opcode::SMod { dst, a, b } | Opcode::UMod { dst, a, b }
-        | Opcode::Shl { dst, a, b } | Opcode::SShr { dst, a, b } | Opcode::UShr { dst, a, b }
-        | Opcode::And { dst, a, b } | Opcode::Or { dst, a, b } | Opcode::Xor { dst, a, b } => {
-            to_base!(dst); to_base!(a); to_base!(b);
+        Opcode::Mov { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
         }
-        Opcode::Neg { dst, src } | Opcode::Not { dst, src } => { to_base!(dst); to_base!(src); }
-        Opcode::Incr { dst } | Opcode::Decr { dst } => { to_base!(dst); }
+        Opcode::Int { dst, .. }
+        | Opcode::Float { dst, .. }
+        | Opcode::Bool { dst, .. }
+        | Opcode::Bytes { dst, .. }
+        | Opcode::String { dst, .. }
+        | Opcode::Null { dst } => {
+            to_base!(dst);
+        }
 
-        Opcode::Call0 { dst, .. } => { to_base!(dst); }
-        Opcode::Call1 { dst, arg0, .. } => { to_base!(dst); to_base!(arg0); }
-        Opcode::Call2 { dst, arg0, arg1, .. } => { to_base!(dst); to_base!(arg0); to_base!(arg1); }
-        Opcode::Call3 { dst, arg0, arg1, arg2, .. } => { to_base!(dst); to_base!(arg0); to_base!(arg1); to_base!(arg2); }
-        Opcode::Call4 { dst, arg0, arg1, arg2, arg3, .. } => { to_base!(dst); to_base!(arg0); to_base!(arg1); to_base!(arg2); to_base!(arg3); }
-        Opcode::CallN { dst, args, .. } | Opcode::CallMethod { dst, args, .. }
+        Opcode::Add { dst, a, b }
+        | Opcode::Sub { dst, a, b }
+        | Opcode::Mul { dst, a, b }
+        | Opcode::SDiv { dst, a, b }
+        | Opcode::UDiv { dst, a, b }
+        | Opcode::SMod { dst, a, b }
+        | Opcode::UMod { dst, a, b }
+        | Opcode::Shl { dst, a, b }
+        | Opcode::SShr { dst, a, b }
+        | Opcode::UShr { dst, a, b }
+        | Opcode::And { dst, a, b }
+        | Opcode::Or { dst, a, b }
+        | Opcode::Xor { dst, a, b } => {
+            to_base!(dst);
+            to_base!(a);
+            to_base!(b);
+        }
+        Opcode::Neg { dst, src } | Opcode::Not { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
+        }
+        Opcode::Incr { dst } | Opcode::Decr { dst } => {
+            to_base!(dst);
+        }
+
+        Opcode::Call0 { dst, .. } => {
+            to_base!(dst);
+        }
+        Opcode::Call1 { dst, arg0, .. } => {
+            to_base!(dst);
+            to_base!(arg0);
+        }
+        Opcode::Call2 {
+            dst, arg0, arg1, ..
+        } => {
+            to_base!(dst);
+            to_base!(arg0);
+            to_base!(arg1);
+        }
+        Opcode::Call3 {
+            dst,
+            arg0,
+            arg1,
+            arg2,
+            ..
+        } => {
+            to_base!(dst);
+            to_base!(arg0);
+            to_base!(arg1);
+            to_base!(arg2);
+        }
+        Opcode::Call4 {
+            dst,
+            arg0,
+            arg1,
+            arg2,
+            arg3,
+            ..
+        } => {
+            to_base!(dst);
+            to_base!(arg0);
+            to_base!(arg1);
+            to_base!(arg2);
+            to_base!(arg3);
+        }
+        Opcode::CallN { dst, args, .. }
+        | Opcode::CallMethod { dst, args, .. }
         | Opcode::CallThis { dst, args, .. } => {
             to_base!(dst);
-            for a in args.iter_mut() { to_base!(a); }
+            for a in args.iter_mut() {
+                to_base!(a);
+            }
         }
         Opcode::CallClosure { dst, fun, args } => {
-            to_base!(dst); to_base!(fun);
-            for a in args.iter_mut() { to_base!(a); }
+            to_base!(dst);
+            to_base!(fun);
+            for a in args.iter_mut() {
+                to_base!(a);
+            }
         }
 
-        Opcode::StaticClosure { dst, .. } => { to_base!(dst); }
-        Opcode::InstanceClosure { dst, obj, .. } => { to_base!(dst); to_base!(obj); }
-        Opcode::VirtualClosure { dst, obj, field } => { to_base!(dst); to_base!(obj); to_base!(field); }
-
-        Opcode::GetGlobal { dst, .. } => { to_base!(dst); }
-        Opcode::SetGlobal { src, .. } => { to_base!(src); }
-        Opcode::Field { dst, obj, .. } => { to_base!(dst); to_base!(obj); }
-        Opcode::SetField { obj, src, .. } => { to_base!(obj); to_base!(src); }
-        Opcode::GetThis { dst, .. } => { to_base!(dst); }
-        Opcode::SetThis { src, .. } => { to_base!(src); }
-        Opcode::DynGet { dst, obj, .. } => { to_base!(dst); to_base!(obj); }
-        Opcode::DynSet { obj, src, .. } => { to_base!(obj); to_base!(src); }
-
-        Opcode::JTrue { cond, .. } | Opcode::JFalse { cond, .. } => { to_base!(cond); }
-        Opcode::JNull { reg, .. } | Opcode::JNotNull { reg, .. } => { to_base!(reg); }
-        Opcode::JSLt { a, b, .. } | Opcode::JSGte { a, b, .. }
-        | Opcode::JSGt { a, b, .. } | Opcode::JSLte { a, b, .. }
-        | Opcode::JULt { a, b, .. } | Opcode::JUGte { a, b, .. }
-        | Opcode::JNotLt { a, b, .. } | Opcode::JNotGte { a, b, .. }
-        | Opcode::JEq { a, b, .. } | Opcode::JNotEq { a, b, .. } => {
-            to_base!(a); to_base!(b);
+        Opcode::StaticClosure { dst, .. } => {
+            to_base!(dst);
+        }
+        Opcode::InstanceClosure { dst, obj, .. } => {
+            to_base!(dst);
+            to_base!(obj);
+        }
+        Opcode::VirtualClosure { dst, obj, field } => {
+            to_base!(dst);
+            to_base!(obj);
+            to_base!(field);
         }
 
-        Opcode::ToDyn { dst, src } | Opcode::ToSFloat { dst, src }
-        | Opcode::ToUFloat { dst, src } | Opcode::ToInt { dst, src }
-        | Opcode::SafeCast { dst, src } | Opcode::UnsafeCast { dst, src }
-        | Opcode::ToVirtual { dst, src } => { to_base!(dst); to_base!(src); }
-
-        Opcode::Ret { ret } => { to_base!(ret); }
-        Opcode::Throw { exc } | Opcode::Rethrow { exc } => { to_base!(exc); }
-        Opcode::Switch { reg, .. } => { to_base!(reg); }
-        Opcode::NullCheck { reg } => { to_base!(reg); }
-        Opcode::Trap { exc, .. } => { to_base!(exc); }
-        Opcode::EndTrap { exc } => { to_base!(exc); }
-
-        Opcode::GetI8 { dst, bytes, index } | Opcode::GetI16 { dst, bytes, index }
-        | Opcode::GetMem { dst, bytes, index } | Opcode::GetArray { dst, array: bytes, index } => {
-            to_base!(dst); to_base!(bytes); to_base!(index);
+        Opcode::GetGlobal { dst, .. } => {
+            to_base!(dst);
         }
-        Opcode::SetI8 { bytes, index, src } | Opcode::SetI16 { bytes, index, src }
-        | Opcode::SetMem { bytes, index, src } | Opcode::SetArray { array: bytes, index, src } => {
-            to_base!(bytes); to_base!(index); to_base!(src);
+        Opcode::SetGlobal { src, .. } => {
+            to_base!(src);
+        }
+        Opcode::Field { dst, obj, .. } => {
+            to_base!(dst);
+            to_base!(obj);
+        }
+        Opcode::SetField { obj, src, .. } => {
+            to_base!(obj);
+            to_base!(src);
+        }
+        Opcode::GetThis { dst, .. } => {
+            to_base!(dst);
+        }
+        Opcode::SetThis { src, .. } => {
+            to_base!(src);
+        }
+        Opcode::DynGet { dst, obj, .. } => {
+            to_base!(dst);
+            to_base!(obj);
+        }
+        Opcode::DynSet { obj, src, .. } => {
+            to_base!(obj);
+            to_base!(src);
         }
 
-        Opcode::New { dst } => { to_base!(dst); }
-        Opcode::ArraySize { dst, array } => { to_base!(dst); to_base!(array); }
-        Opcode::Type { dst, .. } => { to_base!(dst); }
-        Opcode::GetType { dst, src } | Opcode::GetTID { dst, src } => { to_base!(dst); to_base!(src); }
-        Opcode::Ref { dst, src } | Opcode::Unref { dst, src } => { to_base!(dst); to_base!(src); }
-        Opcode::Setref { dst, value } => { to_base!(dst); to_base!(value); }
+        Opcode::JTrue { cond, .. } | Opcode::JFalse { cond, .. } => {
+            to_base!(cond);
+        }
+        Opcode::JNull { reg, .. } | Opcode::JNotNull { reg, .. } => {
+            to_base!(reg);
+        }
+        Opcode::JSLt { a, b, .. }
+        | Opcode::JSGte { a, b, .. }
+        | Opcode::JSGt { a, b, .. }
+        | Opcode::JSLte { a, b, .. }
+        | Opcode::JULt { a, b, .. }
+        | Opcode::JUGte { a, b, .. }
+        | Opcode::JNotLt { a, b, .. }
+        | Opcode::JNotGte { a, b, .. }
+        | Opcode::JEq { a, b, .. }
+        | Opcode::JNotEq { a, b, .. } => {
+            to_base!(a);
+            to_base!(b);
+        }
+
+        Opcode::ToDyn { dst, src }
+        | Opcode::ToSFloat { dst, src }
+        | Opcode::ToUFloat { dst, src }
+        | Opcode::ToInt { dst, src }
+        | Opcode::SafeCast { dst, src }
+        | Opcode::UnsafeCast { dst, src }
+        | Opcode::ToVirtual { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
+        }
+
+        Opcode::Ret { ret } => {
+            to_base!(ret);
+        }
+        Opcode::Throw { exc } | Opcode::Rethrow { exc } => {
+            to_base!(exc);
+        }
+        Opcode::Switch { reg, .. } => {
+            to_base!(reg);
+        }
+        Opcode::NullCheck { reg } => {
+            to_base!(reg);
+        }
+        Opcode::Trap { exc, .. } => {
+            to_base!(exc);
+        }
+        Opcode::EndTrap { exc } => {
+            to_base!(exc);
+        }
+
+        Opcode::GetI8 { dst, bytes, index }
+        | Opcode::GetI16 { dst, bytes, index }
+        | Opcode::GetMem { dst, bytes, index }
+        | Opcode::GetArray {
+            dst,
+            array: bytes,
+            index,
+        } => {
+            to_base!(dst);
+            to_base!(bytes);
+            to_base!(index);
+        }
+        Opcode::SetI8 { bytes, index, src }
+        | Opcode::SetI16 { bytes, index, src }
+        | Opcode::SetMem { bytes, index, src }
+        | Opcode::SetArray {
+            array: bytes,
+            index,
+            src,
+        } => {
+            to_base!(bytes);
+            to_base!(index);
+            to_base!(src);
+        }
+
+        Opcode::New { dst } => {
+            to_base!(dst);
+        }
+        Opcode::ArraySize { dst, array } => {
+            to_base!(dst);
+            to_base!(array);
+        }
+        Opcode::Type { dst, .. } => {
+            to_base!(dst);
+        }
+        Opcode::GetType { dst, src } | Opcode::GetTID { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
+        }
+        Opcode::Ref { dst, src } | Opcode::Unref { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
+        }
+        Opcode::Setref { dst, value } => {
+            to_base!(dst);
+            to_base!(value);
+        }
 
         Opcode::MakeEnum { dst, args, .. } => {
             to_base!(dst);
-            for a in args.iter_mut() { to_base!(a); }
+            for a in args.iter_mut() {
+                to_base!(a);
+            }
         }
-        Opcode::EnumAlloc { dst, .. } => { to_base!(dst); }
-        Opcode::EnumIndex { dst, value } => { to_base!(dst); to_base!(value); }
-        Opcode::EnumField { dst, value, .. } => { to_base!(dst); to_base!(value); }
-        Opcode::SetEnumField { value, src, .. } => { to_base!(value); to_base!(src); }
+        Opcode::EnumAlloc { dst, .. } => {
+            to_base!(dst);
+        }
+        Opcode::EnumIndex { dst, value } => {
+            to_base!(dst);
+            to_base!(value);
+        }
+        Opcode::EnumField { dst, value, .. } => {
+            to_base!(dst);
+            to_base!(value);
+        }
+        Opcode::SetEnumField { value, src, .. } => {
+            to_base!(value);
+            to_base!(src);
+        }
 
-        Opcode::RefData { dst, src } => { to_base!(dst); to_base!(src); }
-        Opcode::RefOffset { dst, reg, offset } => { to_base!(dst); to_base!(reg); to_base!(offset); }
-        Opcode::Prefetch { value, .. } => { to_base!(value); }
+        Opcode::RefData { dst, src } => {
+            to_base!(dst);
+            to_base!(src);
+        }
+        Opcode::RefOffset { dst, reg, offset } => {
+            to_base!(dst);
+            to_base!(reg);
+            to_base!(offset);
+        }
+        Opcode::Prefetch { value, .. } => {
+            to_base!(value);
+        }
 
-        Opcode::JAlways { .. } | Opcode::Label | Opcode::Assert
-        | Opcode::Nop | Opcode::Asm { .. } => {}
+        Opcode::JAlways { .. }
+        | Opcode::Label
+        | Opcode::Assert
+        | Opcode::Nop
+        | Opcode::Asm { .. } => {}
     }
 }
 
@@ -490,9 +853,19 @@ mod tests {
     #[test]
     fn test_linear_no_phis() {
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
-            Opcode::Add { dst: Reg(2), a: Reg(0), b: Reg(1) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
             Opcode::Ret { ret: Reg(2) },
         ];
         let cfg = CFG::build(&ops);
@@ -513,10 +886,19 @@ mod tests {
         // Block 2: Int(r1, 1)
         // Block 3: Ret(r1) — needs phi for r1
         let mut ops = vec![
-            Opcode::JTrue { cond: Reg(0), offset: 2 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
             Opcode::JAlways { offset: 1 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);
@@ -525,7 +907,10 @@ mod tests {
 
         // The join block (block 3, op4) should have a phi for register 1
         let join_block = cfg.block_of[4];
-        let r1_phis: Vec<_> = ssa.phis[join_block].iter().filter(|p| p.base_reg == 1).collect();
+        let r1_phis: Vec<_> = ssa.phis[join_block]
+            .iter()
+            .filter(|p| p.base_reg == 1)
+            .collect();
         assert!(!r1_phis.is_empty(), "expected phi for r1 at join block");
         assert_eq!(r1_phis[0].sources.len(), 2, "phi should have 2 sources");
     }
@@ -534,9 +919,19 @@ mod tests {
     fn test_round_trip_identity() {
         // Construct SSA then destroy — should produce equivalent opcodes
         let original_ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
-            Opcode::Add { dst: Reg(2), a: Reg(0), b: Reg(1) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
             Opcode::Ret { ret: Reg(2) },
         ];
         let mut ops = original_ops.clone();
@@ -546,23 +941,38 @@ mod tests {
         ssa.destroy(&mut ops);
 
         // After round-trip, registers should be back to base registers
-        if let Opcode::Int { dst, .. } = &ops[0] { assert_eq!(*dst, Reg(0)); }
-        if let Opcode::Int { dst, .. } = &ops[1] { assert_eq!(*dst, Reg(1)); }
+        if let Opcode::Int { dst, .. } = &ops[0] {
+            assert_eq!(*dst, Reg(0));
+        }
+        if let Opcode::Int { dst, .. } = &ops[1] {
+            assert_eq!(*dst, Reg(1));
+        }
         if let Opcode::Add { dst, a, b } = &ops[2] {
             assert_eq!(*dst, Reg(2));
             assert_eq!(*a, Reg(0));
             assert_eq!(*b, Reg(1));
         }
-        if let Opcode::Ret { ret } = &ops[3] { assert_eq!(*ret, Reg(2)); }
+        if let Opcode::Ret { ret } = &ops[3] {
+            assert_eq!(*ret, Reg(2));
+        }
     }
 
     #[test]
     fn test_round_trip_diamond() {
         let original_ops = vec![
-            Opcode::JTrue { cond: Reg(0), offset: 2 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
             Opcode::JAlways { offset: 1 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let mut ops = original_ops.clone();
@@ -572,18 +982,32 @@ mod tests {
         ssa.destroy(&mut ops);
 
         // After round-trip, all registers back to base
-        if let Opcode::JTrue { cond, .. } = &ops[0] { assert_eq!(*cond, Reg(0)); }
-        if let Opcode::Int { dst, .. } = &ops[1] { assert_eq!(*dst, Reg(1)); }
-        if let Opcode::Int { dst, .. } = &ops[3] { assert_eq!(*dst, Reg(1)); }
-        if let Opcode::Ret { ret } = &ops[4] { assert_eq!(*ret, Reg(1)); }
+        if let Opcode::JTrue { cond, .. } = &ops[0] {
+            assert_eq!(*cond, Reg(0));
+        }
+        if let Opcode::Int { dst, .. } = &ops[1] {
+            assert_eq!(*dst, Reg(1));
+        }
+        if let Opcode::Int { dst, .. } = &ops[3] {
+            assert_eq!(*dst, Reg(1));
+        }
+        if let Opcode::Ret { ret } = &ops[4] {
+            assert_eq!(*ret, Reg(1));
+        }
     }
 
     #[test]
     fn test_ssa_registers_unique_defs() {
         // In SSA, each register should be written exactly once
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Int { dst: Reg(0), ptr: RefInt(1) },  // second write to r0
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(1),
+            }, // second write to r0
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -591,12 +1015,27 @@ mod tests {
         let ssa = SSAForm::construct(&mut ops, 1, &cfg, &dom);
 
         // The two Int dsts should have different SSA register IDs
-        let dst0 = if let Opcode::Int { dst, .. } = &ops[0] { *dst } else { panic!() };
-        let dst1 = if let Opcode::Int { dst, .. } = &ops[1] { *dst } else { panic!() };
-        assert_ne!(dst0, dst1, "SSA should give distinct register IDs to each def");
+        let dst0 = if let Opcode::Int { dst, .. } = &ops[0] {
+            *dst
+        } else {
+            panic!()
+        };
+        let dst1 = if let Opcode::Int { dst, .. } = &ops[1] {
+            *dst
+        } else {
+            panic!()
+        };
+        assert_ne!(
+            dst0, dst1,
+            "SSA should give distinct register IDs to each def"
+        );
 
         // The Ret should read the SECOND version
-        let ret_reg = if let Opcode::Ret { ret } = &ops[2] { *ret } else { panic!() };
+        let ret_reg = if let Opcode::Ret { ret } = &ops[2] {
+            *ret
+        } else {
+            panic!()
+        };
         assert_eq!(ret_reg, dst1, "Ret should read the latest version");
 
         // Both map back to base reg 0

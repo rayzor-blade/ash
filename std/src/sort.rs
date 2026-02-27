@@ -1,6 +1,6 @@
+use crate::hl::{vbyte, vclosure};
 use std::cmp::Ordering;
 use std::mem;
-use crate::hl::{vclosure, vbyte};
 
 // Define a trait for types that can be sorted
 pub trait Sortable: Clone {}
@@ -26,7 +26,7 @@ impl<'a, T: Sortable> MSort<'a, T> {
     unsafe fn compare(&self, a: usize, b: usize) -> Ordering {
         let cmp = &*self.cmp;
         let result = if cmp.hasValue != 0 {
-            let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 = 
+            let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 =
                 mem::transmute(cmp.fun);
             fun(cmp.value, self.arr[a].clone(), self.arr[b].clone())
         } else {
@@ -162,12 +162,8 @@ impl<'a, T: Sortable> MSort<'a, T> {
 
 // Function to sort different HashLink types
 pub unsafe fn hl_bsort<T: Sortable>(bytes: *mut vbyte, pos: i32, len: i32, cmp: *mut vclosure) {
-    let slice = std::slice::from_raw_parts_mut(
-        (bytes as *mut T).offset(pos as isize),
-        len as usize
-    );
+    let slice =
+        std::slice::from_raw_parts_mut((bytes as *mut T).offset(pos as isize), len as usize);
     let mut sorter = MSort::new(slice, cmp);
     sorter.sort();
 }
-
-

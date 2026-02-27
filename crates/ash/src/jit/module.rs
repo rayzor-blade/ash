@@ -12,7 +12,8 @@ use inkwell::types::{
     AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType, StructType,
 };
 use inkwell::values::{
-    AnyValue, AnyValueEnum, ArrayValue, AsValueRef, BasicValue, BasicValueEnum, FunctionValue, GenericValue, GlobalValue, IntValue, PointerValue, StructValue
+    AnyValue, AnyValueEnum, ArrayValue, AsValueRef, BasicValue, BasicValueEnum, FunctionValue,
+    GenericValue, GlobalValue, IntValue, PointerValue, StructValue,
 };
 use inkwell::{AddressSpace, OptimizationLevel};
 use num_enum::TryFromPrimitive;
@@ -677,8 +678,7 @@ impl<'ctx> JITModule<'ctx> {
                     let field_kind = bytecode.types[field_type_idx].kind;
 
                     let field_offset = unsafe { *(*rt).fields_indexes.add(j + start) };
-                    let field_addr =
-                        unsafe { (obj_ptr as *mut u8).add(field_offset as usize) };
+                    let field_addr = unsafe { (obj_ptr as *mut u8).add(field_offset as usize) };
 
                     match field_kind {
                         hl_type_kind_HBYTES => {
@@ -697,7 +697,9 @@ impl<'ctx> JITModule<'ctx> {
                         }
                         hl_type_kind_HI32 | hl_type_kind_HBOOL => {
                             // field_value is an index into the ints table
-                            let int_val = bytecode.ints.get(field_value as usize)
+                            let int_val = bytecode
+                                .ints
+                                .get(field_value as usize)
                                 .copied()
                                 .unwrap_or(field_value);
                             unsafe {
@@ -706,7 +708,9 @@ impl<'ctx> JITModule<'ctx> {
                         }
                         _ => {
                             // For other types, try ints table lookup too
-                            let int_val = bytecode.ints.get(field_value as usize)
+                            let int_val = bytecode
+                                .ints
+                                .get(field_value as usize)
                                 .copied()
                                 .unwrap_or(field_value);
                             unsafe {
@@ -715,7 +719,6 @@ impl<'ctx> JITModule<'ctx> {
                         }
                     }
                 }
-
             }
         }
 
@@ -914,9 +917,7 @@ impl<'ctx> JITModule<'ctx> {
                     AnyTypeEnum::FunctionType(t) => {
                         t.ptr_type(inkwell::AddressSpace::default()).into()
                     }
-                    AnyTypeEnum::IntType(t) => {
-                        t.ptr_type(inkwell::AddressSpace::default()).into()
-                    }
+                    AnyTypeEnum::IntType(t) => t.ptr_type(inkwell::AddressSpace::default()).into(),
                     AnyTypeEnum::PointerType(t) => {
                         t.ptr_type(inkwell::AddressSpace::default()).into()
                     }

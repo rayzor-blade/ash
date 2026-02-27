@@ -2,9 +2,9 @@ use crate::{module::AshModule, types::Str};
 use anyhow::*;
 use hlbc::types::{Type, TypeObj};
 use inkwell::{
-    types::{ AnyTypeEnum, BasicType, BasicTypeEnum,  StructType},
-    values::{AnyValueEnum, FunctionValue, StructValue, BasicValueEnum},
-    AddressSpace
+    types::{AnyTypeEnum, BasicType, BasicTypeEnum, StructType},
+    values::{AnyValueEnum, BasicValueEnum, FunctionValue, StructValue},
+    AddressSpace,
 };
 
 #[derive(Debug, Clone)]
@@ -23,15 +23,19 @@ pub struct ObjectField<'ctx> {
 }
 
 impl<'ctx> Object<'ctx> {
-    pub fn create_type(module: &mut AshModule<'ctx>, struct_type:StructType<'ctx>, obj: &TypeObj) -> Result<BasicTypeEnum<'ctx>> {
+    pub fn create_type(
+        module: &mut AshModule<'ctx>,
+        struct_type: StructType<'ctx>,
+        obj: &TypeObj,
+    ) -> Result<BasicTypeEnum<'ctx>> {
         let strings = module.bytecode.strings.clone();
         let types = module.bytecode.types.clone();
-        let type_cache =  module.type_cache.clone();
-        
+        let type_cache = module.type_cache.clone();
+
         let name = module.get_obj_type_name(obj.clone());
         // let struct_type = module.context.opaque_struct_type(&name);
         let mut super_type = None;
-      
+
         if let Some(super_type_ref) = obj.super_ {
             let super_type_obj = module.bytecode.types[super_type_ref.0].clone();
             super_type = match super_type_obj {
@@ -41,17 +45,18 @@ impl<'ctx> Object<'ctx> {
                     } else {
                         None
                     }
-                },
+                }
                 _ => None,
             }
         }
-      
 
         let mut field_types: Vec<BasicTypeEnum<'ctx>> = obj
             .fields
             .iter()
             .map(|field| {
-                let field_type =module.get_or_create_any_type(field.t.0).expect("expected to get field type");
+                let field_type = module
+                    .get_or_create_any_type(field.t.0)
+                    .expect("expected to get field type");
                 let type_ = match field_type {
                     AnyTypeEnum::ArrayType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::FloatType(t) => t.as_basic_type_enum(),
@@ -79,7 +84,7 @@ impl<'ctx> Object<'ctx> {
         //         } else {
         //             module.create_function_value(field.findex.0).expect("expect to create function value")
         //         }
-                
+
         //     })
         //     .collect();
 
@@ -131,7 +136,8 @@ impl<'ctx> Object<'ctx> {
             &methods
                 .iter()
                 .map(|_| {
-                    module.context
+                    module
+                        .context
                         .i8_type()
                         .ptr_type(AddressSpace::default())
                         .into()

@@ -55,9 +55,7 @@ impl PassManager {
         // Phase 1: Pre-SSA passes
         {
             let cfg = CFG::build(ops);
-            let pre_ssa: Vec<Box<dyn Pass>> = vec![
-                Box::new(crate::passes::NullCheckElimPass),
-            ];
+            let pre_ssa: Vec<Box<dyn Pass>> = vec![Box::new(crate::passes::NullCheckElimPass)];
             for pass in &pre_ssa {
                 total += pass.run(ops, num_regs, &cfg);
             }
@@ -81,9 +79,7 @@ impl PassManager {
         // Phase 3: Post-SSA cleanup
         {
             let cfg = CFG::build(ops);
-            let post_ssa: Vec<Box<dyn Pass>> = vec![
-                Box::new(crate::passes::DeadRegElimPass),
-            ];
+            let post_ssa: Vec<Box<dyn Pass>> = vec![Box::new(crate::passes::DeadRegElimPass)];
             for pass in &post_ssa {
                 total += pass.run(ops, num_regs, &cfg);
             }

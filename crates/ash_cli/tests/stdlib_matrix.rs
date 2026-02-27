@@ -127,12 +127,7 @@ fn run_haxe_interp(tests_dir: &Path, main: &str) -> Output {
     run(cmd)
 }
 
-fn run_ash(
-    ash_cli: &Path,
-    hl_path: &Path,
-    mode: AshMode,
-    timeout: Option<Duration>,
-) -> RunResult {
+fn run_ash(ash_cli: &Path, hl_path: &Path, mode: AshMode, timeout: Option<Duration>) -> RunResult {
     let mut cmd = Command::new(ash_cli);
     match mode {
         AshMode::Interp => {
@@ -176,7 +171,11 @@ fn run_matrix(mode: AshMode) {
 
     let tests_dir = tests_dir();
     let ash_cli = ash_cli_bin();
-    assert!(ash_cli.exists(), "ash_cli binary not found at {}", ash_cli.display());
+    assert!(
+        ash_cli.exists(),
+        "ash_cli binary not found at {}",
+        ash_cli.display()
+    );
 
     let include_slow = std::env::var("ASH_STDLIB_INCLUDE_SLOW")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

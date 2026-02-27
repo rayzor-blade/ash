@@ -1,9 +1,6 @@
 use std::ffi::*;
-use std::cmp::min;
 
 use crate::{gc::GC, hl, sort::hl_bsort};
-
-use std::simd::{u16x8, u8x32};
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_bytes_blit(
@@ -30,10 +27,7 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
     }
     let _size: usize = size as usize;
     let allocator = GC.get_mut().expect("expected to get garbage collector");
-    let bytes_ptr = allocator
-        .allocate(_size)
-        .expect("Out of memory")
-        .as_ptr() as *mut hl::vbyte;
+    let bytes_ptr = allocator.allocate(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte;
 
     bytes_ptr
 }
@@ -46,55 +40,22 @@ pub unsafe extern "C" fn hlp_bytes_compare(
     bpos: c_int,
     len: c_int,
 ) -> c_int {
-    // -- SCALAR APPROACH
-    // // Check for null pointers and invalid length
-    // if a.is_null() || b.is_null() || len < 0 {
-    //     return 0; // Or another appropriate error value
-    // }
-
-    // let a_slice = std::slice::from_raw_parts(a.offset(apos as isize), len as usize);
-    // let b_slice = std::slice::from_raw_parts(b.offset(bpos as isize), len as usize);
-    // a_slice.cmp(b_slice) as c_int
-
-    // -- SIMD APPROACH
-    // Check for null pointers and invalid parameters
     if a.is_null() || b.is_null() || apos < 0 || bpos < 0 || len < 0 {
-        return 0; // Or another appropriate error value
+        return 0;
     }
-
-    let a_ptr = a.offset(apos as isize);
-    let b_ptr = b.offset(bpos as isize);
-
-    let mut offset = 0;
-    let simd_len = len as usize / 32;
-
-    // SIMD comparison
-    for _ in 0..simd_len {
-        let a_simd = u8x32::from_slice(std::slice::from_raw_parts(a_ptr.add(offset), 32));
-        let b_simd = u8x32::from_slice(std::slice::from_raw_parts(b_ptr.add(offset), 32));
-
-        if a_simd < b_simd {
+    let a_ptr = a.add(apos as usize);
+    let b_ptr = b.add(bpos as usize);
+    for i in 0..(len as usize) {
+        let xa = *a_ptr.add(i);
+        let xb = *b_ptr.add(i);
+        if xa < xb {
             return -1;
-        } else if a_simd > b_simd {
-            return 1;
         }
-
-        offset += 32;
-    }
-
-    // Compare remaining elements
-    for i in offset..(len as usize) {
-        let byte_a = *a_ptr.add(i);
-        let byte_b = *b_ptr.add(i);
-
-        if byte_a < byte_b {
-            return -1;
-        } else if byte_a > byte_b {
+        if xa > xb {
             return 1;
         }
     }
-
-    0 // Arrays are equal for the compared length
+    0
 }
 
 #[no_mangle]
@@ -103,72 +64,23 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
     b: *const hl::vbyte,
     len: c_int,
 ) -> c_int {
-    // -- SCALAR APPROACH
-    // // Check for null pointers and invalid length
-    // if a.is_null() || b.is_null() || len < 0 {
-    //     return 0; // Or another appropriate error value
-    // }
-
-    // let a_slice16 = hlp_vbyte_to_ushort(a);
-    // let b_slice16 = hlp_vbyte_to_ushort(b);
-
-    // // Create slices of c_ushort
-    // let a_slice = std::slice::from_raw_parts(a_slice16, len as usize);
-    // let b_slice = std::slice::from_raw_parts(b_slice16, len as usize);
-
-    // // Compare the slices
-    // for (&char_a, &char_b) in a_slice.iter().zip(b_slice.iter()) {
-    //     match char_a.cmp(&char_b) {
-    //         Ordering::Less => return -1,
-    //         Ordering::Greater => return 1,
-    //         Ordering::Equal => continue,
-    //     }
-    // }
-
-    // 0 // Arrays are equal for the compared length
-
-
-    // -- SIMD APPROACH
-    // Check for null pointers and invalid length
     if a.is_null() || b.is_null() || len < 0 {
-        return 0; // Or another appropriate error value
+        return 0;
     }
-
-    let a_slice16 = a as *const c_ushort;
-    let b_slice16 = b as *const c_ushort;
-
-    let mut offset = 0;
-    let simd_len = len as usize / 8;
-
-    // SIMD comparison
-    for _ in 0..simd_len {
-        let a_simd = u16x8::from_slice(std::slice::from_raw_parts(a_slice16.add(offset), 8));
-        let b_simd = u16x8::from_slice(std::slice::from_raw_parts(b_slice16.add(offset), 8));
-
-        if a_simd < b_simd {
+    let a16 = a as *const c_ushort;
+    let b16 = b as *const c_ushort;
+    for i in 0..(len as usize) {
+        let xa = *a16.add(i);
+        let xb = *b16.add(i);
+        if xa < xb {
             return -1;
-        } else if a_simd > b_simd {
-            return 1;
         }
-
-        offset += 8;
-    }
-
-    // Compare remaining elements
-    for i in (offset * 2)..(len as usize) {
-        let char_a = *a.add(i);
-        let char_b = *b.add(i);
-
-        if char_a < char_b {
-            return -1;
-        } else if char_a > char_b {
+        if xa > xb {
             return 1;
         }
     }
-
-    0 // Arrays are equal for the compared length
+    0
 }
-
 
 pub struct BoyerMooreHorspool {
     shift: [usize; 256],
@@ -176,9 +88,7 @@ pub struct BoyerMooreHorspool {
 
 impl BoyerMooreHorspool {
     pub fn new() -> Self {
-        BoyerMooreHorspool {
-            shift: [0; 256],
-        }
+        BoyerMooreHorspool { shift: [0; 256] }
     }
 
     pub fn find(&mut self, block: &[u8], pattern: &[u8], repeat_find: bool) -> Option<usize> {
@@ -199,8 +109,9 @@ impl BoyerMooreHorspool {
 
         while match_base < limit {
             let mut match_size = 0;
-            while match_size < pattern.len() &&
-                  block[match_base + match_size] == pattern[match_size] {
+            while match_size < pattern.len()
+                && block[match_base + match_size] == pattern[match_size]
+            {
                 match_size += 1;
             }
 
@@ -224,13 +135,10 @@ impl BoyerMooreHorspool {
     }
 }
 
-
 pub fn memfind_rb(block: &[u8], pattern: &[u8], repeat_find: &mut bool) -> Option<usize> {
     static mut BMH: Option<BoyerMooreHorspool> = None;
 
-    let bmh = unsafe {
-        BMH.get_or_insert_with(BoyerMooreHorspool::new)
-    };
+    let bmh = unsafe { BMH.get_or_insert_with(BoyerMooreHorspool::new) };
 
     let result = bmh.find(block, pattern, *repeat_find);
     *repeat_find = true;
@@ -238,7 +146,14 @@ pub fn memfind_rb(block: &[u8], pattern: &[u8], repeat_find: &mut bool) -> Optio
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bytes_find(r#where: *const hl::vbyte, pos:c_int, len:c_int, which:*const hl::vbyte, wpos:c_int, wlen:c_int ) -> c_int {
+pub unsafe extern "C" fn hlp_bytes_find(
+    r#where: *const hl::vbyte,
+    pos: c_int,
+    len: c_int,
+    which: *const hl::vbyte,
+    wpos: c_int,
+    wlen: c_int,
+) -> c_int {
     // Check for null pointers and invalid parameters
     if r#where.is_null() || which.is_null() || pos < 0 || len < 0 || wpos < 0 || wlen < 0 {
         return -1;
@@ -248,7 +163,7 @@ pub unsafe extern "C" fn hlp_bytes_find(r#where: *const hl::vbyte, pos:c_int, le
     let which_slice = std::slice::from_raw_parts(which.offset(wpos as isize), wlen as usize);
 
     let mut repeat_find = false;
-    
+
     match memfind_rb(where_slice, which_slice, &mut repeat_find) {
         Some(found_index) => (found_index + pos as usize) as c_int,
         None => -1,
@@ -256,7 +171,12 @@ pub unsafe extern "C" fn hlp_bytes_find(r#where: *const hl::vbyte, pos:c_int, le
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bytes_fill(bytes: *mut hl::vbyte, pos: c_int, len: c_int, value: c_int) {
+pub unsafe extern "C" fn hlp_bytes_fill(
+    bytes: *mut hl::vbyte,
+    pos: c_int,
+    len: c_int,
+    value: c_int,
+) {
     // Check for null pointer and invalid parameters
     if bytes.is_null() || pos < 0 || len < 0 {
         return; // Early return for invalid input
@@ -269,28 +189,147 @@ pub unsafe extern "C" fn hlp_bytes_fill(bytes: *mut hl::vbyte, pos: c_int, len: 
     slice.fill(value as u8);
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bsort_i32(bytes: *mut hl::vbyte, pos: i32, len: i32, cmp: *mut hl::vclosure) {
+pub unsafe extern "C" fn hlp_bsort_i32(
+    bytes: *mut hl::vbyte,
+    pos: i32,
+    len: i32,
+    cmp: *mut hl::vclosure,
+) {
     hl_bsort::<i32>(bytes, pos, len, cmp);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bsort_i64(bytes: *mut hl::vbyte, pos: i32, len: i32, cmp: *mut hl::vclosure) {
+pub unsafe extern "C" fn hlp_bsort_i64(
+    bytes: *mut hl::vbyte,
+    pos: i32,
+    len: i32,
+    cmp: *mut hl::vclosure,
+) {
     hl_bsort::<i64>(bytes, pos, len, cmp);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bsort_f32(bytes: *mut hl::vbyte, pos: i32, len: i32, cmp: *mut hl::vclosure) {
+pub unsafe extern "C" fn hlp_bsort_f32(
+    bytes: *mut hl::vbyte,
+    pos: i32,
+    len: i32,
+    cmp: *mut hl::vclosure,
+) {
     hl_bsort::<f32>(bytes, pos, len, cmp);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bsort_f64(bytes: *mut hl::vbyte, pos: i32, len: i32, cmp: *mut hl::vclosure) {
+pub unsafe extern "C" fn hlp_bsort_f64(
+    bytes: *mut hl::vbyte,
+    pos: i32,
+    len: i32,
+    cmp: *mut hl::vclosure,
+) {
     hl_bsort::<f64>(bytes, pos, len, cmp);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bsort_bool(bytes: *mut hl::vbyte, pos: i32, len: i32, cmp: *mut hl::vclosure) {
+pub unsafe extern "C" fn hlp_bsort_bool(
+    bytes: *mut hl::vbyte,
+    pos: i32,
+    len: i32,
+    cmp: *mut hl::vclosure,
+) {
     hl_bsort::<bool>(bytes, pos, len, cmp);
+}
+
+unsafe fn read_utf16z(bytes: *const hl::vbyte) -> Vec<u16> {
+    if bytes.is_null() {
+        return Vec::new();
+    }
+    let mut len = 0usize;
+    let ptr = bytes as *const u16;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    std::slice::from_raw_parts(ptr, len).to_vec()
+}
+
+unsafe fn alloc_utf16_bytes(units: &[u16], out_size: *mut c_int) -> *mut hl::vbyte {
+    if !out_size.is_null() {
+        *out_size = units.len() as c_int;
+    }
+    let out = hlp_alloc_bytes(((units.len() + 1) * 2) as c_int) as *mut u16;
+    if out.is_null() {
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(units.as_ptr(), out, units.len());
+    *out.add(units.len()) = 0;
+    out as *mut hl::vbyte
+}
+
+fn url_encode_utf8(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    for &b in input {
+        let is_unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(b);
+        } else {
+            out.push(b'%');
+            out.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
+            out.push(b"0123456789ABCDEF"[(b & 0x0F) as usize]);
+        }
+    }
+    out
+}
+
+fn from_hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + b - b'a'),
+        b'A'..=b'F' => Some(10 + b - b'A'),
+        _ => None,
+    }
+}
+
+fn url_decode_utf8(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len());
+    let mut i = 0usize;
+    while i < input.len() {
+        if input[i] == b'%' && i + 2 < input.len() {
+            if let (Some(h1), Some(h2)) =
+                (from_hex_digit(input[i + 1]), from_hex_digit(input[i + 2]))
+            {
+                out.push((h1 << 4) | h2);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(input[i]);
+        i += 1;
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_url_encode(
+    bytes: *const hl::vbyte,
+    out_size: *mut c_int,
+) -> *mut hl::vbyte {
+    let units = read_utf16z(bytes);
+    let input = String::from_utf16_lossy(&units);
+    let encoded = url_encode_utf8(input.as_bytes());
+    let encoded_ascii = String::from_utf8_lossy(&encoded);
+    let out_units: Vec<u16> = encoded_ascii.encode_utf16().collect();
+    alloc_utf16_bytes(&out_units, out_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_url_decode(
+    bytes: *const hl::vbyte,
+    out_size: *mut c_int,
+) -> *mut hl::vbyte {
+    let units = read_utf16z(bytes);
+    let input = String::from_utf16_lossy(&units);
+    let decoded = url_decode_utf8(input.as_bytes());
+    let decoded_str = String::from_utf8(decoded)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    let out_units: Vec<u16> = decoded_str.encode_utf16().collect();
+    alloc_utf16_bytes(&out_units, out_size)
 }

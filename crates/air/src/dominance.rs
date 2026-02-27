@@ -89,16 +89,26 @@ impl DominatorTree {
             }
         }
 
-        DominatorTree { idom, dom_children, dom_frontier, rpo, rpo_number }
+        DominatorTree {
+            idom,
+            dom_children,
+            dom_frontier,
+            rpo,
+            rpo_number,
+        }
     }
 
     /// Returns true if block `a` dominates block `b`.
     pub fn dominates(&self, a: BlockId, b: BlockId) -> bool {
-        if a == b { return true; }
+        if a == b {
+            return true;
+        }
         let mut cur = b;
         while cur != self.idom[cur] {
             cur = self.idom[cur];
-            if cur == a { return true; }
+            if cur == a {
+                return true;
+            }
         }
         false
     }
@@ -155,7 +165,10 @@ mod tests {
     #[test]
     fn test_single_block() {
         let ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -173,11 +186,20 @@ mod tests {
         // Block 2: (fallthrough → block 3)
         // Block 3: Ret (join point)
         let ops = vec![
-            Opcode::JTrue { cond: Reg(0), offset: 2 },      // op0: block 0
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },     // op1: block 1
-            Opcode::JAlways { offset: 1 },                    // op2: block 1
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },     // op3: block 2
-            Opcode::Ret { ret: Reg(1) },                      // op4: block 3
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            }, // op0: block 0
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // op1: block 1
+            Opcode::JAlways { offset: 1 }, // op2: block 1
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            }, // op3: block 2
+            Opcode::Ret { ret: Reg(1) },   // op4: block 3
         ];
         let cfg = CFG::build(&ops);
         let dom = DominatorTree::build(&cfg);
@@ -205,10 +227,17 @@ mod tests {
         // Block 1: Incr, JSLt back to block 1; fallthrough → block 2
         // Block 2: Ret
         let ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Incr { dst: Reg(0) },                        // op1: block 1 (leader: jump target)
-            Opcode::JSLt { a: Reg(0), b: Reg(1), offset: -2 },   // op2: back to op1
-            Opcode::Ret { ret: Reg(0) },                          // op3: block 2
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Incr { dst: Reg(0) }, // op1: block 1 (leader: jump target)
+            Opcode::JSLt {
+                a: Reg(0),
+                b: Reg(1),
+                offset: -2,
+            }, // op2: back to op1
+            Opcode::Ret { ret: Reg(0) },  // op3: block 2
         ];
         let cfg = CFG::build(&ops);
         let dom = DominatorTree::build(&cfg);
@@ -224,10 +253,19 @@ mod tests {
     #[test]
     fn test_dominates() {
         let ops = vec![
-            Opcode::JTrue { cond: Reg(0), offset: 2 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
             Opcode::JAlways { offset: 1 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);
@@ -252,9 +290,9 @@ mod tests {
     fn test_linear_chain() {
         // 3 blocks in a chain: 0 → 1 → 2
         let ops = vec![
-            Opcode::JAlways { offset: 0 },   // op0: block 0, jumps to op1
-            Opcode::JAlways { offset: 0 },   // op1: block 1, jumps to op2
-            Opcode::Ret { ret: Reg(0) },      // op2: block 2
+            Opcode::JAlways { offset: 0 }, // op0: block 0, jumps to op1
+            Opcode::JAlways { offset: 0 }, // op1: block 1, jumps to op2
+            Opcode::Ret { ret: Reg(0) },   // op2: block 2
         ];
         let cfg = CFG::build(&ops);
         let dom = DominatorTree::build(&cfg);

@@ -1,6 +1,6 @@
+use crate::bytecode::DecodedBytecode;
 use crate::hl::*;
 use crate::types::{HLType, TypeRef};
-use crate::bytecode::DecodedBytecode;
 use std::collections::HashMap;
 use std::ptr;
 
@@ -117,12 +117,10 @@ impl CTypeFactory {
                         let mut c_fields: Vec<hl_obj_field> = obj
                             .fields
                             .iter()
-                            .map(|f| {
-                                hl_obj_field {
-                                    name: str_to_utf16_ptr(&f.name),
-                                    t: self.resolve_type_ref(&f.type_),
-                                    hashed_name: f.hashed_name,
-                                }
+                            .map(|f| hl_obj_field {
+                                name: str_to_utf16_ptr(&f.name),
+                                t: self.resolve_type_ref(&f.type_),
+                                hashed_name: f.hashed_name,
                             })
                             .collect();
                         let ptr = c_fields.as_mut_ptr();
@@ -199,11 +197,8 @@ impl CTypeFactory {
                     let args = if fun.args.is_empty() {
                         ptr::null_mut()
                     } else {
-                        let mut c_args: Vec<*mut hl_type> = fun
-                            .args
-                            .iter()
-                            .map(|a| self.resolve_type_ref(a))
-                            .collect();
+                        let mut c_args: Vec<*mut hl_type> =
+                            fun.args.iter().map(|a| self.resolve_type_ref(a)).collect();
                         let ptr = c_args.as_mut_ptr();
                         std::mem::forget(c_args);
                         ptr
@@ -244,11 +239,8 @@ impl CTypeFactory {
                                 let params = if c.params.is_empty() {
                                     ptr::null_mut()
                                 } else {
-                                    let mut c_params: Vec<*mut hl_type> = c
-                                        .params
-                                        .iter()
-                                        .map(|p| self.resolve_type_ref(p))
-                                        .collect();
+                                    let mut c_params: Vec<*mut hl_type> =
+                                        c.params.iter().map(|p| self.resolve_type_ref(p)).collect();
                                     let ptr = c_params.as_mut_ptr();
                                     std::mem::forget(c_params);
                                     ptr
@@ -306,12 +298,10 @@ impl CTypeFactory {
                         let mut c_fields: Vec<hl_obj_field> = virt
                             .fields
                             .iter()
-                            .map(|f| {
-                                hl_obj_field {
-                                    name: str_to_utf16_ptr(&f.name),
-                                    t: self.resolve_type_ref(&f.type_),
-                                    hashed_name: f.hashed_name,
-                                }
+                            .map(|f| hl_obj_field {
+                                name: str_to_utf16_ptr(&f.name),
+                                t: self.resolve_type_ref(&f.type_),
+                                hashed_name: f.hashed_name,
                             })
                             .collect();
                         let ptr = c_fields.as_mut_ptr();

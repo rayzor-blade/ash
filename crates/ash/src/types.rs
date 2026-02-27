@@ -199,8 +199,6 @@ pub struct HLTypeObj {
     pub global_value: u32,
 }
 
-
-
 #[derive(Debug, Clone, Default)]
 pub struct HLTypeFun {
     pub args: Vec<TypeRef>,
@@ -210,8 +208,6 @@ pub struct HLTypeFun {
     pub closure: Option<Box<HLTypeFun>>,
 }
 
-
-
 #[derive(Debug, Clone, Default)]
 pub struct HLTypeEnum {
     pub name: String,
@@ -219,14 +215,12 @@ pub struct HLTypeEnum {
     pub global_value: u32,
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct HLObjField {
     pub name: String,
     pub type_: TypeRef,
     pub hashed_name: i32,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct HLObjProto {
@@ -245,7 +239,6 @@ pub struct HLEnumConstruct {
     pub offsets: Vec<i32>,
 }
 
-
 #[derive(Debug, Default, Clone)]
 pub struct HLNative {
     pub lib: String,
@@ -253,7 +246,6 @@ pub struct HLNative {
     pub type_: TypeRef,
     pub findex: i32,
 }
-
 
 #[derive(Debug, Default, Clone)]
 pub struct HLFunction {
@@ -268,8 +260,10 @@ pub struct HLFunction {
     pub field_ref: Option<Box<HLFunction>>,
 }
 impl HLFunction {
-    pub fn name(&self)-> String {
-        self.field_name.clone().unwrap_or(format!("Fun_{}", self.findex))
+    pub fn name(&self) -> String {
+        self.field_name
+            .clone()
+            .unwrap_or(format!("Fun_{}", self.findex))
     }
 }
 
@@ -295,7 +289,6 @@ pub struct HLTypeVirtual {
     pub lookup: HLFieldLookup,
 }
 
-
 #[derive(Debug, Clone, Default)]
 pub struct HLFieldLookup {
     pub t: TypeRef,
@@ -303,12 +296,8 @@ pub struct HLFieldLookup {
     pub field_index: usize,
 }
 
-
-
 #[derive(Debug, Clone, Default)]
 pub struct HLConstant {
     pub global: u32,
     pub fields: Vec<i32>,
 }
-
-

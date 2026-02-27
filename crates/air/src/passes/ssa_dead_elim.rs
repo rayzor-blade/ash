@@ -1,13 +1,15 @@
 use crate::cfg::CFG;
 use crate::dominance::DominatorTree;
-use crate::opcodes::Opcode;
 use crate::opcode_info;
+use crate::opcodes::Opcode;
 use crate::ssa::SSAForm;
 
 pub struct SSADeadElimPass;
 
 impl SSADeadElimPass {
-    pub fn name(&self) -> &str { "ssa_dead_elim" }
+    pub fn name(&self) -> &str {
+        "ssa_dead_elim"
+    }
 
     pub fn run_ssa(
         &self,
@@ -20,7 +22,9 @@ impl SSADeadElimPass {
         let mut use_count: Vec<u32> = vec![0; ssa.num_ssa_regs];
 
         for op in ops.iter() {
-            if matches!(op, Opcode::Nop) { continue; }
+            if matches!(op, Opcode::Nop) {
+                continue;
+            }
             for r in opcode_info::reads(op) {
                 if (r.0 as usize) < use_count.len() {
                     use_count[r.0 as usize] += 1;
@@ -42,7 +46,9 @@ impl SSADeadElimPass {
         // Build def-site map: ssa_reg → opcode index (for cascading elimination)
         let mut def_site: Vec<Option<usize>> = vec![None; ssa.num_ssa_regs];
         for (i, op) in ops.iter().enumerate() {
-            if matches!(op, Opcode::Nop) { continue; }
+            if matches!(op, Opcode::Nop) {
+                continue;
+            }
             for w in opcode_info::writes(op) {
                 if (w.0 as usize) < def_site.len() {
                     def_site[w.0 as usize] = Some(i);
@@ -63,7 +69,9 @@ impl SSADeadElimPass {
 
         let mut eliminated = 0;
         while let Some(i) = worklist.pop() {
-            if matches!(ops[i], Opcode::Nop) { continue; }
+            if matches!(ops[i], Opcode::Nop) {
+                continue;
+            }
 
             // Decrement use counts for read operands before eliminating
             let reads = opcode_info::reads(&ops[i]);
@@ -114,8 +122,14 @@ mod tests {
         // r0 = Int(1)  ← overwrites, first is dead
         // Ret(r0)
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Int { dst: Reg(0), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);
@@ -136,9 +150,19 @@ mod tests {
         // r2 = Int(1)
         // Ret(r2)
         let mut ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Add { dst: Reg(1), a: Reg(0), b: Reg(0) },
-            Opcode::Int { dst: Reg(2), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(0),
+                b: Reg(0),
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(2) },
         ];
         let cfg = CFG::build(&ops);
@@ -158,8 +182,14 @@ mod tests {
         // r1 = Int(0)
         // Ret(r1)
         let mut ops = vec![
-            Opcode::Call0 { dst: Reg(0), fun: RefFun(0) },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(0),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);

@@ -388,7 +388,10 @@ pub unsafe extern "C" fn hlp_hbset(
         let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
         ptr::write(dst, ptr::read(src));
-        ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c as i32);
+        ptr::write(
+            ((*m).cells as *mut i32).wrapping_add(ckey as usize),
+            c as i32,
+        );
     }
     (*(*m).values.wrapping_add(c as usize)).value = value;
     (*m).nentries += 1;
@@ -524,10 +527,7 @@ pub unsafe extern "C" fn hlp_hbget(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_hbexists(
-    m: *mut hl::hl_hb_map,
-    key: *mut hl::uchar,
-) -> bool {
+pub unsafe extern "C" fn hlp_hbexists(m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
     use hl_hb::HbMap;
 
     if m.is_null() || (*m).values.is_null() {
@@ -546,10 +546,7 @@ pub unsafe extern "C" fn hlp_hbexists(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_hbremove(
-    mut m: *mut hl::hl_hb_map,
-    key: *mut hl::uchar,
-) -> bool {
+pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::uchar) -> bool {
     use hl_hb::HbMap;
 
     if m.is_null() || (*m).values.is_null() {
@@ -571,10 +568,7 @@ pub unsafe extern "C" fn hlp_hbremove(
                         next as i8,
                     );
                 } else {
-                    ptr::write(
-                        ((*m).cells as *mut i32).wrapping_add(ckey as usize),
-                        next,
-                    );
+                    ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), next);
                 }
             } else {
                 // Middle/end of chain: nexts[prev] = next
@@ -584,10 +578,7 @@ pub unsafe extern "C" fn hlp_hbremove(
                         next as i8,
                     );
                 } else {
-                    ptr::write(
-                        ((*m).nexts as *mut i32).wrapping_add(prev as usize),
-                        next,
-                    );
+                    ptr::write(((*m).nexts as *mut i32).wrapping_add(prev as usize), next);
                 }
             }
             m.erase_entry(c as usize);

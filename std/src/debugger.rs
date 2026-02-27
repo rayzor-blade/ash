@@ -1,9 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-
-
 static DEBUGGER_PRESENT: AtomicBool = AtomicBool::new(false);
-
 
 #[no_mangle]
 #[inline(never)]
@@ -23,7 +20,8 @@ pub fn hl_debug_break() {
                 }
                 #[cfg(not(target_os = "windows"))]
                 {
-                    core::arch::asm!("int3",
+                    core::arch::asm!(
+                        "int3",
                         ".pushsection embed-breakpoints, \"aw\", @progbits",
                         ".quad .",
                         ".popsection"
@@ -39,7 +37,8 @@ pub fn hl_debug_break() {
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
-                    core::arch::asm!("brk #0",
+                    core::arch::asm!(
+                        "brk #0",
                         ".pushsection .debug_gdb_scripts, \"MS\",@progbits,1",
                         ".byte 1",
                         ".asciz \"breakpoint {{ . }}\"",
@@ -75,10 +74,10 @@ fn hl_detect_debugger() -> bool {
         #[cfg(target_os = "macos")]
         {
             use libc::{ptrace, PT_DENY_ATTACH};
-            
+
             // Try to deny debugger attachment
             let result = ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0);
-            
+
             // If ptrace returns -1, it means a debugger is already attached
             result == -1
         }

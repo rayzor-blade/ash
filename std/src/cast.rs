@@ -1,11 +1,25 @@
 use std::{
-    cmp::Ordering, ffi::{c_long, c_void, CStr}, ptr
+    cmp::Ordering,
+    ffi::{c_long, c_void, CStr},
+    ptr,
 };
 
 use crate::{
-    buffer::hlp_type_str, error::hlp_error, fun::hlp_make_fun_wrapper, gc::GC, hl::{
-        self, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT, hl_type_kind_HARRAY, hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HREF, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, uchar, vclosure, vdynamic, vvirtual
-    }, obj::hl_to_virtual, strings::str_to_uchar_ptr, types::{hlp_is_dynamic, hlp_safe_cast}
+    buffer::hlp_type_str,
+    error::hlp_error,
+    fun::hlp_make_fun_wrapper,
+    gc::GC,
+    hl::{
+        self, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT, hl_type_kind_HARRAY,
+        hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
+        hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32,
+        hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ, hl_type_kind_HREF,
+        hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
+        hl_type_kind_HVIRTUAL, uchar, vclosure, vdynamic, vvirtual,
+    },
+    obj::hl_to_virtual,
+    strings::str_to_uchar_ptr,
+    types::{hlp_is_dynamic, hlp_safe_cast},
 };
 
 pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
@@ -15,7 +29,6 @@ pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
         CStr::from_ptr(hlp_type_str(to) as *const i8).to_string_lossy()
     )));
 }
-
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
@@ -151,10 +164,7 @@ pub unsafe extern "C" fn hlp_dyn_casti(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_dyn_castf(
-    data: *mut c_void,
-    t: *mut hl_type
-) -> f32 {
+pub unsafe extern "C" fn hlp_dyn_castf(data: *mut c_void, t: *mut hl_type) -> f32 {
     // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
     let mut t = t;
     let mut data = data;
@@ -191,29 +201,29 @@ pub unsafe extern "C" fn hlp_dyn_castf(
             } else {
                 hlp_dyn_castf(
                     &mut (*v).v as *mut _ as *mut c_void,
-                    (*t).__bindgen_anon_1.tparam
+                    (*t).__bindgen_anon_1.tparam,
                 )
             }
         }
         _ => {
-            invalid_cast(t, &mut hl_type {
-                kind: hl_type_kind_HF32,
-                __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                    obj: ptr::null_mut(),
+            invalid_cast(
+                t,
+                &mut hl_type {
+                    kind: hl_type_kind_HF32,
+                    __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                        obj: ptr::null_mut(),
+                    },
+                    vobj_proto: ptr::null_mut(),
+                    mark_bits: ptr::null_mut(),
                 },
-                vobj_proto: ptr::null_mut(),
-                mark_bits: ptr::null_mut(),
-            });
+            );
             0.0
         }
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_dyn_castd(
-    data: *mut c_void,
-    t: *mut hl_type,
-) -> f64 {
+pub unsafe extern "C" fn hlp_dyn_castd(data: *mut c_void, t: *mut hl_type) -> f64 {
     // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
     let mut t = t;
     let mut data = data;
@@ -251,19 +261,21 @@ pub unsafe extern "C" fn hlp_dyn_castd(
                 hlp_dyn_castd(
                     &mut (*v).v as *mut _ as *mut c_void,
                     (*t).__bindgen_anon_1.tparam,
-                    
                 )
             }
         }
         _ => {
-            invalid_cast(t, &mut hl_type {
-                kind: hl_type_kind_HF64,
-                __bindgen_anon_1: hl_type__bindgen_ty_1 {
-                    obj: ptr::null_mut(),
+            invalid_cast(
+                t,
+                &mut hl_type {
+                    kind: hl_type_kind_HF64,
+                    __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                        obj: ptr::null_mut(),
+                    },
+                    vobj_proto: ptr::null_mut(),
+                    mark_bits: ptr::null_mut(),
                 },
-                vobj_proto: ptr::null_mut(),
-                mark_bits: ptr::null_mut(),
-            });
+            );
             0.0
         }
     }
@@ -346,7 +358,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         }
         if (*to).kind == hl_type_kind_HNULL
             && (*v).t == (*to).__bindgen_anon_1.tparam
-            &&gc.is_gc_ptr(v)
+            && gc.is_gc_ptr(v)
         {
             return v as *mut c_void;
         }
@@ -367,7 +379,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     }
 
     match ((*t).kind, (*to).kind) {
-        (hl_type_kind_HOBJ, hl_type_kind_HOBJ) =>  {
+        (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
             let mut t1 = (*t).__bindgen_anon_1.obj;
             let t2 = (*to).__bindgen_anon_1.obj;
             loop {
@@ -379,8 +391,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 }
                 t1 = (*(*t1).super_).__bindgen_anon_1.obj;
             }
-            if !(*(*t).__bindgen_anon_1.obj).rt.is_null() && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none() {
-                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(*(data as *mut *mut vdynamic), to);
+            if !(*(*t).__bindgen_anon_1.obj).rt.is_null()
+                && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none()
+            {
+                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(
+                    *(data as *mut *mut vdynamic),
+                    to,
+                );
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
@@ -398,8 +415,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 }
                 t1 = (*(*t1).super_).__bindgen_anon_1.obj;
             }
-            if !(*(*t).__bindgen_anon_1.obj).rt.is_null() && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none() {
-                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(*(data as *mut *mut vdynamic), to);
+            if !(*(*t).__bindgen_anon_1.obj).rt.is_null()
+                && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none()
+            {
+                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(
+                    *(data as *mut *mut vdynamic),
+                    to,
+                );
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
@@ -454,19 +476,23 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         match (*(*to).__bindgen_anon_1.tparam).kind {
             hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
                 let v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
-                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam) as *mut c_void;
+                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
+                    as *mut c_void;
             }
             hl_type_kind_HI64 => {
                 let v = hlp_dyn_casti64(data, t);
-                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam) as *mut c_void;
+                return hlp_make_dyn(&v as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
+                    as *mut c_void;
             }
             hl_type_kind_HF32 => {
                 let f = hlp_dyn_castf(data, t);
-                return hlp_make_dyn(&f as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam) as *mut c_void;
+                return hlp_make_dyn(&f as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
+                    as *mut c_void;
             }
             hl_type_kind_HF64 => {
                 let d = hlp_dyn_castd(data, t);
-                return hlp_make_dyn(&d as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam) as *mut c_void;
+                return hlp_make_dyn(&d as *const _ as *mut c_void, (*to).__bindgen_anon_1.tparam)
+                    as *mut c_void;
             }
             _ => {}
         }
@@ -475,35 +501,40 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     if (*to).kind == hl_type_kind_HREF {
         match (*(*to).__bindgen_anon_1.tparam).kind {
             hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
-                let v =gc.allocate(std::mem::size_of::<i32>())
+                let v = gc
+                    .allocate(std::mem::size_of::<i32>())
                     .expect("Out of memory") // Handle this error appropriately
                     .as_ptr() as *mut i32;
                 *v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
                 return v as *mut c_void;
-            },
+            }
             hl_type_kind_HI64 => {
-                let d =gc.allocate(std::mem::size_of::<i64>())
+                let d = gc
+                    .allocate(std::mem::size_of::<i64>())
                     .expect("Out of memory")
                     .as_ptr() as *mut i64;
                 *d = hlp_dyn_casti64(data, t);
                 return d as *mut c_void;
-            },
+            }
             hl_type_kind_HF32 => {
-                let f =gc.allocate(std::mem::size_of::<f32>())
+                let f = gc
+                    .allocate(std::mem::size_of::<f32>())
                     .expect("Out of memory")
                     .as_ptr() as *mut f32;
                 *f = hlp_dyn_castf(data, t);
                 return f as *mut c_void;
-            },
+            }
             hl_type_kind_HF64 => {
-                let d =gc.allocate(std::mem::size_of::<f64>())
+                let d = gc
+                    .allocate(std::mem::size_of::<f64>())
                     .expect("Out of memory")
                     .as_ptr() as *mut f64;
                 *d = hlp_dyn_castd(data, t);
                 return d as *mut c_void;
-            },
+            }
             _ => {
-                let p =gc.allocate(std::mem::size_of::<*mut c_void>())
+                let p = gc
+                    .allocate(std::mem::size_of::<*mut c_void>())
                     .expect("Out of memory")
                     .as_ptr() as *mut *mut c_void;
                 *p = hlp_dyn_castp(data, t, (*to).__bindgen_anon_1.tparam);
@@ -516,9 +547,11 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     ptr::null_mut()
 }
 
-
 #[no_mangle]
-pub unsafe extern "C" fn hlp_value_cast(v: *mut hl::vdynamic, t: *mut hl::hl_type) -> *mut hl::vdynamic {
+pub unsafe extern "C" fn hlp_value_cast(
+    v: *mut hl::vdynamic,
+    t: *mut hl::hl_type,
+) -> *mut hl::vdynamic {
     // hl_track_call(HL_TRACK_CAST, {
     //     let v_type = if !v.is_null() { (*v).t } else { &hl::hlt_dyn as *const _ as *mut _ };
     //     hl::on_cast(v_type, t);
@@ -537,7 +570,6 @@ pub unsafe extern "C" fn hlp_type_safe_cast(a: *mut hl::hl_type, b: *mut hl::hl_
     hlp_safe_cast(a, b)
 }
 
-
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic) -> i32 {
     match (a as usize).cmp(&(b as usize)) {
@@ -545,4 +577,81 @@ pub unsafe extern "C" fn hlp_ptr_compare(a: *const vdynamic, b: *const vdynamic)
         Ordering::Greater => 1,
         Ordering::Less => -1,
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> i32 {
+    if a == b {
+        return 0;
+    }
+    if a.is_null() {
+        return -1;
+    }
+    if b.is_null() {
+        return 1;
+    }
+    if (*a).t.is_null() || (*b).t.is_null() {
+        return hlp_ptr_compare(a, b);
+    }
+
+    let ka = (*(*a).t).kind;
+    let kb = (*(*b).t).kind;
+    let cmp_f64 = |x: f64, y: f64| -> i32 {
+        if x < y {
+            -1
+        } else if x > y {
+            1
+        } else {
+            0
+        }
+    };
+    let cmp_ord = |o: Ordering| -> i32 {
+        match o {
+            Ordering::Less => -1,
+            Ordering::Equal => 0,
+            Ordering::Greater => 1,
+        }
+    };
+
+    if ka == kb {
+        return match ka {
+            hl_type_kind_HI32 => cmp_ord((*a).v.i.cmp(&(*b).v.i)),
+            hl_type_kind_HUI8 => cmp_ord((*a).v.ui8.cmp(&(*b).v.ui8)),
+            hl_type_kind_HUI16 => cmp_ord((*a).v.ui16.cmp(&(*b).v.ui16)),
+            hl_type_kind_HI64 => cmp_ord((*a).v.i64_.cmp(&(*b).v.i64_)),
+            hl_type_kind_HBOOL => cmp_ord(((*a).v.b as u8).cmp(&((*b).v.b as u8))),
+            hl_type_kind_HF32 => cmp_f64((*a).v.f as f64, (*b).v.f as f64),
+            hl_type_kind_HF64 => cmp_f64((*a).v.d, (*b).v.d),
+            hl_type_kind_HBYTES => {
+                crate::ucs2::ucmp((*a).v.bytes as *const uchar, (*b).v.bytes as *const uchar)
+                    .signum()
+            }
+            _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
+        };
+    }
+
+    let as_num = |v: *mut vdynamic, k: u32| -> Option<f64> {
+        match k {
+            hl_type_kind_HI32 => Some(unsafe { (*v).v.i as f64 }),
+            hl_type_kind_HUI8 => Some(unsafe { (*v).v.ui8 as f64 }),
+            hl_type_kind_HUI16 => Some(unsafe { (*v).v.ui16 as f64 }),
+            hl_type_kind_HI64 => Some(unsafe { (*v).v.i64_ as f64 }),
+            hl_type_kind_HF32 => Some(unsafe { (*v).v.f as f64 }),
+            hl_type_kind_HF64 => Some(unsafe { (*v).v.d }),
+            hl_type_kind_HBOOL => Some(unsafe {
+                if (*v).v.b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }),
+            _ => None,
+        }
+    };
+
+    if let (Some(x), Some(y)) = (as_num(a, ka), as_num(b, kb)) {
+        return cmp_f64(x, y);
+    }
+
+    hlp_ptr_compare(a, b)
 }

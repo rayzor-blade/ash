@@ -1,12 +1,15 @@
-use std::fmt::Write;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use syn::{parse_macro_input, FnArg, ForeignItem, ForeignItemFn, Ident, ItemFn, ItemForeignMod, Pat, ReturnType, Signature, Type};
+use std::fmt::Write;
+use syn::{
+    parse_macro_input, FnArg, ForeignItem, ForeignItemFn, Ident, ItemFn, ItemForeignMod, Pat,
+    ReturnType, Signature, Type,
+};
 
 #[proc_macro_attribute]
 pub fn load_symbol(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemForeignMod);
-    
+
     let mut expanded = quote! {};
 
     for item in input.items.iter() {
@@ -17,21 +20,27 @@ pub fn load_symbol(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
             let symbol_name = fn_name.to_string();
 
-            let arg_types: Vec<_> = inputs.iter().map(|arg| {
-                if let FnArg::Typed(pat_type) = arg {
-                    &pat_type.ty
-                } else {
-                    panic!("Unsupported argument type")
-                }
-            }).collect();
+            let arg_types: Vec<_> = inputs
+                .iter()
+                .map(|arg| {
+                    if let FnArg::Typed(pat_type) = arg {
+                        &pat_type.ty
+                    } else {
+                        panic!("Unsupported argument type")
+                    }
+                })
+                .collect();
 
-            let arg_names: Vec<_> = inputs.iter().map(|arg| {
-                if let FnArg::Typed(pat_type) = arg {
-                    &pat_type.pat
-                } else {
-                    panic!("Unsupported argument type")
-                }
-            }).collect();
+            let arg_names: Vec<_> = inputs
+                .iter()
+                .map(|arg| {
+                    if let FnArg::Typed(pat_type) = arg {
+                        &pat_type.pat
+                    } else {
+                        panic!("Unsupported argument type")
+                    }
+                })
+                .collect();
 
             let return_type = match output {
                 ReturnType::Default => quote! { () },
@@ -68,19 +77,21 @@ pub fn load_symbol(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(final_expanded)
 }
 
-
-
 #[proc_macro_attribute]
 pub fn to_llvm(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemForeignMod);
-    
-    let extern_functions: Vec<_> = input.items.iter().filter_map(|item| {
-        if let ForeignItem::Fn(func) = item {
-            Some(func)
-        } else {
-            None
-        }
-    }).collect();
+
+    let extern_functions: Vec<_> = input
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ForeignItem::Fn(func) = item {
+                Some(func)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     let generated_functions = extern_functions.iter().map(|func| {
         let fn_name = &func.sig.ident;
@@ -193,23 +204,53 @@ fn get_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
         Type::Path(type_path) => {
             let type_name = type_path.path.segments.last().unwrap().ident.to_string();
             match type_name.as_str() {
-                "i8" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> = context.i8_type().into(); t} },
-                "i16" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> = context.i16_type().into(); t} },
-                "i32" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i32_type().into(); t} },
-                "i64" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i64_type().into(); t} },
-                "u8" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().into(); t} },
-                "u16" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i16_type().into(); t} },
-                "u32" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i32_type().into(); t} },
-                "u64" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i64_type().into(); t} },
-                "f32" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.f32_type().into(); t} },
-                "f64" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.f64_type().into(); t} },
-                "bool" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.bool_type().into(); t} },
-                "c_void" => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(); t} },
-                _ => quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(); t} },
+                "i8" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> = context.i8_type().into(); t} }
+                }
+                "i16" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> = context.i16_type().into(); t} }
+                }
+                "i32" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i32_type().into(); t} }
+                }
+                "i64" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i64_type().into(); t} }
+                }
+                "u8" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().into(); t} }
+                }
+                "u16" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i16_type().into(); t} }
+                }
+                "u32" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i32_type().into(); t} }
+                }
+                "u64" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i64_type().into(); t} }
+                }
+                "f32" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.f32_type().into(); t} }
+                }
+                "f64" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.f64_type().into(); t} }
+                }
+                "bool" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.bool_type().into(); t} }
+                }
+                "c_void" => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(); t} }
+                }
+                _ => {
+                    quote! { { let t:inkwell::types::BasicMetadataTypeEnum<'ctx> =context.i8_type().ptr_type(inkwell::AddressSpace::default()).into(); t} }
+                }
             }
-        },
-        Type::Ptr(_) => quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() },
-        Type::Reference(_) => quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() },
+        }
+        Type::Ptr(_) => {
+            quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() }
+        }
+        Type::Reference(_) => {
+            quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() }
+        }
         _ => quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() },
     }
 }

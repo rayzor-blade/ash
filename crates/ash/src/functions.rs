@@ -16,8 +16,6 @@ use std::collections::HashMap;
 use std::sync::Once;
 use tempfile::TempDir;
 
-
-
 impl<'ctx> AshModule<'ctx> {
     pub(crate) fn create_function_type(
         &mut self,
@@ -512,9 +510,7 @@ impl<'ctx> AshModule<'ctx> {
             _ => return Err(anyhow!("Invalid function type")),
         };
 
-        Ok(self
-            .module
-            .add_function(name.as_str(), func_type, None))
+        Ok(self.module.add_function(name.as_str(), func_type, None))
     }
 
     fn generate_native_caller_function(
@@ -534,7 +530,7 @@ impl<'ctx> AshModule<'ctx> {
         if let Some(result) = call_site.try_as_basic_value().left() {
             self.builder.build_return(Some(&result));
         }
-        
+
         Ok(function)
     }
 
@@ -573,4 +569,3 @@ impl<'ctx> AshModule<'ctx> {
         Err(anyhow!("Native function not found '{}::{}'", lib, name))
     }
 }
-

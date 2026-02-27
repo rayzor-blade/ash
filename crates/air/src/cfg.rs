@@ -1,5 +1,5 @@
-use crate::opcodes::Opcode;
 use crate::opcode_info;
+use crate::opcodes::Opcode;
 
 pub type BlockId = usize;
 
@@ -25,7 +25,10 @@ impl CFG {
     pub fn build(ops: &[Opcode]) -> Self {
         let n = ops.len();
         if n == 0 {
-            return CFG { blocks: vec![], block_of: vec![] };
+            return CFG {
+                blocks: vec![],
+                block_of: vec![],
+            };
         }
 
         // Pass 1: identify block leaders (first opcode of each basic block)
@@ -45,15 +48,21 @@ impl CFG {
                 Opcode::Switch { offsets, end, .. } => {
                     for off in offsets {
                         let target = (i as i32 + 1 + off) as usize;
-                        if target < n { is_leader[target] = true; }
+                        if target < n {
+                            is_leader[target] = true;
+                        }
                     }
                     let target = (i as i32 + 1 + end) as usize;
-                    if target < n { is_leader[target] = true; }
+                    if target < n {
+                        is_leader[target] = true;
+                    }
                 }
                 _ => {
                     if let Some(offset) = opcode_info::jump_offset(op) {
                         let target = (i as i32 + 1 + offset) as usize;
-                        if target < n { is_leader[target] = true; }
+                        if target < n {
+                            is_leader[target] = true;
+                        }
                     }
                 }
             }
@@ -130,9 +139,19 @@ mod tests {
     #[test]
     fn test_linear_cfg() {
         let ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
-            Opcode::Add { dst: Reg(2), a: Reg(0), b: Reg(1) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
             Opcode::Ret { ret: Reg(2) },
         ];
         let cfg = CFG::build(&ops);
@@ -149,10 +168,19 @@ mod tests {
         // op3: Int(r1, 1)     ← branch target, new block
         // op4: Ret(r1)        ← fallthrough target, new block
         let ops = vec![
-            Opcode::JTrue { cond: Reg(0), offset: 2 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(0) },
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
             Opcode::JAlways { offset: 1 },
-            Opcode::Int { dst: Reg(1), ptr: RefInt(1) },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
             Opcode::Ret { ret: Reg(1) },
         ];
         let cfg = CFG::build(&ops);
@@ -175,10 +203,17 @@ mod tests {
         // op3: JSLt(r0, r1, -2)  → target is op2 (i=3, 3+1+(-2)=2), but op1 is the leader
         // op4: Ret(r0)
         let ops = vec![
-            Opcode::Int { dst: Reg(0), ptr: RefInt(0) },
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
             Opcode::Label,
             Opcode::Incr { dst: Reg(0) },
-            Opcode::JSLt { a: Reg(0), b: Reg(1), offset: -2 },
+            Opcode::JSLt {
+                a: Reg(0),
+                b: Reg(1),
+                offset: -2,
+            },
             Opcode::Ret { ret: Reg(0) },
         ];
         let cfg = CFG::build(&ops);

@@ -27,10 +27,52 @@ use crate::{
 
 /// Pre-computed UTF-16 null-terminated string constants for hash lookups.
 /// These must be properly aligned u16 arrays, not byte strings cast to u16.
-static USTR_COMPARE: &[u16] = &[b'_' as u16, b'_' as u16, b'c' as u16, b'o' as u16, b'm' as u16, b'p' as u16, b'a' as u16, b'r' as u16, b'e' as u16, 0];
-static USTR_STRING: &[u16] = &[b'_' as u16, b'_' as u16, b's' as u16, b't' as u16, b'r' as u16, b'i' as u16, b'n' as u16, b'g' as u16, 0];
-static USTR_CAST: &[u16] = &[b'_' as u16, b'_' as u16, b'c' as u16, b'a' as u16, b's' as u16, b't' as u16, 0];
-static USTR_GET_FIELD: &[u16] = &[b'_' as u16, b'_' as u16, b'g' as u16, b'e' as u16, b't' as u16, b'_' as u16, b'f' as u16, b'i' as u16, b'e' as u16, b'l' as u16, b'd' as u16, 0];
+static USTR_COMPARE: &[u16] = &[
+    b'_' as u16,
+    b'_' as u16,
+    b'c' as u16,
+    b'o' as u16,
+    b'm' as u16,
+    b'p' as u16,
+    b'a' as u16,
+    b'r' as u16,
+    b'e' as u16,
+    0,
+];
+static USTR_STRING: &[u16] = &[
+    b'_' as u16,
+    b'_' as u16,
+    b's' as u16,
+    b't' as u16,
+    b'r' as u16,
+    b'i' as u16,
+    b'n' as u16,
+    b'g' as u16,
+    0,
+];
+static USTR_CAST: &[u16] = &[
+    b'_' as u16,
+    b'_' as u16,
+    b'c' as u16,
+    b'a' as u16,
+    b's' as u16,
+    b't' as u16,
+    0,
+];
+static USTR_GET_FIELD: &[u16] = &[
+    b'_' as u16,
+    b'_' as u16,
+    b'g' as u16,
+    b'e' as u16,
+    b't' as u16,
+    b'_' as u16,
+    b'f' as u16,
+    b'i' as u16,
+    b'e' as u16,
+    b'l' as u16,
+    b'd' as u16,
+    0,
+];
 
 static HL_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[derive(Clone)]
@@ -57,7 +99,7 @@ pub static cache_lock: Mutex<i32> = Mutex::new(0);
 pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvirtual {
     let allocator = GC.get_mut().expect("Expected to get GC");
     if let Some(virt) = allocator.alloc_virtual(t) {
-        return virt.as_ptr()
+        return virt.as_ptr();
     }
     return std::ptr::null_mut();
 }
@@ -648,7 +690,8 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             i as i32
         };
         if !m.is_null() && !(*m).functions_ptrs.is_null() {
-            *(*t).methods.add(method_index as usize) = *(*m).functions_ptrs.add((*pr).findex as usize);
+            *(*t).methods.add(method_index as usize) =
+                *(*m).functions_ptrs.add((*pr).findex as usize);
         }
     }
 
@@ -741,18 +784,9 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
 
     let str_hash = hlp_hash_gen(USTR_STRING.as_ptr(), false);
     let str_field = obj_resolve_field(o, str_hash);
-    let cmp_field = obj_resolve_field(
-        o,
-        hlp_hash_gen(USTR_COMPARE.as_ptr(), false),
-    );
-    let cast_field = obj_resolve_field(
-        o,
-        hlp_hash_gen(USTR_CAST.as_ptr(), false),
-    );
-    let get_field = obj_resolve_field(
-        o,
-        hlp_hash_gen(USTR_GET_FIELD.as_ptr(), false),
-    );
+    let cmp_field = obj_resolve_field(o, hlp_hash_gen(USTR_COMPARE.as_ptr(), false));
+    let cast_field = obj_resolve_field(o, hlp_hash_gen(USTR_CAST.as_ptr(), false));
+    let get_field = obj_resolve_field(o, hlp_hash_gen(USTR_GET_FIELD.as_ptr(), false));
     (*t).toStringFun = if !str_field.is_null() {
         Some(mem::transmute::<
             *const c_void,
@@ -821,8 +855,7 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
     let kind = (*ot).kind;
-    if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {
-    }
+    if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {}
     let o = (*ot).__bindgen_anon_1.obj;
     let m = (*o).m;
 
@@ -1034,7 +1067,8 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             -(method_index + 1),
         );
         nlookup += 1;
-        if !m.is_null() && !(*m).functions_types.is_null()
+        if !m.is_null()
+            && !(*m).functions_types.is_null()
             && (*pr).hashed_name == compare_hash
             && (*(*mt).__bindgen_anon_1.fun).nargs == 2
             && (*(*(*(*mt).__bindgen_anon_1.fun).args.add(1))).kind == hl::hl_type_kind_HDYN
@@ -1884,10 +1918,7 @@ pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynami
 /// the `this` arg — nargs=0 methods like hasNext/next), and returns the result
 /// as a vdynamic* (boxed). The JIT unboxes as needed.
 #[no_mangle]
-pub unsafe extern "C" fn hlp_vcall_virtual_0(
-    virt: *mut vvirtual,
-    field: i32,
-) -> *mut vdynamic {
+pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) -> *mut vdynamic {
     let obj = (*virt).value;
     let vt = (*virt).t;
     let hfield = (*vt)
@@ -1917,9 +1948,16 @@ pub unsafe extern "C" fn hlp_vcall_virtual_0(
     let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
         std::mem::transmute(method_ptr);
     let result = method_fn(obj);
-    eprintln!("[hlp_vcall_virtual_0] field={}, method_ptr={:p}, result={:p}", field, method_ptr, result);
+    eprintln!(
+        "[hlp_vcall_virtual_0] field={}, method_ptr={:p}, result={:p}",
+        field, method_ptr, result
+    );
     if !result.is_null() {
-        eprintln!("[hlp_vcall_virtual_0] result.t.kind={}, result.v.i={}", (*(*result).t).kind, (*result).v.i);
+        eprintln!(
+            "[hlp_vcall_virtual_0] result.t.kind={}, result.v.i={}",
+            (*(*result).t).kind,
+            (*result).v.i
+        );
     }
     result
 }
@@ -2368,7 +2406,10 @@ pub unsafe extern "C" fn hlp_hash(name: *mut vbyte) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
-    use crate::{array::hlp_alloc_array, types::{hlt_bytes, hl_aptr}};
+    use crate::{
+        array::hlp_alloc_array,
+        types::{hl_aptr, hlt_bytes},
+    };
 
     if obj.is_null() {
         return ptr::null_mut();
@@ -2433,7 +2474,10 @@ pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varray {
-    use crate::{array::hlp_alloc_array, types::{hlt_bytes, hl_aptr}};
+    use crate::{
+        array::hlp_alloc_array,
+        types::{hl_aptr, hlt_bytes},
+    };
 
     if t.is_null() {
         return ptr::null_mut();

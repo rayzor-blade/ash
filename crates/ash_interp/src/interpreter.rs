@@ -1,14 +1,14 @@
+use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
-use anyhow::{anyhow, Result};
 
 use ash::bytecode::DecodedBytecode;
 use ash::c_types::CTypeFactory;
-use ash::hl_bindings::{self as hl, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT, _vclosure};
+use ash::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT};
 use ash::jit::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
 use ash::native_lib::NativeFunctionResolver;
 use ash::opcodes::{Opcode, Reg};
@@ -117,7 +117,8 @@ impl Default for TieredConfig {
             enabled: false,
             jit_threshold: 100,
             max_jit_args: 8,
-            min_ops_for_promotion: 16,
+            // 0 disables the static opcode-size gate; promotion hotness is call-count based.
+            min_ops_for_promotion: 0,
             log_promotions: false,
             strict_mode: true,
         }
@@ -434,12 +435,15 @@ impl HLInterpreter {
                 let mut module: Option<JITModule<'static>> = None;
                 for findex in worker_req_rx {
                     if module.is_none() {
-                        let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                            || {
+                        let init_result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 let context = Box::leak(Box::new(Context::create()));
-                                JITModule::new_with_shared_runtime(context, &hl_path, shared.clone())
-                            },
-                        ));
+                                JITModule::new_with_shared_runtime(
+                                    context,
+                                    &hl_path,
+                                    shared.clone(),
+                                )
+                            }));
                         match init_result {
                             Ok(m) => {
                                 if log_promotions {
@@ -457,14 +461,13 @@ impl HLInterpreter {
                         }
                     }
 
-                    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || {
+                    let compile_result =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             module
                                 .as_mut()
                                 .expect("JIT module should be initialized")
                                 .promote_function_strict(findex)
-                        },
-                    ));
+                        }));
                     let result = match compile_result {
                         Ok(Ok(meta)) => Ok(meta),
                         Ok(Err(e)) => Err(e.to_string()),
@@ -509,8 +512,7 @@ impl HLInterpreter {
         type FnSetGlobals = unsafe extern "C" fn(*const *mut c_void, usize);
         type FnSetStackTop = unsafe extern "C" fn(usize);
         let set_globals: FnSetGlobals = unsafe { std::mem::transmute(self.fn_gc_set_globals) };
-        let set_stack_top: FnSetStackTop =
-            unsafe { std::mem::transmute(self.fn_gc_set_stack_top) };
+        let set_stack_top: FnSetStackTop = unsafe { std::mem::transmute(self.fn_gc_set_stack_top) };
         unsafe {
             set_globals(globals_ptr as *const *mut c_void, globals_len);
             let stack_top: usize;
@@ -605,7 +607,10 @@ impl HLInterpreter {
         None
     }
 
-    unsafe fn resolve_virtual_field_offset(c_type_ptr: *mut c_void, field_idx: usize) -> Option<usize> {
+    unsafe fn resolve_virtual_field_offset(
+        c_type_ptr: *mut c_void,
+        field_idx: usize,
+    ) -> Option<usize> {
         if c_type_ptr.is_null() {
             return None;
         }
@@ -718,7 +723,8 @@ impl HLInterpreter {
         };
         let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
             unsafe { std::mem::transmute(self.fn_make_dyn) };
-        let dyn_ptr = unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, field_t as *mut c_void) };
+        let dyn_ptr =
+            unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, field_t as *mut c_void) };
         if dyn_ptr.is_null() {
             NanBoxedValue::null()
         } else {
@@ -726,7 +732,10 @@ impl HLInterpreter {
         }
     }
 
-    fn try_handle_virtual_obj_get_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+    fn try_handle_virtual_obj_get_field(
+        &mut self,
+        args: &[NanBoxedValue],
+    ) -> Option<NanBoxedValue> {
         if args.len() < 2 {
             return Some(NanBoxedValue::null());
         }
@@ -739,11 +748,14 @@ impl HLInterpreter {
             return Some(NanBoxedValue::null());
         }
         let hfield = args[1].as_i32();
-        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none() && unsafe {
-            let t = *(obj_ptr as *const *mut hl_type);
-            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-        } {
+        let meta =
+            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none()
+            && unsafe {
+                let t = *(obj_ptr as *const *mut hl_type);
+                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+            }
+        {
             return None;
         }
         let (val, field_t) = unsafe {
@@ -776,7 +788,10 @@ impl HLInterpreter {
         Some(self.box_value_as_dynamic_with_type(val, field_t))
     }
 
-    fn try_handle_virtual_obj_set_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+    fn try_handle_virtual_obj_set_field(
+        &mut self,
+        args: &[NanBoxedValue],
+    ) -> Option<NanBoxedValue> {
         if args.len() < 3 {
             return Some(NanBoxedValue::void());
         }
@@ -790,11 +805,14 @@ impl HLInterpreter {
         }
         let hfield = args[1].as_i32();
         let src_val = args[2];
-        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none() && unsafe {
-            let t = *(obj_ptr as *const *mut hl_type);
-            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-        } {
+        let meta =
+            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none()
+            && unsafe {
+                let t = *(obj_ptr as *const *mut hl_type);
+                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+            }
+        {
             return None;
         }
 
@@ -823,7 +841,10 @@ impl HLInterpreter {
         Some(NanBoxedValue::void())
     }
 
-    fn try_handle_virtual_obj_has_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+    fn try_handle_virtual_obj_has_field(
+        &mut self,
+        args: &[NanBoxedValue],
+    ) -> Option<NanBoxedValue> {
         if args.len() < 2 {
             return Some(NanBoxedValue::from_bool(false));
         }
@@ -836,11 +857,14 @@ impl HLInterpreter {
             return Some(NanBoxedValue::from_bool(false));
         }
         let hfield = args[1].as_i32();
-        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none() && unsafe {
-            let t = *(obj_ptr as *const *mut hl_type);
-            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-        } {
+        let meta =
+            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none()
+            && unsafe {
+                let t = *(obj_ptr as *const *mut hl_type);
+                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+            }
+        {
             return None;
         }
         let found = match meta {
@@ -853,7 +877,10 @@ impl HLInterpreter {
         Some(NanBoxedValue::from_bool(found))
     }
 
-    fn try_handle_virtual_obj_delete_field(&mut self, args: &[NanBoxedValue]) -> Option<NanBoxedValue> {
+    fn try_handle_virtual_obj_delete_field(
+        &mut self,
+        args: &[NanBoxedValue],
+    ) -> Option<NanBoxedValue> {
         if args.len() < 2 {
             return Some(NanBoxedValue::from_bool(false));
         }
@@ -866,19 +893,28 @@ impl HLInterpreter {
             return Some(NanBoxedValue::from_bool(false));
         }
         let hfield = args[1].as_i32();
-        let meta = unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none() && unsafe {
-            let t = *(obj_ptr as *const *mut hl_type);
-            t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-        } {
+        let meta =
+            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
+        if meta.is_none()
+            && unsafe {
+                let t = *(obj_ptr as *const *mut hl_type);
+                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
+            }
+        {
             return None;
         }
         let removed = match meta {
             Some((idx, _)) => {
                 self.virtual_fields.remove(&(obj_ptr, idx)).is_some()
-                    || self.virtual_hash_fields.remove(&(obj_ptr, hfield)).is_some()
+                    || self
+                        .virtual_hash_fields
+                        .remove(&(obj_ptr, hfield))
+                        .is_some()
             }
-            None => self.virtual_hash_fields.remove(&(obj_ptr, hfield)).is_some(),
+            None => self
+                .virtual_hash_fields
+                .remove(&(obj_ptr, hfield))
+                .is_some(),
         };
         Some(NanBoxedValue::from_bool(removed))
     }
@@ -989,7 +1025,11 @@ impl HLInterpreter {
                 if !fn_dyn_seti.is_null() {
                     let f: FnDynSetI = unsafe { std::mem::transmute(fn_dyn_seti) };
                     let i = if src_kind == hl::hl_type_kind_HBOOL {
-                        if src_val.as_bool() { 1 } else { 0 }
+                        if src_val.as_bool() {
+                            1
+                        } else {
+                            0
+                        }
                     } else {
                         src_val.as_i32()
                     };
@@ -1034,7 +1074,8 @@ impl HLInterpreter {
             let dyn_ptr = val.as_ptr() as *mut hl::vdynamic;
             let base = self.value_to_string(dyn_ptr);
             if !self.fn_obj_get_field.is_null() {
-                let get_field: FnObjGetField = unsafe { std::mem::transmute(self.fn_obj_get_field) };
+                let get_field: FnObjGetField =
+                    unsafe { std::mem::transmute(self.fn_obj_get_field) };
                 let mut extracted: Option<String> = None;
                 for field_name in ["__exceptionMessage", "message"] {
                     let h = self.hash_literal_name(field_name);
@@ -1065,11 +1106,18 @@ impl HLInterpreter {
                 base
             }
         };
-        HLExceptionPropagation { value: val, message: msg }
+        HLExceptionPropagation {
+            value: val,
+            message: msg,
+        }
     }
 
     /// Intern a bytecode string as null-terminated UTF-16 and return a stable pointer.
-    fn intern_utf16_string(&mut self, bytecode: &DecodedBytecode, str_idx: usize) -> Option<*const u16> {
+    fn intern_utf16_string(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        str_idx: usize,
+    ) -> Option<*const u16> {
         if let Some(&cached) = self.utf16_strings.get(&str_idx) {
             return Some(cached);
         }
@@ -1257,7 +1305,9 @@ impl HLInterpreter {
                         }
                         _ => {
                             // field_value is an index into ints table for HI32/HBOOL
-                            let int_val = bytecode.ints.get(field_value as usize)
+                            let int_val = bytecode
+                                .ints
+                                .get(field_value as usize)
                                 .copied()
                                 .unwrap_or(field_value);
                             unsafe {
@@ -1266,7 +1316,6 @@ impl HLInterpreter {
                         }
                     }
                 }
-
             }
         }
 
@@ -1403,15 +1452,13 @@ impl HLInterpreter {
             log_skip("name_blacklisted");
             return false;
         }
-        if func.ops.len() < tiered.config.min_ops_for_promotion {
+        if tiered.config.min_ops_for_promotion > 0
+            && func.ops.len() < tiered.config.min_ops_for_promotion
+        {
             log_skip("op_count_below_min");
             return false;
         }
-        if let Some(bad) = func
-            .ops
-            .iter()
-            .find(|op| !Self::is_v1_tierable_opcode(op))
-        {
+        if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
             if log_this_check {
                 eprintln!(
                     "[tiered] skip findex={} reason=unsupported_opcode op={:?}",
@@ -1627,21 +1674,18 @@ impl HLInterpreter {
                 if jumped != 0 {
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
-                        let exc_ptr = unsafe {
-                            (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))()
-                        };
+                        let exc_ptr =
+                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
                         if !exc_ptr.is_null() {
                             if !fn_clear_exc.is_null() {
                                 type FnClearExc = unsafe extern "C" fn();
                                 unsafe {
-                                    (std::mem::transmute::<*mut c_void, FnClearExc>(
-                                        fn_clear_exc,
-                                    ))()
+                                    (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(self.format_hl_exception(
-                                NanBoxedValue::from_ptr(exc_ptr as usize),
-                            )));
+                            return Err(anyhow::Error::new(
+                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
+                            ));
                         }
                     }
                     return Err(anyhow!(
@@ -1678,7 +1722,12 @@ impl HLInterpreter {
                     4 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(extract_arg(0), extract_arg(1), extract_arg(2), extract_arg(3))
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                        )
                     }
                     5 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
@@ -1801,7 +1850,13 @@ impl HLInterpreter {
 
             let op = func.ops[pc].clone();
             if std::env::var("ASH_TRACE_ASSERT").is_ok() {
-                eprintln!("[TRACE] f{} {} pc={} op={:?}", func_idx, func.name(), pc, op);
+                eprintln!(
+                    "[TRACE] f{} {} pc={} op={:?}",
+                    func_idx,
+                    func.name(),
+                    pc,
+                    op
+                );
             }
             let result = self.execute_opcode(bytecode, &op, func_idx)?;
 
@@ -1878,7 +1933,9 @@ impl HLInterpreter {
             }
             Opcode::Bytes { dst, ptr } => {
                 let pos = bytecode.bytes_pos[ptr.0];
-                frame.registers.set(dst.0, NanBoxedValue::from_bytes_ptr(pos));
+                frame
+                    .registers
+                    .set(dst.0, NanBoxedValue::from_bytes_ptr(pos));
             }
             Opcode::String { dst, ptr } => {
                 // HashLink uses UTF-16 strings internally.
@@ -1897,7 +1954,9 @@ impl HLInterpreter {
                     self.utf16_strings.insert(ptr.0, ptr_val);
                     ptr_val
                 };
-                frame.registers.set(dst.0, NanBoxedValue::from_bytes_ptr(utf16_ptr as usize));
+                frame
+                    .registers
+                    .set(dst.0, NanBoxedValue::from_bytes_ptr(utf16_ptr as usize));
             }
             Opcode::Null { dst } => {
                 frame.registers.set(dst.0, NanBoxedValue::null());
@@ -2164,17 +2223,13 @@ impl HLInterpreter {
                                 let virt_field = &*virt_data.fields.add(field.0);
                                 let hname = virt_field.hashed_name;
                                 // Walk the runtime obj's proto chain for hname
-                                let mut obj_hl_type =
-                                    *(obj_ptr as *const *mut hl_type);
+                                let mut obj_hl_type = *(obj_ptr as *const *mut hl_type);
                                 let mut found = None;
                                 'search: while !obj_hl_type.is_null()
                                     && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
-                                        || (*obj_hl_type).kind
-                                            == hl::hl_type_kind_HSTRUCT)
+                                        || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
                                 {
-                                    let obj = (*obj_hl_type)
-                                        .__bindgen_anon_1
-                                        .obj;
+                                    let obj = (*obj_hl_type).__bindgen_anon_1.obj;
                                     for i in 0..(*obj).nproto as usize {
                                         let pr = &*(*obj).proto.add(i);
                                         if pr.hashed_name == hname {
@@ -2218,22 +2273,17 @@ impl HLInterpreter {
                                 bytecode, func, &args[0], field.0,
                             )
                             .ok_or_else(|| {
-                                anyhow!(
-                                    "Cannot resolve method field={} on type",
-                                    field.0
-                                )
+                                anyhow!("Cannot resolve method field={} on type", field.0)
                             })?
                         }
                     } else {
-                        self.resolve_method_findex_from_bytecode(
-                            bytecode, func, &args[0], field.0,
-                        )
-                        .ok_or_else(|| {
-                            anyhow!(
-                                "Cannot resolve method field={} (null type header)",
-                                field.0
-                            )
-                        })?
+                        self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field.0)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "Cannot resolve method field={} (null type header)",
+                                    field.0
+                                )
+                            })?
                     }
                 };
 
@@ -2259,13 +2309,20 @@ impl HLInterpreter {
                     closure_val.as_func_index()
                 } else {
                     let raw = closure_val.as_ptr();
-                    if self.findex_to_func.contains_key(&raw) || self.findex_to_native.contains_key(&raw) {
+                    if self.findex_to_func.contains_key(&raw)
+                        || self.findex_to_native.contains_key(&raw)
+                    {
                         raw
                     } else {
                         // It's a pointer to a _vclosure struct
                         let cl_ptr = raw as *const _vclosure;
-                        if cl_ptr.is_null() || (cl_ptr as usize) % std::mem::align_of::<_vclosure>() != 0 {
-                            return Err(anyhow!("CallClosure invalid closure value: {:?}", closure_val));
+                        if cl_ptr.is_null()
+                            || (cl_ptr as usize) % std::mem::align_of::<_vclosure>() != 0
+                        {
+                            return Err(anyhow!(
+                                "CallClosure invalid closure value: {:?}",
+                                closure_val
+                            ));
                         }
                         unsafe {
                             let fun_ptr = (*cl_ptr).fun;
@@ -2307,8 +2364,7 @@ impl HLInterpreter {
                     let f: FnAllocClosureVoid =
                         unsafe { std::mem::transmute(self.fn_alloc_closure_void) };
                     let tptr = self.c_type_factory.get(type_idx) as *mut c_void;
-                    let closure =
-                        unsafe { f(tptr, (findex + 1) as *mut c_void) };
+                    let closure = unsafe { f(tptr, (findex + 1) as *mut c_void) };
                     if !closure.is_null() {
                         if std::env::var("ASH_DBG_CLOSURE").is_ok() {
                             eprintln!(
@@ -2459,10 +2515,13 @@ impl HLInterpreter {
                 }
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
-                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT
+                {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let val = unsafe {
-                        Self::read_obj_field(obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt)
+                        Self::read_obj_field(
+                            obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
+                        )
                     };
                     if std::env::var("ASH_DBG_FIELD").is_ok() {
                         eprintln!(
@@ -2472,7 +2531,9 @@ impl HLInterpreter {
                     }
                     frame.registers.set(dst.0, val);
                 } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                    if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                    if let Some(offset) =
+                        unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                    {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
@@ -2529,10 +2590,13 @@ impl HLInterpreter {
                 let obj_val = frame.registers.get(0); // reg 0 is 'this'
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
-                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT
+                {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let val = unsafe {
-                        Self::read_obj_field(obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt)
+                        Self::read_obj_field(
+                            obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
+                        )
                     };
                     if std::env::var("ASH_DBG_FIELD").is_ok() {
                         eprintln!(
@@ -2542,7 +2606,9 @@ impl HLInterpreter {
                     }
                     frame.registers.set(dst.0, val);
                 } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                    if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                    if let Some(offset) =
+                        unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                    {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
@@ -2628,7 +2694,9 @@ impl HLInterpreter {
                             );
                         }
                     } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                        if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                        if let Some(offset) =
+                            unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                        {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
@@ -2639,7 +2707,8 @@ impl HLInterpreter {
                             }
                             unsafe { Self::write_value_at(addr, src_kind, src_val) };
                         } else {
-                            self.virtual_fields.insert((obj_val.as_ptr(), field.0), src_val);
+                            self.virtual_fields
+                                .insert((obj_val.as_ptr(), field.0), src_val);
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
                                 eprintln!(
                                     "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
@@ -2691,7 +2760,9 @@ impl HLInterpreter {
                             );
                         }
                     } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                        if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) } {
+                        if let Some(offset) =
+                            unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                        {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
@@ -2702,7 +2773,8 @@ impl HLInterpreter {
                             }
                             unsafe { Self::write_value_at(addr, src_kind, src_val) };
                         } else {
-                            self.virtual_fields.insert((obj_val.as_ptr(), field.0), src_val);
+                            self.virtual_fields
+                                .insert((obj_val.as_ptr(), field.0), src_val);
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
                                 eprintln!(
                                     "[SETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
@@ -2949,7 +3021,9 @@ impl HLInterpreter {
                     self.c_type_factory.get(type_ref.0) as usize
                 };
 
-                frame.registers.set(dst.0, NanBoxedValue::from_ptr(type_ptr));
+                frame
+                    .registers
+                    .set(dst.0, NanBoxedValue::from_ptr(type_ptr));
             }
             Opcode::GetTID { dst, src } => {
                 // GetTID returns the kind field of the hl_type* in src.
@@ -3055,9 +3129,9 @@ impl HLInterpreter {
                     }
                 } else if val.is_null() {
                     match dst_kind {
-                        hl::hl_type_kind_HI32
-                        | hl::hl_type_kind_HUI8
-                        | hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(0),
+                        hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
+                            NanBoxedValue::from_i32(0)
+                        }
                         hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
                         hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
                             NanBoxedValue::from_f64(0.0)
@@ -3119,7 +3193,9 @@ impl HLInterpreter {
                 if obj.is_null() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
                 } else {
-                    frame.registers.set(dst.0, NanBoxedValue::from_ptr(obj as usize));
+                    frame
+                        .registers
+                        .set(dst.0, NanBoxedValue::from_ptr(obj as usize));
                 }
             }
 
@@ -3155,9 +3231,7 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null()
-                            && (at as usize) % std::mem::align_of::<hl_type>() != 0
-                        {
+                        if !at.is_null() && (at as usize) % std::mem::align_of::<hl_type>() != 0 {
                             return Err(anyhow!(
                                 "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
                                 at,
@@ -3171,30 +3245,48 @@ impl HLInterpreter {
                                 frame.registers.get(16)
                             ));
                         }
-                        let at_kind = if at.is_null() { hl::hl_type_kind_HDYN } else { (*at).kind };
+                        let at_kind = if at.is_null() {
+                            hl::hl_type_kind_HDYN
+                        } else {
+                            (*at).kind
+                        };
                         let data = arr_ptr.add(24);
                         match at_kind {
-                            k if k == hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(*data.add(idx) as i32),
-                            k if k == hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(*(data.add(idx * 2) as *const u16) as i32),
-                            k if k == hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(*(data.add(idx * 2) as *const u16) != 0),
-                            k if k == hl::hl_type_kind_HI32 => NanBoxedValue::from_i32(*(data.add(idx * 4) as *const i32)),
-                            k if k == hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(*(data.add(idx * 8) as *const i64)),
-                            k if k == hl::hl_type_kind_HF32 => NanBoxedValue::from_f64(*(data.add(idx * 4) as *const f32) as f64),
-                            k if k == hl::hl_type_kind_HF64 => NanBoxedValue::from_f64(*(data.add(idx * 8) as *const f64)),
+                            k if k == hl::hl_type_kind_HUI8 => {
+                                NanBoxedValue::from_i32(*data.add(idx) as i32)
+                            }
+                            k if k == hl::hl_type_kind_HUI16 => {
+                                NanBoxedValue::from_i32(*(data.add(idx * 2) as *const u16) as i32)
+                            }
+                            k if k == hl::hl_type_kind_HBOOL => {
+                                NanBoxedValue::from_bool(*(data.add(idx * 2) as *const u16) != 0)
+                            }
+                            k if k == hl::hl_type_kind_HI32 => {
+                                NanBoxedValue::from_i32(*(data.add(idx * 4) as *const i32))
+                            }
+                            k if k == hl::hl_type_kind_HI64 => {
+                                NanBoxedValue::from_i64(*(data.add(idx * 8) as *const i64))
+                            }
+                            k if k == hl::hl_type_kind_HF32 => {
+                                NanBoxedValue::from_f64(*(data.add(idx * 4) as *const f32) as f64)
+                            }
+                            k if k == hl::hl_type_kind_HF64 => {
+                                NanBoxedValue::from_f64(*(data.add(idx * 8) as *const f64))
+                            }
                             _ => {
                                 let ptr_val = *(data.add(idx * 8) as *const usize);
-                                if ptr_val == 0 { NanBoxedValue::null() } else { NanBoxedValue::from_ptr(ptr_val) }
+                                if ptr_val == 0 {
+                                    NanBoxedValue::null()
+                                } else {
+                                    NanBoxedValue::from_ptr(ptr_val)
+                                }
                             }
                         }
                     }
                 };
                 frame.registers.set(dst.0, val);
             }
-            Opcode::SetArray {
-                array,
-                index,
-                src,
-            } => {
+            Opcode::SetArray { array, index, src } => {
                 let arr_val = frame.registers.get(array.0);
                 let idx = frame.registers.get(index.0).as_i32().max(0) as usize;
                 let src_val = frame.registers.get(src.0);
@@ -3225,9 +3317,7 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null()
-                            && (at as usize) % std::mem::align_of::<hl_type>() != 0
-                        {
+                        if !at.is_null() && (at as usize) % std::mem::align_of::<hl_type>() != 0 {
                             return Err(anyhow!(
                                 "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
                                 at,
@@ -3242,18 +3332,40 @@ impl HLInterpreter {
                                 frame.registers.get(16)
                             ));
                         }
-                        let at_kind = if at.is_null() { hl::hl_type_kind_HDYN } else { (*at).kind };
+                        let at_kind = if at.is_null() {
+                            hl::hl_type_kind_HDYN
+                        } else {
+                            (*at).kind
+                        };
                         let data = arr_ptr.add(24);
                         match at_kind {
-                            k if k == hl::hl_type_kind_HUI8 => *data.add(idx) = src_val.as_i32() as u8,
-                            k if k == hl::hl_type_kind_HUI16 => *(data.add(idx * 2) as *mut u16) = src_val.as_i32() as u16,
-                            k if k == hl::hl_type_kind_HBOOL => *(data.add(idx * 2) as *mut u16) = src_val.as_bool() as u16,
-                            k if k == hl::hl_type_kind_HI32 => *(data.add(idx * 4) as *mut i32) = src_val.as_i32(),
-                            k if k == hl::hl_type_kind_HI64 => *(data.add(idx * 8) as *mut i64) = src_val.as_i64_lossy(),
-                            k if k == hl::hl_type_kind_HF32 => *(data.add(idx * 4) as *mut f32) = src_val.as_f64() as f32,
-                            k if k == hl::hl_type_kind_HF64 => *(data.add(idx * 8) as *mut f64) = src_val.as_f64(),
+                            k if k == hl::hl_type_kind_HUI8 => {
+                                *data.add(idx) = src_val.as_i32() as u8
+                            }
+                            k if k == hl::hl_type_kind_HUI16 => {
+                                *(data.add(idx * 2) as *mut u16) = src_val.as_i32() as u16
+                            }
+                            k if k == hl::hl_type_kind_HBOOL => {
+                                *(data.add(idx * 2) as *mut u16) = src_val.as_bool() as u16
+                            }
+                            k if k == hl::hl_type_kind_HI32 => {
+                                *(data.add(idx * 4) as *mut i32) = src_val.as_i32()
+                            }
+                            k if k == hl::hl_type_kind_HI64 => {
+                                *(data.add(idx * 8) as *mut i64) = src_val.as_i64_lossy()
+                            }
+                            k if k == hl::hl_type_kind_HF32 => {
+                                *(data.add(idx * 4) as *mut f32) = src_val.as_f64() as f32
+                            }
+                            k if k == hl::hl_type_kind_HF64 => {
+                                *(data.add(idx * 8) as *mut f64) = src_val.as_f64()
+                            }
                             _ => {
-                                let ptr_val = if src_val.is_null() || src_val.is_void() { 0usize } else { src_val.as_ptr() };
+                                let ptr_val = if src_val.is_null() || src_val.is_void() {
+                                    0usize
+                                } else {
+                                    src_val.as_ptr()
+                                };
                                 *(data.add(idx * 8) as *mut usize) = ptr_val;
                             }
                         }
@@ -3414,7 +3526,9 @@ impl HLInterpreter {
                         let c = &*(*tenum).constructs.add(construct.0);
                         let base = val as *mut u8;
                         for (i, arg_reg) in args.iter().enumerate() {
-                            if i >= c.nparams as usize { break; }
+                            if i >= c.nparams as usize {
+                                break;
+                            }
                             let offset = *c.offsets.add(i) as usize;
                             let arg_val = frame.registers.get(arg_reg.0);
                             let param_kind = (*(*c.params.add(i))).kind;
@@ -3422,22 +3536,28 @@ impl HLInterpreter {
                         }
                     }
                 }
-                frame.registers.set(dst.0, if val.is_null() {
-                    NanBoxedValue::null()
-                } else {
-                    NanBoxedValue::from_ptr(val as usize)
-                });
+                frame.registers.set(
+                    dst.0,
+                    if val.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(val as usize)
+                    },
+                );
             }
             Opcode::EnumAlloc { dst, construct } => {
                 let type_idx = func.regs[dst.0 as usize].0;
                 let c_type_ptr = self.c_type_factory.get(type_idx);
                 let fn_alloc_enum = self.fn_alloc_enum;
                 let val = Self::alloc_enum_value(fn_alloc_enum, c_type_ptr, construct.0 as i32);
-                frame.registers.set(dst.0, if val.is_null() {
-                    NanBoxedValue::null()
-                } else {
-                    NanBoxedValue::from_ptr(val as usize)
-                });
+                frame.registers.set(
+                    dst.0,
+                    if val.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(val as usize)
+                    },
+                );
             }
             Opcode::EnumIndex { dst, value } => {
                 let val = frame.registers.get(value.0);
@@ -3490,8 +3610,8 @@ impl HLInterpreter {
                         let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
                         if !tenum.is_null() {
                             // Get construct index from the actual venum value
-                            let construct_idx = *(val.as_ptr() as *const u8).add(8).cast::<i32>()
-                                as usize;
+                            let construct_idx =
+                                *(val.as_ptr() as *const u8).add(8).cast::<i32>() as usize;
                             if construct_idx < (*tenum).nconstructs as usize {
                                 let c = &*(*tenum).constructs.add(construct_idx);
                                 if field.0 < c.nparams as usize {
@@ -3592,27 +3712,32 @@ impl HLInterpreter {
         let frame = self.stack.last_mut().unwrap();
         let va = frame.registers.get(a);
         let vb = frame.registers.get(b);
-        let result = va
-            .binary_int_op(vb, op)
-            .ok_or_else(|| {
-                anyhow!(
-                    "{:?}: incompatible types {:?}, {:?} in {} at pc={} (dst=r{}, a=r{}, b=r{})",
-                    op,
-                    va,
-                    vb,
-                    func.name(),
-                    frame.pc,
-                    dst,
-                    a,
-                    b
-                )
-            })?;
+        let result = va.binary_int_op(vb, op).ok_or_else(|| {
+            anyhow!(
+                "{:?}: incompatible types {:?}, {:?} in {} at pc={} (dst=r{}, a=r{}, b=r{})",
+                op,
+                va,
+                vb,
+                func.name(),
+                frame.pc,
+                dst,
+                a,
+                b
+            )
+        })?;
         frame.registers.set(dst, result);
         Ok(())
     }
 
     /// Helper: compare two register values.
-    fn compare_regs(&self, bytecode: &DecodedBytecode, func_idx: usize, a: u32, b: u32, op: CmpOp) -> bool {
+    fn compare_regs(
+        &self,
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        a: u32,
+        b: u32,
+        op: CmpOp,
+    ) -> bool {
         let frame = self.stack.last().unwrap();
         let va = frame.registers.get(a);
         let vb = frame.registers.get(b);
@@ -3620,7 +3745,9 @@ impl HLInterpreter {
         let ak = bytecode.types[func.regs[a as usize].0].kind;
         let bk = bytecode.types[func.regs[b as usize].0].kind;
         if let Some(result) = unsafe {
-            self.try_compare_nullable_operands(bytecode, func, a as usize, va, ak, b as usize, vb, bk, op)
+            self.try_compare_nullable_operands(
+                bytecode, func, a as usize, va, ak, b as usize, vb, bk, op,
+            )
         } {
             if std::env::var("ASH_TRACE_EQ").is_ok() {
                 eprintln!(
@@ -3644,7 +3771,10 @@ impl HLInterpreter {
                 };
                 let eq = unsafe { Self::utf16z_eq(pa, pb) };
                 if std::env::var("ASH_TRACE_EQ").is_ok() {
-                    eprintln!("[CMP] f{} op={:?} ak={} bk={} (bytes) -> {}", func_idx, op, ak, bk, eq);
+                    eprintln!(
+                        "[CMP] f{} op={:?} ak={} bk={} (bytes) -> {}",
+                        func_idx, op, ak, bk, eq
+                    );
                 }
                 return if op == CmpOp::Eq { eq } else { !eq };
             }
@@ -3676,8 +3806,12 @@ impl HLInterpreter {
                     if ta_name == tb_name
                         && matches!(ta_name.as_deref(), Some("String") | Some("S"))
                     {
-                        let sa = unsafe { self.try_extract_string_object_raw(va.as_ptr() as *mut c_void) };
-                        let sb = unsafe { self.try_extract_string_object_raw(vb.as_ptr() as *mut c_void) };
+                        let sa = unsafe {
+                            self.try_extract_string_object_raw(va.as_ptr() as *mut c_void)
+                        };
+                        let sb = unsafe {
+                            self.try_extract_string_object_raw(vb.as_ptr() as *mut c_void)
+                        };
                         if std::env::var("ASH_TRACE_EQ").is_ok() {
                             eprintln!(
                                 "[CMP-OBJ] f{} string-extract sa={} sb={}",
@@ -3712,7 +3846,10 @@ impl HLInterpreter {
                 };
                 let eq = unsafe { self.dynamic_eq(pa, pb) };
                 if std::env::var("ASH_TRACE_EQ").is_ok() {
-                    eprintln!("[CMP] f{} op={:?} ak={} bk={} (dyn) -> {}", func_idx, op, ak, bk, eq);
+                    eprintln!(
+                        "[CMP] f{} op={:?} ak={} bk={} (dyn) -> {}",
+                        func_idx, op, ak, bk, eq
+                    );
                     if !eq {
                         let ka_dyn = if pa.is_null() || unsafe { (*pa).t.is_null() } {
                             0
@@ -3997,7 +4134,10 @@ impl HLInterpreter {
         Some((bytes, len))
     }
 
-    unsafe fn try_extract_string_object_raw(&self, obj_ptr: *mut c_void) -> Option<(*const u16, i32)> {
+    unsafe fn try_extract_string_object_raw(
+        &self,
+        obj_ptr: *mut c_void,
+    ) -> Option<(*const u16, i32)> {
         if obj_ptr.is_null() || self.fn_get_obj_rt.is_null() {
             return None;
         }
@@ -4133,16 +4273,10 @@ impl HLInterpreter {
         };
         match dst_kind {
             hl::hl_type_kind_HI32 => as_i64.map(|v| NanBoxedValue::from_i32(v as i32)),
-            hl::hl_type_kind_HUI8 => {
-                as_i64.map(|v| NanBoxedValue::from_i32((v as u8) as i32))
-            }
-            hl::hl_type_kind_HUI16 => {
-                as_i64.map(|v| NanBoxedValue::from_i32((v as u16) as i32))
-            }
+            hl::hl_type_kind_HUI8 => as_i64.map(|v| NanBoxedValue::from_i32((v as u8) as i32)),
+            hl::hl_type_kind_HUI16 => as_i64.map(|v| NanBoxedValue::from_i32((v as u16) as i32)),
             hl::hl_type_kind_HI64 => as_i64.map(NanBoxedValue::from_i64),
-            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
-                as_f64.map(NanBoxedValue::from_f64)
-            }
+            hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => as_f64.map(NanBoxedValue::from_f64),
             hl::hl_type_kind_HBOOL => as_i64.map(|v| NanBoxedValue::from_bool(v != 0)),
             hl::hl_type_kind_HBYTES => {
                 if sk == hl::hl_type_kind_HBYTES {
@@ -4172,12 +4306,7 @@ impl HLInterpreter {
                 || native.name.contains("trim")
                 || native.name.contains("date"))
         {
-            eprintln!(
-                "[NATIVE] {} args={} vals={:?}",
-                func_name,
-                args.len(),
-                args
-            );
+            eprintln!("[NATIVE] {} args={} vals={:?}", func_name, args.len(), args);
         }
         let debug_dyn = std::env::var("ASH_DBG_DYN").is_ok();
         if debug_dyn
@@ -4192,7 +4321,9 @@ impl HLInterpreter {
         {
             eprintln!(
                 "[NATIVE-DYN] {} args={} vals={:?}",
-                func_name, args.len(), args
+                func_name,
+                args.len(),
+                args
             );
             if (native.name == "obj_get_field"
                 || native.name == "obj_set_field"
@@ -4215,7 +4346,11 @@ impl HLInterpreter {
                             (*d).t
                         );
                     }
-                    if native.name == "obj_set_field" && args.len() >= 3 && args[2].is_ptr() && args[2].as_ptr() != 0 {
+                    if native.name == "obj_set_field"
+                        && args.len() >= 3
+                        && args[2].is_ptr()
+                        && args[2].as_ptr() != 0
+                    {
                         let v = args[2].as_ptr() as *mut hl::vdynamic;
                         if !v.is_null() && !(*v).t.is_null() {
                             eprintln!(
@@ -4237,7 +4372,9 @@ impl HLInterpreter {
             "bsort_f64" => return self.sort_bytes_f64(bytecode, native_resolver, args),
             "bsort_i64" => return self.sort_bytes_i64(bytecode, native_resolver, args),
             "call_method" => {
-                if let Some(v) = self.try_handle_call_method_native(bytecode, native_resolver, args)? {
+                if let Some(v) =
+                    self.try_handle_call_method_native(bytecode, native_resolver, args)?
+                {
                     return Ok(v);
                 }
             }
@@ -4302,19 +4439,19 @@ impl HLInterpreter {
         // Check if any argument or return type involves floats.
         // On ARM64, floats use separate FP registers (d0-d7) vs integer registers (x0-x7),
         // so we must use typed dispatch with explicit f64 in the right positions.
-        let is_float_kind = |k: u32| {
-            k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64
-        };
+        let is_float_kind = |k: u32| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
         let ret_is_float = is_float_kind(ret_kind);
-        let float_mask: u32 = arg_kinds
-            .iter()
-            .enumerate()
-            .fold(0u32, |acc, (i, &k)| {
-                if is_float_kind(k) { acc | (1 << i) } else { acc }
-            });
+        let float_mask: u32 = arg_kinds.iter().enumerate().fold(0u32, |acc, (i, &k)| {
+            if is_float_kind(k) {
+                acc | (1 << i)
+            } else {
+                acc
+            }
+        });
 
         if ret_is_float || float_mask != 0 {
-            let raw = self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float)?;
+            let raw =
+                self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float)?;
             return Ok(self.wrap_native_result(raw, ret_kind));
         }
 
@@ -4328,9 +4465,11 @@ impl HLInterpreter {
             self.value_to_i64(args[idx], kind)
         };
 
-
         if args.len() > 8 {
-            return Err(anyhow!("Native call with {} args not yet supported", args.len()));
+            return Err(anyhow!(
+                "Native call with {} args not yet supported",
+                args.len()
+            ));
         }
 
         // Set up a setjmp/longjmp trap so hlp_throw can propagate through native C ABI safely.
@@ -4349,9 +4488,8 @@ impl HLInterpreter {
                 if jumped != 0 {
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
-                        let exc_ptr = unsafe {
-                            (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))()
-                        };
+                        let exc_ptr =
+                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
                         if !exc_ptr.is_null() {
                             if !fn_clear_exc.is_null() {
                                 type FnClearExc = unsafe extern "C" fn();
@@ -4359,12 +4497,15 @@ impl HLInterpreter {
                                     (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(self.format_hl_exception(
-                                NanBoxedValue::from_ptr(exc_ptr as usize),
-                            )));
+                            return Err(anyhow::Error::new(
+                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
+                            ));
                         }
                     }
-                    return Err(anyhow!("Native longjmp without exception value: {}", func_name));
+                    return Err(anyhow!(
+                        "Native longjmp without exception value: {}",
+                        func_name
+                    ));
                 }
             }
         }
@@ -4392,7 +4533,12 @@ impl HLInterpreter {
                 4 => {
                     let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
                         std::mem::transmute(func_ptr);
-                    f(extract_arg(0), extract_arg(1), extract_arg(2), extract_arg(3))
+                    f(
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                    )
                 }
                 5 => {
                     let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
@@ -4461,7 +4607,10 @@ impl HLInterpreter {
                 || native.name.contains("trim")
                 || native.name.contains("date"))
         {
-            eprintln!("[NATIVE] {} -> raw={} wrapped={:?}", func_name, raw_result, wrapped);
+            eprintln!(
+                "[NATIVE] {} -> raw={} wrapped={:?}",
+                func_name, raw_result, wrapped
+            );
         }
         if debug_dyn
             && (native.name == "hash"
@@ -4636,7 +4785,12 @@ impl HLInterpreter {
         args: &[NanBoxedValue],
     ) -> Result<Option<NanBoxedValue>> {
         let dbg = std::env::var("ASH_DBG_DYN").is_ok();
-        if args.len() < 2 || args[0].is_null() || args[0].is_void() || args[1].is_null() || args[1].is_void() {
+        if args.len() < 2
+            || args[0].is_null()
+            || args[0].is_void()
+            || args[1].is_null()
+            || args[1].is_void()
+        {
             return Ok(Some(NanBoxedValue::null()));
         }
 
@@ -4728,9 +4882,8 @@ impl HLInterpreter {
             return Ok(NanBoxedValue::void());
         }
 
-        let mut data: Vec<i32> = unsafe {
-            std::slice::from_raw_parts(bytes_ptr.offset(pos), len)
-        }.to_vec();
+        let mut data: Vec<i32> =
+            unsafe { std::slice::from_raw_parts(bytes_ptr.offset(pos), len) }.to_vec();
 
         // Use raw pointer to avoid borrow conflict inside sort_by closure
         let self_raw = self as *mut Self;
@@ -4745,10 +4898,7 @@ impl HLInterpreter {
             let interp = unsafe { &mut *self_raw };
             let bc = unsafe { &*bytecode_raw };
             let nr = unsafe { &*resolver_raw };
-            let call_args = vec![
-                NanBoxedValue::from_i32(a),
-                NanBoxedValue::from_i32(b),
-            ];
+            let call_args = vec![NanBoxedValue::from_i32(a), NanBoxedValue::from_i32(b)];
             match interp.call_closure_val(bc, nr, cmp_val, call_args) {
                 Ok(r) => r.as_i32().cmp(&0),
                 Err(e) => {
@@ -4788,9 +4938,8 @@ impl HLInterpreter {
             return Ok(NanBoxedValue::void());
         }
 
-        let mut data: Vec<i64> = unsafe {
-            std::slice::from_raw_parts(bytes_ptr.offset(pos), len)
-        }.to_vec();
+        let mut data: Vec<i64> =
+            unsafe { std::slice::from_raw_parts(bytes_ptr.offset(pos), len) }.to_vec();
 
         let self_raw = self as *mut Self;
         let bytecode_raw = bytecode as *const DecodedBytecode;
@@ -4804,10 +4953,7 @@ impl HLInterpreter {
             let interp = unsafe { &mut *self_raw };
             let bc = unsafe { &*bytecode_raw };
             let nr = unsafe { &*resolver_raw };
-            let call_args = vec![
-                NanBoxedValue::from_i64(a),
-                NanBoxedValue::from_i64(b),
-            ];
+            let call_args = vec![NanBoxedValue::from_i64(a), NanBoxedValue::from_i64(b)];
             match interp.call_closure_val(bc, nr, cmp_val, call_args) {
                 Ok(r) => r.as_i32().cmp(&0),
                 Err(e) => {
@@ -4847,9 +4993,8 @@ impl HLInterpreter {
             return Ok(NanBoxedValue::void());
         }
 
-        let mut data: Vec<f64> = unsafe {
-            std::slice::from_raw_parts(bytes_ptr.offset(pos), len)
-        }.to_vec();
+        let mut data: Vec<f64> =
+            unsafe { std::slice::from_raw_parts(bytes_ptr.offset(pos), len) }.to_vec();
 
         let self_raw = self as *mut Self;
         let bytecode_raw = bytecode as *const DecodedBytecode;
@@ -4863,10 +5008,7 @@ impl HLInterpreter {
             let interp = unsafe { &mut *self_raw };
             let bc = unsafe { &*bytecode_raw };
             let nr = unsafe { &*resolver_raw };
-            let call_args = vec![
-                NanBoxedValue::from_f64(a),
-                NanBoxedValue::from_f64(b),
-            ];
+            let call_args = vec![NanBoxedValue::from_f64(a), NanBoxedValue::from_f64(b)];
             match interp.call_closure_val(bc, nr, cmp_val, call_args) {
                 Ok(r) => r.as_i32().cmp(&0),
                 Err(e) => {
@@ -5236,7 +5378,11 @@ impl HLInterpreter {
 
     /// Allocate a venum value for the given type and construct index using the GC allocator.
     /// Takes fn_alloc_enum as a parameter to avoid conflicting with the frame mutable borrow.
-    fn alloc_enum_value(fn_alloc_enum: *mut c_void, c_type_ptr: *mut hl_type, construct_idx: i32) -> *mut u8 {
+    fn alloc_enum_value(
+        fn_alloc_enum: *mut c_void,
+        c_type_ptr: *mut hl_type,
+        construct_idx: i32,
+    ) -> *mut u8 {
         if fn_alloc_enum.is_null() || c_type_ptr.is_null() {
             return std::ptr::null_mut();
         }

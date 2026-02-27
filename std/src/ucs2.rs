@@ -1,6 +1,6 @@
-use std::ptr;
-use std::alloc::{alloc, Layout};
 use crate::hl::uchar;
+use std::alloc::{alloc, Layout};
+use std::ptr;
 
 #[no_mangle]
 pub unsafe extern "C" fn ucmp(a: *const uchar, b: *const uchar) -> i32 {
@@ -40,7 +40,7 @@ pub unsafe extern "C" fn ustrdup(str: *const uchar) -> *mut uchar {
 
     // Ensure we allocate at least one byte (for null terminator)
     let alloc_size = std::cmp::max(len + 1, 1);
-    
+
     let layout = Layout::array::<uchar>(alloc_size).unwrap_or_else(|_| {
         // println!("Failed to create layout for string allocation");
         Layout::new::<uchar>() // Fallback to single char layout

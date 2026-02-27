@@ -1,13 +1,12 @@
+use crate::types::{HLNative, Str};
+use anyhow::{anyhow, Result};
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ffi::c_void;
+use std::path::Path;
 use std::sync::Once;
 use tempfile::TempDir;
-use anyhow::{anyhow, Result};
-use std::ffi::c_void;
-use crate::types::{HLNative, Str};
-use std::path::Path;
-
 
 static STD_INIT: Once = Once::new();
 pub static mut STD_LIBRARY: Option<Library> = None;
@@ -46,7 +45,6 @@ pub fn init_std_library() -> Result<()> {
 
     Ok(())
 }
-
 
 #[derive(Debug)]
 pub struct NativeLibraryManager {
@@ -121,14 +119,20 @@ impl NativeFunctionResolver {
             }
             if !found {
                 // Check if library was optional (had ? prefix)
-                let is_optional = natives.iter().any(|n| n.lib.starts_with('?') && {
-                    let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
-                    clean == lib_name
+                let is_optional = natives.iter().any(|n| {
+                    n.lib.starts_with('?') && {
+                        let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
+                        clean == lib_name
+                    }
                 });
                 if is_optional {
                     eprintln!("[ash] Optional library '{}' not found, skipping", lib_name);
                 } else {
-                    return Err(anyhow!("Required library '{}' not found in {:?}", lib_name, search_dir));
+                    return Err(anyhow!(
+                        "Required library '{}' not found in {:?}",
+                        lib_name,
+                        search_dir
+                    ));
                 }
             }
         }

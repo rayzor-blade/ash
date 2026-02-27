@@ -1,13 +1,13 @@
 use crate::error::{HLException, TrapContext, VDynamicException};
 use crate::hl::{self, hl_type, hl_type_obj, vclosure, vdynamic, HL_WSIZE};
 use crate::types::hlp_type_size;
+use anyhow::Result;
 use std::cell::{Cell, RefCell};
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::{collections::HashSet, mem};
-use anyhow::Result;
 
 const HEAP_SIZE: usize = 1024 * 1024 * 100; // 100 MB
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
@@ -47,7 +47,8 @@ pub struct ImmixAllocator {
     blocks: Vec<Block>,
     roots: Rc<RefCell<RootSet>>,
     pub(crate) current_exception: Option<Box<HLException>>,
-    pub(crate) exception_handler: Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
+    pub(crate) exception_handler:
+        Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
     pub(crate) current_trap: RefCell<*mut TrapContext>,
     pub(crate) exc_value: RefCell<*mut vdynamic>,
     stack_top: usize,
@@ -106,7 +107,8 @@ impl ImmixAllocator {
             return self.allocate_large(size);
         }
 
-        let needs_new_block = self.heap.allocation_point + aligned_size > self.heap.current_block_end;
+        let needs_new_block =
+            self.heap.allocation_point + aligned_size > self.heap.current_block_end;
 
         if needs_new_block {
             if let Some(new_block) = self.heap.free_blocks.pop() {
@@ -172,7 +174,9 @@ impl ImmixAllocator {
                 // Found a contiguous run — remove these blocks from free list
                 let start_idx = run_start.unwrap();
                 let start_addr = self.heap.free_blocks[start_idx];
-                let removed: Vec<usize> = self.heap.free_blocks
+                let removed: Vec<usize> = self
+                    .heap
+                    .free_blocks
                     .drain(start_idx..start_idx + blocks_needed)
                     .collect();
                 for block in removed {
@@ -352,7 +356,9 @@ impl ImmixAllocator {
                     let child_line = offset / LINE_SIZE;
                     let child_block_idx = child_line / LINES_PER_BLOCK;
                     let child_line_idx = child_line % LINES_PER_BLOCK;
-                    if child_block_idx < self.blocks.len() && !self.blocks[child_block_idx].mark_bits[child_line_idx] {
+                    if child_block_idx < self.blocks.len()
+                        && !self.blocks[child_block_idx].mark_bits[child_line_idx]
+                    {
                         let alloc_marks = self.mark_allocation_at_line(child_line);
                         worklist.extend(alloc_marks);
                     }
@@ -432,7 +438,9 @@ impl ImmixAllocator {
         // Conservative scan of thread stack
         if self.stack_top > 0 {
             let sp: usize;
-            unsafe { core::arch::asm!("mov {}, sp", out(reg) sp); }
+            unsafe {
+                core::arch::asm!("mov {}, sp", out(reg) sp);
+            }
             // Stack grows downward on ARM64: SP < stack_top
             if sp < self.stack_top {
                 let newly_marked = self.conservative_scan_range(sp, self.stack_top);
@@ -686,9 +694,11 @@ impl ImmixAllocator {
         if ptr.is_null() || size == 0 {
             return;
         }
-        self.roots.borrow_mut().scan_ranges.push((ptr as usize, size));
+        self.roots
+            .borrow_mut()
+            .scan_ranges
+            .push((ptr as usize, size));
     }
-
 
     pub fn alloc_virtual(&mut self, t: *mut hl::hl_type) -> Option<NonNull<hl::vvirtual>> {
         unsafe {
@@ -699,9 +709,9 @@ impl ImmixAllocator {
 
             let data_size = (*virt).dataSize;
             let nfields = (*virt).nfields;
-            let total_size = std::mem::size_of::<hl::vvirtual>() + 
-                             (nfields as usize * std::mem::size_of::<*mut std::os::raw::c_void>()) + 
-                             (data_size as usize);
+            let total_size = std::mem::size_of::<hl::vvirtual>()
+                + (nfields as usize * std::mem::size_of::<*mut std::os::raw::c_void>())
+                + (data_size as usize);
 
             let ptr = self.allocate(total_size)?;
             let v = ptr.as_ptr() as *mut hl::vvirtual;
@@ -717,7 +727,8 @@ impl ImmixAllocator {
 
             // Initialize fields
             for i in 0..nfields as usize {
-                *fields.add(i) = (v as *mut u8).add((*virt).indexes.add(i) as usize) as *mut std::os::raw::c_void;
+                *fields.add(i) = (v as *mut u8).add((*virt).indexes.add(i) as usize)
+                    as *mut std::os::raw::c_void;
             }
 
             // Zero out vdata

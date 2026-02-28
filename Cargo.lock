@@ -96,6 +96,7 @@ dependencies = [
  "air",
  "anyhow",
  "ash_macro",
+ "bindgen",
  "byteorder",
  "clap",
  "flexstr",

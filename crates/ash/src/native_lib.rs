@@ -17,14 +17,14 @@ pub fn init_std_library() -> Result<()> {
             // Create a temporary directory
             let temp_dir = TempDir::new().expect("Failed to create temp dir");
             let mut lib_path = temp_dir.path().join("libash_std");
-            lib_path.set_extension(
-                #[cfg(any(target_os = "macos", target_os = "ios"))]
-                "dylib",
-                #[cfg(target_os = "windows")]
-                "dll",
-                #[cfg(all(unix, not(target_os = "macos")))]
-                "so",
-            );
+            let ext = if cfg!(target_os = "windows") {
+                "dll"
+            } else if cfg!(any(target_os = "macos", target_os = "ios")) {
+                "dylib"
+            } else {
+                "so"
+            };
+            lib_path.set_extension(ext);
 
             // Extract the embedded library
             let std_lib_bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
@@ -103,16 +103,27 @@ impl NativeFunctionResolver {
         }
 
         for lib_name in &libs {
-            let candidates = [
-                search_dir.join(format!("{}.hdll", lib_name)),
-                search_dir.join(format!("lib{}.dylib", lib_name)),
-                search_dir.join(format!("{}.dylib", lib_name)),
-            ];
+            let mut candidates = vec![search_dir.join(format!("{}.hdll", lib_name))];
+            #[cfg(target_os = "windows")]
+            {
+                candidates.push(search_dir.join(format!("{}.dll", lib_name)));
+                candidates.push(search_dir.join(format!("lib{}.dll", lib_name)));
+            }
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            {
+                candidates.push(search_dir.join(format!("lib{}.dylib", lib_name)));
+                candidates.push(search_dir.join(format!("{}.dylib", lib_name)));
+            }
+            #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+            {
+                candidates.push(search_dir.join(format!("lib{}.so", lib_name)));
+                candidates.push(search_dir.join(format!("{}.so", lib_name)));
+            }
             let mut found = false;
-            for candidate in &candidates {
+            for candidate in candidates {
                 if candidate.exists() {
                     eprintln!("[ash] Loading HDLL: {} from {:?}", lib_name, candidate);
-                    self.library_manager.load_library(lib_name, candidate)?;
+                    self.library_manager.load_library(lib_name, &candidate)?;
                     found = true;
                     break;
                 }

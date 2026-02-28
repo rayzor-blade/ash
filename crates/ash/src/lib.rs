@@ -7,7 +7,12 @@
 pub mod bytecode;
 pub mod c_types;
 pub mod functions;
-pub mod hl_bindings;
+pub mod hl_bindings {
+    #![allow(non_upper_case_globals)]
+    #![allow(non_camel_case_types)]
+    #![allow(non_snake_case)]
+    include!(concat!(env!("OUT_DIR"), "/hl_bindings.rs"));
+}
 pub mod jit;
 pub mod module;
 pub mod native_lib;

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::{env, fs};
+use std::env;
 
 fn main() {
     // // Tell cargo to look for shared libraries in the specified directory
@@ -29,11 +29,4 @@ fn main() {
     bindings
         .write_to_file(out_path.join("hl_bindings.rs"))
         .expect("Couldn't write bindings!");
-
-    let root_dir = env::current_dir().unwrap();
-    fs::copy(
-        out_path.join("hl_bindings.rs"),
-        root_dir.join("../crates/ash/src/hl_bindings.rs"),
-    )
-    .unwrap();
 }

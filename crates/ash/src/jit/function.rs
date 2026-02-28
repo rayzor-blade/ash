@@ -55,6 +55,13 @@ pub enum FuncPtr {
 }
 
 impl<'ctx> JITModule<'ctx> {
+    #[inline(always)]
+    fn current_stack_addr() -> usize {
+        // Portable stack probe: address of a local variable approximates current SP.
+        let marker = 0u8;
+        (&marker as *const u8) as usize
+    }
+
     /// Declare an external native function and create a caller wrapper.
     /// Embeds the native function's address directly as inttoptr constant
     /// to avoid MCJIT symbol resolution issues with add_global_mapping.
@@ -4133,9 +4140,7 @@ impl<'ctx> JITModule<'ctx> {
                     .resolve_function("std", "hlp_gc_set_stack_top")
                     .map_err(|e| anyhow!("Cannot resolve hlp_gc_set_stack_top: {}", e))?,
             );
-            let stack_top: usize;
-            core::arch::asm!("mov {}, sp", out(reg) stack_top);
-            set_stack_top(stack_top);
+            set_stack_top(Self::current_stack_addr());
         }
 
         // Materialize bytecode constants (pre-initialized globals like string literals)

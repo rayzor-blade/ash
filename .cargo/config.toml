@@ -1,7 +1,2 @@
-[build]
-target = "aarch64-apple-darwin"
-
-[env]
-LLVM_SYS_180_PREFIX = "/opt/homebrew/opt/llvm@18"
-
-[target.aarch64-apple-darwin]
+# Keep repository Cargo config platform-neutral.
+# Use local environment variables or per-user Cargo config for machine-specific settings.

@@ -18,7 +18,11 @@ pub fn hl_debug_break() {
                 {
                     core::arch::asm!("int3");
                 }
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "macos")]
+                {
+                    core::arch::asm!("int3");
+                }
+                #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
                 {
                     core::arch::asm!(
                         "int3",

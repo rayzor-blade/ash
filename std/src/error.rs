@@ -8,14 +8,11 @@ use crate::hl::{
 use crate::strings::str_to_uchar_ptr;
 use crate::types::hl_aptr;
 use anyhow::Result;
+use std::ffi::c_void;
 use std::fmt::{self, Formatter};
 use std::mem;
 use std::os::raw::c_int;
 use std::panic;
-
-extern "C" {
-    fn _longjmp(buf: *mut c_int, val: c_int) -> !;
-}
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -77,7 +74,7 @@ impl std::fmt::Debug for VDynamicException {
 unsafe impl Send for VDynamicException {}
 
 pub struct TrapContext {
-    pub buf: [c_int; 48],
+    pub buf: hl::jmp_buf,
     pub has_jmpbuf: bool,
     pub prev: *mut TrapContext,
     pub exception_value: Option<VDynamicException>,
@@ -87,7 +84,8 @@ pub struct TrapContext {
 impl TrapContext {
     pub fn new() -> Self {
         TrapContext {
-            buf: [0; 48],
+            // jmp_buf layout is target-dependent; keep it opaque and initialize storage.
+            buf: unsafe { mem::zeroed() },
             has_jmpbuf: false,
             prev: std::ptr::null_mut(),
             exception_value: None,
@@ -242,11 +240,15 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
         // JIT path: store exception, pop trap, longjmp back to setjmp site
         *gc.exc_value.borrow_mut() = v;
         // Copy jmp_buf to stack BEFORE freeing the TrapContext — longjmp reads from it
-        let mut buf_copy: [c_int; 48] = [0; 48];
-        buf_copy.copy_from_slice(&(*current).buf);
+        let mut buf_copy: hl::jmp_buf = mem::zeroed();
+        std::ptr::copy_nonoverlapping(
+            &(*current).buf as *const hl::jmp_buf,
+            &mut buf_copy as *mut hl::jmp_buf,
+            1,
+        );
         *gc.current_trap.borrow_mut() = (*current).prev;
         let _ = Box::from_raw(current);
-        _longjmp(buf_copy.as_mut_ptr(), 1);
+        hl::_longjmp(buf_copy.as_mut_ptr(), 1);
     } else {
         // No active setjmp trap: this is an uncaught native exception.
         *gc.exc_value.borrow_mut() = v;
@@ -256,11 +258,11 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_int {
+pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     let gc = GC.get_mut().expect("expected GC");
     let trap = gc.setup_trap();
     (*trap).has_jmpbuf = true;
-    (*trap).buf.as_mut_ptr()
+    (*trap).buf.as_mut_ptr().cast()
 }
 
 #[no_mangle]

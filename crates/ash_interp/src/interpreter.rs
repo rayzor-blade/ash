@@ -63,6 +63,13 @@ fn hash_field_name(
     Ok(h.wrapping_rem(0x1FFFFF7B))
 }
 
+#[inline]
+unsafe fn call_setjmp_opaque(jmp_buf: *mut c_void) -> i32 {
+    type SetJmpOpaque = unsafe extern "C" fn(*mut c_void) -> i32;
+    let setjmp_fn: SetJmpOpaque = std::mem::transmute(hl::_setjmp as usize);
+    setjmp_fn(jmp_buf)
+}
+
 /// Result of executing a single opcode.
 enum StepResult {
     /// Continue to next opcode (pc already incremented)
@@ -1696,12 +1703,12 @@ impl HLInterpreter {
         let fn_clear_exc = self.fn_clear_exc_value;
         let mut trap_installed = false;
         if !fn_setup_trap.is_null() {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut i32;
+            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
             let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
             let jmp_buf = unsafe { setup() };
             if !jmp_buf.is_null() {
                 trap_installed = true;
-                let jumped = unsafe { hl::_setjmp(jmp_buf) };
+                let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
@@ -4545,12 +4552,12 @@ impl HLInterpreter {
         let fn_clear_exc = self.fn_clear_exc_value;
         let mut trap_installed = false;
         if !fn_setup_trap.is_null() {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut i32;
+            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
             let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
             let jmp_buf = unsafe { setup() };
             if !jmp_buf.is_null() {
                 trap_installed = true;
-                let jumped = unsafe { hl::_setjmp(jmp_buf) };
+                let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;

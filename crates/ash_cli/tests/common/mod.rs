@@ -30,6 +30,8 @@ pub struct ParityCase {
     pub normalize: NormalizeKind,
     pub compile: bool,
     pub sanity_interp: bool,
+    /// Override the oracle's exit code for comparison (e.g. when HL is known to fail).
+    pub expected_exit: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -262,6 +264,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 normalize: NormalizeKind::Default,
                 compile: true,
                 sanity_interp: true,
+                expected_exit: None,
             });
             continue;
         }
@@ -312,6 +315,11 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             }
             "compile" => c.compile = parse_bool(value),
             "sanity_interp" => c.sanity_interp = parse_bool(value),
+            "expected_exit" => {
+                c.expected_exit = Some(value.trim().parse::<i32>().unwrap_or_else(|_| {
+                    panic!("invalid expected_exit '{}', line {}", value, lineno + 1)
+                }))
+            }
             "schema_version" => {}
             _ => panic!(
                 "unknown key '{}' in parity_cases.toml line {}",

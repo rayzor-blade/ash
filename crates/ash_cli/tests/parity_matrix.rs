@@ -104,13 +104,14 @@ fn validate_output(
     let ash_stdout = String::from_utf8_lossy(&ash.output.stdout).to_string();
     let ash_stderr = String::from_utf8_lossy(&ash.output.stderr).to_string();
 
-    if ash_code != oracle.exit_code {
+    let expected_exit = case.expected_exit.unwrap_or(oracle.exit_code);
+    if ash_code != expected_exit {
         return Some(format!(
             "[EXIT MISMATCH][{}][{}] source={} expected={} actual={}\nash:\n{}",
             mode_name,
             case.name,
             oracle.source,
-            oracle.exit_code,
+            expected_exit,
             ash_code,
             render_output(&ash.output)
         ));

@@ -796,34 +796,25 @@ impl HLInterpreter {
         {
             return None;
         }
-        let (val, field_t) = unsafe {
-            match meta {
-                Some((idx, ft)) => {
-                    let v = self
-                        .virtual_fields
-                        .get(&(obj_ptr, idx))
-                        .copied()
-                        .or_else(|| self.virtual_hash_fields.get(&(obj_ptr, hfield)).copied())
-                        .unwrap_or_else(NanBoxedValue::null);
-                    (v, ft)
+        let found = self
+            .virtual_fields
+            .get(&(obj_ptr, meta.map_or(usize::MAX, |(idx, _)| idx)))
+            .copied()
+            .or_else(|| self.virtual_hash_fields.get(&(obj_ptr, hfield)).copied());
+        match found {
+            Some(val) if !val.is_null() && !val.is_void() => {
+                if val.is_ptr() {
+                    return Some(NanBoxedValue::from_ptr(val.as_ptr()));
                 }
-                None => {
-                    let v = self
-                        .virtual_hash_fields
-                        .get(&(obj_ptr, hfield))
-                        .copied()
-                        .unwrap_or_else(NanBoxedValue::null);
-                    (v, std::ptr::null_mut())
-                }
+                let field_t = meta.map_or(std::ptr::null_mut(), |(_, ft)| ft);
+                Some(self.box_value_as_dynamic_with_type(val, field_t))
             }
-        };
-        if val.is_null() || val.is_void() {
-            return Some(NanBoxedValue::null());
+            _ => {
+                // Field not in interpreter maps — fall through to native hlp_obj_get_field
+                // which can read from the virtual object's backing memory.
+                None
+            }
         }
-        if val.is_ptr() {
-            return Some(NanBoxedValue::from_ptr(val.as_ptr()));
-        }
-        Some(self.box_value_as_dynamic_with_type(val, field_t))
     }
 
     fn try_handle_virtual_obj_set_field(
@@ -4522,30 +4513,8 @@ impl HLInterpreter {
             }
         });
 
-        if ret_is_float || float_mask != 0 {
-            let raw =
-                self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float)?;
-            return Ok(self.wrap_native_result(raw, ret_kind));
-        }
-
-        // Type-aware argument extraction
-        let extract_arg = |idx: usize| -> i64 {
-            let kind = if idx < arg_kinds.len() {
-                arg_kinds[idx]
-            } else {
-                0 // HVOID fallback
-            };
-            self.value_to_i64(args[idx], kind)
-        };
-
-        if args.len() > 8 {
-            return Err(anyhow!(
-                "Native call with {} args not yet supported",
-                args.len()
-            ));
-        }
-
         // Set up a setjmp/longjmp trap so hlp_throw can propagate through native C ABI safely.
+        // This covers BOTH float and integer dispatch paths.
         let fn_setup_trap = self.fn_setup_trap_jit;
         let fn_remove_trap = self.fn_remove_trap_jit;
         let fn_get_exc = self.fn_get_exc_value;
@@ -4581,6 +4550,37 @@ impl HLInterpreter {
                     ));
                 }
             }
+        }
+
+        if ret_is_float || float_mask != 0 {
+            let raw =
+                self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float);
+            if trap_installed && !fn_remove_trap.is_null() {
+                type FnRemoveTrap = unsafe extern "C" fn();
+                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+            }
+            return Ok(self.wrap_native_result(raw?, ret_kind));
+        }
+
+        // Type-aware argument extraction
+        let extract_arg = |idx: usize| -> i64 {
+            let kind = if idx < arg_kinds.len() {
+                arg_kinds[idx]
+            } else {
+                0 // HVOID fallback
+            };
+            self.value_to_i64(args[idx], kind)
+        };
+
+        if args.len() > 8 {
+            if trap_installed && !fn_remove_trap.is_null() {
+                type FnRemoveTrap = unsafe extern "C" fn();
+                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+            }
+            return Err(anyhow!(
+                "Native call with {} args not yet supported",
+                args.len()
+            ));
         }
 
         // Dispatch based on argument count, using type-aware extraction and wrapping.

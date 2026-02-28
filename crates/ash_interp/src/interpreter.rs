@@ -45,22 +45,43 @@ fn hash_field_name(
     bytecode: &DecodedBytecode,
     str_idx: usize,
     fn_hash_gen: *mut c_void,
+    utf16_cache: &mut HashMap<usize, Vec<u16>>,
+    hash_cache: &mut HashMap<usize, i32>,
 ) -> Result<i32> {
-    let s = bytecode
-        .strings
-        .get(str_idx)
-        .ok_or_else(|| anyhow!("Dyn field string out of bounds: {}", str_idx))?;
-    let mut utf16: Vec<u16> = s.encode_utf16().collect();
-    utf16.push(0);
-    if !fn_hash_gen.is_null() {
+    if let Some(&h) = hash_cache.get(&str_idx) {
+        return Ok(h);
+    }
+    let utf16 = if let Some(cached) = utf16_cache.get(&str_idx) {
+        cached.as_ptr()
+    } else {
+        let s = bytecode
+            .strings
+            .get(str_idx)
+            .ok_or_else(|| anyhow!("Dyn field string out of bounds: {}", str_idx))?;
+        let mut buf: Vec<u16> = s.encode_utf16().collect();
+        buf.push(0);
+        utf16_cache.insert(str_idx, buf);
+        utf16_cache[&str_idx].as_ptr()
+    };
+    let h = if !fn_hash_gen.is_null() {
         let f: FnHashGen = unsafe { std::mem::transmute(fn_hash_gen) };
-        return Ok(unsafe { f(utf16.as_ptr(), true) });
-    }
-    let mut h: i32 = 0;
-    for c in &utf16[..utf16.len() - 1] {
-        h = h.wrapping_mul(223).wrapping_add(*c as i32);
-    }
-    Ok(h.wrapping_rem(0x1FFFFF7B))
+        unsafe { f(utf16, true) }
+    } else {
+        let slice = unsafe {
+            let mut len = 0;
+            while *utf16.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts(utf16, len)
+        };
+        let mut h: i32 = 0;
+        for c in slice {
+            h = h.wrapping_mul(223).wrapping_add(*c as i32);
+        }
+        h.wrapping_rem(0x1FFFFF7B)
+    };
+    hash_cache.insert(str_idx, h);
+    Ok(h)
 }
 
 #[inline]
@@ -250,9 +271,11 @@ pub struct HLInterpreter {
     gc_runtime_initialized: bool,
     /// Scratch space for decoded raw pointer roots (from NaN-boxed registers).
     gc_root_ptrs: Vec<usize>,
-    /// Cache of UTF-16 null-terminated strings (string index → leaked pointer)
+    /// Cache of UTF-16 null-terminated strings (string index → owned buffer).
     /// HashLink uses UTF-16 internally; bytecode strings are stored as UTF-8 in Rust.
-    utf16_strings: HashMap<usize, *const u16>,
+    utf16_strings: HashMap<usize, Vec<u16>>,
+    /// Cache of field name hashes (string index → hash value).
+    field_hash_cache: HashMap<usize, i32>,
     /// Fallback storage for HVIRTUAL fields when runtime virtual indexes are unavailable.
     virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
     /// Hash-keyed fallback storage for HVIRTUAL dynamic field access via hl.Api/Reflect.
@@ -409,6 +432,7 @@ impl HLInterpreter {
             gc_runtime_initialized: false,
             gc_root_ptrs: Vec::new(),
             utf16_strings: HashMap::new(),
+            field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
             virtual_hash_fields: HashMap::new(),
             tiered_runtime: None,
@@ -1147,16 +1171,14 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         str_idx: usize,
     ) -> Option<*const u16> {
-        if let Some(&cached) = self.utf16_strings.get(&str_idx) {
-            return Some(cached);
+        if let Some(cached) = self.utf16_strings.get(&str_idx) {
+            return Some(cached.as_ptr());
         }
         let s = bytecode.strings.get(str_idx)?;
         let mut utf16: Vec<u16> = s.encode_utf16().collect();
         utf16.push(0);
-        let ptr = utf16.as_ptr();
-        std::mem::forget(utf16);
-        self.utf16_strings.insert(str_idx, ptr);
-        Some(ptr)
+        self.utf16_strings.insert(str_idx, utf16);
+        Some(self.utf16_strings[&str_idx].as_ptr())
     }
 
     /// Execute starting from the bytecode entrypoint.
@@ -1971,19 +1993,17 @@ impl HLInterpreter {
             Opcode::String { dst, ptr } => {
                 // HashLink uses UTF-16 strings internally.
                 // Get or create a cached null-terminated UTF-16 version of the string.
-                let utf16_ptr = if let Some(&cached) = self.utf16_strings.get(&ptr.0) {
-                    cached
+                let utf16_ptr = if let Some(cached) = self.utf16_strings.get(&ptr.0) {
+                    cached.as_ptr()
                 } else {
                     let s = bytecode
                         .strings
                         .get(ptr.0)
                         .ok_or_else(|| anyhow!("String constant out of bounds: {}", ptr.0))?;
-                    let mut utf16: Vec<u16> = s.encode_utf16().collect();
-                    utf16.push(0); // null terminator
-                    let ptr_val = utf16.as_ptr();
-                    std::mem::forget(utf16); // leak - lives for program duration
-                    self.utf16_strings.insert(ptr.0, ptr_val);
-                    ptr_val
+                    let mut buf: Vec<u16> = s.encode_utf16().collect();
+                    buf.push(0);
+                    self.utf16_strings.insert(ptr.0, buf);
+                    self.utf16_strings[&ptr.0].as_ptr()
                 };
                 frame
                     .registers
@@ -2838,7 +2858,7 @@ impl HLInterpreter {
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
                 } else {
-                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen)?;
+                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen, &mut self.utf16_strings, &mut self.field_hash_cache)?;
                     if std::env::var("ASH_DBG_DYN").is_ok() {
                         let fname = bytecode
                             .strings
@@ -2879,7 +2899,7 @@ impl HLInterpreter {
                 if obj_val.is_null() || obj_val.is_void() {
                     // no-op
                 } else {
-                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen)?;
+                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen, &mut self.utf16_strings, &mut self.field_hash_cache)?;
                     let obj_ptr = obj_val.as_ptr() as *mut c_void;
                     let src_val = frame.registers.get(src.0);
                     let src_type_idx = func.regs[src.0 as usize].0;

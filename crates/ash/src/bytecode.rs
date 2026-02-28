@@ -17,7 +17,6 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::native_lib::STD_LIBRARY;
 use std::io::{self, BufRead, BufReader, Cursor, Read, Seek};
 use std::mem;
-use std::os::macos::raw;
 use std::path::Path;
 use std::rc::Rc;
 

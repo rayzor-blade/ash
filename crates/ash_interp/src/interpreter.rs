@@ -498,6 +498,13 @@ impl HLInterpreter {
         self.tiered_runtime.as_ref().map(|t| &t.stats)
     }
 
+    #[inline(always)]
+    fn current_stack_addr() -> usize {
+        // Portable stack probe: address of a local variable approximates current SP.
+        let marker = 0u8;
+        (&marker as *const u8) as usize
+    }
+
     fn ensure_gc_runtime_initialized(&mut self) {
         if self.gc_runtime_initialized {
             return;
@@ -515,9 +522,7 @@ impl HLInterpreter {
         let set_stack_top: FnSetStackTop = unsafe { std::mem::transmute(self.fn_gc_set_stack_top) };
         unsafe {
             set_globals(globals_ptr as *const *mut c_void, globals_len);
-            let stack_top: usize;
-            core::arch::asm!("mov {}, sp", out(reg) stack_top);
-            set_stack_top(stack_top);
+            set_stack_top(Self::current_stack_addr());
         }
         self.gc_runtime_initialized = true;
     }

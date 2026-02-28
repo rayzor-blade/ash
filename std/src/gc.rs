@@ -56,6 +56,13 @@ pub struct ImmixAllocator {
 }
 
 impl ImmixAllocator {
+    #[inline(always)]
+    fn current_stack_addr() -> usize {
+        // Portable stack probe: address of a local variable approximates current SP.
+        let marker = 0u8;
+        (&marker as *const u8) as usize
+    }
+
     pub fn new() -> Self {
         let mut heap = ImmixHeap {
             memory: Box::new([0; HEAP_SIZE]),
@@ -435,15 +442,16 @@ impl ImmixAllocator {
             }
         }
 
-        // Conservative scan of thread stack
+        // Conservative scan of thread stack.
+        // Do not use arch-specific inline asm here; use a portable stack probe.
         if self.stack_top > 0 {
-            let sp: usize;
-            unsafe {
-                core::arch::asm!("mov {}, sp", out(reg) sp);
-            }
-            // Stack grows downward on ARM64: SP < stack_top
+            let sp = Self::current_stack_addr();
             if sp < self.stack_top {
                 let newly_marked = self.conservative_scan_range(sp, self.stack_top);
+                all_newly_marked.extend(newly_marked);
+            } else if sp > self.stack_top {
+                // Be robust on unusual targets where stack direction may differ.
+                let newly_marked = self.conservative_scan_range(self.stack_top, sp);
                 all_newly_marked.extend(newly_marked);
             }
         }

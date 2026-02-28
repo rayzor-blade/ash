@@ -2,9 +2,9 @@ mod common;
 
 use common::{
     ash_cli_bin, compile_haxe_case, extract_checksum, load_parity_cases, normalize_text,
-    parity_cases_file, parse_bool_env, parse_u64_env, render_output, run_ash, run_hashlink,
-    run_haxe_interp, tests_dir, unified_diff, AshMode, ExpectationKind, NormalizeKind, ParityCase,
-    RunResult,
+    parity_cases_file, parse_bool_env, parse_u64_env, render_output, repo_root, run_ash,
+    run_hashlink, run_haxe_interp, tests_dir, unified_diff, AshMode, ExpectationKind,
+    NormalizeKind, ParityCase, RunResult,
 };
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -191,14 +191,13 @@ fn run_parity_matrix(mode: AshMode) {
     let use_local_hl = parse_bool_env("ASH_PARITY_USE_LOCAL_HL", false);
     let oracle_dir = std::env::var("ASH_PARITY_ORACLE_DIR")
         .ok()
-        .map(PathBuf::from)
+        .map(|s| {
+            let p = PathBuf::from(s);
+            if p.is_absolute() { p } else { repo_root().join(p) }
+        })
         .or_else(|| {
-            let d = PathBuf::from("target/parity-oracle");
-            if d.exists() {
-                Some(d)
-            } else {
-                None
-            }
+            let d = repo_root().join("target/parity-oracle");
+            if d.exists() { Some(d) } else { None }
         })
         .and_then(resolve_oracle_dir);
 

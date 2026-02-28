@@ -68,7 +68,17 @@ def load_cases(repo_root, include_slow):
 
 
 def build_ash_cli(repo_root):
-    code, out, err = run(["cargo", "build", "-q", "-p", "ash_cli"], cwd=repo_root)
+    build_target = os.environ.get("CARGO_BUILD_TARGET")
+    std_cmd = ["cargo", "build", "-q", "-p", "ash_std"]
+    cli_cmd = ["cargo", "build", "-q", "-p", "ash_cli"]
+    if build_target:
+        std_cmd.extend(["--target", build_target])
+        cli_cmd.extend(["--target", build_target])
+
+    code, out, err = run(std_cmd, cwd=repo_root)
+    must_ok(code, out, err, "cargo build -p ash_std")
+
+    code, out, err = run(cli_cmd, cwd=repo_root)
     must_ok(code, out, err, "cargo build -p ash_cli")
 
 

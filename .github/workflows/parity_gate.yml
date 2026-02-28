@@ -96,6 +96,9 @@ jobs:
           name: parity-oracle-current
           path: target/parity-oracle
 
+      - name: Build embedded stdlib cdylib
+        run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
+
       - name: Run parity matrix (interp)
         run: cargo test -p ash_cli --test parity_matrix parity_matrix_interp -- --nocapture
 
@@ -132,6 +135,9 @@ jobs:
         with:
           name: parity-oracle-current
           path: target/parity-oracle
+
+      - name: Build embedded stdlib cdylib
+        run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
       - name: Run parity matrix (hybrid default)
         run: cargo test -p ash_cli --test parity_matrix parity_matrix_hybrid_default -- --nocapture
@@ -175,6 +181,9 @@ jobs:
         with:
           name: parity-oracle-current
           path: target/parity-oracle
+
+      - name: Build embedded stdlib cdylib
+        run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
       - name: Run parity matrix (slow nightly)
         run: cargo test -p ash_cli --test parity_matrix -- --nocapture

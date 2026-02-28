@@ -44,6 +44,9 @@ jobs:
           llvm-config-18 --version
           clang-18 --version
 
+      - name: Build embedded stdlib cdylib
+        run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
+
       - name: Run perf smoke matrix
         run: |
           INCLUDE_SLOW="false"

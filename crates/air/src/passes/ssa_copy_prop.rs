@@ -24,10 +24,47 @@ impl SSACopyPropPass {
         // Skip pinned registers — they're not in SSA form and may have multiple definitions
         let mut copy_of: HashMap<Reg, Reg> = HashMap::new();
 
+        // Count how many SSA definitions exist per base register.
+        // If a base register has multiple SSA versions, substituting across
+        // register families is unsafe after de-SSA: all SSA versions collapse
+        // back to the same base register, so a read might pick up a later
+        // redefinition instead of the intended value.
+        let mut base_def_count: HashMap<u32, usize> = HashMap::new();
+        for op in ops.iter() {
+            let writes = opcode_info::writes(op);
+            for w in writes {
+                if !ssa.pinned.contains(&w.0) {
+                    let base = if (w.0 as usize) < ssa.base_reg.len() {
+                        ssa.base_reg[w.0 as usize]
+                    } else {
+                        w.0
+                    };
+                    *base_def_count.entry(base).or_insert(0) += 1;
+                }
+            }
+        }
+
         for op in ops.iter() {
             if let Opcode::Mov { dst, src } = op {
                 if !ssa.pinned.contains(&dst.0) && !ssa.pinned.contains(&src.0) {
-                    copy_of.insert(*dst, *src);
+                    // Safety check: if src's base register has multiple SSA defs
+                    // and dst has a different base register, the substitution is
+                    // unsafe after de-SSA because the different defs collapse to
+                    // one register and reads may pick up the wrong value.
+                    let src_base = if (src.0 as usize) < ssa.base_reg.len() {
+                        ssa.base_reg[src.0 as usize]
+                    } else {
+                        src.0
+                    };
+                    let dst_base = if (dst.0 as usize) < ssa.base_reg.len() {
+                        ssa.base_reg[dst.0 as usize]
+                    } else {
+                        dst.0
+                    };
+                    let src_defs = base_def_count.get(&src_base).copied().unwrap_or(1);
+                    if src_base == dst_base || src_defs <= 1 {
+                        copy_of.insert(*dst, *src);
+                    }
                 }
             }
         }
@@ -38,8 +75,21 @@ impl SSACopyPropPass {
                 if phi.sources.len() > 0 {
                     let first_src = phi.sources[0].1;
                     if phi.sources.iter().all(|(_, s)| *s == first_src) {
-                        // Trivial phi: all sources are the same → it's a copy
-                        copy_of.insert(phi.dst, first_src);
+                        // Apply same safety check as Mov copies
+                        let src_base = if (first_src.0 as usize) < ssa.base_reg.len() {
+                            ssa.base_reg[first_src.0 as usize]
+                        } else {
+                            first_src.0
+                        };
+                        let dst_base = if (phi.dst.0 as usize) < ssa.base_reg.len() {
+                            ssa.base_reg[phi.dst.0 as usize]
+                        } else {
+                            phi.dst.0
+                        };
+                        let src_defs = base_def_count.get(&src_base).copied().unwrap_or(1);
+                        if src_base == dst_base || src_defs <= 1 {
+                            copy_of.insert(phi.dst, first_src);
+                        }
                     }
                 }
             }

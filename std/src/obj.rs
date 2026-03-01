@@ -690,8 +690,8 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             i as i32
         };
         if !m.is_null() && !(*m).functions_ptrs.is_null() {
-            *(*t).methods.add(method_index as usize) =
-                *(*m).functions_ptrs.add((*pr).findex as usize);
+            let faddr = *(*m).functions_ptrs.add((*pr).findex as usize);
+            *(*t).methods.add(method_index as usize) = faddr;
         }
     }
 
@@ -1758,7 +1758,8 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                         },
                     };
                     tmp.__bindgen_anon_1.fun = &mut tf;
-                    if hlp_safe_cast(&mut tmp, ft) {
+                    let cast_ok = hlp_safe_cast(&mut tmp, ft);
+                    if cast_ok {
                         let method_idx = (-(*f).field_index - 1) as usize;
                         let rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
                         *(hl_vfields(v).add(i)) = *(*rt).methods.wrapping_add(method_idx);
@@ -1948,17 +1949,6 @@ pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) ->
     let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
         std::mem::transmute(method_ptr);
     let result = method_fn(obj);
-    eprintln!(
-        "[hlp_vcall_virtual_0] field={}, method_ptr={:p}, result={:p}",
-        field, method_ptr, result
-    );
-    if !result.is_null() {
-        eprintln!(
-            "[hlp_vcall_virtual_0] result.t.kind={}, result.v.i={}",
-            (*(*result).t).kind,
-            (*result).v.i
-        );
-    }
     result
 }
 

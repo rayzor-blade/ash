@@ -259,10 +259,16 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
-            // Run AIR optimization passes on bytecode before LLVM emission
-            let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
-            let num_regs = f.regs.len();
-            let _eliminated = pass_manager.run(&mut f.ops, num_regs);
+            // Run AIR optimization passes on bytecode before LLVM emission.
+            // Skip optimization for functions containing Trap opcodes — exception
+            // control flow (longjmp) creates implicit CFG edges that the AIR
+            // optimizer can't model, leading to incorrect SSA phi placement.
+            let has_trap = f.ops.iter().any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
+            if !has_trap {
+                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
+                let num_regs = f.regs.len();
+                let _eliminated = pass_manager.run(&mut f.ops, num_regs);
+            }
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
@@ -413,11 +419,14 @@ impl<'ctx> JITModule<'ctx> {
 
         match fun_ptr {
             FuncPtr::Fun(f) => {
-                // Run AIR optimization passes
+                // Run AIR optimization passes (skip for Trap-containing functions)
                 let mut f = f.clone();
-                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
-                let num_regs = f.regs.len();
-                let _eliminated = pass_manager.run(&mut f.ops, num_regs);
+                let has_trap = f.ops.iter().any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
+                if !has_trap {
+                    let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
+                    let num_regs = f.regs.len();
+                    let _eliminated = pass_manager.run(&mut f.ops, num_regs);
+                }
 
                 let function = self.create_function_declaration(&f)?;
                 let basic_block = self.context.append_basic_block(function, "entry");
@@ -524,11 +533,100 @@ impl<'ctx> JITModule<'ctx> {
         })
     }
 
+    /// Cast a value to match a target function's expected parameter type.
+    /// In HashLink, all values are passed as machine-word-sized values regardless of
+    /// declared type. When the bytecode register type differs from the target function's
+    /// parameter type (e.g., i32 register passed to a function expecting ptr/Dynamic),
+    /// we cast to preserve the bit pattern — matching the C calling convention behavior.
+    fn cast_for_call(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i64_type = self.context.i64_type();
+
+        match (value.get_type(), target) {
+            // int → ptr: zero-extend to i64 then inttoptr
+            (BasicTypeEnum::IntType(_), BasicTypeEnum::PointerType(_)) => {
+                let int_val = value.into_int_value();
+                let i64_val = if int_val.get_type().get_bit_width() < 64 {
+                    self.builder
+                        .build_int_z_extend(int_val, i64_type, "zext")?
+                } else {
+                    int_val
+                };
+                Ok(self
+                    .builder
+                    .build_int_to_ptr(i64_val, ptr_type, "cast_itoptr")?
+                    .into())
+            }
+            // ptr → int: ptrtoint then truncate if needed
+            (BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(int_type)) => {
+                let ptr_val = value.into_pointer_value();
+                let i64_val =
+                    self.builder
+                        .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
+                if int_type.get_bit_width() < 64 {
+                    Ok(self
+                        .builder
+                        .build_int_truncate(i64_val, int_type, "cast_trunc")?
+                        .into())
+                } else {
+                    Ok(i64_val.into())
+                }
+            }
+            // float → ptr: bitcast to i64, then inttoptr
+            (BasicTypeEnum::FloatType(_), BasicTypeEnum::PointerType(_)) => {
+                let float_val = value.into_float_value();
+                let i64_val = self
+                    .builder
+                    .build_bit_cast(float_val, i64_type, "cast_ftoi64")?
+                    .into_int_value();
+                Ok(self
+                    .builder
+                    .build_int_to_ptr(i64_val, ptr_type, "cast_ftoptr")?
+                    .into())
+            }
+            // ptr → float: ptrtoint then bitcast
+            (BasicTypeEnum::PointerType(_), BasicTypeEnum::FloatType(float_type)) => {
+                let ptr_val = value.into_pointer_value();
+                let i64_val =
+                    self.builder
+                        .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
+                Ok(self
+                    .builder
+                    .build_bit_cast(i64_val, float_type, "cast_itof")?
+                    .into())
+            }
+            // int widths differ: zext or trunc
+            (BasicTypeEnum::IntType(from), BasicTypeEnum::IntType(to)) => {
+                let int_val = value.into_int_value();
+                if from.get_bit_width() < to.get_bit_width() {
+                    Ok(self
+                        .builder
+                        .build_int_z_extend(int_val, to, "cast_zext")?
+                        .into())
+                } else if from.get_bit_width() > to.get_bit_width() {
+                    Ok(self
+                        .builder
+                        .build_int_truncate(int_val, to, "cast_trunc")?
+                        .into())
+                } else {
+                    Ok(value)
+                }
+            }
+            // Same or compatible types: no conversion
+            _ => Ok(value),
+        }
+    }
+
     fn get_initialized_type(&mut self, type_index: usize) -> Result<BasicValueEnum<'ctx>> {
         if let Some(type_) = self.initialized_type_cache.get(&type_index) {
             return Ok(*type_);
         }
         let kind = self.types_[type_index].clone().kind;
+
 
         // For primitive types (kind <= HDYN), create a real C-side hl_type and store its pointer
         // This matches what HOBJ/HSTRUCT/HENUM/HVIRTUAL already do in init_indexes
@@ -1093,27 +1191,16 @@ impl<'ctx> JITModule<'ctx> {
                         self.builder.build_store(field_ptr, src_val)?;
                     }
                     hl_type_kind_HVIRTUAL => {
-                        // Get the value pointer from vvirtual (byte offset 8)
                         let ptr_type = self.context.ptr_type(AddressSpace::default());
-                        let value_gep = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                obj_val,
-                                &[self.context.i64_type().const_int(8, false)],
-                                "value_gep",
-                            )?
-                        };
-                        let value_ptr = self
-                            .builder
-                            .build_load(ptr_type, value_gep, "value")?
-                            .into_pointer_value();
+                        let vvirt_ptr = obj_val;
 
-                        // vfields array is at value + sizeof(ptr) = value + 8 bytes
+                        // vfields array starts at offset sizeof(vvirtual) = 24
+                        // from the vvirtual pointer (after t, value, next fields)
                         let vfields_ptr = unsafe {
                             self.builder.build_gep(
                                 self.context.i8_type(),
-                                value_ptr,
-                                &[self.context.i64_type().const_int(8, false)],
+                                vvirt_ptr,
+                                &[self.context.i64_type().const_int(24, false)],
                                 "vfields_ptr",
                             )?
                         };
@@ -1210,6 +1297,19 @@ impl<'ctx> JITModule<'ctx> {
                             src_val.into_pointer_value()
                         };
 
+                        // Load value (underlying object) from vvirtual offset 8
+                        let fb_value_gep = unsafe {
+                            self.builder.build_gep(
+                                self.context.i8_type(),
+                                vvirt_ptr,
+                                &[self.context.i64_type().const_int(8, false)],
+                                "sf_fb_value_gep",
+                            )?
+                        };
+                        let fb_value_obj = self
+                            .builder
+                            .build_load(ptr_type, fb_value_gep, "sf_fb_value")?;
+
                         let obj_set_field = self.declare_native(
                             "hlp_obj_set_field",
                             &[
@@ -1221,7 +1321,7 @@ impl<'ctx> JITModule<'ctx> {
                         );
                         self.builder.build_call(
                             obj_set_field,
-                            &[obj_val.into(), field_hash.into(), boxed_val.into()],
+                            &[fb_value_obj.into(), field_hash.into(), boxed_val.into()],
                             "dyn_set_result",
                         )?;
                         self.builder.build_unconditional_branch(cont_block)?;
@@ -1320,27 +1420,16 @@ impl<'ctx> JITModule<'ctx> {
                             .build_store(registers[dst.0 as usize], field_val)?;
                     }
                     hl_type_kind_HVIRTUAL => {
-                        // Get the value pointer from vvirtual (byte offset 8)
                         let ptr_type = self.context.ptr_type(AddressSpace::default());
-                        let value_gep = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                obj_val.into_pointer_value(),
-                                &[self.context.i64_type().const_int(8, false)],
-                                "value_gep",
-                            )?
-                        };
-                        let value_ptr = self
-                            .builder
-                            .build_load(ptr_type, value_gep, "value")?
-                            .into_pointer_value();
+                        let vvirt_ptr = obj_val.into_pointer_value();
 
-                        // vfields array is at value + sizeof(ptr) = value + 8 bytes
+                        // vfields array starts at offset sizeof(vvirtual) = 24
+                        // from the vvirtual pointer (after t, value, next fields)
                         let vfields_ptr = unsafe {
                             self.builder.build_gep(
                                 self.context.i8_type(),
-                                value_ptr,
-                                &[self.context.i64_type().const_int(8, false)],
+                                vvirt_ptr,
+                                &[self.context.i64_type().const_int(24, false)],
                                 "vfields_ptr",
                             )?
                         };
@@ -1399,24 +1488,43 @@ impl<'ctx> JITModule<'ctx> {
                             .build_store(registers[dst.0 as usize], field_value)?;
                         self.builder.build_unconditional_branch(cont_block)?;
 
-                        // Field doesn't exist: r = hl_dyn_get(o,hash(field),vt)
+                        // Field doesn't exist in vfields: fall back to dynamic
+                        // field access on the underlying value object
                         self.builder.position_at_end(else_block);
-                        let hl_dyn_get = self.declare_native(
-                            "hlp_get_dynget",
-                            &[self.context.ptr_type(AddressSpace::default()).into()],
-                            Some(self.context.ptr_type(AddressSpace::default()).into()),
-                        );
+                        let i32_type = self.context.i32_type();
+                        // Load value (underlying object) from vvirtual offset 8
+                        let value_gep = unsafe {
+                            self.builder.build_gep(
+                                self.context.i8_type(),
+                                vvirt_ptr,
+                                &[self.context.i64_type().const_int(8, false)],
+                                "fb_value_gep",
+                            )?
+                        };
+                        let value_obj = self
+                            .builder
+                            .build_load(ptr_type, value_gep, "fb_value")?;
                         let hashed_name = obj_type_
                             .virt
                             .as_ref()
                             .map(|v| v.fields.get(field.0).map(|f| f.hashed_name).unwrap_or(0))
                             .unwrap_or(0);
                         let field_hash =
-                            self.context.i32_type().const_int(hashed_name as u64, false);
+                            i32_type.const_int(hashed_name as u64, true);
+                        let dst_type_idx = f.regs[dst.0 as usize].0;
+                        let dst_kind = self.types_[dst_type_idx].kind;
+                        let type_ptr = self
+                            .get_initialized_type(dst_type_idx)?
+                            .into_pointer_value();
+                        let getter = self.declare_native(
+                            "hlp_dyn_getp",
+                            &[ptr_type.into(), i32_type.into(), ptr_type.into()],
+                            Some(ptr_type.into()),
+                        );
                         let result = self.builder.build_call(
-                            hl_dyn_get,
-                            &[registers[obj.0 as usize].into(), field_hash.into()],
-                            "dyn_get_result",
+                            getter,
+                            &[value_obj.into(), field_hash.into(), type_ptr.into()],
+                            "dyn_get_fb",
                         )?;
                         let dyn_field_value = result.try_as_basic_value().left().unwrap();
                         self.builder
@@ -2055,27 +2163,80 @@ impl<'ctx> JITModule<'ctx> {
 
                     // --- Direct path: vfield is resolved, call directly ---
                     self.builder.position_at_end(direct_block);
+
+                    // Look up virtual field's declared function type to get correct param types.
+                    // Extract type indices first to avoid borrow conflicts with self.
+                    let virt_fn_info: Option<(Vec<usize>, usize)> = obj_type.virt.as_ref()
+                        .and_then(|v| v.fields.get(field.0))
+                        .and_then(|fld| {
+                            let ft = &self.types_[fld.type_.0];
+                            if ft.kind == hl_type_kind_HFUN {
+                                ft.fun.as_ref().map(|fun| {
+                                    let arg_indices: Vec<usize> = fun.args.iter().map(|a| a.0).collect();
+                                    (arg_indices, fun.ret.0)
+                                })
+                            } else {
+                                None
+                            }
+                        });
+
+                    // Convert type indices to LLVM types (now safe to call get_register_type)
+                    let virt_fn_args: Option<Vec<BasicTypeEnum>> = if let Some((ref arg_indices, _)) = virt_fn_info {
+                        let mut types = vec![ptr_type.as_basic_type_enum()];
+                        for &idx in arg_indices {
+                            types.push(self.get_register_type(idx).unwrap_or(ptr_type.into()));
+                        }
+                        Some(types)
+                    } else {
+                        None
+                    };
+                    let virt_ret_type: Option<BasicTypeEnum> = if let Some((_, ret_idx)) = virt_fn_info {
+                        Some(self.get_register_type(ret_idx).unwrap_or(ptr_type.into()))
+                    } else {
+                        None
+                    };
+
                     let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
                     arg_vals.push(value.into());
-                    for arg in &args[1..] {
-                        arg_vals.push(
-                            self.builder
-                                .build_load(
-                                    reg_types[arg.0 as usize],
-                                    registers[arg.0 as usize],
-                                    "arg_val",
-                                )?
-                                .into(),
-                        );
+                    for (idx, arg) in args[1..].iter().enumerate() {
+                        let loaded = self.builder.build_load(
+                            reg_types[arg.0 as usize],
+                            registers[arg.0 as usize],
+                            "arg_val",
+                        )?;
+                        // Cast to match the virtual field's declared function param type
+                        if let Some(ref fn_args) = virt_fn_args {
+                            let param_idx = idx + 1; // +1 for 'this'
+                            if param_idx < fn_args.len() {
+                                let expected = fn_args[param_idx];
+                                if loaded.get_type() != expected {
+                                    let casted = self.cast_for_call(loaded, expected)?;
+                                    arg_vals.push(casted.into());
+                                    continue;
+                                }
+                            }
+                        }
+                        arg_vals.push(loaded.into());
                     }
+
+                    // Build fn_type from the virtual's declared types (not register types)
                     let mut arg_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(args.len());
-                    arg_types.push(ptr_type.into());
-                    for arg in &args[1..] {
-                        arg_types.push(reg_types[arg.0 as usize].into());
+                    if let Some(ref fn_args) = virt_fn_args {
+                        for t in fn_args.iter() {
+                            arg_types.push((*t).into());
+                        }
+                    } else {
+                        arg_types.push(ptr_type.into());
+                        for arg in &args[1..] {
+                            arg_types.push(reg_types[arg.0 as usize].into());
+                        }
                     }
                     let dst_kind = self.types_[f.regs[dst.0 as usize].0].kind;
+                    let ret_type = virt_ret_type;
                     let fn_type = if dst_kind == hl_type_kind_HVOID {
                         self.context.void_type().fn_type(&arg_types, false)
+                    } else if let Some(rt) = ret_type {
+                        rt.fn_type(&arg_types, false)
                     } else {
                         reg_types[dst.0 as usize].fn_type(&arg_types, false)
                     };
@@ -2086,8 +2247,13 @@ impl<'ctx> JITModule<'ctx> {
                         "vcall_virt",
                     )?;
                     if let Some(ret_val) = direct_result.try_as_basic_value().left() {
+                        let store_val = if ret_val.get_type() != reg_types[dst.0 as usize] {
+                            self.cast_for_call(ret_val, reg_types[dst.0 as usize])?
+                        } else {
+                            ret_val
+                        };
                         self.builder
-                            .build_store(registers[dst.0 as usize], ret_val)?;
+                            .build_store(registers[dst.0 as usize], store_val)?;
                     }
                     self.builder.build_unconditional_branch(merge_block)?;
 
@@ -2156,31 +2322,105 @@ impl<'ctx> JITModule<'ctx> {
                 } else if let Some(findex) = obj_type
                     .obj
                     .as_ref()
-                    .and_then(|obj| obj.proto.get(field.0).map(|p| p.findex as usize))
+                    .and_then(|obj| {
+                        // field.0 is the vtable slot index (vobj_proto index).
+                        // Find the proto entry whose pindex matches field.0
+                        // to get the findex for the function signature.
+                        for p in &obj.proto {
+                            if p.pindex as usize == field.0 {
+                                return Some(p.findex as usize);
+                            }
+                        }
+                        None
+                    })
                 {
-                    // Compile-time resolution for HOBJ/HSTRUCT
+                    // Runtime vtable dispatch for HOBJ/HSTRUCT.
+                    // field.0 is the vobj_proto slot index.
+                    let vtable_slot = field.0 as u64;
+
+                    // Get base function type for constructing the indirect call fn_type
                     let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
-                    // Truncate args to match the target function's actual parameter count.
-                    // Bytecode CallMethod may include extra args beyond what the function expects
-                    // (e.g., getter `get_length` takes only `this` but bytecode has extra args).
-                    let expected_params = function.count_params() as usize;
-                    let actual_args = &args[..expected_params.min(args.len())];
-                    let arg_vals: Vec<BasicMetadataValueEnum> = actual_args
-                        .iter()
-                        .map(|arg| {
-                            self.builder
-                                .build_load(
-                                    reg_types[arg.0 as usize],
-                                    registers[arg.0 as usize],
-                                    "arg_val",
-                                )
-                                .unwrap()
-                                .into()
-                        })
-                        .collect();
-                    let result = self
+                    let param_types = function.get_type().get_param_types();
+                    let fn_type = function.get_type();
+
+                    // Load object pointer
+                    let obj_val = self
                         .builder
-                        .build_call(function, &arg_vals, "call_method")?;
+                        .build_load(ptr_type, registers[args[0].0 as usize], "cm_obj")?
+                        .into_pointer_value();
+
+                    // Load hl_type* from object (offset 0)
+                    let type_ptr = self
+                        .builder
+                        .build_load(ptr_type, obj_val, "cm_type")?
+                        .into_pointer_value();
+
+                    // Load vobj_proto from hl_type (offset 16)
+                    let vobj_proto_gep = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(),
+                            type_ptr,
+                            &[self.context.i64_type().const_int(16, false)],
+                            "vobj_proto_gep",
+                        )?
+                    };
+                    let vobj_proto = self
+                        .builder
+                        .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
+                        .into_pointer_value();
+
+                    // Load method pointer from vobj_proto[field.0]
+                    let method_gep = unsafe {
+                        self.builder.build_gep(
+                            ptr_type,
+                            vobj_proto,
+                            &[self.context.i32_type().const_int(vtable_slot, false)],
+                            "method_gep",
+                        )?
+                    };
+                    let method_ptr = self
+                        .builder
+                        .build_load(ptr_type, method_gep, "method_ptr")?
+                        .into_pointer_value();
+
+                    // Build arg values with type casting
+                    let expected_params = function.count_params() as usize;
+                    let mut arg_vals: Vec<BasicMetadataValueEnum> =
+                        Vec::with_capacity(expected_params);
+                    for (idx, arg) in args.iter().enumerate() {
+                        if idx >= expected_params {
+                            break;
+                        }
+                        let loaded = self.builder.build_load(
+                            reg_types[arg.0 as usize],
+                            registers[arg.0 as usize],
+                            "arg_val",
+                        )?;
+                        if idx < param_types.len() {
+                            let expected = param_types[idx];
+                            if loaded.get_type() != expected {
+                                let casted =
+                                    self.cast_for_call(loaded, expected)?;
+                                arg_vals.push(casted.into());
+                            } else {
+                                arg_vals.push(loaded.into());
+                            }
+                        } else {
+                            arg_vals.push(loaded.into());
+                        }
+                    }
+                    while arg_vals.len() < expected_params {
+                        let param_type = param_types[arg_vals.len()];
+                        arg_vals.push(param_type.const_zero().into());
+                    }
+
+                    // Indirect call through the vtable method pointer
+                    let result = self.builder.build_indirect_call(
+                        fn_type,
+                        method_ptr,
+                        &arg_vals,
+                        "call_method",
+                    )?;
                     if let Some(ret_val) = result.try_as_basic_value().left() {
                         self.builder
                             .build_store(registers[dst.0 as usize], ret_val)?;
@@ -2763,8 +3003,32 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_unconditional_branch(done_bb)?;
 
                     self.builder.position_at_end(done_bb);
+                } else if src_kind == hl_type_kind_HDYN || src_kind == hl_type_kind_HNULL {
+                    // Dynamic-to-concrete non-primitive cast: call hlp_dyn_castp to
+                    // properly extract the inner value from the vdynamic wrapper.
+                    // A simple pointer copy would pass the vdynamic header address
+                    // instead of the actual data (e.g. bytes pointer for HBYTES).
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let src_type_ptr = self.get_initialized_type(src_type_idx)?.into_pointer_value();
+                    let dst_type_ptr = self.get_initialized_type(dst_type_idx)?.into_pointer_value();
+                    let dyn_castp = self.declare_native(
+                        "hlp_dyn_castp",
+                        &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    // hlp_dyn_castp expects double-indirection: data points to a slot
+                    // containing the *mut vdynamic, which is exactly what the alloca is.
+                    let result = self.builder.build_call(
+                        dyn_castp,
+                        &[registers[src.0 as usize].into(), src_type_ptr.into(), dst_type_ptr.into()],
+                        "dyn_castp",
+                    )?;
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        result.try_as_basic_value().left().unwrap(),
+                    )?;
                 } else {
-                    // Same type or non-primitive: simple copy
+                    // Same type or non-dynamic: simple pointer copy
                     let src_val = self.builder.build_load(
                         reg_types[src.0 as usize],
                         registers[src.0 as usize],
@@ -2893,6 +3157,10 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap();
                 self.builder
                     .build_store(registers[exc.0 as usize], exc_val)?;
+                // Clear the global exc_value to prevent stale values
+                // contaminating nested exception handlers.
+                let clear_exc = self.declare_native("hlp_clear_exc_value", &[], None);
+                self.builder.build_call(clear_exc, &[], "")?;
                 self.builder.build_unconditional_branch(handler_block)?;
             }
 
@@ -4068,40 +4336,58 @@ impl<'ctx> JITModule<'ctx> {
         ))
     }
 
-    /// Create stub functions for all bytecode functions not yet compiled.
-    /// These stubs simply return zero/null and ensure functions_ptrs has
-    /// valid addresses for all function indices (needed by binding mechanism).
-    fn create_stubs_for_uncompiled_functions(&mut self) -> Result<()> {
-        let findexes_clone: Vec<(usize, FuncPtr)> =
-            self.findexes.iter().map(|(&k, v)| (k, v.clone())).collect();
-        let saved_block = self.builder.get_insert_block();
-
-        for (findex, func_ptr) in findexes_clone {
-            if self.func_cache.contains_key(&findex) {
-                continue; // Already compiled
-            }
-            if let FuncPtr::Fun(f) = func_ptr {
-                // Create a declaration with a valid stub body
-                match self.create_function_declaration(&f) {
-                    Ok(decl) => {
-                        let stub_block = self.context.append_basic_block(decl, "stub");
-                        self.builder.position_at_end(stub_block);
-                        let ret_type = decl.get_type().get_return_type();
-                        if let Some(ret_type) = ret_type {
-                            self.builder.build_return(Some(&ret_type.const_zero())).ok();
-                        } else {
-                            self.builder.build_return(None).ok();
-                        }
-                        self.func_cache.insert(findex, decl);
+    /// Compile all remaining bytecode functions not yet compiled.
+    /// Functions only reachable through virtual dispatch (CallMethod on HVIRTUAL)
+    /// are not discovered during the main compilation pass, so we compile them here.
+    /// Any function that cannot be compiled gets a stub returning zero/null.
+    fn compile_remaining_functions(&mut self) -> Result<()> {
+        let uncompiled: Vec<usize> = self
+            .findexes
+            .iter()
+            .filter_map(|(&findex, fp)| {
+                if !self.func_cache.contains_key(&findex) {
+                    if let FuncPtr::Fun(_) = fp {
+                        return Some(findex);
                     }
-                    Err(_) => {} // Skip types we can't handle
+                }
+                None
+            })
+            .collect();
+
+        for findex in &uncompiled {
+            if let Err(_e) = self.compile_function(*findex) {
+                // Compilation failure: create a stub so functions_ptrs has a valid address
+                if !self.func_cache.contains_key(findex) {
+                    let saved_block = self.builder.get_insert_block();
+                    // Clone the function data to avoid borrow conflict with self
+                    let f_clone = if let Some(FuncPtr::Fun(f)) = self.findexes.get(findex) {
+                        Some(f.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(f) = f_clone {
+                        if let Ok(decl) = self.create_function_declaration(&f) {
+                            let stub_block = self.context.append_basic_block(decl, "stub");
+                            self.builder.position_at_end(stub_block);
+                            let ret_type = decl.get_type().get_return_type();
+                            if let Some(ret_type) = ret_type {
+                                self.builder.build_return(Some(&ret_type.const_zero())).ok();
+                            } else {
+                                self.builder.build_return(None).ok();
+                            }
+                            self.func_cache.insert(*findex, decl);
+                        }
+                    }
+                    if let Some(block) = saved_block {
+                        self.builder.position_at_end(block);
+                    }
                 }
             }
         }
 
-        if let Some(block) = saved_block {
-            self.builder.position_at_end(block);
-        }
+        // Also compile any functions that were discovered during the above compilation
+        self.compile_pending_functions()?;
+
         Ok(())
     }
 
@@ -4109,8 +4395,8 @@ impl<'ctx> JITModule<'ctx> {
         // Compile any pending functions discovered during initialization
         self.compile_pending_functions()?;
 
-        // Create stubs for uncompiled functions so bindings can resolve them
-        self.create_stubs_for_uncompiled_functions()?;
+        // Compile remaining bytecode functions (e.g., virtual-dispatch-only methods)
+        self.compile_remaining_functions()?;
 
         let index = self.bytecode.entrypoint as usize;
         let function = *self

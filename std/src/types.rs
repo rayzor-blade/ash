@@ -210,7 +210,7 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
         hl::hl_type_kind_HVIRTUAL => {
             let t_virt = *(*t).__bindgen_anon_1.virt;
             let to_virt = *(*to).__bindgen_anon_1.virt;
-            if to_virt.nfields < t_virt.nfields {
+            if to_virt.nfields <= t_virt.nfields {
                 for i in 0..to_virt.nfields as usize {
                     let f1 = t_virt.fields.add(i);
                     let f2 = to_virt.fields.add(i);
@@ -238,7 +238,8 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
             let t_fun = *(*t).__bindgen_anon_1.fun;
             let to_fun = *(*to).__bindgen_anon_1.fun;
             if t_fun.nargs == to_fun.nargs {
-                if !hlp_safe_cast(t_fun.ret, to_fun.ret) {
+                let ret_ok = hlp_safe_cast(t_fun.ret, to_fun.ret);
+                if !ret_ok {
                     return false;
                 }
                 for i in 0..t_fun.nargs as usize {

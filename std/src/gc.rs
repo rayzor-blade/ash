@@ -733,10 +733,10 @@ impl ImmixAllocator {
             let fields = v.offset(1) as *mut *mut std::os::raw::c_void;
             let vdata = fields.add(nfields as usize) as *mut u8;
 
-            // Initialize fields
+            // Initialize fields: each vfield[i] points to vdata + indexes[i]
             for i in 0..nfields as usize {
-                *fields.add(i) = (v as *mut u8).add((*virt).indexes.add(i) as usize)
-                    as *mut std::os::raw::c_void;
+                let offset = *(*virt).indexes.add(i) as usize;
+                *fields.add(i) = vdata.add(offset) as *mut std::os::raw::c_void;
             }
 
             // Zero out vdata

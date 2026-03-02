@@ -599,13 +599,13 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 hlp_buffer_addr(
                     b,
                     (v as *mut c_void).add(
-                        (*(*vv).t)
+                        *(*(*vv).t)
                             .__bindgen_anon_1
                             .virt
                             .as_ref()
                             .unwrap()
                             .indexes
-                            .wrapping_add((*f).field_index as usize)
+                            .add((*f).field_index as usize)
                             as usize,
                     ),
                     (*f).t,

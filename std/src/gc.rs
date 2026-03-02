@@ -734,9 +734,16 @@ impl ImmixAllocator {
             let vdata = fields.add(nfields as usize) as *mut u8;
 
             // Initialize fields: each vfield[i] points to vdata + indexes[i]
-            for i in 0..nfields as usize {
-                let offset = *(*virt).indexes.add(i) as usize;
-                *fields.add(i) = vdata.add(offset) as *mut std::os::raw::c_void;
+            // indexes may be null if the virtual type hasn't been initialized yet
+            // (the interpreter doesn't call hlp_init_virtual during setup).
+            if !(*virt).indexes.is_null() {
+                for i in 0..nfields as usize {
+                    let offset = *(*virt).indexes.add(i) as usize;
+                    *fields.add(i) = vdata.add(offset) as *mut std::os::raw::c_void;
+                }
+            } else {
+                // No indexes available — zero all field pointers
+                std::ptr::write_bytes(fields, 0, nfields as usize);
             }
 
             // Zero out vdata

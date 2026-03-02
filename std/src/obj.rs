@@ -97,6 +97,13 @@ pub static cache_lock: Mutex<i32> = Mutex::new(0);
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvirtual {
+    // Ensure the virtual type is initialized (indexes, lookup, dataSize populated).
+    // The interpreter doesn't call hlp_init_virtual during setup, so the first
+    // allocation of a given virtual type triggers lazy initialization here.
+    let virt = (*t).__bindgen_anon_1.virt;
+    if !virt.is_null() && (*virt).indexes.is_null() {
+        hlp_init_virtual(t, std::ptr::null_mut());
+    }
     let allocator = GC.get_mut().expect("Expected to get GC");
     if let Some(virt) = allocator.alloc_virtual(t) {
         return virt.as_ptr();
@@ -293,9 +300,9 @@ pub unsafe extern "C" fn hlp_obj_lookup(
             }
             *t = (*f).t;
             return (d as *mut u8).offset(
-                (*(*(*d).t).__bindgen_anon_1.virt)
+                *(*(*(*d).t).__bindgen_anon_1.virt)
                     .indexes
-                    .wrapping_add((*f).field_index as usize) as isize,
+                    .add((*f).field_index as usize) as isize,
             ) as *mut c_void;
         }
         _ => {

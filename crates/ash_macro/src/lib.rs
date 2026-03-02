@@ -156,24 +156,21 @@ pub fn to_llvm(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 use inkwell::values::{BasicValue, FunctionValue, BasicValueEnum, BasicMetadataValueEnum};
                 use inkwell::types::BasicType;
                 use inkwell::types::BasicMetadataTypeEnum;
-                
+
                 let return_type = #return_type;
-                let mut param_types:Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = vec![#(#param_types),*];
-               
-                let fn_type:inkwell::types::FunctionType<'ctx> = match return_type {
+                let mut param_types: Vec<inkwell::types::BasicMetadataTypeEnum<'ctx>> = vec![#(#param_types),*];
+
+                let fn_type: inkwell::types::FunctionType<'ctx> = match return_type {
                     BasicMetadataTypeEnum::ArrayType(t) => t.fn_type(&param_types, false),
                     BasicMetadataTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
-                   
-                        BasicMetadataTypeEnum::IntType(t) => t.fn_type(&param_types, false),
-                        BasicMetadataTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
-                        BasicMetadataTypeEnum::StructType(t) => t.fn_type(&param_types, false),
-                        BasicMetadataTypeEnum::VectorType(t) => t.fn_type(&param_types, false),
-                        _=> return Err(anyhow::anyhow!("Invalid return type"))
+                    BasicMetadataTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+                    BasicMetadataTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
+                    BasicMetadataTypeEnum::StructType(t) => t.fn_type(&param_types, false),
+                    BasicMetadataTypeEnum::VectorType(t) => t.fn_type(&param_types, false),
+                    _ => return Err(anyhow::anyhow!("Invalid return type")),
                 };
-                
-              
-         
-                let function: inkwell::values::FunctionValue<'ctx> = 
+
+                let function: inkwell::values::FunctionValue<'ctx> =
                     module.add_function(stringify!(#fn_name), fn_type, Some(inkwell::module::Linkage::External));
 
                 let basic_block = context.append_basic_block(function, "entry");

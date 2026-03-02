@@ -263,7 +263,10 @@ impl<'ctx> JITModule<'ctx> {
             // Skip optimization for functions containing Trap opcodes — exception
             // control flow (longjmp) creates implicit CFG edges that the AIR
             // optimizer can't model, leading to incorrect SSA phi placement.
-            let has_trap = f.ops.iter().any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
+            let has_trap = f
+                .ops
+                .iter()
+                .any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
             if !has_trap {
                 let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
                 let num_regs = f.regs.len();
@@ -421,7 +424,10 @@ impl<'ctx> JITModule<'ctx> {
             FuncPtr::Fun(f) => {
                 // Run AIR optimization passes (skip for Trap-containing functions)
                 let mut f = f.clone();
-                let has_trap = f.ops.iter().any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
+                let has_trap = f
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
                 if !has_trap {
                     let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
                     let num_regs = f.regs.len();
@@ -551,8 +557,7 @@ impl<'ctx> JITModule<'ctx> {
             (BasicTypeEnum::IntType(_), BasicTypeEnum::PointerType(_)) => {
                 let int_val = value.into_int_value();
                 let i64_val = if int_val.get_type().get_bit_width() < 64 {
-                    self.builder
-                        .build_int_z_extend(int_val, i64_type, "zext")?
+                    self.builder.build_int_z_extend(int_val, i64_type, "zext")?
                 } else {
                     int_val
                 };
@@ -564,9 +569,9 @@ impl<'ctx> JITModule<'ctx> {
             // ptr → int: ptrtoint then truncate if needed
             (BasicTypeEnum::PointerType(_), BasicTypeEnum::IntType(int_type)) => {
                 let ptr_val = value.into_pointer_value();
-                let i64_val =
-                    self.builder
-                        .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
+                let i64_val = self
+                    .builder
+                    .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
                 if int_type.get_bit_width() < 64 {
                     Ok(self
                         .builder
@@ -591,9 +596,9 @@ impl<'ctx> JITModule<'ctx> {
             // ptr → float: ptrtoint then bitcast
             (BasicTypeEnum::PointerType(_), BasicTypeEnum::FloatType(float_type)) => {
                 let ptr_val = value.into_pointer_value();
-                let i64_val =
-                    self.builder
-                        .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
+                let i64_val = self
+                    .builder
+                    .build_ptr_to_int(ptr_val, i64_type, "cast_ptrtoi")?;
                 Ok(self
                     .builder
                     .build_bit_cast(i64_val, float_type, "cast_itof")?
@@ -626,7 +631,6 @@ impl<'ctx> JITModule<'ctx> {
             return Ok(*type_);
         }
         let kind = self.types_[type_index].clone().kind;
-
 
         // For primitive types (kind <= HDYN), create a real C-side hl_type and store its pointer
         // This matches what HOBJ/HSTRUCT/HENUM/HVIRTUAL already do in init_indexes
@@ -1306,9 +1310,9 @@ impl<'ctx> JITModule<'ctx> {
                                 "sf_fb_value_gep",
                             )?
                         };
-                        let fb_value_obj = self
-                            .builder
-                            .build_load(ptr_type, fb_value_gep, "sf_fb_value")?;
+                        let fb_value_obj =
+                            self.builder
+                                .build_load(ptr_type, fb_value_gep, "sf_fb_value")?;
 
                         let obj_set_field = self.declare_native(
                             "hlp_obj_set_field",
@@ -1501,16 +1505,13 @@ impl<'ctx> JITModule<'ctx> {
                                 "fb_value_gep",
                             )?
                         };
-                        let value_obj = self
-                            .builder
-                            .build_load(ptr_type, value_gep, "fb_value")?;
+                        let value_obj = self.builder.build_load(ptr_type, value_gep, "fb_value")?;
                         let hashed_name = obj_type_
                             .virt
                             .as_ref()
                             .map(|v| v.fields.get(field.0).map(|f| f.hashed_name).unwrap_or(0))
                             .unwrap_or(0);
-                        let field_hash =
-                            i32_type.const_int(hashed_name as u64, true);
+                        let field_hash = i32_type.const_int(hashed_name as u64, true);
                         let dst_type_idx = f.regs[dst.0 as usize].0;
                         let dst_kind = self.types_[dst_type_idx].kind;
                         let type_ptr = self
@@ -2166,13 +2167,16 @@ impl<'ctx> JITModule<'ctx> {
 
                     // Look up virtual field's declared function type to get correct param types.
                     // Extract type indices first to avoid borrow conflicts with self.
-                    let virt_fn_info: Option<(Vec<usize>, usize)> = obj_type.virt.as_ref()
+                    let virt_fn_info: Option<(Vec<usize>, usize)> = obj_type
+                        .virt
+                        .as_ref()
                         .and_then(|v| v.fields.get(field.0))
                         .and_then(|fld| {
                             let ft = &self.types_[fld.type_.0];
                             if ft.kind == hl_type_kind_HFUN {
                                 ft.fun.as_ref().map(|fun| {
-                                    let arg_indices: Vec<usize> = fun.args.iter().map(|a| a.0).collect();
+                                    let arg_indices: Vec<usize> =
+                                        fun.args.iter().map(|a| a.0).collect();
                                     (arg_indices, fun.ret.0)
                                 })
                             } else {
@@ -2181,20 +2185,22 @@ impl<'ctx> JITModule<'ctx> {
                         });
 
                     // Convert type indices to LLVM types (now safe to call get_register_type)
-                    let virt_fn_args: Option<Vec<BasicTypeEnum>> = if let Some((ref arg_indices, _)) = virt_fn_info {
-                        let mut types = vec![ptr_type.as_basic_type_enum()];
-                        for &idx in arg_indices {
-                            types.push(self.get_register_type(idx).unwrap_or(ptr_type.into()));
-                        }
-                        Some(types)
-                    } else {
-                        None
-                    };
-                    let virt_ret_type: Option<BasicTypeEnum> = if let Some((_, ret_idx)) = virt_fn_info {
-                        Some(self.get_register_type(ret_idx).unwrap_or(ptr_type.into()))
-                    } else {
-                        None
-                    };
+                    let virt_fn_args: Option<Vec<BasicTypeEnum>> =
+                        if let Some((ref arg_indices, _)) = virt_fn_info {
+                            let mut types = vec![ptr_type.as_basic_type_enum()];
+                            for &idx in arg_indices {
+                                types.push(self.get_register_type(idx).unwrap_or(ptr_type.into()));
+                            }
+                            Some(types)
+                        } else {
+                            None
+                        };
+                    let virt_ret_type: Option<BasicTypeEnum> =
+                        if let Some((_, ret_idx)) = virt_fn_info {
+                            Some(self.get_register_type(ret_idx).unwrap_or(ptr_type.into()))
+                        } else {
+                            None
+                        };
 
                     let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
                     arg_vals.push(value.into());
@@ -2319,21 +2325,17 @@ impl<'ctx> JITModule<'ctx> {
 
                     // Continue at merge
                     self.builder.position_at_end(merge_block);
-                } else if let Some(findex) = obj_type
-                    .obj
-                    .as_ref()
-                    .and_then(|obj| {
-                        // field.0 is the vtable slot index (vobj_proto index).
-                        // Find the proto entry whose pindex matches field.0
-                        // to get the findex for the function signature.
-                        for p in &obj.proto {
-                            if p.pindex as usize == field.0 {
-                                return Some(p.findex as usize);
-                            }
+                } else if let Some(findex) = obj_type.obj.as_ref().and_then(|obj| {
+                    // field.0 is the vtable slot index (vobj_proto index).
+                    // Find the proto entry whose pindex matches field.0
+                    // to get the findex for the function signature.
+                    for p in &obj.proto {
+                        if p.pindex as usize == field.0 {
+                            return Some(p.findex as usize);
                         }
-                        None
-                    })
-                {
+                    }
+                    None
+                }) {
                     // Runtime vtable dispatch for HOBJ/HSTRUCT.
                     // field.0 is the vobj_proto slot index.
                     let vtable_slot = field.0 as u64;
@@ -2399,8 +2401,7 @@ impl<'ctx> JITModule<'ctx> {
                         if idx < param_types.len() {
                             let expected = param_types[idx];
                             if loaded.get_type() != expected {
-                                let casted =
-                                    self.cast_for_call(loaded, expected)?;
+                                let casted = self.cast_for_call(loaded, expected)?;
                                 arg_vals.push(casted.into());
                             } else {
                                 arg_vals.push(loaded.into());
@@ -3009,8 +3010,12 @@ impl<'ctx> JITModule<'ctx> {
                     // A simple pointer copy would pass the vdynamic header address
                     // instead of the actual data (e.g. bytes pointer for HBYTES).
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
-                    let src_type_ptr = self.get_initialized_type(src_type_idx)?.into_pointer_value();
-                    let dst_type_ptr = self.get_initialized_type(dst_type_idx)?.into_pointer_value();
+                    let src_type_ptr = self
+                        .get_initialized_type(src_type_idx)?
+                        .into_pointer_value();
+                    let dst_type_ptr = self
+                        .get_initialized_type(dst_type_idx)?
+                        .into_pointer_value();
                     let dyn_castp = self.declare_native(
                         "hlp_dyn_castp",
                         &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
@@ -3020,7 +3025,11 @@ impl<'ctx> JITModule<'ctx> {
                     // containing the *mut vdynamic, which is exactly what the alloca is.
                     let result = self.builder.build_call(
                         dyn_castp,
-                        &[registers[src.0 as usize].into(), src_type_ptr.into(), dst_type_ptr.into()],
+                        &[
+                            registers[src.0 as usize].into(),
+                            src_type_ptr.into(),
+                            dst_type_ptr.into(),
+                        ],
                         "dyn_castp",
                     )?;
                     self.builder.build_store(

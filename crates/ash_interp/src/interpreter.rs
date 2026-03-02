@@ -2858,7 +2858,13 @@ impl HLInterpreter {
                 if obj_val.is_null() || obj_val.is_void() {
                     frame.registers.set(dst.0, NanBoxedValue::null());
                 } else {
-                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen, &mut self.utf16_strings, &mut self.field_hash_cache)?;
+                    let hfield = hash_field_name(
+                        bytecode,
+                        field.0,
+                        fn_hash_gen,
+                        &mut self.utf16_strings,
+                        &mut self.field_hash_cache,
+                    )?;
                     if std::env::var("ASH_DBG_DYN").is_ok() {
                         let fname = bytecode
                             .strings
@@ -2899,7 +2905,13 @@ impl HLInterpreter {
                 if obj_val.is_null() || obj_val.is_void() {
                     // no-op
                 } else {
-                    let hfield = hash_field_name(bytecode, field.0, fn_hash_gen, &mut self.utf16_strings, &mut self.field_hash_cache)?;
+                    let hfield = hash_field_name(
+                        bytecode,
+                        field.0,
+                        fn_hash_gen,
+                        &mut self.utf16_strings,
+                        &mut self.field_hash_cache,
+                    )?;
                     let obj_ptr = obj_val.as_ptr() as *mut c_void;
                     let src_val = frame.registers.get(src.0);
                     let src_type_idx = func.regs[src.0 as usize].0;

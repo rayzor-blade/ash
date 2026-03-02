@@ -265,7 +265,7 @@ impl BytecodeDecoder {
 
     fn read_string(&mut self, r: &mut impl BufRead) -> Result<Vec<u16>, std::io::Error> {
         let index = self.read_var_int(r)? as usize;
-        if index < 0 || index >= self.nstrings.clone() as usize {
+        if index >= self.nstrings.clone() as usize {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Invalid string index",
@@ -349,7 +349,7 @@ impl BytecodeDecoder {
 
     fn get_type(&mut self, r: &mut impl BufRead) -> Result<TypeRef, std::io::Error> {
         let pos = self.read_var_int(r)? as usize;
-        if pos < 0 || pos >= self.ntypes as usize {
+        if pos >= self.ntypes as usize {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Invalid type index",

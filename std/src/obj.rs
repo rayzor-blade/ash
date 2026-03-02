@@ -1404,7 +1404,7 @@ unsafe fn hlp_dynobj_delete_field(o: *mut vdynobj, f: *mut hl_field_lookup) {
         ptr::copy(
             (*o).values.add(index as usize + 1),
             (*o).values.add(index as usize),
-            ((*o).nvalues as usize - (index as usize + 1)) * mem::size_of::<*mut c_void>(),
+            (*o).nvalues as usize - (index as usize + 1),
         );
         (*o).nvalues -= 1;
         *(*o).values.add((*o).nvalues as usize) = ptr::null_mut();
@@ -1449,7 +1449,7 @@ unsafe fn hlp_dynobj_delete_field(o: *mut vdynobj, f: *mut hl_field_lookup) {
     ptr::copy(
         (*o).lookup.add(field + 1),
         (*o).lookup.add(field),
-        ((*o).nfields as usize - (field + 1)) * mem::size_of::<hl_field_lookup>(),
+        (*o).nfields as usize - (field + 1),
     );
     (*o).nfields -= 1;
 

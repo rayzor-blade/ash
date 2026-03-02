@@ -194,11 +194,19 @@ fn run_parity_matrix(mode: AshMode) {
         .ok()
         .map(|s| {
             let p = PathBuf::from(s);
-            if p.is_absolute() { p } else { repo_root().join(p) }
+            if p.is_absolute() {
+                p
+            } else {
+                repo_root().join(p)
+            }
         })
         .or_else(|| {
             let d = repo_root().join("target/parity-oracle");
-            if d.exists() { Some(d) } else { None }
+            if d.exists() {
+                Some(d)
+            } else {
+                None
+            }
         })
         .and_then(resolve_oracle_dir);
 

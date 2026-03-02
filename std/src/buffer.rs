@@ -605,8 +605,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                             .as_ref()
                             .unwrap()
                             .indexes
-                            .add((*f).field_index as usize)
-                            as usize,
+                            .add((*f).field_index as usize) as usize,
                     ),
                     (*f).t,
                     &mut l as *mut vlist,

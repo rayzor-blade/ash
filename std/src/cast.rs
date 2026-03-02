@@ -108,10 +108,11 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 .allocate(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
-            (*v).v.ptr = data;
+            (*v).t = t;
+            (*v).v.ptr = *(data as *mut *mut c_void);
             v
         }
-        _ => std::mem::transmute(data),
+        _ => *(data as *mut *mut vdynamic),
     }
 }
 

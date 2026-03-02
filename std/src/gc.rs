@@ -738,8 +738,10 @@ impl ImmixAllocator {
             // (the interpreter doesn't call hlp_init_virtual during setup).
             if !(*virt).indexes.is_null() {
                 for i in 0..nfields as usize {
+                    // indexes[i] stores absolute byte offset from start of allocation (v),
+                    // NOT relative to vdata. Use v as base, not vdata.
                     let offset = *(*virt).indexes.add(i) as usize;
-                    *fields.add(i) = vdata.add(offset) as *mut std::os::raw::c_void;
+                    *fields.add(i) = (v as *mut u8).add(offset) as *mut std::os::raw::c_void;
                 }
             } else {
                 // No indexes available — zero all field pointers

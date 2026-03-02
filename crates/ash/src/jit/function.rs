@@ -1479,12 +1479,15 @@ impl<'ctx> JITModule<'ctx> {
                         // Field exists: r = *hl_vfields(o)[f]
                         self.builder.position_at_end(then_block);
                         let field_value_ptr = self.builder.build_load(
-                            field_ptr.get_type(),
+                            ptr_type,
                             field_ptr,
                             "field_value_ptr",
                         )?;
+                        // Load with the destination register's type, not ptr,
+                        // to avoid reading more bytes than the field actually holds.
+                        let dst_load_type = reg_types[dst.0 as usize];
                         let field_value = self.builder.build_load(
-                            field_value_ptr.get_type(),
+                            dst_load_type,
                             field_value_ptr.into_pointer_value(),
                             "field_value",
                         )?;
@@ -4181,18 +4184,29 @@ impl<'ctx> JITModule<'ctx> {
                 "cmp",
             )?,
             AnyTypeEnum::PointerType(_) => {
-                let a_int = self.builder.build_ptr_to_int(
-                    a_val.into_pointer_value(),
-                    self.context.i64_type(),
-                    "a_int",
-                )?;
-                let b_int = self.builder.build_ptr_to_int(
-                    b_val.into_pointer_value(),
-                    self.context.i64_type(),
-                    "b_int",
-                )?;
+                // For pointer types (Dynamic, objects, etc.), use hlp_dyn_compare
+                // for value-based equality. hlp_dyn_compare returns 0 if equal.
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let dyn_compare = self.declare_native(
+                    "hlp_dyn_compare",
+                    &[ptr_type.into(), ptr_type.into()],
+                    Some(i32_type.into()),
+                );
+                let result = self
+                    .builder
+                    .build_call(
+                        dyn_compare,
+                        &[a_val.into(), b_val.into()],
+                        "dyn_cmp",
+                    )?
+                    .try_as_basic_value()
+                    .left()
+                    .unwrap()
+                    .into_int_value();
+                let zero = i32_type.const_int(0, false);
                 self.builder
-                    .build_int_compare(int_pred, a_int, b_int, "cmp")?
+                    .build_int_compare(int_pred, result, zero, "cmp")?
             }
             _ => return Err(anyhow!("Unsupported types for comparison jump")),
         };

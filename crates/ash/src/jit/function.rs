@@ -1695,135 +1695,85 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- Comparison jumps ---
             Opcode::JSLt { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SLT,
-                    FloatPredicate::OLT,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SLT, FloatPredicate::OLT,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JSGte { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SGE,
-                    FloatPredicate::OGE,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SGE, FloatPredicate::OGE,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JSGt { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SGT,
-                    FloatPredicate::OGT,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SGT, FloatPredicate::OGT,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JSLte { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SLE,
-                    FloatPredicate::OLE,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SLE, FloatPredicate::OLE,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JULt { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::ULT,
-                    FloatPredicate::OLT,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::ULT, FloatPredicate::OLT,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JUGte { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::UGE,
-                    FloatPredicate::OGE,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::UGE, FloatPredicate::OGE,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JNotLt { a, b, offset } => {
                 // !(a < b) is the same as a >= b
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SGE,
-                    FloatPredicate::OGE,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SGE, FloatPredicate::OGE,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JNotGte { a, b, offset } => {
                 // !(a >= b) is the same as a < b
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::SLT,
-                    FloatPredicate::OLT,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::SLT, FloatPredicate::OLT,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JEq { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::EQ,
-                    FloatPredicate::OEQ,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::EQ, FloatPredicate::OEQ,
+                    i, *offset, opcode_blocks,
                 )?;
             }
             Opcode::JNotEq { a, b, offset } => {
+                let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers,
-                    reg_types,
-                    a,
-                    b,
-                    IntPredicate::NE,
-                    FloatPredicate::ONE,
-                    i,
-                    *offset,
-                    opcode_blocks,
+                    registers, reg_types, a, b, a_kind,
+                    IntPredicate::NE, FloatPredicate::ONE,
+                    i, *offset, opcode_blocks,
                 )?;
             }
 
@@ -4158,6 +4108,7 @@ impl<'ctx> JITModule<'ctx> {
         reg_types: &[BasicTypeEnum<'ctx>],
         a: &crate::opcodes::Reg,
         b: &crate::opcodes::Reg,
+        a_kind: u32,
         int_pred: IntPredicate,
         float_pred: FloatPredicate,
         i: usize,
@@ -4184,29 +4135,46 @@ impl<'ctx> JITModule<'ctx> {
                 "cmp",
             )?,
             AnyTypeEnum::PointerType(_) => {
-                // For pointer types (Dynamic, objects, etc.), use hlp_dyn_compare
-                // for value-based equality. hlp_dyn_compare returns 0 if equal.
-                let ptr_type = self.context.ptr_type(AddressSpace::default());
-                let i32_type = self.context.i32_type();
-                let dyn_compare = self.declare_native(
-                    "hlp_dyn_compare",
-                    &[ptr_type.into(), ptr_type.into()],
-                    Some(i32_type.into()),
-                );
-                let result = self
-                    .builder
-                    .build_call(
-                        dyn_compare,
-                        &[a_val.into(), b_val.into()],
-                        "dyn_cmp",
-                    )?
-                    .try_as_basic_value()
-                    .left()
-                    .unwrap()
-                    .into_int_value();
-                let zero = i32_type.const_int(0, false);
-                self.builder
-                    .build_int_compare(int_pred, result, zero, "cmp")?
+                // Only use hlp_dyn_compare for Dynamic/Null types (boxed values).
+                // For other pointer types (HOBJ, HBYTES, etc.), use pointer comparison
+                // (identity check), matching the original HashLink C VM behavior.
+                if a_kind == hl_type_kind_HDYN || a_kind == hl_type_kind_HNULL {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let i32_type = self.context.i32_type();
+                    let dyn_compare = self.declare_native(
+                        "hlp_dyn_compare",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(i32_type.into()),
+                    );
+                    let result = self
+                        .builder
+                        .build_call(
+                            dyn_compare,
+                            &[a_val.into(), b_val.into()],
+                            "dyn_cmp",
+                        )?
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap()
+                        .into_int_value();
+                    let zero = i32_type.const_int(0, false);
+                    self.builder
+                        .build_int_compare(int_pred, result, zero, "cmp")?
+                } else {
+                    // Non-dynamic pointer: identity comparison
+                    let a_int = self.builder.build_ptr_to_int(
+                        a_val.into_pointer_value(),
+                        self.context.i64_type(),
+                        "a_int",
+                    )?;
+                    let b_int = self.builder.build_ptr_to_int(
+                        b_val.into_pointer_value(),
+                        self.context.i64_type(),
+                        "b_int",
+                    )?;
+                    self.builder
+                        .build_int_compare(int_pred, a_int, b_int, "cmp")?
+                }
             }
             _ => return Err(anyhow!("Unsupported types for comparison jump")),
         };

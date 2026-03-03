@@ -1081,8 +1081,11 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             && (*(*(*(*mt).__bindgen_anon_1.fun).args.add(1))).kind == hl::hl_type_kind_HDYN
             && (*(*(*mt).__bindgen_anon_1.fun).ret).kind == hl::hl_type_kind_HI32
         {
-            //TODO: Need to make sure findex is really a pointer to a function or figure out how to look up the function table
-            (*t).compareFun = Some(mem::transmute((*pr).findex as *mut std::os::raw::c_void));
+            // Look up the actual function pointer from the module's functions table
+            let fptr = *(*m).functions_ptrs.add((*pr).findex as usize);
+            if !fptr.is_null() {
+                (*t).compareFun = Some(mem::transmute(fptr));
+            }
         }
     }
 
@@ -1666,29 +1669,17 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
             let mut rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
             while !rt.is_null() {
                 for i in 0..(*rt).ninterfaces as usize {
-                    if (*(*rt).t)
-                        .__bindgen_anon_1
-                        .obj
-                        .as_ref()
-                        .unwrap()
-                        .fields
-                        .add((*rt).interfaces.add(i as usize) as usize)
-                        .as_ref()
-                        .unwrap()
-                        .t
-                        == vt
-                    {
+                    let fi = *(*rt).interfaces.add(i) as usize;
+                    let tobj = (*(*rt).t).__bindgen_anon_1.obj;
+                    if (*(*tobj).fields.add(fi)).t == vt {
                         let start = if (*rt).parent.is_null() {
                             0
                         } else {
                             (*(*rt).parent).nfields as usize
                         };
-                        interface_address = (obj as *mut u8).add(
-                            (*rt)
-                                .fields_indexes
-                                .wrapping_add((*rt).interfaces.add(i as usize) as usize + start)
-                                as usize,
-                        ) as *mut *mut vvirtual;
+                        let offset = *(*rt).fields_indexes.add(fi + start) as usize;
+                        interface_address =
+                            (obj as *mut u8).add(offset) as *mut *mut vvirtual;
                         break;
                     }
                 }

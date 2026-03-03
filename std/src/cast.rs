@@ -627,6 +627,38 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                 crate::ucs2::ucmp((*a).v.bytes as *const uchar, (*b).v.bytes as *const uchar)
                     .signum()
             }
+            hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+                let obj = (*(*a).t).__bindgen_anon_1.obj;
+                if !obj.is_null() {
+                    let rt = (*obj).rt;
+                    if !rt.is_null() {
+                        if let Some(compare_fn) = (*rt).compareFun {
+                            let f: unsafe extern "C" fn(*mut vdynamic, *mut vdynamic) -> i32 =
+                                std::mem::transmute(compare_fn);
+                            return f(a, b);
+                        }
+                        // String-like objects (first field is HBYTES): compare content
+                        if (*obj).nfields >= 1
+                            && !(*obj).fields.is_null()
+                            && (*(*(*obj).fields).t).kind == hl_type_kind_HBYTES
+                        {
+                            let parent_fields =
+                                (*rt).nfields as usize - (*obj).nfields as usize;
+                            let offset =
+                                *(*rt).fields_indexes.add(parent_fields) as usize;
+                            let a_bytes =
+                                *((a as *mut u8).add(offset) as *mut *const uchar);
+                            let b_bytes =
+                                *((b as *mut u8).add(offset) as *mut *const uchar);
+                            if !a_bytes.is_null() && !b_bytes.is_null() {
+                                return crate::ucs2::ucmp(a_bytes, b_bytes)
+                                    .signum();
+                            }
+                        }
+                    }
+                }
+                hlp_ptr_compare(a, b)
+            }
             _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
         };
     }

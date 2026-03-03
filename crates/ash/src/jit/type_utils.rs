@@ -5,7 +5,7 @@ use libc::c_char;
 use libc::{c_void, malloc};
 use num_enum::TryFromPrimitive;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::mem;
@@ -560,6 +560,22 @@ impl<'ctx> JITModule<'ctx> {
         // Find the corresponding Rust type in types_
         let type_index = self.c_ptr_to_type_index.clone().get(&ptr).unwrap().clone();
 
+        // Cycle detection: if already processed or being processed, return early.
+        // Check if the type's detail field is already populated.
+        let already_processed = match kind {
+            hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => self.types_[type_index].obj.is_some(),
+            hl_type_kind_HFUN | hl_type_kind_HMETHOD => self.types_[type_index].fun.is_some(),
+            hl_type_kind_HENUM => self.types_[type_index].tenum.is_some(),
+            hl_type_kind_HVIRTUAL => self.types_[type_index].virt.is_some(),
+            hl_type_kind_HPACKED | hl_type_kind_HNULL | hl_type_kind_HREF => {
+                self.types_[type_index].tparam.is_some()
+            }
+            _ => false,
+        };
+        if already_processed {
+            return Ok(TypeRef(type_index));
+        }
+
         match kind {
             hl_type_kind_HABSTRACT => {
                 if !c_type.__bindgen_anon_1.abs_name.is_null() {
@@ -584,8 +600,11 @@ impl<'ctx> JITModule<'ctx> {
             }
             hl_type_kind_HENUM => {
                 if !c_type.__bindgen_anon_1.tenum.is_null() {
-                    self.types_[type_index].tenum =
-                        Some(self.update_hl_type_enum(&*c_type.__bindgen_anon_1.tenum)?);
+                    // Pre-mark as processing to break cycles (e.g., recursive enums like Tree)
+                    self.types_[type_index].tenum = Some(HLTypeEnum::default());
+                    let tenum =
+                        self.update_hl_type_enum(&*c_type.__bindgen_anon_1.tenum)?;
+                    self.types_[type_index].tenum = Some(tenum);
                 }
             }
             hl_type_kind_HVIRTUAL => {
@@ -602,9 +621,6 @@ impl<'ctx> JITModule<'ctx> {
             }
             _ => {}
         }
-
-        // // Store the mapping between C pointer and Rust type index
-        // self.c_ptr_to_type_index.insert(ptr, type_index);
 
         Ok(TypeRef(type_index))
     }
@@ -644,7 +660,7 @@ impl<'ctx> JITModule<'ctx> {
 
     unsafe fn update_hl_type_enum(&mut self, c_enum: &hl_type_enum) -> Result<HLTypeEnum> {
         let mut rust_enum = HLTypeEnum::default();
-        rust_enum.name = CString::from_raw(c_enum.name as *mut c_char)
+        rust_enum.name = CStr::from_ptr(c_enum.name as *const c_char)
             .to_string_lossy()
             .to_string();
         rust_enum.constructs = self.update_constructs(c_enum.constructs, c_enum.nconstructs)?;
@@ -729,7 +745,7 @@ impl<'ctx> JITModule<'ctx> {
         for i in 0..nconstructs {
             let c_construct = &*c_constructs.offset(i as isize);
             constructs.push(HLEnumConstruct {
-                name: CString::from_raw(c_construct.name as *mut c_char)
+                name: CStr::from_ptr(c_construct.name as *const c_char)
                     .to_str()?
                     .to_string(),
                 params: self.update_type_refs(c_construct.params, c_construct.nparams)?,

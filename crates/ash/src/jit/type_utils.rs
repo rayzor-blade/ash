@@ -15,6 +15,15 @@ use std::slice;
 
 use super::module::JITModule;
 
+/// Convert a Rust &str to a leaked, null-terminated UTF-16 pointer (for HashLink uchar*).
+fn str_to_uchar_leaked(s: &str) -> *const u16 {
+    let mut utf16: Vec<u16> = s.encode_utf16().collect();
+    utf16.push(0); // null terminator
+    let ptr = utf16.as_ptr();
+    std::mem::forget(utf16);
+    ptr
+}
+
 impl<'ctx> JITModule<'ctx> {
     pub(crate) fn convert_to_c_type(
         &mut self,
@@ -41,9 +50,7 @@ impl<'ctx> JITModule<'ctx> {
         match hl_type.kind {
             hl_type_kind_HABSTRACT => {
                 if let Some(ref name) = hl_type.abs_name {
-                    let c_str = CString::new(name.as_str())?;
-                    c_type.__bindgen_anon_1.abs_name = c_str.into_raw() as *const u16;
-                    // mem::forget(c_str); // Prevent deallocation
+                    c_type.__bindgen_anon_1.abs_name = str_to_uchar_leaked(name);
                 }
             }
             hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
@@ -52,7 +59,7 @@ impl<'ctx> JITModule<'ctx> {
                         nfields: obj.fields.len() as i32,
                         nproto: obj.proto.len() as i32,
                         nbindings: obj.bindings.len() as i32 / 2,
-                        name: CString::new(obj.name.as_str())?.into_raw() as *const u16,
+                        name: str_to_uchar_leaked(&obj.name),
                         super_: if let Some(ref super_type) = obj.super_ {
                             self.convert_to_c_type(
                                 super_type.0.clone(),
@@ -119,7 +126,7 @@ impl<'ctx> JITModule<'ctx> {
             hl_type_kind_HENUM => {
                 if let Some(ref tenum) = hl_type.tenum {
                     let c_enum = Box::new(hl_type_enum {
-                        name: CString::new(tenum.name.as_str())?.into_raw() as *const u16,
+                        name: str_to_uchar_leaked(&tenum.name),
                         global_value: if tenum.global_value > 0 {
                             let gv_idx = (tenum.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
@@ -184,7 +191,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut c_fields = Vec::with_capacity(fields.len());
         for field in fields {
             let c_field = hl_obj_field {
-                name: CString::new(field.name.as_str())?.into_raw() as *const u16,
+                name: str_to_uchar_leaked(&field.name),
                 t: self.convert_type_ref_to_c_cached(&field.type_.clone(), Rc::clone(&cache))?,
                 hashed_name: field.hashed_name,
             };
@@ -206,7 +213,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut c_proto = Vec::with_capacity(proto.len());
         for p in proto {
             let c_p = hl_obj_proto {
-                name: CString::new(p.name.as_str())?.into_raw() as *const u16,
+                name: str_to_uchar_leaked(&p.name),
                 findex: p.findex,
                 pindex: p.pindex,
                 hashed_name: p.hashed_name,
@@ -253,12 +260,6 @@ impl<'ctx> JITModule<'ctx> {
         Ok(ptr)
     }
 
-    fn create_c_string(&self, s: &str) -> Result<*const u16> {
-        let c_str = std::ffi::CString::new(s)?;
-        let ptr = c_str.into_raw() as *const u16;
-        Ok(ptr)
-    }
-
     pub(crate) fn convert_type_ref_to_c_cached(
         &mut self,
         type_ref: &TypeRef,
@@ -295,16 +296,29 @@ impl<'ctx> JITModule<'ctx> {
         match rust_type.kind {
             hl_type_kind_HABSTRACT => {
                 if let Some(ref name) = rust_type.abs_name {
-                    c_type.__bindgen_anon_1.abs_name = self.create_c_string(name)?;
+                    c_type.__bindgen_anon_1.abs_name = str_to_uchar_leaked(name);
                 }
             }
             hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
                 if let Some(ref obj) = rust_type.obj {
+                    let gv_ptr = if obj.global_value > 0 {
+                        let gv_idx = (obj.global_value - 1) as usize;
+                        if gv_idx < self.globals_data.len() {
+                            let ptr = unsafe {
+                                self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
+                            };
+                            ptr
+                        } else {
+                            ptr::null_mut()
+                        }
+                    } else {
+                        ptr::null_mut()
+                    };
                     let c_obj = Box::new(hl_type_obj {
                         nfields: obj.fields.len() as i32,
                         nproto: obj.proto.len() as i32,
                         nbindings: obj.bindings.len() as i32 / 2,
-                        name: CString::new(obj.name.as_str())?.into_raw() as *const u16,
+                        name: str_to_uchar_leaked(&obj.name),
                         super_: if let Some(ref super_type) = obj.super_ {
                             self.convert_type_ref_to_c_cached(
                                 &super_type.clone(),
@@ -316,18 +330,7 @@ impl<'ctx> JITModule<'ctx> {
                         fields: self.convert_fields_to_c(&obj.fields, Rc::clone(&cache))?,
                         proto: self.convert_proto_to_c(&obj.proto)?,
                         bindings: self.convert_bindings_to_c(&obj.bindings),
-                        global_value: if obj.global_value > 0 {
-                            let gv_idx = (obj.global_value - 1) as usize;
-                            if gv_idx < self.globals_data.len() {
-                                unsafe {
-                                    self.globals_data.as_ptr().add(gv_idx) as *mut *mut c_void
-                                }
-                            } else {
-                                ptr::null_mut()
-                            }
-                        } else {
-                            ptr::null_mut()
-                        },
+                        global_value: gv_ptr,
                         m: ptr::null_mut(),
                         rt: ptr::null_mut(),
                     });
@@ -363,7 +366,7 @@ impl<'ctx> JITModule<'ctx> {
             hl_type_kind_HENUM => {
                 if let Some(ref tenum) = rust_type.tenum {
                     let c_enum = Box::new(hl_type_enum {
-                        name: CString::new(tenum.name.as_str())?.into_raw() as *const u16,
+                        name: str_to_uchar_leaked(&tenum.name),
                         global_value: if tenum.global_value > 0 {
                             let gv_idx = (tenum.global_value - 1) as usize;
                             if gv_idx < self.globals_data.len() {
@@ -427,7 +430,7 @@ impl<'ctx> JITModule<'ctx> {
         for construct in constructs {
             let offsets = construct.offsets.clone().as_mut_ptr();
             let mut c_construct = hl_enum_construct {
-                name: CString::new(construct.name.as_str())?.into_raw() as *const u16,
+                name: str_to_uchar_leaked(&construct.name),
                 nparams: construct.params.len() as i32,
                 params: self.convert_type_refs_to_c(&construct.params, Rc::clone(&cache))?,
                 size: construct.size,

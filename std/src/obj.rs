@@ -114,7 +114,6 @@ pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvir
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic {
     let allocator = GC.get_mut().expect("Expected to get GC");
-
     let obj = (*t).__bindgen_anon_1.obj;
     if obj.is_null() {
         return ptr::null_mut();

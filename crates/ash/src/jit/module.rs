@@ -234,6 +234,9 @@ impl<'ctx> JITModule<'ctx> {
             .init_natives()
             .expect("Failed to initialize native functions");
 
+        // Set up dynamic call callbacks (needed by hlp_call_method for Type.createInstance etc.)
+        module.setup_callbacks();
+
         module.init_indexes().expect("Failed to initialie indexes");
 
         module
@@ -312,6 +315,32 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         Ok(())
+    }
+
+    fn setup_callbacks(&mut self) {
+        // Resolve hl_setup_callbacks2 and ash_static_call
+        if let Ok(setup_fn_ptr) = self
+            .native_function_resolver
+            .resolve_function("std", "hl_setup_callbacks2")
+        {
+            if let Ok(static_call_ptr) = self
+                .native_function_resolver
+                .resolve_function("std", "ash_static_call")
+            {
+                type FnSetupCallbacks2 =
+                    unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+                let setup: FnSetupCallbacks2 = unsafe { std::mem::transmute(setup_fn_ptr) };
+                // flags=0: fun arg is the direct function pointer (not double-indirection)
+                // wrapper=null: we don't use the wrapper mechanism
+                unsafe {
+                    setup(
+                        static_call_ptr,
+                        std::ptr::null_mut(),
+                        0,
+                    );
+                }
+            }
+        }
     }
 
     fn init_natives(&mut self) -> Result<()> {
@@ -681,6 +710,59 @@ impl<'ctx> JITModule<'ctx> {
                     let field_addr = unsafe { (obj_ptr as *mut u8).add(field_offset as usize) };
 
                     match field_kind {
+                        hl_type_kind_HFUN | hl_type_kind_HMETHOD => {
+                            // field_value is a findex — create a closure
+                            let findex = field_value as usize;
+                            if findex < self.functions_ptrs.len() {
+                                let func_ptr = self.functions_ptrs[findex];
+                                let field_c_type = match type_to_c_ptr.get(&field_type_idx) {
+                                    Some(&ptr) if !ptr.is_null() => ptr,
+                                    _ => continue,
+                                };
+                                type FnAllocClosureVoid =
+                                    unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+                                let fn_alloc_cl: FnAllocClosureVoid = unsafe {
+                                    std::mem::transmute(
+                                        self.native_function_resolver
+                                            .resolve_function("std", "hlp_alloc_closure_void")
+                                            .map_err(|e| {
+                                                anyhow!(
+                                                    "Cannot resolve hlp_alloc_closure_void: {}",
+                                                    e
+                                                )
+                                            })?,
+                                    )
+                                };
+                                let closure = unsafe {
+                                    fn_alloc_cl(field_c_type as *mut c_void, func_ptr)
+                                };
+                                if !closure.is_null() {
+                                    unsafe {
+                                        *(field_addr as *mut *mut c_void) = closure;
+                                    }
+                                }
+                            }
+                        }
+                        hl_type_kind_HTYPE => {
+                            // field_value is a type index — store the C type pointer
+                            let ref_type_idx = field_value as usize;
+                            if let Some(&type_ptr) = type_to_c_ptr.get(&ref_type_idx) {
+                                unsafe {
+                                    *(field_addr as *mut usize) = type_ptr as usize;
+                                }
+                            }
+                        }
+                        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+                            // field_value is a global index — store the global's pointer
+                            let ref_global = field_value as usize;
+                            if ref_global < self.globals_data.len() {
+                                let ref_val = self.globals_data[ref_global];
+                                unsafe {
+                                    *(field_addr as *mut usize) =
+                                        if ref_val.is_null() { 0 } else { ref_val as usize };
+                                }
+                            }
+                        }
                         hl_type_kind_HBYTES => {
                             // field_value is a string index → convert to UTF-16
                             let str_idx = field_value as usize;
@@ -725,110 +807,16 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// Pre-allocate class descriptors for types with global_value > 0.
-    /// In HashLink, each HOBJ type with a non-zero global_value stores its class
-    /// descriptor at that global slot. The init() bytecode function creates and
-    /// populates these via New+SetGlobal, but the type's global_value pointer must
-    /// be wired so that runtime code (like type casting) can find the descriptor.
-    /// We only allocate here for types whose bytecode global_value is non-zero AND
-    /// whose global slot is still empty after init_constants.
+    /// Wire up class descriptor global slots.
+    /// The global_value pointers in C type structs are already wired to
+    /// globals_data slots by convert_type_ref_to_c_cached. The bytecode
+    /// init code creates fully-populated Class descriptors (with __name__,
+    /// __constructor__, etc.) and stores them via SetGlobal. We must NOT
+    /// pre-allocate bare descriptors here, as the bytecode init code checks
+    /// if the global is already non-null and skips full initialization.
     pub(crate) fn init_class_descriptors(&mut self) -> Result<()> {
-        let type_to_c_ptr: HashMap<usize, *mut hl_type> = self
-            .c_ptr_to_type_index
-            .iter()
-            .map(|(&ptr, &idx)| (idx, ptr as *mut hl_type))
-            .collect();
-
-        type FnAllocObj = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
-        type FnGetObjRt = unsafe extern "C" fn(*mut hl_type) -> *mut hl_runtime_obj;
-        let fn_alloc_obj: FnAllocObj = unsafe {
-            let ptr = self
-                .native_function_resolver
-                .resolve_function("std", "hlp_alloc_obj")
-                .map_err(|e| anyhow!("Cannot resolve hlp_alloc_obj: {}", e))?;
-            std::mem::transmute(ptr)
-        };
-        let fn_get_obj_rt: FnGetObjRt = unsafe {
-            let ptr = self
-                .native_function_resolver
-                .resolve_function("std", "hlp_get_obj_rt")
-                .map_err(|e| anyhow!("Cannot resolve hlp_get_obj_rt: {}", e))?;
-            std::mem::transmute(ptr)
-        };
-
-        // For each type with bytecode global_value > 0, allocate a class descriptor
-        // at the designated global slot using the GLOBAL's declared type.
-        // The global_value is 1-based: value N means global slot N-1.
-        let bytecode = self.bytecode.clone();
-        for (type_idx, type_) in bytecode.types.iter().enumerate() {
-            if type_.kind != hl_type_kind_HOBJ && type_.kind != hl_type_kind_HSTRUCT {
-                continue;
-            }
-            let obj = match type_.obj.as_ref() {
-                Some(o) => o,
-                None => continue,
-            };
-            if obj.global_value == 0 {
-                continue;
-            }
-            let gv_idx = (obj.global_value - 1) as usize;
-            if gv_idx >= self.globals_data.len() {
-                continue;
-            }
-            // Skip if already populated by init_constants
-            if !self.globals_data[gv_idx].is_null() {
-                continue;
-            }
-
-            // Use the global slot's declared type for allocation, not the source type
-            let global_type_idx = bytecode.globals[gv_idx].0;
-            let c_type_ptr = match type_to_c_ptr.get(&global_type_idx) {
-                Some(&ptr) if !ptr.is_null() => ptr,
-                _ => continue,
-            };
-
-            let obj_ptr = unsafe { fn_alloc_obj(c_type_ptr) };
-            if obj_ptr.is_null() {
-                continue;
-            }
-
-            self.globals_data[gv_idx] = obj_ptr as *mut c_void;
-
-            // Set the __type__ field of the class descriptor.
-            // Class descriptors inherit from hl.BaseType which has __type__ as field[0].
-            // The __type__ field should point to the source type's hl_type*.
-            // We need the runtime obj to get the correct field offset.
-            let rt = unsafe { fn_get_obj_rt(c_type_ptr) };
-            if !rt.is_null() {
-                let src_c_type_ptr = match type_to_c_ptr.get(&type_idx) {
-                    Some(&ptr) if !ptr.is_null() => ptr,
-                    _ => continue,
-                };
-                // __type__ is the first field inherited from hl.BaseType
-                // Its fields_indexes[0] gives the byte offset
-                let nfields = unsafe { (*rt).nfields };
-                if nfields > 0 {
-                    let type_field_offset = unsafe { *(*rt).fields_indexes.add(0) } as usize;
-                    unsafe {
-                        let field_addr = (obj_ptr as *mut u8).add(type_field_offset);
-                        *(field_addr as *mut *mut hl_type) = src_c_type_ptr;
-                    }
-                }
-            }
-
-            // Also update the SOURCE type's global_value pointer
-            let src_c_type_ptr = match type_to_c_ptr.get(&type_idx) {
-                Some(&ptr) if !ptr.is_null() => ptr,
-                _ => continue,
-            };
-            unsafe {
-                let c_obj = (*src_c_type_ptr).__bindgen_anon_1.obj;
-                if !c_obj.is_null() && !(*c_obj).global_value.is_null() {
-                    *(*c_obj).global_value = obj_ptr as *mut c_void;
-                }
-            }
-        }
-
+        // No-op: global_value pointers are already wired by convert_type_ref_to_c_cached.
+        // The bytecode init code handles class descriptor creation and population.
         Ok(())
     }
 

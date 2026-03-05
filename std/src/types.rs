@@ -296,7 +296,9 @@ pub unsafe extern "C" fn hlp_is_dynamic(t: *const hl::hl_type) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_name(t: *const hl::hl_type) -> *mut vbyte {
     match (*t).kind {
-        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => (*(*t).__bindgen_anon_1.obj).name as *mut vbyte,
+        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
+            (*(*t).__bindgen_anon_1.obj).name as *mut vbyte
+        }
         hl_type_kind_HENUM => (*(*t).__bindgen_anon_1.tenum).name as *mut vbyte,
         hl_type_kind_HABSTRACT => (*t).__bindgen_anon_1.abs_name as *mut vbyte,
         _ => std::ptr::null_mut(),

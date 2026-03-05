@@ -38,6 +38,106 @@ pub unsafe extern "C" fn empty_static_call(
     return ptr::null_mut();
 }
 
+/// Dynamic function call for aarch64 — marshals args according to function type
+/// and calls the function pointer. Used by hlp_call_method for dynamic dispatch.
+#[cfg(target_arch = "aarch64")]
+#[no_mangle]
+pub unsafe extern "C" fn ash_static_call(
+    fun: *mut c_void,
+    t: *mut hl_type,
+    args: *mut *mut c_void,
+    out: *mut vdynamic,
+) -> *mut c_void {
+    let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
+    let nargs = ft.nargs as usize;
+
+    // Separate integer/pointer and float args for register allocation
+    let mut ivals = [0usize; 8];
+    let mut fvals = [0.0f64; 8];
+    let mut ireg = 0usize;
+    let mut freg = 0usize;
+
+    for i in 0..nargs.min(8) {
+        let arg_t = *ft.args.add(i);
+        let kind = (*arg_t).kind;
+        let p = *args.add(i);
+        match kind {
+            hl_type_kind_HF32 => {
+                fvals[freg] = *(p as *const f32) as f64;
+                freg += 1;
+            }
+            hl_type_kind_HF64 => {
+                fvals[freg] = *(p as *const f64);
+                freg += 1;
+            }
+            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                // p points to a stack slot containing the value as f64
+                let val = (*(p as *const f64)) as i32;
+                ivals[ireg] = val as i64 as usize; // sign-extend
+                ireg += 1;
+            }
+            hl_type_kind_HI64 => {
+                let val = *(p as *const i64);
+                ivals[ireg] = val as usize;
+                ireg += 1;
+            }
+            _ => {
+                // Pointer types: p IS the pointer value
+                ivals[ireg] = p as usize;
+                ireg += 1;
+            }
+        }
+    }
+
+    let result: usize;
+    let fresult: f64;
+
+    core::arch::asm!(
+        "blr x9",
+        in("x9") fun,
+        inout("x0") ivals[0] => result,
+        in("x1") ivals[1],
+        in("x2") ivals[2],
+        in("x3") ivals[3],
+        in("x4") ivals[4],
+        in("x5") ivals[5],
+        in("x6") ivals[6],
+        in("x7") ivals[7],
+        inout("d0") fvals[0] => fresult,
+        in("d1") fvals[1],
+        in("d2") fvals[2],
+        in("d3") fvals[3],
+        in("d4") fvals[4],
+        in("d5") fvals[5],
+        in("d6") fvals[6],
+        in("d7") fvals[7],
+        clobber_abi("C"),
+    );
+
+    // Handle return value
+    let ret_kind = (*ft.ret).kind;
+    match ret_kind {
+        hl_type_kind_HVOID => ptr::null_mut(),
+        hl_type_kind_HF32 => {
+            (*out).v.f = fresult as f32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HF64 => {
+            (*out).v.d = fresult;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+            (*out).v.i = result as i32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI64 => {
+            (*out).v.i64_ = result as i64;
+            ptr::null_mut()
+        }
+        _ => result as *mut c_void,
+    }
+}
+
 pub static mut hlc_get_wrapper: HlcFunWrapperType = empty_fun_wrapper;
 pub static mut hlc_static_call: HlcStaticCallType = empty_static_call;
 pub static mut hlc_call_flags: i32 = 0;
@@ -104,7 +204,10 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
         let wrapped_addr = (*c).v.ptr as usize;
         if wrapped_addr >= 0x10000 && (wrapped_addr % std::mem::align_of::<usize>() == 0) {
             let wrapped = wrapped_addr as *mut vdynamic;
+            // Only dereference if it's a valid GC heap pointer, not JIT code
+            let gc = GC.get_mut().expect("Expected to get GC");
             if !wrapped.is_null()
+                && gc.is_gc_ptr(wrapped)
                 && !(*wrapped).t.is_null()
                 && (*(*wrapped).t).kind == hl_type_kind_HFUN
             {

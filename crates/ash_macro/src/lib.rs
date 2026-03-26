@@ -1,8 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use syn::{
-    parse_macro_input, FnArg, ForeignItem, Ident, ItemForeignMod, Pat, ReturnType, Type,
-};
+use syn::{parse_macro_input, FnArg, ForeignItem, Ident, ItemForeignMod, Pat, ReturnType, Type};
 
 #[proc_macro_attribute]
 pub fn load_symbol(_attr: TokenStream, item: TokenStream) -> TokenStream {

@@ -193,10 +193,7 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
         l = (*l).next;
     }
 
-    let mut cur = tlist {
-        t,
-        next: parents,
-    };
+    let mut cur = tlist { t, next: parents };
     let l = &mut cur as *mut tlist;
 
     match (*t).kind {

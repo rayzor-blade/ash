@@ -24,12 +24,7 @@ pub struct SSAForm {
 
 impl SSAForm {
     /// Construct SSA form from opcodes. Mutates ops in-place (renames registers).
-    pub fn construct(
-        ops: &mut [Opcode],
-        num_regs: usize,
-        cfg: &CFG,
-        dom: &DominatorTree,
-    ) -> Self {
+    pub fn construct(ops: &mut [Opcode], num_regs: usize, cfg: &CFG, dom: &DominatorTree) -> Self {
         let n_blocks = cfg.blocks.len();
         if n_blocks == 0 {
             return SSAForm {

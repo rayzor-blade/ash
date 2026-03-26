@@ -3297,7 +3297,9 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
+                        if !at.is_null()
+                            && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>())
+                        {
                             return Err(anyhow!(
                                 "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
                                 at,
@@ -3402,7 +3404,9 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
+                        if !at.is_null()
+                            && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>())
+                        {
                             return Err(anyhow!(
                                 "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
                                 at,

@@ -349,6 +349,7 @@ pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
 }
 
 #[no_mangle]
+#[allow(clippy::useless_assignment)]
 pub unsafe extern "C" fn hlp_hbset(
     mut m: *mut hl::hl_hb_map,
     key: *mut hl::uchar,
@@ -358,7 +359,7 @@ pub unsafe extern "C" fn hlp_hbset(
 
     let mut c;
     let hash = hl_hb::hb_hash(key);
-    let mut ckey = hash % (*m).ncells as u32;
+    let mut ckey = 0u32;
     if !(*m).values.is_null() {
         ckey = hash % (*m).ncells as u32;
         c = m.m_index(ckey);

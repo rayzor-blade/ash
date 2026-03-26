@@ -138,6 +138,118 @@ pub unsafe extern "C" fn ash_static_call(
     }
 }
 
+/// Dynamic function call for x86_64 — marshals args per System V AMD64 ABI
+/// and calls the function pointer. Used by hlp_call_method for dynamic dispatch.
+///
+/// System V AMD64 ABI:
+///   Integer/pointer args → rdi, rsi, rdx, rcx, r8, r9  (6 regs, independent counter)
+///   Float args           → xmm0–xmm7                   (8 regs, independent counter)
+///   Return               → rax (integer) / xmm0 (float)
+#[cfg(target_arch = "x86_64")]
+#[no_mangle]
+pub unsafe extern "C" fn ash_static_call(
+    fun: *mut c_void,
+    t: *mut hl_type,
+    args: *mut *mut c_void,
+    out: *mut vdynamic,
+) -> *mut c_void {
+    let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
+    let nargs = ft.nargs as usize;
+
+    // x86_64 SysV: integer and float args use independent register banks
+    let mut ivals = [0usize; 6];
+    let mut fvals = [0.0f64; 8];
+    let mut ireg = 0usize;
+    let mut freg = 0usize;
+
+    for i in 0..nargs.min(14) {
+        let arg_t = *ft.args.add(i);
+        let kind = (*arg_t).kind;
+        let p = *args.add(i);
+        match kind {
+            hl_type_kind_HF32 => {
+                if freg < 8 {
+                    fvals[freg] = *(p as *const f32) as f64;
+                    freg += 1;
+                }
+            }
+            hl_type_kind_HF64 => {
+                if freg < 8 {
+                    fvals[freg] = *(p as *const f64);
+                    freg += 1;
+                }
+            }
+            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                if ireg < 6 {
+                    let val = (*(p as *const f64)) as i32;
+                    ivals[ireg] = val as i64 as usize; // sign-extend
+                    ireg += 1;
+                }
+            }
+            hl_type_kind_HI64 => {
+                if ireg < 6 {
+                    let val = *(p as *const i64);
+                    ivals[ireg] = val as usize;
+                    ireg += 1;
+                }
+            }
+            _ => {
+                if ireg < 6 {
+                    ivals[ireg] = p as usize;
+                    ireg += 1;
+                }
+            }
+        }
+    }
+
+    let result: usize;
+    let fresult: f64;
+
+    core::arch::asm!(
+        "call r10",
+        in("r10") fun,
+        out("rax") result,
+        in("rdi") ivals[0],
+        in("rsi") ivals[1],
+        in("rdx") ivals[2],
+        in("rcx") ivals[3],
+        in("r8") ivals[4],
+        in("r9") ivals[5],
+        inout("xmm0") fvals[0] => fresult,
+        in("xmm1") fvals[1],
+        in("xmm2") fvals[2],
+        in("xmm3") fvals[3],
+        in("xmm4") fvals[4],
+        in("xmm5") fvals[5],
+        in("xmm6") fvals[6],
+        in("xmm7") fvals[7],
+        clobber_abi("C"),
+    );
+
+    // Handle return value
+    let ret_kind = (*ft.ret).kind;
+    match ret_kind {
+        hl_type_kind_HVOID => ptr::null_mut(),
+        hl_type_kind_HF32 => {
+            (*out).v.f = fresult as f32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HF64 => {
+            (*out).v.d = fresult;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+            (*out).v.i = result as i32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI64 => {
+            (*out).v.i64_ = result as i64;
+            ptr::null_mut()
+        }
+        _ => result as *mut c_void,
+    }
+}
+
 pub static mut hlc_get_wrapper: HlcFunWrapperType = empty_fun_wrapper;
 pub static mut hlc_static_call: HlcStaticCallType = empty_static_call;
 pub static mut hlc_call_flags: i32 = 0;

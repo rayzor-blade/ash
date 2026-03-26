@@ -1,0 +1,59 @@
+# Docker Compose for ash parity testing.
+#
+# HashLink doesn't run natively on Apple M-series without Rosetta.
+# This provides an x86_64 Linux container with hl + haxe for:
+#   - Running .hl bytecode files through the reference HashLink VM
+#   - Generating parity oracle bundles
+#   - Compiling Haxe source to .hl bytecode
+#
+# Quick start:
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm oracle
+#   docker compose -f docker/docker-compose.yml run --rm hl crates/ash/test/tests/test_stdlib.hl
+
+services:
+  # Base HashLink image (x86_64)
+  hashlink:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.hashlink
+    platform: linux/amd64
+    volumes:
+      - ..:/work
+    working_dir: /work
+
+  # Run a single .hl file through HashLink
+  # Usage: docker compose -f docker/docker-compose.yml run --rm hl <path-to-hl-file>
+  hl:
+    extends:
+      service: hashlink
+    entrypoint: ["hl"]
+
+  # Compile a Haxe source file to .hl bytecode
+  # Usage: docker compose -f docker/docker-compose.yml run --rm haxe -main TestStdlib -hl test_stdlib.hl
+  haxe:
+    extends:
+      service: hashlink
+    entrypoint: ["haxe"]
+    working_dir: /work/crates/ash/test/tests
+
+  # Generate the full parity oracle bundle
+  # Usage: docker compose -f docker/docker-compose.yml run --rm oracle
+  oracle:
+    extends:
+      service: hashlink
+    entrypoint:
+      - python3
+      - /work/scripts/generate_parity_oracle.py
+      - --repo-root
+      - /work
+      - --out-dir
+      - /work/target/parity-oracle
+      - --include-slow
+
+  # Compare ash output against HashLink for a single test
+  # Usage: docker compose -f docker/docker-compose.yml run --rm compare TestStdlib
+  compare:
+    extends:
+      service: hashlink
+    entrypoint: ["/work/scripts/docker_compare.sh"]

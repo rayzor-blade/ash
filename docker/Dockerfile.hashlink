@@ -1,0 +1,68 @@
+# HashLink reference runtime for parity testing.
+# Provides `hl` binary and `haxe` compiler on x86_64 Linux.
+#
+# Usage:
+#   docker build -f docker/Dockerfile.hashlink -t ash-hashlink .
+#   docker run --rm -v "$PWD":/work ash-hashlink hl /work/crates/ash/test/tests/test_stdlib.hl
+#
+# Or generate the full parity oracle:
+#   docker run --rm -v "$PWD":/work ash-hashlink \
+#     python3 /work/scripts/generate_parity_oracle.py \
+#       --repo-root /work --out-dir /work/target/parity-oracle --include-slow
+
+FROM ubuntu:22.04
+
+ARG HAXE_VERSION=4.3.4
+ARG HASHLINK_VERSION=1.14
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies for HashLink build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    curl \
+    python3 \
+    python3-pip \
+    libmbedtls-dev \
+    libsdl2-dev \
+    libpng-dev \
+    zlib1g-dev \
+    libturbojpeg0-dev \
+    libvorbis-dev \
+    libopenal-dev \
+    libuv1-dev \
+    libsqlite3-dev \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Haxe
+RUN mkdir -p /opt/haxe && \
+    curl -fsSL "https://github.com/HaxeFoundation/haxe/releases/download/${HAXE_VERSION}/haxe-${HAXE_VERSION}-linux64.tar.gz" \
+      | tar xz --strip-components=1 -C /opt/haxe && \
+    ln -s /opt/haxe/haxe /usr/local/bin/haxe && \
+    ln -s /opt/haxe/haxelib /usr/local/bin/haxelib && \
+    mkdir -p /opt/haxe/std && \
+    haxe --version
+
+# Build and install HashLink from source
+RUN git clone --depth 1 --branch "${HASHLINK_VERSION}" \
+      https://github.com/HaxeFoundation/hashlink.git /tmp/hashlink && \
+    make -C /tmp/hashlink -j"$(nproc)" && \
+    make -C /tmp/hashlink install && \
+    ldconfig && \
+    rm -rf /tmp/hashlink && \
+    hl --version
+
+# Python 3.10 on Ubuntu 22.04 lacks tomllib (3.11+).
+# Install tomli and register it as tomllib for generate_parity_oracle.py.
+RUN pip3 install --no-cache-dir tomli && \
+    python3 -c "import tomli; print('tomli OK')" && \
+    printf 'from tomli import *\nloads = __import__("tomli").loads\n' \
+      > /usr/lib/python3/dist-packages/tomllib.py
+
+WORKDIR /work
+
+# Default: show versions
+CMD ["sh", "-c", "echo \"haxe $(haxe --version)\" && echo \"hl $(hl --version)\""]

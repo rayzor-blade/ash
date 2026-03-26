@@ -4121,8 +4121,93 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_unreachable()?;
             }
 
-            // --- Prefetch / Asm / RefData / RefOffset: stubs ---
-            Opcode::Prefetch { .. } | Opcode::Asm { .. } => {}
+            // --- Prefetch: emit target-specific cache hint via inline asm ---
+            Opcode::Prefetch { value, field, mode } => {
+                let _ = field; // field offset elision is safe; prefetch is purely a hint
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let base = self
+                    .builder
+                    .build_load(ptr_type, registers[value.0 as usize], "prefetch_ptr")?
+                    .into_pointer_value();
+                let void_type = self.context.void_type();
+                let fn_type = void_type.fn_type(&[ptr_type.into()], false);
+
+                #[cfg(target_arch = "x86_64")]
+                let hint = match mode {
+                    0 => "prefetcht0 ($0)",
+                    1 => "prefetcht1 ($0)",
+                    2 => "prefetcht2 ($0)",
+                    _ => "prefetchnta ($0)",
+                };
+                #[cfg(target_arch = "aarch64")]
+                let hint = match mode {
+                    0 => "prfm pldl1keep, [$0]",
+                    1 => "prfm pldl2keep, [$0]",
+                    2 => "prfm pldl3keep, [$0]",
+                    _ => "prfm pldl1strm, [$0]",
+                };
+                // Fallback for other architectures: no-op
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+                let hint = {
+                    let _ = mode;
+                    ""
+                };
+
+                if !hint.is_empty() {
+                    let asm_val = self.context.create_inline_asm(
+                        fn_type,
+                        hint.to_string(),
+                        "r".to_string(),
+                        true,
+                        false,
+                        Some(inkwell::InlineAsmDialect::ATT),
+                        false,
+                    );
+                    self.builder.build_indirect_call(
+                        fn_type,
+                        asm_val,
+                        &[base.into()],
+                        "prefetch",
+                    )?;
+                }
+            }
+            // --- Asm: inline assembly byte emission ---
+            //
+            // HashLink OAsm modes:
+            //   0 → emit raw byte (p2) into code stream
+            //   1 → mark physical register (p2) as clobbered
+            //   2 → load VM register into physical register (p2)
+            //   3 → store physical register (p2) into VM register
+            //   4 → naked function (strip prologue; must be first opcode)
+            //
+            // Modes 1-3 are register-allocator directives for HashLink's custom JIT;
+            // LLVM handles register allocation automatically so these are no-ops.
+            // Mode 0 emits raw bytes via `.byte` — works on all LLVM targets.
+            Opcode::Asm { mode, value, reg } => {
+                let _ = reg;
+                match mode {
+                    0 => {
+                        let byte = *value as u8;
+                        let void_type = self.context.void_type();
+                        let fn_type = void_type.fn_type(&[], false);
+                        let asm_val = self.context.create_inline_asm(
+                            fn_type,
+                            format!(".byte 0x{byte:02x}"),
+                            String::new(),
+                            true,  // side effects
+                            false, // align stack
+                            Some(inkwell::InlineAsmDialect::ATT),
+                            false, // can_throw
+                        );
+                        self.builder
+                            .build_indirect_call(fn_type, asm_val, &[], "")?;
+                    }
+                    1 | 2 | 3 | 4 => {
+                        // Register hints / naked: LLVM handles allocation automatically.
+                    }
+                    _ => {}
+                }
+            }
             // --- RefData: extract value pointer from vdynamic (offset 8) ---
             Opcode::RefData { dst, src } => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());

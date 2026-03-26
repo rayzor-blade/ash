@@ -1,17 +1,13 @@
 use crate::array::hlp_alloc_array;
 use crate::fun::hlp_dyn_call;
 use crate::gc::{ImmixAllocator, GC};
-use crate::hl::{
-    self, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HBYTES, uchar, varray, vbyte, vclosure,
-    vdynamic,
-};
+use crate::hl::{self, uchar, varray, vbyte, vclosure, vdynamic};
 use crate::strings::str_to_uchar_ptr;
 use crate::types::hl_aptr;
 use anyhow::Result;
 use std::ffi::c_void;
 use std::fmt::{self, Formatter};
 use std::mem;
-use std::os::raw::c_int;
 use std::panic;
 
 #[repr(C)]
@@ -220,13 +216,13 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_exception_stack_raw(arr: *mut varray) -> i32 {
+pub unsafe extern "C" fn hlp_exception_stack_raw(_arr: *mut varray) -> i32 {
     // Stub: return 0 entries (no stack trace available)
     0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
+pub unsafe extern "C" fn hlp_call_stack_raw(_arr: *mut varray) -> i32 {
     // Stub: return 0 entries (no call stack available)
     0
 }

@@ -1478,11 +1478,9 @@ impl<'ctx> JITModule<'ctx> {
 
                         // Field exists: r = *hl_vfields(o)[f]
                         self.builder.position_at_end(then_block);
-                        let field_value_ptr = self.builder.build_load(
-                            ptr_type,
-                            field_ptr,
-                            "field_value_ptr",
-                        )?;
+                        let field_value_ptr =
+                            self.builder
+                                .build_load(ptr_type, field_ptr, "field_value_ptr")?;
                         // Load with the destination register's type, not ptr,
                         // to avoid reading more bytes than the field actually holds.
                         let dst_load_type = reg_types[dst.0 as usize];
@@ -1697,83 +1695,153 @@ impl<'ctx> JITModule<'ctx> {
             Opcode::JSLt { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SLT, FloatPredicate::OLT,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SLT,
+                    FloatPredicate::OLT,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JSGte { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SGE, FloatPredicate::OGE,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SGE,
+                    FloatPredicate::OGE,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JSGt { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SGT, FloatPredicate::OGT,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SGT,
+                    FloatPredicate::OGT,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JSLte { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SLE, FloatPredicate::OLE,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SLE,
+                    FloatPredicate::OLE,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JULt { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::ULT, FloatPredicate::OLT,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::ULT,
+                    FloatPredicate::OLT,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JUGte { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::UGE, FloatPredicate::OGE,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::UGE,
+                    FloatPredicate::OGE,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JNotLt { a, b, offset } => {
                 // !(a < b) is the same as a >= b
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SGE, FloatPredicate::OGE,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SGE,
+                    FloatPredicate::OGE,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JNotGte { a, b, offset } => {
                 // !(a >= b) is the same as a < b
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::SLT, FloatPredicate::OLT,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::SLT,
+                    FloatPredicate::OLT,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JEq { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::EQ, FloatPredicate::OEQ,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::EQ,
+                    FloatPredicate::OEQ,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
             Opcode::JNotEq { a, b, offset } => {
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
                 self.emit_comparison_jump(
-                    registers, reg_types, a, b, a_kind,
-                    IntPredicate::NE, FloatPredicate::ONE,
-                    i, *offset, opcode_blocks,
+                    registers,
+                    reg_types,
+                    a,
+                    b,
+                    a_kind,
+                    IntPredicate::NE,
+                    FloatPredicate::ONE,
+                    i,
+                    *offset,
+                    opcode_blocks,
                 )?;
             }
 
@@ -4148,11 +4216,7 @@ impl<'ctx> JITModule<'ctx> {
                     );
                     let result = self
                         .builder
-                        .build_call(
-                            dyn_compare,
-                            &[a_val.into(), b_val.into()],
-                            "dyn_cmp",
-                        )?
+                        .build_call(dyn_compare, &[a_val.into(), b_val.into()], "dyn_cmp")?
                         .try_as_basic_value()
                         .left()
                         .unwrap()

@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     gc::{ImmixAllocator, GC},
-    hl::{self, hl_hb_map, uchar},
+    hl::{self, hl_hb_map},
     strings,
 };
 
@@ -356,9 +356,9 @@ pub unsafe extern "C" fn hlp_hbset(
 ) {
     use hl_hb::HbMap;
 
-    let mut c = 0;
-    let mut ckey = 0;
+    let mut c;
     let hash = hl_hb::hb_hash(key);
+    let mut ckey = hash % (*m).ncells as u32;
     if !(*m).values.is_null() {
         ckey = hash % (*m).ncells as u32;
         c = m.m_index(ckey);

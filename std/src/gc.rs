@@ -2,7 +2,7 @@ use crate::error::{HLException, TrapContext, VDynamicException};
 use crate::hl::{self, hl_type, hl_type_obj, vclosure, vdynamic, HL_WSIZE};
 use crate::types::hlp_type_size;
 use anyhow::Result;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
@@ -228,8 +228,8 @@ impl ImmixAllocator {
         ptr::write(
             closure,
             vclosure {
-                t: t,
-                fun: fun,
+                t,
+                fun,
                 hasValue: 1,
                 stackCount: stack,
                 value: ptr,
@@ -375,11 +375,8 @@ impl ImmixAllocator {
     }
 
     pub fn collect_garbage(&mut self) {
-        let used_before = self.heap.used_blocks.len();
         self.mark_roots();
         self.sweep();
-        let freed = self.heap.free_blocks.len();
-        let retained = self.heap.used_blocks.len();
         // eprintln!("[GC] collected: freed={freed} retained={retained} (was {used_before} used)");
 
         self.heap.alloc_count = 0;

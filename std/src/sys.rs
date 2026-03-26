@@ -38,6 +38,6 @@ pub extern "C" fn hlp_sys_is64() -> bool {
 }
 
 #[no_mangle]
-pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
+pub extern "C" fn hlp_sys_check_reload(_debug_alt_file: *const vbyte) -> bool {
     return false;
 }

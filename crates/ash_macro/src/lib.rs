@@ -1,9 +1,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use std::fmt::Write;
 use syn::{
-    parse_macro_input, FnArg, ForeignItem, ForeignItemFn, Ident, ItemFn, ItemForeignMod, Pat,
-    ReturnType, Signature, Type,
+    parse_macro_input, FnArg, ForeignItem, Ident, ItemForeignMod, Pat, ReturnType, Type,
 };
 
 #[proc_macro_attribute]
@@ -112,13 +110,7 @@ pub fn to_llvm(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let type_tokens = get_type_tokens(param_type);
                 (ident, param_type, type_tokens)
             } else {
-                let ident = format_ident!("param_{}", i);
-                let param_type = match arg {
-                    FnArg::Receiver(_) => panic!("Self parameters are not supported"),
-                    _ => panic!("Unexpected argument type"),
-                };
-                let type_tokens = quote! { context.i8_type().ptr_type(inkwell::AddressSpace::default()).into() };
-                (ident, param_type, type_tokens)
+                panic!("Unsupported argument type in to_llvm");
             }
         }).collect();
 

@@ -327,17 +327,12 @@ impl<'ctx> JITModule<'ctx> {
                 .native_function_resolver
                 .resolve_function("std", "ash_static_call")
             {
-                type FnSetupCallbacks2 =
-                    unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+                type FnSetupCallbacks2 = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
                 let setup: FnSetupCallbacks2 = unsafe { std::mem::transmute(setup_fn_ptr) };
                 // flags=0: fun arg is the direct function pointer (not double-indirection)
                 // wrapper=null: we don't use the wrapper mechanism
                 unsafe {
-                    setup(
-                        static_call_ptr,
-                        std::ptr::null_mut(),
-                        0,
-                    );
+                    setup(static_call_ptr, std::ptr::null_mut(), 0);
                 }
             }
         }
@@ -733,9 +728,8 @@ impl<'ctx> JITModule<'ctx> {
                                             })?,
                                     )
                                 };
-                                let closure = unsafe {
-                                    fn_alloc_cl(field_c_type as *mut c_void, func_ptr)
-                                };
+                                let closure =
+                                    unsafe { fn_alloc_cl(field_c_type as *mut c_void, func_ptr) };
                                 if !closure.is_null() {
                                     unsafe {
                                         *(field_addr as *mut *mut c_void) = closure;
@@ -758,8 +752,11 @@ impl<'ctx> JITModule<'ctx> {
                             if ref_global < self.globals_data.len() {
                                 let ref_val = self.globals_data[ref_global];
                                 unsafe {
-                                    *(field_addr as *mut usize) =
-                                        if ref_val.is_null() { 0 } else { ref_val as usize };
+                                    *(field_addr as *mut usize) = if ref_val.is_null() {
+                                        0
+                                    } else {
+                                        ref_val as usize
+                                    };
                                 }
                             }
                         }

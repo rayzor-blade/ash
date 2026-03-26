@@ -605,8 +605,7 @@ impl<'ctx> JITModule<'ctx> {
                 if !c_type.__bindgen_anon_1.tenum.is_null() {
                     // Pre-mark as processing to break cycles (e.g., recursive enums like Tree)
                     self.types_[type_index].tenum = Some(HLTypeEnum::default());
-                    let tenum =
-                        self.update_hl_type_enum(&*c_type.__bindgen_anon_1.tenum)?;
+                    let tenum = self.update_hl_type_enum(&*c_type.__bindgen_anon_1.tenum)?;
                     self.types_[type_index].tenum = Some(tenum);
                 }
             }

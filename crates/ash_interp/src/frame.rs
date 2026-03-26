@@ -41,6 +41,11 @@ impl RegisterFile {
     }
 
     #[inline(always)]
+    pub fn is_empty(&self) -> bool {
+        self.registers.is_empty()
+    }
+
+    #[inline(always)]
     pub fn as_slice(&self) -> &[NanBoxedValue] {
         &self.registers
     }

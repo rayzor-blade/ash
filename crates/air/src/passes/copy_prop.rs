@@ -259,6 +259,7 @@ impl Pass for CopyPropPass {
             // Local copy map: dst → src (from Mov instructions)
             let mut copies: HashMap<Reg, Reg> = HashMap::new();
 
+            #[allow(clippy::needless_range_loop)]
             for i in block.start..=block.end {
                 // Apply copy substitutions to reads
                 let active_copies: Vec<(Reg, Reg)> = copies.iter().map(|(&k, &v)| (k, v)).collect();

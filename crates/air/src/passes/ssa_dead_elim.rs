@@ -13,7 +13,7 @@ impl SSADeadElimPass {
 
     pub fn run_ssa(
         &self,
-        ops: &mut Vec<Opcode>,
+        ops: &mut [Opcode],
         ssa: &mut SSAForm,
         _cfg: &CFG,
         _dom: &DominatorTree,

@@ -55,7 +55,7 @@ pub fn hlt_i32() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HI32) as usize) as *mut hl_type
 }
 
-pub static TSTR: [&'static str; 22] = [
+pub static TSTR: [&str; 22] = [
     "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "array",
     "type", "null", "null", "dynobj", "null", "null", "null", "null", "null", "null",
 ];
@@ -296,9 +296,7 @@ pub unsafe extern "C" fn hlp_is_dynamic(t: *const hl::hl_type) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_name(t: *const hl::hl_type) -> *mut vbyte {
     match (*t).kind {
-        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
-            (*(*t).__bindgen_anon_1.obj).name as *mut vbyte
-        }
+        hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => (*(*t).__bindgen_anon_1.obj).name as *mut vbyte,
         hl_type_kind_HENUM => (*(*t).__bindgen_anon_1.tenum).name as *mut vbyte,
         hl_type_kind_HABSTRACT => (*t).__bindgen_anon_1.abs_name as *mut vbyte,
         _ => std::ptr::null_mut(),
@@ -484,7 +482,7 @@ pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_cont
         let params = std::slice::from_raw_parts(c.params, c.nparams as usize);
         let offsets = std::slice::from_raw_parts(c.offsets, c.nparams as usize);
 
-        for (j, (&param, &offset)) in params.iter().zip(offsets.iter()).enumerate() {
+        for (&param, &offset) in params.iter().zip(offsets.iter()) {
             if hl_is_ptr(param) {
                 let pos = (offset / HL_WSIZE as i32) - 2;
                 *mark.add(i + (pos as usize >> 5)) |= 1 << (pos & 31);

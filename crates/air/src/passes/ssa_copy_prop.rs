@@ -15,7 +15,7 @@ impl SSACopyPropPass {
 
     pub fn run_ssa(
         &self,
-        ops: &mut Vec<Opcode>,
+        ops: &mut [Opcode],
         ssa: &mut SSAForm,
         _cfg: &CFG,
         _dom: &DominatorTree,
@@ -72,7 +72,7 @@ impl SSACopyPropPass {
         // Also record phi nodes that have a single unique source value as copies
         for block_phis in &ssa.phis {
             for phi in block_phis {
-                if phi.sources.len() > 0 {
+                if !phi.sources.is_empty() {
                     let first_src = phi.sources[0].1;
                     if phi.sources.iter().all(|(_, s)| *s == first_src) {
                         // Apply same safety check as Mov copies
@@ -115,6 +115,7 @@ impl SSACopyPropPass {
 
         // Replace all reads in opcodes
         let mut eliminated = 0;
+        #[allow(clippy::needless_range_loop)]
         for i in 0..ops.len() {
             if matches!(ops[i], Opcode::Nop) {
                 continue;

@@ -87,7 +87,7 @@ fn hash_field_name(
 #[inline]
 unsafe fn call_setjmp_opaque(jmp_buf: *mut c_void) -> i32 {
     type SetJmpOpaque = unsafe extern "C" fn(*mut c_void) -> i32;
-    let setjmp_fn: SetJmpOpaque = std::mem::transmute(hl::_setjmp as usize);
+    let setjmp_fn: SetJmpOpaque = std::mem::transmute(hl::_setjmp as *const () as usize);
     setjmp_fn(jmp_buf)
 }
 
@@ -972,6 +972,7 @@ impl HLInterpreter {
         Some(NanBoxedValue::from_bool(removed))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dyn_get_field_by_hash(
         obj_ptr: *mut c_void,
         hfield: i32,
@@ -1040,6 +1041,7 @@ impl HLInterpreter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dyn_set_field_by_hash(
         obj_ptr: *mut c_void,
         hfield: i32,
@@ -2368,7 +2370,7 @@ impl HLInterpreter {
                         // It's a pointer to a _vclosure struct
                         let cl_ptr = raw as *const _vclosure;
                         if cl_ptr.is_null()
-                            || (cl_ptr as usize) % std::mem::align_of::<_vclosure>() != 0
+                            || !(cl_ptr as usize).is_multiple_of(std::mem::align_of::<_vclosure>())
                         {
                             return Err(anyhow!(
                                 "CallClosure invalid closure value: {:?}",
@@ -3295,7 +3297,7 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null() && (at as usize) % std::mem::align_of::<hl_type>() != 0 {
+                        if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
                             return Err(anyhow!(
                                 "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
                                 at,
@@ -3400,7 +3402,7 @@ impl HLInterpreter {
                             ));
                         }
                         let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null() && (at as usize) % std::mem::align_of::<hl_type>() != 0 {
+                        if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
                             return Err(anyhow!(
                                 "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
                                 at,
@@ -3981,6 +3983,7 @@ impl HLInterpreter {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn try_compare_nullable_operands(
         &self,
         bytecode: &DecodedBytecode,

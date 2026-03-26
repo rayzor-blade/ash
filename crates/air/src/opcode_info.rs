@@ -347,7 +347,7 @@ pub fn successors(op: &Opcode, i: usize, num_ops: usize) -> Vec<usize> {
                 } else {
                     vec![i + 1, target]
                 }
-            } else if i + 1 <= num_ops {
+            } else if i < num_ops {
                 vec![i + 1]
             } else {
                 vec![]

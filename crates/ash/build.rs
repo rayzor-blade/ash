@@ -1,8 +1,8 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn generate_hl_bindings(out_dir: &PathBuf) {
+fn generate_hl_bindings(out_dir: &Path) {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let wrapper = manifest_dir.join("../../std/wrapper.h");
     let hl_header = manifest_dir.join("../../std/hl.h");

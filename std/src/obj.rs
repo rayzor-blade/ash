@@ -1,7 +1,5 @@
-use core::slice;
 use std::alloc::alloc;
-use std::rc::Rc;
-use std::sync::{MutexGuard, RwLock};
+use std::sync::RwLock;
 use std::{
     alloc::Layout,
     cmp::Ordering,
@@ -11,10 +9,9 @@ use std::{
 };
 
 use crate::gc::ImmixAllocator;
-use crate::strings::{hlp_utf16_length, hlp_utf16_to_utf8};
 use crate::{
     buffer::hlp_type_str,
-    cast::{self, *},
+    cast::*,
     error::hlp_error,
     gc::{hlp_mark_size, hlp_zalloc, GC, HL_GLOBAL_LOCK},
     hl::{self, *},
@@ -757,8 +754,8 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
             let ft = (*field_lookup).t;
 
-            let func_type_ptr = *(*m).functions_types.add(mid as usize);
-            let func_ptr = *(*m).functions_ptrs.add(mid as usize);
+            let _func_type_ptr = *(*m).functions_types.add(mid as usize);
+            let _func_ptr = *(*m).functions_ptrs.add(mid as usize);
 
             match (*ft).kind {
                 hl::hl_type_kind_HFUN
@@ -1640,8 +1637,8 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
     if (*obj).t.is_null() {
         return ptr::null_mut();
     }
-    let obj_kind = (*(*obj).t).kind;
-    let vt_nfields = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields;
+    let _obj_kind = (*(*obj).t).kind;
+    let _vt_nfields = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields;
 
     #[cfg(debug_assertions)]
     {
@@ -1662,7 +1659,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
     match (*obj).t.as_ref().unwrap().kind {
         hl::hl_type_kind_HOBJ => {
-            let mut v: *mut vvirtual = ptr::null_mut();
+            let mut v: *mut vvirtual;
             let mut interface_address: *mut *mut vvirtual = ptr::null_mut();
 
             let mut rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
@@ -1677,8 +1674,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                             (*(*rt).parent).nfields as usize
                         };
                         let offset = *(*rt).fields_indexes.add(fi + start) as usize;
-                        interface_address =
-                            (obj as *mut u8).add(offset) as *mut *mut vvirtual;
+                        interface_address = (obj as *mut u8).add(offset) as *mut *mut vvirtual;
                         break;
                     }
                 }
@@ -1993,7 +1989,7 @@ pub unsafe extern "C" fn hlp_dyn_setp(
         hlp_write_dyn(addr, ft, value as *mut vdynamic, false);
     } else {
         let mut tmp = vdynamic {
-            t: t,
+            t,
             v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { ptr: value }),
         };
         hlp_write_dyn(addr, ft, &mut tmp as *mut vdynamic, true);
@@ -2098,7 +2094,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
             let mut tmp = vdynamic {
-                t: t,
+                t,
                 v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i: value }),
             };
             hlp_write_dyn(addr, ft, &mut tmp, true);

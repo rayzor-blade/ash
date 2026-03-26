@@ -25,7 +25,7 @@ pub struct SSAForm {
 impl SSAForm {
     /// Construct SSA form from opcodes. Mutates ops in-place (renames registers).
     pub fn construct(
-        ops: &mut Vec<Opcode>,
+        ops: &mut [Opcode],
         num_regs: usize,
         cfg: &CFG,
         dom: &DominatorTree,
@@ -59,15 +59,15 @@ impl SSAForm {
         let mut def_blocks: Vec<HashSet<BlockId>> = vec![HashSet::new(); num_regs];
 
         // All registers are implicitly defined at entry (function params, default-initialized)
-        for v in 0..num_regs {
+        for (v, defs) in def_blocks.iter_mut().enumerate().take(num_regs) {
             if !pinned.contains(&(v as u32)) {
-                def_blocks[v].insert(0);
+                defs.insert(0);
             }
         }
 
         for block in &cfg.blocks {
-            for i in block.start..=block.end {
-                for w in opcode_info::writes(&ops[i]) {
+            for op in &ops[block.start..=block.end] {
+                for w in opcode_info::writes(op) {
                     if !pinned.contains(&w.0) {
                         def_blocks[w.0 as usize].insert(block.id);
                     }
@@ -78,17 +78,17 @@ impl SSAForm {
         // Phase 2: Insert phi nodes at iterated dominance frontiers
         let mut phis: Vec<Vec<PhiNode>> = vec![vec![]; n_blocks];
 
-        for v in 0..num_regs {
+        for (v, defs) in def_blocks.iter().enumerate().take(num_regs) {
             if pinned.contains(&(v as u32)) {
                 continue;
             }
-            if def_blocks[v].is_empty() {
+            if defs.is_empty() {
                 continue;
             }
 
-            let mut worklist: Vec<BlockId> = def_blocks[v].iter().copied().collect();
+            let mut worklist: Vec<BlockId> = defs.iter().copied().collect();
             let mut has_phi: HashSet<BlockId> = HashSet::new();
-            let mut ever_on_worklist: HashSet<BlockId> = def_blocks[v].clone();
+            let mut ever_on_worklist: HashSet<BlockId> = defs.clone();
 
             while let Some(x) = worklist.pop() {
                 for &y in &dom.dom_frontier[x] {
@@ -162,6 +162,7 @@ impl SSAForm {
 
             // Process opcodes in the block
             let block = &cfg.blocks[block_id];
+            #[allow(clippy::needless_range_loop)]
             for i in block.start..=block.end {
                 // Rename reads first (before writes, important for Incr/Decr which are pinned anyway)
                 rename_reads(&mut ops[i], &stacks, &pinned);
@@ -204,7 +205,7 @@ impl SSAForm {
 
     /// Destroy SSA form: rename all SSA registers back to their base registers.
     /// Phi nodes are discarded.
-    pub fn destroy(&self, ops: &mut Vec<Opcode>) {
+    pub fn destroy(&self, ops: &mut [Opcode]) {
         for op in ops.iter_mut() {
             rename_to_base(op, &self.base_reg);
         }

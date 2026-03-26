@@ -387,11 +387,11 @@ impl BytecodeDecoder {
                     let mut fields = vec![HLObjField::default(); nfields as usize];
 
                     for i in 0..nfields {
-                        let name = self.read_string(r)?.into_boxed_slice();
-
+                        let mut name = self.read_string(r)?;
+                        name.push(0); // null terminator for hash computation
                         let hashed_name = __hlp_hash_gen(name.as_ptr(), true);
-                        let mut field = HLObjField {
-                            name: String::from_utf16_lossy(name.as_ref()),
+                        let field = HLObjField {
+                            name: String::from_utf16_lossy(&name[..name.len() - 1]),
                             type_: self.get_type(r)?,
                             hashed_name,
                         };

@@ -194,7 +194,7 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
     }
 
     let mut cur = tlist {
-        t: t,
+        t,
         next: parents,
     };
     let l = &mut cur as *mut tlist;
@@ -320,7 +320,7 @@ pub unsafe extern "C" fn hlp_buffer_addr(
         }
         hl_type_kind_HTYPE => {
             let mut tmp = vdynamic {
-                t: t,
+                t,
                 v: vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
                 },
@@ -337,7 +337,7 @@ pub unsafe extern "C" fn hlp_buffer_addr(
         }
         hl_type_kind_HREF => {
             let mut tmp = vdynamic {
-                t: t,
+                t,
                 v: vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
                 },
@@ -354,7 +354,7 @@ pub unsafe extern "C" fn hlp_buffer_addr(
         }
         hl_type_kind_HABSTRACT => {
             let mut tmp = vdynamic {
-                t: t,
+                t,
                 v: vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
                 },
@@ -580,7 +580,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 vtmp = (*vtmp).next;
             }
 
-            let mut l = vlist { v: v, next: stack };
+            let mut l = vlist { v, next: stack };
 
             hlp_buffer_char(b, '{' as u16);
             for i in 0..(*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize {
@@ -625,7 +625,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 vtmp = (*vtmp).next;
             }
 
-            let mut l = vlist { v: v, next: stack };
+            let mut l = vlist { v, next: stack };
 
             let f = hlp_lookup_find(
                 (*o).lookup,
@@ -719,7 +719,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                     vtmp = (*vtmp).next;
                 }
 
-                let mut l = vlist { v: v, next: stack };
+                let mut l = vlist { v, next: stack };
 
                 hlp_buffer_str(b, (*c).name);
                 hlp_buffer_char(b, '(' as u16);

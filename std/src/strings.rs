@@ -418,7 +418,6 @@ pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_
 
     // Convert the uchar (UTF-16) to a Rust string for parsing
     let mut chars = Vec::new();
-    let start = p;
     while *p != 0 {
         chars.push(*p);
         p = p.add(1);

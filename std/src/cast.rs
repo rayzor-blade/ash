@@ -642,17 +642,12 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                             && !(*obj).fields.is_null()
                             && (*(*(*obj).fields).t).kind == hl_type_kind_HBYTES
                         {
-                            let parent_fields =
-                                (*rt).nfields as usize - (*obj).nfields as usize;
-                            let offset =
-                                *(*rt).fields_indexes.add(parent_fields) as usize;
-                            let a_bytes =
-                                *((a as *mut u8).add(offset) as *mut *const uchar);
-                            let b_bytes =
-                                *((b as *mut u8).add(offset) as *mut *const uchar);
+                            let parent_fields = (*rt).nfields as usize - (*obj).nfields as usize;
+                            let offset = *(*rt).fields_indexes.add(parent_fields) as usize;
+                            let a_bytes = *((a as *mut u8).add(offset) as *mut *const uchar);
+                            let b_bytes = *((b as *mut u8).add(offset) as *mut *const uchar);
                             if !a_bytes.is_null() && !b_bytes.is_null() {
-                                return crate::ucs2::ucmp(a_bytes, b_bytes)
-                                    .signum();
+                                return crate::ucs2::ucmp(a_bytes, b_bytes).signum();
                             }
                         }
                     }

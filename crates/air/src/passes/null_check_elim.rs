@@ -51,9 +51,7 @@ impl Pass for NullCheckElimPass {
                 };
 
                 // Forward walk through block
-                for i in block.start..=block.end {
-                    let op = &ops[i];
-
+                for op in &ops[block.start..=block.end] {
                     // Any write to a register invalidates its non-null status
                     for w in opcode_info::writes(op) {
                         nonnull.remove(&w.0);
@@ -110,6 +108,7 @@ impl Pass for NullCheckElimPass {
                 set
             };
 
+            #[allow(clippy::needless_range_loop)]
             for i in block.start..=block.end {
                 let op = &ops[i];
 

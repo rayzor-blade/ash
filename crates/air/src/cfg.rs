@@ -73,8 +73,8 @@ impl CFG {
         let mut block_of = vec![0usize; n];
         let mut current_start = 0;
 
-        for i in 0..n {
-            if is_leader[i] && i > current_start {
+        for (i, &is_ldr) in is_leader.iter().enumerate().take(n) {
+            if is_ldr && i > current_start {
                 // Close the previous block
                 let id = blocks.len();
                 blocks.push(BasicBlock {
@@ -84,8 +84,8 @@ impl CFG {
                     successors: vec![],
                     predecessors: vec![],
                 });
-                for j in current_start..i {
-                    block_of[j] = id;
+                for bo in &mut block_of[current_start..i] {
+                    *bo = id;
                 }
                 current_start = i;
             }
@@ -99,11 +99,12 @@ impl CFG {
             successors: vec![],
             predecessors: vec![],
         });
-        for j in current_start..n {
-            block_of[j] = id;
+        for bo in &mut block_of[current_start..n] {
+            *bo = id;
         }
 
         // Pass 3: compute edges
+        #[allow(clippy::needless_range_loop)]
         for block_idx in 0..blocks.len() {
             let last_op_idx = blocks[block_idx].end;
             let succs = opcode_info::successors(&ops[last_op_idx], last_op_idx, n);

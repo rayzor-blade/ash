@@ -1924,8 +1924,15 @@ impl HLInterpreter {
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
         // Use reloaded bytecode if available (hot-reload swapped function bodies)
+        let using_reloaded = self.reloaded_bytecode.is_some();
         let bc: &DecodedBytecode = self.reloaded_bytecode.unwrap_or(bytecode);
         let func = &bc.functions[func_idx];
+        if using_reloaded && std::env::var("ASH_DBG_RELOAD").is_ok() {
+            eprintln!(
+                "[reload-exec] func_idx={} name={} nops={} using=reloaded",
+                func_idx, func.name(), func.ops.len()
+            );
+        }
 
         if self.stack.len() >= self.max_stack_depth {
             return Err(anyhow!("Stack overflow (depth {})", self.stack.len()));
@@ -2027,6 +2034,21 @@ impl HLInterpreter {
                                     }
 
                                     self.field_hash_cache.clear();
+
+                                    // Invalidate tiered JIT cache — compiled functions still
+                                    // point to old code. Forces fallback to interpreter which
+                                    // uses the new bytecode.
+                                    if let Some(tiered) = self.tiered_runtime.as_mut() {
+                                        tiered.compiled.clear();
+                                        tiered.blacklist.clear();
+                                    }
+
+                                    // Re-initialize constants from the new bytecode so that
+                                    // globals (string literals, class descriptors) reflect V2.
+                                    if let Err(e) = self.init_constants(&new_bc, native_resolver) {
+                                        eprintln!("[hot-reload] warning: init_constants failed: {}", e);
+                                    }
+
                                     let leaked: &'static _ = Box::leak(Box::new(new_bc));
                                     self.reloaded_bytecode = Some(leaked);
                                 }

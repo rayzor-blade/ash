@@ -238,6 +238,8 @@ pub struct HLInterpreter {
     fn_dyn_geti: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_getp
     fn_dyn_getp: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_dyn_castp (for SafeCast)
+    fn_dyn_castp: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_setd
     fn_dyn_setd: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_setf
@@ -344,6 +346,9 @@ impl HLInterpreter {
         let fn_dyn_getp = native_resolver
             .resolve_function("std", "hlp_dyn_getp")
             .unwrap_or(std::ptr::null_mut());
+        let fn_dyn_castp = native_resolver
+            .resolve_function("std", "hlp_dyn_castp")
+            .unwrap_or(std::ptr::null_mut());
         let fn_dyn_setd = native_resolver
             .resolve_function("std", "hlp_dyn_setd")
             .unwrap_or(std::ptr::null_mut());
@@ -418,6 +423,7 @@ impl HLInterpreter {
             fn_dyn_geti64,
             fn_dyn_geti,
             fn_dyn_getp,
+            fn_dyn_castp,
             fn_dyn_setd,
             fn_dyn_setf,
             fn_dyn_seti64,
@@ -3429,15 +3435,10 @@ impl HLInterpreter {
             }
             Opcode::SafeCast { dst, src } => {
                 let val = frame.registers.get(src.0);
-                let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
-                // When casting a vdynamic* to a primitive type, extract the value
-                // from the vdynamic (layout: t=0..7, v=8..15).
-                let result = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
-                    unsafe {
-                        Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
-                            .unwrap_or(val)
-                    }
-                } else if val.is_null() {
+                let dst_type_idx = func.regs[dst.0 as usize].0;
+                let dst_kind = bytecode.types[dst_type_idx].kind;
+
+                let result = if val.is_null() || val.is_void() {
                     match dst_kind {
                         hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
                             NanBoxedValue::from_i32(0)
@@ -3448,6 +3449,43 @@ impl HLInterpreter {
                         }
                         hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
                         _ => val,
+                    }
+                } else if val.is_ptr() && val.as_ptr() != 0 {
+                    if Self::is_unboxable_primitive_kind(dst_kind) {
+                        // Primitive destination: unbox from vdynamic
+                        unsafe {
+                            Self::unbox_dynamic_to_kind(
+                                val.as_ptr() as *mut hl::vdynamic, dst_kind,
+                            ).unwrap_or(val)
+                        }
+                    } else {
+                        let src_type_idx = func.regs[src.0 as usize].0;
+                        let src_kind = bytecode.types[src_type_idx].kind;
+
+                        if (src_kind == hl::hl_type_kind_HDYN
+                            || src_kind == hl::hl_type_kind_HNULL)
+                            && !self.fn_dyn_castp.is_null()
+                        {
+                            // HDYN/HNULL → concrete type: use hlp_dyn_castp
+                            let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                            let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                            type FnCastp = unsafe extern "C" fn(
+                                *mut c_void, *mut c_void, *mut c_void,
+                            ) -> *mut c_void;
+                            let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                            let mut data = val.as_ptr() as *mut c_void;
+                            let result_ptr = unsafe {
+                                castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
+                            };
+                            if result_ptr.is_null() {
+                                NanBoxedValue::null()
+                            } else {
+                                NanBoxedValue::from_ptr(result_ptr as usize)
+                            }
+                        } else {
+                            // HOBJ→HOBJ and other pointer casts: just copy
+                            val
+                        }
                     }
                 } else {
                     val

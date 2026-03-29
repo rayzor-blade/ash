@@ -24,6 +24,7 @@ pub mod random;
 pub mod regexp;
 pub mod strings;
 pub mod sys;
+pub mod thread;
 pub mod types;
 #[macro_use]
 pub mod debugger;

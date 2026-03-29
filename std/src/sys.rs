@@ -37,6 +37,7 @@ pub extern "C" fn hlp_sys_is64() -> bool {
     }
 }
 
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
@@ -150,4 +151,113 @@ pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
     } else {
         false
     }
+}
+
+// ============================================================================
+// Additional sys functions needed by Heaps.io / real-world programs
+// ============================================================================
+
+/// Returns the path to the current .hl bytecode file (UTF-16).
+#[no_mangle]
+pub extern "C" fn hlp_sys_hl_file() -> *const u16 {
+    if let Ok(guard) = RELOAD_STATE.lock() {
+        if let Some(state) = guard.as_ref() {
+            let s = state.bytecode_path.to_string_lossy();
+            let mut utf16: Vec<u16> = s.encode_utf16().collect();
+            utf16.push(0);
+            let ptr = utf16.as_ptr();
+            std::mem::forget(utf16);
+            return ptr;
+        }
+    }
+    // Return empty string if no path registered
+    static EMPTY: [u16; 1] = [0];
+    EMPTY.as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn hlp_sys_time() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
+#[no_mangle]
+pub extern "C" fn hlp_sys_cpu_time() -> f64 {
+    hlp_sys_time() // Simplified: use wall time
+}
+
+#[no_mangle]
+pub extern "C" fn hlp_sys_get_env(_name: *const vbyte) -> *const vbyte {
+    std::ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_string(_v: *mut c_void) -> *const vbyte {
+    std::ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_set_flags(_v: i32) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *const vbyte {
+    // Return the path unchanged (simplified: no canonical resolution)
+    path
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_exists(path: *const vbyte) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let p = path as *const u16;
+    let mut len = 0;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+    std::path::Path::new(&s).exists()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_is_dir(path: *const vbyte) -> bool {
+    if path.is_null() {
+        return false;
+    }
+    let p = path as *const u16;
+    let mut len = 0;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, len));
+    std::path::Path::new(&s).is_dir()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_file_open(name: *const vbyte, mode: *const vbyte) -> *mut c_void {
+    std::ptr::null_mut() // Stub
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_file_close(_f: *mut c_void) {}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_file_contents(
+    _name: *const vbyte,
+    _len: *mut i32,
+) -> *const vbyte {
+    std::ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
+    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
 }

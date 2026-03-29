@@ -74,7 +74,11 @@ fn run() -> Result<()> {
     init_std_library()?;
 
     let bytecode = BytecodeDecoder::decode(&hl_path)?;
-    let native_resolver = NativeFunctionResolver::new();
+    let mut native_resolver = NativeFunctionResolver::new();
+
+    // Discover and load external HDLL libraries from the .hl file's directory
+    let search_dir = hl_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
 
     match cli.mode {
         Mode::Interp => {

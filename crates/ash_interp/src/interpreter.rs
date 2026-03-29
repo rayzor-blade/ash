@@ -2767,7 +2767,9 @@ impl HLInterpreter {
                             obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
                         )
                     };
-                    if std::env::var("ASH_DBG_FIELD").is_ok() {
+                    if std::env::var("ASH_DBG_FIELD").is_ok()
+                        || (val.is_ptr() && !val.is_null() && val.as_ptr() > 0 && val.as_ptr() < 0x1000)
+                    {
                         eprintln!(
                             "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
                             func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
@@ -3474,6 +3476,14 @@ impl HLInterpreter {
                 } else {
                     // varray: t@0, at@8, size@16, data@24
                     let arr_ptr = arr_val.as_ptr() as *const u8;
+                    if (arr_ptr as usize) < 0x1000
+                        || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
+                    {
+                        return Err(anyhow!(
+                            "GetArray: invalid array pointer {:p} in {} at pc={} (arr=r{} val={:?})",
+                            arr_ptr, func.name(), frame.pc, array.0, arr_val
+                        ));
+                    }
                     unsafe {
                         let size = *(arr_ptr.add(16) as *const i32);
                         if idx >= size.max(0) as usize {
@@ -5544,7 +5554,6 @@ impl HLInterpreter {
             return NanBoxedValue::null();
         }
 
-        // Get the type pointer for runtime object lookup.
         // For HOBJ, prefer the object's own header type (supports polymorphism).
         // For HSTRUCT, use the register's declared type (structs have no header).
         let type_ptr = if obj_kind != hl_type_kind_HSTRUCT {

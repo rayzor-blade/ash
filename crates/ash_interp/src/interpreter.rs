@@ -2068,6 +2068,8 @@ impl HLInterpreter {
                         let is_nat = self.findex_to_native.contains_key(&findex);
                         let depth = self.stack.len();
                         eprintln!("[trace] call findex={} bc={} nat={} args={} depth={}", findex, is_bc, is_nat, args.len(), depth);
+                        use std::io::Write;
+                        std::io::stderr().flush().ok();
                     }
                     match self.call_function(bytecode, native_resolver, findex, &args) {
                         Ok(ret) => {
@@ -3731,7 +3733,15 @@ impl HLInterpreter {
                 let src_kind = bytecode.types[func.regs[src.0 as usize].0].kind;
                 if !base.is_null() && !base.is_void() && idx >= 0 {
                     let addr = (base.as_ptr() as *mut u8).wrapping_add(idx as usize);
-                    Self::write_value_to_ptr(addr, src_val, src_kind);
+                    // Crash guard: check if address is accessible
+                    if (addr as usize) < 0x1000 {
+                        eprintln!(
+                            "[CRASH GUARD] SetMem bad addr={:p} base={:?} idx={} in {} pc={}",
+                            addr, base, idx, func.name(), 0
+                        );
+                    } else {
+                        Self::write_value_to_ptr(addr, src_val, src_kind);
+                    }
                 }
             }
 

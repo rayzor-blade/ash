@@ -135,12 +135,12 @@ impl ImmixAllocator {
         }
 
         let result = unsafe {
-            NonNull::new_unchecked(
-                self.heap
-                    .memory
-                    .as_mut_ptr()
-                    .add(self.heap.allocation_point),
-            )
+            let ptr = self.heap.memory.as_mut_ptr().add(self.heap.allocation_point);
+            // Zero the allocation — HashLink semantics require zeroed memory.
+            // Reused GC blocks contain stale data that would be misinterpreted
+            // as valid pointers by the conservative scanner and HDLL code.
+            std::ptr::write_bytes(ptr, 0, aligned_size);
+            NonNull::new_unchecked(ptr)
         };
 
         // Record allocation size in line table for GC multi-line marking
@@ -197,7 +197,9 @@ impl ImmixAllocator {
                     self.heap.alloc_sizes[start_line + j] = 0;
                 }
                 return Some(unsafe {
-                    NonNull::new_unchecked(self.heap.memory.as_mut_ptr().add(start_addr))
+                    let ptr = self.heap.memory.as_mut_ptr().add(start_addr);
+                    std::ptr::write_bytes(ptr, 0, blocks_needed * BLOCK_SIZE);
+                    NonNull::new_unchecked(ptr)
                 });
             }
         }

@@ -1491,8 +1491,11 @@ impl HLInterpreter {
                                 *(field_addr as *mut usize) = type_ptr as usize;
                             }
                         }
-                        _ => {
-                            // field_value is an index into ints table for HI32/HBOOL
+                        hl::hl_type_kind_HI32
+                        | hl::hl_type_kind_HBOOL
+                        | hl::hl_type_kind_HUI8
+                        | hl::hl_type_kind_HUI16 => {
+                            // field_value is an index into ints table
                             let int_val = bytecode
                                 .ints
                                 .get(field_value as usize)
@@ -1500,6 +1503,57 @@ impl HLInterpreter {
                                 .unwrap_or(field_value);
                             unsafe {
                                 *(field_addr as *mut i32) = int_val;
+                            }
+                        }
+                        hl::hl_type_kind_HI64 => {
+                            let int_val = bytecode
+                                .ints
+                                .get(field_value as usize)
+                                .copied()
+                                .unwrap_or(field_value);
+                            unsafe {
+                                *(field_addr as *mut i64) = int_val as i64;
+                            }
+                        }
+                        hl::hl_type_kind_HF64 => {
+                            let float_val = bytecode
+                                .floats
+                                .get(field_value as usize)
+                                .copied()
+                                .unwrap_or(0.0);
+                            unsafe {
+                                *(field_addr as *mut f64) = float_val;
+                            }
+                        }
+                        hl::hl_type_kind_HF32 => {
+                            let float_val = bytecode
+                                .floats
+                                .get(field_value as usize)
+                                .copied()
+                                .unwrap_or(0.0);
+                            unsafe {
+                                *(field_addr as *mut f32) = float_val as f32;
+                            }
+                        }
+                        _ => {
+                            // All other types are pointer-like (HARRAY, HDYN, HENUM, etc.)
+                            // field_value=0 means null; otherwise it's a global index.
+                            if field_value == 0 {
+                                unsafe {
+                                    *(field_addr as *mut usize) = 0;
+                                }
+                            } else {
+                                let ref_global = field_value as usize;
+                                if ref_global < self.globals.len() {
+                                    let ref_val = self.globals[ref_global];
+                                    unsafe {
+                                        *(field_addr as *mut usize) = if ref_val.is_null() {
+                                            0
+                                        } else {
+                                            ref_val.as_ptr()
+                                        };
+                                    }
+                                }
                             }
                         }
                     }
@@ -5709,13 +5763,17 @@ impl HLInterpreter {
             HF64 => *(addr as *mut f64) = val.as_f64(),
             HBOOL => *(addr as *mut u8) = val.as_bool() as u8,
             _ => {
-                // Pointer types
-                let ptr = if val.is_null() || val.is_void() {
-                    0usize
+                // Pointer types — but the NanBoxed value might actually
+                // be a primitive (e.g., HDYN register holding an I32).
+                if val.is_null() || val.is_void() {
+                    *(addr as *mut usize) = 0;
+                } else if val.is_i32() {
+                    *(addr as *mut i32) = val.as_i32();
+                } else if val.is_f64() {
+                    *(addr as *mut f64) = val.as_f64();
                 } else {
-                    val.as_ptr()
-                };
-                *(addr as *mut usize) = ptr;
+                    *(addr as *mut usize) = val.as_ptr();
+                }
             }
         }
     }

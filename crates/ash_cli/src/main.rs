@@ -125,9 +125,10 @@ fn run() -> Result<()> {
         if bytecode.globals.len() > 58 {
             eprintln!("  global[58] type_idx={}", bytecode.globals[58].0);
         }
-        // Find Fun_5483
+        // Find Fun_5483 and Fun_2360
         for f in &bytecode.functions {
-            if f.name() == "Fun_5483" || f.findex == 5483 {
+            if f.name() == "Fun_5483" || f.findex == 5483
+                || f.name() == "Fun_2360" || f.findex == 2360 {
                 eprintln!("  Fun_5483: findex={} type_idx={} nregs={}", f.findex, f.type_.0, f.regs.len());
                 for (ri, reg) in f.regs.iter().enumerate().take(16) {
                     eprintln!("    r{}: type_idx={} kind={}", ri, reg.0, bytecode.types[reg.0].kind);

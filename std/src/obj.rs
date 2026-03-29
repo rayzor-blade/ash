@@ -2541,6 +2541,26 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
 }
 
 #[no_mangle]
+/// Flush a type's cached vtable/proto so it gets re-populated from `functions_ptrs`
+/// on the next method dispatch. Used during hot-reload after function pointers are updated.
+pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
+    if ot.is_null() {
+        return;
+    }
+    // Reset the cached method dispatch table.
+    // On next CallMethod, hlp_get_obj_proto / hlp_get_obj_rt will re-read
+    // from functions_ptrs and rebuild the proto array.
+    (*ot).vobj_proto = ptr::null_mut();
+    let kind = (*ot).kind;
+    if kind == hl_type_kind_HOBJ || kind == hl_type_kind_HSTRUCT {
+        let obj = (*ot).__bindgen_anon_1.obj;
+        if !obj.is_null() && !(*obj).rt.is_null() {
+            // Clear the runtime binding's cached method pointers
+            (*(*obj).rt).methods = ptr::null_mut();
+        }
+    }
+}
+
 pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_context) {
     unsafe {
         let virt = (*vt).__bindgen_anon_1.virt.as_mut().unwrap();

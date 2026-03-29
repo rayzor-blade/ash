@@ -1251,6 +1251,17 @@ pub struct DecodedBytecode {
     pub entrypoint: u32,
 }
 
+impl DecodedBytecode {
+    /// Compute a hash for every bytecode function, keyed by findex.
+    /// Used for hot-reload diffing: functions with identical hashes are unchanged.
+    pub fn compute_function_hashes(&self) -> std::collections::HashMap<usize, u32> {
+        self.functions
+            .iter()
+            .map(|f| (f.findex as usize, f.compute_hash()))
+            .collect()
+    }
+}
+
 pub fn str_to_uchar_ptr(s: &str) -> Vec<u16> {
     // Convert the &str to a UTF-16 vector
     s.encode_utf16().collect()

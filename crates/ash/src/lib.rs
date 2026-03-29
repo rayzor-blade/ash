@@ -17,6 +17,7 @@ pub mod jit;
 pub mod module;
 pub mod native_lib;
 pub mod opcodes;
+pub mod reload;
 pub mod types;
 pub mod values;
 

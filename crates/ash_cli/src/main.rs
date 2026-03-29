@@ -113,7 +113,7 @@ fn run() -> Result<()> {
             bytecode.types.len(), bytecode.globals.len(),
             bytecode.functions.len(), bytecode.natives.len());
         for (i, t) in bytecode.types.iter().enumerate() {
-            if i < 50 || i == 39 {
+            if i < 50 || i == 39 || i == 203 {
                 let name = t.obj.as_ref().map(|o| o.name.as_str()).unwrap_or("");
                 let super_idx = t.obj.as_ref().and_then(|o| o.super_.as_ref()).map(|s| s.0);
                 let field_names: Vec<_> = t.obj.as_ref().map(|o| o.fields.iter().map(|f| format!("{}(k={})", f.name, bytecode.types[f.type_.0].kind)).collect()).unwrap_or_default();

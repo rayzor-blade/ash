@@ -3477,7 +3477,12 @@ impl HLInterpreter {
                     if (arr_ptr as usize) < 0x1000
                         || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
                     {
-                        // Treat invalid array pointers as empty arrays (return null/default)
+                        static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        let c = BAD_ARR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if c == 0 || c == 100 || c == 10000 {
+                            eprintln!("[WARN] GetArray invalid ptr={:#x} count={} in {} pc={}",
+                                arr_ptr as usize, c + 1, func.name(), frame.pc);
+                        }
                         frame.registers.set(dst.0, NanBoxedValue::null());
                         self.stack.last_mut().unwrap().pc += 1;
                         return Ok(StepResult::Continue);

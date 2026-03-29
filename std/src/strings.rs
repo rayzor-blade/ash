@@ -265,7 +265,7 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
-    let out = crate::bytes::hlp_alloc_bytes(len + 1) as *mut uchar;
+    let out = crate::bytes::hlp_alloc_bytes((len + 1) * 2) as *mut uchar;
 
     if out.is_null() {
         return ptr::null_mut();
@@ -291,7 +291,8 @@ pub unsafe extern "C" fn hlp_ucs2_upper(str: *const vbyte, pos: i32, len: i32) -
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ucs2_lower(str: *const vbyte, pos: i32, len: i32) -> *mut vbyte {
     let cstr = str.offset(pos as isize) as *const uchar;
-    let out = crate::bytes::hlp_alloc_bytes(len + 1) as *mut uchar;
+    // len is in u16 characters; allocate (len+1) * sizeof(u16) bytes
+    let out = crate::bytes::hlp_alloc_bytes((len + 1) * 2) as *mut uchar;
 
     if out.is_null() {
         return ptr::null_mut();
@@ -462,6 +463,7 @@ pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) -> *const vbyte {
+    // removed debug counter
     if d.is_null() {
         *len = 4;
         return str_to_uchar_ptr("null") as *mut vbyte;
@@ -472,14 +474,14 @@ pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) 
         return str_to_uchar_ptr("null") as *mut vbyte;
     }
     let kind = (*t).kind;
-    match kind {
-        hl_type_kind_HI32 => return hlp_itos((*d).v.i, len),
-        hl_type_kind_HF64 => return hlp_ftos((*d).v.d, len),
+    let result = match kind {
+        hl_type_kind_HI32 => hlp_itos((*d).v.i, len),
+        hl_type_kind_HF64 => hlp_ftos((*d).v.d, len),
         _ => {
             let b = hlp_alloc_buffer();
             hlp_buffer_val(b, d);
-            let result = hlp_buffer_content(b, len) as *mut vbyte;
-            return result;
+            hlp_buffer_content(b, len) as *mut vbyte
         }
-    }
+    };
+    result
 }

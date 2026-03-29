@@ -5018,13 +5018,50 @@ impl HLInterpreter {
             return Ok(self.wrap_native_result(raw?, ret_kind));
         }
 
-        // Type-aware argument extraction
+        // Type-aware argument extraction.
+        // For HNULL parameters: if the value is a primitive (I32/F64/Bool),
+        // box it into a vdynamic via hlp_make_dyn so the native gets a pointer.
         let extract_arg = |idx: usize| -> i64 {
             let kind = if idx < arg_kinds.len() {
                 arg_kinds[idx]
             } else {
                 0 // HVOID fallback
             };
+
+            // HNULL(T) parameters expect a vdynamic* pointer, not raw values
+            if kind == hl::hl_type_kind_HNULL && !self.fn_make_dyn.is_null() {
+                let val = args[idx];
+                if val.is_null() || val.is_void() {
+                    return 0; // null pointer
+                }
+                if val.is_i32() || val.is_f64() || val.is_bool()
+                    || (val.is_ptr() && val.as_ptr() < 0x10000)
+                {
+                    // Box the primitive into a vdynamic
+                    // Determine the inner type from the type signature
+                    let inner_type_idx = if idx < type_fun.args.len() {
+                        let arg_type = &bytecode.types[type_fun.args[idx].0];
+                        arg_type.tparam.as_ref().map(|t| t.0).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let inner_c_type = self.c_type_factory.get(inner_type_idx) as *mut c_void;
+                    let mut data: i64 = if val.is_i32() {
+                        val.as_i32() as i64
+                    } else if val.is_f64() {
+                        val.as_f64().to_bits() as i64
+                    } else {
+                        val.as_bool() as i64
+                    };
+                    let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                        unsafe { std::mem::transmute(self.fn_make_dyn) };
+                    let boxed = unsafe {
+                        make_dyn(&mut data as *mut i64 as *mut c_void, inner_c_type)
+                    };
+                    return boxed as i64;
+                }
+            }
+
             self.value_to_i64(args[idx], kind)
         };
 

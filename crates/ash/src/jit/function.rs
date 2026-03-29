@@ -259,6 +259,25 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
+            // When hot-reload is enabled, rewrite direct calls to bytecode functions
+            // into IndirectCall opcodes that dispatch through functions_ptrs[findex].
+            // This runs BEFORE the optimizer so IndirectCall flows through SSA/copy prop.
+            if self.hot_reload {
+                let native_set: std::collections::HashSet<usize> = self
+                    .findexes
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if matches!(v, FuncPtr::Native(_)) {
+                            Some(*k)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let rewrite = air::passes::IndirectCallRewritePass::new(native_set);
+                rewrite.run(&mut f.ops);
+            }
+
             // Run AIR optimization passes on bytecode before LLVM emission.
             // Skip optimization for functions containing Trap opcodes — exception
             // control flow (longjmp) creates implicit CFG edges that the AIR
@@ -422,8 +441,26 @@ impl<'ctx> JITModule<'ctx> {
 
         match fun_ptr {
             FuncPtr::Fun(f) => {
-                // Run AIR optimization passes (skip for Trap-containing functions)
                 let mut f = f.clone();
+
+                // Indirect call rewrite for hot-reload
+                if self.hot_reload {
+                    let native_set: std::collections::HashSet<usize> = self
+                        .findexes
+                        .iter()
+                        .filter_map(|(k, v)| {
+                            if matches!(v, FuncPtr::Native(_)) {
+                                Some(*k)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    let rewrite = air::passes::IndirectCallRewritePass::new(native_set);
+                    rewrite.run(&mut f.ops);
+                }
+
+                // Run AIR optimization passes (skip for Trap-containing functions)
                 let has_trap = f
                     .ops
                     .iter()

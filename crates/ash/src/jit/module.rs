@@ -88,6 +88,9 @@ pub struct JITModule<'ctx> {
     /// Function pointer table indexed by findex, used by hl_module_context.
     pub(crate) functions_ptrs: Vec<*mut c_void>,
     pub(crate) shared_runtime: Option<SharedRuntimeHandles>,
+    /// When true, the IndirectCallRewritePass converts direct calls to bytecode
+    /// functions into indirect dispatch through functions_ptrs, enabling hot-reload.
+    pub(crate) hot_reload: bool,
 }
 
 impl<'ctx> JITModule<'ctx> {
@@ -130,6 +133,7 @@ impl<'ctx> JITModule<'ctx> {
             hl_type_struct_type: None,
             functions_ptrs: Vec::new(),
             shared_runtime: None,
+            hot_reload: false,
         };
 
         module.string_globals = module
@@ -244,6 +248,10 @@ impl<'ctx> JITModule<'ctx> {
             .expect("Failed to initialize constants");
 
         module
+    }
+
+    pub fn set_hot_reload(&mut self, enabled: bool) {
+        self.hot_reload = enabled;
     }
 
     pub fn new_with_shared_runtime(

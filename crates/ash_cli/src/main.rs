@@ -35,6 +35,10 @@ struct Cli {
     /// Suppress non-program output (useful for parity testing)
     #[arg(long, default_value_t = false)]
     quiet: bool,
+
+    /// Enable hot-reload support (converts direct calls to indirect dispatch)
+    #[arg(long, default_value_t = false)]
+    hot_reload: bool,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -89,6 +93,7 @@ fn run() -> Result<()> {
                 min_ops_for_promotion: cli.jit_min_ops,
                 log_promotions: cli.jit_log,
                 strict_mode: true,
+                hot_reload: cli.hot_reload,
             };
             interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
             let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;

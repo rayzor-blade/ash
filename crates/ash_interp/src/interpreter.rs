@@ -137,6 +137,7 @@ pub struct TieredConfig {
     pub min_ops_for_promotion: usize,
     pub log_promotions: bool,
     pub strict_mode: bool,
+    pub hot_reload: bool,
 }
 
 impl Default for TieredConfig {
@@ -149,6 +150,7 @@ impl Default for TieredConfig {
             min_ops_for_promotion: 0,
             log_promotions: false,
             strict_mode: true,
+            hot_reload: false,
         }
     }
 }
@@ -449,6 +451,7 @@ impl HLInterpreter {
         self.jit_threshold = config.jit_threshold;
 
         let log_promotions = config.log_promotions;
+        let hot_reload = config.hot_reload;
         let hl_path = hl_path.to_path_buf();
         let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
         let shared = SharedRuntimeHandles {
@@ -469,11 +472,13 @@ impl HLInterpreter {
                         let init_result =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 let context = Box::leak(Box::new(Context::create()));
-                                JITModule::new_with_shared_runtime(
+                                let mut m = JITModule::new_with_shared_runtime(
                                     context,
                                     &hl_path,
                                     shared.clone(),
-                                )
+                                );
+                                m.set_hot_reload(hot_reload);
+                                m
                             }));
                         match init_result {
                             Ok(m) => {

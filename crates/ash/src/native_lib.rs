@@ -77,6 +77,23 @@ impl NativeLibraryManager {
     }
 
     fn load_library(&mut self, name: &str, path: &Path) -> Result<()> {
+        // Load HDLLs with RTLD_GLOBAL so they can see ash_std's hl_ symbols.
+        // On macOS, also use flat namespace to override libhl.dylib bindings.
+        #[cfg(unix)]
+        let library = {
+            use std::ffi::CString;
+            let path_cstr = CString::new(path.to_str().unwrap_or(""))
+                .map_err(|e| anyhow!("Invalid path: {}", e))?;
+            let handle = unsafe {
+                libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
+            };
+            if handle.is_null() {
+                let err = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) };
+                return Err(anyhow!("Failed to load {}: {:?}", name, err));
+            }
+            unsafe { Library::from(libloading::os::unix::Library::from_raw(handle)) }
+        };
+        #[cfg(not(unix))]
         let library = unsafe { Library::new(path) }?;
         self.libraries.insert(Str::from(name), library);
         Ok(())

@@ -8,8 +8,46 @@
 use std::ffi::c_void;
 use std::ptr;
 
+// ============================================================================
+// Global type singletons (hlt_*)
+//
+// HashLink HDLLs reference these as global variables, not functions.
+// Each is a static hl_type with the correct kind field set.
+// ============================================================================
+
+// Wrapper to make hl_type Sync for static globals
+#[repr(transparent)]
+struct SyncHlType(hl_type);
+unsafe impl Sync for SyncHlType {}
+
+macro_rules! hlt_global {
+    ($name:ident, $kind:expr) => {
+        #[no_mangle]
+        pub static $name: SyncHlType = SyncHlType(hl_type {
+            kind: $kind,
+            __bindgen_anon_1: hl_type__bindgen_ty_1 {
+                obj: std::ptr::null_mut(),
+            },
+            vobj_proto: std::ptr::null_mut(),
+            mark_bits: std::ptr::null_mut(),
+        });
+    };
+}
+
+hlt_global!(hlt_void, 0);      // HVOID
+hlt_global!(hlt_i32, 3);      // HI32
+hlt_global!(hlt_i64, 4);      // HI64
+hlt_global!(hlt_f32, 5);      // HF32
+hlt_global!(hlt_f64, 6);      // HF64
+hlt_global!(hlt_bool, 7);     // HBOOL
+hlt_global!(hlt_bytes, 8);    // HBYTES
+hlt_global!(hlt_dyn, 9);      // HDYN
+hlt_global!(hlt_array, 12);   // HARRAY
+hlt_global!(hlt_dynobj, 16);  // HDYNOBJ
+hlt_global!(hlt_abstract, 17); // HABSTRACT
+
 use crate::gc::{ImmixAllocator, GC};
-use crate::hl::{self, hl_buffer, hl_type, varray, vbyte, vdynamic};
+use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vbyte, vdynamic};
 use crate::strings;
 
 // ============================================================================
@@ -245,6 +283,35 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_blocking(_enter: bool) {
-    // No-op: threading model doesn't need blocking markers yet
+pub unsafe extern "C" fn hl_blocking(_enter: bool) {}
+
+// ============================================================================
+// UTF-16 string utilities (exported by libhl.dylib)
+// ============================================================================
+
+// ustrdup is in ucs2.rs
+
+#[no_mangle]
+pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
+    if s.is_null() { return 0; }
+    let mut len = 0;
+    while *s.add(len) != 0 { len += 1; }
+    len
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn uprintf(_fmt: *const u16, ...) {
+    // Stub: UTF-16 printf
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn usprintf(_out: *mut u16, _size: i32, _fmt: *const u16, ...) -> i32 {
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn uvszprintf(
+    _out: *mut u16, _size: i32, _fmt: *const u16, _args: *mut c_void,
+) -> i32 {
+    0
 }

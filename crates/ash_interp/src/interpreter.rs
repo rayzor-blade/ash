@@ -605,6 +605,38 @@ impl HLInterpreter {
         (&marker as *const u8) as usize
     }
 
+    /// Get the base (highest address) of the current thread's stack.
+    /// Used for GC conservative scanning — scans from stack base down to current SP.
+    fn thread_stack_base() -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            unsafe {
+                let thread = libc::pthread_self();
+                let addr = libc::pthread_get_stackaddr_np(thread) as usize;
+                if addr != 0 {
+                    return addr;
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+                if libc::pthread_attr_init(&mut attr) == 0 {
+                    let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+                    let mut stack_size: libc::size_t = 0;
+                    if libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0 {
+                        libc::pthread_attr_destroy(&mut attr);
+                        return stack_addr as usize + stack_size;
+                    }
+                    libc::pthread_attr_destroy(&mut attr);
+                }
+            }
+        }
+        // Fallback: use a high local address
+        Self::current_stack_addr() + 8 * 1024 * 1024 // assume 8MB stack
+    }
+
     fn ensure_gc_runtime_initialized(&mut self) {
         if self.gc_runtime_initialized {
             return;
@@ -622,7 +654,11 @@ impl HLInterpreter {
         let set_stack_top: FnSetStackTop = unsafe { std::mem::transmute(self.fn_gc_set_stack_top) };
         unsafe {
             set_globals(globals_ptr as *const *mut c_void, globals_len);
-            set_stack_top(Self::current_stack_addr());
+            // Set stack top to the thread's stack base (highest address),
+            // not the current frame. On ARM/x86 stacks grow downward,
+            // so the GC scans from stack_top down to current SP.
+            let stack_top = Self::thread_stack_base();
+            set_stack_top(stack_top);
         }
         self.gc_runtime_initialized = true;
     }
@@ -2027,6 +2063,12 @@ impl HLInterpreter {
                     return Ok(value);
                 }
                 StepResult::Call { findex, args, dst } => {
+                    if std::env::var("ASH_TRACE_NATIVE").is_ok() {
+                        let is_bc = self.findex_to_func.contains_key(&findex);
+                        let is_nat = self.findex_to_native.contains_key(&findex);
+                        let depth = self.stack.len();
+                        eprintln!("[trace] call findex={} bc={} nat={} args={} depth={}", findex, is_bc, is_nat, args.len(), depth);
+                    }
                     match self.call_function(bytecode, native_resolver, findex, &args) {
                         Ok(ret) => {
                             let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
@@ -4548,6 +4590,12 @@ impl HLInterpreter {
     ) -> Result<NanBoxedValue> {
         let native = &bytecode.natives[native_idx];
         let func_name = format!("hlp_{}", native.name);
+
+        // Trace every native call when ASH_TRACE_NATIVE is set
+        if std::env::var("ASH_TRACE_NATIVE").is_ok() {
+            eprintln!("[trace] native {} lib={} args={}", func_name, native.lib, args.len());
+        }
+
         let debug_native = std::env::var("ASH_DBG_NATIVE").is_ok();
         if debug_native
             && (native.name.contains("compare")

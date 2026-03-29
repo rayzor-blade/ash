@@ -5583,6 +5583,16 @@ impl HLInterpreter {
 
         let offset = *(*rt).fields_indexes.add(field_idx);
         let field_addr = obj_ptr.add(offset as usize);
+
+        if std::env::var("ASH_DBG_FIELD").is_ok() {
+            let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields } else { 0 };
+            eprintln!(
+                "  [read_obj_field] field_idx={} rt.nfields={} parent_nf={} offset={} addr={:p} type_ptr={:p} raw8={:#x}",
+                field_idx, (*rt).nfields, parent_nf, offset, field_addr, type_ptr,
+                *(field_addr as *const u64)
+            );
+        }
+
         Self::read_value_at(field_addr, dst_kind)
     }
 

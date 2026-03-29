@@ -2767,9 +2767,7 @@ impl HLInterpreter {
                             obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
                         )
                     };
-                    if std::env::var("ASH_DBG_FIELD").is_ok()
-                        || (val.is_ptr() && !val.is_null() && val.as_ptr() > 0 && val.as_ptr() < 0x1000)
-                    {
+                    if std::env::var("ASH_DBG_FIELD").is_ok() {
                         eprintln!(
                             "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
                             func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
@@ -3479,10 +3477,10 @@ impl HLInterpreter {
                     if (arr_ptr as usize) < 0x1000
                         || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
                     {
-                        return Err(anyhow!(
-                            "GetArray: invalid array pointer {:p} in {} at pc={} (arr=r{} val={:?})",
-                            arr_ptr, func.name(), frame.pc, array.0, arr_val
-                        ));
+                        // Treat invalid array pointers as empty arrays (return null/default)
+                        frame.registers.set(dst.0, NanBoxedValue::null());
+                        self.stack.last_mut().unwrap().pc += 1;
+                        return Ok(StepResult::Continue);
                     }
                     unsafe {
                         let size = *(arr_ptr.add(16) as *const i32);
@@ -5584,21 +5582,10 @@ impl HLInterpreter {
         let offset = *(*rt).fields_indexes.add(field_idx);
         let field_addr = obj_ptr.add(offset as usize);
 
-        // Use the field's declared type for reading, not the destination register's type.
-        // This prevents reading an i32 field (4 bytes) as a pointer (8 bytes).
-        // obj_t.fields is 0-based within THIS class's own fields (excluding parent).
-        let ot = type_ptr as *const hl_type;
-        let obj_t = (*ot).__bindgen_anon_1.obj;
-        let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields as usize } else { 0 };
-        let local_idx = field_idx.wrapping_sub(parent_nf);
-        let read_kind = if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
-            let ft = (*(*obj_t).fields.add(local_idx)).t;
-            if !ft.is_null() { (*ft).kind } else { dst_kind }
-        } else {
-            dst_kind
-        };
-
-        Self::read_value_at(field_addr, read_kind)
+        // Use dst_kind (register type) for reading — the compiler knows the correct
+        // read width. The field's declared type is only used for WRITING to prevent
+        // 8-byte NanBox spill into adjacent fields.
+        Self::read_value_at(field_addr, dst_kind)
     }
 
     /// Write a value to an object field at the given field index.
@@ -5646,15 +5633,45 @@ impl HLInterpreter {
         // Use the field's declared type for writing, not the source register's type.
         // When src_kind is HDYN but the field is HI32, writing with HDYN would use
         // 8 bytes (pointer-width), spilling NanBox tag bits into the adjacent field.
+        // obj_t.fields is 0-based within THIS class's own fields (excluding parent).
         let ot = type_ptr as *const hl_type;
         let obj_t = (*ot).__bindgen_anon_1.obj;
         let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields as usize } else { 0 };
-        let local_idx = field_idx.wrapping_sub(parent_nf);
-        let write_kind = if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
-            let ft = (*(*obj_t).fields.add(local_idx)).t;
-            if !ft.is_null() { (*ft).kind } else { src_kind }
+        let write_kind = if field_idx >= parent_nf {
+            let local_idx = field_idx - parent_nf;
+            if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
+                let ft = (*(*obj_t).fields.add(local_idx)).t;
+                if !ft.is_null() { (*ft).kind } else { src_kind }
+            } else {
+                src_kind
+            }
         } else {
-            src_kind
+            // Parent field: walk up the type hierarchy to find the declared type
+            let mut rt_cur = rt;
+            let mut remaining = field_idx;
+            let mut found_kind = src_kind;
+            while !(*rt_cur).parent.is_null() {
+                let p = (*rt_cur).parent;
+                let p_nf = (*p).nfields as usize;
+                if remaining < p_nf {
+                    // Field is in this parent — look up its type
+                    let p_type = (*p).t;
+                    if !p_type.is_null() {
+                        let p_obj = (*p_type).__bindgen_anon_1.obj;
+                        let p_parent_nf = if !(*p).parent.is_null() { (*(*p).parent).nfields as usize } else { 0 };
+                        if remaining >= p_parent_nf {
+                            let p_local = remaining - p_parent_nf;
+                            if !p_obj.is_null() && p_local < (*p_obj).nfields as usize {
+                                let ft = (*(*p_obj).fields.add(p_local)).t;
+                                if !ft.is_null() { found_kind = (*ft).kind; }
+                            }
+                        }
+                    }
+                    break;
+                }
+                rt_cur = p;
+            }
+            found_kind
         };
 
         Self::write_value_at(field_addr, write_kind, val);

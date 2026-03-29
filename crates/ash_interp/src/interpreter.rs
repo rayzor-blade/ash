@@ -5584,16 +5584,21 @@ impl HLInterpreter {
         let offset = *(*rt).fields_indexes.add(field_idx);
         let field_addr = obj_ptr.add(offset as usize);
 
-        if std::env::var("ASH_DBG_FIELD").is_ok() {
-            let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields } else { 0 };
-            eprintln!(
-                "  [read_obj_field] field_idx={} rt.nfields={} parent_nf={} offset={} addr={:p} type_ptr={:p} raw8={:#x}",
-                field_idx, (*rt).nfields, parent_nf, offset, field_addr, type_ptr,
-                *(field_addr as *const u64)
-            );
-        }
+        // Use the field's declared type for reading, not the destination register's type.
+        // This prevents reading an i32 field (4 bytes) as a pointer (8 bytes).
+        // obj_t.fields is 0-based within THIS class's own fields (excluding parent).
+        let ot = type_ptr as *const hl_type;
+        let obj_t = (*ot).__bindgen_anon_1.obj;
+        let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields as usize } else { 0 };
+        let local_idx = field_idx.wrapping_sub(parent_nf);
+        let read_kind = if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
+            let ft = (*(*obj_t).fields.add(local_idx)).t;
+            if !ft.is_null() { (*ft).kind } else { dst_kind }
+        } else {
+            dst_kind
+        };
 
-        Self::read_value_at(field_addr, dst_kind)
+        Self::read_value_at(field_addr, read_kind)
     }
 
     /// Write a value to an object field at the given field index.
@@ -5637,7 +5642,22 @@ impl HLInterpreter {
 
         let offset = *(*rt).fields_indexes.add(field_idx);
         let field_addr = obj_ptr.add(offset as usize) as *mut u8;
-        Self::write_value_at(field_addr, src_kind, val);
+
+        // Use the field's declared type for writing, not the source register's type.
+        // When src_kind is HDYN but the field is HI32, writing with HDYN would use
+        // 8 bytes (pointer-width), spilling NanBox tag bits into the adjacent field.
+        let ot = type_ptr as *const hl_type;
+        let obj_t = (*ot).__bindgen_anon_1.obj;
+        let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields as usize } else { 0 };
+        let local_idx = field_idx.wrapping_sub(parent_nf);
+        let write_kind = if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
+            let ft = (*(*obj_t).fields.add(local_idx)).t;
+            if !ft.is_null() { (*ft).kind } else { src_kind }
+        } else {
+            src_kind
+        };
+
+        Self::write_value_at(field_addr, write_kind, val);
     }
 
     /// Read a value from a raw memory address based on the HL type kind.

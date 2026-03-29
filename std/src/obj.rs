@@ -2543,6 +2543,7 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
 #[no_mangle]
 /// Flush a type's cached vtable/proto so it gets re-populated from `functions_ptrs`
 /// on the next method dispatch. Used during hot-reload after function pointers are updated.
+#[no_mangle]
 pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
     if ot.is_null() {
         return;
@@ -2561,6 +2562,7 @@ pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
     }
 }
 
+#[no_mangle]
 pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_context) {
     unsafe {
         let virt = (*vt).__bindgen_anon_1.virt.as_mut().unwrap();

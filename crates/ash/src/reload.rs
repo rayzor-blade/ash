@@ -5,7 +5,10 @@
 
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
+use crate::jit::module::SharedRuntimeHandles;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// Result of diffing two bytecode versions.
 #[derive(Debug)]
@@ -194,14 +197,20 @@ pub fn perform_reload(
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
 fn flush_affected_protos(
     shared: &crate::jit::module::SharedRuntimeHandles,
-    changed_findexes: &[usize],
+    _changed_findexes: &[usize],
 ) {
-    if changed_findexes.is_empty() {
-        return;
-    }
-    let changed_set: HashSet<usize> = changed_findexes.iter().copied().collect();
+    // Resolve hlp_flush_proto dynamically from the std library
+    let flush_fn = crate::native_lib::NativeFunctionResolver::new()
+        .resolve_function("std", "hlp_flush_proto")
+        .ok();
+    let flush_fn = match flush_fn {
+        Some(f) => f,
+        None => return,
+    };
+    type FnFlush = unsafe extern "C" fn(*mut crate::hl::hl_type);
+    let flush: FnFlush = unsafe { std::mem::transmute(flush_fn) };
 
-    // For safety, flush all HOBJ/HSTRUCT types — we don't track which types
+    // Flush all HOBJ/HSTRUCT types — we don't track which types
     // reference which findexes, and the cost is just a lazy re-init on next dispatch.
     for c_type in &shared.c_types {
         if c_type.is_null() {
@@ -210,12 +219,102 @@ fn flush_affected_protos(
         unsafe {
             let kind = (**c_type).kind;
             if kind == hl::hl_type_kind_HOBJ || kind == hl::hl_type_kind_HSTRUCT {
-                // Defined in std/src/obj.rs
-                extern "C" {
-                    fn hlp_flush_proto(ot: *mut crate::hl::hl_type);
-                }
-                hlp_flush_proto(*c_type);
+                flush(*c_type);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Global reload context — bridges the stdlib callback to perform_reload
+// ---------------------------------------------------------------------------
+
+struct ReloadContext {
+    bytecode_path: PathBuf,
+    old_bytecode: DecodedBytecode,
+    functions_ptrs: Vec<*mut std::ffi::c_void>,
+    shared_runtime: SharedRuntimeHandles,
+}
+
+// ReloadContext holds raw pointers from SharedRuntimeHandles.
+unsafe impl Send for ReloadContext {}
+
+static RELOAD_CTX: Mutex<Option<ReloadContext>> = Mutex::new(None);
+
+/// Initialize the global reload context. Called once during runtime startup
+/// when `--hot-reload` is active.
+pub fn init_reload_context(
+    bytecode_path: PathBuf,
+    old_bytecode: DecodedBytecode,
+    functions_ptrs: Vec<*mut std::ffi::c_void>,
+    shared_runtime: SharedRuntimeHandles,
+) {
+    *RELOAD_CTX.lock().unwrap() = Some(ReloadContext {
+        bytecode_path,
+        old_bytecode,
+        functions_ptrs,
+        shared_runtime,
+    });
+}
+
+/// Atomic flag set by the stdlib callback when a file change is detected.
+/// The interpreter polls this after native calls and triggers `do_reload()`.
+static RELOAD_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Callback invoked by the stdlib when a bytecode file change is detected.
+/// Sets the pending flag — actual recompilation is deferred to the interpreter
+/// loop to avoid doing heavy work inside a native call stack.
+pub unsafe extern "C" fn reload_callback(_path_utf16: *const u16) -> bool {
+    RELOAD_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    true
+}
+
+/// Check and clear the pending reload flag. Called by the interpreter after
+/// returning from native calls.
+pub fn take_reload_pending() -> bool {
+    RELOAD_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel)
+}
+
+/// Execute the deferred reload and return the new bytecode (for interpreter update).
+/// Called by the interpreter when `take_reload_pending` returns true.
+/// This runs on the interpreter's thread, outside any native call stack.
+pub fn do_reload() -> Option<DecodedBytecode> {
+    let mut guard = match RELOAD_CTX.lock() {
+        Ok(g) => g,
+        Err(_) => return None,
+    };
+    let ctx = match guard.as_mut() {
+        Some(c) => c,
+        None => return None,
+    };
+
+    match perform_reload(
+        &ctx.bytecode_path,
+        &ctx.old_bytecode,
+        &mut ctx.functions_ptrs,
+        &ctx.shared_runtime,
+    ) {
+        Ok(diff) => {
+            if diff.has_changes() {
+                eprintln!(
+                    "[hot-reload] reloaded {} changed function(s)",
+                    diff.changed.len()
+                );
+                // Re-decode for both the stored state and the caller
+                if let Ok(new_bc) =
+                    crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path)
+                {
+                    let ret = new_bc.clone();
+                    ctx.old_bytecode = new_bc;
+                    return Some(ret);
+                }
+            }
+            None
+        }
+        Err(e) => {
+            eprintln!("[hot-reload] reload failed: {}", e);
+            None
         }
     }
 }

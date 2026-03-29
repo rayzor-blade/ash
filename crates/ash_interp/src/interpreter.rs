@@ -207,6 +207,9 @@ pub struct HLInterpreter {
     pub jit_candidates: Vec<usize>,
     /// Map from findex → function array index (for bytecode functions)
     findex_to_func: HashMap<usize, usize>,
+    /// Hot-reloaded bytecode (replaces the original for function lookup).
+    /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
+    reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
     /// Map from findex → native array index
     findex_to_native: HashMap<usize, usize>,
     /// C-level type structures for native function interop
@@ -400,6 +403,7 @@ impl HLInterpreter {
             jit_threshold: 100,
             jit_candidates: Vec::new(),
             findex_to_func,
+            reloaded_bytecode: None,
             findex_to_native,
             c_type_factory,
             fn_alloc_obj,
@@ -470,18 +474,6 @@ impl HLInterpreter {
                     eprintln!("[hot-reload] warning: could not register reload check: {}", e);
                 }
             }
-            // Register reload callback (hlp_set_reload_callback)
-            // For now, the callback just logs — actual perform_reload integration
-            // requires the callback to have access to JIT module state, which is
-            // done in a future phase when the runtime loop is refactored.
-            if let Ok(set_cb_fn) =
-                _native_resolver.resolve_function("std", "hlp_set_reload_callback")
-            {
-                // The callback is a no-op for now — the mtime detection + return true
-                // is sufficient for the e2e test to verify the plumbing works.
-                // Full recompilation will be wired when perform_reload is integrated.
-                let _ = set_cb_fn; // callback registration deferred to full integration
-            }
         }
         let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
         let shared = SharedRuntimeHandles {
@@ -490,6 +482,48 @@ impl HLInterpreter {
             c_types: self.c_type_factory.as_slice().to_vec(),
             module_ctx: self.c_type_factory.module_ctx(),
         };
+
+        // Initialize the global reload context and register the callback
+        if hot_reload {
+            // Build the functions_ptrs snapshot from the module context.
+            // Use bytecode function/native count to size the table.
+            let old_bc = ash::bytecode::BytecodeDecoder::decode(&hl_path);
+            let max_findex = old_bc.as_ref().map_or(0, |bc| {
+                let max_fn = bc.functions.iter().map(|f| f.findex as usize).max().unwrap_or(0);
+                let max_nat = bc.natives.iter().map(|n| n.findex as usize).max().unwrap_or(0);
+                max_fn.max(max_nat) + 1
+            });
+            let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
+                .map(|i| unsafe {
+                    if !shared.module_ctx.is_null()
+                        && !(*shared.module_ctx).functions_ptrs.is_null()
+                    {
+                        *(*shared.module_ctx).functions_ptrs.add(i)
+                    } else {
+                        std::ptr::null_mut()
+                    }
+                })
+                .collect();
+
+            if let Ok(old_bc) = old_bc {
+                ash::reload::init_reload_context(
+                    hl_path.to_path_buf(),
+                    old_bc,
+                    fptrs,
+                    shared.clone(),
+                );
+
+                // Register the actual reload callback
+                if let Ok(set_cb_fn) =
+                    _native_resolver.resolve_function("std", "hlp_set_reload_callback")
+                {
+                    type FnSetCb = unsafe extern "C" fn(unsafe extern "C" fn(*const u16) -> bool);
+                    let set_cb: FnSetCb = unsafe { std::mem::transmute(set_cb_fn) };
+                    unsafe { set_cb(ash::reload::reload_callback) };
+                    eprintln!("[hot-reload] reload callback registered");
+                }
+            }
+        }
         let (worker_tx, worker_req_rx) = mpsc::channel::<usize>();
         let (worker_res_tx, worker_rx) = mpsc::channel::<PromotionResult>();
 
@@ -1889,7 +1923,9 @@ impl HLInterpreter {
         func_idx: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
-        let func = &bytecode.functions[func_idx];
+        // Use reloaded bytecode if available (hot-reload swapped function bodies)
+        let bc: &DecodedBytecode = self.reloaded_bytecode.unwrap_or(bytecode);
+        let func = &bc.functions[func_idx];
 
         if self.stack.len() >= self.max_stack_depth {
             return Err(anyhow!("Stack overflow (depth {})", self.stack.len()));
@@ -1900,7 +1936,7 @@ impl HLInterpreter {
         let mut frame = InterpreterFrame::new(func_idx, reg_count);
 
         // Bind arguments to first N registers
-        let type_fun = bytecode.types[func.type_.0]
+        let type_fun = bc.types[func.type_.0]
             .fun
             .as_ref()
             .expect("function should have fun type");
@@ -1914,7 +1950,7 @@ impl HLInterpreter {
         self.sync_gc_scan_roots();
 
         // Main interpretation loop — always pop the frame even on error
-        let result = self.interpret_loop(bytecode, native_resolver, func_idx);
+        let result = self.interpret_loop(bc, native_resolver, func_idx);
         self.stack.pop();
         self.sync_gc_scan_roots();
         result
@@ -1971,6 +2007,18 @@ impl HLInterpreter {
                             let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
                             self.stack.last_mut().unwrap().registers.set(dst, coerced);
                             self.stack.last_mut().unwrap().pc += 1;
+
+                            // Check deferred hot-reload flag after native calls
+                            if ash::reload::take_reload_pending() {
+                                if let Some(new_bc) = ash::reload::do_reload() {
+                                    // Clear caches that reference old bytecode data
+                                    self.utf16_strings.clear();
+                                    self.field_hash_cache.clear();
+                                    // Leak the bytecode so it lives as long as the process
+                                    let leaked: &'static _ = Box::leak(Box::new(new_bc));
+                                    self.reloaded_bytecode = Some(leaked);
+                                }
+                            }
                         }
                         Err(e) => {
                             if let Some(hl_exc) = e.downcast_ref::<HLExceptionPropagation>() {

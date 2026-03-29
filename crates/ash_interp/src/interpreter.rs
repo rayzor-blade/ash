@@ -3490,9 +3490,68 @@ impl HLInterpreter {
                             let src_kind = bytecode.types[src_type_idx].kind;
 
                             {
-                                // Pointer→pointer cast: just copy the pointer.
-                                // The Haxe code is responsible for type compatibility.
-                                val
+                                // Debug: trace HOBJ→HOBJ super chain
+                                if src_kind == hl::hl_type_kind_HOBJ
+                                    && dst_kind == hl::hl_type_kind_HOBJ
+                                    && val.as_ptr() > 0x10000
+                                    && std::env::var("ASH_DBG_CAST").is_ok()
+                                {
+                                    static CAST_COUNT: std::sync::atomic::AtomicU32 =
+                                        std::sync::atomic::AtomicU32::new(0);
+                                    let c = CAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if c >= 9 && c < 12 { // trace casts #9+
+                                        let obj_ptr = val.as_ptr() as *const hl::vdynamic;
+                                        let header_t = unsafe { (*obj_ptr).t };
+                                        let dst_c = self.c_type_factory.get(dst_type_idx);
+                                        eprintln!(
+                                            "[SafeCast-HOBJ#{}] src_tidx={} dst_tidx={} header={:p} dst_c={:p}",
+                                            c, src_type_idx, dst_type_idx, header_t, dst_c
+                                        );
+                                        if !header_t.is_null() && (header_t as usize) >= 0x10000 {
+                                            unsafe {
+                                                let mut cur = header_t;
+                                                for d in 0..8 {
+                                                    if cur.is_null() || (cur as usize) < 0x10000 { break; }
+                                                    let k = (*cur).kind;
+                                                    if k != hl::hl_type_kind_HOBJ { eprintln!("  [{d}] kind={k} (not HOBJ)"); break; }
+                                                    let obj = (*cur).__bindgen_anon_1.obj;
+                                                    if obj.is_null() || (obj as usize) < 0x10000 { eprintln!("  [{d}] obj={obj:p} (invalid)"); break; }
+                                                    let name_ptr = (*obj).name;
+                                                    let name = if !name_ptr.is_null() && (name_ptr as usize) > 0x10000 {
+                                                        let mut len = 0;
+                                                        while *name_ptr.add(len) != 0 && len < 100 { len += 1; }
+                                                        String::from_utf16_lossy(std::slice::from_raw_parts(name_ptr, len))
+                                                    } else { "?".into() };
+                                                    let sup = (*obj).super_;
+                                                    eprintln!("  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}");
+                                                    if sup.is_null() || (sup as usize) < 0x10000 { break; }
+                                                    cur = sup;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Call hlp_dyn_castp for proper type casting.
+                                // This handles castFun (e.g. ArrayDyn→ArrayObj conversion).
+                                if !self.fn_dyn_castp.is_null() {
+                                    let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                                    let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                                    type FnCastp = unsafe extern "C" fn(
+                                        *mut c_void, *mut c_void, *mut c_void,
+                                    ) -> *mut c_void;
+                                    let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                                    let mut data = val.as_ptr() as *mut c_void;
+                                    let result_ptr = unsafe {
+                                        castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
+                                    };
+                                    if result_ptr.is_null() {
+                                        NanBoxedValue::null()
+                                    } else {
+                                        NanBoxedValue::from_ptr(result_ptr as usize)
+                                    }
+                                } else {
+                                    val
+                                }
                             }
                         }
                     }

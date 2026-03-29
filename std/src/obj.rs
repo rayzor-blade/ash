@@ -791,33 +791,46 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     let cast_field = obj_resolve_field(o, hlp_hash_gen(USTR_CAST.as_ptr(), false));
     let get_field = obj_resolve_field(o, hlp_hash_gen(USTR_GET_FIELD.as_ptr(), false));
     (*t).toStringFun = if !str_field.is_null() {
-        Some(mem::transmute::<
-            *const c_void,
-            unsafe extern "C" fn(*mut vdynamic) -> *const u16,
-        >(*(*t).methods.offset(
+        let fptr = *(*t).methods.offset(
             (-((*str_field).field_index + 1)).try_into().unwrap(),
-        )))
+        );
+        if (fptr as usize) < 0x10000 { None } else {
+            Some(mem::transmute::<_, unsafe extern "C" fn(*mut vdynamic) -> *const u16>(fptr))
+        }
     } else {
         None
     };
-    (*t).compareFun = if !cmp_field.is_null() && !(*t).compareFun.is_none() {
-        Some(mem::transmute(*(*t).methods.offset(
+    (*t).compareFun = if !cmp_field.is_null() {
+        let fptr = *(*t).methods.offset(
             (-((*cmp_field).field_index + 1)).try_into().unwrap(),
-        )))
+        );
+        if (fptr as usize) < 0x10000 { None } else {
+            Some(mem::transmute(fptr))
+        }
     } else {
         None
     };
     (*t).castFun = if !cast_field.is_null() {
-        Some(mem::transmute(*(*t).methods.offset(
+        let fptr = *(*t).methods.offset(
             (-((*cast_field).field_index + 1)).try_into().unwrap(),
-        )))
+        );
+        // Guard: stub function pointers (findex+1) from the interpreter are
+        // small integers, not valid code addresses. Treat them as None.
+        if (fptr as usize) < 0x10000 {
+            None
+        } else {
+            Some(mem::transmute(fptr))
+        }
     } else {
         None
     };
     (*t).getFieldFun = if !get_field.is_null() {
-        Some(mem::transmute(*(*t).methods.offset(
+        let fptr = *(*t).methods.offset(
             (-((*get_field).field_index + 1)).try_into().unwrap(),
-        )))
+        );
+        if (fptr as usize) < 0x10000 { None } else {
+            Some(mem::transmute(fptr))
+        }
     } else {
         None
     };

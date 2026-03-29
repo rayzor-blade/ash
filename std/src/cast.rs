@@ -386,9 +386,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     if t.is_null() || to.is_null() {
         return ptr::null_mut();
     }
-    // Debug: log type pointers for crash investigation
-    if std::env::var("ASH_DBG_CAST").is_ok() {
-        eprintln!("[cast] t={:p} t.kind={} to={:p} to.kind={}", t, (*t).kind, to, (*to).kind);
+    if std::env::var("ASH_DBG_SC").is_ok() {
+        eprintln!("[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}", t, (*t).kind, to, (*to).kind);
+        use std::io::Write;
+        std::io::stderr().flush().ok();
     }
     if t == to || hlp_safe_cast(t, to) {
         return *(data as *mut *mut c_void);
@@ -437,10 +438,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 && ((*t_obj_for_cast).rt as usize) >= 0x10000
                 && !(*(*t_obj_for_cast).rt).castFun.is_none()
             {
-                let v = (*(*t_obj_for_cast).rt).castFun.unwrap()(
-                    *(data as *mut *mut vdynamic),
-                    to,
-                );
+                let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
+                let obj_val = *(data as *mut *mut vdynamic);
+                if std::env::var("ASH_DBG_SC").is_ok() {
+                    eprintln!("[dyn_castp] castFun={:p} obj={:p} to={:p}", cast_fn as *const (), obj_val, to);
+                    std::io::Write::flush(&mut std::io::stderr()).ok();
+                }
+                let v = cast_fn(obj_val, to);
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
@@ -465,10 +469,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 && ((*t_obj_for_cast).rt as usize) >= 0x10000
                 && !(*(*t_obj_for_cast).rt).castFun.is_none()
             {
-                let v = (*(*t_obj_for_cast).rt).castFun.unwrap()(
-                    *(data as *mut *mut vdynamic),
-                    to,
-                );
+                let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
+                let obj_val = *(data as *mut *mut vdynamic);
+                if std::env::var("ASH_DBG_SC").is_ok() {
+                    eprintln!("[dyn_castp] castFun={:p} obj={:p} to={:p}", cast_fn as *const (), obj_val, to);
+                    std::io::Write::flush(&mut std::io::stderr()).ok();
+                }
+                let v = cast_fn(obj_val, to);
                 if !v.is_null() {
                     return v as *mut c_void;
                 }

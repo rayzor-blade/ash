@@ -241,6 +241,10 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
         hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
             let o_init = (*t).__bindgen_anon_1.obj;
             let oto = (*to).__bindgen_anon_1.obj;
+            if std::env::var("ASH_DBG_SC").is_ok() {
+                eprintln!("[safe_cast] t={:p} k={} obj={:p} to={:p} k={} oto={:p}",
+                    t, (*t).kind, o_init, to, (*to).kind, oto);
+            }
             if o_init.is_null() || oto.is_null()
                 || (o_init as usize) < 0x10000
                 || (oto as usize) < 0x10000

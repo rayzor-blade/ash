@@ -206,6 +206,16 @@ pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
+    if std::env::var("ASH_DBG_SHADER").is_ok() {
+        if !str.is_null() && (str as usize) > 0x10000 {
+            let mut len = 0;
+            while *str.add(len) != 0 && len < 200 { len += 1; }
+            let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
+            eprintln!("[hl_to_utf8] len={} first100={:?}", len, &s[..s.len().min(100)]);
+        } else {
+            eprintln!("[hl_to_utf8] str={:p} (null or invalid)", str);
+        }
+    }
     if str.is_null() {
         return ptr::null();
     }

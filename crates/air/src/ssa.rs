@@ -273,7 +273,8 @@ fn rename_reads(op: &mut Opcode, stacks: &[Vec<Reg>], pinned: &HashSet<u32>) {
         }
         Opcode::CallN { args, .. }
         | Opcode::CallMethod { args, .. }
-        | Opcode::CallThis { args, .. } => {
+        | Opcode::CallThis { args, .. }
+        | Opcode::IndirectCall { args, .. } => {
             for a in args.iter_mut() {
                 ren!(a);
             }
@@ -642,7 +643,8 @@ fn rename_to_base(op: &mut Opcode, base_reg_map: &[u32]) {
         }
         Opcode::CallN { dst, args, .. }
         | Opcode::CallMethod { dst, args, .. }
-        | Opcode::CallThis { dst, args, .. } => {
+        | Opcode::CallThis { dst, args, .. }
+        | Opcode::IndirectCall { dst, args, .. } => {
             to_base!(dst);
             for a in args.iter_mut() {
                 to_base!(a);

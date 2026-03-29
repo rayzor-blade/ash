@@ -242,6 +242,11 @@ pub fn substitute_reads(op: &mut Opcode, from: Reg, to: Reg) -> bool {
         | Opcode::Asm { .. }
         | Opcode::Trap { .. }
         | Opcode::EndTrap { .. } => {}
+        Opcode::IndirectCall { args, .. } => {
+            for a in args.iter_mut() {
+                sub!(a);
+            }
+        }
     }
 
     changed

@@ -789,4 +789,15 @@ pub enum Opcode {
         value: InlineInt,
         reg: Reg,
     },
+    /// Indirect call through `functions_ptrs[findex]`.
+    ///
+    /// Introduced by the `IndirectCallRewritePass` for hot-reload support.
+    /// Semantically identical to `Call0/1/2/3/4/N` but the JIT emits an
+    /// indirect call via the function pointer table instead of a direct
+    /// LLVM function reference, allowing the callee to be patched at runtime.
+    IndirectCall {
+        dst: Reg,
+        fun: RefFun,
+        args: Vec<Reg>,
+    },
 }

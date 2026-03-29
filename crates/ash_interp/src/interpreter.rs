@@ -3797,6 +3797,16 @@ impl HLInterpreter {
             Opcode::Asm { .. } => {
                 // No-op on interpreter (x86 specific)
             }
+            // IndirectCall: same as CallN in the interpreter (dispatch is always by findex)
+            Opcode::IndirectCall { dst, fun, args } => {
+                let arg_vals: Vec<NanBoxedValue> =
+                    args.iter().map(|r| frame.registers.get(r.0)).collect();
+                return Ok(StepResult::Call {
+                    findex: fun.0,
+                    args: arg_vals,
+                    dst: dst.0,
+                });
+            }
         }
 
         Ok(StepResult::Continue)

@@ -2108,6 +2108,60 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
 
+            // --- IndirectCall: dispatch through functions_ptrs[findex] ---
+            //
+            // Emitted by the AIR IndirectCallRewritePass for hot-reload support.
+            // Loads the callee address from the mutable function pointer table at
+            // runtime, so recompiled functions are picked up without recompiling
+            // the caller.
+            Opcode::IndirectCall { dst, fun, args } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+                // Ensure the callee is declared so we have its LLVM function type
+                let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
+                let fn_type = function.get_type();
+
+                // Load callee address from functions_ptrs[findex] at runtime
+                let findex = fun.0;
+                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_ptr = self
+                    .context
+                    .i64_type()
+                    .const_int(fun_addr_slot, false)
+                    .const_to_pointer(ptr_type);
+                let fun_addr = self
+                    .builder
+                    .build_load(ptr_type, fun_addr_ptr, "indirect_call_fn")?
+                    .into_pointer_value();
+
+                // Build argument values
+                let arg_vals: Vec<BasicMetadataValueEnum> = args
+                    .iter()
+                    .map(|arg| {
+                        self.builder
+                            .build_load(
+                                reg_types[arg.0 as usize],
+                                registers[arg.0 as usize],
+                                "arg_val",
+                            )
+                            .unwrap()
+                            .into()
+                    })
+                    .collect();
+
+                // Indirect call through the loaded pointer
+                let result =
+                    self.builder
+                        .build_indirect_call(fn_type, fun_addr, &arg_vals, "icall")?;
+                if let Some(ret_val) = result.try_as_basic_value().left() {
+                    self.builder
+                        .build_store(registers[dst.0 as usize], ret_val)?;
+                }
+                if is_placeholder {
+                    self.add_pending_compilation(fun.0);
+                }
+            }
+
             // --- GetThis / SetThis (delegate to Field/SetField with obj = reg 0) ---
             Opcode::GetThis { dst, field } => {
                 let rewritten = Opcode::Field {

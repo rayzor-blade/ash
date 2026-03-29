@@ -138,6 +138,7 @@ pub fn reads(op: &Opcode) -> Vec<Reg> {
         Opcode::Nop => vec![],
         Opcode::Prefetch { value, .. } => vec![*value],
         Opcode::Asm { .. } => vec![],
+        Opcode::IndirectCall { args, .. } => args.clone(),
     }
 }
 
@@ -177,7 +178,8 @@ pub fn writes(op: &Opcode) -> Vec<Reg> {
         | Opcode::CallN { dst, .. }
         | Opcode::CallMethod { dst, .. }
         | Opcode::CallThis { dst, .. }
-        | Opcode::CallClosure { dst, .. } => vec![*dst],
+        | Opcode::CallClosure { dst, .. }
+        | Opcode::IndirectCall { dst, .. } => vec![*dst],
 
         Opcode::StaticClosure { dst, .. }
         | Opcode::InstanceClosure { dst, .. }

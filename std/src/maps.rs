@@ -640,3 +640,106 @@ pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray 
     }
     a
 }
+
+// ============================================================================
+// IntMap (hi*) — HashMap<i32, *mut vdynamic>
+// ============================================================================
+
+use std::collections::HashMap;
+type IntMap = HashMap<i32, *mut hl::vdynamic>;
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hialloc() -> *mut c_void {
+    Box::into_raw(Box::new(IntMap::new())) as *mut c_void
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdynamic) {
+    if !m.is_null() { (*(m as *mut IntMap)).insert(key, value); }
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hiexists(m: *mut c_void, key: i32) -> bool {
+    if m.is_null() { return false; } (*(m as *const IntMap)).contains_key(&key)
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_higet(m: *mut c_void, key: i32) -> *mut hl::vdynamic {
+    if m.is_null() { return ptr::null_mut(); }
+    (*(m as *const IntMap)).get(&key).copied().unwrap_or(ptr::null_mut())
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hiremove(m: *mut c_void, key: i32) -> bool {
+    if m.is_null() { return false; } (*(m as *mut IntMap)).remove(&key).is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hikeys(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() { return ptr::null_mut(); }
+    let map = &*(m as *const IntMap);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i32(), map.len() as i32);
+    for (i, &key) in map.keys().enumerate() { *(crate::types::hl_aptr::<i32>(arr)).add(i) = key; }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hivalues(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() { return ptr::null_mut(); }
+    let map = &*(m as *const IntMap);
+    let hlt_dyn = crate::types::hlt_dyn();
+    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
+    for (i, &val) in map.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = val;
+    }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hiclear(m: *mut c_void) { if !m.is_null() { (*(m as *mut IntMap)).clear(); } }
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 { if m.is_null() { 0 } else { (*(m as *const IntMap)).len() as i32 } }
+
+// ============================================================================
+// ObjectMap (ho*) — HashMap<usize, *mut vdynamic>
+// ============================================================================
+type ObjMap = HashMap<usize, *mut hl::vdynamic>;
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hoalloc() -> *mut c_void { Box::into_raw(Box::new(ObjMap::new())) as *mut c_void }
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: *mut hl::vdynamic) {
+    if !m.is_null() && !key.is_null() { (*(m as *mut ObjMap)).insert(key as usize, val); }
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hoexists(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
+    if m.is_null() || key.is_null() { return false; } (*(m as *const ObjMap)).contains_key(&(key as usize))
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hoget(m: *mut c_void, key: *mut hl::vdynamic) -> *mut hl::vdynamic {
+    if m.is_null() || key.is_null() { return ptr::null_mut(); }
+    (*(m as *const ObjMap)).get(&(key as usize)).copied().unwrap_or(ptr::null_mut())
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_horemove(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
+    if m.is_null() || key.is_null() { return false; } (*(m as *mut ObjMap)).remove(&(key as usize)).is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hokeys(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() { return ptr::null_mut(); }
+    let map = &*(m as *const ObjMap);
+    let hlt_dyn = crate::types::hlt_dyn();
+    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
+    for (i, &key) in map.keys().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = key as *mut hl::vdynamic;
+    }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hovalues(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() { return ptr::null_mut(); }
+    let map = &*(m as *const ObjMap);
+    let hlt_dyn = crate::types::hlt_dyn();
+    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
+    for (i, &val) in map.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = val;
+    }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hoclear(m: *mut c_void) { if !m.is_null() { (*(m as *mut ObjMap)).clear(); } }
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 { if m.is_null() { 0 } else { (*(m as *const ObjMap)).len() as i32 } }

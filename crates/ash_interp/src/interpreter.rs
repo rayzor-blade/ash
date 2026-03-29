@@ -806,7 +806,21 @@ impl HLInterpreter {
                 | hl::hl_type_kind_HF32
                 | hl::hl_type_kind_HF64
                 | hl::hl_type_kind_HBOOL
-                | hl::hl_type_kind_HBYTES
+        )
+    }
+
+    /// Kinds where a pointer return should be unboxed from vdynamic.
+    /// HBYTES is excluded — bytes pointers are raw buffers, not boxed primitives.
+    fn is_unboxable_primitive_kind(kind: u32) -> bool {
+        matches!(
+            kind,
+            hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+                | hl::hl_type_kind_HI64
+                | hl::hl_type_kind_HF32
+                | hl::hl_type_kind_HF64
+                | hl::hl_type_kind_HBOOL
         )
     }
 
@@ -878,21 +892,18 @@ impl HLInterpreter {
         if val.is_ptr()
             && !val.is_null()
             && val.as_ptr() != 0
-            && Self::is_primitive_or_bytes_kind(dst_kind)
+            && Self::is_unboxable_primitive_kind(dst_kind)
         {
             // Only attempt unboxing if the pointer looks like a valid vdynamic:
             // aligned, non-tiny address, and type pointer field also looks valid.
             let addr = val.as_ptr();
             if addr > 0x10000 && addr % std::mem::align_of::<usize>() == 0 {
                 let d = addr as *const hl::vdynamic;
-                // Read type pointer — if it's null or misaligned, skip unboxing.
-                // This is safe because the pointer passed all basic validity checks
-                // and we only read one pointer-sized field.
                 let t = unsafe { (*d).t };
                 if !t.is_null() && (t as usize) % std::mem::align_of::<usize>() == 0 {
                     let kind = unsafe { (*t).kind };
                     // Only unbox if the source type IS a boxed primitive
-                    if Self::is_primitive_or_bytes_kind(kind) {
+                    if Self::is_unboxable_primitive_kind(kind) {
                         return unsafe {
                             Self::unbox_dynamic_to_kind(
                                 addr as *mut hl::vdynamic,

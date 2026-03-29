@@ -5630,51 +5630,7 @@ impl HLInterpreter {
         let offset = *(*rt).fields_indexes.add(field_idx);
         let field_addr = obj_ptr.add(offset as usize) as *mut u8;
 
-        // Use the field's declared type for writing, not the source register's type.
-        // When src_kind is HDYN but the field is HI32, writing with HDYN would use
-        // 8 bytes (pointer-width), spilling NanBox tag bits into the adjacent field.
-        // obj_t.fields is 0-based within THIS class's own fields (excluding parent).
-        let ot = type_ptr as *const hl_type;
-        let obj_t = (*ot).__bindgen_anon_1.obj;
-        let parent_nf = if !(*rt).parent.is_null() { (*(*rt).parent).nfields as usize } else { 0 };
-        let write_kind = if field_idx >= parent_nf {
-            let local_idx = field_idx - parent_nf;
-            if !obj_t.is_null() && local_idx < (*obj_t).nfields as usize {
-                let ft = (*(*obj_t).fields.add(local_idx)).t;
-                if !ft.is_null() { (*ft).kind } else { src_kind }
-            } else {
-                src_kind
-            }
-        } else {
-            // Parent field: walk up the type hierarchy to find the declared type
-            let mut rt_cur = rt;
-            let mut remaining = field_idx;
-            let mut found_kind = src_kind;
-            while !(*rt_cur).parent.is_null() {
-                let p = (*rt_cur).parent;
-                let p_nf = (*p).nfields as usize;
-                if remaining < p_nf {
-                    // Field is in this parent — look up its type
-                    let p_type = (*p).t;
-                    if !p_type.is_null() {
-                        let p_obj = (*p_type).__bindgen_anon_1.obj;
-                        let p_parent_nf = if !(*p).parent.is_null() { (*(*p).parent).nfields as usize } else { 0 };
-                        if remaining >= p_parent_nf {
-                            let p_local = remaining - p_parent_nf;
-                            if !p_obj.is_null() && p_local < (*p_obj).nfields as usize {
-                                let ft = (*(*p_obj).fields.add(p_local)).t;
-                                if !ft.is_null() { found_kind = (*ft).kind; }
-                            }
-                        }
-                    }
-                    break;
-                }
-                rt_cur = p;
-            }
-            found_kind
-        };
-
-        Self::write_value_at(field_addr, write_kind, val);
+        Self::write_value_at(field_addr, src_kind, val);
     }
 
     /// Read a value from a raw memory address based on the HL type kind.

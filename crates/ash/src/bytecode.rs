@@ -1254,10 +1254,34 @@ pub struct DecodedBytecode {
 impl DecodedBytecode {
     /// Compute a hash for every bytecode function, keyed by findex.
     /// Used for hot-reload diffing: functions with identical hashes are unchanged.
+    ///
+    /// Incorporates the content of referenced string literals so that functions
+    /// using changed strings (same index, different content) are detected even
+    /// when their opcodes are byte-identical.
     pub fn compute_function_hashes(&self) -> std::collections::HashMap<usize, u32> {
+        use crate::opcodes::Opcode;
+
         self.functions
             .iter()
-            .map(|f| (f.findex as usize, f.compute_hash()))
+            .map(|f| {
+                let mut h = f.compute_hash();
+                // Mix in the actual content of any string literal this function references
+                for op in &f.ops {
+                    let str_idx = match op {
+                        Opcode::String { ptr, .. } => Some(ptr.0),
+                        _ => None,
+                    };
+                    if let Some(idx) = str_idx {
+                        if let Some(s) = self.strings.get(idx) {
+                            for b in s.as_bytes() {
+                                h = H(h, *b);
+                            }
+                            h = H(h, 0);
+                        }
+                    }
+                }
+                (f.findex as usize, h)
+            })
             .collect()
     }
 }

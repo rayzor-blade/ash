@@ -2011,10 +2011,22 @@ impl HLInterpreter {
                             // Check deferred hot-reload flag after native calls
                             if ash::reload::take_reload_pending() {
                                 if let Some(new_bc) = ash::reload::do_reload() {
-                                    // Clear caches that reference old bytecode data
-                                    self.utf16_strings.clear();
+                                    // Leak the old utf16_strings cache — live NanBoxed registers
+                                    // in the current (old) frame hold raw pointers into those
+                                    // Vec<u16> buffers. Clearing would create dangling pointers.
+                                    let old_cache = std::mem::take(&mut self.utf16_strings);
+                                    Box::leak(Box::new(old_cache));
+
+                                    // Pre-populate the new cache from the new bytecode's string
+                                    // table. This ensures all Opcode::String hits return new
+                                    // strings regardless of which bytecode ref interpret_loop holds.
+                                    for (idx, s) in new_bc.strings.iter().enumerate() {
+                                        let mut buf: Vec<u16> = s.encode_utf16().collect();
+                                        buf.push(0);
+                                        self.utf16_strings.insert(idx, buf);
+                                    }
+
                                     self.field_hash_cache.clear();
-                                    // Leak the bytecode so it lives as long as the process
                                     let leaked: &'static _ = Box::leak(Box::new(new_bc));
                                     self.reloaded_bytecode = Some(leaked);
                                 }

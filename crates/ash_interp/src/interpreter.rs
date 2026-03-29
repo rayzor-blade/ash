@@ -3483,7 +3483,10 @@ impl HLInterpreter {
                                 NanBoxedValue::from_ptr(result_ptr as usize)
                             }
                         } else {
-                            // HOBJ→HOBJ and other pointer casts: just copy
+                            // Pointer→pointer casts: just copy the pointer.
+                            // HashLink's JIT calls hlp_dyn_castp but that requires
+                            // fully initialized C-level type chains which may not
+                            // be available in the interpreter context.
                             val
                         }
                     }

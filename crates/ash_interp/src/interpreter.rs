@@ -453,6 +453,36 @@ impl HLInterpreter {
         let log_promotions = config.log_promotions;
         let hot_reload = config.hot_reload;
         let hl_path = hl_path.to_path_buf();
+
+        // Register the bytecode path for hot-reload mtime detection
+        if hot_reload {
+            match _native_resolver.resolve_function("std", "hlp_setup_reload_check") {
+                Ok(setup_fn) => {
+                    let path_str = hl_path.to_string_lossy();
+                    let mut utf16: Vec<u16> = path_str.encode_utf16().collect();
+                    utf16.push(0);
+                    type FnSetup = unsafe extern "C" fn(*const u16);
+                    let setup: FnSetup = unsafe { std::mem::transmute(setup_fn) };
+                    unsafe { setup(utf16.as_ptr()) };
+                    eprintln!("[hot-reload] registered bytecode path: {}", hl_path.display());
+                }
+                Err(e) => {
+                    eprintln!("[hot-reload] warning: could not register reload check: {}", e);
+                }
+            }
+            // Register reload callback (hlp_set_reload_callback)
+            // For now, the callback just logs — actual perform_reload integration
+            // requires the callback to have access to JIT module state, which is
+            // done in a future phase when the runtime loop is refactored.
+            if let Ok(set_cb_fn) =
+                _native_resolver.resolve_function("std", "hlp_set_reload_callback")
+            {
+                // The callback is a no-op for now — the mtime detection + return true
+                // is sufficient for the e2e test to verify the plumbing works.
+                // Full recompilation will be wired when perform_reload is integrated.
+                let _ = set_cb_fn; // callback registration deferred to full integration
+            }
+        }
         let (globals_data_ptr, nglobals) = self.c_type_factory.globals_data();
         let shared = SharedRuntimeHandles {
             globals_data_ptr,

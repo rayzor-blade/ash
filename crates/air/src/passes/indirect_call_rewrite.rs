@@ -1,4 +1,4 @@
-use crate::opcodes::{Opcode, RefFun};
+use crate::opcodes::Opcode;
 use std::collections::HashSet;
 
 /// Rewrites direct `Call0/1/2/3/4/N` opcodes targeting bytecode functions

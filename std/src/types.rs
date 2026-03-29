@@ -222,8 +222,12 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
             }
         }
         hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
-            let mut o = (*t).__bindgen_anon_1.obj;
+            let o_init = (*t).__bindgen_anon_1.obj;
             let oto = (*to).__bindgen_anon_1.obj;
+            if o_init.is_null() || oto.is_null() {
+                return false;
+            }
+            let mut o = o_init;
             loop {
                 if o == oto {
                     return true;
@@ -231,7 +235,15 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                 if (*o).super_.is_null() {
                     return false;
                 }
-                o = (*(*o).super_).__bindgen_anon_1.obj;
+                let sup = (*o).super_;
+                if (*sup).kind != hl::hl_type_kind_HOBJ && (*sup).kind != hl::hl_type_kind_HSTRUCT {
+                    return false;
+                }
+                let sup_obj = (*sup).__bindgen_anon_1.obj;
+                if sup_obj.is_null() {
+                    return false;
+                }
+                o = sup_obj;
             }
         }
         hl::hl_type_kind_HFUN | hl::hl_type_kind_HMETHOD => {

@@ -3483,11 +3483,34 @@ impl HLInterpreter {
                                 NanBoxedValue::from_ptr(result_ptr as usize)
                             }
                         } else {
-                            // Pointer→pointer casts: just copy the pointer.
-                            // HashLink's JIT calls hlp_dyn_castp but that requires
-                            // fully initialized C-level type chains which may not
-                            // be available in the interpreter context.
-                            val
+                            // For HOBJ→HOBJ: call hlp_dyn_castp for type-safe cast
+                            // (validates supertype chain, returns null on mismatch).
+                            // For other pointer casts: plain copy.
+                            let src_type_idx = func.regs[src.0 as usize].0;
+                            let src_kind = bytecode.types[src_type_idx].kind;
+
+                            if !self.fn_dyn_castp.is_null()
+                                && src_kind == hl::hl_type_kind_HOBJ
+                                && dst_kind == hl::hl_type_kind_HOBJ
+                            {
+                                let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                                let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                                type FnCastp = unsafe extern "C" fn(
+                                    *mut c_void, *mut c_void, *mut c_void,
+                                ) -> *mut c_void;
+                                let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                                let mut data = val.as_ptr() as *mut c_void;
+                                let result_ptr = unsafe {
+                                    castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
+                                };
+                                if result_ptr.is_null() {
+                                    NanBoxedValue::null()
+                                } else {
+                                    NanBoxedValue::from_ptr(result_ptr as usize)
+                                }
+                            } else {
+                                val
+                            }
                         }
                     }
                 } else {

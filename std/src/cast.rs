@@ -341,7 +341,12 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     t: *mut hl_type,
     to: *mut hl_type,
 ) -> *mut c_void {
-    // hl_track_call(HL_TRACK_CAST, on_cast(t, to));
+    if t.is_null() || to.is_null() {
+        return ptr::null_mut();
+    }
+    if (*t).kind > 22 || (*to).kind > 22 {
+        return ptr::null_mut();
+    }
 
     if (*to).kind == hl_type_kind_HDYN && hlp_is_dynamic(t) {
         return *(data as *mut *mut vdynamic) as *mut c_void;
@@ -373,16 +378,26 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             return ptr::null_mut();
         }
         t = (*v).t;
+        if t.is_null() || (*t).kind > 22 {
+            return ptr::null_mut();
+        }
     }
 
+    if t.is_null() || to.is_null() {
+        return ptr::null_mut();
+    }
     if t == to || hlp_safe_cast(t, to) {
         return *(data as *mut *mut c_void);
     }
 
     match ((*t).kind, (*to).kind) {
         (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
-            let mut t1 = (*t).__bindgen_anon_1.obj;
+            let t1_obj = (*t).__bindgen_anon_1.obj;
             let t2 = (*to).__bindgen_anon_1.obj;
+            if t1_obj.is_null() || t2.is_null() {
+                return ptr::null_mut();
+            }
+            let mut t1 = t1_obj;
             loop {
                 if t1 == t2 {
                     return *(data as *mut *mut c_void);
@@ -390,7 +405,15 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 if (*t1).super_.is_null() {
                     break;
                 }
-                t1 = (*(*t1).super_).__bindgen_anon_1.obj;
+                let sup = (*t1).super_;
+                if (*sup).kind != hl_type_kind_HOBJ {
+                    break;
+                }
+                let sup_obj = (*sup).__bindgen_anon_1.obj;
+                if sup_obj.is_null() {
+                    break;
+                }
+                t1 = sup_obj;
             }
             if !(*(*t).__bindgen_anon_1.obj).rt.is_null()
                 && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none()

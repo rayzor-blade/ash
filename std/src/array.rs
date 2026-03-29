@@ -51,7 +51,22 @@ pub fn array_blit<T: Copy>(dst: &mut [T], dpos: usize, src: &[T], spos: usize, l
 
 #[no_mangle]
 pub unsafe fn hlp_array_blit(dst: *mut varray, dpos: i32, src: *const varray, spos: i32, len: i32) {
-    let size = hlp_type_size((*dst).at);
+    if dst.is_null() || src.is_null() || len <= 0 {
+        return;
+    }
+    let dst_at = (*dst).at;
+    let src_at = (*src).at;
+    if dst_at.is_null() || src_at.is_null() {
+        return;
+    }
+    // Guard against misaligned or invalid type pointers
+    if (dst_at as usize) < 0x1000 || (dst_at as usize) % std::mem::align_of::<usize>() != 0 {
+        return;
+    }
+    if (*dst_at).kind > 22 {
+        return;
+    }
+    let size = hlp_type_size(dst_at);
 
     let dst_ptr = hl_aptr::<vbyte>(dst).add((dpos as usize) * (size as usize));
     let src_ptr = hl_aptr::<vbyte>(src as *mut varray).add((spos as usize) * (size as usize));

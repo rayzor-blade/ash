@@ -793,6 +793,46 @@ pub extern "C" fn hlp_mark_size(data_size: i32) -> i32 {
         .unwrap()
 }
 
+/// Walk all live heap objects, calling `visitor(obj_ptr, type_ptr)` for each.
+/// Used by hot-reload to propagate field updates to existing objects.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_walk_heap(
+    visitor: unsafe extern "C" fn(*mut hl::vdynamic, *mut hl::hl_type, *mut c_void),
+    ctx: *mut c_void,
+) {
+    let gc = match GC.get_mut() {
+        Some(g) => g,
+        None => return,
+    };
+    let heap_base = gc.heap.memory.as_ptr() as usize;
+
+    for &block_addr in &gc.heap.used_blocks {
+        let block_offset = block_addr - heap_base;
+        let first_line = block_offset / LINE_SIZE;
+
+        let mut line = first_line;
+        let block_end_line = first_line + LINES_PER_BLOCK;
+
+        while line < block_end_line {
+            let alloc_lines = gc.heap.alloc_sizes[line] as usize;
+            if alloc_lines == 0 {
+                line += 1;
+                continue;
+            }
+
+            let obj_addr = heap_base + line * LINE_SIZE;
+            let obj = obj_addr as *mut hl::vdynamic;
+
+            // Validate: first field must be a type pointer
+            if !(*obj).t.is_null() {
+                visitor(obj, (*obj).t, ctx);
+            }
+
+            line += alloc_lines;
+        }
+    }
+}
+
 /// Initialize the garbage collector. Must be called before any allocation.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_init() {

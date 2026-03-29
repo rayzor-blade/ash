@@ -251,9 +251,14 @@ fn run_parity_matrix(mode: AshMode) {
 
         let ash_run = run_ash(&ash_cli, &hl_path, mode, timeout);
         if ash_run.timed_out {
+            let actual_timeout = if case.slow {
+                slow_timeout_secs
+            } else {
+                case.timeout_secs
+            };
             failures.push(format!(
                 "[ASH TIMEOUT][{}][{}] exceeded {}s",
-                mode_name, case.name, case.timeout_secs
+                mode_name, case.name, actual_timeout
             ));
             continue;
         }

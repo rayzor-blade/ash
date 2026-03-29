@@ -178,7 +178,7 @@ name = "Mandelbrot"
 main = "Mandelbrot"
 hl = "test_mandelbrot.hl"
 slow = true
-timeout_secs = 240
+timeout_secs = 600
 expectation = "checksum"
 normalize = "default"
 

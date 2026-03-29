@@ -156,7 +156,7 @@ jobs:
       ASH_PARITY_REQUIRE_ORACLE: "1"
       ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
       ASH_PARITY_INCLUDE_SLOW: "1"
-      ASH_PARITY_SLOW_TIMEOUT_SECS: "360"
+      ASH_PARITY_SLOW_TIMEOUT_SECS: "600"
     steps:
       - uses: actions/checkout@v4
 

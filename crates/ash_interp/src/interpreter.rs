@@ -3531,26 +3531,68 @@ impl HLInterpreter {
                                         }
                                     }
                                 }
-                                // Call hlp_dyn_castp for proper type casting.
-                                // This handles castFun (e.g. ArrayDyn→ArrayObj conversion).
-                                if !self.fn_dyn_castp.is_null() {
-                                    let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                                    let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                                    type FnCastp = unsafe extern "C" fn(
-                                        *mut c_void, *mut c_void, *mut c_void,
-                                    ) -> *mut c_void;
-                                    let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
-                                    let mut data = val.as_ptr() as *mut c_void;
-                                    let result_ptr = unsafe {
-                                        castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
-                                    };
-                                    if result_ptr.is_null() {
-                                        NanBoxedValue::null()
+                                // For HOBJ→HOBJ SafeCast: check if source has __cast proto.
+                                // In the interpreter, castFun can't be called (it's a stub
+                                // pointer), so we call the __cast bytecode function directly.
+                                if src_kind == hl::hl_type_kind_HOBJ
+                                    && dst_kind == hl::hl_type_kind_HOBJ
+                                {
+                                    // Look up __cast proto findex from the object's runtime type
+                                    let obj_ptr = val.as_ptr() as *const hl::vdynamic;
+                                    let header_t = unsafe { (*obj_ptr).t };
+                                    let cast_findex = if !header_t.is_null() && (header_t as usize) >= 0x10000
+                                        && unsafe { (*header_t).kind } == hl::hl_type_kind_HOBJ
+                                    {
+                                        unsafe {
+                                            let obj_t = (*header_t).__bindgen_anon_1.obj;
+                                            if !obj_t.is_null() && (obj_t as usize) >= 0x10000 {
+                                                // Hash "__cast" using same algorithm as hlp_hash_gen
+                                                let cast_hash = {
+                                                    let chars: &[u16] = &[0x5F, 0x5F, 0x63, 0x61, 0x73, 0x74]; // __cast
+                                                    let mut h: i32 = 0;
+                                                    for &c in chars {
+                                                        h = h.wrapping_mul(223).wrapping_add(c as i32);
+                                                    }
+                                                    h.wrapping_rem(0x1FFFFF7B)
+                                                };
+                                                // Search proto array in hl_type_obj
+                                                let mut found: Option<usize> = None;
+                                                let nproto = (*obj_t).nproto;
+                                                let proto_ptr = (*obj_t).proto;
+                                                if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
+                                                    for i in 0..nproto as usize {
+                                                        let proto = &*proto_ptr.add(i);
+                                                        if proto.hashed_name == cast_hash {
+                                                            found = Some(proto.findex as usize);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                found
+                                            } else {
+                                                None
+                                            }
+                                        }
                                     } else {
-                                        NanBoxedValue::from_ptr(result_ptr as usize)
+                                        None
+                                    };
+
+                                    if let Some(findex) = cast_findex {
+                                        // Call __cast(obj, dst_type) via StepResult::Call
+                                        let dst_c_type = self.c_type_factory.get(dst_type_idx);
+                                        let type_val = NanBoxedValue::from_ptr(dst_c_type as usize);
+                                        // Store args in registers and dispatch as a call
+                                        frame.registers.set(dst.0, val); // temp: store obj in dst
+                                        return Ok(StepResult::Call {
+                                            findex,
+                                            args: vec![val, type_val],
+                                            dst: dst.0,
+                                        });
+                                    } else {
+                                        val // no __cast, just copy
                                     }
                                 } else {
-                                    val
+                                    val // non-HOBJ cast, just copy
                                 }
                             }
                         }

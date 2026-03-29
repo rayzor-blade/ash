@@ -14,9 +14,6 @@ pub static mut STD_LIBRARY: Option<Library> = None;
 pub fn init_std_library() -> Result<()> {
     STD_INIT.call_once(|| {
         unsafe {
-            // Create a temporary directory
-            let temp_dir = TempDir::new().expect("Failed to create temp dir");
-            let mut lib_path = temp_dir.path().join("libash_std");
             let ext = if cfg!(target_os = "windows") {
                 "dll"
             } else if cfg!(any(target_os = "macos", target_os = "ios")) {
@@ -24,11 +21,27 @@ pub fn init_std_library() -> Result<()> {
             } else {
                 "so"
             };
-            lib_path.set_extension(ext);
 
-            // Extract the embedded library
-            let std_lib_bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
-            std::fs::write(&lib_path, std_lib_bytes).expect("Failed to write std library");
+            // Try to load libhl.dylib from the system first. If found, use it
+            // so HDLLs and the interpreter share the SAME library instance
+            // (and thus the same GC static). This avoids the dual-runtime issue.
+            let system_libhl = std::path::Path::new("/usr/local/lib")
+                .join(format!("libhl.{}", ext));
+
+            let lib_path = if system_libhl.exists() {
+                eprintln!("[ash] Using system libhl at {}", system_libhl.display());
+                system_libhl
+            } else {
+                // Fallback: extract the embedded library to a temp file
+                let temp_dir = TempDir::new().expect("Failed to create temp dir");
+                let mut path = temp_dir.path().join("libash_std");
+                path.set_extension(ext);
+                let std_lib_bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+                std::fs::write(&path, std_lib_bytes).expect("Failed to write std library");
+                // Leak temp_dir so the file isn't deleted
+                std::mem::forget(temp_dir);
+                path
+            };
 
             // Load the library with RTLD_GLOBAL so hl_ symbols are visible
             // to subsequently loaded HDLLs (they link against libhl.dylib symbols).

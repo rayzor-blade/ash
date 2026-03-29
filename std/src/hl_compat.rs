@@ -1,0 +1,250 @@
+//! HashLink ABI compatibility layer.
+//!
+//! The HashLink HDLLs (fmt.hdll, sdl.hdll, etc.) are compiled against
+//! `libhl.dylib` which exports `hl_` prefixed symbols. Ash's stdlib
+//! exports `hlp_` prefixed symbols. This module re-exports ash functions
+//! under their `hl_` names so HDLLs can link against ash_std directly.
+
+use std::ffi::c_void;
+use std::ptr;
+
+use crate::gc::{ImmixAllocator, GC};
+use crate::hl::{self, hl_buffer, hl_type, varray, vbyte, vdynamic};
+use crate::strings;
+
+// ============================================================================
+// Direct aliases: forward hl_XXX to hlp_XXX
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_alloc_array(t: *mut hl_type, size: i32) -> *mut varray {
+    crate::array::hlp_alloc_array(t, size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
+    crate::obj::hlp_alloc_dynamic(t)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_alloc_dynobj() -> *mut vdynamic {
+    crate::obj::hlp_alloc_dynobj() as *mut vdynamic
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64) {
+    crate::obj::hlp_dyn_setd(d, hfield, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_type, value: i32) {
+    crate::obj::hlp_dyn_seti(d, hfield, t, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_setp(
+    d: *mut vdynamic,
+    hfield: i32,
+    t: *mut hl_type,
+    value: *mut c_void,
+) {
+    crate::obj::hlp_dyn_setp(d, hfield, t, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_hash_gen(name: *const hl::uchar, cache_name: bool) -> i32 {
+    crate::obj::hlp_hash_gen(name, cache_name)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
+    crate::cast::hlp_make_dyn(data, t)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_throw(v: *mut vdynamic) {
+    crate::error::hlp_throw(v);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_call(c: *mut vdynamic, args: *mut varray) -> *mut vdynamic {
+    crate::fun::hlp_call_method(c, args)
+}
+
+// ============================================================================
+// Buffer functions (forward to existing hlp_buffer_*)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_alloc_buffer(init: *const hl::uchar) -> *mut c_void {
+    crate::buffer::hlp_alloc_buffer() as *mut c_void
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_buffer_char(b: *mut c_void, c: u16) {
+    crate::buffer::hlp_buffer_char(b as *mut hl_buffer, c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_buffer_str(b: *mut c_void, s: *const hl::uchar) {
+    crate::buffer::hlp_buffer_str(b as *mut hl_buffer, s);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
+    if s.is_null() {
+        return;
+    }
+    let cstr = std::ffi::CStr::from_ptr(s as *const i8);
+    if let Ok(st) = cstr.to_str() {
+        let utf16 = crate::strings::str_to_uchar_ptr(st);
+        crate::buffer::hlp_buffer_str(b as *mut hl_buffer, utf16);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_buffer_content(b: *mut c_void, len: *mut i32) -> *const hl::uchar {
+    crate::buffer::hlp_buffer_content(b as *mut hl_buffer, len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
+    crate::buffer::hlp_buffer_val(b as *mut hl_buffer, v);
+}
+
+// ============================================================================
+// GC functions
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_gc_alloc_gen(
+    t: *mut hl_type,
+    size: i32,
+    _flags: i32,
+) -> *mut c_void {
+    let gc = GC.get_mut().expect("GC");
+    if let Some(ptr) = gc.allocate(size as usize) {
+        let p = ptr.as_ptr() as *mut vdynamic;
+        (*p).t = t;
+        p as *mut c_void
+    } else {
+        ptr::null_mut()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
+    let gc = GC.get_mut().expect("GC");
+    gc.register_persistent(ptr as *mut vdynamic);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
+    let gc = GC.get_mut().expect("GC");
+    gc.unregister_persistent(ptr as *mut vdynamic);
+}
+
+// ============================================================================
+// String/encoding functions
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
+    if str.is_null() {
+        return ptr::null();
+    }
+    let cstr = std::ffi::CStr::from_ptr(str as *const i8);
+    if let Ok(s) = cstr.to_str() {
+        let ptr = crate::strings::str_to_uchar_ptr(s);
+        return ptr;
+    }
+    ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
+    if str.is_null() {
+        return ptr::null();
+    }
+    let mut len = 0;
+    while *str.add(len) != 0 {
+        len += 1;
+    }
+    let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
+    let cstr = std::ffi::CString::new(s).unwrap_or_default();
+    let ptr = cstr.as_ptr() as *const u8;
+    std::mem::forget(cstr);
+    ptr
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uchar {
+    if str.is_null() {
+        return ptr::null();
+    }
+    let bytes = std::slice::from_raw_parts(str, len as usize);
+    let s = String::from_utf8_lossy(bytes);
+    let ptr = crate::strings::str_to_uchar_ptr(&s);
+    ptr
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_alloc_strbytes(len: i32) -> *mut hl::uchar {
+    let gc = GC.get_mut().expect("GC");
+    let size = (len as usize + 1) * 2; // u16 per char + null
+    if let Some(ptr) = gc.allocate(size) {
+        let p = ptr.as_ptr() as *mut hl::uchar;
+        std::ptr::write_bytes(p, 0, len as usize + 1);
+        p
+    } else {
+        ptr::null_mut()
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
+    // Hash UTF-8 bytes by first converting to UTF-16
+    if name.is_null() {
+        return 0;
+    }
+    let cstr = std::ffi::CStr::from_ptr(name as *const i8);
+    if let Ok(s) = cstr.to_str() {
+        let utf16 = crate::strings::str_to_uchar_ptr(s);
+        crate::obj::hlp_hash_gen(utf16, true)
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// Misc
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_copy_bytes(dst: *mut u8, src: *const u8, size: i32) {
+    if !dst.is_null() && !src.is_null() && size > 0 {
+        std::ptr::copy_nonoverlapping(src, dst, size as usize);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
+    // Convert buffer content to a string and throw as exception
+    let mut len: i32 = 0;
+    let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
+    if !content.is_null() {
+        let gc = GC.get_mut().expect("GC");
+        let d = gc
+            .allocate(std::mem::size_of::<vdynamic>())
+            .expect("alloc")
+            .as_ptr() as *mut vdynamic;
+        (*d).t = crate::types::hlt_bytes();
+        (*d).v.ptr = content as *mut c_void;
+        hl_throw(d);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_blocking(_enter: bool) {
+    // No-op: threading model doesn't need blocking markers yet
+}

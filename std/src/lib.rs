@@ -17,6 +17,7 @@ pub mod error;
 pub mod fun;
 pub mod gc;
 pub mod hl;
+pub mod hl_compat;
 pub mod maps;
 pub mod math;
 pub mod obj;

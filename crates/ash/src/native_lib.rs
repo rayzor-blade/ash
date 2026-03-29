@@ -30,7 +30,25 @@ pub fn init_std_library() -> Result<()> {
             let std_lib_bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
             std::fs::write(&lib_path, std_lib_bytes).expect("Failed to write std library");
 
-            // Load the library
+            // Load the library with RTLD_GLOBAL so hl_ symbols are visible
+            // to subsequently loaded HDLLs (they link against libhl.dylib symbols).
+            #[cfg(unix)]
+            let lib = {
+                use std::ffi::CString;
+                let path_cstr =
+                    CString::new(lib_path.to_str().unwrap()).expect("invalid path");
+                let handle = libc::dlopen(
+                    path_cstr.as_ptr(),
+                    libc::RTLD_NOW | libc::RTLD_GLOBAL,
+                );
+                if handle.is_null() {
+                    let err = std::ffi::CStr::from_ptr(libc::dlerror());
+                    panic!("Failed to load std library: {:?}", err);
+                }
+                // Wrap in libloading::Library for consistent API
+                Library::from(libloading::os::unix::Library::from_raw(handle))
+            };
+            #[cfg(not(unix))]
             let lib = Library::new(&lib_path).expect("Failed to load std library");
 
             // Initialize the GC before any native calls

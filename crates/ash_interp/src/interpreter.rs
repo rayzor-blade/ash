@@ -3489,26 +3489,9 @@ impl HLInterpreter {
                             let src_type_idx = func.regs[src.0 as usize].0;
                             let src_kind = bytecode.types[src_type_idx].kind;
 
-                            if !self.fn_dyn_castp.is_null()
-                                && src_kind == hl::hl_type_kind_HOBJ
-                                && dst_kind == hl::hl_type_kind_HOBJ
                             {
-                                let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                                let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                                type FnCastp = unsafe extern "C" fn(
-                                    *mut c_void, *mut c_void, *mut c_void,
-                                ) -> *mut c_void;
-                                let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
-                                let mut data = val.as_ptr() as *mut c_void;
-                                let result_ptr = unsafe {
-                                    castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
-                                };
-                                if result_ptr.is_null() {
-                                    NanBoxedValue::null()
-                                } else {
-                                    NanBoxedValue::from_ptr(result_ptr as usize)
-                                }
-                            } else {
+                                // Pointer→pointer cast: just copy the pointer.
+                                // The Haxe code is responsible for type compatibility.
                                 val
                             }
                         }
@@ -4088,25 +4071,12 @@ impl HLInterpreter {
             Opcode::NullCheck { reg } => {
                 let val = frame.registers.get(reg.0);
                 if val.is_null() {
-                    let pc = frame.pc;
-                    let fname = func.name();
-                    // Show surrounding opcodes for debugging context
-                    let start = 0;
-                    let end = func.ops.len().min(120);
-                    let context: Vec<String> = (start..end)
-                        .map(|i| {
-                            let marker = if i == pc { ">>>" } else { "   " };
-                            format!("{} pc={}: {:?}", marker, i, func.ops[i])
-                        })
-                        .collect();
-                    return Err(anyhow!(
-                        "Null pointer access in {} at pc={} reg=r{} (type_kind={})\nOpcodes:\n{}",
-                        fname,
-                        pc,
-                        reg.0,
-                        bytecode.types[func.regs[reg.0 as usize].0].kind,
-                        context.join("\n")
-                    ));
+                    // Throw as an HL exception (like HashLink does) so it can
+                    // be caught by a Trap in the call stack.
+                    return Err(anyhow::Error::new(HLExceptionPropagation {
+                        value: NanBoxedValue::null(),
+                        message: Some("Null access".to_string()),
+                    }));
                 }
             }
 

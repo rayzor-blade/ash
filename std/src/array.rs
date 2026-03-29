@@ -60,10 +60,12 @@ pub unsafe fn hlp_array_blit(dst: *mut varray, dpos: i32, src: *const varray, sp
         return;
     }
     // Guard against misaligned or invalid type pointers
-    if (dst_at as usize) < 0x1000 || (dst_at as usize) % std::mem::align_of::<usize>() != 0 {
+    if (dst_at as usize) < 0x10000 || (dst_at as usize) % std::mem::align_of::<usize>() != 0 {
+        eprintln!("[WARN] array_blit: invalid dst.at={:#x} dst={:p}", dst_at as usize, dst);
         return;
     }
-    if (*dst_at).kind > 22 {
+    if (src_at as usize) < 0x10000 || (src_at as usize) % std::mem::align_of::<usize>() != 0 {
+        eprintln!("[WARN] array_blit: invalid src.at={:#x} src={:p}", src_at as usize, src);
         return;
     }
     let size = hlp_type_size(dst_at);

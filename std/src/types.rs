@@ -184,6 +184,15 @@ pub unsafe extern "C" fn hlp_same_type(a: *mut hl::hl_type, b: *mut hl::hl_type)
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type) -> bool {
+    if t.is_null() || to.is_null() {
+        return false;
+    }
+    if (t as usize) < 0x10000 || (to as usize) < 0x10000 {
+        return false;
+    }
+    if (*t).kind > 22 || (*to).kind > 22 {
+        return false;
+    }
     if t == to {
         return true;
     }
@@ -192,10 +201,18 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
     }
     // HNULL<T> is castable to T and vice versa
     if (*t).kind == hl::hl_type_kind_HNULL {
-        return hlp_safe_cast((*t).__bindgen_anon_1.tparam, to);
+        let tp = (*t).__bindgen_anon_1.tparam;
+        if tp.is_null() || (tp as usize) < 0x10000 {
+            return false;
+        }
+        return hlp_safe_cast(tp, to);
     }
     if (*to).kind == hl::hl_type_kind_HNULL {
-        return hlp_safe_cast(t, (*to).__bindgen_anon_1.tparam);
+        let tp = (*to).__bindgen_anon_1.tparam;
+        if tp.is_null() || (tp as usize) < 0x10000 {
+            return false;
+        }
+        return hlp_safe_cast(t, tp);
     }
     // HFUN and HMETHOD are interchangeable for safe casting
     let t_kind = (*t).kind;
@@ -224,7 +241,12 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
         hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
             let o_init = (*t).__bindgen_anon_1.obj;
             let oto = (*to).__bindgen_anon_1.obj;
-            if o_init.is_null() || oto.is_null() {
+            if o_init.is_null() || oto.is_null()
+                || (o_init as usize) < 0x10000
+                || (oto as usize) < 0x10000
+                || (o_init as usize) % std::mem::align_of::<usize>() != 0
+                || (oto as usize) % std::mem::align_of::<usize>() != 0
+            {
                 return false;
             }
             let mut o = o_init;
@@ -236,11 +258,17 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                     return false;
                 }
                 let sup = (*o).super_;
+                if (sup as usize) < 0x10000 || (sup as usize) % std::mem::align_of::<usize>() != 0 {
+                    return false;
+                }
                 if (*sup).kind != hl::hl_type_kind_HOBJ && (*sup).kind != hl::hl_type_kind_HSTRUCT {
                     return false;
                 }
                 let sup_obj = (*sup).__bindgen_anon_1.obj;
-                if sup_obj.is_null() {
+                if sup_obj.is_null()
+                    || (sup_obj as usize) < 0x10000
+                    || (sup_obj as usize) % std::mem::align_of::<usize>() != 0
+                {
                     return false;
                 }
                 o = sup_obj;

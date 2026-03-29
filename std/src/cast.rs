@@ -386,6 +386,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     if t.is_null() || to.is_null() {
         return ptr::null_mut();
     }
+    // Debug: log type pointers for crash investigation
+    if std::env::var("ASH_DBG_CAST").is_ok() {
+        eprintln!("[cast] t={:p} t.kind={} to={:p} to.kind={}", t, (*t).kind, to, (*to).kind);
+    }
     if t == to || hlp_safe_cast(t, to) {
         return *(data as *mut *mut c_void);
     }
@@ -394,7 +398,12 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
             let t1_obj = (*t).__bindgen_anon_1.obj;
             let t2 = (*to).__bindgen_anon_1.obj;
-            if t1_obj.is_null() || t2.is_null() {
+            if t1_obj.is_null() || t2.is_null()
+                || (t1_obj as usize) < 0x10000
+                || (t2 as usize) < 0x10000
+                || (t1_obj as usize) % std::mem::align_of::<usize>() != 0
+                || (t2 as usize) % std::mem::align_of::<usize>() != 0
+            {
                 return ptr::null_mut();
             }
             let mut t1 = t1_obj;
@@ -406,19 +415,29 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                     break;
                 }
                 let sup = (*t1).super_;
+                if (sup as usize) < 0x10000 || (sup as usize) % std::mem::align_of::<usize>() != 0 {
+                    break;
+                }
                 if (*sup).kind != hl_type_kind_HOBJ {
                     break;
                 }
                 let sup_obj = (*sup).__bindgen_anon_1.obj;
-                if sup_obj.is_null() {
+                if sup_obj.is_null()
+                    || (sup_obj as usize) < 0x10000
+                    || (sup_obj as usize) % std::mem::align_of::<usize>() != 0
+                {
                     break;
                 }
                 t1 = sup_obj;
             }
-            if !(*(*t).__bindgen_anon_1.obj).rt.is_null()
-                && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none()
+            let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
+            if !t_obj_for_cast.is_null()
+                && (t_obj_for_cast as usize) >= 0x10000
+                && !(*t_obj_for_cast).rt.is_null()
+                && ((*t_obj_for_cast).rt as usize) >= 0x10000
+                && !(*(*t_obj_for_cast).rt).castFun.is_none()
             {
-                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(
+                let v = (*(*t_obj_for_cast).rt).castFun.unwrap()(
                     *(data as *mut *mut vdynamic),
                     to,
                 );
@@ -439,10 +458,14 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 }
                 t1 = (*(*t1).super_).__bindgen_anon_1.obj;
             }
-            if !(*(*t).__bindgen_anon_1.obj).rt.is_null()
-                && !(*(*(*t).__bindgen_anon_1.obj).rt).castFun.is_none()
+            let t_obj_for_cast = (*t).__bindgen_anon_1.obj;
+            if !t_obj_for_cast.is_null()
+                && (t_obj_for_cast as usize) >= 0x10000
+                && !(*t_obj_for_cast).rt.is_null()
+                && ((*t_obj_for_cast).rt as usize) >= 0x10000
+                && !(*(*t_obj_for_cast).rt).castFun.is_none()
             {
-                let v = (*(*(*t).__bindgen_anon_1.obj).rt).castFun.unwrap()(
+                let v = (*(*t_obj_for_cast).rt).castFun.unwrap()(
                     *(data as *mut *mut vdynamic),
                     to,
                 );

@@ -52,11 +52,14 @@ enum Mode {
 }
 
 fn main() {
-    // Install SIGSEGV handler for debugging HDLL crashes
+    // Install signal handlers with sigaction for faulting address info
     unsafe {
-        libc::signal(libc::SIGSEGV, crash_handler as libc::sighandler_t);
-        libc::signal(libc::SIGBUS, crash_handler as libc::sighandler_t);
-        libc::signal(libc::SIGABRT, crash_handler as libc::sighandler_t);
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = crash_handler_siginfo as usize;
+        sa.sa_flags = libc::SA_SIGINFO;
+        libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
     }
 
     if let Err(e) = run() {
@@ -65,24 +68,34 @@ fn main() {
     }
 }
 
-extern "C" fn crash_handler(sig: i32) {
+unsafe extern "C" fn crash_handler_siginfo(
+    sig: i32,
+    info: *mut libc::siginfo_t,
+    _ctx: *mut std::ffi::c_void,
+) {
     let name = match sig {
         libc::SIGSEGV => "SIGSEGV",
         libc::SIGBUS => "SIGBUS",
         libc::SIGABRT => "SIGABRT",
         _ => "UNKNOWN",
     };
-    eprintln!("\n=== CRASH: {} (signal {}) ===", name, sig);
+    let fault_addr = if !info.is_null() {
+        (*info).si_addr as usize
+    } else {
+        0
+    };
+    eprintln!(
+        "\n=== CRASH: {} (signal {}) fault_addr={:#x} ===",
+        name, sig, fault_addr
+    );
 
     // Print backtrace
     let bt = std::backtrace::Backtrace::force_capture();
     eprintln!("{}", bt);
 
-    // Re-raise to get core dump
-    unsafe {
-        libc::signal(sig, libc::SIG_DFL);
-        libc::raise(sig);
-    }
+    // Re-raise
+    libc::signal(sig, libc::SIG_DFL);
+    libc::raise(sig);
 }
 
 fn run() -> Result<()> {

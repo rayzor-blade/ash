@@ -5029,6 +5029,9 @@ impl HLInterpreter {
             };
 
             // HNULL(T) parameters expect a vdynamic* pointer, not raw values
+            if std::env::var("ASH_DBG_ALLOC").is_ok() && kind == hl::hl_type_kind_HNULL {
+                eprintln!("[extract_arg] idx={} kind=HNULL val={:?} is_i32={} is_ptr={}", idx, args[idx], args[idx].is_i32(), args[idx].is_ptr());
+            }
             if kind == hl::hl_type_kind_HNULL && !self.fn_make_dyn.is_null() {
                 let val = args[idx];
                 if val.is_null() || val.is_void() {

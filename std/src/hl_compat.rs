@@ -61,7 +61,12 @@ pub unsafe extern "C" fn hl_alloc_array(t: *mut hl_type, size: i32) -> *mut varr
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
-    crate::obj::hlp_alloc_dynamic(t)
+    let result = crate::obj::hlp_alloc_dynamic(t);
+    if std::env::var("ASH_DBG_ALLOC").is_ok() {
+        let kind = if !t.is_null() { (*t).kind } else { 999 };
+        eprintln!("[hl_alloc_dynamic] t={:p} kind={} -> {:p}", t, kind, result);
+    }
+    result
 }
 
 #[no_mangle]

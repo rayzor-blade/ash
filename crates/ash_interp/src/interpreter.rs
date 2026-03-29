@@ -844,10 +844,29 @@ impl HLInterpreter {
             && val.as_ptr() != 0
             && Self::is_primitive_or_bytes_kind(dst_kind)
         {
-            return unsafe {
-                Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
-                    .unwrap_or(val)
-            };
+            // Only attempt unboxing if the pointer looks like a valid vdynamic:
+            // aligned, non-tiny address, and type pointer field also looks valid.
+            let addr = val.as_ptr();
+            if addr > 0x10000 && addr % std::mem::align_of::<usize>() == 0 {
+                let d = addr as *const hl::vdynamic;
+                // Read type pointer — if it's null or misaligned, skip unboxing.
+                // This is safe because the pointer passed all basic validity checks
+                // and we only read one pointer-sized field.
+                let t = unsafe { (*d).t };
+                if !t.is_null() && (t as usize) % std::mem::align_of::<usize>() == 0 {
+                    let kind = unsafe { (*t).kind };
+                    // Only unbox if the source type IS a boxed primitive
+                    if Self::is_primitive_or_bytes_kind(kind) {
+                        return unsafe {
+                            Self::unbox_dynamic_to_kind(
+                                addr as *mut hl::vdynamic,
+                                dst_kind,
+                            )
+                            .unwrap_or(val)
+                        };
+                    }
+                }
+            }
         }
         if val.is_null() {
             return match dst_kind {

@@ -52,9 +52,36 @@ enum Mode {
 }
 
 fn main() {
+    // Install SIGSEGV handler for debugging HDLL crashes
+    unsafe {
+        libc::signal(libc::SIGSEGV, crash_handler as libc::sighandler_t);
+        libc::signal(libc::SIGBUS, crash_handler as libc::sighandler_t);
+        libc::signal(libc::SIGABRT, crash_handler as libc::sighandler_t);
+    }
+
     if let Err(e) = run() {
         eprintln!("Error: {:#}", e);
         process::exit(1);
+    }
+}
+
+extern "C" fn crash_handler(sig: i32) {
+    let name = match sig {
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGABRT => "SIGABRT",
+        _ => "UNKNOWN",
+    };
+    eprintln!("\n=== CRASH: {} (signal {}) ===", name, sig);
+
+    // Print backtrace
+    let bt = std::backtrace::Backtrace::force_capture();
+    eprintln!("{}", bt);
+
+    // Re-raise to get core dump
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
     }
 }
 

@@ -119,6 +119,7 @@ dependencies = [
  "ash_interp",
  "clap",
  "inkwell",
+ "libc",
 ]
 
 [[package]]

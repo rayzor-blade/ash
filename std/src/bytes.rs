@@ -82,6 +82,17 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
     0
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn hlp_bytes_offset(
+    bytes: *mut hl::vbyte,
+    offset: c_int,
+) -> *mut hl::vbyte {
+    if bytes.is_null() {
+        return std::ptr::null_mut();
+    }
+    bytes.add(offset as usize)
+}
+
 pub struct BoyerMooreHorspool {
     shift: [usize; 256],
 }

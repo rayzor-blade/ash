@@ -55,7 +55,7 @@ fn main() {
     // Install signal handlers with sigaction for faulting address info
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = crash_handler_siginfo as usize;
+        sa.sa_sigaction = crash_handler_siginfo as *const () as usize;
         sa.sa_flags = libc::SA_SIGINFO;
         libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
         libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
@@ -73,16 +73,24 @@ unsafe extern "C" fn crash_handler_siginfo(
     info: *mut libc::siginfo_t,
     _ctx: *mut std::ffi::c_void,
 ) {
+    let fault_addr = if !info.is_null() {
+        (*info).si_addr as usize
+    } else {
+        0
+    };
+
+    // If a native call recovery point is armed, siglongjmp back to it
+    // instead of crashing. This handles cases like macOS GL driver bugs
+    // where native code triggers SIGSEGV during normal operation.
+    if ash_interp::native_recovery::try_recover_from_signal(sig, fault_addr) {
+        return; // unreachable — siglongjmp never returns
+    }
+
     let name = match sig {
         libc::SIGSEGV => "SIGSEGV",
         libc::SIGBUS => "SIGBUS",
         libc::SIGABRT => "SIGABRT",
         _ => "UNKNOWN",
-    };
-    let fault_addr = if !info.is_null() {
-        (*info).si_addr as usize
-    } else {
-        0
     };
     eprintln!(
         "\n=== CRASH: {} (signal {}) fault_addr={:#x} ===",

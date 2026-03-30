@@ -4920,6 +4920,29 @@ impl HLInterpreter {
                     return Ok(v);
                 }
             }
+            // macOS OpenGL core profile jumps from GLSL 1.20 → 1.50 (no 1.30/1.40).
+            // Heaps probes #version 130, fails, and treats it as fatal.
+            // Patch the source bytes in-place so the probe succeeds.
+            #[cfg(target_os = "macos")]
+            "gl_shader_source" if args.len() >= 2 && args[1].is_ptr() => {
+                let obj_ptr = args[1].as_ptr() as *const u8;
+                if !obj_ptr.is_null() && (obj_ptr as usize) > 0x10000 {
+                    // HOBJ String: UTF-16 data pointer at offset 8
+                    let data_ptr = unsafe { *(obj_ptr.add(8) as *const *mut u16) };
+                    if !data_ptr.is_null() && (data_ptr as usize) > 0x10000 {
+                        // Read first 12 UTF-16 chars: "#version 1X0"
+                        let prefix = unsafe { std::slice::from_raw_parts(data_ptr, 12) };
+                        let prefix_str = String::from_utf16_lossy(prefix);
+                        if prefix_str.starts_with("#version 130")
+                            || prefix_str.starts_with("#version 140")
+                        {
+                            // Patch char at index 10: '3'/'4' → '5' (UTF-16 LE)
+                            unsafe { *data_ptr.add(10) = b'5' as u16; }
+                        }
+                    }
+                }
+                // Fall through to normal dispatch
+            }
             _ => {}
         }
 
@@ -5009,8 +5032,25 @@ impl HLInterpreter {
         }
 
         if ret_is_float || float_mask != 0 {
+            // Arm recovery for float-dispatch native calls too
+            let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
+            if recovered != 0 {
+                crate::native_recovery::disarm_native_recovery();
+                if trap_installed && !fn_remove_trap.is_null() {
+                    type FnRemoveTrap = unsafe extern "C" fn();
+                    unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+                }
+                let sig = crate::native_recovery::last_recovery_signal();
+                let addr = crate::native_recovery::last_recovery_fault_addr();
+                eprintln!(
+                    "[ash] Recovered from signal {} (fault_addr={:#x}) in native float call: {}",
+                    sig, addr, func_name
+                );
+                return Ok(self.wrap_native_result(0i64, ret_kind));
+            }
             let raw =
                 self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float);
+            crate::native_recovery::disarm_native_recovery();
             if trap_installed && !fn_remove_trap.is_null() {
                 type FnRemoveTrap = unsafe extern "C" fn();
                 unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
@@ -5068,7 +5108,7 @@ impl HLInterpreter {
             self.value_to_i64(args[idx], kind)
         };
 
-        if args.len() > 8 {
+        if args.len() > 12 {
             if trap_installed && !fn_remove_trap.is_null() {
                 type FnRemoveTrap = unsafe extern "C" fn();
                 unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
@@ -5077,6 +5117,30 @@ impl HLInterpreter {
                 "Native call with {} args not yet supported",
                 args.len()
             ));
+        }
+
+        // Arm the native call recovery point so SIGSEGV/SIGBUS from native code
+        // (e.g., macOS GL driver bugs) is caught and turned into a recoverable error.
+        let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
+        if recovered != 0 {
+            // We got here via siglongjmp from the signal handler
+            crate::native_recovery::disarm_native_recovery();
+            if trap_installed && !fn_remove_trap.is_null() {
+                type FnRemoveTrap = unsafe extern "C" fn();
+                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+            }
+            let sig = crate::native_recovery::last_recovery_signal();
+            let addr = crate::native_recovery::last_recovery_fault_addr();
+            let sig_name = match sig {
+                11 => "SIGSEGV",
+                10 => "SIGBUS",
+                _ => "SIGNAL",
+            };
+            eprintln!(
+                "[ash] Recovered from {} (fault_addr={:#x}) in native call: {}",
+                sig_name, addr, func_name
+            );
+            return Ok(self.wrap_native_result(0i64, ret_kind));
         }
 
         // Dispatch based on argument count, using type-aware extraction and wrapping.
@@ -5159,9 +5223,51 @@ impl HLInterpreter {
                         extract_arg(7),
                     )
                 }
+                9 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(
+                        extract_arg(0), extract_arg(1), extract_arg(2),
+                        extract_arg(3), extract_arg(4), extract_arg(5),
+                        extract_arg(6), extract_arg(7), extract_arg(8),
+                    )
+                }
+                10 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(
+                        extract_arg(0), extract_arg(1), extract_arg(2),
+                        extract_arg(3), extract_arg(4), extract_arg(5),
+                        extract_arg(6), extract_arg(7), extract_arg(8),
+                        extract_arg(9),
+                    )
+                }
+                11 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(
+                        extract_arg(0), extract_arg(1), extract_arg(2),
+                        extract_arg(3), extract_arg(4), extract_arg(5),
+                        extract_arg(6), extract_arg(7), extract_arg(8),
+                        extract_arg(9), extract_arg(10),
+                    )
+                }
+                12 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(
+                        extract_arg(0), extract_arg(1), extract_arg(2),
+                        extract_arg(3), extract_arg(4), extract_arg(5),
+                        extract_arg(6), extract_arg(7), extract_arg(8),
+                        extract_arg(9), extract_arg(10), extract_arg(11),
+                    )
+                }
                 _ => 0i64, // arg count is pre-validated above
             }
         };
+
+        // Disarm recovery after successful call
+        crate::native_recovery::disarm_native_recovery();
 
         if trap_installed && !fn_remove_trap.is_null() {
             type FnRemoveTrap = unsafe extern "C" fn();

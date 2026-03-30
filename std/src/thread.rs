@@ -10,6 +10,45 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use crate::hl::vdynamic;
 
 // ============================================================================
+// SDL event pump for single-threaded mode
+// ============================================================================
+// When Heaps' event thread isn't running (thread_create is stubbed),
+// we pump SDL events during lock_wait so the window stays responsive.
+
+static mut SDL_POLL_EVENT_FN: Option<unsafe extern "C" fn(*mut u8) -> i32> = None;
+static SDL_POLL_INIT: std::sync::Once = std::sync::Once::new();
+
+unsafe fn get_sdl_poll_event() -> Option<unsafe extern "C" fn(*mut u8) -> i32> {
+    SDL_POLL_INIT.call_once(|| {
+        // SDL2 is already loaded via sdl.hdll with RTLD_GLOBAL,
+        // so SDL_PollEvent should be resolvable via RTLD_DEFAULT.
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            b"SDL_PollEvent\0".as_ptr() as *const libc::c_char,
+        );
+        if !sym.is_null() {
+            eprintln!("[ash] SDL_PollEvent resolved at {:p}", sym);
+            SDL_POLL_EVENT_FN = Some(std::mem::transmute(sym));
+        } else {
+            eprintln!("[ash] WARNING: SDL_PollEvent not found via dlsym");
+        }
+    });
+    SDL_POLL_EVENT_FN
+}
+
+/// Pump all pending SDL events (non-blocking).
+/// This makes the window visible and responsive on macOS,
+/// which requires event processing on the main thread.
+unsafe fn pump_sdl_events() {
+    if let Some(poll) = get_sdl_poll_event() {
+        let mut event = [0u8; 128]; // SDL_Event is 56 bytes, 128 is plenty
+        while poll(event.as_mut_ptr()) != 0 {
+            // Events are consumed — Heaps will re-query state as needed
+        }
+    }
+}
+
+// ============================================================================
 // Mutex
 // ============================================================================
 
@@ -249,12 +288,65 @@ pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynamic) -> bool {
+pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
     if lock.is_null() {
         return false;
     }
-    hlp_semaphore_acquire(lock);
-    true
+    // Extract timeout in seconds from the vdynamic (nullable f64).
+    // null or negative = wait forever; >= 0 = timed wait.
+    let timeout_secs: Option<f64> = if !timeout.is_null() {
+        let t = timeout as *const crate::hl::vdynamic;
+        let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
+        if kind == 6 {
+            // HF64
+            Some((*t).v.d)
+        } else if kind == 5 {
+            // HF32
+            Some((*t).v.f as f64)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Pump SDL events before waiting — keeps the window responsive
+    // when Heaps' event thread isn't running (single-threaded mode).
+    pump_sdl_events();
+
+    match timeout_secs {
+        Some(secs) if secs >= 0.0 => {
+            let s = lock as *mut HlSemaphore;
+            libc::pthread_mutex_lock(&mut (*s).mutex);
+            if (*s).value > 0 {
+                (*s).value -= 1;
+                libc::pthread_mutex_unlock(&mut (*s).mutex);
+                return true;
+            }
+            // Compute absolute deadline for pthread_cond_timedwait
+            let mut ts: libc::timespec = std::mem::zeroed();
+            libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+            let deadline_ns = (ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9 + secs) * 1e9;
+            ts.tv_sec = (deadline_ns / 1e9) as libc::time_t;
+            ts.tv_nsec = (deadline_ns as i64 % 1_000_000_000) as libc::c_long;
+
+            while (*s).value <= 0 {
+                let ret = libc::pthread_cond_timedwait(&mut (*s).cond, &mut (*s).mutex, &ts);
+                if ret == libc::ETIMEDOUT {
+                    libc::pthread_mutex_unlock(&mut (*s).mutex);
+                    return false;
+                }
+            }
+            (*s).value -= 1;
+            libc::pthread_mutex_unlock(&mut (*s).mutex);
+            true
+        }
+        _ => {
+            // No timeout — block forever
+            hlp_semaphore_acquire(lock);
+            true
+        }
+    }
 }
 
 #[no_mangle]

@@ -43,7 +43,11 @@ unsafe fn pump_sdl_events() {
     if let Some(poll) = get_sdl_poll_event() {
         let mut event = [0u8; 128]; // SDL_Event is 56 bytes, 128 is plenty
         while poll(event.as_mut_ptr()) != 0 {
-            // Events are consumed — Heaps will re-query state as needed
+            // Check for SDL_QUIT (type field is first u32 = 0x100)
+            let event_type = u32::from_ne_bytes([event[0], event[1], event[2], event[3]]);
+            if event_type == 0x100 {
+                std::process::exit(0);
+            }
         }
     }
 }
@@ -310,8 +314,7 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
         None
     };
 
-    // Pump SDL events before waiting — keeps the window responsive
-    // when Heaps' event thread isn't running (single-threaded mode).
+    // Pump SDL events to keep the window responsive on macOS.
     pump_sdl_events();
 
     match timeout_secs {
@@ -334,6 +337,13 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
                 let ret = libc::pthread_cond_timedwait(&mut (*s).cond, &mut (*s).mutex, &ts);
                 if ret == libc::ETIMEDOUT {
                     libc::pthread_mutex_unlock(&mut (*s).mutex);
+                    // Throttle idle loop: sleep ~16ms (~60fps) to avoid
+                    // burning CPU and exhausting GC with temp allocations.
+                    let sleep_ts = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 16_000_000, // 16ms
+                    };
+                    libc::nanosleep(&sleep_ts, std::ptr::null_mut());
                     return false;
                 }
             }
@@ -342,7 +352,13 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
             true
         }
         _ => {
-            // No timeout — block forever
+            // No timeout — pump events and sleep briefly to avoid spin
+            pump_sdl_events();
+            let sleep_ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 16_000_000,
+            };
+            libc::nanosleep(&sleep_ts, std::ptr::null_mut());
             hlp_semaphore_acquire(lock);
             true
         }

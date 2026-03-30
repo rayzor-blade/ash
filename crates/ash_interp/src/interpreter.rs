@@ -289,6 +289,13 @@ pub struct HLInterpreter {
     virtual_hash_fields: HashMap<(usize, i32), NanBoxedValue>,
     /// Optional tiered runtime (hybrid mode).
     tiered_runtime: Option<TieredRuntime>,
+    /// Saved event thread closure (findex, bound_value) from intercepted thread_create.
+    /// Used for cooperative event dispatch: the event closure is called during lock_wait
+    /// to pump SDL events on the main thread without actual threading.
+    event_thread_closure: Option<(usize, Option<NanBoxedValue>)>,
+    /// Whether we're currently inside the event thread closure dispatch
+    /// (prevents recursive calls during lock_wait → event_closure → lock_wait).
+    in_event_dispatch: bool,
 }
 
 impl HLInterpreter {
@@ -448,6 +455,8 @@ impl HLInterpreter {
             virtual_fields: HashMap::new(),
             virtual_hash_fields: HashMap::new(),
             tiered_runtime: None,
+            event_thread_closure: None,
+            in_event_dispatch: false,
         }
     }
 
@@ -4943,6 +4952,51 @@ impl HLInterpreter {
                 }
                 // Fall through to normal dispatch
             }
+            // Cooperative event dispatch: call the saved event thread closure
+            // during lock_wait to pump SDL events before blocking.
+            "lock_wait" if self.event_thread_closure.is_some() && !self.in_event_dispatch => {
+                if let Some((findex, bound)) = self.event_thread_closure.clone() {
+                    self.in_event_dispatch = true;
+                    let mut call_args = Vec::new();
+                    if let Some(v) = bound {
+                        call_args.push(v);
+                    }
+                    let _ = self.call_function(bytecode, native_resolver, findex, &call_args);
+                    self.in_event_dispatch = false;
+                }
+                // Fall through to real lock_wait
+            }
+            // Cooperative threading: save event thread closure instead of creating
+            // a real thread. The closure will be called during lock_wait to pump
+            // SDL events on the main thread.
+            "thread_create" if !args.is_empty() => {
+                let closure_val = args[0];
+                if closure_val.is_ptr() && closure_val.as_ptr() > 0x10000 {
+                    let cl = closure_val.as_ptr() as *const hl::_vclosure;
+                    let findex = unsafe { (*cl).fun as usize }.wrapping_sub(1);
+                    let bound = unsafe {
+                        if (*cl).hasValue != 0 && !(*cl).value.is_null() {
+                            Some(NanBoxedValue::from_ptr((*cl).value as usize))
+                        } else {
+                            None
+                        }
+                    };
+                    eprintln!("[ash] Intercepted thread_create: findex={} bound={}", findex, bound.is_some());
+                    self.event_thread_closure = Some((findex, bound));
+                    // Return a fake non-null thread handle
+                    return Ok(NanBoxedValue::from_ptr(0xDEAD_BEEF));
+                }
+                // Fall through to real call (will return null)
+            }
+            // Cooperative event loop: instead of blocking forever in SDL's event_loop,
+            // pump events non-blocking and return. Called from the saved event thread
+            // closure during lock_wait.
+            "event_loop" => {
+                // Pump SDL events and swap GL buffers
+                let alive = self.pump_events_and_swap();
+                // Return false on SDL_QUIT to exit the Heaps while loop
+                return Ok(NanBoxedValue::from_i32(if alive { 1 } else { 0 }));
+            }
             _ => {}
         }
 
@@ -5534,6 +5588,50 @@ impl HLInterpreter {
             eprintln!("[CALL_METHOD] out={:?}", out);
         }
         Ok(Some(out))
+    }
+
+    /// Cooperative SDL event pump: resolve SDL_PollEvent, poll all pending events,
+    /// and call the Heaps event callback for each via the interpreter.
+    /// Cooperative SDL event pump + buffer swap.
+    /// Pumps SDL events (so the window stays responsive and close works)
+    /// and swaps the GL buffer (so rendered content is presented).
+    /// Returns false if SDL_QUIT was received (app should exit).
+    fn pump_events_and_swap(&mut self) -> bool {
+        let mut alive = true;
+        unsafe {
+            let poll = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_PollEvent\0".as_ptr() as *const i8);
+            let swap = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_GL_SwapWindow\0".as_ptr() as *const i8);
+            let get_win = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_GL_GetCurrentWindow\0".as_ptr() as *const i8);
+
+            if !poll.is_null() {
+                let poll_fn: unsafe extern "C" fn(*mut u8) -> i32 = std::mem::transmute(poll);
+                let mut event_buf = [0u8; 128]; // SDL_Event union
+                while poll_fn(event_buf.as_mut_ptr()) != 0 {
+                    let event_type = u32::from_ne_bytes([event_buf[0], event_buf[1], event_buf[2], event_buf[3]]);
+                    // Log first few event types for debugging
+                    static EVT_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    let c = EVT_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if c < 20 || event_type == 0x100 {
+                        eprintln!("[ash] SDL event type={:#x} ({})", event_type, event_type);
+                    }
+                    if event_type == 0x100 { // SDL_QUIT
+                        eprintln!("[ash] SDL_QUIT received, exiting");
+                        alive = false;
+                    }
+                }
+            }
+
+            // Swap GL buffers
+            if !swap.is_null() && !get_win.is_null() {
+                let get_win_fn: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(get_win);
+                let swap_fn: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(swap);
+                let window = get_win_fn();
+                if !window.is_null() {
+                    swap_fn(window);
+                }
+            }
+        }
+        alive
     }
 
     /// Interpreter-side implementation of bsort_i32 that uses the interpreter's

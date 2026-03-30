@@ -334,7 +334,14 @@ static T_IS_DYNAMIC: [bool; 23] = [
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_is_dynamic(t: *const hl::hl_type) -> bool {
-    T_IS_DYNAMIC[(*t).kind as usize]
+    if t.is_null() {
+        return false;
+    }
+    let kind = (*t).kind as usize;
+    if kind >= T_IS_DYNAMIC.len() {
+        return false;
+    }
+    T_IS_DYNAMIC[kind]
 }
 
 #[no_mangle]

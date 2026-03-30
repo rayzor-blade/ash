@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use std::{collections::HashSet, mem};
 
-const HEAP_SIZE: usize = 1024 * 1024 * 100; // 100 MB
+const HEAP_SIZE: usize = 1024 * 1024 * 512; // 512 MB
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
@@ -153,6 +153,17 @@ impl ImmixAllocator {
 
         self.heap.allocation_point += aligned_size;
         self.heap.alloc_count += 1;
+
+        // Proactive GC: collect every 4096 allocations to avoid OOM in tight loops
+        // (e.g., Heaps main loop allocating temp arrays each frame).
+        if self.heap.alloc_count % 4096 == 0 {
+            let free_ratio = self.heap.free_blocks.len() as f64
+                / (HEAP_SIZE / BLOCK_SIZE) as f64;
+            if free_ratio < 0.25 {
+                self.collect_garbage();
+            }
+        }
+
         Some(result)
     }
 

@@ -1,0 +1,12 @@
+[package]
+name = "ash_sdl"
+version = "0.1.0"
+edition = "2021"
+description = "ASH SDL HDLL — drop-in replacement for HashLink's sdl.hdll"
+
+[lib]
+crate-type = ["cdylib"]
+name = "sdl"
+
+[dependencies]
+libc = "0.2"

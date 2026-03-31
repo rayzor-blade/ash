@@ -1,6 +1,7 @@
 use crate::bytecode::{BytecodeDecoder, DecodedBytecode};
 use crate::hl::*;
 use crate::native_lib::{init_std_library, NativeFunctionResolver};
+use crate::opcodes::Opcode;
 use crate::types::{HLType, HLTypeFun, HLTypeObj, TypeRef, ValueTypeKind};
 use anyhow::{anyhow, Result};
 use inkwell::basic_block::BasicBlock;
@@ -347,21 +348,64 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     fn init_natives(&mut self) -> Result<()> {
-        let natives = self.bytecode.natives.clone();
-        let len = natives.len();
-        for i in 0..len {
-            let native_f = &natives[i];
-            match self.init_native_func(native_f) {
-                Ok(fun_value) => {
-                    self.func_cache.insert(native_f.findex as usize, fun_value);
-                }
-                Err(_) => {
-                    // Missing native — create a stub that returns 0.
-                    // Functions that actually get called will fail at runtime,
-                    // but most bytecodes only use a subset of declared natives.
+        // Tree-shaking: only resolve natives that are actually referenced by
+        // bytecode functions. Bytecodes declare natives for all possible functions
+        // (process, socket, etc.) but only a subset are actually called.
+        let mut needed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        // Scan all bytecode functions for call opcodes referencing native findexes
+        let native_findex_set: std::collections::HashSet<usize> = self
+            .bytecode
+            .natives
+            .iter()
+            .map(|n| n.findex as usize)
+            .collect();
+
+        for func in &self.bytecode.functions {
+            for op in &func.ops {
+                // Extract referenced findex from call opcodes
+                let findex = match op {
+                    Opcode::Call0 { fun, .. } => Some(fun.0),
+                    Opcode::Call1 { fun, .. } => Some(fun.0),
+                    Opcode::Call2 { fun, .. } => Some(fun.0),
+                    Opcode::Call3 { fun, .. } => Some(fun.0),
+                    Opcode::Call4 { fun, .. } => Some(fun.0),
+                    Opcode::CallN { fun, .. } => Some(fun.0),
+                    Opcode::StaticClosure { fun, .. } => Some(fun.0),
+                    _ => None,
+                };
+                if let Some(fi) = findex {
+                    if native_findex_set.contains(&fi) {
+                        needed.insert(fi);
+                    }
                 }
             }
         }
+
+        let natives = self.bytecode.natives.clone();
+        let mut resolved = 0;
+        let mut skipped = 0;
+        for native_f in &natives {
+            let fi = native_f.findex as usize;
+            if !needed.contains(&fi) {
+                skipped += 1;
+                continue; // Tree-shaken: not referenced by any bytecode function
+            }
+            match self.init_native_func(native_f) {
+                Ok(fun_value) => {
+                    self.func_cache.insert(fi, fun_value);
+                    resolved += 1;
+                }
+                Err(_) => {
+                    // Missing symbol — skip silently
+                    skipped += 1;
+                }
+            }
+        }
+        eprintln!(
+            "[ash] JIT natives: {} resolved, {} tree-shaken/skipped (of {} total)",
+            resolved, skipped, natives.len()
+        );
         Ok(())
     }
 

@@ -267,75 +267,27 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Creates a JIT module for the tiered worker thread.
-    /// Skips init_indexes and init_constants which allocate from the GC
-    /// (not thread-safe). The shared runtime provides pre-initialized
-    /// types and constants from the main thread instead.
+    /// Uses the full Self::new() constructor. GC access is made thread-safe
+    /// via hlp_gc_lock/hlp_gc_unlock around GC-allocating operations.
     fn new_for_tiered(context: &'ctx Context, path: &Path) -> Self {
         init_std_library();
 
-        let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
-
-        let module = context.create_module("Hashlink");
-        let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::Aggressive)
-            .expect("Failed to initialize execution engine");
-
-        let native_function_resolver = NativeFunctionResolver::new();
-
-        let types_ = bytecode.types.clone();
-        let type_cache: HashMap<usize, AnyTypeEnum<'ctx>> = HashMap::new();
-        let initialized_type_cache: HashMap<usize, BasicValueEnum<'ctx>> = HashMap::new();
-
-        let nfuncs = bytecode.functions.len() + bytecode.natives.len();
-
-        let mut m = JITModule {
-            context,
-            module,
-            builder: context.create_builder(),
-            execution_engine,
-            bytecode,
-            types_,
-            type_cache,
-            initialized_type_cache,
-            type_info_globals: HashMap::new(),
-            findexes: HashMap::new(),
-            func_types: vec![std::ptr::null_mut(); nfuncs],
-            func_cache: HashMap::new(),
-            native_function_resolver,
-            int_globals: Vec::new(),
-            float_globals: Vec::new(),
-            string_globals: Vec::new(),
-            bytes_globals: Vec::new(),
-            globals: HashMap::new(),
-            globals_data: Vec::new(),
-            pending_compilations: Vec::new(),
-            c_ptr_to_type_index: HashMap::new(),
-            hl_type_struct_type: None,
-            functions_ptrs: vec![std::ptr::null_mut(); nfuncs],
-            shared_runtime: None,
-            hot_reload: false,
-        };
-
-        // Discover and load HDLLs
-        let search_dir = path.parent().unwrap_or(Path::new("."));
-        m.native_function_resolver
-            .discover_and_load_libraries(search_dir, &m.bytecode.natives)
-            .expect("Failed to discover HDLL libraries");
-
-        // Resolve only needed natives (tree-shaken)
-        m.init_natives()
-            .expect("Failed to initialize native functions");
-
-        m.setup_callbacks();
-
-        // Build function index tables (findex → FuncPtr, func_types) without
-        // GC-allocating type init. The shared runtime provides type data instead.
-        m.init_findexes_only()
-            .expect("Failed to initialize function indexes");
-
-        // Skip init_constants() — the shared runtime provides constants.
-
-        m
+        // Lock the GC during init so the worker thread can safely allocate
+        // (init_indexes calls hlp_init_enum/hlp_init_virtual which use GC).
+        unsafe {
+            let lock_fn = libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_lock\0".as_ptr() as *const _);
+            let unlock_fn = libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_unlock\0".as_ptr() as *const _);
+            if !lock_fn.is_null() {
+                let lock: unsafe extern "C" fn() = std::mem::transmute(lock_fn);
+                lock();
+            }
+            let m = Self::new(context, path);
+            if !unlock_fn.is_null() {
+                let unlock: unsafe extern "C" fn() = std::mem::transmute(unlock_fn);
+                unlock();
+            }
+            m
+        }
     }
 
     /// Build findexes and func_types tables without initializing HOBJ/HENUM types.

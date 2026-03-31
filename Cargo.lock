@@ -142,6 +142,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_sdl"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "ash_std"
 version = "0.1.0"
 dependencies = [

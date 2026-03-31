@@ -17,6 +17,21 @@ const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
 pub static mut GC: OnceLock<ImmixAllocator> = OnceLock::new();
 pub static HL_GLOBAL_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 
+// Thread-safe GC access for the JIT worker thread.
+static GC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static mut GC_LOCK_GUARD: Option<std::sync::MutexGuard<'static, ()>> = None;
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_lock() {
+    let guard = GC_MUTEX.lock().unwrap();
+    GC_LOCK_GUARD = Some(std::mem::transmute(guard));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_unlock() {
+    GC_LOCK_GUARD = None;
+}
+
 struct ImmixHeap {
     memory: Box<[u8; HEAP_SIZE]>,
     free_blocks: Vec<usize>,

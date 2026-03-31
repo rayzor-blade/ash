@@ -283,10 +283,7 @@ pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_lock_create() -> *mut c_void {
-    // Initialize with counter=1 so the first lock_wait returns true.
-    // In single-threaded mode (no event thread), this ensures the MainLoop's
-    // first tick processes the pending onReady callback that System.init added.
-    hlp_semaphore_alloc(1)
+    hlp_semaphore_alloc(0)
 }
 
 #[no_mangle]
@@ -295,27 +292,34 @@ pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynamic) -> bool {
+pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
     if lock.is_null() {
         return false;
     }
-    // Non-blocking lock check — matches HashLink's !HL_THREADS behavior.
-    // The single-threaded VM checks the counter and returns immediately:
-    //   counter > 0 → decrement, return true (event available)
-    //   counter == 0 → return false (no events, caller runs callbacks)
-    // This is critical: returning false triggers MainLoop.tick() to run
-    // timer callbacks and loopFunc (the render loop).
     let s = lock as *mut HlSemaphore;
+    // Debug: log lock_wait calls
+    // Fast path: counter > 0, consume and return true
     if (*s).value > 0 {
         (*s).value -= 1;
         return true;
     }
 
-    // No events — pump SDL events and throttle to ~60fps
+    // Extract timeout (null = forever, 0 = immediate poll, >0 = wait)
+    let timeout_secs: f64 = if !timeout.is_null() {
+        let t = timeout as *const crate::hl::vdynamic;
+        let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
+        if kind == 6 { (*t).v.d } else if kind == 5 { (*t).v.f as f64 } else { -1.0 }
+    } else {
+        -1.0
+    };
+
+    // Pump SDL events and sleep briefly before returning false.
+    // The sleep throttles the loop to ~60fps and ensures timers
+    // expire between lock_wait calls.
     pump_sdl_events();
     let sleep_ts = libc::timespec {
         tv_sec: 0,
-        tv_nsec: 16_000_000, // 16ms
+        tv_nsec: 1_000_000, // 1ms — enough for Timer.delay(cb, 1) to expire
     };
     libc::nanosleep(&sleep_ts, std::ptr::null_mut());
     false

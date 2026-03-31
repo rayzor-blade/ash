@@ -292,78 +292,32 @@ pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
+pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynamic) -> bool {
     if lock.is_null() {
         return false;
     }
-    // Extract timeout in seconds from the vdynamic (nullable f64).
-    // null or negative = wait forever; >= 0 = timed wait.
-    let timeout_secs: Option<f64> = if !timeout.is_null() {
-        let t = timeout as *const crate::hl::vdynamic;
-        let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
-        if kind == 6 {
-            // HF64
-            Some((*t).v.d)
-        } else if kind == 5 {
-            // HF32
-            Some((*t).v.f as f64)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Pump SDL events to keep the window responsive on macOS.
-    pump_sdl_events();
-
-    match timeout_secs {
-        Some(secs) if secs >= 0.0 => {
-            let s = lock as *mut HlSemaphore;
-            libc::pthread_mutex_lock(&mut (*s).mutex);
-            if (*s).value > 0 {
-                (*s).value -= 1;
-                libc::pthread_mutex_unlock(&mut (*s).mutex);
-                return true;
-            }
-            // Compute absolute deadline for pthread_cond_timedwait
-            let mut ts: libc::timespec = std::mem::zeroed();
-            libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
-            let deadline_ns = (ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9 + secs) * 1e9;
-            ts.tv_sec = (deadline_ns / 1e9) as libc::time_t;
-            ts.tv_nsec = (deadline_ns as i64 % 1_000_000_000) as libc::c_long;
-
-            while (*s).value <= 0 {
-                let ret = libc::pthread_cond_timedwait(&mut (*s).cond, &mut (*s).mutex, &ts);
-                if ret == libc::ETIMEDOUT {
-                    libc::pthread_mutex_unlock(&mut (*s).mutex);
-                    // Throttle idle loop: sleep ~16ms (~60fps) to avoid
-                    // burning CPU and exhausting GC with temp allocations.
-                    let sleep_ts = libc::timespec {
-                        tv_sec: 0,
-                        tv_nsec: 16_000_000, // 16ms
-                    };
-                    libc::nanosleep(&sleep_ts, std::ptr::null_mut());
-                    return false;
-                }
-            }
-            (*s).value -= 1;
-            libc::pthread_mutex_unlock(&mut (*s).mutex);
-            true
-        }
-        _ => {
-            // No timeout — pump events and sleep briefly to avoid spin
-            pump_sdl_events();
-            let sleep_ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 16_000_000,
-            };
-            libc::nanosleep(&sleep_ts, std::ptr::null_mut());
-            hlp_semaphore_acquire(lock);
-            true
-        }
+    // Non-blocking lock check — matches HashLink's !HL_THREADS behavior.
+    // The single-threaded VM checks the counter and returns immediately:
+    //   counter > 0 → decrement, return true (event available)
+    //   counter == 0 → return false (no events, caller runs callbacks)
+    // This is critical: returning false triggers MainLoop.tick() to run
+    // timer callbacks and loopFunc (the render loop).
+    let s = lock as *mut HlSemaphore;
+    if (*s).value > 0 {
+        (*s).value -= 1;
+        return true;
     }
+
+    // No events — pump SDL events and throttle to ~60fps
+    pump_sdl_events();
+    let sleep_ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 16_000_000, // 16ms
+    };
+    libc::nanosleep(&sleep_ts, std::ptr::null_mut());
+    false
 }
+
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_lock_free(lock: *mut c_void) {

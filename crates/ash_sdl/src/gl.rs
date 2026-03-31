@@ -131,7 +131,12 @@ unsafe fn zidx(val: *mut vdynamic) -> u32 {
 
 unsafe extern "C" fn gl_init() -> bool { true } // On macOS, GL functions are linked statically
 unsafe extern "C" fn gl_is_context_lost() -> bool { false }
-unsafe extern "C" fn gl_clear(bits: i32) { glClear(bits as u32); }
+unsafe extern "C" fn gl_clear(bits: i32) {
+    static CLEAR_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let c = CLEAR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if c < 5 { eprintln!("[ash_sdl] gl_clear #{} bits={:#x}", c, bits); }
+    glClear(bits as u32);
+}
 unsafe extern "C" fn gl_get_error() -> i32 { glGetError() as i32 }
 unsafe extern "C" fn gl_scissor(x: i32, y: i32, w: i32, h: i32) { glScissor(x, y, w, h); }
 unsafe extern "C" fn gl_clear_color(r: f64, g: f64, b: f64, a: f64) { glClearColor(r as f32, g as f32, b as f32, a as f32); }

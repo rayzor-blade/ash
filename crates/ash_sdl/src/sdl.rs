@@ -445,7 +445,12 @@ unsafe extern "C" fn sdl_win_get_opacity(win: *mut c_void) -> f64 {
 unsafe extern "C" fn sdl_win_set_opacity(win: *mut c_void, opacity: f64) -> bool {
     SDL_SetWindowOpacity(win, opacity as f32) == 0
 }
-unsafe extern "C" fn sdl_win_swap_window(win: *mut c_void) { SDL_GL_SwapWindow(win); }
+unsafe extern "C" fn sdl_win_swap_window(win: *mut c_void) {
+    static SWAP_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let c = SWAP_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if c < 5 { eprintln!("[ash_sdl] win_swap_window #{}", c); }
+    SDL_GL_SwapWindow(win);
+}
 unsafe extern "C" fn sdl_win_render_to(win: *mut c_void, ctx: *mut c_void) { SDL_GL_MakeCurrent(win, ctx); }
 unsafe extern "C" fn sdl_win_destroy(win: *mut c_void, ctx: *mut c_void) {
     // Must detach GL context before destroying the window to avoid

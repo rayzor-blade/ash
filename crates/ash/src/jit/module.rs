@@ -339,6 +339,7 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Build findexes and func_types tables without initializing HOBJ/HENUM types.
+    /// Copies func_types and functions_ptrs from the shared runtime if available.
     /// Safe to call from the worker thread (no GC allocation).
     fn init_findexes_only(&mut self) -> Result<()> {
         let natives = self.bytecode.natives.clone();
@@ -346,13 +347,38 @@ impl<'ctx> JITModule<'ctx> {
         let funs = self.bytecode.functions.clone();
         let funs_len = funs.len();
 
-        self.func_types = vec![std::ptr::null_mut(); funs_len + native_len];
-
         let max_findex = std::cmp::max(
             funs.iter().map(|f| f.findex as usize).max().unwrap_or(0),
             natives.iter().map(|n| n.findex as usize).max().unwrap_or(0),
         ) + 1;
-        self.functions_ptrs = vec![std::ptr::null_mut(); max_findex];
+
+        // Copy func_types and functions_ptrs from the shared runtime (main thread)
+        // instead of building them from scratch (which requires GC allocation).
+        if let Some(shared) = &self.shared_runtime {
+            if !shared.module_ctx.is_null() {
+                let ctx = unsafe { &*shared.module_ctx };
+                self.func_types = Vec::with_capacity(max_findex);
+                self.functions_ptrs = Vec::with_capacity(max_findex);
+                for i in 0..max_findex {
+                    self.func_types.push(if !ctx.functions_types.is_null() {
+                        unsafe { *ctx.functions_types.add(i) }
+                    } else {
+                        std::ptr::null_mut()
+                    });
+                    self.functions_ptrs.push(if !ctx.functions_ptrs.is_null() {
+                        unsafe { *ctx.functions_ptrs.add(i) }
+                    } else {
+                        std::ptr::null_mut()
+                    });
+                }
+            } else {
+                self.func_types = vec![std::ptr::null_mut(); max_findex];
+                self.functions_ptrs = vec![std::ptr::null_mut(); max_findex];
+            }
+        } else {
+            self.func_types = vec![std::ptr::null_mut(); max_findex];
+            self.functions_ptrs = vec![std::ptr::null_mut(); max_findex];
+        }
 
         // Register bytecode functions
         for fun in &funs {

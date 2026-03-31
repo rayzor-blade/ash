@@ -260,10 +260,78 @@ impl<'ctx> JITModule<'ctx> {
         path: &Path,
         shared: SharedRuntimeHandles,
     ) -> Self {
-        let mut module = Self::new(context, path);
+        let mut module = Self::new_for_tiered(context, path);
         module.shared_runtime = Some(shared.clone());
         module.apply_shared_runtime_overrides(&shared);
         module
+    }
+
+    /// Creates a JIT module for the tiered worker thread.
+    /// Skips init_indexes and init_constants which allocate from the GC
+    /// (not thread-safe). The shared runtime provides pre-initialized
+    /// types and constants from the main thread instead.
+    fn new_for_tiered(context: &'ctx Context, path: &Path) -> Self {
+        init_std_library();
+
+        let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+
+        let module = context.create_module("Hashlink");
+        let execution_engine = module
+            .create_jit_execution_engine(OptimizationLevel::Aggressive)
+            .expect("Failed to initialize execution engine");
+
+        let native_function_resolver = NativeFunctionResolver::new();
+
+        let types_ = bytecode.types.clone();
+        let type_cache: HashMap<usize, AnyTypeEnum<'ctx>> = HashMap::new();
+        let initialized_type_cache: HashMap<usize, BasicValueEnum<'ctx>> = HashMap::new();
+
+        let nfuncs = bytecode.functions.len() + bytecode.natives.len();
+
+        let mut m = JITModule {
+            context,
+            module,
+            builder: context.create_builder(),
+            execution_engine,
+            bytecode,
+            types_,
+            type_cache,
+            initialized_type_cache,
+            type_info_globals: HashMap::new(),
+            findexes: HashMap::new(),
+            func_types: vec![std::ptr::null_mut(); nfuncs],
+            func_cache: HashMap::new(),
+            native_function_resolver,
+            int_globals: Vec::new(),
+            float_globals: Vec::new(),
+            string_globals: Vec::new(),
+            bytes_globals: Vec::new(),
+            globals: HashMap::new(),
+            globals_data: Vec::new(),
+            pending_compilations: Vec::new(),
+            c_ptr_to_type_index: HashMap::new(),
+            hl_type_struct_type: None,
+            functions_ptrs: vec![std::ptr::null_mut(); nfuncs],
+            shared_runtime: None,
+            hot_reload: false,
+        };
+
+        // Discover and load HDLLs
+        let search_dir = path.parent().unwrap_or(Path::new("."));
+        m.native_function_resolver
+            .discover_and_load_libraries(search_dir, &m.bytecode.natives)
+            .expect("Failed to discover HDLL libraries");
+
+        // Resolve only needed natives (tree-shaken)
+        m.init_natives()
+            .expect("Failed to initialize native functions");
+
+        m.setup_callbacks();
+
+        // Skip init_indexes() and init_constants() — they allocate from the GC
+        // which is not thread-safe. The shared runtime provides these instead.
+
+        m
     }
 
     fn apply_shared_runtime_overrides(&mut self, shared: &SharedRuntimeHandles) {

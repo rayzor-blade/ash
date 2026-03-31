@@ -283,7 +283,10 @@ pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_lock_create() -> *mut c_void {
-    hlp_semaphore_alloc(0)
+    // Initialize with counter=1 so the first lock_wait returns true.
+    // In single-threaded mode (no event thread), this ensures the MainLoop's
+    // first tick processes the pending onReady callback that System.init added.
+    hlp_semaphore_alloc(1)
 }
 
 #[no_mangle]
@@ -553,5 +556,8 @@ pub unsafe extern "C" fn hlp_track_call(_mode: i32, _data: *mut c_void) {}
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
+    eprintln!("[ash] sys_exit({})", code);
+    // Print backtrace for debugging
+    eprintln!("{}", std::backtrace::Backtrace::force_capture());
     std::process::exit(code);
 }

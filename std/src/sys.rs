@@ -202,6 +202,22 @@ pub unsafe extern "C" fn hlp_sys_string(_v: *mut c_void) -> *const vbyte {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_set_flags(_v: i32) {}
 
+// The VM event loop function, set by haxe.MainLoop via @:hlNative("std","sys_set_loop").
+// After main() returns, the interpreter should call this in a loop.
+static mut SYS_LOOP_FUNC: *mut std::ffi::c_void = std::ptr::null_mut();
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_set_loop(func: *mut std::ffi::c_void) {
+    eprintln!("[ash] hlp_sys_set_loop called with {:p}", func);
+    SYS_LOOP_FUNC = func;
+}
+
+/// Returns the registered loop function (for the interpreter to call after main).
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_get_loop() -> *mut std::ffi::c_void {
+    SYS_LOOP_FUNC
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_resolve_symbol(
     _name: *const u8,

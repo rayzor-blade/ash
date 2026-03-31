@@ -1344,7 +1344,49 @@ impl HLInterpreter {
         self.init_constants(bytecode, native_resolver)?;
 
         let entry_findex = bytecode.entrypoint as usize;
-        self.call_function(bytecode, native_resolver, entry_findex, &[])
+        let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
+
+        // After main() returns, run the VM event loop.
+        // haxe.MainLoop registers its tick function via hlp_sys_set_loop.
+        // The HashLink VM calls this in a loop after the entrypoint returns.
+        // This is what drives callbacks, timers, and the render loop.
+        let get_loop = native_resolver
+            .resolve_function("std", "hlp_sys_get_loop")
+            .unwrap_or(std::ptr::null_mut());
+        eprintln!("[ash] Post-main: hlp_sys_get_loop={:p}", get_loop);
+        if !get_loop.is_null() {
+            type FnGetLoop = unsafe extern "C" fn() -> *mut c_void;
+            let get: FnGetLoop = unsafe { std::mem::transmute(get_loop) };
+            let loop_fn = unsafe { get() };
+            if !loop_fn.is_null() {
+                // The loop function is a vclosure — extract findex from stub pointer
+                let cl = loop_fn as *const hl::_vclosure;
+                let findex = unsafe { (*cl).fun as usize }.wrapping_sub(1);
+                let bound = unsafe {
+                    if (*cl).hasValue != 0 && !(*cl).value.is_null() {
+                        Some(NanBoxedValue::from_ptr((*cl).value as usize))
+                    } else {
+                        None
+                    }
+                };
+                eprintln!("[ash] Entering VM event loop (findex={})", findex);
+                loop {
+                    let mut args = Vec::new();
+                    if let Some(v) = bound {
+                        args.push(v);
+                    }
+                    match self.call_function(bytecode, native_resolver, findex, &args) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("[ash] VM event loop error: {:#}", e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Initialize bytecode constants into the globals array.

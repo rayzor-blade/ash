@@ -2,13 +2,12 @@ class Main extends hxd.App {
     var time:Float = 0;
 
     override function init() {
-        // No text/font — just colored rectangles to prove rendering works
+        trace("=== Main.init() called ===");
         engine.backgroundColor = 0xFF2244AA;
     }
 
     override function update(dt:Float) {
         time += dt;
-        // Cycle background color
         var r = Std.int(128 + 127 * Math.sin(time));
         var g = Std.int(128 + 127 * Math.sin(time * 0.7));
         var b = Std.int(128 + 127 * Math.sin(time * 1.3));
@@ -16,6 +15,8 @@ class Main extends hxd.App {
     }
 
     static function main() {
+        trace("=== main() START ===");
         new Main();
+        trace("=== main() after new Main ===");
     }
 }

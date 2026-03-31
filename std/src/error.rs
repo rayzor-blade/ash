@@ -229,6 +229,14 @@ pub unsafe extern "C" fn hlp_call_stack_raw(_arr: *mut varray) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
+    // Log the exception for debugging
+    if !v.is_null() {
+        let t = (*v).t;
+        let kind = if !t.is_null() { (*t).kind } else { 999 };
+        eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
+    } else {
+        eprintln!("[ash] hlp_throw: null");
+    }
     let gc = GC.get_mut().expect("expected GC");
     let current = *gc.current_trap.borrow();
 

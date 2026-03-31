@@ -328,10 +328,45 @@ impl<'ctx> JITModule<'ctx> {
 
         m.setup_callbacks();
 
-        // Skip init_indexes() and init_constants() — they allocate from the GC
-        // which is not thread-safe. The shared runtime provides these instead.
+        // Build function index tables (findex → FuncPtr, func_types) without
+        // GC-allocating type init. The shared runtime provides type data instead.
+        m.init_findexes_only()
+            .expect("Failed to initialize function indexes");
+
+        // Skip init_constants() — the shared runtime provides constants.
 
         m
+    }
+
+    /// Build findexes and func_types tables without initializing HOBJ/HENUM types.
+    /// Safe to call from the worker thread (no GC allocation).
+    fn init_findexes_only(&mut self) -> Result<()> {
+        let natives = self.bytecode.natives.clone();
+        let native_len = natives.len();
+        let funs = self.bytecode.functions.clone();
+        let funs_len = funs.len();
+
+        self.func_types = vec![std::ptr::null_mut(); funs_len + native_len];
+
+        let max_findex = std::cmp::max(
+            funs.iter().map(|f| f.findex as usize).max().unwrap_or(0),
+            natives.iter().map(|n| n.findex as usize).max().unwrap_or(0),
+        ) + 1;
+        self.functions_ptrs = vec![std::ptr::null_mut(); max_findex];
+
+        // Register bytecode functions
+        for fun in &funs {
+            let findex = fun.findex as usize;
+            self.findexes.insert(findex, FuncPtr::Fun(fun.clone()));
+        }
+
+        // Register native functions
+        for nat in &natives {
+            let findex = nat.findex as usize;
+            self.findexes.insert(findex, FuncPtr::Native(nat.clone()));
+        }
+
+        Ok(())
     }
 
     fn apply_shared_runtime_overrides(&mut self, shared: &SharedRuntimeHandles) {

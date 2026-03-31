@@ -4952,51 +4952,53 @@ impl HLInterpreter {
                 }
                 // Fall through to normal dispatch
             }
-            // Cooperative event dispatch: call the saved event thread closure
-            // during lock_wait to pump SDL events before blocking.
-            "lock_wait" if self.event_thread_closure.is_some() && !self.in_event_dispatch => {
-                if let Some((findex, bound)) = self.event_thread_closure.clone() {
-                    self.in_event_dispatch = true;
-                    let mut call_args = Vec::new();
-                    if let Some(v) = bound {
-                        call_args.push(v);
-                    }
-                    let _ = self.call_function(bytecode, native_resolver, findex, &call_args);
-                    self.in_event_dispatch = false;
-                }
-                // Fall through to real lock_wait
-            }
-            // Cooperative threading: save event thread closure instead of creating
-            // a real thread. The closure will be called during lock_wait to pump
-            // SDL events on the main thread.
+            // thread_create: return fake non-null handle so Heaps doesn't error.
             "thread_create" if !args.is_empty() => {
-                let closure_val = args[0];
-                if closure_val.is_ptr() && closure_val.as_ptr() > 0x10000 {
-                    let cl = closure_val.as_ptr() as *const hl::_vclosure;
-                    let findex = unsafe { (*cl).fun as usize }.wrapping_sub(1);
-                    let bound = unsafe {
-                        if (*cl).hasValue != 0 && !(*cl).value.is_null() {
-                            Some(NanBoxedValue::from_ptr((*cl).value as usize))
-                        } else {
-                            None
+                return Ok(NanBoxedValue::from_ptr(0xDEAD_BEEF));
+            }
+            // Simulate event thread: poll SDL events and release the lock
+            // so the main loop wakes up and processes them.
+            "lock_wait" => {
+                // Call the real sdl event_loop to fill the shared event_data,
+                // then release the lock so the main loop can process it.
+                // We find the event_data and lock from Heaps' globals indirectly:
+                // just pump SDL events so the window is responsive, and release
+                // the lock (args[0]) to unblock the main loop.
+                if args.len() >= 1 && args[0].is_ptr() && args[0].as_ptr() > 0x10000 {
+                    let lock_ptr = args[0].as_ptr() as *mut c_void;
+                    // Pump SDL events to keep window responsive
+                    unsafe {
+                        let poll = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_PollEvent\0".as_ptr() as *const i8);
+                        if !poll.is_null() {
+                            let poll_fn: unsafe extern "C" fn(*mut u8) -> i32 = std::mem::transmute(poll);
+                            let mut buf = [0u8; 128];
+                            while poll_fn(buf.as_mut_ptr()) != 0 {
+                                let etype = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                                if etype == 0x100 { // SDL_QUIT
+                                    std::process::exit(0);
+                                }
+                            }
                         }
-                    };
-                    eprintln!("[ash] Intercepted thread_create: findex={} bound={}", findex, bound.is_some());
-                    self.event_thread_closure = Some((findex, bound));
-                    // Return a fake non-null thread handle
-                    return Ok(NanBoxedValue::from_ptr(0xDEAD_BEEF));
+                    }
+                    // Release the lock so the main loop unblocks
+                    let fn_lock_release = native_resolver
+                        .resolve_function("std", "hlp_lock_release")
+                        .unwrap_or(std::ptr::null_mut());
+                    if !fn_lock_release.is_null() {
+                        let release: unsafe extern "C" fn(*mut c_void) =
+                            unsafe { std::mem::transmute(fn_lock_release) };
+                        unsafe { release(lock_ptr) };
+                    }
                 }
-                // Fall through to real call (will return null)
+                // Fall through to real lock_wait (which should return immediately
+                // since we just released the lock)
             }
             // Cooperative event loop: instead of blocking forever in SDL's event_loop,
             // pump events non-blocking and return. Called from the saved event thread
             // closure during lock_wait.
-            "event_loop" => {
-                // Pump SDL events and swap GL buffers
-                let alive = self.pump_events_and_swap();
-                // Return false on SDL_QUIT to exit the Heaps while loop
-                return Ok(NanBoxedValue::from_i32(if alive { 1 } else { 0 }));
-            }
+            // event_loop takes _DYN (event_data struct), NOT a callback.
+            // Let it fall through to the real sdl.hdll native which fills
+            // the struct with SDL event data. No interception needed.
             _ => {}
         }
 
@@ -5626,6 +5628,10 @@ impl HLInterpreter {
                 let get_win_fn: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(get_win);
                 let swap_fn: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(swap);
                 let window = get_win_fn();
+                static SWAP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !SWAP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("[ash] SDL_GL_SwapWindow: window={:p} swap_fn={:p}", window, swap as *const ());
+                }
                 if !window.is_null() {
                     swap_fn(window);
                 }

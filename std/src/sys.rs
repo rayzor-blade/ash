@@ -203,6 +203,26 @@ pub unsafe extern "C" fn hlp_sys_string(_v: *mut c_void) -> *const vbyte {
 pub unsafe extern "C" fn hlp_sys_set_flags(_v: i32) {}
 
 #[no_mangle]
+pub unsafe extern "C" fn hlp_resolve_symbol(
+    _name: *const u8,
+    _lib: *const u8,
+    _p: *mut std::ffi::c_void,
+) -> *mut std::ffi::c_void {
+    // Runtime symbol resolution — used by JIT for dynamic linking.
+    // Resolve via dlsym since all libs are loaded with RTLD_GLOBAL.
+    if !_name.is_null() {
+        let sym = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            _name as *const libc::c_char,
+        );
+        if !sym.is_null() {
+            return sym;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
     std::ptr::null_mut()
 }

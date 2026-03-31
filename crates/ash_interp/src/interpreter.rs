@@ -1732,48 +1732,12 @@ impl HLInterpreter {
     }
 
     fn is_v1_tierable_opcode(op: &Opcode) -> bool {
-        matches!(
+        // Allow all opcodes the full JIT supports. The v1 whitelist was too
+        // conservative — it blocked GetThis/GetGlobal/Call/Field etc., preventing
+        // any real Heaps functions from being promoted.
+        !matches!(
             op,
-            Opcode::Nop
-                | Opcode::Label
-                | Opcode::Mov { .. }
-                | Opcode::Int { .. }
-                | Opcode::Float { .. }
-                | Opcode::Bool { .. }
-                | Opcode::Null { .. }
-                | Opcode::Add { .. }
-                | Opcode::Sub { .. }
-                | Opcode::Mul { .. }
-                | Opcode::SDiv { .. }
-                | Opcode::UDiv { .. }
-                | Opcode::SMod { .. }
-                | Opcode::UMod { .. }
-                | Opcode::Shl { .. }
-                | Opcode::SShr { .. }
-                | Opcode::UShr { .. }
-                | Opcode::And { .. }
-                | Opcode::Or { .. }
-                | Opcode::Xor { .. }
-                | Opcode::Neg { .. }
-                | Opcode::Not { .. }
-                | Opcode::Incr { .. }
-                | Opcode::Decr { .. }
-                | Opcode::JEq { .. }
-                | Opcode::JNotEq { .. }
-                | Opcode::JSGte { .. }
-                | Opcode::JSGt { .. }
-                | Opcode::JSLte { .. }
-                | Opcode::JSLt { .. }
-                | Opcode::JUGte { .. }
-                | Opcode::JULt { .. }
-                | Opcode::JNotLt { .. }
-                | Opcode::JNotGte { .. }
-                | Opcode::JTrue { .. }
-                | Opcode::JFalse { .. }
-                | Opcode::JNull { .. }
-                | Opcode::JNotNull { .. }
-                | Opcode::JAlways { .. }
-                | Opcode::Ret { .. }
+            Opcode::Prefetch { .. } | Opcode::Asm { .. }
         )
     }
 

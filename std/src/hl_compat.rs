@@ -46,7 +46,6 @@ hlt_global!(hlt_array, 12); // HARRAY
 hlt_global!(hlt_dynobj, 16); // HDYNOBJ
 hlt_global!(hlt_abstract, 17); // HABSTRACT
 
-use crate::gc::{ImmixAllocator, GC};
 use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vbyte, vdynamic};
 use crate::strings;
 
@@ -161,7 +160,7 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32) -> *mut c_void {
-    let gc = GC.get_mut().expect("GC");
+    let mut gc = crate::gc::gc_locked();
     if let Some(ptr) = gc.allocate(size as usize) {
         let p = ptr.as_ptr() as *mut vdynamic;
         (*p).t = t;
@@ -173,13 +172,13 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
-    let gc = GC.get_mut().expect("GC");
+    let mut gc = crate::gc::gc_locked();
     gc.register_persistent(ptr as *mut vdynamic);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
-    let gc = GC.get_mut().expect("GC");
+    let mut gc = crate::gc::gc_locked();
     gc.unregister_persistent(ptr as *mut vdynamic);
 }
 
@@ -245,7 +244,7 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_alloc_strbytes(len: i32) -> *mut hl::uchar {
-    let gc = GC.get_mut().expect("GC");
+    let mut gc = crate::gc::gc_locked();
     let size = (len as usize + 1) * 2; // u16 per char + null
     if let Some(ptr) = gc.allocate(size) {
         let p = ptr.as_ptr() as *mut hl::uchar;
@@ -293,7 +292,7 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
     let mut len: i32 = 0;
     let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
     if !content.is_null() {
-        let gc = GC.get_mut().expect("GC");
+        let mut gc = crate::gc::gc_locked();
         let d = gc
             .allocate(std::mem::size_of::<vdynamic>())
             .expect("alloc")

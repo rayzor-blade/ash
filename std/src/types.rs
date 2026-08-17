@@ -2,7 +2,7 @@ use std::{ffi::c_void, mem, ptr, sync::OnceLock};
 
 use crate::{
     array::hlp_alloc_array,
-    gc::{hlp_mark_size, hlp_zalloc, GC},
+    gc::{hlp_mark_size, hlp_zalloc},
     hl::{
         self, hl_module_context, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT,
         hl_type_kind_HARRAY, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     let tenum = (*t).__bindgen_anon_1.tenum;
     if tenum.is_null() {

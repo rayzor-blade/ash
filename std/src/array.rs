@@ -2,7 +2,6 @@ use std::ptr;
 
 use crate::{
     error::hlp_error,
-    gc::GC,
     hl::*,
     types::{hl_aptr, hlp_type_size},
 };
@@ -21,7 +20,7 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
     let esize = hlp_type_size(at);
     let total_size = std::mem::size_of::<varray>() + (esize as usize) * (size as usize);
 
-    let gc = GC.get_mut().expect("expected to call GC");
+    let mut gc = crate::gc::gc_locked();
     // let flag = if hl_is_ptr(at) {
     //     MEM_KIND_DYNAMIC
     // } else {

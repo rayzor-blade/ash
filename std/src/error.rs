@@ -1,6 +1,6 @@
 use crate::array::hlp_alloc_array;
 use crate::fun::hlp_dyn_call;
-use crate::gc::{ImmixAllocator, GC};
+use crate::gc::ImmixAllocator;
 use crate::hl::{self, uchar, varray, vbyte, vclosure, vdynamic};
 use crate::strings::str_to_uchar_ptr;
 use crate::types::hl_aptr;
@@ -75,6 +75,10 @@ pub struct TrapContext {
     pub prev: *mut TrapContext,
     pub exception_value: Option<VDynamicException>,
     pub caught: bool,
+    /// GC-lock depth held by this thread at the setjmp site. hlp_throw
+    /// restores the lock to this depth before longjmp, releasing guards
+    /// held by the frames being jumped over (their Drop never runs).
+    pub saved_lock_depth: usize,
 }
 
 impl TrapContext {
@@ -86,6 +90,7 @@ impl TrapContext {
             prev: std::ptr::null_mut(),
             exception_value: None,
             caught: false,
+            saved_lock_depth: 0,
         }
     }
 }
@@ -190,7 +195,7 @@ impl ImmixAllocator {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
-    let gc = GC.get_mut().expect("expected to get GC");
+    let gc = crate::gc::gc_locked();
 
     if let Some(exception) = gc.get_current_exception() {
         let stack_trace = &*exception.stack_trace;
@@ -237,61 +242,73 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     } else {
         eprintln!("[ash] hlp_throw: null");
     }
-    let gc = GC.get_mut().expect("expected GC");
-    let current = *gc.current_trap.borrow();
+    let mut buf_copy: hl::jmp_buf = mem::zeroed();
+    let saved_lock_depth;
+    {
+        let gc = crate::gc::gc_locked();
+        let current = *gc.current_trap.borrow();
 
-    if !current.is_null() && (*current).has_jmpbuf {
-        // JIT path: store exception, pop trap, longjmp back to setjmp site
-        *gc.exc_value.borrow_mut() = v;
-        // Copy jmp_buf to stack BEFORE freeing the TrapContext — longjmp reads from it
-        let mut buf_copy: hl::jmp_buf = mem::zeroed();
-        std::ptr::copy_nonoverlapping(
-            &(*current).buf as *const hl::jmp_buf,
-            &mut buf_copy as *mut hl::jmp_buf,
-            1,
-        );
-        *gc.current_trap.borrow_mut() = (*current).prev;
-        let _ = Box::from_raw(current);
-        hl::_longjmp(buf_copy.as_mut_ptr(), 1);
-    } else {
-        // No active setjmp trap: this is an uncaught native exception.
-        *gc.exc_value.borrow_mut() = v;
-        eprintln!("hlp_throw called without active trap; aborting");
-        std::process::abort();
-    }
+        if !current.is_null() && (*current).has_jmpbuf {
+            // JIT path: store exception, pop trap, longjmp back to setjmp site
+            *gc.exc_value.borrow_mut() = v;
+            saved_lock_depth = (*current).saved_lock_depth;
+            // Copy jmp_buf to stack BEFORE freeing the TrapContext — longjmp reads from it
+            std::ptr::copy_nonoverlapping(
+                &(*current).buf as *const hl::jmp_buf,
+                &mut buf_copy as *mut hl::jmp_buf,
+                1,
+            );
+            *gc.current_trap.borrow_mut() = (*current).prev;
+            let _ = Box::from_raw(current);
+        } else {
+            // No active setjmp trap: this is an uncaught native exception.
+            *gc.exc_value.borrow_mut() = v;
+            eprintln!("hlp_throw called without active trap; aborting");
+            std::process::abort();
+        }
+    } // GcRef dropped here: hlp_throw's own lock hold is released normally.
+
+    // The frames between the setjmp site and this longjmp are abandoned, so
+    // any GcGuards they hold never run Drop. Restore the lock depth recorded
+    // at trap setup (= the depth held at the setjmp site).
+    crate::gc::gc_lock_unwind_to(saved_lock_depth);
+    hl::_longjmp(buf_copy.as_mut_ptr(), 1);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
-    let gc = GC.get_mut().expect("expected GC");
+    // Depth held by this thread OUTSIDE this call — i.e. at the setjmp site
+    // the caller (JIT code) is about to establish.
+    let outer_depth = crate::gc::gc_lock_held_depth();
+    let gc = crate::gc::gc_locked();
     let trap = gc.setup_trap();
     (*trap).has_jmpbuf = true;
+    (*trap).saved_lock_depth = outer_depth;
     (*trap).buf.as_mut_ptr().cast()
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_remove_trap_jit() {
-    let gc = GC.get_mut().expect("expected GC");
+    let gc = crate::gc::gc_locked();
     gc.remove_trap();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
-    let gc = GC.get_mut().expect("expected GC");
-    *gc.exc_value.borrow()
+    let gc = crate::gc::gc_locked();
+    let v = *gc.exc_value.borrow();
+    v
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_clear_exc_value() {
-    let gc = GC.get_mut().expect("expected GC");
+    let gc = crate::gc::gc_locked();
     *gc.exc_value.borrow_mut() = std::ptr::null_mut();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
-    let d = GC
-        .get_mut()
-        .expect("expeted to call GC")
+    let d = crate::gc::gc_locked()
         .allocate(mem::size_of::<hl::vdynamic>())
         .unwrap()
         .as_ptr() as *mut vdynamic;
@@ -303,10 +320,10 @@ pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_set_error_handler(handler: *mut vclosure) {
-    let gc = GC.get_mut().expect("expeted to call GC");
+    let mut gc = crate::gc::gc_locked();
 
     gc.set_exception_handler(Box::new(move |exp: &mut HLException| {
-        let gc = GC.get_mut().expect("expeted to call GC");
+        let gc = crate::gc::gc_locked();
         let mut value = exp.value.clone();
         gc.run_with_trap(move || hlp_dyn_call(handler, &mut value, 1))
     }));

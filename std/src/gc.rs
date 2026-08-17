@@ -17,19 +17,189 @@ const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
 pub static mut GC: OnceLock<ImmixAllocator> = OnceLock::new();
 pub static HL_GLOBAL_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 
-// Thread-safe GC access for the JIT worker thread.
-static GC_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static mut GC_LOCK_GUARD: Option<std::sync::MutexGuard<'static, ()>> = None;
+// ── Reentrant GC lock ───────────────────────────────────────────────────────
+//
+// The GC singleton (and its Rc<RefCell<..>> cells) is not thread-safe, but it
+// is reached concurrently from the main thread and the tiered-JIT worker
+// thread. Every extern "C" entry point that touches GC state must hold this
+// lock. It is REENTRANT because GC operations nest on the same thread
+// (e.g. allocate → collect_garbage, or the JIT worker holding hlp_gc_lock
+// across its whole init, which itself calls hlp_alloc_*).
+//
+// Standard owner+depth pattern: `owner` is a unique per-thread token (0 =
+// free). If the current thread already owns the lock, only `depth` is bumped;
+// otherwise the thread waits on `inner`/`cond` until `owner` is 0. All
+// cross-thread happens-before edges are provided by `inner`, which is always
+// held while `owner` transitions between 0 and non-zero.
 
-#[no_mangle]
-pub unsafe extern "C" fn hlp_gc_lock() {
-    let guard = GC_MUTEX.lock().unwrap();
-    GC_LOCK_GUARD = Some(std::mem::transmute(guard));
+struct ReentrantGcLock {
+    owner: std::sync::atomic::AtomicU64,
+    depth: std::sync::atomic::AtomicUsize,
+    inner: std::sync::Mutex<()>,
+    cond: std::sync::Condvar,
 }
 
+static GC_LOCK: ReentrantGcLock = ReentrantGcLock {
+    owner: std::sync::atomic::AtomicU64::new(0),
+    depth: std::sync::atomic::AtomicUsize::new(0),
+    inner: std::sync::Mutex::new(()),
+    cond: std::sync::Condvar::new(),
+};
+
+/// Unique, never-zero, never-reused token for the current thread.
+fn gc_thread_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
+    thread_local! {
+        static TOKEN: u64 = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
+    }
+    TOKEN.with(|t| *t)
+}
+
+impl ReentrantGcLock {
+    fn acquire(&self) {
+        use std::sync::atomic::Ordering;
+        let me = gc_thread_token();
+        // Fast path: we already own the lock — only this thread can have
+        // stored `me` into owner, so a plain load is sufficient.
+        if self.owner.load(Ordering::Relaxed) == me {
+            self.depth.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        let mut g = self.inner.lock().unwrap();
+        while self.owner.load(Ordering::Relaxed) != 0 {
+            g = self.cond.wait(g).unwrap();
+        }
+        self.owner.store(me, Ordering::Relaxed);
+        self.depth.store(1, Ordering::Relaxed);
+        drop(g);
+    }
+
+    fn release(&self) {
+        use std::sync::atomic::Ordering;
+        let me = gc_thread_token();
+        debug_assert_eq!(
+            self.owner.load(Ordering::Relaxed),
+            me,
+            "GC lock released by non-owner thread"
+        );
+        if self.depth.load(Ordering::Relaxed) > 1 {
+            self.depth.fetch_sub(1, Ordering::Relaxed);
+            return;
+        }
+        let g = self.inner.lock().unwrap();
+        self.depth.store(0, Ordering::Relaxed);
+        self.owner.store(0, Ordering::Relaxed);
+        drop(g);
+        self.cond.notify_all();
+    }
+
+    /// Depth held by the CURRENT thread (0 if it is not the owner).
+    fn held_depth(&self) -> usize {
+        use std::sync::atomic::Ordering;
+        if self.owner.load(Ordering::Relaxed) == gc_thread_token() {
+            self.depth.load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+
+    /// Force the current thread's hold depth down to `target`. Used on the
+    /// longjmp throw path: guards held by frames being jumped over never run
+    /// their Drop, so the thrower restores the depth recorded at trap setup.
+    fn unwind_to(&self, target: usize) {
+        use std::sync::atomic::Ordering;
+        let me = gc_thread_token();
+        if self.owner.load(Ordering::Relaxed) != me {
+            return;
+        }
+        if self.depth.load(Ordering::Relaxed) <= target {
+            return;
+        }
+        if target > 0 {
+            self.depth.store(target, Ordering::Relaxed);
+        } else {
+            let g = self.inner.lock().unwrap();
+            self.depth.store(0, Ordering::Relaxed);
+            self.owner.store(0, Ordering::Relaxed);
+            drop(g);
+            self.cond.notify_all();
+        }
+    }
+}
+
+/// RAII guard for the reentrant GC lock.
+pub(crate) struct GcGuard(());
+
+impl Drop for GcGuard {
+    fn drop(&mut self) {
+        GC_LOCK.release();
+    }
+}
+
+/// Acquire the reentrant GC lock. Every extern "C" entry point that touches
+/// GC state must hold one of these (directly or via `gc_locked()`).
+pub(crate) fn gc_guard() -> GcGuard {
+    GC_LOCK.acquire();
+    GcGuard(())
+}
+
+/// Lock-holding handle to the GC singleton. Derefs to `ImmixAllocator`;
+/// the lock is held until the handle is dropped.
+pub(crate) struct GcRef {
+    gc: *mut ImmixAllocator,
+    _guard: GcGuard,
+}
+
+impl std::ops::Deref for GcRef {
+    type Target = ImmixAllocator;
+    fn deref(&self) -> &ImmixAllocator {
+        unsafe { &*self.gc }
+    }
+}
+
+impl std::ops::DerefMut for GcRef {
+    fn deref_mut(&mut self) -> &mut ImmixAllocator {
+        unsafe { &mut *self.gc }
+    }
+}
+
+/// Acquire the GC lock and return a handle to the (initialized) singleton.
+pub(crate) fn gc_locked() -> GcRef {
+    let guard = gc_guard();
+    let gc = unsafe { GC.get_mut().expect("GC not initialized") as *mut ImmixAllocator };
+    GcRef { gc, _guard: guard }
+}
+
+/// Acquire the GC lock, initializing the singleton if needed.
+pub(crate) fn gc_locked_init() -> GcRef {
+    let guard = gc_guard();
+    let gc = unsafe { GC.get_mut_or_init(ImmixAllocator::new) as *mut ImmixAllocator };
+    GcRef { gc, _guard: guard }
+}
+
+/// Depth of the current thread's hold on the GC lock (0 = not held).
+pub(crate) fn gc_lock_held_depth() -> usize {
+    GC_LOCK.held_depth()
+}
+
+/// Restore the current thread's GC-lock depth to `target`, releasing
+/// ownership entirely when `target` is 0. Longjmp throw path only.
+pub(crate) fn gc_lock_unwind_to(target: usize) {
+    GC_LOCK.unwind_to(target);
+}
+
+/// Manually acquire the GC lock (reentrant). Used by the tiered-JIT worker
+/// to hold the lock across its whole module init.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_lock() {
+    GC_LOCK.acquire();
+}
+
+/// Manually release one level of the GC lock.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_unlock() {
-    GC_LOCK_GUARD = None;
+    GC_LOCK.release();
 }
 
 struct ImmixHeap {
@@ -828,7 +998,7 @@ pub unsafe extern "C" fn hlp_gc_register_root(ptr: *mut hl::vdynamic) {
     if ptr.is_null() {
         return;
     }
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = gc_locked();
     gc.register_persistent(ptr);
 }
 
@@ -840,11 +1010,7 @@ pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {
 
     let size_usize = size as usize;
 
-    match GC
-        .get_mut()
-        .expect("expected to call garbage collector")
-        .allocate(size_usize)
-    {
+    match gc_locked().allocate(size_usize) {
         Some(ptr) => {
             // Zero out the allocated memory
             ptr::write_bytes(ptr.as_ptr() as *mut u8, 0, size_usize);
@@ -870,6 +1036,7 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
     visitor: unsafe extern "C" fn(*mut hl::vdynamic, *mut hl::hl_type, *mut c_void),
     ctx: *mut c_void,
 ) {
+    let _guard = gc_guard();
     let gc = match GC.get_mut() {
         Some(g) => g,
         None => return,
@@ -906,14 +1073,14 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
 /// Initialize the garbage collector. Must be called before any allocation.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_init() {
-    GC.get_mut_or_init(|| ImmixAllocator::new());
+    gc_locked_init();
 }
 
 /// Record the stack top for conservative scanning.
 /// Called once at JIT entry before running user code.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     gc.stack_top = top;
 }
 
@@ -921,28 +1088,28 @@ pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
 /// Called after init_constants with pointer to globals array and count.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_globals(ptr: *const *mut c_void, count: usize) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     gc.globals_range = Some((ptr, count));
 }
 
 /// Clear interpreter-provided conservative scan ranges.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     gc.clear_scan_ranges();
 }
 
 /// Add an interpreter-provided conservative scan range.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     gc.add_scan_range(ptr, size);
 }
 
 // ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────
 
 pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     // Lazily register the main-stack descriptor the first time a fiber
     // appears, so mark_roots can scan the suspended main stack.
     if !gc.fiber_stacks.iter().any(|f| f.id == 0) {
@@ -962,7 +1129,7 @@ pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) 
 }
 
 pub(crate) unsafe fn gc_update_fiber_sp(id: u32, sp: usize) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     if let Some(f) = gc.fiber_stacks.iter_mut().find(|f| f.id == id) {
         f.saved_sp = sp;
     }
@@ -970,17 +1137,17 @@ pub(crate) unsafe fn gc_update_fiber_sp(id: u32, sp: usize) {
 
 /// Must be called BEFORE the fiber's stack memory is freed.
 pub(crate) unsafe fn gc_unregister_fiber_stack(id: u32) {
-    let gc = GC.get_mut().expect("expected GC");
+    let mut gc = gc_locked();
     gc.fiber_stacks.retain(|f| f.id != id);
 }
 
 pub(crate) unsafe fn gc_add_persistent(ptr: *mut hl::vdynamic) {
-    let gc = GC.get_mut().expect("expected GC");
+    let gc = gc_locked();
     gc.roots.borrow_mut().persistent_roots.insert(ptr);
 }
 
 pub(crate) unsafe fn gc_remove_persistent(ptr: *mut hl::vdynamic) {
-    let gc = GC.get_mut().expect("expected GC");
+    let gc = gc_locked();
     gc.roots.borrow_mut().persistent_roots.remove(&ptr);
 }
 
@@ -990,7 +1157,7 @@ pub(crate) unsafe fn gc_swap_exc_state(
     trap: &mut *mut crate::error::TrapContext,
     exc: &mut *mut hl::vdynamic,
 ) {
-    let gc = GC.get_mut().expect("expected GC");
+    let gc = gc_locked();
     std::mem::swap(&mut *gc.current_trap.borrow_mut(), trap);
     std::mem::swap(&mut *gc.exc_value.borrow_mut(), exc);
 }

@@ -1,9 +1,6 @@
 use std::{ffi::c_int, mem, ptr::NonNull};
 
-use crate::{
-    gc::{ImmixAllocator, GC},
-    hl,
-};
+use crate::{gc::ImmixAllocator, hl};
 
 impl ImmixAllocator {
     fn allocate_rnd(&mut self) -> Option<NonNull<hl::rnd>> {
@@ -44,7 +41,7 @@ pub static INIT_SEEDS: &[::std::os::raw::c_ulong] = &[
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
-    let allocator = GC.get_mut().expect("expected to get garbage collector");
+    let mut allocator = crate::gc::gc_locked();
     let allocated_rnd = allocator
         .allocate_rnd()
         .expect("could not allocate hl::rnd");

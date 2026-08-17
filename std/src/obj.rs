@@ -8,12 +8,11 @@ use std::{
     sync::{LazyLock, Mutex, OnceLock},
 };
 
-use crate::gc::ImmixAllocator;
 use crate::{
     buffer::hlp_type_str,
     cast::*,
     error::hlp_error,
-    gc::{hlp_mark_size, hlp_zalloc, GC, HL_GLOBAL_LOCK},
+    gc::{hlp_mark_size, hlp_zalloc, HL_GLOBAL_LOCK},
     hl::{self, *},
     strings::str_to_uchar_ptr,
     types::{
@@ -101,7 +100,7 @@ pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvir
     if !virt.is_null() && (*virt).indexes.is_null() {
         hlp_init_virtual(t, std::ptr::null_mut());
     }
-    let allocator = GC.get_mut().expect("Expected to get GC");
+    let mut allocator = crate::gc::gc_locked();
     if let Some(virt) = allocator.alloc_virtual(t) {
         return virt.as_ptr();
     }
@@ -110,7 +109,7 @@ pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvir
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic {
-    let allocator = GC.get_mut().expect("Expected to get GC");
+    let mut allocator = crate::gc::gc_locked();
     let obj = (*t).__bindgen_anon_1.obj;
     if obj.is_null() {
         return ptr::null_mut();
@@ -162,7 +161,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     // let flags = mem_kind | MEM_ZERO;
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     let d = gc
         .allocate(std::mem::size_of::<vdynamic>())
@@ -629,7 +628,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         return t;
     }
 
-    let allocator = GC.get_mut().expect("expected to get garbage collector");
+    let mut allocator = crate::gc::gc_locked();
 
     if (*t).nproto != 0 {
         let fptr = allocator
@@ -902,7 +901,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
         return (*o).rt;
     }
 
-    let gc = GC.get_mut_or_init(|| ImmixAllocator::new());
+    let mut gc = crate::gc::gc_locked_init();
     let t = gc
         .allocate(std::mem::size_of::<hl_runtime_obj>())
         .expect("Failed to allocate memory")
@@ -1238,7 +1237,7 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
             let obj = (*(*d).t).__bindgen_anon_1.obj;
             let f = obj_resolve_field(obj, hfield);
             if !f.is_null() && (*f).field_index < 0 {
-                let allocator = GC.get_mut().expect("Failed to get GC");
+                let mut allocator = crate::gc::gc_locked();
                 let closure = allocator.allocate_closure_ptr(
                     (*f).t,
                     *(*(*obj).rt).methods.offset(-(*f).field_index as isize - 1),
@@ -1319,7 +1318,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     let index: i32;
     let address_offset: isize;
 
-    let allocator = GC.get_mut().expect("Failed to get GC");
+    let mut allocator = crate::gc::gc_locked();
 
     // expand data
     if hl_is_ptr(t) {
@@ -1496,7 +1495,7 @@ pub fn hlp_pad_size(size: i32, t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
-    let allocator = GC.get_mut().expect("Failed to get GC");
+    let mut allocator = crate::gc::gc_locked();
 
     // Allocate memory for the vdynobj structure
     let obj = allocator
@@ -1550,7 +1549,7 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
     let mut nvalues = 0;
 
     // Copy the lookup table
-    let allocator = GC.get_mut().expect("Failed to get GC");
+    let mut allocator = crate::gc::gc_locked();
     (*o).lookup = allocator
         .allocate(mem::size_of::<hl_field_lookup>() * nfields as usize)
         .expect("Failed to allocate memory")
@@ -1677,7 +1676,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
         }
     }
 
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     match (*obj).t.as_ref().unwrap().kind {
         hl::hl_type_kind_HOBJ => {
@@ -2593,7 +2592,7 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
             + mem::size_of::<*mut std::os::raw::c_void>() * virt.nfields as usize;
         let mut size = vsize;
 
-        let allocator = GC.get_mut_or_init(|| ImmixAllocator::new());
+        let mut allocator = crate::gc::gc_locked_init();
 
         let l = allocator
             .allocate(mem::size_of::<hl_field_lookup>() * virt.nfields as usize)

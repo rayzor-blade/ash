@@ -1,4 +1,3 @@
-use crate::gc::GC;
 use crate::hl::{
     self, _stringitem, hl_buffer, hl_type, hl_type_kind, hl_type_kind_HABSTRACT,
     hl_type_kind_HARRAY, hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYNOBJ,
@@ -16,7 +15,7 @@ use crate::types::{hl_aptr, hl_is_ptr, hlp_type_size, TSTR};
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     // Get the global GC instance
-    let gc = GC.get_mut().expect("GC not initialized");
+    let mut gc = crate::gc::gc_locked();
 
     // Allocate memory for the hl_buffer struct
     let buffer_ptr = match gc.allocate(std::mem::size_of::<hl_buffer>()) {
@@ -38,7 +37,7 @@ pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
 #[no_mangle]
 pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, len: i32) {
     // Get the global GC instance
-    let gc = GC.get_mut().expect("GC not initialized");
+    let mut gc = crate::gc::gc_locked();
 
     // Adjust buffer length if necessary
     while (*b).totlen >= ((*b).blen << 2) {
@@ -142,7 +141,7 @@ use std::ptr;
 
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
     // Get the global GC instance
-    let gc = GC.get_mut().expect("GC not initialized");
+    let mut gc = crate::gc::gc_locked();
 
     // Allocate memory for the buffer content
     let buf = match gc.allocate((((*b).totlen + 1) << 1) as usize) {
@@ -658,7 +657,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let indexes_ptr = if (*o).nfields <= 128 {
                 indexes.as_mut_ptr()
             } else {
-                let gc = GC.get_mut().expect("GC not initialized");
+                let mut gc = crate::gc::gc_locked();
                 let size = ((*o).nfields as usize * std::mem::size_of::<i32>()) as usize;
                 match gc.allocate(size) {
                     Some(ptr) => ptr.as_ptr() as *mut i32,

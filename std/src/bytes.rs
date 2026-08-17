@@ -1,6 +1,6 @@
 use std::ffi::*;
 
-use crate::{gc::GC, hl, sort::hl_bsort};
+use crate::{hl, sort::hl_bsort};
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_bytes_blit(
@@ -26,7 +26,7 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
         panic!("invalid size for bytes allocation")
     }
     let _size: usize = size as usize;
-    let allocator = GC.get_mut().expect("expected to get garbage collector");
+    let mut allocator = crate::gc::gc_locked();
     let bytes_ptr = allocator.allocate(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte;
 
     bytes_ptr

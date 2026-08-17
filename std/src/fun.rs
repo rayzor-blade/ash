@@ -5,7 +5,6 @@ use crate::{
         hlp_dyn_castd, hlp_dyn_castf, hlp_dyn_casti, hlp_dyn_casti64, hlp_dyn_castp, hlp_make_dyn,
     },
     error::hlp_error,
-    gc::GC,
     hl::{
         self, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HBOOL, hl_type_kind_HDYN,
         hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI32,
@@ -272,7 +271,7 @@ pub static mut fun_var_args: unsafe extern "C" fn() = _fun_var_args;
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type) -> *mut vclosure {
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
     let wrap = hlc_get_wrapper(to);
     if wrap.is_null() {
         return ptr::null_mut();
@@ -317,7 +316,7 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
         if wrapped_addr >= 0x10000 && (wrapped_addr % std::mem::align_of::<usize>() == 0) {
             let wrapped = wrapped_addr as *mut vdynamic;
             // Only dereference if it's a valid GC heap pointer, not JIT code
-            let gc = GC.get_mut().expect("Expected to get GC");
+            let gc = crate::gc::gc_locked();
             if !wrapped.is_null()
                 && gc.is_gc_ptr(wrapped)
                 && !(*wrapped).t.is_null()
@@ -511,7 +510,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
     fvalue: *mut libc::c_void,
 ) -> *mut vclosure {
     let size = mem::size_of::<vclosure>();
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     let c_ptr = gc
         .allocate(size)
@@ -538,7 +537,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
     fun: *mut std::ffi::c_void,
     ptr: *mut std::ffi::c_void,
 ) -> *mut vclosure {
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     let c_ptr = gc.allocate_closure_ptr(t, fun, ptr);
 

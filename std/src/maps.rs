@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    gc::{ImmixAllocator, GC},
+    gc::ImmixAllocator,
     hl::{self, hl_hb_map},
     strings,
 };
@@ -241,9 +241,7 @@ unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
 }
 
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
-    let new_buckets = GC
-        .get_mut()
-        .expect("Expected to get GC")
+    let new_buckets = crate::gc::gc_locked()
         .allocate(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
         .expect("Out of memory")
         .as_ptr() as *mut hl::hl_free_bucket;
@@ -340,7 +338,7 @@ impl HbMapExt for *mut hl::hl_hb_map {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
-    let allocator = GC.get_mut().expect("expected to get garbage collector");
+    let mut allocator = crate::gc::gc_locked();
     let allocated_map = allocator
         .allocate_map(0)
         .expect("could not allocate bytes map");
@@ -434,15 +432,11 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     } else {
         mem::size_of::<i32>()
     };
-    (*m).entries = GC
-        .get_mut()
-        .expect("expected to get garbage collector")
+    (*m).entries = crate::gc::gc_locked()
         .allocate(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
         .expect("Out of memory")
         .as_ptr() as *mut hl::hl_hb_entry;
-    (*m).values = GC
-        .get_mut()
-        .expect("expected to get garbage collector")
+    (*m).values = crate::gc::gc_locked()
         .allocate(nentries as usize * mem::size_of::<hl::hl_hb_value>())
         .expect("Out of memory")
         .as_ptr() as *mut hl::hl_hb_value;
@@ -450,9 +444,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
 
     if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
         // simply expand
-        (*m).nexts = GC
-            .get_mut()
-            .expect("expected to get garbage collector")
+        (*m).nexts = crate::gc::gc_locked()
             .allocate(nentries as usize * ksize)
             .expect("Out of memory")
             .as_ptr() as *mut c_void;
@@ -471,9 +463,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         );
     } else {
         // expand and remap
-        (*m).cells = GC
-            .get_mut()
-            .expect("expected to get garbage collector")
+        (*m).cells = crate::gc::gc_locked()
             .allocate((ncells + nentries) as usize * ksize)
             .expect("Out of memory")
             .as_ptr() as *mut c_void;

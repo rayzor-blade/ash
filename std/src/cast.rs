@@ -8,7 +8,6 @@ use crate::{
     buffer::hlp_type_str,
     error::hlp_error,
     fun::hlp_make_fun_wrapper,
-    gc::GC,
     hl::{
         self, hl_type, hl_type__bindgen_ty_1, hl_type_kind_HABSTRACT, hl_type_kind_HARRAY,
         hl_type_kind_HBOOL, hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ,
@@ -33,7 +32,7 @@ pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut vdynamic {
     let kind = (*t).kind;
-    let gc = GC.get_mut().expect("Expect to get GC");
+    let mut gc = crate::gc::gc_locked();
     match kind {
         hl_type_kind_HUI8 => {
             let v = gc
@@ -355,7 +354,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     let mut t = t;
     let mut data = data;
 
-    let gc = GC.get_mut().expect("Expected to get GC");
+    let mut gc = crate::gc::gc_locked();
 
     if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
         let v = *(data as *mut *mut vdynamic);

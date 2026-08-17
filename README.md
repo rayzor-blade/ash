@@ -33,13 +33,18 @@ A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`,
 
 ## Platforms
 
-Most of ASH is portable Rust. Three components carry architecture-specific code: the fiber context switch that backs `sys.thread`, the reflection call bridge that marshals arguments for `Type.createInstance` and friends, and native crash recovery.
-
 | Architecture | Status |
 |--------------|--------|
-| `aarch64` | All paths implemented; primary development and test target |
-| `x86_64` | All paths implemented, including the SysV and Windows fiber ABIs |
-| others | Supported once those three components gain a path; everything else already compiles |
+| `aarch64` | Complete; primary development and test target |
+| `x86_64` | Complete, including the SysV and Windows fiber ABIs |
+| others | Needs the two assembly components below |
+
+Most of ASH is portable Rust — the interpreter, the GC, AIR, and both compiler backends build anywhere Rust and LLVM do. Porting to another architecture means supplying two pieces of assembly:
+
+- **The reflection call bridge** (`ash_static_call`) marshals arguments into registers to invoke a function pointer whose signature is only known at runtime, for `Type.createInstance` and dynamic dispatch. There is no portable fallback, so an unported architecture fails to link.
+- **The fiber context switch**, which backs `sys.thread`, lives in [krio](https://github.com/darmie/krio). Unported architectures compile against a stub that panics when a thread is created.
+
+Native crash recovery already has a portable fallback; only the register dump in its report is specific to macOS on `aarch64`.
 
 macOS is where ASH is developed and tested. Linux and Windows have code paths throughout, and `make all` builds every target `rustup` has installed, but neither is exercised regularly yet.
 

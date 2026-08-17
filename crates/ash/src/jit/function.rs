@@ -83,6 +83,7 @@ impl<'ctx> JITModule<'ctx> {
             Some(BasicTypeEnum::StructType(t)) => t.fn_type(param_types, false),
             Some(BasicTypeEnum::ArrayType(t)) => t.fn_type(param_types, false),
             Some(BasicTypeEnum::VectorType(t)) => t.fn_type(param_types, false),
+            Some(BasicTypeEnum::ScalableVectorType(t)) => t.fn_type(param_types, false),
             None => self.context.void_type().fn_type(param_types, false),
         };
 
@@ -187,6 +188,7 @@ impl<'ctx> JITModule<'ctx> {
                     | AnyTypeEnum::ArrayType(_)
                     | AnyTypeEnum::FunctionType(_)
                     | AnyTypeEnum::VectorType(_)
+                    | AnyTypeEnum::ScalableVectorType(_)
                     | AnyTypeEnum::VoidType(_) => ptr_type.as_basic_type_enum(),
                 })
                 .into()
@@ -202,7 +204,8 @@ impl<'ctx> JITModule<'ctx> {
             AnyTypeEnum::StructType(_)
             | AnyTypeEnum::ArrayType(_)
             | AnyTypeEnum::FunctionType(_)
-            | AnyTypeEnum::VectorType(_) => ptr_type.fn_type(&param_types, false),
+            | AnyTypeEnum::VectorType(_)
+            | AnyTypeEnum::ScalableVectorType(_) => ptr_type.fn_type(&param_types, false),
         };
 
         Ok(function_type)
@@ -572,6 +575,7 @@ impl<'ctx> JITModule<'ctx> {
             | AnyTypeEnum::ArrayType(_)
             | AnyTypeEnum::FunctionType(_)
             | AnyTypeEnum::VectorType(_)
+            | AnyTypeEnum::ScalableVectorType(_)
             | AnyTypeEnum::VoidType(_) => ptr_type.as_basic_type_enum(),
         })
     }
@@ -906,10 +910,10 @@ impl<'ctx> JITModule<'ctx> {
                 let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
                 let result = self.builder.build_call(function, &[], "call")?;
 
-                if result.try_as_basic_value().left().is_some() {
+                if result.try_as_basic_value().basic().is_some() {
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                 }
 
@@ -929,10 +933,10 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(function, &[arg0_val.into()], "call")?;
 
-                if result.try_as_basic_value().left().is_some() {
+                if result.try_as_basic_value().basic().is_some() {
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                 }
 
@@ -964,10 +968,10 @@ impl<'ctx> JITModule<'ctx> {
                     "call",
                 )?;
 
-                if result.try_as_basic_value().left().is_some() {
+                if result.try_as_basic_value().basic().is_some() {
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                 }
 
@@ -1004,10 +1008,10 @@ impl<'ctx> JITModule<'ctx> {
                     "call",
                 )?;
 
-                if result.try_as_basic_value().left().is_some() {
+                if result.try_as_basic_value().basic().is_some() {
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                 }
 
@@ -1102,7 +1106,7 @@ impl<'ctx> JITModule<'ctx> {
                         let result = self.builder.build_call(*fun, &[type_ptr.into()], "call")?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         );
                     }
                     hl_type_kind_HDYNOBJ => {
@@ -1115,7 +1119,7 @@ impl<'ctx> JITModule<'ctx> {
                         let result = self.builder.build_call(fun, &[], "call")?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         );
                     }
                     hl_type_kind_HVIRTUAL => {
@@ -1134,7 +1138,7 @@ impl<'ctx> JITModule<'ctx> {
                         let result = self.builder.build_call(fun, &[type_ptr.into()], "call")?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         );
                     }
                     _ => return Err(anyhow!("Can't call constructor on invalid type")),
@@ -1176,7 +1180,7 @@ impl<'ctx> JITModule<'ctx> {
                             .builder
                             .build_call(hl_get_obj_rt, &[type_ptr.into()], "rt_obj")?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap();
 
                         // Get fields_indexes pointer from rt_obj (byte offset 40 in hl_runtime_obj)
@@ -1331,7 +1335,7 @@ impl<'ctx> JITModule<'ctx> {
                                     "boxed_val",
                                 )?
                                 .try_as_basic_value()
-                                .left()
+                                .basic()
                                 .unwrap()
                                 .into_pointer_value()
                         } else {
@@ -1400,7 +1404,7 @@ impl<'ctx> JITModule<'ctx> {
                             .builder
                             .build_call(hl_get_obj_rt, &[type_ptr.into()], "rt_obj")?
                             .try_as_basic_value()
-                            .left()
+                            .basic()
                             .unwrap();
 
                         // Get fields_indexes pointer from rt_obj (byte offset 40 in hl_runtime_obj)
@@ -1565,7 +1569,7 @@ impl<'ctx> JITModule<'ctx> {
                             &[value_obj.into(), field_hash.into(), type_ptr.into()],
                             "dyn_get_fb",
                         )?;
-                        let dyn_field_value = result.try_as_basic_value().left().unwrap();
+                        let dyn_field_value = result.try_as_basic_value().basic().unwrap();
                         self.builder
                             .build_store(registers[dst.0 as usize], dyn_field_value)?;
                         self.builder.build_unconditional_branch(cont_block)?;
@@ -2112,7 +2116,7 @@ impl<'ctx> JITModule<'ctx> {
                     })
                     .collect();
                 let result = self.builder.build_call(function, &args, "call")?;
-                if let Some(ret_val) = result.try_as_basic_value().left() {
+                if let Some(ret_val) = result.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -2136,7 +2140,7 @@ impl<'ctx> JITModule<'ctx> {
                     })
                     .collect();
                 let result = self.builder.build_call(function, &arg_vals, "call")?;
-                if let Some(ret_val) = result.try_as_basic_value().left() {
+                if let Some(ret_val) = result.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -2187,10 +2191,10 @@ impl<'ctx> JITModule<'ctx> {
                     .collect();
 
                 // Indirect call through the loaded pointer
-                let result =
-                    self.builder
-                        .build_indirect_call(fn_type, fun_addr, &arg_vals, "icall")?;
-                if let Some(ret_val) = result.try_as_basic_value().left() {
+                let result = self
+                    .builder
+                    .build_indirect_call(fn_type, fun_addr, &arg_vals, "icall")?;
+                if let Some(ret_val) = result.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -2364,7 +2368,7 @@ impl<'ctx> JITModule<'ctx> {
                         &arg_vals,
                         "vcall_virt",
                     )?;
-                    if let Some(ret_val) = direct_result.try_as_basic_value().left() {
+                    if let Some(ret_val) = direct_result.try_as_basic_value().basic() {
                         let store_val = if ret_val.get_type() != reg_types[dst.0 as usize] {
                             self.cast_for_call(ret_val, reg_types[dst.0 as usize])?
                         } else {
@@ -2390,7 +2394,7 @@ impl<'ctx> JITModule<'ctx> {
                         .builder
                         .build_call(helper, &[vvirt.into(), field_val.into()], "vcall_dyn")?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap()
                         .into_pointer_value();
                     // Unbox vdynamic to destination type
@@ -2454,7 +2458,15 @@ impl<'ctx> JITModule<'ctx> {
 
                     // Get base function type for constructing the indirect call fn_type
                     let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
-                    let param_types = function.get_type().get_param_types();
+                    let param_types: Vec<BasicTypeEnum> = function
+                        .get_type()
+                        .get_param_types()
+                        .into_iter()
+                        .map(|t| {
+                            BasicTypeEnum::try_from(t)
+                                .expect("unsupported metadata param type in method call")
+                        })
+                        .collect();
                     let fn_type = function.get_type();
 
                     // Load object pointer
@@ -2534,7 +2546,7 @@ impl<'ctx> JITModule<'ctx> {
                         &arg_vals,
                         "call_method",
                     )?;
-                    if let Some(ret_val) = result.try_as_basic_value().left() {
+                    if let Some(ret_val) = result.try_as_basic_value().basic() {
                         self.builder
                             .build_store(registers[dst.0 as usize], ret_val)?;
                     }
@@ -2564,7 +2576,7 @@ impl<'ctx> JITModule<'ctx> {
                         .builder
                         .build_call(hl_get_obj_rt, &[obj_type_ptr.into()], "rt_obj")?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap()
                         .into_pointer_value();
 
@@ -2626,7 +2638,7 @@ impl<'ctx> JITModule<'ctx> {
                     let result = self
                         .builder
                         .build_indirect_call(fn_type, fn_ptr, &arg_vals, "vcall")?;
-                    if let Some(ret_val) = result.try_as_basic_value().left() {
+                    if let Some(ret_val) = result.try_as_basic_value().basic() {
                         self.builder
                             .build_store(registers[dst.0 as usize], ret_val)?;
                     }
@@ -2670,7 +2682,7 @@ impl<'ctx> JITModule<'ctx> {
                     );
                 }
                 let result = self.builder.build_call(function, &arg_vals, "call_this")?;
-                if let Some(ret_val) = result.try_as_basic_value().left() {
+                if let Some(ret_val) = result.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -2714,7 +2726,7 @@ impl<'ctx> JITModule<'ctx> {
                     )?;
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     )?;
                 }
             }
@@ -2868,7 +2880,7 @@ impl<'ctx> JITModule<'ctx> {
                         "static_closure",
                     )?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
                 self.builder
                     .build_store(registers[dst.0 as usize], closure)?;
@@ -2978,6 +2990,7 @@ impl<'ctx> JITModule<'ctx> {
                         BasicTypeEnum::ArrayType(t) => t.fn_type(&extended_params, false),
                         BasicTypeEnum::StructType(t) => t.fn_type(&extended_params, false),
                         BasicTypeEnum::VectorType(t) => t.fn_type(&extended_params, false),
+                        BasicTypeEnum::ScalableVectorType(t) => t.fn_type(&extended_params, false),
                     }
                 } else {
                     self.context.void_type().fn_type(&extended_params, false)
@@ -3020,7 +3033,7 @@ impl<'ctx> JITModule<'ctx> {
                     &args_with_value,
                     "call_closure_hv",
                 )?;
-                if let Some(ret_val) = result_with_value.try_as_basic_value().left() {
+                if let Some(ret_val) = result_with_value.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -3034,7 +3047,7 @@ impl<'ctx> JITModule<'ctx> {
                     &arg_vals,
                     "call_closure",
                 )?;
-                if let Some(ret_val) = result_without_value.try_as_basic_value().left() {
+                if let Some(ret_val) = result_without_value.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -3146,7 +3159,7 @@ impl<'ctx> JITModule<'ctx> {
                     )?;
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     )?;
                 } else {
                     // Same type or non-dynamic: simple pointer copy
@@ -3188,7 +3201,7 @@ impl<'ctx> JITModule<'ctx> {
                     )?;
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     )?;
                 } else {
                     // Non-virtual dst: simple pointer copy
@@ -3213,7 +3226,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(setup, &[], "trap_buf")?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap()
                     .into_pointer_value();
 
@@ -3238,7 +3251,7 @@ impl<'ctx> JITModule<'ctx> {
                 setjmp_call.add_attribute(inkwell::attributes::AttributeLoc::Function, rt_attr);
                 let setjmp_result = setjmp_call
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap()
                     .into_int_value();
 
@@ -3274,7 +3287,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(get_exc, &[], "exc_val")?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
                 self.builder
                     .build_store(registers[exc.0 as usize], exc_val)?;
@@ -3393,7 +3406,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(get_closure_type, &[func_type_const.into()], "closure_type")?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
 
                 // Load bound object
@@ -3415,7 +3428,7 @@ impl<'ctx> JITModule<'ctx> {
                         "inst_closure",
                     )?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
                 self.builder
                     .build_store(registers[dst.0 as usize], closure)?;
@@ -3474,7 +3487,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(get_closure_type, &[func_type_const.into()], "vclos_type")?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
 
                 // Call hlp_alloc_closure_ptr(closure_type, fun_addr, obj_ptr)
@@ -3491,7 +3504,7 @@ impl<'ctx> JITModule<'ctx> {
                         "vclos",
                     )?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap();
                 self.builder
                     .build_store(registers[dst.0 as usize], closure)?;
@@ -3527,7 +3540,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         )?;
                     }
                     hl_type_kind_HF32 => {
@@ -3543,7 +3556,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         )?;
                     }
                     hl_type_kind_HI64 => {
@@ -3559,7 +3572,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         )?;
                     }
                     hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8
@@ -3579,7 +3592,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         )?;
                     }
                     _ => {
@@ -3599,7 +3612,7 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(
                             registers[dst.0 as usize],
-                            result.try_as_basic_value().left().unwrap(),
+                            result.try_as_basic_value().basic().unwrap(),
                         )?;
                     }
                 }
@@ -3761,7 +3774,7 @@ impl<'ctx> JITModule<'ctx> {
                 )?;
                 self.builder.build_store(
                     registers[dst.0 as usize],
-                    result.try_as_basic_value().left().unwrap(),
+                    result.try_as_basic_value().basic().unwrap(),
                 )?;
             }
             Opcode::MakeEnum {
@@ -3790,7 +3803,7 @@ impl<'ctx> JITModule<'ctx> {
                         "make_enum",
                     )?
                     .try_as_basic_value()
-                    .left()
+                    .basic()
                     .unwrap()
                     .into_pointer_value();
 
@@ -4394,7 +4407,7 @@ impl<'ctx> JITModule<'ctx> {
                         .builder
                         .build_call(dyn_compare, &[a_val.into(), b_val.into()], "dyn_cmp")?
                         .try_as_basic_value()
-                        .left()
+                        .basic()
                         .unwrap()
                         .into_int_value();
                     let zero = i32_type.const_int(0, false);
@@ -4494,7 +4507,7 @@ impl<'ctx> JITModule<'ctx> {
             .builder
             .build_indirect_call(fn_type, func_ptr, &args, "call")?;
 
-        if let Some(result) = call_site.try_as_basic_value().left() {
+        if let Some(result) = call_site.try_as_basic_value().basic() {
             self.builder.build_return(Some(&result))?;
         } else {
             self.builder.build_return(None)?;

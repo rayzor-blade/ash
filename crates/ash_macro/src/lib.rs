@@ -132,7 +132,7 @@ pub fn to_llvm(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     params_array.as_slice(),
                     "call_result"
                 )?;
-                let return_value = call_site.try_as_basic_value().left().unwrap();
+                let return_value = call_site.try_as_basic_value().basic().unwrap();
                 builder.build_return(Some(&return_value))?;
             },
         };

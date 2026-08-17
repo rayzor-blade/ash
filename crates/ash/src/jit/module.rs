@@ -276,7 +276,8 @@ impl<'ctx> JITModule<'ctx> {
         // (init_indexes calls hlp_init_enum/hlp_init_virtual which use GC).
         unsafe {
             let lock_fn = libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_lock\0".as_ptr() as *const _);
-            let unlock_fn = libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_unlock\0".as_ptr() as *const _);
+            let unlock_fn =
+                libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_unlock\0".as_ptr() as *const _);
             if !lock_fn.is_null() {
                 let lock: unsafe extern "C" fn() = std::mem::transmute(lock_fn);
                 lock();
@@ -485,7 +486,9 @@ impl<'ctx> JITModule<'ctx> {
         }
         eprintln!(
             "[ash] JIT natives: {} resolved, {} tree-shaken/skipped (of {} total)",
-            resolved, skipped, natives.len()
+            resolved,
+            skipped,
+            natives.len()
         );
         Ok(())
     }
@@ -1053,6 +1056,9 @@ impl<'ctx> JITModule<'ctx> {
                     AnyTypeEnum::VectorType(t) => {
                         t.ptr_type(inkwell::AddressSpace::default()).into()
                     }
+                    AnyTypeEnum::ScalableVectorType(t) => {
+                        t.ptr_type(inkwell::AddressSpace::default()).into()
+                    }
                     AnyTypeEnum::VoidType(_) => {
                         self.context.ptr_type(AddressSpace::default()).into()
                     }
@@ -1450,6 +1456,9 @@ impl<'ctx> JITModule<'ctx> {
             AnyTypeEnum::PointerType(t) => t.const_null(),
             AnyTypeEnum::StructType(t) => t.ptr_type(inkwell::AddressSpace::default()).const_null(),
             AnyTypeEnum::VectorType(t) => t.ptr_type(inkwell::AddressSpace::default()).const_null(),
+            AnyTypeEnum::ScalableVectorType(t) => {
+                t.ptr_type(inkwell::AddressSpace::default()).const_null()
+            }
             AnyTypeEnum::VoidType(_) => self
                 .context
                 .i8_type()

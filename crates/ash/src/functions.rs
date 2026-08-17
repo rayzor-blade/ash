@@ -38,6 +38,7 @@ impl<'ctx> AshModule<'ctx> {
                     AnyTypeEnum::PointerType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::StructType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::VectorType(t) => t.as_basic_type_enum(),
+                    AnyTypeEnum::ScalableVectorType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::VoidType(t) => self
                         .context
                         .opaque_struct_type("haxe.Void")
@@ -60,6 +61,7 @@ impl<'ctx> AshModule<'ctx> {
             AnyTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
             AnyTypeEnum::StructType(t) => t.fn_type(&param_types, false),
             AnyTypeEnum::VectorType(t) => t.fn_type(&param_types, false),
+            AnyTypeEnum::ScalableVectorType(t) => t.fn_type(&param_types, false),
             AnyTypeEnum::VoidType(t) => self.context.void_type().fn_type(&param_types, false),
         };
 
@@ -148,6 +150,7 @@ impl<'ctx> AshModule<'ctx> {
             AnyTypeEnum::PointerType(t) => t.as_basic_type_enum(),
             AnyTypeEnum::StructType(t) => t.as_basic_type_enum(),
             AnyTypeEnum::VectorType(t) => t.as_basic_type_enum(),
+            AnyTypeEnum::ScalableVectorType(t) => t.as_basic_type_enum(),
             AnyTypeEnum::VoidType(_) => self
                 .context
                 .opaque_struct_type("haxe.Void")
@@ -366,7 +369,7 @@ impl<'ctx> AshModule<'ctx> {
                     let result = self.builder.build_call(function, &[], "call")?;
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                     return Ok(());
                 } else if let Some(FunPtr::Native(n)) = self.function_indexes.clone().get(&fun.0) {
@@ -374,7 +377,7 @@ impl<'ctx> AshModule<'ctx> {
                     let result = self.builder.build_call(*function, &[], "call")?;
                     self.builder.build_store(
                         registers[dst.0 as usize],
-                        result.try_as_basic_value().left().unwrap(),
+                        result.try_as_basic_value().basic().unwrap(),
                     );
                     return Ok(());
                 }
@@ -393,7 +396,7 @@ impl<'ctx> AshModule<'ctx> {
                     .build_call(function, &[arg0_val.into()], "call")?;
                 self.builder.build_store(
                     registers[dst.0 as usize],
-                    result.try_as_basic_value().left().unwrap(),
+                    result.try_as_basic_value().basic().unwrap(),
                 );
             }
             Opcode::Ret { ret } => {
@@ -527,7 +530,7 @@ impl<'ctx> AshModule<'ctx> {
             function.get_param_iter().map(|arg| arg.into()).collect();
 
         let call_site = self.builder.build_call(target_fn, &args, "call")?;
-        if let Some(result) = call_site.try_as_basic_value().left() {
+        if let Some(result) = call_site.try_as_basic_value().basic() {
             self.builder.build_return(Some(&result));
         }
 

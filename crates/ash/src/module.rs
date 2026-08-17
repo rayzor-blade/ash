@@ -243,6 +243,9 @@ impl<'ctx> AshModule<'ctx> {
                         AnyTypeEnum::VectorType(t) => {
                             t.ptr_type(inkwell::AddressSpace::default()).into()
                         }
+                        AnyTypeEnum::ScalableVectorType(t) => {
+                            t.ptr_type(inkwell::AddressSpace::default()).into()
+                        }
                         AnyTypeEnum::VoidType(_) => self
                             .context
                             .i8_type()
@@ -321,6 +324,9 @@ impl<'ctx> AshModule<'ctx> {
             AnyTypeEnum::PointerType(t) => t.const_null(),
             AnyTypeEnum::StructType(t) => t.ptr_type(inkwell::AddressSpace::default()).const_null(),
             AnyTypeEnum::VectorType(t) => t.ptr_type(inkwell::AddressSpace::default()).const_null(),
+            AnyTypeEnum::ScalableVectorType(t) => {
+                t.ptr_type(inkwell::AddressSpace::default()).const_null()
+            }
             AnyTypeEnum::VoidType(_) => self
                 .context
                 .i8_type()
@@ -827,6 +833,9 @@ impl<'ctx> AshModule<'ctx> {
                 Ok(array_type.ptr_type(inkwell::AddressSpace::default()).into())
             }
             AnyTypeEnum::VectorType(vector_type) => Ok(vector_type
+                .ptr_type(inkwell::AddressSpace::default())
+                .into()),
+            AnyTypeEnum::ScalableVectorType(vector_type) => Ok(vector_type
                 .ptr_type(inkwell::AddressSpace::default())
                 .into()),
             AnyTypeEnum::VoidType(_) => Err(anyhow!("Cannot create nullable void type")),

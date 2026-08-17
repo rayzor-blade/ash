@@ -68,6 +68,7 @@ impl<'ctx> Object<'ctx> {
                     AnyTypeEnum::PointerType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::StructType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::VectorType(t) => t.as_basic_type_enum(),
+                    AnyTypeEnum::ScalableVectorType(t) => t.as_basic_type_enum(),
                     AnyTypeEnum::VoidType(t) => panic!("Unsupported field type"),
                 };
                 return type_;

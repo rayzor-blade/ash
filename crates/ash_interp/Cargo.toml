@@ -10,4 +10,5 @@ description = "HashLink bytecode interpreter for ASH VM"
 ash = { path = "../ash" }
 anyhow = { workspace = true }
 inkwell = { workspace = true }
+beadie = { workspace = true }
 libc = "0.2"

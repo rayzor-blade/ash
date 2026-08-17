@@ -2644,44 +2644,133 @@ impl<'ctx> JITModule<'ctx> {
                     }
                 }
             }
-            // --- CallThis (same as CallMethod but this = reg 0) ---
+            // --- CallThis (same as CallMethod HOBJ vtable dispatch, this = reg 0) ---
             Opcode::CallThis { dst, field, args } => {
                 let obj_type_idx = f.regs[0].0;
-                let obj_type = &self.types_[obj_type_idx];
-                let findex = obj_type
-                    .obj
-                    .as_ref()
-                    .and_then(|obj| obj.proto.get(field.0).map(|p| p.findex as usize))
-                    .ok_or_else(|| {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+                // field.0 is the vtable slot index (vobj_proto index).
+                // Find the proto entry whose pindex matches field.0 to get the
+                // findex for the function signature, walking the super chain
+                // since this-calls often resolve to ancestor methods.
+                let findex = {
+                    let mut found: Option<usize> = None;
+                    let mut cur_obj = self.types_[obj_type_idx].obj.as_ref();
+                    while let Some(obj) = cur_obj {
+                        if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == field.0) {
+                            found = Some(p.findex as usize);
+                            break;
+                        }
+                        cur_obj = obj
+                            .super_
+                            .as_ref()
+                            .and_then(|s| self.types_[s.0].obj.as_ref());
+                    }
+                    found.ok_or_else(|| {
                         anyhow!(
-                            "CallThis: cannot resolve proto field {} on type {}",
+                            "CallThis: cannot resolve vtable slot {} on type {}",
                             field.0,
                             obj_type_idx
                         )
-                    })?;
+                    })?
+                };
 
+                // Runtime vtable dispatch for HOBJ/HSTRUCT.
+                // field.0 is the vobj_proto slot index.
+                let vtable_slot = field.0 as u64;
+
+                // Get base function type for constructing the indirect call fn_type
                 let (function, is_placeholder) = self.get_or_create_function_value(findex)?;
+                let param_types: Vec<BasicTypeEnum> = function
+                    .get_type()
+                    .get_param_types()
+                    .into_iter()
+                    .map(|t| {
+                        BasicTypeEnum::try_from(t)
+                            .expect("unsupported metadata param type in method call")
+                    })
+                    .collect();
+                let fn_type = function.get_type();
+
+                // Load `this` object pointer (reg 0)
+                let obj_val = self
+                    .builder
+                    .build_load(ptr_type, registers[0], "ct_obj")?
+                    .into_pointer_value();
+
+                // Load hl_type* from object (offset 0)
+                let type_ptr = self
+                    .builder
+                    .build_load(ptr_type, obj_val, "ct_type")?
+                    .into_pointer_value();
+
+                // Load vobj_proto from hl_type (offset 16)
+                let vobj_proto_gep = unsafe {
+                    self.builder.build_gep(
+                        self.context.i8_type(),
+                        type_ptr,
+                        &[self.context.i64_type().const_int(16, false)],
+                        "vobj_proto_gep",
+                    )?
+                };
+                let vobj_proto = self
+                    .builder
+                    .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
+                    .into_pointer_value();
+
+                // Load method pointer from vobj_proto[field.0]
+                let method_gep = unsafe {
+                    self.builder.build_gep(
+                        ptr_type,
+                        vobj_proto,
+                        &[self.context.i32_type().const_int(vtable_slot, false)],
+                        "method_gep",
+                    )?
+                };
+                let method_ptr = self
+                    .builder
+                    .build_load(ptr_type, method_gep, "method_ptr")?
+                    .into_pointer_value();
+
+                // Build arg values with type casting; this (reg 0) comes first
                 let expected_params = function.count_params() as usize;
-                // Prepend reg 0 (this) to args, truncate to match target param count
                 let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(expected_params);
-                arg_vals.push(
-                    self.builder
-                        .build_load(reg_types[0], registers[0], "this_val")?
-                        .into(),
-                );
-                let extra_count = (expected_params.saturating_sub(1)).min(args.len());
-                for arg in &args[..extra_count] {
-                    arg_vals.push(
-                        self.builder
-                            .build_load(
-                                reg_types[arg.0 as usize],
-                                registers[arg.0 as usize],
-                                "arg_val",
-                            )?
-                            .into(),
-                    );
+                for (idx, reg_idx) in std::iter::once(0usize)
+                    .chain(args.iter().map(|arg| arg.0 as usize))
+                    .enumerate()
+                {
+                    if idx >= expected_params {
+                        break;
+                    }
+                    let loaded = self.builder.build_load(
+                        reg_types[reg_idx],
+                        registers[reg_idx],
+                        "arg_val",
+                    )?;
+                    if idx < param_types.len() {
+                        let expected = param_types[idx];
+                        if loaded.get_type() != expected {
+                            let casted = self.cast_for_call(loaded, expected)?;
+                            arg_vals.push(casted.into());
+                        } else {
+                            arg_vals.push(loaded.into());
+                        }
+                    } else {
+                        arg_vals.push(loaded.into());
+                    }
                 }
-                let result = self.builder.build_call(function, &arg_vals, "call_this")?;
+                while arg_vals.len() < expected_params {
+                    let param_type = param_types[arg_vals.len()];
+                    arg_vals.push(param_type.const_zero().into());
+                }
+
+                // Indirect call through the vtable method pointer
+                let result = self.builder.build_indirect_call(
+                    fn_type,
+                    method_ptr,
+                    &arg_vals,
+                    "call_this",
+                )?;
                 if let Some(ret_val) = result.try_as_basic_value().basic() {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;

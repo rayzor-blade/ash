@@ -428,7 +428,9 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<*mut hl_enum_construct> {
         let mut c_constructs = Vec::with_capacity(constructs.len());
         for construct in constructs {
-            let offsets = construct.offsets.clone().as_mut_ptr();
+            let mut offsets_vec = construct.offsets.clone();
+            let offsets = offsets_vec.as_mut_ptr();
+            mem::forget(offsets_vec);
             let mut c_construct = hl_enum_construct {
                 name: str_to_uchar_leaked(&construct.name),
                 nparams: construct.params.len() as i32,
@@ -439,7 +441,6 @@ impl<'ctx> JITModule<'ctx> {
             };
 
             c_constructs.push(c_construct);
-            mem::forget(offsets);
         }
         let ptr = c_constructs.as_mut_ptr();
         mem::forget(c_constructs);

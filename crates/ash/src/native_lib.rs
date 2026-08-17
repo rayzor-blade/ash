@@ -65,16 +65,64 @@ pub fn init_std_library() -> Result<()> {
                         system_libhl.display()
                     );
                 }
-                // Fallback: extract the embedded library to a temp file
-                let temp_dir = TempDir::new().expect("Failed to create temp dir");
-                let mut path = temp_dir.path().join("libash_std");
-                path.set_extension(ext);
-                let std_lib_bytes: &[u8] =
-                    include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
-                std::fs::write(&path, std_lib_bytes).expect("Failed to write std library");
-                // Leak temp_dir so the file isn't deleted
-                std::mem::forget(temp_dir);
-                path
+                // Fallback 1: dlopen a real on-disk build artifact directly.
+                // Extracting a fresh temp copy every run forces the kernel to
+                // register a new code signature on each dlopen (fcntl
+                // F_ADDFILESIGS), which can stall indefinitely once many leaked
+                // temp copies have accumulated. A stable on-disk path avoids
+                // that entirely. Candidates are resolved relative to the
+                // executable (NOT the cwd).
+                let lib_name = format!("libash_std.{}", ext);
+                let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(exe_dir) = exe.parent() {
+                        // Sibling next to the executable
+                        candidates.push(exe_dir.join(&lib_name));
+                        // exe in target/debug/ -> dylib in target/<triple>/debug/
+                        candidates.push(
+                            exe_dir
+                                .join("../aarch64-apple-darwin/debug")
+                                .join(&lib_name),
+                        );
+                        // exe in target/<triple>/debug/ -> dylib in target/debug/
+                        candidates.push(exe_dir.join("../../debug").join(&lib_name));
+                    }
+                }
+                if let Some(found) = candidates.iter().find(|c| c.exists()) {
+                    let canonical = found.canonicalize().unwrap_or_else(|_| found.clone());
+                    eprintln!("[ash] Loading on-disk ash_std at {}", canonical.display());
+                    canonical
+                } else {
+                    // Last resort: extract the embedded library to a temp file
+                    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+                    let mut path = temp_dir.path().join("libash_std");
+                    path.set_extension(ext);
+                    let std_lib_bytes: &[u8] =
+                        include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+                    std::fs::write(&path, std_lib_bytes).expect("Failed to write std library");
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+                    }
+                    // Ad-hoc sign the fresh copy so dlopen's code-signature
+                    // registration doesn't stall in the kernel (ignore failure).
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = std::process::Command::new("codesign")
+                            .args(["-s", "-", "-f"])
+                            .arg(&path)
+                            .status();
+                    }
+                    eprintln!(
+                        "[ash] Extracted embedded ash_std to {} (last resort)",
+                        path.display()
+                    );
+                    // Leak temp_dir so the file isn't deleted
+                    std::mem::forget(temp_dir);
+                    path
+                }
             };
 
             // Load the library with RTLD_GLOBAL so hl_ symbols are visible

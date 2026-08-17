@@ -230,7 +230,10 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 - **Delete the pre-JIT module path and drop the `hlbc` dependency.**
   `crates/ash/src/{module.rs, functions.rs, values.rs}` (916 + 574 + 209
   lines) reference only each other and `types.rs`'s `FunPtr` enum, and
-  nothing outside `crates/ash` imports them — the live entry point is
+  `AshModule` is constructed in exactly one place — its own unit test at
+  `module.rs:888`. It is the pre-`jit/` prototype: `translate_opcode` covers
+  about twelve opcodes, bails with "not yet implemented" on the rest, and
+  never implemented jump targets at all. The live entry point is
   `main.rs` → `ash::jit::module::JITModule`, and `jit/`, `bytecode.rs` and
   `c_types.rs` contain no `hlbc` at all (they use ash's own decoder and
   AIR's vendored opcode definitions). Removing the three files, the `FunPtr`

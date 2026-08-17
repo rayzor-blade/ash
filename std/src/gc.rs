@@ -41,7 +41,9 @@ fn env_usize(name: &str) -> Option<usize> {
 fn heap_max_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
-        let mb = env_usize("ASH_GC_HEAP_MB").unwrap_or(DEFAULT_HEAP_MB).max(32);
+        let mb = env_usize("ASH_GC_HEAP_MB")
+            .unwrap_or(DEFAULT_HEAP_MB)
+            .max(32);
         (mb * 1024 * 1024 / BLOCK_SIZE) * BLOCK_SIZE
     })
 }
@@ -60,7 +62,9 @@ fn trigger_floor_bytes() -> usize {
 fn gc_stats_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
-        std::env::var("ASH_GC_STATS").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+        std::env::var("ASH_GC_STATS")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
     })
 }
 

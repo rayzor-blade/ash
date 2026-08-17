@@ -168,6 +168,30 @@ fn loaded_libraries() -> &'static Mutex<HashMap<String, Arc<Library>>> {
     LOADED_LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Canonical process-global symbol table: `"lib@symbol"` (clean lib name,
+/// resolved symbol name like `hlp_alloc_bytes`) -> implementation address.
+///
+/// Built once at startup after HDLL loading (see `build_symbol_table`) from
+/// the bytecode natives list — STD_LIBRARY direct exports plus every loaded
+/// hdll's DEFINE_PRIM resolution — then extended lazily as new symbols are
+/// resolved. Consumers:
+///   - interpreter `call_native` (table hit + per-findex cache instead of a
+///     per-call format!/dlsym)
+///   - tiered JIT `init_native_func` via `resolve_function`
+///   - a future cranelift `JITBuilder` can ingest `symbol_table_entries()`
+///     wholesale at build time (addresses are final impl pointers, already
+///     past the DEFINE_PRIM resolver indirection).
+static SYMBOL_TABLE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn symbol_table() -> &'static Mutex<HashMap<String, usize>> {
+    SYMBOL_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn symbol_key(library_name: &str, function_name: &str) -> String {
+    let clean = library_name.strip_prefix('?').unwrap_or(library_name);
+    format!("{}@{}", clean, function_name)
+}
+
 #[derive(Debug)]
 pub struct NativeLibraryManager;
 
@@ -308,10 +332,97 @@ impl NativeFunctionResolver {
             }
         }
 
+        // Build the canonical process-global symbol table now that every
+        // hdll is loaded. Idempotent: the second resolver instance (tiered
+        // JIT pre-warm) finds the table already populated.
+        let (resolved, missing) = self.build_symbol_table(natives);
+        if !missing.is_empty() {
+            eprintln!(
+                "[ash] symbol table: {} natives resolved, {} missing: {}",
+                resolved,
+                missing.len(),
+                missing.join(", ")
+            );
+        }
+
         Ok(())
     }
 
+    /// Look up a symbol in the process-global table without touching dlsym.
+    pub fn lookup_symbol(library_name: &str, function_name: &str) -> Option<*mut c_void> {
+        symbol_table()
+            .lock()
+            .expect("symbol table poisoned")
+            .get(&symbol_key(library_name, function_name))
+            .map(|&addr| addr as *mut c_void)
+    }
+
+    /// Snapshot of the whole symbol table as `("lib@symbol", address)` pairs.
+    /// Designed for bulk consumption (e.g. a future cranelift `JITBuilder`
+    /// registering every known native before codegen); addresses are the
+    /// final implementation pointers.
+    pub fn symbol_table_entries() -> Vec<(String, usize)> {
+        symbol_table()
+            .lock()
+            .expect("symbol table poisoned")
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect()
+    }
+
+    /// Populate the canonical symbol table from the bytecode natives list.
+    /// Called once after HDLL loading; idempotent and shared process-wide.
+    /// Returns (resolved_count, missing_keys) — misses are left out of the
+    /// table so consumers keep their lazy-resolution fallback semantics.
+    pub fn build_symbol_table(&self, natives: &[HLNative]) -> (usize, Vec<String>) {
+        let mut resolved = 0usize;
+        let mut missing = Vec::new();
+        for native in natives {
+            let name = format!("hlp_{}", native.name);
+            let key = symbol_key(&native.lib, &name);
+            if symbol_table()
+                .lock()
+                .expect("symbol table poisoned")
+                .contains_key(&key)
+            {
+                resolved += 1;
+                continue;
+            }
+            match self.resolve_function_uncached(&native.lib, &name) {
+                Ok(addr) if !addr.is_null() => {
+                    symbol_table()
+                        .lock()
+                        .expect("symbol table poisoned")
+                        .insert(key, addr as usize);
+                    resolved += 1;
+                }
+                _ => missing.push(key),
+            }
+        }
+        (resolved, missing)
+    }
+
+    /// Resolve a native symbol: process-global table first, then the slow
+    /// dlsym/DEFINE_PRIM path (memoized into the table on success).
     pub fn resolve_function(&self, library_name: &str, function_name: &str) -> Result<*mut c_void> {
+        if let Some(addr) = Self::lookup_symbol(library_name, function_name) {
+            return Ok(addr);
+        }
+        let addr = self.resolve_function_uncached(library_name, function_name)?;
+        if !addr.is_null() {
+            symbol_table()
+                .lock()
+                .expect("symbol table poisoned")
+                .insert(symbol_key(library_name, function_name), addr as usize);
+        }
+        Ok(addr)
+    }
+
+    fn resolve_function_uncached(
+        &self,
+        library_name: &str,
+        function_name: &str,
+    ) -> Result<*mut c_void> {
         let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
 
         if clean_lib == "std" {

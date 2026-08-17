@@ -324,6 +324,23 @@ fn tiered_compile(ctx: &TieredSharedCtx, findex: usize) -> *mut () {
 /// Executes HL bytecode directly using a register-based architecture
 /// with NaN-boxed values. Tracks per-function call counts and signals
 /// when a function should be promoted to JIT compilation.
+/// Cache an env-var presence check (they sit on the native-call hot path;
+/// getenv per call was a measured tax).
+macro_rules! env_flag {
+    ($name:literal) => {{
+        static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CELL.get_or_init(|| std::env::var($name).is_ok())
+    }};
+}
+
+/// Zero-alloc "hlp_<name>" display for native-call diagnostics.
+struct HlpName<'a>(&'a str);
+impl std::fmt::Display for HlpName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "hlp_{}", self.0)
+    }
+}
+
 pub struct HLInterpreter {
     /// Global variable store (indexed by global index)
     pub globals: Vec<NanBoxedValue>,
@@ -338,6 +355,10 @@ pub struct HLInterpreter {
     reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
     /// Map from findex → native array index
     findex_to_native: HashMap<usize, usize>,
+    /// Per-native resolved function pointer cache (indexed by native array
+    /// index). Backed by the process-global symbol table on first miss;
+    /// kills the per-call format!/table-lock on the native hot path.
+    native_fn_cache: Vec<*mut c_void>,
     /// C-level type structures for native function interop
     c_type_factory: CTypeFactory,
     /// Resolved stdlib function pointer: hlp_alloc_obj
@@ -554,6 +575,7 @@ impl HLInterpreter {
             findex_to_func,
             reloaded_bytecode: None,
             findex_to_native,
+            native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
             c_type_factory,
             fn_alloc_obj,
             fn_get_obj_rt,
@@ -5155,19 +5177,19 @@ impl HLInterpreter {
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
         let native = &bytecode.natives[native_idx];
-        let func_name = format!("hlp_{}", native.name);
 
         // Trace every native call when ASH_TRACE_NATIVE is set
-        if std::env::var("ASH_TRACE_NATIVE").is_ok() {
+        if env_flag!("ASH_TRACE_NATIVE") {
             eprintln!(
-                "[trace] native {} lib={} args={}",
-                func_name,
+                "[trace] native hlp_{} lib={} args={}",
+                native.name,
                 native.lib,
                 args.len()
             );
         }
 
-        let debug_native = std::env::var("ASH_DBG_NATIVE").is_ok();
+        let debug_native = env_flag!("ASH_DBG_NATIVE");
+        let func_name = HlpName(&native.name);
         if debug_native
             && (native.name.contains("compare")
                 || native.name.contains("eq")
@@ -5176,7 +5198,7 @@ impl HLInterpreter {
         {
             eprintln!("[NATIVE] {} args={} vals={:?}", func_name, args.len(), args);
         }
-        let debug_dyn = std::env::var("ASH_DBG_DYN").is_ok();
+        let debug_dyn = env_flag!("ASH_DBG_DYN");
         if debug_dyn
             && (native.name == "hash"
                 || native.name == "obj_get_field"
@@ -5298,8 +5320,20 @@ impl HLInterpreter {
             _ => {}
         }
 
-        // Resolve the native function pointer
-        let func_ptr = native_resolver.resolve_function(&native.lib, &func_name)?;
+        // Resolve the native function pointer: per-native cache first, then
+        // the process-global symbol table (falls back to lazy dlsym once).
+        let mut func_ptr = self
+            .native_fn_cache
+            .get(native_idx)
+            .copied()
+            .unwrap_or(std::ptr::null_mut());
+        if func_ptr.is_null() {
+            func_ptr =
+                native_resolver.resolve_function(&native.lib, &format!("hlp_{}", native.name))?;
+            if let Some(slot) = self.native_fn_cache.get_mut(native_idx) {
+                *slot = func_ptr;
+            }
+        }
 
         // Get the function type signature for type-aware marshaling
         let type_fun = bytecode.types[native.type_.0]
@@ -5421,7 +5455,7 @@ impl HLInterpreter {
             };
 
             // HNULL(T) parameters expect a vdynamic* pointer, not raw values
-            if std::env::var("ASH_DBG_ALLOC").is_ok() && kind == hl::hl_type_kind_HNULL {
+            if env_flag!("ASH_DBG_ALLOC") && kind == hl::hl_type_kind_HNULL {
                 eprintln!(
                     "[extract_arg] idx={} kind=HNULL val={:?} is_i32={} is_ptr={}",
                     idx,

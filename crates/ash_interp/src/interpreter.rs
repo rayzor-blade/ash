@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use beadie::{Bead, HotnessPolicy, ThresholdPolicy, TieredAdapter, TieredBound};
 
@@ -1758,6 +1758,112 @@ impl HLInterpreter {
         Some(s.to_string_lossy().into_owned())
     }
 
+    /// Turn a stub-bridge failure into a real HL exception on the native trap
+    /// chain. **Never returns.**
+    ///
+    /// The bridge runs *inside* a JIT frame, so its return value is consumed
+    /// as a raw word of the callee's declared return type. Reporting a failure
+    /// by returning `0` therefore hands compiled code a null it immediately
+    /// uses — the reported crash was a field load at offset 0x10 off that
+    /// null, one JIT instruction after the bridge returned. There is no safe
+    /// poison value, so every failure leaves through `hlp_throw`:
+    ///
+    /// * A propagating HL exception (`Throw`/`Rethrow` with a real value)
+    ///   rethrows unchanged.
+    /// * An interpreter-internal failure — a `NullCheck`'s "Null access", an
+    ///   unknown findex — carries no throwable `vdynamic`, so one is minted
+    ///   from the message exactly the way HashLink's `hl_error` does (a bytes
+    ///   dynamic). Haxe sees what it would in interpreter mode, and heaps'
+    ///   `catch(e:Dynamic)` in `runMainLoop` handles it identically.
+    ///
+    /// The throw longjmps to the `setjmp` in `call_compiled_function`, which
+    /// restores the interpreter frame stack (the Rust frames between here and
+    /// there are abandoned without unwinding) and returns the exception to the
+    /// interpreted caller.
+    ///
+    /// Aborting is the last resort, used only when the stdlib offers no way to
+    /// raise at all.
+    ///
+    /// # Safety
+    /// Must be called from the stub bridge, i.e. with a trap armed by
+    /// `call_compiled_function` somewhere up the stack.
+    unsafe fn raise_stub_bridge_failure(
+        resolver: &NativeFunctionResolver,
+        findex: usize,
+        err: anyhow::Error,
+    ) -> ! {
+        // One line per findex: the exception itself is the report, and the old
+        // unconditional log turned a per-event failure into a stderr flood.
+        static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+        let first = REPORTED
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .map(|mut s| s.insert(findex))
+            .unwrap_or(true);
+        if first {
+            eprintln!(
+                "[ash] stub bridge: findex {} failed, raising into the HL trap chain: {:#}",
+                findex, err
+            );
+        }
+
+        let throw_fn = resolver
+            .resolve_function("std", "hlp_throw")
+            .unwrap_or(std::ptr::null_mut());
+        if let Some(hl_exc) = err.downcast_ref::<HLExceptionPropagation>() {
+            let val = hl_exc.value;
+            if val.is_ptr() && val.as_ptr() != 0 && !throw_fn.is_null() {
+                type FnThrow = unsafe extern "C" fn(*mut c_void) -> !;
+                let f: FnThrow = std::mem::transmute(throw_fn);
+                f(val.as_ptr() as *mut c_void);
+            }
+        }
+
+        // No throwable value: mint one from the message, as `hl_error` does.
+        let error_fn = resolver
+            .resolve_function("std", "hlp_error")
+            .unwrap_or(std::ptr::null_mut());
+        if !error_fn.is_null() {
+            let msg = Self::interned_utf16_message(&format!("{:#}", err));
+            // `hlp_error` is variadic (`printf`-style), but it is called here
+            // with only its fixed argument, and on AAPCS64 the fixed argument
+            // lands in x0 either way — the variadic tail lives on the stack.
+            type FnError = unsafe extern "C" fn(*const u16) -> !;
+            let f: FnError = std::mem::transmute(error_fn);
+            f(msg);
+        }
+
+        eprintln!(
+            "[ash] FATAL: stub bridge cannot raise for findex {} (hlp_throw/hlp_error \
+             unresolvable); aborting rather than returning a poison value: {:#}",
+            findex, err
+        );
+        std::process::abort();
+    }
+
+    /// Intern `msg` as a leaked, NUL-terminated UTF-16 buffer.
+    ///
+    /// `hl_error`-style exception values keep a borrowed `uchar*`, so the
+    /// buffer has to outlive the throw. Interning bounds the leak by the
+    /// number of distinct messages instead of the number of throws.
+    fn interned_utf16_message(msg: &str) -> *const u16 {
+        static MESSAGES: OnceLock<Mutex<HashMap<String, &'static [u16]>>> = OnceLock::new();
+        let map = MESSAGES.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = match map.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let buf = *guard.entry(msg.to_string()).or_insert_with(|| {
+            let mut utf16: Vec<u16> = msg.encode_utf16().collect();
+            utf16.push(0);
+            &*Box::leak(utf16.into_boxed_slice())
+        });
+        // Drop the guard before returning: the caller longjmps out of its
+        // frame, which would otherwise strand the lock held forever.
+        drop(guard);
+        buf.as_ptr()
+    }
+
     fn format_hl_exception(&self, val: NanBoxedValue) -> HLExceptionPropagation {
         let msg = if val.is_null() || val.is_void() {
             None
@@ -1942,8 +2048,16 @@ impl HLInterpreter {
             nargs: i32,
         ) -> i64 {
             let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
-                eprintln!("[ash] stub bridge: no interpreter context registered");
-                return 0;
+                // Without the context there is no resolver to throw through
+                // and no interpreter to run the callee: the only honest
+                // outcomes are abort or a poison return, and a poison return
+                // is a delayed crash somewhere else.
+                eprintln!(
+                    "[ash] FATAL: stub bridge called for findex {} with no interpreter \
+                     context registered; aborting rather than returning a poison value",
+                    findex
+                );
+                std::process::abort();
             };
             let interp = &mut *ctx.interp;
             let bytecode = &*ctx.bytecode;
@@ -1956,12 +2070,18 @@ impl HLInterpreter {
             } else if let Some(&ni) = interp.findex_to_native.get(&findex) {
                 bytecode.natives[ni].type_.0
             } else {
-                eprintln!("[ash] stub bridge: unknown findex {}", findex);
-                return 0;
+                HLInterpreter::raise_stub_bridge_failure(
+                    resolver,
+                    findex,
+                    anyhow!("stub bridge: unknown findex {}", findex),
+                );
             };
             let Some(fun) = bytecode.types[type_idx].fun.as_ref() else {
-                eprintln!("[ash] stub bridge: findex {} has no function type", findex);
-                return 0;
+                HLInterpreter::raise_stub_bridge_failure(
+                    resolver,
+                    findex,
+                    anyhow!("stub bridge: findex {} has no function type", findex),
+                );
             };
 
             let nargs = nargs.max(0) as usize;
@@ -1983,29 +2103,10 @@ impl HLInterpreter {
 
             match interp.call_function(bytecode, resolver, findex, &vals) {
                 Ok(v) => interp.value_to_i64(v, ret_kind),
-                Err(e) => {
-                    // Re-throw HL exceptions into the native trap chain so
-                    // the JIT caller's active Trap (or the compiled-call
-                    // guard trap) observes them with correct semantics.
-                    if let Some(hl_exc) = e.downcast_ref::<HLExceptionPropagation>() {
-                        let val = hl_exc.value;
-                        if val.is_ptr() && val.as_ptr() != 0 {
-                            let throw_fn = resolver
-                                .resolve_function("std", "hlp_throw")
-                                .unwrap_or(std::ptr::null_mut());
-                            if !throw_fn.is_null() {
-                                type FnThrow = unsafe extern "C" fn(*mut c_void) -> !;
-                                let f: FnThrow = std::mem::transmute(throw_fn);
-                                f(val.as_ptr() as *mut c_void);
-                            }
-                        }
-                    }
-                    eprintln!(
-                        "[ash] stub bridge: findex {} failed (returning 0): {:#}",
-                        findex, e
-                    );
-                    0
-                }
+                // Every failure leaves through the native trap chain — see
+                // `raise_stub_bridge_failure`. Returning a value here would
+                // hand compiled code a word it is about to use as a pointer.
+                Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
             }
         }
         ash::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
@@ -2576,6 +2677,12 @@ impl HLInterpreter {
         let fn_remove_trap = self.fn_remove_trap_jit;
         let fn_get_exc = self.fn_get_exc_value;
         let fn_clear_exc = self.fn_clear_exc_value;
+        // Frame depth at the setjmp site. A throw from inside the compiled
+        // callee — including one raised by the stub bridge re-entering the
+        // interpreter — longjmps back here without unwinding, so the frames
+        // those abandoned Rust activations pushed are still on `self.stack`
+        // and have to be dropped explicitly.
+        let stack_depth = self.stack.len();
         let mut trap_installed = false;
         if !fn_setup_trap.is_null() {
             type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
@@ -2585,6 +2692,8 @@ impl HLInterpreter {
                 trap_installed = true;
                 let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
+                    self.stack.truncate(stack_depth);
+                    self.sync_gc_scan_roots();
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
                         let exc_ptr =
@@ -5841,6 +5950,11 @@ impl HLInterpreter {
         let fn_remove_trap = self.fn_remove_trap_jit;
         let fn_get_exc = self.fn_get_exc_value;
         let fn_clear_exc = self.fn_clear_exc_value;
+        // Same frame-stack invariant as `call_compiled_function`: a native that
+        // re-enters the interpreter (closure runner, dynamic dispatch) and then
+        // throws longjmps straight back here, leaving the frames it pushed
+        // behind.
+        let stack_depth = self.stack.len();
         let mut trap_installed = false;
         if !fn_setup_trap.is_null() {
             type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
@@ -5850,6 +5964,8 @@ impl HLInterpreter {
                 trap_installed = true;
                 let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
+                    self.stack.truncate(stack_depth);
+                    self.sync_gc_scan_roots();
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
                         let exc_ptr =
@@ -7076,5 +7192,78 @@ impl HLInterpreter {
     /// Write a NanBoxedValue to a raw memory pointer using the given type kind.
     fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: u32) {
         unsafe { Self::write_value_at(ptr, kind, val) }
+    }
+}
+
+#[cfg(test)]
+mod stub_bridge_tests {
+    use super::*;
+    use ash::native_lib::init_std_library;
+
+    /// The stub bridge must never report a failure by returning a value:
+    /// compiled code consumes that word as the callee's declared return type,
+    /// so a `0` becomes a null pointer it dereferences immediately.
+    ///
+    /// This drives the exact failure the crash report came from — an
+    /// interpreter-internal "Null access" with no throwable `vdynamic` — and
+    /// asserts it arrives at an armed native trap as a real HL exception
+    /// value, which is what lets the Haxe-side `catch` see it.
+    #[test]
+    fn interpreter_internal_failure_raises_into_the_trap_chain() {
+        init_std_library().expect("std library");
+        let resolver = NativeFunctionResolver::new();
+
+        let setup = resolver
+            .resolve_function("std", "hlp_setup_trap_jit")
+            .expect("hlp_setup_trap_jit");
+        let get_exc = resolver
+            .resolve_function("std", "hlp_get_exc_value")
+            .expect("hlp_get_exc_value");
+        let clear_exc = resolver
+            .resolve_function("std", "hlp_clear_exc_value")
+            .expect("hlp_clear_exc_value");
+
+        unsafe {
+            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
+            let setup: FnSetupTrap = std::mem::transmute(setup);
+            let jmp_buf = setup();
+            assert!(!jmp_buf.is_null(), "trap setup failed");
+
+            if call_setjmp_opaque(jmp_buf) == 0 {
+                // No HL value on this error, exactly like a `NullCheck`
+                // failure raised while the bridge re-enters the interpreter.
+                let err = anyhow::Error::new(HLExceptionPropagation {
+                    value: NanBoxedValue::null(),
+                    message: Some("Null access".to_string()),
+                });
+                HLInterpreter::raise_stub_bridge_failure(&resolver, 698, err);
+            }
+
+            // Reached only via longjmp out of the raise.
+            type FnGetExc = unsafe extern "C" fn() -> *mut hl::vdynamic;
+            let exc = std::mem::transmute::<*mut c_void, FnGetExc>(get_exc)();
+            assert!(
+                !exc.is_null(),
+                "raise produced no exception value — the trap chain saw nothing to catch"
+            );
+
+            // `hl_error`-shaped value: a bytes dynamic carrying the message.
+            let msg_ptr = (*exc).v.bytes as *const u16;
+            assert!(!msg_ptr.is_null(), "exception carries no message");
+            let mut units = Vec::new();
+            let mut i = 0isize;
+            while *msg_ptr.offset(i) != 0 && i < 512 {
+                units.push(*msg_ptr.offset(i));
+                i += 1;
+            }
+            let msg = String::from_utf16_lossy(&units);
+            assert!(
+                msg.contains("Null access"),
+                "unexpected exception message: {msg}"
+            );
+
+            type FnClearExc = unsafe extern "C" fn();
+            std::mem::transmute::<*mut c_void, FnClearExc>(clear_exc)();
+        }
     }
 }

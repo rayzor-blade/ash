@@ -225,6 +225,20 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 - **Committed build artifacts** in `examples/heaps_base2d/bin/` (`game.hl`
   plus eight `.hdll` files).
 
+## Dead code
+
+- **Delete the pre-JIT module path and drop the `hlbc` dependency.**
+  `crates/ash/src/{module.rs, functions.rs, values.rs}` (916 + 574 + 209
+  lines) reference only each other and `types.rs`'s `FunPtr` enum, and
+  nothing outside `crates/ash` imports them — the live entry point is
+  `main.rs` → `ash::jit::module::JITModule`, and `jit/`, `bytecode.rs` and
+  `c_types.rs` contain no `hlbc` at all (they use ash's own decoder and
+  AIR's vendored opcode definitions). Removing the three files, the `FunPtr`
+  enum with its `use hlbc::types::{Function, Native}`, the three `pub mod`
+  lines in `lib.rs`, and the `hlbc` entry in `crates/ash/Cargo.toml`
+  eliminates the last dependency on an upstream that has been unmaintained
+  for two years — without forking or vendoring anything.
+
 ## Build & tooling
 
 - **`build.rs` dylib path** — nightly cargo emits `libash_std.dylib` to

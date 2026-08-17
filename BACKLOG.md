@@ -86,11 +86,21 @@ a third). Pins: cranelift 0.130.2, `wasmtime-internal-jit-icache-coherence`
   functions (4.0% of opcodes) in `game.hl`; throw-only functions stay
   eligible because the interpreter's per-call setjmp wrapper guarantees the
   jump exits the frame.
-- **Cross-tier FMA policy** — Cranelift at `speed` never contracts
-  `fmul`+`fadd` (matching hxcpp: mandelbrot checksum 112798515), while the
-  LLVM tier contracts (112798587), so promoting a hot float function changes
-  bit patterns mid-run. Either drop the contract flag or emit explicit `fma`
-  in both tiers.
+- **Cross-tier FMA policy — emit explicit `fma`, do not rely on contraction.**
+  Measured against a C port of `Mandelbrot.hx` (`clang -O2`, checksums for
+  298² / 875×500): unfused `-ffp-contract=off` gives 22816350 / 112790102 and
+  matches ash's interpreter bit-for-bit; fused `-ffp-contract=on` (clang's
+  default, 4 `fmadd` in the binary) gives 22825041 / 112798515 and matches
+  ash's LLVM tier exactly on 298² — and 112798515 is also the hxcpp/hxjava
+  value. So **fusion is what every reference implementation does**, and the
+  unfused number appears nowhere but a strict interpreter. Cranelift has an
+  `fma` instruction (spike-verified bit-exact with `f64::mul_add`) but does
+  not auto-contract, so the tier must emit `fma` explicitly — best as an AIR
+  peephole (`Mul` feeding a single-use `Add`/`Sub` → `Fma`) that both
+  backends lower literally, which also removes ash's dependence on LLVM
+  DAGCombine heuristics (the residual 72-unit gap from hxcpp at 875×500 is a
+  fusion-*pattern* difference, not a fusion-presence one). Repro:
+  `scratchpad/fma_repro/mandel.c`.
 - **`TieredAdapter` has no batched-flush path** — tier ≥ 1 promotions pay one
   `finalize_definitions` per function. Acceptable at hot-tier volume; the
   null-sentinel trick (backend performs `swap_compiled_with_osr` itself)

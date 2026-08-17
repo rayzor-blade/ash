@@ -94,20 +94,46 @@ pub struct JITModule<'ctx> {
     pub(crate) hot_reload: bool,
 }
 
+/// Per-phase init timing, printed when ASH_TIERED_TIMING=1 is set.
+macro_rules! phase_timer {
+    ($enabled:expr, $label:expr, $start:expr) => {
+        if $enabled {
+            eprintln!(
+                "[jit-init] {:<24} {:>8.1}ms",
+                $label,
+                $start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    };
+}
+
+fn timing_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| std::env::var("ASH_TIERED_TIMING").is_ok())
+}
+
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
+        let timing = timing_enabled();
+        let mut t = std::time::Instant::now();
         init_std_library();
 
         let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+        phase_timer!(timing, "decode", t);
+        t = std::time::Instant::now();
 
         let module = context.create_module("Hashlink");
         let execution_engine = module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Failed to initialize execution engine");
+        phase_timer!(timing, "engine", t);
+        t = std::time::Instant::now();
 
         let native_function_resolver = NativeFunctionResolver::new();
 
         let types_ = bytecode.types.clone();
+        phase_timer!(timing, "resolver+types clone", t);
+        t = std::time::Instant::now();
 
         let mut module = JITModule {
             context,
@@ -137,7 +163,51 @@ impl<'ctx> JITModule<'ctx> {
             hot_reload: false,
         };
 
-        module.string_globals = module
+        module.create_constant_pool_globals();
+        phase_timer!(timing, "const globals", t);
+        t = std::time::Instant::now();
+
+        module
+            .initialize_globals()
+            .expect("Failed to initialize globals");
+        phase_timer!(timing, "initialize_globals", t);
+        t = std::time::Instant::now();
+
+        // Discover and load external HDLL libraries
+        let search_dir = path.parent().unwrap_or(Path::new("."));
+        module
+            .native_function_resolver
+            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
+            .expect("Failed to discover HDLL libraries");
+        phase_timer!(timing, "discover_libraries", t);
+        t = std::time::Instant::now();
+
+        module
+            .init_natives()
+            .expect("Failed to initialize native functions");
+        phase_timer!(timing, "init_natives", t);
+        t = std::time::Instant::now();
+
+        // Set up dynamic call callbacks (needed by hlp_call_method for Type.createInstance etc.)
+        module.setup_callbacks();
+
+        module.init_indexes().expect("Failed to initialie indexes");
+        phase_timer!(timing, "init_indexes", t);
+        t = std::time::Instant::now();
+
+        module
+            .init_constants()
+            .expect("Failed to initialize constants");
+        phase_timer!(timing, "init_constants", t);
+
+        module
+    }
+
+    /// Create LLVM module globals for the bytecode constant pools
+    /// (strings, ints, floats, bytes). Compiled code references these
+    /// directly via Opcode::String/Int/Float/Bytes.
+    fn create_constant_pool_globals(&mut self) {
+        self.string_globals = self
             .bytecode
             .strings
             .iter()
@@ -146,12 +216,9 @@ impl<'ctx> JITModule<'ctx> {
                 // Convert UTF-8 string to UTF-16 (HashLink uses UTF-16 internally)
                 let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect(); // null-terminated
                 let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
-                let string_val = module.context.const_string(&utf16_bytes, false);
-                let global = module.module.add_global(
-                    module
-                        .context
-                        .i8_type()
-                        .array_type(utf16_bytes.len() as u32),
+                let string_val = self.context.const_string(&utf16_bytes, false);
+                let global = self.module.add_global(
+                    self.context.i8_type().array_type(utf16_bytes.len() as u32),
                     None,
                     &format!("String_{}", i),
                 );
@@ -163,58 +230,54 @@ impl<'ctx> JITModule<'ctx> {
             })
             .collect();
 
-        module.int_globals = module
+        self.int_globals = self
             .bytecode
             .ints
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let int_val = module.context.i32_type().const_int(*v as u64, false);
-                let global = module.module.add_global(
-                    module.context.i32_type(),
-                    None,
-                    &format!("Int_{}", i),
-                );
+                let int_val = self.context.i32_type().const_int(*v as u64, false);
+                let global =
+                    self.module
+                        .add_global(self.context.i32_type(), None, &format!("Int_{}", i));
                 global.set_initializer(&int_val);
                 global.set_constant(true);
                 global
             })
             .collect();
 
-        module.float_globals = module
+        self.float_globals = self
             .bytecode
             .floats
             .iter()
             .enumerate()
             .map(|(i, v)| {
-                let float_val = module.context.f64_type().const_float(*v);
-                let global = module.module.add_global(
-                    module.context.f64_type(),
-                    None,
-                    &format!("Float_{}", i),
-                );
+                let float_val = self.context.f64_type().const_float(*v);
+                let global =
+                    self.module
+                        .add_global(self.context.f64_type(), None, &format!("Float_{}", i));
                 global.set_initializer(&float_val);
                 global.set_constant(true);
                 global
             })
             .collect();
 
-        module.bytes_globals = module
+        self.bytes_globals = self
             .bytecode
             .bytes_pos
             .iter()
             .enumerate()
             .map(|(i, &pos)| {
-                let end = module
+                let end = self
                     .bytecode
                     .bytes_pos
                     .get(i + 1)
                     .copied()
-                    .unwrap_or(module.bytecode.bytes_data.len());
-                let slice = &module.bytecode.bytes_data[pos..end];
-                let val = module.context.const_string(slice, false);
-                let global = module.module.add_global(
-                    module.context.i8_type().array_type(slice.len() as u32),
+                    .unwrap_or(self.bytecode.bytes_data.len());
+                let slice = &self.bytecode.bytes_data[pos..end];
+                let val = self.context.const_string(slice, false);
+                let global = self.module.add_global(
+                    self.context.i8_type().array_type(slice.len() as u32),
                     None,
                     &format!("Bytes_{}", i),
                 );
@@ -223,32 +286,6 @@ impl<'ctx> JITModule<'ctx> {
                 global
             })
             .collect();
-
-        module
-            .initialize_globals()
-            .expect("Failed to initialize globals");
-
-        // Discover and load external HDLL libraries
-        let search_dir = path.parent().unwrap_or(Path::new("."));
-        module
-            .native_function_resolver
-            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
-            .expect("Failed to discover HDLL libraries");
-
-        module
-            .init_natives()
-            .expect("Failed to initialize native functions");
-
-        // Set up dynamic call callbacks (needed by hlp_call_method for Type.createInstance etc.)
-        module.setup_callbacks();
-
-        module.init_indexes().expect("Failed to initialie indexes");
-
-        module
-            .init_constants()
-            .expect("Failed to initialize constants");
-
-        module
     }
 
     pub fn set_hot_reload(&mut self, enabled: bool) {
@@ -260,53 +297,163 @@ impl<'ctx> JITModule<'ctx> {
         path: &Path,
         shared: SharedRuntimeHandles,
     ) -> Self {
-        let mut module = Self::new_for_tiered(context, path);
-        module.shared_runtime = Some(shared.clone());
+        Self::new_for_tiered(context, path, shared)
+    }
+
+    /// Minimal constructor for tiered promotion (hybrid pre-warm) and
+    /// hot-reload. Builds ONLY what `promote_function_strict` touches:
+    ///
+    /// - LLVM module + MCJIT execution engine
+    /// - constant-pool globals (Opcode::String/Int/Float/Bytes load them)
+    /// - HDLL discovery (dlopen is process-global; native symbols then
+    ///   resolve lazily per compiled function through
+    ///   `get_or_create_function_value` -> `init_native_func`, off the
+    ///   startup path)
+    /// - `findexes` plus `func_types`/`functions_ptrs` mirrored from the
+    ///   interpreter's shared module context
+    /// - dynamic-call callbacks (process-global, idempotent)
+    ///
+    /// Everything else the full `Self::new()` builds is either discarded by
+    /// `apply_shared_runtime_overrides` (own globals_data wiring, own C type
+    /// graph + initialized_type_cache, own boxed HFUN types) or never reached
+    /// by single-function promotion (entrypoint compilation, constants
+    /// materialization — the interpreter owns program init in hybrid mode).
+    /// Unlike the full constructor, nothing here allocates from the GC, so no
+    /// GC lock is needed and it is safe to run mid-program (hot-reload
+    /// callback) without stalling collections.
+    fn new_for_tiered(context: &'ctx Context, path: &Path, shared: SharedRuntimeHandles) -> Self {
+        let timing = timing_enabled();
+        let mut t = std::time::Instant::now();
+        init_std_library();
+
+        let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+        phase_timer!(timing, "tiered decode", t);
+        t = std::time::Instant::now();
+
+        let llvm_module = context.create_module("Hashlink");
+        let execution_engine = llvm_module
+            .create_jit_execution_engine(OptimizationLevel::Aggressive)
+            .expect("Failed to initialize execution engine");
+        phase_timer!(timing, "tiered engine", t);
+        t = std::time::Instant::now();
+
+        let native_function_resolver = NativeFunctionResolver::new();
+        let types_ = bytecode.types.clone();
+
+        let mut module = JITModule {
+            context,
+            module: llvm_module,
+            builder: context.create_builder(),
+            execution_engine,
+            bytecode,
+            type_cache: HashMap::new(),
+            initialized_type_cache: HashMap::new(),
+            findexes: HashMap::new(),
+            func_cache: HashMap::new(),
+            native_function_resolver,
+            types_,
+            int_globals: Vec::new(),
+            float_globals: Vec::new(),
+            string_globals: Vec::new(),
+            bytes_globals: Vec::new(),
+            type_info_globals: HashMap::new(),
+            pending_compilations: Vec::new(),
+            globals: HashMap::new(),
+            globals_data: Vec::new(),
+            c_ptr_to_type_index: HashMap::new(),
+            func_types: Vec::new(),
+            hl_type_struct_type: None,
+            functions_ptrs: Vec::new(),
+            shared_runtime: Some(shared.clone()),
+            hot_reload: false,
+        };
+
+        module.create_constant_pool_globals();
+        phase_timer!(timing, "tiered const globals", t);
+        t = std::time::Instant::now();
+
+        // dlopen HDLLs up front (process-global side effect) so lazily
+        // resolved natives find their symbols during promotion.
+        let search_dir = path.parent().unwrap_or(Path::new("."));
+        module
+            .native_function_resolver
+            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
+            .expect("Failed to discover HDLL libraries");
+        phase_timer!(timing, "tiered discover_libs", t);
+        t = std::time::Instant::now();
+
+        // Set up dynamic call callbacks (needed by hlp_call_method for Type.createInstance etc.)
+        module.setup_callbacks();
+
+        // The translate path resolves natives lazily through
+        // get_or_create_function_value with ONE exception: Opcode::New for
+        // HOBJ/HSTRUCT looks up "std_hlp_alloc_obj_caller" in func_cache by
+        // name. Pre-create just that caller so object allocation compiles.
+        module
+            .init_required_natives()
+            .expect("Failed to initialize required natives");
+        phase_timer!(timing, "tiered required natives", t);
+        t = std::time::Instant::now();
+
+        module
+            .init_findexes_only()
+            .expect("Failed to initialize findexes");
         module.apply_shared_runtime_overrides(&shared);
+        phase_timer!(timing, "tiered findexes+shared", t);
+
+        // Seed the compile queue with the entrypoint. MCJIT code-generates a
+        // module exactly once: functions added after the first
+        // get_function_address are never compiled, so everything that might
+        // later be promoted must be IN the module before that first
+        // finalization. The first promotion's strict drain pops this seed and
+        // transitively compiles the entrypoint's direct-call closure — the
+        // same compiled set the full constructor produced by compiling the
+        // entrypoint during init — but on the broker thread, off the
+        // main-thread startup path. Later promotions then resolve addresses
+        // from the already-finalized object.
+        module
+            .pending_compilations
+            .push(module.bytecode.entrypoint as usize);
+
         module
     }
 
-    /// Creates a JIT module for tiered promotion, using the full Self::new()
-    /// constructor. MUST be called on the main thread (hybrid pre-warm at
-    /// startup, or the hot-reload callback): init GC-allocates, and a
-    /// collection triggered from any other thread would conservatively scan
-    /// the wrong stack. The GC lock is held across init so a concurrent
-    /// broker/worker thread cannot enter the GC mid-init; on the pre-start
-    /// main thread it is uncontended and effectively free.
-    fn new_for_tiered(context: &'ctx Context, path: &Path) -> Self {
-        init_std_library();
-
-        // Lock the GC during init so the worker thread can safely allocate
-        // (init_indexes calls hlp_init_enum/hlp_init_virtual which use GC).
-        unsafe {
-            let lock_fn = libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_lock\0".as_ptr() as *const _);
-            let unlock_fn =
-                libc::dlsym(libc::RTLD_DEFAULT, b"hlp_gc_unlock\0".as_ptr() as *const _);
-            if !lock_fn.is_null() {
-                let lock: unsafe extern "C" fn() = std::mem::transmute(lock_fn);
-                lock();
-            }
-            let m = Self::new(context, path);
-            if !unlock_fn.is_null() {
-                let unlock: unsafe extern "C" fn() = std::mem::transmute(unlock_fn);
-                unlock();
-            }
-            m
+    /// Pre-create the native callers the translate path expects to find in
+    /// `func_cache` by generated name instead of resolving lazily. Currently
+    /// only std/alloc_obj (Opcode::New emits a call to
+    /// "std_hlp_alloc_obj_caller" fetched from func_cache).
+    fn init_required_natives(&mut self) -> Result<()> {
+        let required: Vec<_> = self
+            .bytecode
+            .natives
+            .iter()
+            .filter(|n| n.lib == "std" && n.name == "alloc_obj")
+            .cloned()
+            .collect();
+        for native_f in &required {
+            let fun_value = self.init_native_func(native_f)?;
+            self.func_cache.insert(native_f.findex as usize, fun_value);
         }
+        Ok(())
     }
 
     /// Build findexes and func_types tables without initializing HOBJ/HENUM types.
     /// Copies func_types and functions_ptrs from the shared runtime if available.
     /// Safe to call from the worker thread (no GC allocation).
     fn init_findexes_only(&mut self) -> Result<()> {
-        let natives = self.bytecode.natives.clone();
-        let native_len = natives.len();
-        let funs = self.bytecode.functions.clone();
-        let funs_len = funs.len();
-
         let max_findex = std::cmp::max(
-            funs.iter().map(|f| f.findex as usize).max().unwrap_or(0),
-            natives.iter().map(|n| n.findex as usize).max().unwrap_or(0),
+            self.bytecode
+                .functions
+                .iter()
+                .map(|f| f.findex as usize)
+                .max()
+                .unwrap_or(0),
+            self.bytecode
+                .natives
+                .iter()
+                .map(|n| n.findex as usize)
+                .max()
+                .unwrap_or(0),
         ) + 1;
 
         // Copy func_types and functions_ptrs from the shared runtime (main thread)
@@ -338,15 +485,15 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         // Register bytecode functions
-        for fun in &funs {
-            let findex = fun.findex as usize;
-            self.findexes.insert(findex, FuncPtr::Fun(fun.clone()));
+        for fun in &self.bytecode.functions {
+            self.findexes
+                .insert(fun.findex as usize, FuncPtr::Fun(fun.clone()));
         }
 
         // Register native functions
-        for nat in &natives {
-            let findex = nat.findex as usize;
-            self.findexes.insert(findex, FuncPtr::Native(nat.clone()));
+        for nat in &self.bytecode.natives {
+            self.findexes
+                .insert(nat.findex as usize, FuncPtr::Native(nat.clone()));
         }
 
         Ok(())

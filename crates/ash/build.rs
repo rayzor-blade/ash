@@ -106,20 +106,17 @@ fn main() {
         println!("cargo:rerun-if-changed={}", c.display());
     }
 
-    let lib_path = candidates
-        .iter()
-        .find(|p| p.exists())
-        .unwrap_or_else(|| {
-            panic!(
-                "Could not find the ash_std cdylib to embed. Build it first:\n\
+    let lib_path = candidates.iter().find(|p| p.exists()).unwrap_or_else(|| {
+        panic!(
+            "Could not find the ash_std cdylib to embed. Build it first:\n\
                  \x20   cargo build -p ash_std\n\
                  Tried:\n{}",
-                candidates
-                    .iter()
-                    .map(|p| format!("  {}\n", p.display()))
-                    .collect::<String>()
-            )
-        });
+            candidates
+                .iter()
+                .map(|p| format!("  {}\n", p.display()))
+                .collect::<String>()
+        )
+    });
 
     println!("lib_path {:?}", lib_path);
 

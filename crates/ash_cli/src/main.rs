@@ -237,7 +237,34 @@ unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64,
     Some((ss.pc, ss.lr, ss.fp, ss.sp))
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+/// x86_64 Linux: the register file lives in `ucontext_t.uc_mcontext.gregs`,
+/// indexed by the `REG_*` constants from `<sys/ucontext.h>`. `libc` models
+/// this one, so no hand-rolled layout is needed.
+///
+/// x86_64 has no link register — the return address sits on the stack at
+/// `[rbp+8]` once a frame is set up — so `lr` is reported as 0 rather than
+/// dereferencing a possibly-garbage frame pointer inside a signal handler.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
+    if ctx.is_null() {
+        return None;
+    }
+    const REG_RBP: usize = 10;
+    const REG_RSP: usize = 15;
+    const REG_RIP: usize = 16;
+    let gregs = &(*(ctx as *const libc::ucontext_t)).uc_mcontext.gregs;
+    Some((
+        gregs[REG_RIP] as u64,
+        0,
+        gregs[REG_RBP] as u64,
+        gregs[REG_RSP] as u64,
+    ))
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64")
+)))]
 unsafe fn signal_registers(_ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
     None
 }

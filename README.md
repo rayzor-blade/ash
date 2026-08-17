@@ -4,7 +4,7 @@
 
 <h1 align="center">ASH</h1>
 
-<p align="center">A HashLink virtual machine written in Rust.</p>
+<p align="center">A fast HashLink virtual machine written in Rust.</p>
 
 ASH executes [HashLink](https://hashlink.haxe.org/) bytecode (`.hl` files) compiled from [Haxe](https://haxe.org/). Execution is tiered: a bytecode interpreter runs everything, hot functions are promoted to Cranelift-compiled code, and the hottest are recompiled by LLVM.
 
@@ -30,6 +30,18 @@ A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`,
 - **Shared symbol table** — one canonical `lib@symbol` → address map built at startup and consumed by the interpreter and both compiled tiers
 - **HDLL support** — external HashLink dynamic libraries via the standard `DEFINE_PRIM` resolver protocol
 - **Embedded standard library** — the HashLink standard library implemented in Rust, built as a cdylib and embedded in the binary
+
+## Platforms
+
+Most of ASH is portable Rust. Three components carry architecture-specific code: the fiber context switch that backs `sys.thread`, the reflection call bridge that marshals arguments for `Type.createInstance` and friends, and native crash recovery.
+
+| Architecture | Status |
+|--------------|--------|
+| `aarch64` | All paths implemented; primary development and test target |
+| `x86_64` | All paths implemented, including the SysV and Windows fiber ABIs |
+| others | Supported once those three components gain a path; everything else already compiles |
+
+macOS is where ASH is developed and tested. Linux and Windows have code paths throughout, and `make all` builds every target `rustup` has installed, but neither is exercised regularly yet.
 
 ## Prerequisites
 

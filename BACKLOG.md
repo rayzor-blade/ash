@@ -100,6 +100,20 @@ O3. v1 remains the production path until the backends switch over.
   registers actually live into the handler.
 - **Landing-pad design for exceptional-edge copies** — would lift the
   handler-block non-trivial-phi restriction.
+- **Bounds-check elimination.** HashLink puts the check in Haxe source, not in
+  generated code: `ArrayObj.getDyn` is `var pos:UInt = pos; if (pos >= length)
+  return null;`, and ash's JIT emits no check of its own on
+  `GetArray`/`SetArray`. So every check is a bytecode-level `Field(length)` +
+  unsigned compare + branch that AIR can see and remove outright — no backend
+  cooperation needed, and no safety consequence, since eliminating a
+  *provably* redundant check cannot change behaviour. Like SROA it depends on
+  inlining running first: until `ArrayObj.getDyn` is inlined there is no check
+  in the loop, only a call. What it then needs is a range/interval analysis
+  relating an induction variable to the array length — for the mandelbrot
+  benchmark, `palette[iteration]` with `iteration` in `[0, MaxIterations]`
+  against a palette of `MaxIterations + 1` entries, and `image[outPixel++]`
+  bounded by the loop trip count. The `ArrayLen` alias class already exists,
+  so GVN can CSE repeated length loads even before full elimination lands.
 - **Loop vectorization.** Earlier analysis deferred this to LLVM's loop/SLP
   vectorizers, but that assumed LLVM was the only compiled backend. Cranelift
   has SIMD types and instructions (`i8x16`…`f64x2`, including a vector `fma`)
@@ -126,6 +140,18 @@ O3. v1 remains the production path until the backends switch over.
   promotion sidesteps it; AIR v2 lowering should remove the cause.
 - **Hybrid `test_mandelbrot_small` post-main `SIGSEGV`** (exit 139) after
   printing the correct checksum. Pre-existing, reproduces on baseline.
+- **Full-JIT `Map` iteration yields garbage; `Map.get` is correct.** Found by
+  `scripts/ash_bench.py`, which is why the benchmark corpus checks answers
+  rather than only clocks — `target/debug/ash` completes `test_map_simple.hl`
+  and `test_mapiter.hl` in ~1 s and prints a wrong number, so without the
+  correctness gate it reads as a fast run. `m.get("x")` returns `42`, but
+  `for (v in m)` prints a *different* value on every invocation (247019776,
+  239646976, 205322496 across three runs) — the magnitude and the run-to-run
+  variance both say the low 32 bits of a heap pointer are being read where an
+  `i32` is expected, i.e. the iterator's `next()` return is not being unboxed.
+  Only the full-JIT binary is affected; `interp` and all three hybrid tiers
+  are correct. Repro:
+  `target/debug/ash crates/ash/test/tests/test_map_simple.hl`.
 - **MCJIT is legacy** — isolate the execution-engine surface
   (`create_jit_execution_engine`, `get_function_address`, `run_function`,
   `add_global_mapping`) behind a trait so an ORC backend can replace it
@@ -279,8 +305,10 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
   `target/aarch64-apple-darwin/debug/` and panics if it is missing. It should
   fall back.
 - **No test runner** — there is no `run_tests.sh`; the parity matrix
-  (`crates/ash/test/tests/run_stdlib_matrix.sh` + `parity_cases.toml`) and
-  `scripts/run_perf_matrix.py` are the closest things.
+  (`crates/ash/test/tests/run_stdlib_matrix.sh` + `parity_cases.toml`) is the
+  closest thing. For performance, `scripts/ash_bench.py` is now canonical
+  (corpus in `bench/benchmarks.toml`, docs in `bench/README.md`);
+  `scripts/run_perf_matrix.py` is a deprecated shim that forwards to it.
 - **README is stale** — it documents O0/O1/O2 AIR levels and describes MCJIT
   codegen as "O3 optimizations"; no LLVM middle-end pipeline runs at all
   (adding one is the cheapest large win available).

@@ -13,6 +13,9 @@
 //!   and with it a predecessor of the handler.
 //! * **`ClobberAll` is a hard barrier.** No load is reused, and nothing is
 //!   hoisted, across a call, `Asm`, or region marker.
+//! * **Cells are memory.** `CellGet`/`CellSet`/`CellIncr`/`CellDecr` carry
+//!   [`AliasClass::Cell`](super::analysis::AliasClass::Cell) and take part in
+//!   the same aliasing rules as heap accesses.
 //! * **Live ranges stay register-correct.** De-SSA assigns every value to
 //!   [`ValueData::reg`], and lowering guarantees that assignment is
 //!   conflict-free only for the live ranges it built. Any rewrite that
@@ -21,12 +24,21 @@
 //!   that is impossible (the value is a `Param`, whose register is fixed by
 //!   the calling convention).
 
+use super::analysis::{clobbers_all, write_class, AliasClass, CfgInfo};
 use super::ir::*;
 use anyhow::{bail, Result};
 
+pub mod dce;
 pub mod fma;
+pub mod gvn;
+pub mod licm;
+pub mod nullcheck;
 
+pub use dce::DeadCodeElim;
 pub use fma::FmaPeephole;
+pub use gvn::GlobalValueNumbering;
+pub use licm::LoopInvariantCodeMotion;
+pub use nullcheck::NullCheckElim;
 
 // ---------------------------------------------------------------------------
 // pass interface
@@ -96,9 +108,11 @@ pub trait Pass {
 pub enum OptLevel {
     /// Nothing runs; the IR is left exactly as lowered.
     O0,
-    /// Cleanups that cannot grow the function.
+    /// Cleanups that cannot grow the function: null-check elimination and
+    /// dead-code elimination.
     O1,
-    /// The full pipeline, run to a fixed point.
+    /// The full pipeline: null-check elimination, GVN/CSE, LICM, the FMA
+    /// peephole, and dead-code elimination, run to a fixed point.
     O2,
 }
 
@@ -145,8 +159,14 @@ impl PassManager {
     pub fn new(level: OptLevel) -> Self {
         let passes: Vec<Box<dyn Pass>> = match level {
             OptLevel::O0 => vec![],
-            OptLevel::O1 => vec![],
-            OptLevel::O2 => vec![Box::new(FmaPeephole)],
+            OptLevel::O1 => vec![Box::new(NullCheckElim), Box::new(DeadCodeElim)],
+            OptLevel::O2 => vec![
+                Box::new(NullCheckElim),
+                Box::new(GlobalValueNumbering),
+                Box::new(LoopInvariantCodeMotion),
+                Box::new(FmaPeephole),
+                Box::new(DeadCodeElim),
+            ],
         };
         PassManager {
             passes,
@@ -462,4 +482,80 @@ pub fn compact_values(f: &mut Function) -> Result<()> {
     }
     f.values = values;
     Ok(())
+}
+
+/// True when no instruction between the two program points may write storage
+/// aliasing `class`, on **any** path from `from` to `to` — loops included.
+///
+/// `from` and `to` are instruction indices; the scan is exclusive at both
+/// ends. The region is the set of blocks reachable from `from`'s block that
+/// can also reach `to`'s block; a block that a path may re-enter is scanned in
+/// full rather than from (or up to) the anchor position.
+pub fn clobber_free(
+    f: &Function,
+    cfg: &CfgInfo,
+    class: AliasClass,
+    from: (BlockId, usize),
+    to: (BlockId, usize),
+) -> bool {
+    let nb = f.blocks.len();
+    let (db, dk) = from;
+    let (ub, uk) = to;
+
+    // Blocks reachable from db via at least one edge.
+    let mut fwd = vec![false; nb];
+    let mut stack: Vec<BlockId> = cfg.succs[db.idx()].clone();
+    while let Some(x) = stack.pop() {
+        if fwd[x.idx()] {
+            continue;
+        }
+        fwd[x.idx()] = true;
+        stack.extend(cfg.succs[x.idx()].iter().copied());
+    }
+    // Blocks that reach ub via at least one edge.
+    let mut bwd = vec![false; nb];
+    let mut stack: Vec<BlockId> = cfg.preds[ub.idx()].clone();
+    while let Some(x) = stack.pop() {
+        if bwd[x.idx()] {
+            continue;
+        }
+        bwd[x.idx()] = true;
+        stack.extend(cfg.preds[x.idx()].iter().copied());
+    }
+
+    let db_reentered = fwd[db.idx()];
+    let ub_reentered = bwd[ub.idx()];
+
+    for b in 0..nb {
+        let bid = BlockId(b as u32);
+        let in_region = (bid == db || fwd[b]) && (bid == ub || bwd[b]);
+        if !in_region {
+            continue;
+        }
+        let blk = &f.blocks[b];
+        let start = if bid == db && !db_reentered {
+            dk + 1
+        } else {
+            0
+        };
+        let end = if bid == ub && !ub_reentered {
+            uk
+        } else {
+            blk.instrs.len()
+        };
+        if start >= end {
+            continue;
+        }
+        for ins in &blk.instrs[start..end] {
+            if clobbers_all(ins) {
+                return false;
+            }
+            if let Some(w) = write_class(ins) {
+                if w.may_alias(class) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }

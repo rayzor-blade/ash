@@ -8,10 +8,14 @@
 //! plus (where the mini interpreter covers the ops) identical input/output
 //! behavior, plus register-type-table preservation.
 
+use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
 use super::ir::*;
 use super::lower::{lower, lower_with, ModuleBuilder};
-use super::module::{ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
-use super::passes::{FmaPeephole, OptLevel, Pass, PassManager, PassOptions, PassStats};
+use super::module::{ModuleTables, NativeImport, NativeTable, NoModuleInfo};
+use super::passes::{
+    DeadCodeElim, FmaPeephole, GlobalValueNumbering, LoopInvariantCodeMotion, NullCheckElim,
+    OptLevel, Pass, PassManager, PassOptions, PassStats,
+};
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
 use crate::opcodes::*;
@@ -2130,4 +2134,1258 @@ fn fma_fuses_one_product_per_add() {
         eval_f64(&f, &[], &args),
         args[0].mul_add(args[1], args[2] * args[2])
     );
+}
+
+// ---------------------------------------------------------------------------
+// analysis: natural loops and alias classes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn loop_forest_finds_the_natural_loop() {
+    let (ops, tys) = fix_loop();
+    let f = lower(&ops, &tys).unwrap();
+    let cfg = CfgInfo::build(&f);
+    let forest = LoopForest::analyze(&f, &cfg);
+    assert_eq!(forest.len(), 1);
+    let l = forest.roots[0];
+    let lp = forest.get(l);
+    assert_eq!(lp.latches.len(), 1);
+    assert!(lp.contains(lp.header));
+    assert_eq!(lp.depth, 0);
+    assert_eq!(forest.depth_of(lp.header), 1);
+    assert_eq!(forest.innermost_of(lp.header), Some(l));
+    // Entry predecessors are outside the loop, exits leave it.
+    let entries = forest.entry_preds(&cfg, l);
+    assert_eq!(entries.len(), 1);
+    assert!(!lp.contains(entries[0]));
+    let exits = forest.exiting_blocks(&cfg, l);
+    assert!(!exits.is_empty());
+    // Blocks outside the loop have depth 0.
+    assert_eq!(forest.depth_of(BlockId(0)), 0);
+}
+
+/// Nested counting loops: `for i in 0..n { for j in 0..n {} }`.
+fn fix_nested_loops() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            }, // one = 1
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(0),
+            }, // acc = 0
+            Opcode::Label, // 3: outer header
+            Opcode::JSGte {
+                a: Reg(1),
+                b: Reg(0),
+                offset: 7,
+            }, // 4: exit outer -> 12
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            }, // 5: j = 0
+            Opcode::Label, // 6: inner header
+            Opcode::JSGte {
+                a: Reg(2),
+                b: Reg(0),
+                offset: 3,
+            }, // 7: exit inner -> 11
+            Opcode::Add {
+                dst: Reg(4),
+                a: Reg(4),
+                b: Reg(3),
+            }, // 8
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(3),
+            }, // 9: j++
+            Opcode::JAlways { offset: -4 }, // 10 -> 6
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(3),
+            }, // 11: i++
+            Opcode::JAlways { offset: -10 }, // 12 -> wrong; patched below
+            Opcode::Ret { ret: Reg(4) },
+        ],
+        vec![t(0); 5],
+    )
+}
+
+#[test]
+fn loop_forest_nests_inner_loops() {
+    let (mut ops, tys) = fix_nested_loops();
+    // op 12 jumps back to the outer header (op 3).
+    ops[12] = Opcode::JAlways { offset: -10 };
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let cfg = CfgInfo::build(&f);
+    let forest = LoopForest::analyze(&f, &cfg);
+    assert_eq!(forest.len(), 2, "one outer and one inner loop");
+    let inner = forest.innermost_first()[0];
+    let outer = forest.get(inner).parent.expect("inner loop has a parent");
+    assert_eq!(forest.get(inner).depth, 1);
+    assert_eq!(forest.get(outer).depth, 0);
+    assert!(forest.get(outer).children.contains(&inner));
+    assert!(forest.roots.contains(&outer));
+    assert!(forest
+        .get(inner)
+        .blocks
+        .iter()
+        .all(|&b| forest.get(outer).contains(b)));
+    assert_eq!(forest.depth_of(forest.get(inner).header), 2);
+}
+
+#[test]
+fn alias_classes_separate_storage() {
+    let of0 = AliasClass::ObjField { ty: t(5), field: 0 };
+    let of1 = AliasClass::ObjField { ty: t(5), field: 1 };
+    let other_ty = AliasClass::ObjField { ty: t(6), field: 0 };
+    assert!(of0.may_alias(of0));
+    assert!(!of0.may_alias(of1), "different field slots are disjoint");
+    assert!(!of0.may_alias(other_ty), "different types are disjoint");
+    assert!(!AliasClass::ArrayData.may_alias(AliasClass::ArrayLen));
+    assert!(!AliasClass::Global(1).may_alias(AliasClass::Global(2)));
+    assert!(AliasClass::Global(1).may_alias(AliasClass::Global(1)));
+    assert!(!AliasClass::RawBytes.may_alias(AliasClass::ArrayData));
+    assert!(!AliasClass::Cell(CellId(0)).may_alias(AliasClass::Cell(CellId(1))));
+    assert!(!AliasClass::EnumParam {
+        construct: 0,
+        field: 0
+    }
+    .may_alias(AliasClass::EnumParam {
+        construct: 1,
+        field: 0
+    }));
+    // Reflective access can resolve to an object field.
+    assert!(AliasClass::DynBox.may_alias(of0));
+    assert!(of0.may_alias(AliasClass::DynBox));
+    // Unknown storage aliases everything.
+    for c in [
+        of0,
+        AliasClass::ArrayData,
+        AliasClass::ArrayLen,
+        AliasClass::RawBytes,
+        AliasClass::DynBox,
+        AliasClass::Cell(CellId(3)),
+        AliasClass::Global(9),
+    ] {
+        assert!(c.may_alias(AliasClass::Any));
+        assert!(AliasClass::Any.may_alias(c));
+    }
+}
+
+#[test]
+fn alias_classification_of_instructions() {
+    let v = ValueId(0);
+    assert_eq!(
+        read_class(&Instr::FieldGet {
+            dst: v,
+            obj: v,
+            obj_ty: t(5),
+            field: 3
+        }),
+        Some(AliasClass::ObjField { ty: t(5), field: 3 })
+    );
+    assert_eq!(
+        read_class(&Instr::ArraySize { dst: v, array: v }),
+        Some(AliasClass::ArrayLen)
+    );
+    assert_eq!(
+        read_class(&Instr::MemGet {
+            kind: MemAccess::Array,
+            dst: v,
+            base: v,
+            index: v
+        }),
+        Some(AliasClass::ArrayData)
+    );
+    assert_eq!(
+        read_class(&Instr::MemGet {
+            kind: MemAccess::I8,
+            dst: v,
+            base: v,
+            index: v
+        }),
+        Some(AliasClass::RawBytes)
+    );
+    // Allocations write only storage nothing else can reach yet.
+    assert_eq!(write_class(&Instr::New { dst: v }), None);
+    assert_eq!(
+        write_class(&Instr::Call {
+            dst: v,
+            fun: 0,
+            args: vec![]
+        }),
+        Some(AliasClass::Any)
+    );
+    assert_eq!(
+        write_class(&Instr::CellIncr { cell: CellId(2) }),
+        Some(AliasClass::Cell(CellId(2)))
+    );
+    assert_eq!(read_class(&Instr::Null { dst: v }), None);
+}
+
+// ---------------------------------------------------------------------------
+// null-check elimination
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nullcheck_elim_removes_dominated_check() {
+    let ops = vec![
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(5)]).unwrap();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::NullCheck { .. })),
+        1
+    );
+}
+
+#[test]
+fn nullcheck_elim_knows_allocations_are_non_null() {
+    let ops = vec![
+        Opcode::New { dst: Reg(1) },
+        Opcode::NullCheck { reg: Reg(1) },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(5)]).unwrap();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::NullCheck { .. })),
+        0
+    );
+}
+
+#[test]
+fn nullcheck_elim_follows_copies() {
+    let ops = vec![
+        Opcode::New { dst: Reg(1) },
+        Opcode::Mov {
+            dst: Reg(2),
+            src: Reg(1),
+        },
+        Opcode::NullCheck { reg: Reg(2) },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let mut f = lower(&ops, &[t(5); 3]).unwrap();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+}
+
+#[test]
+fn nullcheck_elim_uses_guard_edges() {
+    // if (r0 != null) { nullcheck r0 }  — the check is redundant.
+    let ops = vec![
+        Opcode::JNull {
+            reg: Reg(0),
+            offset: 1,
+        },
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(5)]).unwrap();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 1, "{}", f.dump());
+}
+
+#[test]
+fn nullcheck_elim_keeps_unproven_checks() {
+    let ops = vec![
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::NullCheck { reg: Reg(1) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(5)]).unwrap();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 0, "different values, nothing proven");
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::NullCheck { .. })),
+        2
+    );
+}
+
+#[test]
+fn nullcheck_elim_keeps_the_last_thrower_of_a_trapped_block() {
+    // Inside the trap region the only may-throw instruction is the second
+    // NullCheck: removing it would delete the handler's incoming edge.
+    let ops = vec![
+        Opcode::Trap {
+            exc: Reg(1),
+            offset: 4,
+        },
+        Opcode::NullCheck { reg: Reg(2) },
+        Opcode::NullCheck { reg: Reg(2) },
+        Opcode::EndTrap { exc: Reg(1) },
+        Opcode::JAlways { offset: 1 },
+        Opcode::Ret { ret: Reg(0) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let tys = vec![t(0), t(2), t(5)];
+    let f0 = lower(&ops, &tys).unwrap();
+    let handler_preds = f0.preds();
+    let mut f = f0.clone();
+    let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
+    assert_eq!(
+        stats.eliminated, 1,
+        "the redundant check goes, one thrower stays"
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::NullCheck { .. })),
+        1
+    );
+    assert_eq!(
+        f.preds(),
+        handler_preds,
+        "the exceptional edge and every phi arity survive"
+    );
+
+    // With only one check in the region, nothing is removable at all.
+    let ops2 = vec![
+        Opcode::Trap {
+            exc: Reg(1),
+            offset: 4,
+        },
+        Opcode::New { dst: Reg(2) },
+        Opcode::NullCheck { reg: Reg(2) },
+        Opcode::EndTrap { exc: Reg(1) },
+        Opcode::JAlways { offset: 1 },
+        Opcode::Ret { ret: Reg(0) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f2 = lower(&ops2, &tys).unwrap();
+    let stats2 = run_pass(&mut f2, &NullCheckElim, PassOptions::default());
+    assert_eq!(
+        stats2.eliminated, 0,
+        "provably non-null, but it is the block's only exceptional edge"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GVN / CSE
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gvn_numbers_pure_arithmetic() {
+    let ops = vec![
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let tys = vec![t(0); 5];
+    let mut f = lower(&ops, &tys).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+    assert!(stats.replaced >= 1);
+    // Semantics survive serialization.
+    let out = serialize(&f).unwrap();
+    let ints = [0];
+    for (a, b) in [(3i64, 4i64), (-1, 9)] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[a, b], out.num_regs),
+            mini_eval(&ops, &ints, &[a, b], tys.len())
+        );
+    }
+}
+
+#[test]
+fn gvn_numbers_commutative_operands_up_to_order() {
+    let ops = vec![
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(1),
+            b: Reg(0),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = lower(&ops, &[t(0); 5]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+}
+
+#[test]
+fn gvn_refuses_trapping_arithmetic() {
+    let ops = vec![
+        Opcode::SDiv {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::SDiv {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = lower(&ops, &[t(0); 5]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 0, "division may throw");
+}
+
+#[test]
+fn gvn_reuses_a_load_with_no_intervening_write() {
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(1),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(0), t(0), t(0)]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 1);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::FieldGet { .. })), 1);
+}
+
+#[test]
+fn gvn_refuses_a_load_across_an_aliasing_write() {
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(0),
+            src: Reg(1),
+        },
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(1),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(0), t(0), t(0)]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 0, "the field was written in between");
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::FieldGet { .. })), 2);
+}
+
+#[test]
+fn gvn_allows_a_load_across_a_disjoint_write() {
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(1),
+            src: Reg(1),
+        },
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(1),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(0), t(0), t(0)]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 1, "a different field slot cannot alias");
+}
+
+#[test]
+fn gvn_refuses_a_load_across_a_call() {
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Call0 {
+            dst: Reg(2),
+            fun: RefFun(3),
+        },
+        Opcode::Field {
+            dst: Reg(3),
+            obj: Reg(0),
+            field: RefField(0),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(1),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(0), t(0), t(0), t(0)]).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 0, "a call clobbers all memory");
+}
+
+#[test]
+fn gvn_refuses_a_load_clobbered_on_the_loop_back_edge() {
+    // The dominating load is in the preheader, the write happens after the
+    // second load inside the loop: only the back edge exposes it.
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 0: dominating load
+        Opcode::Label, // 1
+        Opcode::Field {
+            dst: Reg(4),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 2: candidate
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(3),
+        }, // 3: clobber
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: -4,
+        }, // 4 -> 1
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let tys = vec![t(0), t(5), t(0), t(0), t(0)];
+    let mut f = lower(&ops, &tys).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(
+        stats.eliminated,
+        0,
+        "the write reaches the candidate around the back edge:\n{}",
+        f.dump()
+    );
+
+    // Control: the identical loop without the write does reuse the load.
+    let mut ops2 = ops.clone();
+    ops2[3] = Opcode::Nop;
+    let mut g = lower(&ops2, &tys).unwrap();
+    let gs = run_pass(&mut g, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(
+        gs.eliminated,
+        1,
+        "without the clobber the load is redundant:\n{}",
+        g.dump()
+    );
+}
+
+#[test]
+fn gvn_refuses_a_cell_load_across_a_cell_write() {
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Incr { dst: Reg(0) },
+        Opcode::Mov {
+            dst: Reg(1),
+            src: Reg(0),
+        },
+        Opcode::Incr { dst: Reg(0) },
+        Opcode::Mov {
+            dst: Reg(2),
+            src: Reg(0),
+        },
+        Opcode::Add {
+            dst: Reg(3),
+            a: Reg(1),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let tys = vec![t(0); 4];
+    let base_ops = ops.clone();
+    let mut f = lower(&ops, &tys).unwrap();
+    run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::CellGet { .. })),
+        2,
+        "cells are memory: an Incr between two reads blocks reuse"
+    );
+    let out = serialize(&f).unwrap();
+    let ints = [40];
+    assert_eq!(
+        mini_eval(&out.ops, &ints, &[], out.num_regs),
+        mini_eval(&base_ops, &ints, &[], tys.len())
+    );
+}
+
+#[test]
+fn gvn_propagates_copies() {
+    let ops = vec![
+        Opcode::Mov {
+            dst: Reg(1),
+            src: Reg(0),
+        },
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(1),
+            b: Reg(1),
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let tys = vec![t(0); 3];
+    let mut f = lower(&ops, &tys).unwrap();
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(stats.eliminated, 1, "the copy is gone");
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Copy { .. })), 0);
+    let out = serialize(&f).unwrap();
+    for a in [3i64, -7] {
+        assert_eq!(
+            mini_eval(&out.ops, &[0], &[a], out.num_regs),
+            mini_eval(&ops, &[0], &[a], tys.len())
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LICM
+// ---------------------------------------------------------------------------
+
+/// `while (i < n) { t = a * a; i = i + 1 } return t` — `t` is invariant.
+fn fix_loop_invariant() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            }, // one = 1
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(2),
+                b: Reg(0),
+                offset: 3,
+            },
+            Opcode::Mul {
+                dst: Reg(4),
+                a: Reg(1),
+                b: Reg(1),
+            }, // invariant
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(3),
+            },
+            Opcode::JAlways { offset: -4 },
+            Opcode::Ret { ret: Reg(4) },
+        ],
+        vec![t(0); 5],
+    )
+}
+
+#[test]
+fn licm_hoists_invariant_arithmetic() {
+    let (ops, tys) = fix_loop_invariant();
+    let mut f = lower(&ops, &tys).unwrap();
+    let cfg = CfgInfo::build(&f);
+    let forest = LoopForest::analyze(&f, &cfg);
+    let body: Vec<BlockId> = forest.get(forest.roots[0]).blocks.clone();
+    let stats = run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(stats.hoisted, 1, "{}", f.dump());
+    let still_in_loop = body.iter().any(|&b| {
+        f.blocks[b.idx()]
+            .instrs
+            .iter()
+            .any(|i| matches!(i, Instr::BinOp { op: BinOp::Mul, .. }))
+    });
+    assert!(!still_in_loop, "the multiply left the loop:\n{}", f.dump());
+    // Behaviour is unchanged.
+    let out = serialize(&f).unwrap();
+    let ints = [0, 1];
+    for n in [0i64, 1, 4] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[n, 6], out.num_regs),
+            mini_eval(&ops, &ints, &[n, 6], tys.len()),
+            "n={}",
+            n
+        );
+    }
+}
+
+#[test]
+fn licm_creates_a_preheader_when_the_header_has_several_entries() {
+    // Two paths reach the loop header, so no existing block qualifies.
+    let ops = vec![
+        Opcode::JTrue {
+            cond: Reg(5),
+            offset: 2,
+        }, // 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(0),
+        }, // 1: i = 0
+        Opcode::JAlways { offset: 1 }, // 2 -> 4
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(1),
+        }, // 3: i = 1
+        Opcode::Label,                 // 4: header, two entry edges
+        Opcode::JSGte {
+            a: Reg(2),
+            b: Reg(0),
+            offset: 3,
+        }, // 5
+        Opcode::Mul {
+            dst: Reg(4),
+            a: Reg(1),
+            b: Reg(1),
+        }, // 6: invariant
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(2),
+            b: Reg(3),
+        }, // 7
+        Opcode::JAlways { offset: -5 }, // 8 -> 4
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let tys = vec![t(0); 6];
+    let mut f = lower(&ops, &tys).unwrap();
+    let before_blocks = f.blocks.len();
+    let stats = run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(stats.hoisted, 1, "{}", f.dump());
+    assert_eq!(
+        f.blocks.len(),
+        before_blocks + 1,
+        "a preheader was inserted"
+    );
+    let out = serialize(&f).unwrap();
+    let ints = [0, 1];
+    for cond in [0i64, 1] {
+        for n in [0i64, 3] {
+            assert_eq!(
+                mini_eval(&out.ops, &ints, &[n, 5, 0, 1, 0, cond], out.num_regs),
+                mini_eval(&ops, &ints, &[n, 5, 0, 1, 0, cond], tys.len()),
+                "cond={} n={}",
+                cond,
+                n
+            );
+        }
+    }
+}
+
+#[test]
+fn licm_refuses_to_hoist_out_of_a_trap_region() {
+    // The same invariant multiply, but the loop sits inside a try block: the
+    // preheader would be outside the region.
+    let ops = vec![
+        Opcode::Trap {
+            exc: Reg(1),
+            offset: 5,
+        }, // 0 -> handler at 6
+        Opcode::Label, // 1: header
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(4),
+            b: Reg(4),
+        }, // 2: invariant
+        Opcode::JSLt {
+            a: Reg(2),
+            b: Reg(0),
+            offset: -3,
+        }, // 3 -> 1
+        Opcode::EndTrap { exc: Reg(1) }, // 4
+        Opcode::JAlways { offset: 1 }, // 5 -> 7
+        Opcode::Ret { ret: Reg(0) }, // 6: handler
+        Opcode::Ret { ret: Reg(0) }, // 7
+    ];
+    let tys = vec![t(0), t(2), t(0), t(0), t(0)];
+    let mut f = lower(&ops, &tys).unwrap();
+    let before = f.dump();
+    let stats = run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(
+        stats.hoisted, 0,
+        "hoisting would cross the trap-region boundary"
+    );
+    assert_eq!(f.dump(), before);
+
+    // Control: the identical loop outside a trap region does hoist.
+    let plain = vec![
+        Opcode::Label,
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(4),
+            b: Reg(4),
+        },
+        Opcode::JSLt {
+            a: Reg(2),
+            b: Reg(0),
+            offset: -3,
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut g = lower(&plain, &tys).unwrap();
+    let gs = run_pass(&mut g, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(gs.hoisted, 1, "control case must hoist:\n{}", g.dump());
+}
+
+#[test]
+fn licm_refuses_a_load_written_inside_the_loop() {
+    let ops = vec![
+        Opcode::Label,
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(2),
+        },
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: -4,
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let tys = vec![t(0), t(5), t(0), t(0)];
+    let mut f = lower(&ops, &tys).unwrap();
+    let stats = run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(stats.hoisted, 0, "the loop writes the field it loads");
+
+    // Control: with the write on a different field slot the load hoists.
+    let ops2 = vec![
+        Opcode::Label,
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(1),
+            src: Reg(2),
+        },
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: -4,
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let mut g = lower(&ops2, &tys).unwrap();
+    let gs = run_pass(&mut g, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(gs.hoisted, 1, "disjoint field slot:\n{}", g.dump());
+}
+
+#[test]
+fn licm_refuses_a_load_that_the_loop_can_skip() {
+    // The load sits on a conditional path, so it does not dominate the loop
+    // exit and hoisting it would speculate a dereference.
+    let ops = vec![
+        Opcode::Label, // 0: header
+        Opcode::JTrue {
+            cond: Reg(3),
+            offset: 1,
+        }, // 1
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 2: conditional load
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: -4,
+        }, // 3 -> 0
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let tys = vec![t(0), t(5), t(0), t(0)];
+    let mut f = lower(&ops, &tys).unwrap();
+    let stats = run_pass(&mut f, &LoopInvariantCodeMotion, PassOptions::default());
+    assert_eq!(
+        stats.hoisted,
+        0,
+        "the load is not guaranteed to execute:\n{}",
+        f.dump()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DCE
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dce_removes_unused_pure_chains() {
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        },
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        },
+        Opcode::Ret { ret: Reg(3) },
+    ];
+    let mut f = lower(&ops, &[t(0); 4]).unwrap();
+    let stats = run_pass(&mut f, &DeadCodeElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 3, "the add and both of its inputs");
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::BinOp { .. })), 0);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Int { .. })), 1);
+    // Params are the entry-register surface and stay.
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Param { .. })), 4);
+}
+
+#[test]
+fn dce_keeps_side_effecting_instructions() {
+    let ops = vec![
+        Opcode::Call0 {
+            dst: Reg(1),
+            fun: RefFun(2),
+        }, // unused result, but a call
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(0),
+            src: Reg(1),
+        },
+        Opcode::NullCheck { reg: Reg(0) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(0)]).unwrap();
+    let stats = run_pass(&mut f, &DeadCodeElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 0);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Call { .. })), 1);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::FieldSet { .. })), 1);
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::NullCheck { .. })),
+        1
+    );
+}
+
+#[test]
+fn dce_removes_dead_phis() {
+    let ops = vec![
+        Opcode::JTrue {
+            cond: Reg(0),
+            offset: 1,
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(0), t(0)]).unwrap();
+    let phis_before: usize = f.blocks.iter().map(|b| b.phis.len()).sum();
+    assert_eq!(phis_before, 1, "r1 joins at the merge block");
+    let stats = run_pass(&mut f, &DeadCodeElim, PassOptions::default());
+    assert!(stats.eliminated >= 2, "the phi and its source");
+    assert_eq!(f.blocks.iter().map(|b| b.phis.len()).sum::<usize>(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// pass manager
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pass_manager_o0_is_inert() {
+    let (ops, tys) = fix_loop();
+    let mut f = lower(&ops, &tys).unwrap();
+    let before = f.dump();
+    let report = PassManager::new(OptLevel::O0).run(&mut f).unwrap();
+    assert!(report.per_pass.is_empty());
+    assert!(!report.changed());
+    assert_eq!(f.dump(), before);
+}
+
+#[test]
+fn pass_manager_reports_per_pass_statistics() {
+    let ops = vec![
+        Opcode::New { dst: Reg(1) },
+        Opcode::NullCheck { reg: Reg(1) },
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::Field {
+            dst: Reg(3),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = lower(&ops, &[t(5), t(5), t(0), t(0), t(0)]).unwrap();
+    let pm = PassManager::new(OptLevel::O2).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    let report = pm.run(&mut f).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(
+        pm.pass_names(),
+        vec!["null-check-elim", "gvn", "licm", "fma", "dce"]
+    );
+    assert_eq!(report.stats_for("null-check-elim").eliminated, 1);
+    assert_eq!(report.stats_for("gvn").eliminated, 1);
+    assert_eq!(report.stats_for("fma").fused, 0, "no float types here");
+    assert!(report.rounds >= 1 && report.rounds <= pm.options().max_rounds);
+    assert!(report.total().eliminated >= 2);
+    assert!(report.changed());
+}
+
+#[test]
+fn pass_manager_accepts_an_explicit_pass_list() {
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(0),
+            b: Reg(0),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &[t(0), t(0)]).unwrap();
+    let pm = PassManager::with_passes(vec![Box::new(DeadCodeElim)]);
+    assert_eq!(pm.pass_names(), vec!["dce"]);
+    let report = pm.run(&mut f).unwrap();
+    assert_eq!(report.stats_for("dce").eliminated, 1);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::BinOp { .. })), 0);
+}
+
+#[test]
+fn pass_manager_runs_to_a_fixed_point() {
+    // GVN exposes dead code, DCE removes it, and the next round finds
+    // nothing: the manager must stop rather than spin.
+    let (ops, tys) = fix_loop_invariant();
+    let mut f = lower(&ops, &tys).unwrap();
+    let pm = PassManager::new(OptLevel::O2).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    let report = pm.run(&mut f).unwrap();
+    assert!(report.rounds <= pm.options().max_rounds);
+    // A second run finds nothing left to do.
+    let again = pm.run(&mut f).unwrap();
+    assert!(!again.changed(), "pipeline is not at a fixed point");
+}
+
+// ---------------------------------------------------------------------------
+// optimized round-trip property + semantic equivalence
+// ---------------------------------------------------------------------------
+
+fn optimized_round_trip(ops: &[Opcode], tys: &[TypeRef]) -> Serialized {
+    let mut f1 = lower(ops, tys).expect("lower");
+    verify(&f1).unwrap_or_else(|e| panic!("verify(lowered): {e}\n{}", f1.dump()));
+    let pm = PassManager::new(OptLevel::O2).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    pm.run(&mut f1).expect("passes");
+    verify(&f1).unwrap_or_else(|e| panic!("verify(optimized): {e}\n{}", f1.dump()));
+    let out = serialize(&f1).expect("serialize");
+    assert_eq!(
+        &out.reg_types[..tys.len()],
+        tys,
+        "original register types survive optimization"
+    );
+    for op in &out.ops {
+        assert!(
+            !matches!(op, Opcode::Nop | Opcode::IndirectCall { .. }),
+            "interpreter-compatible opcodes only, got {:?}",
+            op
+        );
+    }
+    let f2 = lower(&out.ops, &out.reg_types)
+        .unwrap_or_else(|e| panic!("re-lower: {e}\nops: {}", ops_text(&out.ops)));
+    verify(&f2).unwrap_or_else(|e| panic!("verify(re-lowered): {e}\n{}", f2.dump()));
+    check_cfg_equivalent(&f1, &f2).unwrap_or_else(|e| {
+        panic!(
+            "optimized CFG equivalence failed: {e}\nf1:\n{}\nf2:\n{}",
+            f1.dump(),
+            f2.dump()
+        )
+    });
+    out
+}
+
+#[test]
+fn optimized_round_trip_over_every_fixture() {
+    for (name, (ops, tys)) in [
+        ("straight_line", fix_straight_line()),
+        ("diamond", fix_diamond()),
+        ("loop", fix_loop()),
+        ("loop_no_label", fix_loop_no_label()),
+        ("loop_invariant", fix_loop_invariant()),
+        ("switch", fix_switch()),
+        ("trap", fix_trap()),
+        ("nested_traps", fix_nested_traps()),
+        ("multi_endtrap", fix_multi_endtrap()),
+        ("incr", fix_incr()),
+        ("ref", fix_ref()),
+        ("setenumfield", fix_setenumfield()),
+    ] {
+        let out = optimized_round_trip(&ops, &tys);
+        // Optimizing the optimized output is stable.
+        let _ = optimized_round_trip(&out.ops, &out.reg_types);
+        assert!(!out.ops.is_empty(), "{} produced no opcodes", name);
+    }
+}
+
+#[test]
+fn passes_preserve_semantics() {
+    struct Case {
+        name: &'static str,
+        ops: Vec<Opcode>,
+        tys: Vec<TypeRef>,
+        ints: Vec<i32>,
+        inputs: Vec<Vec<i64>>,
+    }
+    let (sl_ops, sl_tys) = fix_straight_line();
+    let (d_ops, d_tys) = fix_diamond();
+    let (l_ops, l_tys) = fix_loop();
+    let (ln_ops, ln_tys) = fix_loop_no_label();
+    let (li_ops, li_tys) = fix_loop_invariant();
+    let (sw_ops, sw_tys) = fix_switch();
+    let (in_ops, in_tys) = fix_incr();
+    let cases = vec![
+        Case {
+            name: "straight_line",
+            ops: sl_ops,
+            tys: sl_tys,
+            ints: vec![7, 35],
+            inputs: vec![vec![]],
+        },
+        Case {
+            name: "diamond",
+            ops: d_ops,
+            tys: d_tys,
+            ints: vec![10, 20],
+            inputs: vec![vec![0], vec![1]],
+        },
+        Case {
+            name: "loop",
+            ops: l_ops,
+            tys: l_tys,
+            ints: vec![0, 1],
+            inputs: vec![vec![0], vec![1], vec![5], vec![10]],
+        },
+        Case {
+            name: "loop_no_label",
+            ops: ln_ops,
+            tys: ln_tys,
+            ints: vec![0, 1],
+            inputs: vec![vec![0], vec![3], vec![7]],
+        },
+        Case {
+            name: "loop_invariant",
+            ops: li_ops,
+            tys: li_tys,
+            ints: vec![0, 1],
+            inputs: vec![vec![0, 3], vec![4, 5]],
+        },
+        Case {
+            name: "switch",
+            ops: sw_ops,
+            tys: sw_tys,
+            ints: vec![100, 200, 300],
+            inputs: vec![vec![0], vec![1], vec![2], vec![5], vec![-1]],
+        },
+        Case {
+            name: "incr",
+            ops: in_ops,
+            tys: in_tys,
+            ints: vec![40],
+            inputs: vec![vec![]],
+        },
+    ];
+    for c in cases {
+        let out = optimized_round_trip(&c.ops, &c.tys);
+        for input in &c.inputs {
+            let before = mini_eval(&c.ops, &c.ints, input, c.tys.len());
+            let after = mini_eval(&out.ops, &c.ints, input, out.num_regs);
+            assert_eq!(
+                before,
+                after,
+                "{}: optimization changed the result for {:?}\n{}",
+                c.name,
+                input,
+                ops_text(&out.ops)
+            );
+        }
+    }
 }

@@ -86,12 +86,14 @@
 //!
 //! ## Passes
 //!
-//! [`passes::PassManager`] sequences the optimizations by opt level or from an
-//! explicit list, running to a fixed point and reporting per-pass statistics.
-//! Every pass preserves [`verify`], the trap-region invariants and the cell
-//! invariants; the rules each one commits to are documented on the pass
-//! itself.
+//! [`passes::PassManager`] sequences the optimizations — null-check
+//! elimination, GVN/CSE, LICM, the FMA peephole and dead-code elimination —
+//! by opt level or from an explicit list, running to a fixed point and
+//! reporting per-pass statistics. Every pass preserves [`verify`], the
+//! trap-region invariants and the cell invariants; the rules each one commits
+//! to are documented on the pass itself.
 
+pub mod analysis;
 pub mod ir;
 pub mod lower;
 pub mod module;
@@ -102,6 +104,7 @@ pub mod verify;
 #[cfg(test)]
 mod tests;
 
+pub use analysis::{AliasClass, CfgInfo, LoopForest, LoopId, NaturalLoop};
 pub use ir::{
     BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, Instr,
     MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,

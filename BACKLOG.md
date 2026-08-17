@@ -17,20 +17,38 @@ full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
 ## AIR v2
 
 The typed phi-SSA IR (`crates/air/src/v2`) is in place with lowering,
-verification, and a serializer back to standard HL bytecode. v1 remains the
-production path until the backends switch over.
+verification, a serializer back to standard HL bytecode, a native-import
+declaration table, loop and alias-class analyses, and a pass manager running
+null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE. v1 remains
+the production path until the backends switch over.
 
-- **Native import declarations in the IR builder** — a module-level
-  `NativeImport { lib, name, signature, findex }` table populated at lowering
-  and consumed by every backend (LLVM `declare`, Cranelift `import_function`,
-  symbol-table binding). Prerequisite for any backend consuming v2, because
-  Cranelift requires imports declared before the function builder exists.
-- **Optimization passes over the typed IR**, in payoff order established by
-  the mandelbrot trace: static field-offset resolution, field-load GVN with
-  HL alias classes (`(type, field-slot)`, varray data/length, enum params,
-  globals), inlining, escape analysis and scalar replacement (below),
-  bounds-check LICM, dominance-based null-check elimination, box/unbox
-  forwarding.
+- **Remaining optimization passes over the typed IR**, in payoff order
+  established by the mandelbrot trace: static field-offset resolution,
+  inlining, escape analysis and scalar replacement (below), bounds-check
+  elimination, box/unbox forwarding. (Field-load GVN with the HL alias
+  classes, dominance-based null-check elimination and LICM have landed.)
+- **`Function::float_types` needs module info.** A `TypeRef` is an index into
+  the module's type table, so `air` cannot tell floats apart on its own: the
+  embedder answers `ModuleInfo::is_float`. Lowering through the bare `lower()`
+  wrapper records no float types, which makes the FMA peephole inert — the
+  JIT must lower through `lower_with`/`ModuleBuilder` to get fusion.
+- **The FMA peephole is same-block only.** Sinking a multiply into a
+  dominated block is legal for a pure operation but is refused today, so a
+  product computed in a loop preheader and consumed in the body does not
+  fuse. It also refuses both negating forms when an operand register happens
+  to be the product's register, rather than allocating around it.
+- **Live-range extension uses per-value private registers.** Any pass that
+  lengthens a value's live range appends a register for that value instead of
+  running a real allocator, and refuses outright when the value is a `Param`.
+  Correct and cheap, but it grows the register table and turns elided copies
+  into real `Mov`s on the serialize path.
+- **LICM skips loops whose entry edges cross a trap-region boundary** (and
+  loops whose header is a trap handler). A preheader has to share the
+  header's handler, so a loop opened by a `Trap` terminator never gets one.
+- **GVN's clobber-free check is quadratic.** Each `ReadMem` candidate walks
+  the whole reachable-and-reaching block region. Fine at fixture scale;
+  a per-class memory-SSA numbering would replace it if it shows up in
+  compile-time profiles.
 - **Scalar replacement of aggregates, and the inlining it depends on.** The
   traced mandelbrot inner loop spends two heap allocations and three calls
   per iteration because every `Complex` is a `New` plus a constructor call —

@@ -150,7 +150,11 @@ impl ImmixAllocator {
         }
 
         let result = unsafe {
-            let ptr = self.heap.memory.as_mut_ptr().add(self.heap.allocation_point);
+            let ptr = self
+                .heap
+                .memory
+                .as_mut_ptr()
+                .add(self.heap.allocation_point);
             // Zero the allocation — HashLink semantics require zeroed memory.
             // Reused GC blocks contain stale data that would be misinterpreted
             // as valid pointers by the conservative scanner and HDLL code.
@@ -172,8 +176,7 @@ impl ImmixAllocator {
         // Proactive GC: collect every 4096 allocations to avoid OOM in tight loops
         // (e.g., Heaps main loop allocating temp arrays each frame).
         if self.heap.alloc_count % 4096 == 0 {
-            let free_ratio = self.heap.free_blocks.len() as f64
-                / (HEAP_SIZE / BLOCK_SIZE) as f64;
+            let free_ratio = self.heap.free_blocks.len() as f64 / (HEAP_SIZE / BLOCK_SIZE) as f64;
             if free_ratio < 0.25 {
                 self.collect_garbage();
             }

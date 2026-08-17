@@ -387,7 +387,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         return ptr::null_mut();
     }
     if std::env::var("ASH_DBG_SC").is_ok() {
-        eprintln!("[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}", t, (*t).kind, to, (*to).kind);
+        eprintln!(
+            "[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}",
+            t,
+            (*t).kind,
+            to,
+            (*to).kind
+        );
         use std::io::Write;
         std::io::stderr().flush().ok();
     }
@@ -399,7 +405,8 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         (hl_type_kind_HOBJ, hl_type_kind_HOBJ) => {
             let t1_obj = (*t).__bindgen_anon_1.obj;
             let t2 = (*to).__bindgen_anon_1.obj;
-            if t1_obj.is_null() || t2.is_null()
+            if t1_obj.is_null()
+                || t2.is_null()
                 || (t1_obj as usize) < 0x10000
                 || (t2 as usize) < 0x10000
                 || (t1_obj as usize) % std::mem::align_of::<usize>() != 0
@@ -441,7 +448,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
                 if std::env::var("ASH_DBG_SC").is_ok() {
-                    eprintln!("[dyn_castp] castFun={:p} obj={:p} to={:p}", cast_fn as *const (), obj_val, to);
+                    eprintln!(
+                        "[dyn_castp] castFun={:p} obj={:p} to={:p}",
+                        cast_fn as *const (), obj_val, to
+                    );
                     std::io::Write::flush(&mut std::io::stderr()).ok();
                 }
                 let v = cast_fn(obj_val, to);
@@ -472,7 +482,10 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
                 if std::env::var("ASH_DBG_SC").is_ok() {
-                    eprintln!("[dyn_castp] castFun={:p} obj={:p} to={:p}", cast_fn as *const (), obj_val, to);
+                    eprintln!(
+                        "[dyn_castp] castFun={:p} obj={:p} to={:p}",
+                        cast_fn as *const (), obj_val, to
+                    );
                     std::io::Write::flush(&mut std::io::stderr()).ok();
                 }
                 let v = cast_fn(obj_val, to);

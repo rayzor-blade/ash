@@ -83,10 +83,7 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_bytes_offset(
-    bytes: *mut hl::vbyte,
-    offset: c_int,
-) -> *mut hl::vbyte {
+pub unsafe extern "C" fn hlp_bytes_offset(bytes: *mut hl::vbyte, offset: c_int) -> *mut hl::vbyte {
     if bytes.is_null() {
         return std::ptr::null_mut();
     }

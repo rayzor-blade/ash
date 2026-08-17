@@ -227,10 +227,7 @@ pub unsafe extern "C" fn hlp_resolve_symbol(
     // Runtime symbol resolution — used by JIT for dynamic linking.
     // Resolve via dlsym since all libs are loaded with RTLD_GLOBAL.
     if !_name.is_null() {
-        let sym = libc::dlsym(
-            libc::RTLD_DEFAULT,
-            _name as *const libc::c_char,
-        );
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, _name as *const libc::c_char);
         if !sym.is_null() {
             return sym;
         }
@@ -286,10 +283,7 @@ pub unsafe extern "C" fn hlp_file_open(name: *const vbyte, mode: *const vbyte) -
 pub unsafe extern "C" fn hlp_file_close(_f: *mut c_void) {}
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_file_contents(
-    _name: *const vbyte,
-    _len: *mut i32,
-) -> *const vbyte {
+pub unsafe extern "C" fn hlp_file_contents(_name: *const vbyte, _len: *mut i32) -> *const vbyte {
     std::ptr::null()
 }
 

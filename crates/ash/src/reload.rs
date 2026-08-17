@@ -115,11 +115,7 @@ fn is_obj_kind(kind: u32) -> bool {
 /// Collect the set of native function findexes from bytecode.
 /// Used by `IndirectCallRewritePass` to know which calls should stay direct.
 pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
-    bytecode
-        .natives
-        .iter()
-        .map(|n| n.findex as usize)
-        .collect()
+    bytecode.natives.iter().map(|n| n.findex as usize).collect()
 }
 
 /// Perform a full hot-reload cycle.
@@ -169,8 +165,7 @@ pub fn perform_reload(
     // (LLVM modules are immutable post-compilation; we leak the context
     //  intentionally — old JIT code may still be on active call stacks)
     let context = Box::leak(Box::new(Context::create()));
-    let mut jit =
-        JITModule::new_with_shared_runtime(context, path, shared_runtime.clone());
+    let mut jit = JITModule::new_with_shared_runtime(context, path, shared_runtime.clone());
 
     for &findex in &diff.changed {
         match jit.promote_function_strict(findex) {
@@ -366,10 +361,16 @@ fn field_byte_size(kind: u32) -> usize {
 
 fn encode_constant_value(field_value: i32, kind: u32, bc: &DecodedBytecode) -> Vec<u8> {
     match kind {
-        hl::hl_type_kind_HI32 | hl::hl_type_kind_HBOOL | hl::hl_type_kind_HUI8
+        hl::hl_type_kind_HI32
+        | hl::hl_type_kind_HBOOL
+        | hl::hl_type_kind_HUI8
         | hl::hl_type_kind_HUI16 => {
             // field_value is index into ints table
-            let val = bc.ints.get(field_value as usize).copied().unwrap_or(field_value);
+            let val = bc
+                .ints
+                .get(field_value as usize)
+                .copied()
+                .unwrap_or(field_value);
             val.to_le_bytes().to_vec()
         }
         hl::hl_type_kind_HF64 => {
@@ -378,7 +379,11 @@ fn encode_constant_value(field_value: i32, kind: u32, bc: &DecodedBytecode) -> V
         }
         hl::hl_type_kind_HBYTES => {
             // field_value is string index — encode the string content as an identifier
-            let s = bc.strings.get(field_value as usize).cloned().unwrap_or_default();
+            let s = bc
+                .strings
+                .get(field_value as usize)
+                .cloned()
+                .unwrap_or_default();
             s.as_bytes().to_vec()
         }
         _ => {
@@ -446,11 +451,7 @@ unsafe extern "C" fn heap_patch_visitor(
 
         // Compare-and-swap: only update if field still holds old default
         if current == patch.old_bytes.as_slice() {
-            std::ptr::copy_nonoverlapping(
-                patch.new_bytes.as_ptr(),
-                field_ptr,
-                patch.size,
-            );
+            std::ptr::copy_nonoverlapping(patch.new_bytes.as_ptr(), field_ptr, patch.size);
         }
     }
 }
@@ -489,8 +490,7 @@ pub fn init_reload_context(
 
 /// Atomic flag set by the stdlib callback when a file change is detected.
 /// The interpreter polls this after native calls and triggers `do_reload()`.
-static RELOAD_PENDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static RELOAD_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Callback invoked by the stdlib when a bytecode file change is detected.
 /// Sets the pending flag — actual recompilation is deferred to the interpreter
@@ -532,9 +532,7 @@ pub fn do_reload() -> Option<DecodedBytecode> {
                     diff.changed.len()
                 );
                 // Re-decode for both the stored state and the caller
-                if let Ok(new_bc) =
-                    crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path)
-                {
+                if let Ok(new_bc) = crate::bytecode::BytecodeDecoder::decode(&ctx.bytecode_path) {
                     let ret = new_bc.clone();
                     ctx.old_bytecode = new_bc;
                     return Some(ret);

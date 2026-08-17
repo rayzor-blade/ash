@@ -483,10 +483,16 @@ impl HLInterpreter {
                     type FnSetup = unsafe extern "C" fn(*const u16);
                     let setup: FnSetup = unsafe { std::mem::transmute(setup_fn) };
                     unsafe { setup(utf16.as_ptr()) };
-                    eprintln!("[hot-reload] registered bytecode path: {}", hl_path.display());
+                    eprintln!(
+                        "[hot-reload] registered bytecode path: {}",
+                        hl_path.display()
+                    );
                 }
                 Err(e) => {
-                    eprintln!("[hot-reload] warning: could not register reload check: {}", e);
+                    eprintln!(
+                        "[hot-reload] warning: could not register reload check: {}",
+                        e
+                    );
                 }
             }
         }
@@ -504,8 +510,18 @@ impl HLInterpreter {
             // Use bytecode function/native count to size the table.
             let old_bc = ash::bytecode::BytecodeDecoder::decode(&hl_path);
             let max_findex = old_bc.as_ref().map_or(0, |bc| {
-                let max_fn = bc.functions.iter().map(|f| f.findex as usize).max().unwrap_or(0);
-                let max_nat = bc.natives.iter().map(|n| n.findex as usize).max().unwrap_or(0);
+                let max_fn = bc
+                    .functions
+                    .iter()
+                    .map(|f| f.findex as usize)
+                    .max()
+                    .unwrap_or(0);
+                let max_nat = bc
+                    .natives
+                    .iter()
+                    .map(|n| n.findex as usize)
+                    .max()
+                    .unwrap_or(0);
                 max_fn.max(max_nat) + 1
             });
             let fptrs: Vec<*mut std::ffi::c_void> = (0..max_findex)
@@ -920,11 +936,8 @@ impl HLInterpreter {
                     // Only unbox if the source type IS a boxed primitive
                     if Self::is_unboxable_primitive_kind(kind) {
                         return unsafe {
-                            Self::unbox_dynamic_to_kind(
-                                addr as *mut hl::vdynamic,
-                                dst_kind,
-                            )
-                            .unwrap_or(val)
+                            Self::unbox_dynamic_to_kind(addr as *mut hl::vdynamic, dst_kind)
+                                .unwrap_or(val)
                         };
                     }
                 }
@@ -1777,10 +1790,7 @@ impl HLInterpreter {
         // Allow all opcodes the full JIT supports. The v1 whitelist was too
         // conservative — it blocked GetThis/GetGlobal/Call/Field etc., preventing
         // any real Heaps functions from being promoted.
-        !matches!(
-            op,
-            Opcode::Prefetch { .. } | Opcode::Asm { .. }
-        )
+        !matches!(op, Opcode::Prefetch { .. } | Opcode::Asm { .. })
     }
 
     fn queue_tiered_promotion(&mut self, findex: usize) {
@@ -2071,7 +2081,9 @@ impl HLInterpreter {
         if using_reloaded && std::env::var("ASH_DBG_RELOAD").is_ok() {
             eprintln!(
                 "[reload-exec] func_idx={} name={} nops={} using=reloaded",
-                func_idx, func.name(), func.ops.len()
+                func_idx,
+                func.name(),
+                func.ops.len()
             );
         }
 
@@ -2153,7 +2165,14 @@ impl HLInterpreter {
                         let is_bc = self.findex_to_func.contains_key(&findex);
                         let is_nat = self.findex_to_native.contains_key(&findex);
                         let depth = self.stack.len();
-                        eprintln!("[trace] call findex={} bc={} nat={} args={} depth={}", findex, is_bc, is_nat, args.len(), depth);
+                        eprintln!(
+                            "[trace] call findex={} bc={} nat={} args={} depth={}",
+                            findex,
+                            is_bc,
+                            is_nat,
+                            args.len(),
+                            depth
+                        );
                         use std::io::Write;
                         std::io::stderr().flush().ok();
                     }
@@ -2195,7 +2214,10 @@ impl HLInterpreter {
                                     // Re-initialize constants from the new bytecode so that
                                     // globals (string literals, class descriptors) reflect V2.
                                     if let Err(e) = self.init_constants(&new_bc, native_resolver) {
-                                        eprintln!("[hot-reload] warning: init_constants failed: {}", e);
+                                        eprintln!(
+                                            "[hot-reload] warning: init_constants failed: {}",
+                                            e
+                                        );
                                     }
 
                                     let leaked: &'static _ = Box::leak(Box::new(new_bc));
@@ -3469,24 +3491,25 @@ impl HLInterpreter {
                     if Self::is_unboxable_primitive_kind(dst_kind) {
                         // Primitive destination: unbox from vdynamic
                         unsafe {
-                            Self::unbox_dynamic_to_kind(
-                                val.as_ptr() as *mut hl::vdynamic, dst_kind,
-                            ).unwrap_or(val)
+                            Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
+                                .unwrap_or(val)
                         }
                     } else {
                         let src_type_idx = func.regs[src.0 as usize].0;
                         let src_kind = bytecode.types[src_type_idx].kind;
 
-                        if (src_kind == hl::hl_type_kind_HDYN
-                            || src_kind == hl::hl_type_kind_HNULL)
+                        if (src_kind == hl::hl_type_kind_HDYN || src_kind == hl::hl_type_kind_HNULL)
                             && !self.fn_dyn_castp.is_null()
                         {
                             // HDYN/HNULL → concrete type: use hlp_dyn_castp
                             let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
                             let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
                             type FnCastp = unsafe extern "C" fn(
-                                *mut c_void, *mut c_void, *mut c_void,
-                            ) -> *mut c_void;
+                                *mut c_void,
+                                *mut c_void,
+                                *mut c_void,
+                            )
+                                -> *mut c_void;
                             let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
                             let mut data = val.as_ptr() as *mut c_void;
                             let result_ptr = unsafe {
@@ -3513,8 +3536,10 @@ impl HLInterpreter {
                                 {
                                     static CAST_COUNT: std::sync::atomic::AtomicU32 =
                                         std::sync::atomic::AtomicU32::new(0);
-                                    let c = CAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if c >= 9 && c < 12 { // trace casts #9+
+                                    let c = CAST_COUNT
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    if c >= 9 && c < 12 {
+                                        // trace casts #9+
                                         let obj_ptr = val.as_ptr() as *const hl::vdynamic;
                                         let header_t = unsafe { (*obj_ptr).t };
                                         let dst_c = self.c_type_factory.get(dst_type_idx);
@@ -3526,20 +3551,40 @@ impl HLInterpreter {
                                             unsafe {
                                                 let mut cur = header_t;
                                                 for d in 0..8 {
-                                                    if cur.is_null() || (cur as usize) < 0x10000 { break; }
+                                                    if cur.is_null() || (cur as usize) < 0x10000 {
+                                                        break;
+                                                    }
                                                     let k = (*cur).kind;
-                                                    if k != hl::hl_type_kind_HOBJ { eprintln!("  [{d}] kind={k} (not HOBJ)"); break; }
+                                                    if k != hl::hl_type_kind_HOBJ {
+                                                        eprintln!("  [{d}] kind={k} (not HOBJ)");
+                                                        break;
+                                                    }
                                                     let obj = (*cur).__bindgen_anon_1.obj;
-                                                    if obj.is_null() || (obj as usize) < 0x10000 { eprintln!("  [{d}] obj={obj:p} (invalid)"); break; }
+                                                    if obj.is_null() || (obj as usize) < 0x10000 {
+                                                        eprintln!("  [{d}] obj={obj:p} (invalid)");
+                                                        break;
+                                                    }
                                                     let name_ptr = (*obj).name;
-                                                    let name = if !name_ptr.is_null() && (name_ptr as usize) > 0x10000 {
+                                                    let name = if !name_ptr.is_null()
+                                                        && (name_ptr as usize) > 0x10000
+                                                    {
                                                         let mut len = 0;
-                                                        while *name_ptr.add(len) != 0 && len < 100 { len += 1; }
-                                                        String::from_utf16_lossy(std::slice::from_raw_parts(name_ptr, len))
-                                                    } else { "?".into() };
+                                                        while *name_ptr.add(len) != 0 && len < 100 {
+                                                            len += 1;
+                                                        }
+                                                        String::from_utf16_lossy(
+                                                            std::slice::from_raw_parts(
+                                                                name_ptr, len,
+                                                            ),
+                                                        )
+                                                    } else {
+                                                        "?".into()
+                                                    };
                                                     let sup = (*obj).super_;
                                                     eprintln!("  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}");
-                                                    if sup.is_null() || (sup as usize) < 0x10000 { break; }
+                                                    if sup.is_null() || (sup as usize) < 0x10000 {
+                                                        break;
+                                                    }
                                                     cur = sup;
                                                 }
                                             }
@@ -3555,7 +3600,8 @@ impl HLInterpreter {
                                     // Look up __cast proto findex from the object's runtime type
                                     let obj_ptr = val.as_ptr() as *const hl::vdynamic;
                                     let header_t = unsafe { (*obj_ptr).t };
-                                    let cast_findex = if !header_t.is_null() && (header_t as usize) >= 0x10000
+                                    let cast_findex = if !header_t.is_null()
+                                        && (header_t as usize) >= 0x10000
                                         && unsafe { (*header_t).kind } == hl::hl_type_kind_HOBJ
                                     {
                                         unsafe {
@@ -3563,10 +3609,13 @@ impl HLInterpreter {
                                             if !obj_t.is_null() && (obj_t as usize) >= 0x10000 {
                                                 // Hash "__cast" using same algorithm as hlp_hash_gen
                                                 let cast_hash = {
-                                                    let chars: &[u16] = &[0x5F, 0x5F, 0x63, 0x61, 0x73, 0x74]; // __cast
+                                                    let chars: &[u16] =
+                                                        &[0x5F, 0x5F, 0x63, 0x61, 0x73, 0x74]; // __cast
                                                     let mut h: i32 = 0;
                                                     for &c in chars {
-                                                        h = h.wrapping_mul(223).wrapping_add(c as i32);
+                                                        h = h
+                                                            .wrapping_mul(223)
+                                                            .wrapping_add(c as i32);
                                                     }
                                                     h.wrapping_rem(0x1FFFFF7B)
                                                 };
@@ -3574,7 +3623,9 @@ impl HLInterpreter {
                                                 let mut found: Option<usize> = None;
                                                 let nproto = (*obj_t).nproto;
                                                 let proto_ptr = (*obj_t).proto;
-                                                if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
+                                                if !proto_ptr.is_null()
+                                                    && (proto_ptr as usize) >= 0x10000
+                                                {
                                                     for i in 0..nproto as usize {
                                                         let proto = &*proto_ptr.add(i);
                                                         if proto.hashed_name == cast_hash {
@@ -3694,11 +3745,17 @@ impl HLInterpreter {
                     if (arr_ptr as usize) < 0x1000
                         || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
                     {
-                        static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 =
+                            std::sync::atomic::AtomicU32::new(0);
                         let c = BAD_ARR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if c == 0 || c == 100 || c == 10000 {
-                            eprintln!("[WARN] GetArray invalid ptr={:#x} count={} in {} pc={}",
-                                arr_ptr as usize, c + 1, func.name(), frame.pc);
+                            eprintln!(
+                                "[WARN] GetArray invalid ptr={:#x} count={} in {} pc={}",
+                                arr_ptr as usize,
+                                c + 1,
+                                func.name(),
+                                frame.pc
+                            );
                         }
                         frame.registers.set(dst.0, NanBoxedValue::null());
                         self.stack.last_mut().unwrap().pc += 1;
@@ -3978,7 +4035,11 @@ impl HLInterpreter {
                     if (addr as usize) < 0x1000 {
                         eprintln!(
                             "[CRASH GUARD] SetMem bad addr={:p} base={:?} idx={} in {} pc={}",
-                            addr, base, idx, func.name(), 0
+                            addr,
+                            base,
+                            idx,
+                            func.name(),
+                            0
                         );
                     } else {
                         Self::write_value_to_ptr(addr, src_val, src_kind);
@@ -4831,7 +4892,12 @@ impl HLInterpreter {
 
         // Trace every native call when ASH_TRACE_NATIVE is set
         if std::env::var("ASH_TRACE_NATIVE").is_ok() {
-            eprintln!("[trace] native {} lib={} args={}", func_name, native.lib, args.len());
+            eprintln!(
+                "[trace] native {} lib={} args={}",
+                func_name,
+                native.lib,
+                args.len()
+            );
         }
 
         let debug_native = std::env::var("ASH_DBG_NATIVE").is_ok();
@@ -4952,7 +5018,9 @@ impl HLInterpreter {
                             || prefix_str.starts_with("#version 140")
                         {
                             // Patch char at index 10: '3'/'4' → '5' (UTF-16 LE)
-                            unsafe { *data_ptr.add(10) = b'5' as u16; }
+                            unsafe {
+                                *data_ptr.add(10) = b'5' as u16;
+                            }
                         }
                     }
                 }
@@ -5087,14 +5155,22 @@ impl HLInterpreter {
 
             // HNULL(T) parameters expect a vdynamic* pointer, not raw values
             if std::env::var("ASH_DBG_ALLOC").is_ok() && kind == hl::hl_type_kind_HNULL {
-                eprintln!("[extract_arg] idx={} kind=HNULL val={:?} is_i32={} is_ptr={}", idx, args[idx], args[idx].is_i32(), args[idx].is_ptr());
+                eprintln!(
+                    "[extract_arg] idx={} kind=HNULL val={:?} is_i32={} is_ptr={}",
+                    idx,
+                    args[idx],
+                    args[idx].is_i32(),
+                    args[idx].is_ptr()
+                );
             }
             if kind == hl::hl_type_kind_HNULL && !self.fn_make_dyn.is_null() {
                 let val = args[idx];
                 if val.is_null() || val.is_void() {
                     return 0; // null pointer
                 }
-                if val.is_i32() || val.is_f64() || val.is_bool()
+                if val.is_i32()
+                    || val.is_f64()
+                    || val.is_bool()
                     || (val.is_ptr() && val.as_ptr() < 0x10000)
                 {
                     // Box the primitive into a vdynamic
@@ -5115,9 +5191,8 @@ impl HLInterpreter {
                     };
                     let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
                         unsafe { std::mem::transmute(self.fn_make_dyn) };
-                    let boxed = unsafe {
-                        make_dyn(&mut data as *mut i64 as *mut c_void, inner_c_type)
-                    };
+                    let boxed =
+                        unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, inner_c_type) };
                     return boxed as i64;
                 }
             }
@@ -5241,42 +5316,111 @@ impl HLInterpreter {
                     )
                 }
                 9 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
+                    let f: unsafe extern "C" fn(
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                    ) -> i64 = std::mem::transmute(func_ptr);
                     f(
-                        extract_arg(0), extract_arg(1), extract_arg(2),
-                        extract_arg(3), extract_arg(4), extract_arg(5),
-                        extract_arg(6), extract_arg(7), extract_arg(8),
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                        extract_arg(4),
+                        extract_arg(5),
+                        extract_arg(6),
+                        extract_arg(7),
+                        extract_arg(8),
                     )
                 }
                 10 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
+                    let f: unsafe extern "C" fn(
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                    ) -> i64 = std::mem::transmute(func_ptr);
                     f(
-                        extract_arg(0), extract_arg(1), extract_arg(2),
-                        extract_arg(3), extract_arg(4), extract_arg(5),
-                        extract_arg(6), extract_arg(7), extract_arg(8),
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                        extract_arg(4),
+                        extract_arg(5),
+                        extract_arg(6),
+                        extract_arg(7),
+                        extract_arg(8),
                         extract_arg(9),
                     )
                 }
                 11 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
+                    let f: unsafe extern "C" fn(
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                    ) -> i64 = std::mem::transmute(func_ptr);
                     f(
-                        extract_arg(0), extract_arg(1), extract_arg(2),
-                        extract_arg(3), extract_arg(4), extract_arg(5),
-                        extract_arg(6), extract_arg(7), extract_arg(8),
-                        extract_arg(9), extract_arg(10),
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                        extract_arg(4),
+                        extract_arg(5),
+                        extract_arg(6),
+                        extract_arg(7),
+                        extract_arg(8),
+                        extract_arg(9),
+                        extract_arg(10),
                     )
                 }
                 12 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
+                    let f: unsafe extern "C" fn(
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                        i64,
+                    ) -> i64 = std::mem::transmute(func_ptr);
                     f(
-                        extract_arg(0), extract_arg(1), extract_arg(2),
-                        extract_arg(3), extract_arg(4), extract_arg(5),
-                        extract_arg(6), extract_arg(7), extract_arg(8),
-                        extract_arg(9), extract_arg(10), extract_arg(11),
+                        extract_arg(0),
+                        extract_arg(1),
+                        extract_arg(2),
+                        extract_arg(3),
+                        extract_arg(4),
+                        extract_arg(5),
+                        extract_arg(6),
+                        extract_arg(7),
+                        extract_arg(8),
+                        extract_arg(9),
+                        extract_arg(10),
+                        extract_arg(11),
                     )
                 }
                 _ => 0i64, // arg count is pre-validated above
@@ -5563,21 +5707,34 @@ impl HLInterpreter {
         let mut alive = true;
         unsafe {
             let poll = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_PollEvent\0".as_ptr() as *const i8);
-            let swap = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_GL_SwapWindow\0".as_ptr() as *const i8);
-            let get_win = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_GL_GetCurrentWindow\0".as_ptr() as *const i8);
+            let swap = libc::dlsym(
+                libc::RTLD_DEFAULT,
+                b"SDL_GL_SwapWindow\0".as_ptr() as *const i8,
+            );
+            let get_win = libc::dlsym(
+                libc::RTLD_DEFAULT,
+                b"SDL_GL_GetCurrentWindow\0".as_ptr() as *const i8,
+            );
 
             if !poll.is_null() {
                 let poll_fn: unsafe extern "C" fn(*mut u8) -> i32 = std::mem::transmute(poll);
                 let mut event_buf = [0u8; 128]; // SDL_Event union
                 while poll_fn(event_buf.as_mut_ptr()) != 0 {
-                    let event_type = u32::from_ne_bytes([event_buf[0], event_buf[1], event_buf[2], event_buf[3]]);
+                    let event_type = u32::from_ne_bytes([
+                        event_buf[0],
+                        event_buf[1],
+                        event_buf[2],
+                        event_buf[3],
+                    ]);
                     // Log first few event types for debugging
-                    static EVT_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    static EVT_LOG_COUNT: std::sync::atomic::AtomicU32 =
+                        std::sync::atomic::AtomicU32::new(0);
                     let c = EVT_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if c < 20 || event_type == 0x100 {
                         eprintln!("[ash] SDL event type={:#x} ({})", event_type, event_type);
                     }
-                    if event_type == 0x100 { // SDL_QUIT
+                    if event_type == 0x100 {
+                        // SDL_QUIT
                         eprintln!("[ash] SDL_QUIT received, exiting");
                         alive = false;
                     }
@@ -5586,12 +5743,17 @@ impl HLInterpreter {
 
             // Swap GL buffers
             if !swap.is_null() && !get_win.is_null() {
-                let get_win_fn: unsafe extern "C" fn() -> *mut c_void = std::mem::transmute(get_win);
+                let get_win_fn: unsafe extern "C" fn() -> *mut c_void =
+                    std::mem::transmute(get_win);
                 let swap_fn: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(swap);
                 let window = get_win_fn();
-                static SWAP_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                static SWAP_LOGGED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
                 if !SWAP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!("[ash] SDL_GL_SwapWindow: window={:p} swap_fn={:p}", window, swap as *const ());
+                    eprintln!(
+                        "[ash] SDL_GL_SwapWindow: window={:p} swap_fn={:p}",
+                        window, swap as *const ()
+                    );
                 }
                 if !window.is_null() {
                     swap_fn(window);

@@ -25,8 +25,8 @@ pub fn init_std_library() -> Result<()> {
             // Try to load libhl.dylib from the system first. If found, use it
             // so HDLLs and the interpreter share the SAME library instance
             // (and thus the same GC static). This avoids the dual-runtime issue.
-            let system_libhl = std::path::Path::new("/usr/local/lib")
-                .join(format!("libhl.{}", ext));
+            let system_libhl =
+                std::path::Path::new("/usr/local/lib").join(format!("libhl.{}", ext));
 
             let lib_path = if system_libhl.exists() {
                 eprintln!("[ash] Using system libhl at {}", system_libhl.display());
@@ -36,7 +36,8 @@ pub fn init_std_library() -> Result<()> {
                 let temp_dir = TempDir::new().expect("Failed to create temp dir");
                 let mut path = temp_dir.path().join("libash_std");
                 path.set_extension(ext);
-                let std_lib_bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+                let std_lib_bytes: &[u8] =
+                    include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
                 std::fs::write(&path, std_lib_bytes).expect("Failed to write std library");
                 // Leak temp_dir so the file isn't deleted
                 std::mem::forget(temp_dir);
@@ -48,12 +49,8 @@ pub fn init_std_library() -> Result<()> {
             #[cfg(unix)]
             let lib = {
                 use std::ffi::CString;
-                let path_cstr =
-                    CString::new(lib_path.to_str().unwrap()).expect("invalid path");
-                let handle = libc::dlopen(
-                    path_cstr.as_ptr(),
-                    libc::RTLD_NOW | libc::RTLD_GLOBAL,
-                );
+                let path_cstr = CString::new(lib_path.to_str().unwrap()).expect("invalid path");
+                let handle = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
                 if handle.is_null() {
                     let err = std::ffi::CStr::from_ptr(libc::dlerror());
                     panic!("Failed to load std library: {:?}", err);
@@ -97,9 +94,8 @@ impl NativeLibraryManager {
             use std::ffi::CString;
             let path_cstr = CString::new(path.to_str().unwrap_or(""))
                 .map_err(|e| anyhow!("Invalid path: {}", e))?;
-            let handle = unsafe {
-                libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
-            };
+            let handle =
+                unsafe { libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
             if handle.is_null() {
                 let err = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) };
                 return Err(anyhow!("Failed to load {}: {:?}", name, err));

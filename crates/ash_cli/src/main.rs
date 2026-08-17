@@ -125,22 +125,49 @@ fn run() -> Result<()> {
     let mut native_resolver = NativeFunctionResolver::new();
 
     // Discover and load external HDLL libraries from the .hl file's directory
-    let search_dir = hl_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let search_dir = hl_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
 
     // Debug: dump type info for Heaps investigation
     if std::env::var("ASH_DUMP_TYPES").is_ok() {
-        eprintln!("=== Bytecode: {} types, {} globals, {} functions, {} natives ===",
-            bytecode.types.len(), bytecode.globals.len(),
-            bytecode.functions.len(), bytecode.natives.len());
+        eprintln!(
+            "=== Bytecode: {} types, {} globals, {} functions, {} natives ===",
+            bytecode.types.len(),
+            bytecode.globals.len(),
+            bytecode.functions.len(),
+            bytecode.natives.len()
+        );
         for (i, t) in bytecode.types.iter().enumerate() {
             if i < 50 || i == 39 || i == 203 {
                 let name = t.obj.as_ref().map(|o| o.name.as_str()).unwrap_or("");
                 let super_idx = t.obj.as_ref().and_then(|o| o.super_.as_ref()).map(|s| s.0);
-                let field_names: Vec<_> = t.obj.as_ref().map(|o| o.fields.iter().map(|f| format!("{}(k={})", f.name, bytecode.types[f.type_.0].kind)).collect()).unwrap_or_default();
-                let vname = t.virt.as_ref().map(|v| format!("virt({} fields)", v.fields.len())).unwrap_or_default();
-                eprintln!("  type[{}] kind={} nfields={} super={:?} name={} fields={:?} {}", i, t.kind,
-                    t.obj.as_ref().map(|o| o.fields.len()).unwrap_or(0), super_idx, name, field_names, vname);
+                let field_names: Vec<_> = t
+                    .obj
+                    .as_ref()
+                    .map(|o| {
+                        o.fields
+                            .iter()
+                            .map(|f| format!("{}(k={})", f.name, bytecode.types[f.type_.0].kind))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let vname = t
+                    .virt
+                    .as_ref()
+                    .map(|v| format!("virt({} fields)", v.fields.len()))
+                    .unwrap_or_default();
+                eprintln!(
+                    "  type[{}] kind={} nfields={} super={:?} name={} fields={:?} {}",
+                    i,
+                    t.kind,
+                    t.obj.as_ref().map(|o| o.fields.len()).unwrap_or(0),
+                    super_idx,
+                    name,
+                    field_names,
+                    vname
+                );
             }
         }
         if bytecode.globals.len() > 58 {
@@ -148,11 +175,22 @@ fn run() -> Result<()> {
         }
         // Find Fun_5483 and Fun_2360
         for f in &bytecode.functions {
-            if f.name() == "Fun_5483" || f.findex == 5483
-                || f.name() == "Fun_2360" || f.findex == 2360 {
-                eprintln!("  Fun_5483: findex={} type_idx={} nregs={}", f.findex, f.type_.0, f.regs.len());
+            if f.name() == "Fun_5483"
+                || f.findex == 5483
+                || f.name() == "Fun_2360"
+                || f.findex == 2360
+            {
+                eprintln!(
+                    "  Fun_5483: findex={} type_idx={} nregs={}",
+                    f.findex,
+                    f.type_.0,
+                    f.regs.len()
+                );
                 for (ri, reg) in f.regs.iter().enumerate().take(16) {
-                    eprintln!("    r{}: type_idx={} kind={}", ri, reg.0, bytecode.types[reg.0].kind);
+                    eprintln!(
+                        "    r{}: type_idx={} kind={}",
+                        ri, reg.0, bytecode.types[reg.0].kind
+                    );
                 }
             }
         }

@@ -34,16 +34,16 @@ macro_rules! hlt_global {
     };
 }
 
-hlt_global!(hlt_void, 0);      // HVOID
-hlt_global!(hlt_i32, 3);      // HI32
-hlt_global!(hlt_i64, 4);      // HI64
-hlt_global!(hlt_f32, 5);      // HF32
-hlt_global!(hlt_f64, 6);      // HF64
-hlt_global!(hlt_bool, 7);     // HBOOL
-hlt_global!(hlt_bytes, 8);    // HBYTES
-hlt_global!(hlt_dyn, 9);      // HDYN
-hlt_global!(hlt_array, 12);   // HARRAY
-hlt_global!(hlt_dynobj, 16);  // HDYNOBJ
+hlt_global!(hlt_void, 0); // HVOID
+hlt_global!(hlt_i32, 3); // HI32
+hlt_global!(hlt_i64, 4); // HI64
+hlt_global!(hlt_f32, 5); // HF32
+hlt_global!(hlt_f64, 6); // HF64
+hlt_global!(hlt_bool, 7); // HBOOL
+hlt_global!(hlt_bytes, 8); // HBYTES
+hlt_global!(hlt_dyn, 9); // HDYN
+hlt_global!(hlt_array, 12); // HARRAY
+hlt_global!(hlt_dynobj, 16); // HDYNOBJ
 hlt_global!(hlt_abstract, 17); // HABSTRACT
 
 use crate::gc::{ImmixAllocator, GC};
@@ -160,11 +160,7 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_gc_alloc_gen(
-    t: *mut hl_type,
-    size: i32,
-    _flags: i32,
-) -> *mut c_void {
+pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32) -> *mut c_void {
     let gc = GC.get_mut().expect("GC");
     if let Some(ptr) = gc.allocate(size as usize) {
         let p = ptr.as_ptr() as *mut vdynamic;
@@ -209,9 +205,15 @@ pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
     if std::env::var("ASH_DBG_SHADER").is_ok() {
         if !str.is_null() && (str as usize) > 0x10000 {
             let mut len = 0;
-            while *str.add(len) != 0 && len < 200 { len += 1; }
+            while *str.add(len) != 0 && len < 200 {
+                len += 1;
+            }
             let s = String::from_utf16_lossy(std::slice::from_raw_parts(str, len));
-            eprintln!("[hl_to_utf8] len={} first100={:?}", len, &s[..s.len().min(100)]);
+            eprintln!(
+                "[hl_to_utf8] len={} first100={:?}",
+                len,
+                &s[..s.len().min(100)]
+            );
         } else {
             eprintln!("[hl_to_utf8] str={:p} (null or invalid)", str);
         }
@@ -313,9 +315,13 @@ pub unsafe extern "C" fn hl_blocking(_enter: bool) {}
 
 #[no_mangle]
 pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     let mut len = 0;
-    while *s.add(len) != 0 { len += 1; }
+    while *s.add(len) != 0 {
+        len += 1;
+    }
     len
 }
 
@@ -331,7 +337,10 @@ pub unsafe extern "C" fn usprintf(_out: *mut u16, _size: i32, _fmt: *const u16, 
 
 #[no_mangle]
 pub unsafe extern "C" fn uvszprintf(
-    _out: *mut u16, _size: i32, _fmt: *const u16, _args: *mut c_void,
+    _out: *mut u16,
+    _size: i32,
+    _fmt: *const u16,
+    _args: *mut c_void,
 ) -> i32 {
     0
 }

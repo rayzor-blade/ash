@@ -157,6 +157,7 @@ dependencies = [
  "bindgen",
  "chrono",
  "flexstr",
+ "krio-fiber",
  "libc",
  "once_cell",
  "regex",
@@ -531,6 +532,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1868808506b929d7b0cfa8f75951347aa71bb21144b7791bae35d9bccfcfe37a"
 dependencies = [
  "wasm-bindgen",
+]
+
+[[package]]
+name = "krio-core"
+version = "0.1.0"
+source = "git+https://github.com/darmie/krio#065f77d1681f7deb2aebff0c3d8fdbdd31b204a3"
+
+[[package]]
+name = "krio-fiber"
+version = "0.1.0"
+source = "git+https://github.com/darmie/krio#065f77d1681f7deb2aebff0c3d8fdbdd31b204a3"
+dependencies = [
+ "krio-core",
+ "libc",
 ]
 
 [[package]]

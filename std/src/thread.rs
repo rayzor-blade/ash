@@ -39,7 +39,7 @@ unsafe fn get_sdl_poll_event() -> Option<unsafe extern "C" fn(*mut u8) -> i32> {
 /// Pump all pending SDL events (non-blocking).
 /// This makes the window visible and responsive on macOS,
 /// which requires event processing on the main thread.
-unsafe fn pump_sdl_events() {
+pub(crate) unsafe fn pump_sdl_events() {
     if let Some(poll) = get_sdl_poll_event() {
         let mut event = [0u8; 128]; // SDL_Event is 56 bytes, 128 is plenty
         while poll(event.as_mut_ptr()) != 0 {
@@ -68,7 +68,14 @@ pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
     if ptr.is_null() {
         return ptr::null_mut();
     }
-    libc::pthread_mutex_init(&mut (*ptr).inner, ptr::null());
+    // HashLink mutexes are RECURSIVE (thread.c uses PTHREAD_MUTEX_RECURSIVE);
+    // sys.thread.EventLoop re-acquires from the same thread — a default
+    // (non-recursive) mutex deadlocks progress().
+    let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+    libc::pthread_mutexattr_init(&mut attr);
+    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+    libc::pthread_mutex_init(&mut (*ptr).inner, &attr);
+    libc::pthread_mutexattr_destroy(&mut attr);
     ptr as *mut c_void
 }
 
@@ -131,33 +138,32 @@ pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
     if sem.is_null() {
         return;
     }
+    // HashLink !HL_THREADS: semaphore_acquire is a NO-OP (thread.c:219-220).
+    // Blocking here is fatal in a single-threaded VM — nothing can release.
     let s = sem as *mut HlSemaphore;
     libc::pthread_mutex_lock(&mut (*s).mutex);
-    while (*s).value <= 0 {
-        libc::pthread_cond_wait(&mut (*s).cond, &mut (*s).mutex);
+    if (*s).value > 0 {
+        (*s).value -= 1;
     }
-    (*s).value -= 1;
     libc::pthread_mutex_unlock(&mut (*s).mutex);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     sem: *mut c_void,
-    timeout: *mut vdynamic,
+    _timeout: *mut vdynamic,
 ) -> bool {
     if sem.is_null() {
         return false;
     }
+    // HashLink !HL_THREADS: try_acquire ALWAYS returns true (thread.c:238-240).
     let s = sem as *mut HlSemaphore;
     libc::pthread_mutex_lock(&mut (*s).mutex);
     if (*s).value > 0 {
         (*s).value -= 1;
-        libc::pthread_mutex_unlock(&mut (*s).mutex);
-        return true;
     }
-    // No timeout support for now — just fail immediately
     libc::pthread_mutex_unlock(&mut (*s).mutex);
-    false
+    true
 }
 
 #[no_mangle]
@@ -199,7 +205,12 @@ pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
     if ptr.is_null() {
         return ptr::null_mut();
     }
-    libc::pthread_mutex_init(&mut (*ptr).mutex, ptr::null());
+    // Recursive, matching HashLink's condition mutex (thread.c:340-344).
+    let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+    libc::pthread_mutexattr_init(&mut attr);
+    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+    libc::pthread_mutex_init(&mut (*ptr).mutex, &attr);
+    libc::pthread_mutexattr_destroy(&mut attr);
     libc::pthread_cond_init(&mut (*ptr).cond, ptr::null());
     ptr as *mut c_void
 }
@@ -227,30 +238,15 @@ pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_condition_wait(c: *mut c_void) {
-    if !c.is_null() {
-        let cv = c as *mut HlCondition;
-        libc::pthread_cond_wait(&mut (*cv).cond, &mut (*cv).mutex);
-    }
+pub unsafe extern "C" fn hlp_condition_wait(_c: *mut c_void) {
+    // HashLink !HL_THREADS: condition_wait returns immediately (thread.c:380).
+    // Blocking here is fatal in a single-threaded VM — no other thread can signal.
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
-    if c.is_null() {
-        return false;
-    }
-    let cv = c as *mut HlCondition;
-    let mut ts: libc::timespec = std::mem::zeroed();
-    libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
-    let secs = timeout as i64;
-    let nsecs = ((timeout - secs as f64) * 1_000_000_000.0) as i64;
-    ts.tv_sec += secs;
-    ts.tv_nsec += nsecs;
-    if ts.tv_nsec >= 1_000_000_000 {
-        ts.tv_sec += 1;
-        ts.tv_nsec -= 1_000_000_000;
-    }
-    libc::pthread_cond_timedwait(&mut (*cv).cond, &mut (*cv).mutex, &ts) == 0
+pub unsafe extern "C" fn hlp_condition_timed_wait(_c: *mut c_void, _timeout: f64) -> bool {
+    // HashLink !HL_THREADS: timed_wait returns true immediately (thread.c:393-394).
+    true
 }
 
 #[no_mangle]
@@ -296,16 +292,46 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynami
     if lock.is_null() {
         return false;
     }
-    // Exact match of HashLink's !HL_THREADS implementation:
-    //   if (l->counter == 0) return false;
-    //   l->counter--;
-    //   return true;
     let s = lock as *mut HlSemaphore;
-    if (*s).value == 0 {
+    if (*s).value > 0 {
+        (*s).value -= 1;
+        return true;
+    }
+    // No fibers: exact HashLink !HL_THREADS semantics — never block.
+    if !crate::fiber::fibers_active() {
         return false;
     }
-    (*s).value -= 1;
-    true
+    // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
+    // Timeout arrives as a boxed Null<Float> (seconds); null = wait forever.
+    let deadline = if _timeout.is_null() {
+        None
+    } else {
+        let t = _timeout as *const vdynamic;
+        let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
+        let secs = if kind == 6 {
+            (*t).v.d
+        } else if kind == 5 {
+            (*t).v.f as f64
+        } else {
+            0.0
+        };
+        if secs <= 0.0 {
+            return false; // wait(0.0): pure poll, e.g. EventLoop's drain
+        }
+        Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
+    };
+    loop {
+        crate::fiber::block_yield();
+        if (*s).value > 0 {
+            (*s).value -= 1;
+            return true;
+        }
+        if let Some(d) = deadline {
+            if std::time::Instant::now() >= d {
+                return false;
+            }
+        }
+    }
 }
 
 // Separate SDL pump function called from the main loop, not from lock_wait
@@ -364,13 +390,22 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
         return ptr::null_mut();
     }
     let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
-    if let Ok(mut v) = deque.lock() {
-        if v.is_empty() {
+    loop {
+        if let Ok(mut v) = deque.lock() {
+            if !v.is_empty() {
+                return v.remove(0) as *mut vdynamic;
+            }
+        } else {
             return ptr::null_mut();
         }
-        return v.remove(0) as *mut vdynamic;
+        // Empty: blocking pop waits cooperatively while fibers exist;
+        // otherwise keep the non-blocking null return (single-threaded,
+        // nothing can ever push).
+        if !block || !crate::fiber::fibers_active() {
+            return ptr::null_mut();
+        }
+        crate::fiber::block_yield();
     }
-    ptr::null_mut()
 }
 
 // ============================================================================
@@ -412,11 +447,11 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_thread_create(_callback: *mut c_void) -> *mut c_void {
-    // Thread creation requires marshaling a HashLink closure through pthread.
-    // Stub for now — returns null (thread not created).
-    eprintln!("[ash] warning: hlp_thread_create not yet implemented");
-    ptr::null_mut()
+pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void {
+    // Haxe threads run as cooperative stackful fibers on the main OS thread
+    // (krio) — blocking primitives yield to the scheduler. Upstream prim is
+    // _FUN(_VOID,_NO_ARG): callback is a vclosure*.
+    crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
 }
 
 #[no_mangle]

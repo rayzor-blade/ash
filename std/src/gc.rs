@@ -68,6 +68,18 @@ pub struct ImmixAllocator {
     pub(crate) exc_value: RefCell<*mut vdynamic>,
     stack_top: usize,
     globals_range: Option<(*const *mut c_void, usize)>,
+    /// Registered fiber stacks for conservative scanning. id 0 is the main
+    /// stack descriptor (base/size 0 — scanned as [saved_sp, stack_top)).
+    fiber_stacks: Vec<FiberStackInfo>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct FiberStackInfo {
+    pub id: u32,
+    pub base: usize,
+    pub size: usize,
+    /// SP recorded at the stack's last switch-out; 0 = never suspended.
+    pub saved_sp: usize,
 }
 
 impl ImmixAllocator {
@@ -114,6 +126,7 @@ impl ImmixAllocator {
             exception_handler: None,
             current_trap: RefCell::new(std::ptr::null_mut()),
             exc_value: RefCell::new(std::ptr::null_mut()),
+            fiber_stacks: Vec::new(),
             stack_top: 0,
             globals_range: None,
         }
@@ -470,17 +483,43 @@ impl ImmixAllocator {
             }
         }
 
-        // Conservative scan of thread stack.
-        // Do not use arch-specific inline asm here; use a portable stack probe.
-        if self.stack_top > 0 {
-            let sp = Self::current_stack_addr();
-            if sp < self.stack_top {
-                let newly_marked = self.conservative_scan_range(sp, self.stack_top);
-                all_newly_marked.extend(newly_marked);
-            } else if sp > self.stack_top {
-                // Be robust on unusual targets where stack direction may differ.
-                let newly_marked = self.conservative_scan_range(self.stack_top, sp);
-                all_newly_marked.extend(newly_marked);
+        // Conservative scan of execution stacks. Collection always runs on
+        // the allocating context's stack, which may be the main thread OR a
+        // fiber stack — resolve the live probe SP against the registry.
+        // (8-align the probe: conservative_scan_range walks 8-byte words.)
+        let sp = (Self::current_stack_addr() + 7) & !7;
+        let fiber_stacks = self.fiber_stacks.clone();
+        let running_fiber = fiber_stacks
+            .iter()
+            .find(|f| f.size > 0 && sp >= f.base && sp < f.base + f.size)
+            .map(|f| (f.id, f.base + f.size));
+        match running_fiber {
+            Some((_, top)) => {
+                all_newly_marked.extend(self.conservative_scan_range(sp, top));
+            }
+            None => {
+                if self.stack_top > 0 && sp < self.stack_top {
+                    all_newly_marked.extend(self.conservative_scan_range(sp, self.stack_top));
+                }
+            }
+        }
+        // All OTHER registered stacks scan from their saved switch-out SP.
+        for f in &fiber_stacks {
+            if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
+                continue;
+            }
+            let start = (f.saved_sp + 7) & !7;
+            let top = if f.size > 0 {
+                f.base + f.size
+            } else {
+                // Main-stack descriptor: only meaningful while a fiber runs.
+                if running_fiber.is_none() {
+                    continue;
+                }
+                self.stack_top
+            };
+            if start < top {
+                all_newly_marked.extend(self.conservative_scan_range(start, top));
             }
         }
 
@@ -898,4 +937,60 @@ pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
 pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
     let gc = GC.get_mut().expect("expected GC");
     gc.add_scan_range(ptr, size);
+}
+
+// ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────
+
+pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) {
+    let gc = GC.get_mut().expect("expected GC");
+    // Lazily register the main-stack descriptor the first time a fiber
+    // appears, so mark_roots can scan the suspended main stack.
+    if !gc.fiber_stacks.iter().any(|f| f.id == 0) {
+        gc.fiber_stacks.push(FiberStackInfo {
+            id: 0,
+            base: 0,
+            size: 0,
+            saved_sp: 0,
+        });
+    }
+    gc.fiber_stacks.push(FiberStackInfo {
+        id,
+        base,
+        size,
+        saved_sp: 0,
+    });
+}
+
+pub(crate) unsafe fn gc_update_fiber_sp(id: u32, sp: usize) {
+    let gc = GC.get_mut().expect("expected GC");
+    if let Some(f) = gc.fiber_stacks.iter_mut().find(|f| f.id == id) {
+        f.saved_sp = sp;
+    }
+}
+
+/// Must be called BEFORE the fiber's stack memory is freed.
+pub(crate) unsafe fn gc_unregister_fiber_stack(id: u32) {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.fiber_stacks.retain(|f| f.id != id);
+}
+
+pub(crate) unsafe fn gc_add_persistent(ptr: *mut hl::vdynamic) {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.roots.borrow_mut().persistent_roots.insert(ptr);
+}
+
+pub(crate) unsafe fn gc_remove_persistent(ptr: *mut hl::vdynamic) {
+    let gc = GC.get_mut().expect("expected GC");
+    gc.roots.borrow_mut().persistent_roots.remove(&ptr);
+}
+
+/// Swap the live exception-state cells (trap chain head + exception value)
+/// with the given values — the fiber scheduler's per-fiber state switch.
+pub(crate) unsafe fn gc_swap_exc_state(
+    trap: &mut *mut crate::error::TrapContext,
+    exc: &mut *mut hl::vdynamic,
+) {
+    let gc = GC.get_mut().expect("expected GC");
+    std::mem::swap(&mut *gc.current_trap.borrow_mut(), trap);
+    std::mem::swap(&mut *gc.exc_value.borrow_mut(), exc);
 }

@@ -22,16 +22,49 @@ pub fn init_std_library() -> Result<()> {
                 "so"
             };
 
-            // Try to load libhl.dylib from the system first. If found, use it
-            // so HDLLs and the interpreter share the SAME library instance
-            // (and thus the same GC static). This avoids the dual-runtime issue.
+            // Prefer the system libhl.dylib so HDLLs and the interpreter share
+            // the SAME library instance (and thus the same GC static) — C hdlls
+            // resolve their libhl.dylib install-name dependency to this path
+            // regardless of what we dlopen. BUT only if it is not stale: a
+            // system libhl missing the canary symbol predates the current
+            // stdlib ABI and silently shadows every freshly built ash_std
+            // (this cost months: all EventLoop debugging since March ran
+            // against a stale root-owned build).
+            // Override with ASH_LIBHL=system|embedded.
+            // Bump the canary when the stdlib ABI changes materially.
+            const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
             let system_libhl =
                 std::path::Path::new("/usr/local/lib").join(format!("libhl.{}", ext));
 
-            let lib_path = if system_libhl.exists() {
+            let force = std::env::var("ASH_LIBHL").unwrap_or_default();
+            let system_ok = system_libhl.exists()
+                && (force == "system" || {
+                    let path_cstr = std::ffi::CString::new(system_libhl.to_str().unwrap()).unwrap();
+                    let probe = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+                    if probe.is_null() {
+                        false
+                    } else {
+                        let has_canary =
+                            !libc::dlsym(probe, CANARY_SYMBOL.as_ptr() as *const libc::c_char)
+                                .is_null();
+                        libc::dlclose(probe);
+                        has_canary
+                    }
+                });
+
+            let lib_path = if system_ok && force != "embedded" {
                 eprintln!("[ash] Using system libhl at {}", system_libhl.display());
                 system_libhl
             } else {
+                if system_libhl.exists() && force != "embedded" {
+                    eprintln!(
+                        "[ash] WARNING: {} exists but is STALE (missing canary symbol) — \
+                         using embedded ash_std instead. C hdlls may still bind the stale \
+                         copy; refresh it with: sudo cp <target>/libash_std.dylib {}",
+                        system_libhl.display(),
+                        system_libhl.display()
+                    );
+                }
                 // Fallback: extract the embedded library to a temp file
                 let temp_dir = TempDir::new().expect("Failed to create temp dir");
                 let mut path = temp_dir.path().join("libash_std");

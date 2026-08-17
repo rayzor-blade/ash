@@ -289,5 +289,15 @@ pub unsafe extern "C" fn hlp_file_contents(_name: *const vbyte, _len: *mut i32) 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
+    // With fibers alive, sleeping is a scheduling window: let workers run
+    // until the deadline instead of stalling the whole VM.
+    if crate::fiber::fibers_active() {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds.max(0.0));
+        while std::time::Instant::now() < deadline {
+            crate::fiber::block_yield();
+        }
+        return;
+    }
     std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
 }

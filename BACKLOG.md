@@ -169,3 +169,19 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 - **README is stale** — it documents O0/O1/O2 AIR levels and describes MCJIT
   codegen as "O3 optimizations"; no LLVM middle-end pipeline runs at all
   (adding one is the cheapest large win available).
+
+## Cranelift tier — follow-ups
+
+- **Own the backend; implement `beadie::JitBackend` directly.** beadie-cranelift
+  is a reference implementation, not a dependency — neither rayzor
+  (`BeadieJit`) nor zyntax (`ZyntaxCraneliftBackend`) uses its concrete
+  backend. `AshCraneliftBackend` should own its own
+  `Arc<Mutex<cranelift_jit::JITModule>>` and `FunctionDef`, depending only on
+  the cranelift-agnostic `beadie-core` / `beadie-backend` traits. This also
+  frees ash to pick its own cranelift version: while ash consumes
+  beadie-cranelift's `CraneliftFunctionDef`, both crates must resolve to the
+  same cranelift or the `ir::Function` types are distinct.
+- **Move to cranelift from wasmtime upstream** (git rev, 0.136.0-dev — the
+  crates.io maximum is 0.134.3). Verify the flag names the tier sets survive
+  the bump: `opt_level`, `enable_probestack`, `preserve_frame_pointers`,
+  `is_pic`.

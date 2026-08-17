@@ -58,14 +58,14 @@
 //!   it), `Nop` and unreachable code are dropped, and `Label`s are re-derived
 //!   from actual backward edges.
 //!
-//! ## Phase 1 limitations (documented, checked with errors — not UB)
+//! ## Current limitations (documented, checked with errors — not UB)
 //!
 //! * Parallel copies cannot be inserted on exceptional edges (there is no
 //!   program point between "throw" and "handler entry"); `serialize` rejects
 //!   non-trivial phis at handler blocks. Plain `lower` output never produces
 //!   them because in-region-written registers are pinned to cells.
 //! * In-region pinning is conservative: *every* register written inside a trap
-//!   region becomes a cell. Phase 2 can refine this with liveness.
+//!   region becomes a cell. Liveness analysis can refine this later.
 //! * `IndirectCall` (a v1 hot-reload pass artifact, not a real bytecode op)
 //!   is rejected by `lower`.
 

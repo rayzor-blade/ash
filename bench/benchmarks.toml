@@ -120,6 +120,28 @@ checksums = [
   { value = "112798587", label = "fused-llvm" },
 ]
 
+# Object field access with no allocation in the hot loop, which makes it the
+# cleanest read on what field access itself costs: the profiler charges ~46% of
+# this benchmark to hlp_get_obj_rt, one runtime call per field read. Whatever
+# replaces that call with a constant-offset load should move this row and leave
+# mandelbrot's allocation-bound row roughly alone.
+[[bench]]
+name = "nbody"
+hl = "test_nbody.hl"
+# Judged on its own reduced value rather than on stdout, so that no interpreter
+# reference run is needed — the interpreter is excluded below, and demanding a
+# reference it can never produce would mark every row INVALID.
+expectation = "checksum"
+checksum_marker = "Energy:"
+checksums = [{ value = "-169077", label = "reference" }]
+timeout_secs = 300
+group = "fp"
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = """10M calls to advance(); the interpreter needs minutes for a \
+number that only restates what mandelbrot_small already measures"""
+description = """N-body, 10M integration steps. Verbatim from HaxeBenchmarks, \
+so the number is comparable with the official Haxe targets."""
+
 [[bench]]
 name = "array_push"
 parity_case = "test_array_push"

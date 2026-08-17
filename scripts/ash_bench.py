@@ -299,10 +299,16 @@ def parse_rss_bytes(stderr: str) -> int | None:
     return None
 
 
-def extract_checksum(stdout: str) -> str | None:
+def extract_checksum(stdout: str, marker: str = "Checksum:") -> str | None:
+    """Pull the single value a benchmark reduces its work to.
+
+    The marker is per-benchmark because some programs are verbatim copies of an
+    upstream corpus — nbody prints `Energy:` — and editing their output to suit
+    this runner would cost the comparability that made them worth copying.
+    """
     for line in stdout.splitlines():
-        if "Checksum:" in line:
-            return line.split("Checksum:", 1)[1].strip()
+        if marker in line:
+            return line.split(marker, 1)[1].strip()
     return None
 
 
@@ -452,6 +458,7 @@ class Bench:
             raw["slow"] if "slow" in raw else base.get("slow", False)
         )
         self.checksums: list[dict] = list(raw.get("checksums", []))
+        self.checksum_marker: str = raw.get("checksum_marker", "Checksum:")
         # Optional allowlist. A benchmark that only says something under one
         # mode should not burn the timeout under the others just to record a
         # result nobody can read.
@@ -547,7 +554,7 @@ def judge(bench: Bench, res: RunResult, ref: Reference | None) -> tuple[bool, st
     checksum_record: dict = {}
 
     if bench.expectation == "checksum":
-        got = extract_checksum(res.stdout)
+        got = extract_checksum(res.stdout, bench.checksum_marker)
         accepted = {c["value"]: c.get("label", "?") for c in bench.checksums}
         checksum_record = {
             "value": got,
@@ -555,7 +562,11 @@ def judge(bench: Bench, res: RunResult, ref: Reference | None) -> tuple[bool, st
             "accepted": got in accepted,
         }
         if got is None:
-            return False, "no 'Checksum:' line in stdout", checksum_record
+            return (
+                False,
+                f"no {bench.checksum_marker!r} line in stdout",
+                checksum_record,
+            )
         if got not in accepted:
             return (
                 False,
@@ -587,7 +598,7 @@ def fingerprint(bench: Bench, res: RunResult) -> str:
     wrong in a *different* way each time is reading uninitialized memory.
     """
     if bench.expectation == "checksum":
-        return str(extract_checksum(res.stdout))
+        return str(extract_checksum(res.stdout, bench.checksum_marker))
     if bench.expectation == "exit_only":
         return f"exit={res.returncode}"
     return normalize_text(res.stdout, bench.normalize)

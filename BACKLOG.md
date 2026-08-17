@@ -14,6 +14,47 @@ full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
 
 ---
 
+## Where the time actually goes
+
+Measured with the built-in profiler (`ASH_PROFILE=sample`, see the README), so
+these are shares of observed execution rather than estimates. Both rows are the
+whole-program JIT, where every function is LLVM-compiled at `-O3` and nothing
+is left interpreted — that is, the best code ash currently produces.
+
+| | nbody | mandelbrot (875×500) |
+|---|---|---|
+| Generated code (`llvm`) | 45.6% | 15.4% |
+| `hlp_get_obj_rt` | **44.8%** | 13.7% |
+| GC (mark, sweep, allocate, lock, `madvise`) | ~0% | **53.6%** |
+
+The two benchmarks isolate different costs, which is why both are worth
+keeping. nbody's hot loop only reads and writes fields of long-lived objects,
+so it measures field access alone: nearly half of it is one runtime call per
+field access. mandelbrot allocates two `Complex` values per inner iteration, so
+it measures allocation, and the collector costs more than three times what the
+generated code does.
+
+The consequence for prioritization is that **codegen quality is not currently
+the limiting factor for either**. If ash emitted perfect machine code and
+changed nothing else, mandelbrot would still spend 84% of its time exactly
+where it does now. The three items that would move these numbers —
+[static field-offset GEP lowering](#jit--tiering), scalar replacement so the
+`Complex` allocations never happen, and the [GC](#gc) work below — are already
+listed separately; this section exists to rank them.
+
+Two caveats on the figures. They come from a `target/debug` build, where
+`[profile.dev] opt-level = 1` applies to `ash_std` — so the runtime and GC
+halves are lightly optimized while the JIT-generated half is not, which
+overstates their share by an unmeasured amount. And `target/release/ash`
+currently embeds a *debug* `ash_std` (there is no `target/release/libash_std.dylib`),
+so a release build does not settle the question either; see
+[Build & tooling](#build--tooling). Re-measure once that is fixed. The
+*ordering* is robust to this — a call per field access and two allocations per
+iteration are architectural, not artifacts of an optimization level — but the
+percentages will move.
+
+---
+
 ## AIR v2
 
 The typed phi-SSA IR (`crates/air/src/v2`) is in place with lowering,

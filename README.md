@@ -39,7 +39,9 @@ A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`,
 | `x86_64` | Complete, including the SysV and Windows fiber ABIs |
 | others | Needs the two assembly components below |
 
-Most of ASH is portable Rust — the interpreter, the GC, AIR, and both compiler backends build anywhere Rust and LLVM do. Porting to another architecture means supplying two pieces of assembly:
+ASH requires a 64-bit target: `HL_WSIZE` is 8, and NaN-boxed values pack a 48-bit payload into a `u64`.
+
+Code generation itself is architecture-independent — AIR, the lowerings, and both backends work on any target LLVM and Cranelift support. What does not follow automatically is two pieces of assembly at the runtime boundary:
 
 - **The reflection call bridge** (`ash_static_call`) marshals arguments into registers to invoke a function pointer whose signature is only known at runtime, for `Type.createInstance` and dynamic dispatch. There is no portable fallback, so an unported architecture fails to link.
 - **The fiber context switch**, which backs `sys.thread`, lives in [krio](https://github.com/darmie/krio). Unported architectures compile against a stub that panics when a thread is created.

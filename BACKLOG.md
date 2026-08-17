@@ -237,6 +237,24 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 - **Committed build artifacts** in `examples/heaps_base2d/bin/` (`game.hl`
   plus eight `.hdll` files).
 
+## Portability
+
+- **Generate the reflection call bridge with Cranelift instead of writing it by
+  hand.** `ash_static_call` is per-ABI assembly (currently `aarch64` and
+  `x86_64`, with no fallback, so an unported architecture fails to link) that
+  marshals arguments into registers for a signature known only at runtime. It
+  is reached as a function pointer installed through `hl_setup_callbacks2`, so
+  it can just as well be a trampoline emitted per distinct signature by the
+  Cranelift backend already in the tree and cached by signature — roughly
+  0.04 ms to compile, once per signature. Architecture support would then
+  follow the backends rather than needing new assembly. The fiber context
+  switch cannot be handled this way: swapping the stack pointer and restoring
+  callee-saved registers is inexpressible in both LLVM IR and CLIF, which
+  assume call/return discipline.
+- **64-bit only.** `HL_WSIZE` is 8 and NaN-boxed values pack a 48-bit payload
+  into a `u64`, so a 32-bit target needs a different value representation
+  regardless of which backend compiles it.
+
 ## Dead code
 
 - **Delete the pre-JIT module path and drop the `hlbc` dependency.**

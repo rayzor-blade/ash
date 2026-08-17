@@ -1,11 +1,11 @@
-use crate::types::{HLNative, Str};
+use crate::types::HLNative;
 use anyhow::{anyhow, Result};
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::path::Path;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use tempfile::TempDir;
 
 static STD_INIT: Once = Once::new();
@@ -155,19 +155,56 @@ pub fn init_std_library() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct NativeLibraryManager {
-    libraries: HashMap<Str, Library>,
+/// Process-global registry of loaded HDLL handles, keyed by clean library
+/// name. Shared across ALL NativeLibraryManager instances so the
+/// interpreter's resolver and the pre-warmed tiered JIT's resolver reuse the
+/// same dlopen handle: each HDLL is loaded (and logged) exactly once per
+/// process instead of once per resolver instance. dlopen refcounts, so the
+/// per-instance registries "worked", but every hdll (uv/fmt/ui/sdl/...) was
+/// dlopen'd and logged twice in hybrid mode.
+static LOADED_LIBRARIES: OnceLock<Mutex<HashMap<String, Arc<Library>>>> = OnceLock::new();
+
+fn loaded_libraries() -> &'static Mutex<HashMap<String, Arc<Library>>> {
+    LOADED_LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+#[derive(Debug)]
+pub struct NativeLibraryManager;
 
 impl NativeLibraryManager {
     pub fn new() -> Self {
-        NativeLibraryManager {
-            libraries: HashMap::new(),
-        }
+        NativeLibraryManager
+    }
+
+    /// True if a library with this (clean) name is already registered
+    /// process-wide (loaded earlier by any resolver instance).
+    fn is_loaded(name: &str) -> bool {
+        let clean = name.strip_prefix('?').unwrap_or(name);
+        loaded_libraries()
+            .lock()
+            .expect("HDLL registry poisoned")
+            .contains_key(clean)
+    }
+
+    /// Fetch a registered library handle by (clean) name.
+    fn get_registered(name: &str) -> Option<Arc<Library>> {
+        let clean = name.strip_prefix('?').unwrap_or(name);
+        loaded_libraries()
+            .lock()
+            .expect("HDLL registry poisoned")
+            .get(clean)
+            .cloned()
     }
 
     fn load_library(&mut self, name: &str, path: &Path) -> Result<()> {
+        let clean = name.strip_prefix('?').unwrap_or(name).to_string();
+        // Hold the registry lock across dlopen so two resolvers racing on the
+        // same library cannot both load it.
+        let mut registry = loaded_libraries().lock().expect("HDLL registry poisoned");
+        if registry.contains_key(&clean) {
+            // Already loaded by another resolver instance — share the handle.
+            return Ok(());
+        }
         // Load HDLLs with RTLD_GLOBAL so they can see ash_std's hl_ symbols.
         // On macOS, also use flat namespace to override libhl.dylib bindings.
         #[cfg(unix)]
@@ -185,16 +222,8 @@ impl NativeLibraryManager {
         };
         #[cfg(not(unix))]
         let library = unsafe { Library::new(path) }?;
-        self.libraries.insert(Str::from(name), library);
+        registry.insert(clean, Arc::new(library));
         Ok(())
-    }
-
-    fn get_library(&self, name: &str) -> Option<&Library> {
-        let clean = name.strip_prefix('?').unwrap_or(name);
-        if clean == "std" {
-            unsafe { return STD_LIBRARY.as_ref() }
-        }
-        self.libraries.get(&Str::from(clean))
     }
 }
 
@@ -228,6 +257,12 @@ impl NativeFunctionResolver {
         }
 
         for lib_name in &libs {
+            if NativeLibraryManager::is_loaded(lib_name) {
+                // Already loaded process-wide (e.g. by the interpreter's
+                // resolver before the tiered JIT pre-warm) — don't re-dlopen
+                // or re-log.
+                continue;
+            }
             let mut candidates = vec![search_dir.join(format!("{}.hdll", lib_name))];
             #[cfg(target_os = "windows")]
             {
@@ -278,26 +313,28 @@ impl NativeFunctionResolver {
 
     pub fn resolve_function(&self, library_name: &str, function_name: &str) -> Result<*mut c_void> {
         let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
-        let library = self
-            .library_manager
-            .get_library(library_name)
+
+        if clean_lib == "std" {
+            // ash_std uses direct exports (Rust #[no_mangle])
+            let library = unsafe { STD_LIBRARY.as_ref() }
+                .ok_or_else(|| anyhow!("std library not initialized"))?;
+            let symbol: Symbol<*mut c_void> = unsafe { library.get(function_name.as_bytes()) }?;
+            return Ok(*symbol);
+        }
+
+        let library = NativeLibraryManager::get_registered(clean_lib)
             .ok_or_else(|| anyhow!("Library '{}' not found", library_name))?;
 
         unsafe {
             let symbol: Symbol<*mut c_void> = library.get(function_name.as_bytes())?;
 
-            if clean_lib == "std" {
-                // ash_std uses direct exports (Rust #[no_mangle])
-                Ok(*symbol)
-            } else {
-                // HDLLs use DEFINE_PRIM resolver protocol:
-                // hlp_xxx is a resolver: fn(*mut *const c_char) -> *mut c_void
-                type ResolverFn = unsafe extern "C" fn(*mut *const std::ffi::c_char) -> *mut c_void;
-                let resolver: ResolverFn = std::mem::transmute(*symbol);
-                let mut sign: *const std::ffi::c_char = std::ptr::null();
-                let actual_fn = resolver(&mut sign);
-                Ok(actual_fn)
-            }
+            // HDLLs use DEFINE_PRIM resolver protocol:
+            // hlp_xxx is a resolver: fn(*mut *const c_char) -> *mut c_void
+            type ResolverFn = unsafe extern "C" fn(*mut *const std::ffi::c_char) -> *mut c_void;
+            let resolver: ResolverFn = std::mem::transmute(*symbol);
+            let mut sign: *const std::ffi::c_char = std::ptr::null();
+            let actual_fn = resolver(&mut sign);
+            Ok(actual_fn)
         }
     }
 }

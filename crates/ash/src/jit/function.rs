@@ -28,6 +28,21 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
+/// Opt-in (ASH_JIT_NATIVE_TRAPS=1): compile unresolved natives to call-time
+/// trap stubs instead of failing the whole function compile. Unlocks tier
+/// promotion of functions referencing unimplemented std natives, but promoted
+/// code on game.hl currently SIGBUSes calling interpreter stub sentinels —
+/// keep off by default until JIT call sites guard against them.
+fn native_traps_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("ASH_JIT_NATIVE_TRAPS").as_deref(),
+            Ok("1") | Ok("true")
+        )
+    })
+}
+
 /// Compute HashLink field hash at compile time (same algorithm as hlp_hash_gen)
 fn hl_hash_utf8(s: &str) -> i32 {
     let mut h: i32 = 0;
@@ -4630,9 +4645,36 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expected to get function type");
         let func_type = self.create_function_type(&type_fun)?;
 
-        let func_addr = self
-            .native_function_resolver
-            .resolve_function(lib, name.as_str())? as usize;
+        let func_addr = match self.native_function_resolver.resolve_function(lib, &name) {
+            Ok(addr) => addr as usize,
+            Err(resolve_err) => {
+                // Unresolved native. HashLink maps these to a stub that errors
+                // at CALL time (disabled_primitive in hl's module.c), and the
+                // interpreter resolves natives lazily per call — so failing
+                // the whole compile here blacklists every hot function that
+                // merely references (but never executes) an unimplemented
+                // native. With ASH_JIT_NATIVE_TRAPS=1, generate a trap that
+                // throws via hlp_error if the code path is actually taken,
+                // letting such functions promote.
+                //
+                // Default is OFF: on game.hl the promotions this unlocks are
+                // the FIRST ever, and the promoted code promptly dies with
+                // SIGBUS at fault_addr = findex+1 — a call through a function
+                // pointer slot still holding the interpreter's stub sentinel
+                // (vtables/closures built from the shared module_ctx
+                // functions_ptrs). Until JIT call sites guard against stub
+                // sentinels, keeping the compile-time failure preserves the
+                // previous stable blacklist behavior.
+                if native_traps_enabled() {
+                    eprintln!(
+                        "[ash] native {}@{} unresolved ({}); generating call-time trap",
+                        lib, name, resolve_err
+                    );
+                    return self.generate_missing_native_trap(lib, &name, func_type);
+                }
+                return Err(resolve_err);
+            }
+        };
 
         let caller_name = format!("{}_{}_caller", lib, name);
         let native_caller =
@@ -4641,6 +4683,65 @@ impl<'ctx> JITModule<'ctx> {
         debug_assert!(native_caller.verify(true));
 
         Ok(native_caller)
+    }
+
+    /// Build a caller-shaped function for a native that failed to resolve.
+    /// Invoking it throws an HL error ("Unresolved native lib@name") via
+    /// hlp_error — matching interpreter semantics, where native resolution
+    /// happens lazily at call time and only an executed call can fail.
+    fn generate_missing_native_trap(
+        &self,
+        lib: &str,
+        name: &str,
+        fn_type: FunctionType<'ctx>,
+    ) -> Result<FunctionValue<'ctx>> {
+        let hlp_error_addr = self
+            .native_function_resolver
+            .resolve_function("std", "hlp_error")
+            .map_err(|e| anyhow!("cannot build missing-native trap (no hlp_error): {}", e))?
+            as usize;
+
+        // Leak a NUL-terminated UTF-16 message; the JIT code embeds its address.
+        let msg: Vec<u16> = format!("Unresolved native {}@{}", lib, name)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let msg_addr = Box::leak(msg.into_boxed_slice()).as_ptr() as u64;
+
+        let saved_block = self.builder.get_insert_block();
+        let function =
+            self.module
+                .add_function(&format!("{}_{}_missing", lib, name), fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        // hlp_error(msg, ...) is variadic; we pass only the named arg.
+        let err_fn_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
+        let err_ptr = self.builder.build_int_to_ptr(
+            self.context
+                .i64_type()
+                .const_int(hlp_error_addr as u64, false),
+            ptr_type,
+            "hlp_error",
+        )?;
+        let msg_ptr = self.builder.build_int_to_ptr(
+            self.context.i64_type().const_int(msg_addr, false),
+            ptr_type,
+            "msg",
+        )?;
+        self.builder
+            .build_indirect_call(err_fn_type, err_ptr, &[msg_ptr.into()], "trap")?;
+        // hlp_error longjmps to the active trap (or aborts); never returns.
+        self.builder.build_unreachable()?;
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+
+        debug_assert!(function.verify(true));
+
+        Ok(function)
     }
 
     // fn generate_std_lib_func(&mut self, lib: &str, name: &str) -> Result<FunctionValue<'ctx>> {

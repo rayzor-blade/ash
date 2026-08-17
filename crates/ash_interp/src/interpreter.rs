@@ -1,10 +1,13 @@
 use anyhow::{anyhow, Result};
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ffi::CStr;
-use std::path::Path;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::thread;
+use std::mem::ManuallyDrop;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use beadie::{Bead, BeadState, Beadie, SubmitResult, ThresholdPolicy};
 
 use ash::bytecode::DecodedBytecode;
 use ash::c_types::CTypeFactory;
@@ -164,27 +167,122 @@ pub struct TieredStats {
     pub fallback_calls: u64,
 }
 
+/// Marshaling metadata for a promoted function, cached findex-indexed on the
+/// interpreter side. Cloned per compiled call — kept cheap via `Arc<[u32]>`.
 #[derive(Debug, Clone)]
 struct CompiledFunctionEntry {
     fn_addr: usize,
-    arg_kinds: Vec<u32>,
+    arg_kinds: Arc<[u32]>,
     ret_kind: u32,
 }
 
-#[derive(Debug)]
-struct PromotionResult {
-    findex: usize,
-    result: std::result::Result<CompiledFunctionMeta, String>,
+/// State shared between the interpreter thread and beadie's broker thread.
+/// Compile closures capture this via `Arc`; the broker writes marshaling
+/// metadata here before returning the code pointer to beadie.
+struct TieredSharedCtx {
+    hl_path: PathBuf,
+    shared: SharedRuntimeHandles,
+    hot_reload: bool,
+    log_promotions: bool,
+    /// Compile results parked by the broker closure; the interpreter drains
+    /// an entry on its first `bead.compiled()` observation for that findex.
+    meta: Mutex<HashMap<usize, CompiledFunctionMeta>>,
+    /// Compile failures counted on the broker thread (bead goes to Deopt via
+    /// the broker's null-return handling).
+    failed: std::sync::atomic::AtomicU64,
 }
 
+/// Tiered promotion state built on the beadie broker.
+///
+/// One `Arc<Bead>` per tierable findex (registered lazily on first call);
+/// beadie owns the hotness tick, the promotion CAS, and the background
+/// compile thread. The interpreter keeps only marshaling metadata and stats.
 struct TieredRuntime {
     config: TieredConfig,
-    compiled: HashMap<usize, CompiledFunctionEntry>,
-    blacklist: HashMap<usize, String>,
-    queued: HashSet<usize>,
-    worker_tx: Sender<usize>,
-    worker_rx: Receiver<PromotionResult>,
+    beadie: Beadie<ThresholdPolicy>,
+    /// findex-indexed beads. `None` = gate not yet run, or untierable.
+    beads: Vec<Option<Arc<Bead>>>,
+    /// findex-indexed: whether the one-time registration gate has run.
+    gate_checked: Vec<bool>,
+    /// findex-indexed cache of marshaling metadata for compiled functions.
+    entries: Vec<Option<CompiledFunctionEntry>>,
+    /// Invocation count at which the compile job is submitted
+    /// (threshold minus queue-ahead; see `ThresholdPolicy::queue_at`).
+    promote_at: u32,
+    shared_ctx: Arc<TieredSharedCtx>,
+    /// Interp-side counters; broker-side failures live in `shared_ctx.failed`.
     stats: TieredStats,
+}
+
+thread_local! {
+    /// Per-broker-thread JIT module. Created lazily by the first compile job;
+    /// lives as long as the broker thread. `ManuallyDrop` because LLVM objects
+    /// may throw foreign exceptions during drop on some platforms — the module
+    /// is intentionally leaked on thread exit (same as the old worker's
+    /// `std::mem::forget` on shutdown).
+    static TIERED_JIT: RefCell<Option<ManuallyDrop<JITModule<'static>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Compile one function on beadie's broker thread.
+///
+/// Lazily initializes the thread-local `JITModule` (leaked LLVM context,
+/// shared runtime handles, GC lock held during init via `new_for_tiered`),
+/// then runs `promote_function_strict`. On success the marshaling metadata is
+/// parked in `ctx.meta` before the code pointer is returned — beadie installs
+/// the pointer with release ordering, so the interpreter's acquire load of
+/// `bead.compiled()` always finds the metadata. On failure returns null; the
+/// broker invalidates the bead (Deopt), which permanently blacklists it.
+fn tiered_compile(ctx: &TieredSharedCtx, findex: usize) -> *mut () {
+    let result: std::result::Result<CompiledFunctionMeta, String> = TIERED_JIT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let context = Box::leak(Box::new(Context::create()));
+                let mut m =
+                    JITModule::new_with_shared_runtime(context, &ctx.hl_path, ctx.shared.clone());
+                m.set_hot_reload(ctx.hot_reload);
+                m
+            }));
+            match init_result {
+                Ok(m) => {
+                    if ctx.log_promotions {
+                        eprintln!("[tiered] initialized shared JIT module");
+                    }
+                    *slot = Some(ManuallyDrop::new(m));
+                }
+                Err(_) => return Err("tiered broker JIT init panicked".to_string()),
+            }
+        }
+        let module = slot.as_mut().expect("JIT module initialized above");
+        let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            module.promote_function_strict(findex)
+        }));
+        match compile_result {
+            Ok(Ok(meta)) if meta.fn_addr != 0 => Ok(meta),
+            Ok(Ok(_)) => Err("promotion returned null fn_addr".to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("promotion panicked".to_string()),
+        }
+    });
+    match result {
+        Ok(meta) => {
+            let fn_addr = meta.fn_addr;
+            ctx.meta
+                .lock()
+                .expect("tiered meta mutex poisoned")
+                .insert(findex, meta);
+            fn_addr as *mut ()
+        }
+        Err(reason) => {
+            ctx.failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if ctx.log_promotions {
+                eprintln!("[tiered] blacklist findex={} reason={}", findex, reason);
+            }
+            std::ptr::null_mut()
+        }
+    }
 }
 
 /// Hybrid HashLink bytecode interpreter with JIT promotion support.
@@ -199,12 +297,6 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
-    /// Per-function call counts for JIT promotion
-    call_counts: HashMap<usize, u64>,
-    /// Call count threshold before signaling JIT promotion
-    pub jit_threshold: u64,
-    /// Functions that have been flagged for JIT promotion
-    pub jit_candidates: Vec<usize>,
     /// Map from findex → function array index (for bytecode functions)
     findex_to_func: HashMap<usize, usize>,
     /// Hot-reloaded bytecode (replaces the original for function lookup).
@@ -296,6 +388,20 @@ pub struct HLInterpreter {
     /// Whether we're currently inside the event thread closure dispatch
     /// (prevents recursive calls during lock_wait → event_closure → lock_wait).
     in_event_dispatch: bool,
+}
+
+impl Drop for HLInterpreter {
+    fn drop(&mut self) {
+        // Beadie's broker drains its whole queue on Drop (Shutdown is FIFO
+        // behind any queued compile jobs). Invalidate every bead first so
+        // still-queued jobs fail the mark_compiling gate and are skipped —
+        // no LLVM compiles for a process that is exiting.
+        if let Some(tiered) = self.tiered_runtime.as_mut() {
+            for bead in tiered.beads.iter().flatten() {
+                bead.invalidate();
+            }
+        }
+    }
 }
 
 impl HLInterpreter {
@@ -411,9 +517,6 @@ impl HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
             max_stack_depth: 1000,
-            call_counts: HashMap::new(),
-            jit_threshold: 100,
-            jit_candidates: Vec::new(),
             findex_to_func,
             reloaded_bytecode: None,
             findex_to_native,
@@ -467,7 +570,6 @@ impl HLInterpreter {
         mut config: TieredConfig,
     ) -> Result<()> {
         config.enabled = true;
-        self.jit_threshold = config.jit_threshold;
 
         let log_promotions = config.log_promotions;
         let hot_reload = config.hot_reload;
@@ -555,78 +657,46 @@ impl HLInterpreter {
                 }
             }
         }
-        let (worker_tx, worker_req_rx) = mpsc::channel::<usize>();
-        let (worker_res_tx, worker_rx) = mpsc::channel::<PromotionResult>();
+        // Beadie owns the hotness policy and the broker thread. Queue-ahead
+        // submits the compile job slightly before the threshold so code is
+        // ready by the time the function is truly hot.
+        let threshold = u32::try_from(config.jit_threshold).unwrap_or(u32::MAX);
+        let queue_ahead = (threshold / 5).max(1);
+        let policy = ThresholdPolicy::new(threshold).queue_ahead(queue_ahead);
+        let promote_at = policy.queue_at();
+        let beadie = Beadie::with_policy(policy);
 
-        let _ = thread::Builder::new()
-            .name("ash-jit-worker".to_string())
-            .spawn(move || {
-                let mut module: Option<JITModule<'static>> = None;
-                for findex in worker_req_rx {
-                    if module.is_none() {
-                        let init_result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let context = Box::leak(Box::new(Context::create()));
-                                let mut m = JITModule::new_with_shared_runtime(
-                                    context,
-                                    &hl_path,
-                                    shared.clone(),
-                                );
-                                m.set_hot_reload(hot_reload);
-                                m
-                            }));
-                        match init_result {
-                            Ok(m) => {
-                                if log_promotions {
-                                    eprintln!("[tiered] initialized shared JIT module");
-                                }
-                                module = Some(m);
-                            }
-                            Err(_) => {
-                                let _ = worker_res_tx.send(PromotionResult {
-                                    findex,
-                                    result: Err("tiered worker init panicked".to_string()),
-                                });
-                                continue;
-                            }
-                        }
-                    }
-
-                    let compile_result =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            module
-                                .as_mut()
-                                .expect("JIT module should be initialized")
-                                .promote_function_strict(findex)
-                        }));
-                    let result = match compile_result {
-                        Ok(Ok(meta)) => Ok(meta),
-                        Ok(Err(e)) => Err(e.to_string()),
-                        Err(_) => Err("promotion panicked".to_string()),
-                    };
-                    let _ = worker_res_tx.send(PromotionResult { findex, result });
-                }
-                // LLVM objects may throw foreign exceptions during drop on some platforms.
-                // Leak the JIT module on worker shutdown to keep process termination stable.
-                if let Some(m) = module.take() {
-                    std::mem::forget(m);
-                }
-            });
+        let shared_ctx = Arc::new(TieredSharedCtx {
+            hl_path,
+            shared,
+            hot_reload,
+            log_promotions,
+            meta: Mutex::new(HashMap::new()),
+            failed: std::sync::atomic::AtomicU64::new(0),
+        });
 
         self.tiered_runtime = Some(TieredRuntime {
             config,
-            compiled: HashMap::new(),
-            blacklist: HashMap::new(),
-            queued: HashSet::new(),
-            worker_tx,
-            worker_rx,
+            beadie,
+            beads: Vec::new(),
+            gate_checked: Vec::new(),
+            entries: Vec::new(),
+            promote_at,
+            shared_ctx,
             stats: TieredStats::default(),
         });
         Ok(())
     }
 
-    pub fn tiered_stats(&self) -> Option<&TieredStats> {
-        self.tiered_runtime.as_ref().map(|t| &t.stats)
+    pub fn tiered_stats(&self) -> Option<TieredStats> {
+        self.tiered_runtime.as_ref().map(|t| {
+            let mut stats = t.stats.clone();
+            stats.failed_promotions += t
+                .shared_ctx
+                .failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            stats
+        })
     }
 
     #[inline(always)]
@@ -1730,59 +1800,28 @@ impl HLInterpreter {
     ) -> Result<NanBoxedValue> {
         self.ensure_gc_runtime_initialized();
 
-        // Track call count for JIT promotion
-        let call_count = {
-            let count = self.call_counts.entry(findex).or_insert(0);
-            *count += 1;
-            *count
-        };
-        let threshold = self
-            .tiered_runtime
-            .as_ref()
-            .map(|t| t.config.jit_threshold)
-            .unwrap_or(self.jit_threshold);
-        if call_count == threshold {
-            self.jit_candidates.push(findex);
-        }
-        self.poll_tiered_results();
-
-        // Hybrid tiered call path for bytecode functions.
-        if self.findex_to_func.contains_key(&findex) {
-            let mut compiled_entry = self
-                .tiered_runtime
-                .as_ref()
-                .and_then(|t| t.compiled.get(&findex).cloned());
-
-            if compiled_entry.is_none()
-                && self.should_attempt_tiered_promotion(bytecode, findex, args, call_count)
-            {
-                self.queue_tiered_promotion(findex);
-                compiled_entry = self
-                    .tiered_runtime
-                    .as_ref()
-                    .and_then(|t| t.compiled.get(&findex).cloned());
-            }
-
-            if let Some(entry) = compiled_entry {
-                match self.call_compiled_function(findex, &entry, args) {
-                    Ok(v) => {
-                        if let Some(tiered) = self.tiered_runtime.as_mut() {
-                            tiered.stats.compiled_calls += 1;
+        // Check if it's a bytecode function or native
+        if let Some(&func_idx) = self.findex_to_func.get(&findex) {
+            // Hybrid tiered call path: tick the bead and dispatch to compiled
+            // code once beadie's broker has installed it.
+            if self.tiered_runtime.is_some() {
+                if let Some(entry) = self.tiered_on_invoke(bytecode, findex, func_idx) {
+                    match self.call_compiled_function(findex, &entry, args) {
+                        Ok(v) => {
+                            if let Some(tiered) = self.tiered_runtime.as_mut() {
+                                tiered.stats.compiled_calls += 1;
+                            }
+                            return Ok(v);
                         }
-                        return Ok(v);
-                    }
-                    Err(e) => {
-                        self.record_tiered_fallback(
-                            findex,
-                            format!("compiled invoke failed: {}", e),
-                        );
+                        Err(e) => {
+                            self.record_tiered_fallback(
+                                findex,
+                                format!("compiled invoke failed: {}", e),
+                            );
+                        }
                     }
                 }
             }
-        }
-
-        // Check if it's a bytecode function or native
-        if let Some(&func_idx) = self.findex_to_func.get(&findex) {
             self.execute_hl_function(bytecode, native_resolver, func_idx, args)
         } else if let Some(&native_idx) = self.findex_to_native.get(&findex) {
             self.call_native(bytecode, native_resolver, native_idx, args)
@@ -1791,73 +1830,144 @@ impl HLInterpreter {
         }
     }
 
-    fn should_attempt_tiered_promotion(
-        &self,
+    /// beadie on_invoke semantics for one bytecode-function call.
+    ///
+    /// Fast path: an acquire load of `bead.compiled()` plus the cached
+    /// marshaling entry. Cold path: tick the bead; once the hotness policy
+    /// fires, submit the compile closure to beadie's broker thread. Returns
+    /// `Some(entry)` when compiled code should be dispatched, `None` to keep
+    /// interpreting.
+    fn tiered_on_invoke(
+        &mut self,
         bytecode: &DecodedBytecode,
         findex: usize,
-        args: &[NanBoxedValue],
-        call_count: u64,
-    ) -> bool {
-        let Some(tiered) = self.tiered_runtime.as_ref() else {
-            return false;
-        };
-        let log_promotions = tiered.config.log_promotions;
-        let log_this_check = log_promotions && call_count == tiered.config.jit_threshold;
-        let log_skip = |reason: &str| {
-            if log_this_check {
-                eprintln!("[tiered] skip findex={} reason={}", findex, reason);
+        func_idx: usize,
+    ) -> Option<CompiledFunctionEntry> {
+        // One-time registration gate: untierable findexes get no bead.
+        {
+            let tiered = self.tiered_runtime.as_mut()?;
+            if !tiered.config.enabled {
+                return None;
             }
-        };
-        if !tiered.config.enabled || !tiered.config.strict_mode {
-            log_skip("disabled_or_non_strict");
-            return false;
+            if findex >= tiered.beads.len() {
+                tiered.beads.resize_with(findex + 1, || None);
+                tiered.gate_checked.resize(findex + 1, false);
+                tiered.entries.resize_with(findex + 1, || None);
+            }
+            if !tiered.gate_checked[findex] {
+                tiered.gate_checked[findex] = true;
+                match Self::tierable_reason(bytecode, func_idx, &tiered.config) {
+                    Ok(()) => {
+                        let bead = tiered.beadie.register(findex as beadie::CoreHandle, None);
+                        tiered.beads[findex] = Some(bead);
+                    }
+                    Err(reason) => {
+                        if tiered.config.log_promotions {
+                            eprintln!("[tiered] skip findex={} reason={}", findex, reason);
+                        }
+                        return None;
+                    }
+                }
+            }
         }
-        if tiered.blacklist.contains_key(&findex) || tiered.compiled.contains_key(&findex) {
-            log_skip("already_blacklisted_or_compiled");
-            return false;
+
+        let tiered = self.tiered_runtime.as_mut()?;
+        let bead = tiered.beads[findex].as_ref()?;
+
+        // Fast path: compiled code installed and marshaling entry cached.
+        if tiered.entries[findex].is_some() {
+            if bead.compiled().is_some() {
+                return tiered.entries[findex].clone();
+            }
+            // Deopt/reload cleared the code — drop the stale cache.
+            tiered.entries[findex] = None;
         }
-        if tiered.queued.contains(&findex) {
-            log_skip("already_queued");
-            return false;
+
+        if bead.compiled().is_some() {
+            // First observation of freshly installed code: pull the
+            // marshaling metadata the compile closure parked for us.
+            let meta = tiered
+                .shared_ctx
+                .meta
+                .lock()
+                .expect("tiered meta mutex poisoned")
+                .remove(&findex)?;
+            let entry = CompiledFunctionEntry {
+                fn_addr: meta.fn_addr,
+                arg_kinds: meta.arg_kinds.into(),
+                ret_kind: meta.ret_kind,
+            };
+            tiered.stats.successful_promotions += 1;
+            if tiered.config.log_promotions {
+                eprintln!(
+                    "[tiered] promoted findex={} addr=0x{:x}",
+                    findex, entry.fn_addr
+                );
+            }
+            tiered.entries[findex] = Some(entry.clone());
+            return Some(entry);
         }
-        if args.len() > tiered.config.max_jit_args {
-            log_skip("arg_count_over_limit");
-            return false;
+
+        // Cold path: tick every invocation; submit once the policy fires.
+        let (count, state) = bead.tick();
+        if state == BeadState::Interpreted && count >= tiered.promote_at {
+            let ctx = Arc::clone(&tiered.shared_ctx);
+            match tiered
+                .beadie
+                .submit(bead, move |_b| tiered_compile(&ctx, findex))
+            {
+                SubmitResult::Accepted => {
+                    tiered.stats.attempted_promotions += 1;
+                    if tiered.config.log_promotions {
+                        eprintln!("[tiered] queued findex={}", findex);
+                    }
+                }
+                SubmitResult::AlreadyQueued | SubmitResult::QueueFull => {}
+                SubmitResult::BrokerShutDown => {
+                    tiered.config.enabled = false;
+                    if tiered.config.log_promotions {
+                        eprintln!("[tiered] broker shut down; disabling tiered runtime");
+                    }
+                }
+            }
         }
-        let Some(&func_idx) = self.findex_to_func.get(&findex) else {
-            log_skip("not_bytecode_function");
-            return false;
-        };
+        None
+    }
+
+    /// One-time tierability gate, run at bead registration (not per call).
+    fn tierable_reason(
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        config: &TieredConfig,
+    ) -> std::result::Result<(), String> {
+        if !config.strict_mode {
+            return Err("non_strict_mode".to_string());
+        }
         let func = &bytecode.functions[func_idx];
+        // Static signature arg count; call_compiled_function marshals at most 8.
+        let nargs = bytecode.types[func.type_.0]
+            .fun
+            .as_ref()
+            .map(|f| f.args.len())
+            .unwrap_or(0);
+        if nargs > config.max_jit_args || nargs > 8 {
+            return Err("arg_count_over_limit".to_string());
+        }
         let func_name = func.name();
         if func_name == "init"
             || func_name == "main"
             || func_name == "__constructor__"
             || func_name.starts_with("__")
         {
-            log_skip("name_blacklisted");
-            return false;
+            return Err("name_blacklisted".to_string());
         }
-        if tiered.config.min_ops_for_promotion > 0
-            && func.ops.len() < tiered.config.min_ops_for_promotion
-        {
-            log_skip("op_count_below_min");
-            return false;
+        if config.min_ops_for_promotion > 0 && func.ops.len() < config.min_ops_for_promotion {
+            return Err("op_count_below_min".to_string());
         }
         if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
-            if log_this_check {
-                eprintln!(
-                    "[tiered] skip findex={} reason=unsupported_opcode op={:?}",
-                    findex, bad
-                );
-            }
-            return false;
+            return Err(format!("unsupported_opcode op={:?}", bad));
         }
-        if call_count < tiered.config.jit_threshold {
-            log_skip("below_threshold");
-            return false;
-        }
-        true
+        Ok(())
     }
 
     fn is_v1_tierable_opcode(op: &Opcode) -> bool {
@@ -1867,100 +1977,19 @@ impl HLInterpreter {
         !matches!(op, Opcode::Prefetch { .. } | Opcode::Asm { .. })
     }
 
-    fn queue_tiered_promotion(&mut self, findex: usize) {
-        let Some(tiered) = self.tiered_runtime.as_mut() else {
-            return;
-        };
-        if tiered.blacklist.contains_key(&findex)
-            || tiered.compiled.contains_key(&findex)
-            || tiered.queued.contains(&findex)
-        {
-            return;
-        }
-        tiered.stats.attempted_promotions += 1;
-        if tiered.worker_tx.send(findex).is_ok() {
-            tiered.queued.insert(findex);
-            if tiered.config.log_promotions {
-                eprintln!("[tiered] queued findex={}", findex);
-            }
-        } else {
-            tiered.stats.failed_promotions += 1;
-            tiered.config.enabled = false;
-            let reason = "tiered worker channel closed".to_string();
-            tiered.blacklist.insert(findex, reason.clone());
-            if tiered.config.log_promotions {
-                eprintln!("[tiered] disabling tiered runtime: {}", reason);
-            }
-        }
-    }
-
-    fn poll_tiered_results(&mut self) {
-        let mut disconnected = false;
-        loop {
-            let msg = {
-                let Some(tiered) = self.tiered_runtime.as_mut() else {
-                    return;
-                };
-                match tiered.worker_rx.try_recv() {
-                    Ok(msg) => Some(msg),
-                    Err(TryRecvError::Empty) => None,
-                    Err(TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        None
-                    }
-                }
-            };
-
-            let Some(PromotionResult { findex, result }) = msg else {
-                break;
-            };
-
-            if let Some(tiered) = self.tiered_runtime.as_mut() {
-                tiered.queued.remove(&findex);
-                match result {
-                    Ok(CompiledFunctionMeta {
-                        findex: _,
-                        fn_addr,
-                        arg_kinds,
-                        ret_kind,
-                    }) => {
-                        let entry = CompiledFunctionEntry {
-                            fn_addr,
-                            arg_kinds,
-                            ret_kind,
-                        };
-                        tiered.compiled.insert(findex, entry);
-                        tiered.stats.successful_promotions += 1;
-                        if tiered.config.log_promotions {
-                            eprintln!("[tiered] promoted findex={} addr=0x{:x}", findex, fn_addr);
-                        }
-                    }
-                    Err(reason) => {
-                        tiered.stats.failed_promotions += 1;
-                        tiered.blacklist.insert(findex, reason.clone());
-                        if tiered.config.log_promotions {
-                            eprintln!("[tiered] blacklist findex={} reason={}", findex, reason);
-                        }
-                    }
-                }
-            }
-        }
-
-        if disconnected {
-            if let Some(tiered) = self.tiered_runtime.as_mut() {
-                tiered.config.enabled = false;
-                if tiered.config.log_promotions {
-                    eprintln!("[tiered] worker disconnected; disabling tiered runtime");
-                }
-            }
-        }
-    }
-
+    /// Deopt after a compiled invoke failed: invalidate the bead (permanent
+    /// Deopt via beadie) and drop the cached marshaling entry so the function
+    /// falls back to the interpreter.
     fn record_tiered_fallback(&mut self, findex: usize, reason: String) {
         if let Some(tiered) = self.tiered_runtime.as_mut() {
             tiered.stats.fallback_calls += 1;
-            tiered.compiled.remove(&findex);
-            tiered.blacklist.insert(findex, reason.clone());
+            tiered.stats.failed_promotions += 1;
+            if let Some(slot) = tiered.entries.get_mut(findex) {
+                *slot = None;
+            }
+            if let Some(bead) = tiered.beads.get(findex).and_then(|b| b.as_ref()) {
+                bead.invalidate();
+            }
             if tiered.config.log_promotions {
                 eprintln!("[tiered] fallback findex={} reason={}", findex, reason);
             }
@@ -2279,10 +2308,30 @@ impl HLInterpreter {
 
                                     // Invalidate tiered JIT cache — compiled functions still
                                     // point to old code. Forces fallback to interpreter which
-                                    // uses the new bytecode.
+                                    // uses the new bytecode. Beads reload (Compiled →
+                                    // Interpreted, will recompile); deopt'd beads are cleared
+                                    // so the gate re-registers them fresh.
                                     if let Some(tiered) = self.tiered_runtime.as_mut() {
-                                        tiered.compiled.clear();
-                                        tiered.blacklist.clear();
+                                        for slot in tiered.entries.iter_mut() {
+                                            *slot = None;
+                                        }
+                                        tiered
+                                            .shared_ctx
+                                            .meta
+                                            .lock()
+                                            .expect("tiered meta mutex poisoned")
+                                            .clear();
+                                        tiered.beadie.reload_all();
+                                        for (findex, slot) in tiered.beads.iter_mut().enumerate() {
+                                            let dead = slot
+                                                .as_ref()
+                                                .map(|b| !b.is_valid())
+                                                .unwrap_or(false);
+                                            if dead {
+                                                *slot = None;
+                                                tiered.gate_checked[findex] = false;
+                                            }
+                                        }
                                     }
 
                                     // Re-initialize constants from the new bytecode so that

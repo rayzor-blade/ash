@@ -4,7 +4,7 @@
 
 # ASH
 
-A HashLink virtual machine written in Rust, targeting ARM64 / Apple M-series.
+A HashLink virtual machine written in Rust.
 
 ASH executes [HashLink](https://hashlink.haxe.org/) bytecode (`.hl` files) compiled from [Haxe](https://haxe.org/). Execution is tiered: a bytecode interpreter runs everything, hot functions are promoted to Cranelift-compiled code, and the hottest are recompiled by LLVM.
 
@@ -37,14 +37,17 @@ A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`,
 - **LLVM 21** — required by the Inkwell bindings
 - **Haxe** (optional) — only to recompile `.hx` sources to `.hl` bytecode
 
+`llvm-sys` finds LLVM through `LLVM_SYS_211_PREFIX`, or `llvm-config` on `PATH`:
+
 ```bash
-brew install llvm            # LLVM 21 on macOS
+brew install llvm                                   # macOS
 export LLVM_SYS_211_PREFIX=/opt/homebrew/opt/llvm
+
+apt install llvm-21-dev                             # Debian/Ubuntu
+export LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
 ```
 
 ## Building
-
-The default target is `aarch64-apple-darwin`.
 
 ```bash
 cargo build -p ash        # JIT binary
@@ -59,10 +62,11 @@ Release builds use `make` (host target with LTO) or `make all` (every installed 
 
 ```bash
 cargo build -p ash_std
-cp target/debug/libash_std.dylib target/aarch64-apple-darwin/debug/
 cargo clean -p ash
 cargo build -p ash -p ash_cli
 ```
+
+`build.rs` reads the cdylib from `target/<triple>/debug/`. If the toolchain writes it to `target/debug/` instead — which happens when no explicit target is configured — copy it across before rebuilding `ash`.
 
 ## CLI
 

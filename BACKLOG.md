@@ -20,15 +20,14 @@ The typed phi-SSA IR (`crates/air/src/v2`) is in place with lowering,
 verification, a serializer back to standard HL bytecode, a native-import
 declaration table, loop and alias-class analyses, and a pass manager running
 null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE at O2, plus
-tail-recursion elimination and inlining at O3. v1 remains the production path
-until the backends switch over.
+tail-recursion elimination, inlining and scalar replacement of aggregates at
+O3. v1 remains the production path until the backends switch over.
 
 - **Remaining optimization passes over the typed IR**, in payoff order
   established by the mandelbrot trace: static field-offset resolution,
-  escape analysis and scalar replacement (below), bounds-check elimination,
-  box/unbox forwarding. (Field-load GVN with the HL alias classes,
-  dominance-based null-check elimination, LICM, tail-recursion elimination
-  and inlining have landed.)
+  bounds-check elimination, box/unbox forwarding. (Field-load GVN with the HL
+  alias classes, dominance-based null-check elimination, LICM, tail-recursion
+  elimination, inlining and scalar replacement have landed.)
 - **`Function::float_types` needs module info.** A `TypeRef` is an index into
   the module's type table, so `air` cannot tell floats apart on its own: the
   embedder answers `ModuleInfo::is_float`. Lowering through the bare `lower()`
@@ -51,18 +50,25 @@ until the backends switch over.
   the whole reachable-and-reaching block region. Fine at fixture scale;
   a per-class memory-SSA numbering would replace it if it shows up in
   compile-time profiles.
-- **Scalar replacement of aggregates, and the inlining it depends on.** The
-  traced mandelbrot inner loop spends two heap allocations and three calls
-  per iteration because every `Complex` is a `New` plus a constructor call —
-  the float math is a minority of the work. Replacing a non-escaping `New`
-  with SSA values for its fields (and the same for `EnumAlloc`/`MakeEnum`
-  payloads, `vvirtual` boxes, and `ToDyn` boxing) is what turns that loop
-  into straight-line arithmetic, and it is the prerequisite that makes
-  vectorization possible on such loops at all.
-  **Ordering matters in HL: inlining must come first.** `new C(...)` passes
-  the fresh object to its constructor, so *every* allocation escapes by
-  definition until that constructor is inlined; escape analysis run before
-  inlining will find nothing.
+- **Scalar replacement covers `New` and enum payloads, not boxes.**
+  `vvirtual` boxes and `ToDyn` boxing still allocate on every iteration of a
+  de-abstracted loop; both would need their own accessor model, since neither
+  addresses storage by `(object type, field slot)`.
+- **SROA is all-or-nothing.** An allocation whose pointer escapes anywhere is
+  left completely alone, even when most of its fields are only ever read and
+  written locally. Partial scalarization would have to keep the object's
+  memory and the promoted values coherent at every point the pointer is
+  visible, which is a different (and much larger) transform.
+- **SROA cannot name an object's initial state**, so a field read on a path
+  where nothing wrote it refuses the whole allocation. HL zero-fills a fresh
+  object; expressing that needs a typed default the IR has no way to mint —
+  the same gap that makes `EnumIndex` an escape (folding a construct tag
+  would need an integer constant-pool index).
+- **An allocation in a loop body is scalarized a round late.** It is written
+  to a register the loop header merges, so the header carries a phi over the
+  pointer — an escape — until DCE removes that phi as dead. Pruned SSA
+  construction at lowering time, or a phi-transparency rule in the escape
+  analysis, would collapse that to one round.
 - **Inlining refuses anything involving a trap region or a cell.** A call site
   covered by a handler is refused because the inlined blocks would become new
   exceptional predecessors of a handler that may carry phis; a callee with
@@ -83,8 +89,9 @@ until the backends switch over.
   through the cell: a pinned argument register is a memory slot whose address
   may have escaped, and each real activation gets a fresh one. Narrowing this
   to `Ref`-taken parameters only would let `Incr`/`Decr` counters through.
-  It also refuses when a non-argument `Param` is still read: the frame's
-  initial value cannot be named. Mutual recursion remains out of scope.
+  It also refuses when a non-argument `Param` is still read, for the same
+  reason SROA refuses a read-before-write: the frame's initial value cannot
+  be named. Mutual recursion remains out of scope.
 - **JIT lowers from v2** instead of raw opcodes — the point at which
   malformed-IR crashes and verifier rejections become structurally impossible
   rather than blacklisted.

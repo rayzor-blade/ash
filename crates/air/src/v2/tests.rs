@@ -14,7 +14,8 @@ use super::lower::{lower, lower_with, ModuleBuilder};
 use super::module::{CalleeBody, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
 use super::passes::{
     DeadCodeElim, FmaPeephole, GlobalValueNumbering, Inlining, LoopInvariantCodeMotion,
-    NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, TailRecursionElim,
+    NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, ScalarReplacement,
+    TailRecursionElim,
 };
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
@@ -3329,13 +3330,30 @@ fn pass_manager_runs_to_a_fixed_point() {
 // ---------------------------------------------------------------------------
 
 fn optimized_round_trip(ops: &[Opcode], tys: &[TypeRef]) -> Serialized {
-    let mut f1 = lower(ops, tys).expect("lower");
+    optimized_round_trip_at(OptLevel::O2, &NoModuleInfo, None, ops, tys)
+}
+
+/// The round-trip property at an arbitrary opt level, with the module info the
+/// inliner reads and the function identity tail-recursion elimination needs.
+fn optimized_round_trip_at(
+    level: OptLevel,
+    info: &dyn super::module::ModuleInfo,
+    findex: Option<usize>,
+    ops: &[Opcode],
+    tys: &[TypeRef],
+) -> Serialized {
+    let mut f1 = lower_with(ops, tys, info).expect("lower");
+    f1.findex = findex;
     verify(&f1).unwrap_or_else(|e| panic!("verify(lowered): {e}\n{}", f1.dump()));
-    let pm = PassManager::new(OptLevel::O2).with_options(PassOptions {
+    let pm = PassManager::with_module(level, info).with_options(PassOptions {
         verify_each: true,
         ..PassOptions::default()
     });
-    pm.run(&mut f1).expect("passes");
+    let report = pm.run(&mut f1).expect("passes");
+    assert!(
+        report.rounds <= pm.options().max_rounds,
+        "the pipeline did not reach a fixed point within its round cap"
+    );
     verify(&f1).unwrap_or_else(|e| panic!("verify(optimized): {e}\n{}", f1.dump()));
     let out = serialize(&f1).expect("serialize");
     assert_eq!(
@@ -4198,6 +4216,846 @@ fn inline_preserves_semantics() {
                 after,
                 "{}: inlining changed the result for {:?}\n{}",
                 name,
+                input,
+                ops_text(&out.ops)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// escape analysis + scalar replacement of aggregates
+// ---------------------------------------------------------------------------
+
+/// Object type used by the SROA fixtures.
+const OBJ: u32 = 5;
+/// Enum type used by the SROA fixtures.
+const ENUM: u32 = 3;
+
+/// Allocate, fill two fields, read both back. The pointer never leaves.
+fn fix_sroa_local_object() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::New { dst: Reg(1) },
+            Opcode::SetField {
+                obj: Reg(1),
+                field: RefField(0),
+                src: Reg(0),
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            },
+            Opcode::SetField {
+                obj: Reg(1),
+                field: RefField(1),
+                src: Reg(2),
+            },
+            Opcode::Field {
+                dst: Reg(3),
+                obj: Reg(1),
+                field: RefField(0),
+            },
+            Opcode::Field {
+                dst: Reg(4),
+                obj: Reg(1),
+                field: RefField(1),
+            },
+            Opcode::Add {
+                dst: Reg(5),
+                a: Reg(3),
+                b: Reg(4),
+            },
+            Opcode::Ret { ret: Reg(5) },
+        ],
+        vec![t(0), t(OBJ), t(0), t(0), t(0), t(0)],
+    )
+}
+
+/// The same object, but one field is written on each arm of a branch, so the
+/// read needs a phi.
+fn fix_sroa_merged_field() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::New { dst: Reg(1) },
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 3,
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            },
+            Opcode::SetField {
+                obj: Reg(1),
+                field: RefField(0),
+                src: Reg(2),
+            },
+            Opcode::JAlways { offset: 2 },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            },
+            Opcode::SetField {
+                obj: Reg(1),
+                field: RefField(0),
+                src: Reg(2),
+            },
+            Opcode::Field {
+                dst: Reg(3),
+                obj: Reg(1),
+                field: RefField(0),
+            },
+            Opcode::Ret { ret: Reg(3) },
+        ],
+        vec![t(0), t(OBJ), t(0), t(0)],
+    )
+}
+
+/// Reading a field the program never wrote: the object's initial state cannot
+/// be named, so the allocation stays.
+fn fix_sroa_read_before_write() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::New { dst: Reg(1) },
+            Opcode::Field {
+                dst: Reg(2),
+                obj: Reg(1),
+                field: RefField(0),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0), t(OBJ), t(0)],
+    )
+}
+
+/// Body of `fix_sroa_local_object` with the final read replaced by `escape`.
+fn sroa_escape(escape: Vec<Opcode>, extra_tys: Vec<TypeRef>) -> (Vec<Opcode>, Vec<TypeRef>) {
+    let mut ops = vec![
+        Opcode::New { dst: Reg(1) },
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(0),
+        },
+    ];
+    ops.extend(escape);
+    let mut tys = vec![t(0), t(OBJ), t(0), t(0)];
+    tys.extend(extra_tys);
+    (ops, tys)
+}
+
+/// `MakeEnum` initializes its payload; reading it back never needs the box.
+fn fix_sroa_enum_payload() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            },
+            Opcode::MakeEnum {
+                dst: Reg(1),
+                construct: RefEnumConstruct(0),
+                args: vec![Reg(0), Reg(2)],
+            },
+            Opcode::EnumField {
+                dst: Reg(3),
+                value: Reg(1),
+                construct: RefEnumConstruct(0),
+                field: RefField(1),
+            },
+            Opcode::Ret { ret: Reg(3) },
+        ],
+        vec![t(0), t(ENUM), t(0), t(0)],
+    )
+}
+
+/// Same enum, but the construct tag is read: folding it would need an integer
+/// constant-pool index the IR cannot mint.
+fn fix_sroa_enum_index() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::MakeEnum {
+                dst: Reg(1),
+                construct: RefEnumConstruct(0),
+                args: vec![Reg(0)],
+            },
+            Opcode::EnumIndex {
+                dst: Reg(2),
+                value: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0), t(ENUM), t(0)],
+    )
+}
+
+/// The allocation happens inside a `try`, so lowering pins it to a cell.
+fn fix_sroa_in_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(2),
+                offset: 5,
+            }, // handler at op 6
+            Opcode::New { dst: Reg(1) },
+            Opcode::SetField {
+                obj: Reg(1),
+                field: RefField(0),
+                src: Reg(0),
+            },
+            Opcode::Field {
+                dst: Reg(3),
+                obj: Reg(1),
+                field: RefField(0),
+            },
+            Opcode::EndTrap { exc: Reg(2) },
+            Opcode::Ret { ret: Reg(3) },
+            Opcode::Ret { ret: Reg(0) }, // handler
+        ],
+        vec![t(0), t(OBJ), t(2), t(0)],
+    )
+}
+
+fn sroa_on(ops: &[Opcode], tys: &[TypeRef]) -> (Function, PassStats) {
+    let mut f = lower(ops, tys).expect("lower");
+    let stats = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+    (f, stats)
+}
+
+fn count_allocs(f: &Function) -> usize {
+    count_instrs(f, |i| {
+        matches!(
+            i,
+            Instr::New { .. } | Instr::EnumAlloc { .. } | Instr::MakeEnum { .. }
+        )
+    })
+}
+
+#[test]
+fn sroa_removes_a_non_escaping_object() {
+    let (ops, tys) = fix_sroa_local_object();
+    let (f, stats) = sroa_on(&ops, &tys);
+    assert_eq!(stats.allocs_removed, 1, "{}", f.dump());
+    assert_eq!(stats.fields_scalarized, 2);
+    assert_eq!(count_allocs(&f), 0, "{}", f.dump());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::FieldGet { .. } | Instr::FieldSet { .. }
+        )),
+        0,
+        "every field access became an SSA value\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn sroa_builds_a_phi_for_a_field_written_on_both_arms() {
+    let (ops, tys) = fix_sroa_merged_field();
+    let (f, stats) = sroa_on(&ops, &tys);
+    assert_eq!(stats.allocs_removed, 1, "{}", f.dump());
+    assert_eq!(count_allocs(&f), 0);
+    let phis: usize = f.blocks.iter().map(|b| b.phis.len()).sum();
+    assert!(
+        phis >= 1,
+        "the merged field needs a phi at the join\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn sroa_scalarizes_an_enum_payload() {
+    let (ops, tys) = fix_sroa_enum_payload();
+    let (f, stats) = sroa_on(&ops, &tys);
+    assert_eq!(stats.allocs_removed, 1, "{}", f.dump());
+    assert_eq!(count_allocs(&f), 0, "{}", f.dump());
+}
+
+#[test]
+fn sroa_refuses_an_escaping_object() {
+    let cases: Vec<(&str, (Vec<Opcode>, Vec<TypeRef>))> = vec![
+        (
+            "returned",
+            sroa_escape(vec![Opcode::Ret { ret: Reg(1) }], vec![]),
+        ),
+        (
+            "passed to a call",
+            sroa_escape(
+                vec![
+                    Opcode::Call1 {
+                        dst: Reg(2),
+                        fun: RefFun(7),
+                        arg0: Reg(1),
+                    },
+                    Opcode::Ret { ret: Reg(2) },
+                ],
+                vec![],
+            ),
+        ),
+        (
+            "stored into memory",
+            sroa_escape(
+                vec![
+                    Opcode::New { dst: Reg(4) },
+                    Opcode::SetField {
+                        obj: Reg(4),
+                        field: RefField(2),
+                        src: Reg(1),
+                    },
+                    Opcode::Ret { ret: Reg(4) },
+                ],
+                vec![t(OBJ)],
+            ),
+        ),
+        (
+            "address taken",
+            sroa_escape(
+                vec![
+                    Opcode::Ref {
+                        dst: Reg(4),
+                        src: Reg(1),
+                    },
+                    Opcode::Ret { ret: Reg(0) },
+                ],
+                vec![t(9)],
+            ),
+        ),
+        (
+            "identity compared",
+            sroa_escape(
+                vec![
+                    Opcode::Null { dst: Reg(4) },
+                    Opcode::JEq {
+                        a: Reg(1),
+                        b: Reg(4),
+                        offset: 0,
+                    },
+                    Opcode::Ret { ret: Reg(0) },
+                ],
+                vec![t(OBJ)],
+            ),
+        ),
+        (
+            "boxed",
+            sroa_escape(
+                vec![
+                    Opcode::ToDyn {
+                        dst: Reg(4),
+                        src: Reg(1),
+                    },
+                    Opcode::Ret { ret: Reg(0) },
+                ],
+                vec![t(7)],
+            ),
+        ),
+        ("enum tag observed", fix_sroa_enum_index()),
+        ("read before write", fix_sroa_read_before_write()),
+        ("inside a try", fix_sroa_in_trap()),
+    ];
+    for (name, (ops, tys)) in cases {
+        let (f, stats) = sroa_on(&ops, &tys);
+        assert_eq!(
+            stats,
+            PassStats::default(),
+            "{}: the allocation must not be scalarized\n{}",
+            name,
+            f.dump()
+        );
+        assert!(count_allocs(&f) >= 1, "{}: {}", name, f.dump());
+    }
+}
+
+#[test]
+fn sroa_refuses_a_phi_merged_allocation() {
+    // Two allocations merged into one register, then a field read: neither
+    // pointer is single-valued at the read.
+    let ops = vec![
+        Opcode::JTrue {
+            cond: Reg(0),
+            offset: 2,
+        },
+        Opcode::New { dst: Reg(1) },
+        Opcode::JAlways { offset: 1 },
+        Opcode::New { dst: Reg(1) },
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(0),
+        },
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let tys = vec![t(0), t(OBJ), t(0)];
+    let (f, stats) = sroa_on(&ops, &tys);
+    assert!(
+        f.blocks.iter().any(|b| !b.phis.is_empty()),
+        "the fixture must actually merge the two allocations\n{}",
+        f.dump()
+    );
+    assert_eq!(stats, PassStats::default(), "{}", f.dump());
+    assert_eq!(count_allocs(&f), 2);
+}
+
+#[test]
+fn sroa_preserves_semantics_on_the_scalarizable_fixtures() {
+    // The mini interpreter has no heap, so equivalence is checked on the
+    // post-SROA arithmetic: the fixtures are written so the result is a pure
+    // function of the arguments.
+    for (name, (ops, tys), ints, inputs, expect) in [
+        (
+            "local_object",
+            fix_sroa_local_object(),
+            vec![7],
+            vec![vec![3i64], vec![-2]],
+            vec![10i64, 5],
+        ),
+        (
+            "merged_field",
+            fix_sroa_merged_field(),
+            vec![11, 22],
+            vec![vec![0i64], vec![1]],
+            vec![11, 22],
+        ),
+    ] {
+        let mut f = lower(&ops, &tys).expect("lower");
+        let stats = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+        assert_eq!(stats.allocs_removed, 1, "{}: {}", name, f.dump());
+        let out = serialize(&f).expect("serialize");
+        assert!(
+            !out.ops
+                .iter()
+                .any(|o| matches!(o, Opcode::New { .. } | Opcode::Field { .. })),
+            "{}: the heap traffic is gone\n{}",
+            name,
+            ops_text(&out.ops)
+        );
+        let f2 = lower(&out.ops, &out.reg_types)
+            .unwrap_or_else(|e| panic!("{name}: re-lower: {e}\n{}", ops_text(&out.ops)));
+        verify(&f2).unwrap();
+        for (input, want) in inputs.iter().zip(expect) {
+            assert_eq!(
+                mini_eval(&out.ops, &ints, input, out.num_regs),
+                want,
+                "{}: wrong result for {:?}\n{}",
+                name,
+                input,
+                ops_text(&out.ops)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the pass chain the mandelbrot inner loop needs
+// ---------------------------------------------------------------------------
+
+/// `Complex(this, re, im)`: the constructor shape every HL `new` goes through
+/// — the fresh object is passed straight in, which is why nothing stops
+/// escaping until this call is inlined. findex 7.
+fn fix_complex_ctor() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::SetField {
+                obj: Reg(0),
+                field: RefField(0),
+                src: Reg(1),
+            },
+            Opcode::SetField {
+                obj: Reg(0),
+                field: RefField(1),
+                src: Reg(2),
+            },
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(OBJ), t(0), t(0)],
+    )
+}
+
+/// A loop whose body allocates a small aggregate, hands it to its constructor
+/// and reads the fields back — the mandelbrot inner-loop shape.
+fn fix_mandelbrot_shaped() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(6),
+                ptr: RefInt(0),
+            }, // acc = 0
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            }, // one = 1
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(1),
+                b: Reg(0),
+                offset: 10,
+            }, // while i < n
+            Opcode::New { dst: Reg(3) },
+            Opcode::Mov {
+                dst: Reg(4),
+                src: Reg(1),
+            },
+            Opcode::Mov {
+                dst: Reg(5),
+                src: Reg(1),
+            },
+            Opcode::Call3 {
+                dst: Reg(8),
+                fun: RefFun(7),
+                arg0: Reg(3),
+                arg1: Reg(4),
+                arg2: Reg(5),
+            },
+            Opcode::Field {
+                dst: Reg(7),
+                obj: Reg(8),
+                field: RefField(0),
+            },
+            Opcode::Add {
+                dst: Reg(6),
+                a: Reg(6),
+                b: Reg(7),
+            },
+            Opcode::Field {
+                dst: Reg(7),
+                obj: Reg(8),
+                field: RefField(1),
+            },
+            Opcode::Add {
+                dst: Reg(6),
+                a: Reg(6),
+                b: Reg(7),
+            },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(2),
+            },
+            Opcode::JAlways { offset: -12 },
+            Opcode::Ret { ret: Reg(6) },
+        ],
+        vec![t(0), t(0), t(0), t(OBJ), t(0), t(0), t(0), t(0), t(OBJ)],
+    )
+}
+
+#[test]
+fn inlining_then_sroa_removes_the_per_iteration_allocation() {
+    let (ops, tys) = fix_mandelbrot_shaped();
+    let info = bodies(&[(7, fix_complex_ctor())]);
+    let mut f = lower_with(&ops, &tys, &info).expect("lower");
+    assert_eq!(
+        count_allocs(&f),
+        1,
+        "the fixture allocates once per iteration"
+    );
+
+    // Escape analysis alone finds nothing: the object is handed to the
+    // constructor call.
+    let before = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+    assert_eq!(
+        before,
+        PassStats::default(),
+        "SROA before inlining must find nothing\n{}",
+        f.dump()
+    );
+
+    let pm = PassManager::with_module(OptLevel::O3, &info).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    let report = pm.run(&mut f).expect("O3");
+    verify(&f).unwrap_or_else(|e| panic!("verify after O3: {e}\n{}", f.dump()));
+
+    assert_eq!(report.stats_for("inline").inlined, 1, "{}", f.dump());
+    // The allocation is written to the object register inside the loop, so the
+    // loop header carries a phi over it until DCE removes that dead phi. SROA
+    // therefore fires on a later manager round, not the first.
+    assert!(
+        report.rounds > 1,
+        "the chain needs a second round to see past the loop-carried phi"
+    );
+    assert_eq!(
+        report.stats_for("sroa").allocs_removed,
+        1,
+        "the allocation must be gone\n{}",
+        f.dump()
+    );
+    assert_eq!(count_allocs(&f), 0, "{}", f.dump());
+    assert_eq!(
+        any_call(&f),
+        0,
+        "the constructor call is gone\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::FieldGet { .. } | Instr::FieldSet { .. }
+        )),
+        0,
+        "no field traffic survives\n{}",
+        f.dump()
+    );
+
+    // And the loop still computes the same thing.
+    let out = serialize(&f).expect("serialize");
+    let ints = vec![0, 1];
+    let m = MiniModule::new(&ints);
+    for n in [0i64, 1, 4, 9] {
+        let expect: i64 = (0..n).map(|i| 2 * i).sum();
+        assert_eq!(
+            mini_eval_in(&m, &out.ops, &[n], out.num_regs),
+            expect,
+            "n = {}\n{}",
+            n,
+            ops_text(&out.ops)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// O3: round-trip property and semantic equivalence
+// ---------------------------------------------------------------------------
+
+/// Every fixture in the corpus, with what O3 needs to act on it: the module
+/// info the inliner reads and the identity tail-recursion elimination needs.
+fn o3_corpus() -> Vec<(
+    &'static str,
+    Vec<Opcode>,
+    Vec<TypeRef>,
+    Option<usize>,
+    ModuleTables,
+)> {
+    let none = ModuleTables::new;
+    let mut out: Vec<(
+        &'static str,
+        Vec<Opcode>,
+        Vec<TypeRef>,
+        Option<usize>,
+        ModuleTables,
+    )> = Vec::new();
+    for (name, (ops, tys)) in [
+        ("straight_line", fix_straight_line()),
+        ("diamond", fix_diamond()),
+        ("loop", fix_loop()),
+        ("loop_no_label", fix_loop_no_label()),
+        ("loop_invariant", fix_loop_invariant()),
+        ("switch", fix_switch()),
+        ("trap", fix_trap()),
+        ("nested_traps", fix_nested_traps()),
+        ("multi_endtrap", fix_multi_endtrap()),
+        ("incr", fix_incr()),
+        ("ref", fix_ref()),
+        ("setenumfield", fix_setenumfield()),
+        ("sroa_local_object", fix_sroa_local_object()),
+        ("sroa_merged_field", fix_sroa_merged_field()),
+        ("sroa_enum_payload", fix_sroa_enum_payload()),
+        ("sroa_enum_index", fix_sroa_enum_index()),
+        ("sroa_read_before_write", fix_sroa_read_before_write()),
+        ("sroa_in_trap", fix_sroa_in_trap()),
+    ] {
+        out.push((name, ops, tys, None, none()));
+    }
+    for (name, (ops, tys)) in [
+        ("tail_sum", fix_tail_sum()),
+        ("tail_swap", fix_tail_swap()),
+        ("tail_cell_param", fix_tail_cell_param()),
+        ("tail_in_trap", fix_tail_in_trap()),
+    ] {
+        out.push((name, ops, tys, Some(0), none()));
+    }
+    let (ops, tys) = fix_caller_call2();
+    out.push((
+        "caller_add",
+        ops.clone(),
+        tys.clone(),
+        None,
+        bodies(&[(7, fix_callee_add())]),
+    ));
+    out.push((
+        "caller_max",
+        ops,
+        tys,
+        None,
+        bodies(&[(7, fix_callee_max())]),
+    ));
+    let (ops, tys) = fix_caller_call1();
+    out.push((
+        "caller_nested",
+        ops,
+        tys,
+        None,
+        bodies(&[(7, fix_callee_outer()), (8, fix_callee_inner())]),
+    ));
+    let (ops, tys) = fix_mandelbrot_shaped();
+    out.push((
+        "mandelbrot_shaped",
+        ops,
+        tys,
+        None,
+        bodies(&[(7, fix_complex_ctor())]),
+    ));
+    out
+}
+
+#[test]
+fn optimized_round_trip_at_o3_over_every_fixture() {
+    for (name, ops, tys, findex, info) in o3_corpus() {
+        let out = optimized_round_trip_at(OptLevel::O3, &info, findex, &ops, &tys);
+        assert!(!out.ops.is_empty(), "{} produced no opcodes", name);
+        // Optimizing the optimized output is stable. The output is a different
+        // function, so it carries neither the identity nor the call sites.
+        let again = optimized_round_trip_at(
+            OptLevel::O3,
+            &ModuleTables::new(),
+            None,
+            &out.ops,
+            &out.reg_types,
+        );
+        assert!(!again.ops.is_empty(), "{} was not stable", name);
+    }
+}
+
+#[test]
+fn o3_reaches_a_fixed_point() {
+    // Inlining grows a function and DCE shrinks it, so the pair could oscillate
+    // without the caller ceiling.
+    let (ops, tys) = fix_caller_call1();
+    let info = bodies(&[(7, fix_callee_outer()), (8, fix_callee_inner())]);
+    let mut f = lower_with(&ops, &tys, &info).expect("lower");
+    let pm = PassManager::with_module(OptLevel::O3, &info).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    pm.run(&mut f).expect("O3");
+    let again = pm.run(&mut f).expect("O3 again");
+    assert!(!again.changed(), "O3 is not at a fixed point\n{}", f.dump());
+}
+
+#[test]
+fn o3_preserves_semantics() {
+    struct Case {
+        name: &'static str,
+        ops: Vec<Opcode>,
+        tys: Vec<TypeRef>,
+        findex: Option<usize>,
+        info: ModuleTables,
+        callees: Vec<(usize, (Vec<Opcode>, Vec<TypeRef>))>,
+        ints: Vec<i32>,
+        inputs: Vec<Vec<i64>>,
+    }
+    let plain = |name, (ops, tys): (Vec<Opcode>, Vec<TypeRef>), ints: Vec<i32>, inputs| Case {
+        name,
+        ops,
+        tys,
+        findex: None,
+        info: ModuleTables::new(),
+        callees: vec![],
+        ints,
+        inputs,
+    };
+    let cases = vec![
+        plain(
+            "straight_line",
+            fix_straight_line(),
+            vec![7, 35],
+            vec![vec![]],
+        ),
+        plain(
+            "diamond",
+            fix_diamond(),
+            vec![10, 20],
+            vec![vec![0], vec![1]],
+        ),
+        plain(
+            "loop",
+            fix_loop(),
+            vec![0, 1],
+            vec![vec![0], vec![1], vec![5], vec![10]],
+        ),
+        plain(
+            "loop_no_label",
+            fix_loop_no_label(),
+            vec![0, 1],
+            vec![vec![0], vec![3], vec![7]],
+        ),
+        plain(
+            "loop_invariant",
+            fix_loop_invariant(),
+            vec![0, 1],
+            vec![vec![0, 3], vec![4, 5]],
+        ),
+        plain(
+            "switch",
+            fix_switch(),
+            vec![100, 200, 300],
+            vec![vec![0], vec![1], vec![2], vec![5], vec![-1]],
+        ),
+        plain("incr", fix_incr(), vec![40], vec![vec![]]),
+        Case {
+            name: "tail_sum",
+            ops: fix_tail_sum().0,
+            tys: fix_tail_sum().1,
+            findex: Some(0),
+            info: ModuleTables::new(),
+            callees: vec![(0, fix_tail_sum())],
+            ints: vec![0, 1],
+            inputs: vec![vec![0, 0], vec![1, 0], vec![6, 2], vec![9, -3]],
+        },
+        Case {
+            name: "tail_swap",
+            ops: fix_tail_swap().0,
+            tys: fix_tail_swap().1,
+            findex: Some(0),
+            info: ModuleTables::new(),
+            callees: vec![(0, fix_tail_swap())],
+            ints: vec![0, 1],
+            inputs: vec![vec![7, 11, 0], vec![7, 11, 1], vec![7, 11, 4]],
+        },
+        Case {
+            name: "caller_max",
+            ops: fix_caller_call2().0,
+            tys: fix_caller_call2().1,
+            findex: None,
+            info: bodies(&[(7, fix_callee_max())]),
+            callees: vec![(7, fix_callee_max())],
+            ints: vec![10, 1],
+            inputs: vec![vec![0], vec![3], vec![25], vec![-8]],
+        },
+        Case {
+            name: "caller_nested",
+            ops: fix_caller_call1().0,
+            tys: fix_caller_call1().1,
+            findex: None,
+            info: bodies(&[(7, fix_callee_outer()), (8, fix_callee_inner())]),
+            callees: vec![(7, fix_callee_outer()), (8, fix_callee_inner())],
+            ints: vec![10, 1],
+            inputs: vec![vec![0], vec![5], vec![-2]],
+        },
+    ];
+    for c in cases {
+        let out = optimized_round_trip_at(OptLevel::O3, &c.info, c.findex, &c.ops, &c.tys);
+        let mut m = MiniModule::new(&c.ints);
+        for (findex, (cops, ctys)) in &c.callees {
+            m = m.with_fun(*findex, cops, ctys.len());
+        }
+        for input in &c.inputs {
+            let before = mini_eval_in(&m, &c.ops, input, c.tys.len());
+            let after = mini_eval_in(&m, &out.ops, input, out.num_regs);
+            assert_eq!(
+                before,
+                after,
+                "{}: O3 changed the result for {:?}\n{}",
+                c.name,
                 input,
                 ops_text(&out.ops)
             );

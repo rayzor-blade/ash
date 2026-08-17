@@ -26,11 +26,12 @@
 //!
 //! # Passes that grow the function
 //!
-//! [`TailRecursionElim`] and [`Inlining`] head [`OptLevel::O3`], ahead of the
-//! O2 pipeline that cleans up after them. Inlining is what makes HL programs
-//! optimizable at all: `new C(...)` passes the fresh object straight into the
-//! constructor call, so nothing about an allocation is visible until that call
-//! is gone.
+//! [`TailRecursionElim`], [`Inlining`] and [`ScalarReplacement`] make up
+//! [`OptLevel::O3`] and run in that order, ahead of the O2 pipeline. The
+//! ordering is forced by HL's object protocol rather than chosen: `new C(...)`
+//! passes the fresh object straight into the constructor call, so every
+//! allocation escapes until that call has been inlined, and escape analysis
+//! run before inlining finds nothing at all.
 
 use super::analysis::{clobbers_all, write_class, AliasClass, CfgInfo};
 use super::ir::*;
@@ -43,6 +44,7 @@ pub mod gvn;
 pub mod inline;
 pub mod licm;
 pub mod nullcheck;
+pub mod sroa;
 pub mod tre;
 
 pub use dce::DeadCodeElim;
@@ -51,6 +53,7 @@ pub use gvn::GlobalValueNumbering;
 pub use inline::Inlining;
 pub use licm::LoopInvariantCodeMotion;
 pub use nullcheck::NullCheckElim;
+pub use sroa::ScalarReplacement;
 pub use tre::TailRecursionElim;
 
 // ---------------------------------------------------------------------------
@@ -75,6 +78,10 @@ pub struct PassStats {
     pub inlined: usize,
     /// Instructions added to the function.
     pub added: usize,
+    /// Allocations replaced by SSA values for their fields.
+    pub allocs_removed: usize,
+    /// Field slots promoted to SSA values.
+    pub fields_scalarized: usize,
 }
 
 impl PassStats {
@@ -90,6 +97,8 @@ impl PassStats {
         self.tail_calls += other.tail_calls;
         self.inlined += other.inlined;
         self.added += other.added;
+        self.allocs_removed += other.allocs_removed;
+        self.fields_scalarized += other.fields_scalarized;
     }
 }
 
@@ -155,9 +164,14 @@ pub enum OptLevel {
     /// LICM, the FMA peephole, and dead-code elimination, run to a fixed
     /// point.
     O2,
-    /// Everything in [`OptLevel::O2`], preceded by the passes that can grow a
-    /// function: tail-recursion elimination and inlining, in that order, so
-    /// that GVN, LICM and DCE clean up what they expose.
+    /// Everything in [`OptLevel::O2`], preceded by the three passes that can
+    /// grow a function: tail-recursion elimination, inlining, and scalar
+    /// replacement of aggregates, in that order.
+    ///
+    /// The order is the whole point. In HL `new C(...)` hands the fresh object
+    /// straight to its constructor, so escape analysis finds nothing until
+    /// inlining has removed that call; and the O2 passes run *after* SROA so
+    /// that GVN, LICM and DCE clean up the arithmetic it exposes.
     ///
     /// Inlining needs callee bodies, which only [`PassManager::with_module`]
     /// can supply — `PassManager::new(OptLevel::O3)` still builds the full
@@ -231,6 +245,7 @@ impl<'m> PassManager<'m> {
             OptLevel::O3 => vec![
                 Box::new(TailRecursionElim),
                 Box::new(Inlining::new(info)),
+                Box::new(ScalarReplacement),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),
                 Box::new(LoopInvariantCodeMotion),

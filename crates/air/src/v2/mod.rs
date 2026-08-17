@@ -90,10 +90,10 @@
 //! explicit list, running to a fixed point and reporting per-pass statistics.
 //! [`passes::OptLevel::O2`] is the pipeline that cannot grow a function —
 //! null-check elimination, GVN/CSE, LICM, the FMA peephole and dead-code
-//! elimination. [`passes::OptLevel::O3`] runs tail-recursion elimination and
-//! inlining ahead of it: HL's `new C(...)` hands the fresh object to its
-//! constructor, so nothing about a program's allocations is visible until
-//! that call is gone.
+//! elimination. [`passes::OptLevel::O3`] runs tail-recursion elimination,
+//! inlining and scalar replacement of aggregates ahead of it, in that order:
+//! HL's `new C(...)` hands the fresh object to its constructor, so nothing
+//! stops escaping until the constructor is inlined.
 //!
 //! Inlining is the one pass that needs to see past the function it is given,
 //! so it asks the embedder for callee bodies through

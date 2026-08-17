@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use beadie::{Bead, BeadState, Beadie, SubmitResult, ThresholdPolicy};
@@ -180,10 +180,12 @@ struct CompiledFunctionEntry {
 /// Compile closures capture this via `Arc`; the broker writes marshaling
 /// metadata here before returning the code pointer to beadie.
 struct TieredSharedCtx {
-    hl_path: PathBuf,
-    shared: SharedRuntimeHandles,
-    hot_reload: bool,
     log_promotions: bool,
+    /// JIT module pre-warmed on the MAIN thread by `enable_tiered`, before any
+    /// bytecode runs. The broker adopts it on its first compile job. All
+    /// GC-allocating init (constants, obj runtimes, enum marks) happens during
+    /// pre-warm; the broker only compiles (pure LLVM + MCJIT finalization).
+    prewarmed: Mutex<Option<PrewarmedJit>>,
     /// Compile results parked by the broker closure; the interpreter drains
     /// an entry on its first `bead.compiled()` observation for that findex.
     meta: Mutex<HashMap<usize, CompiledFunctionMeta>>,
@@ -191,6 +193,14 @@ struct TieredSharedCtx {
     /// the broker's null-return handling).
     failed: std::sync::atomic::AtomicU64,
 }
+
+/// Raw pointer to the JIT module pre-warmed on the main thread, handed off to
+/// beadie's broker thread. `Send` is sound the same way `SharedRuntimeHandles`
+/// is: exactly one consumer thread dereferences it after the handoff (the
+/// broker is a single persistent thread; the main thread never touches the
+/// module again).
+struct PrewarmedJit(*mut ManuallyDrop<JITModule<'static>>);
+unsafe impl Send for PrewarmedJit {}
 
 /// Tiered promotion state built on the beadie broker.
 ///
@@ -215,49 +225,73 @@ struct TieredRuntime {
 }
 
 thread_local! {
-    /// Per-broker-thread JIT module. Created lazily by the first compile job;
-    /// lives as long as the broker thread. `ManuallyDrop` because LLVM objects
-    /// may throw foreign exceptions during drop on some platforms — the module
-    /// is intentionally leaked on thread exit (same as the old worker's
-    /// `std::mem::forget` on shutdown).
+    /// Per-broker-thread JIT module. Adopted from the main-thread pre-warm on
+    /// the first compile job; lives as long as the broker thread.
+    /// `ManuallyDrop` because LLVM objects may throw foreign exceptions during
+    /// drop on some platforms — the module is intentionally leaked on thread
+    /// exit (same as the old worker's `std::mem::forget` on shutdown).
     static TIERED_JIT: RefCell<Option<ManuallyDrop<JITModule<'static>>>> =
         const { RefCell::new(None) };
 }
 
 /// Compile one function on beadie's broker thread.
 ///
-/// Lazily initializes the thread-local `JITModule` (leaked LLVM context,
-/// shared runtime handles, GC lock held during init via `new_for_tiered`),
-/// then runs `promote_function_strict`. On success the marshaling metadata is
-/// parked in `ctx.meta` before the code pointer is returned — beadie installs
-/// the pointer with release ordering, so the interpreter's acquire load of
-/// `bead.compiled()` always finds the metadata. On failure returns null; the
-/// broker invalidates the bead (Deopt), which permanently blacklists it.
+/// Adopts the JIT module pre-warmed on the main thread by `enable_tiered`,
+/// then runs `promote_function_strict`. Module init must NEVER run here
+/// mid-program: it GC-allocates (constants, obj runtimes, enum marks), and a
+/// broker-side collection scans the wrong stack — reclaiming objects live
+/// only in main-thread frames/registers — while holding the GC lock across
+/// the multi-second init stalls the main thread's next allocation.
+/// MCJIT finalization (`get_function_address`) still happens here, on the
+/// same thread as before.
+///
+/// On success the marshaling metadata is parked in `ctx.meta` before the code
+/// pointer is returned — beadie installs the pointer with release ordering,
+/// so the interpreter's acquire load of `bead.compiled()` always finds the
+/// metadata. On failure returns null; the broker invalidates the bead
+/// (Deopt), which permanently blacklists it.
 fn tiered_compile(ctx: &TieredSharedCtx, findex: usize) -> *mut () {
     let result: std::result::Result<CompiledFunctionMeta, String> = TIERED_JIT.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
-            let init_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let context = Box::leak(Box::new(Context::create()));
-                let mut m =
-                    JITModule::new_with_shared_runtime(context, &ctx.hl_path, ctx.shared.clone());
-                m.set_hot_reload(ctx.hot_reload);
-                m
-            }));
-            match init_result {
-                Ok(m) => {
+            match ctx
+                .prewarmed
+                .lock()
+                .expect("tiered prewarm mutex poisoned")
+                .take()
+            {
+                Some(pw) => {
+                    // Move the module out of its Box into the thread-local.
+                    *slot = Some(unsafe { *Box::from_raw(pw.0) });
                     if ctx.log_promotions {
-                        eprintln!("[tiered] initialized shared JIT module");
+                        eprintln!("[tiered] broker adopted pre-warmed JIT module");
                     }
-                    *slot = Some(ManuallyDrop::new(m));
                 }
-                Err(_) => return Err("tiered broker JIT init panicked".to_string()),
+                None => {
+                    return Err("no pre-warmed JIT module (startup init failed)".to_string());
+                }
             }
         }
         let module = slot.as_mut().expect("JIT module initialized above");
+        // Arm a broker-local recovery point: a hardware fault during
+        // compilation (e.g., a torn read of a type pointer the main thread is
+        // still initializing) longjmps back HERE — on this thread — and
+        // blacklists the findex, instead of crashing the process or, worse,
+        // being misrouted into the main thread's armed recovery context.
         let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if unsafe { crate::native_recovery::arm_tiered_recovery() } != 0 {
+                // Drop the queue so the faulting transitive compile is not
+                // re-popped (and re-faulted) by every subsequent job.
+                module.clear_pending_compilations();
+                return Err(anyhow!(
+                    "native fault during promotion (sig={} fault_addr={:#x})",
+                    crate::native_recovery::last_tiered_recovery_signal(),
+                    crate::native_recovery::last_tiered_recovery_fault_addr()
+                ));
+            }
             module.promote_function_strict(findex)
         }));
+        crate::native_recovery::disarm_tiered_recovery();
         match compile_result {
             Ok(Ok(meta)) if meta.fn_addr != 0 => Ok(meta),
             Ok(Ok(_)) => Err("promotion returned null fn_addr".to_string()),
@@ -657,6 +691,36 @@ impl HLInterpreter {
                 }
             }
         }
+        // Pre-warm the tiered JIT module ON THE MAIN THREAD, before any
+        // bytecode runs. Module init GC-allocates (constants via
+        // hlp_alloc_obj + hlp_gc_register_root, obj runtimes via
+        // hlp_get_obj_rt, enum marks via hlp_init_enum) — doing it lazily on
+        // the broker thread mid-program both froze the main thread (GC lock
+        // held across the whole multi-second init) and let a broker-side
+        // collection scan the wrong stack, reclaiming objects live only in
+        // main-thread frames. Compilation itself (pure LLVM + MCJIT
+        // finalization) stays on the broker thread, same as before.
+        eprintln!("[tiered] pre-warming JIT module on main thread (one-time startup cost)...");
+        let prewarm_start = std::time::Instant::now();
+        let prewarmed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let context: &'static Context = Box::leak(Box::new(Context::create()));
+            let mut jit = JITModule::new_with_shared_runtime(context, &hl_path, shared.clone());
+            jit.set_hot_reload(hot_reload);
+            Box::into_raw(Box::new(ManuallyDrop::new(jit)))
+        })) {
+            Ok(ptr) => {
+                eprintln!(
+                    "[tiered] JIT module ready in {:.2}s",
+                    prewarm_start.elapsed().as_secs_f64()
+                );
+                Some(PrewarmedJit(ptr))
+            }
+            Err(_) => {
+                eprintln!("[tiered] pre-warm panicked; tier promotion disabled");
+                None
+            }
+        };
+
         // Beadie owns the hotness policy and the broker thread. Queue-ahead
         // submits the compile job slightly before the threshold so code is
         // ready by the time the function is truly hot.
@@ -667,10 +731,8 @@ impl HLInterpreter {
         let beadie = Beadie::with_policy(policy);
 
         let shared_ctx = Arc::new(TieredSharedCtx {
-            hl_path,
-            shared,
-            hot_reload,
             log_promotions,
+            prewarmed: Mutex::new(prewarmed),
             meta: Mutex::new(HashMap::new()),
             failed: std::sync::atomic::AtomicU64::new(0),
         });

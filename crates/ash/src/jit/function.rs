@@ -215,6 +215,14 @@ impl<'ctx> JITModule<'ctx> {
         self.pending_compilations.push(index);
     }
 
+    /// Drop any queued transitive compilations. Called by the tiered broker
+    /// after a recovered hardware fault: the queue may still hold the findex
+    /// whose translation faulted, and re-popping it on the next job would
+    /// fault again, poisoning every subsequent promotion.
+    pub fn clear_pending_compilations(&mut self) {
+        self.pending_compilations.clear();
+    }
+
     fn compile_pending_functions(&mut self) -> Result<()> {
         while let Some(index) = self.pending_compilations.pop() {
             if let Err(e) = self.compile_function(index) {

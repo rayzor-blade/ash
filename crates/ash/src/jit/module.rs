@@ -266,9 +266,13 @@ impl<'ctx> JITModule<'ctx> {
         module
     }
 
-    /// Creates a JIT module for the tiered worker thread.
-    /// Uses the full Self::new() constructor. GC access is made thread-safe
-    /// via hlp_gc_lock/hlp_gc_unlock around GC-allocating operations.
+    /// Creates a JIT module for tiered promotion, using the full Self::new()
+    /// constructor. MUST be called on the main thread (hybrid pre-warm at
+    /// startup, or the hot-reload callback): init GC-allocates, and a
+    /// collection triggered from any other thread would conservatively scan
+    /// the wrong stack. The GC lock is held across init so a concurrent
+    /// broker/worker thread cannot enter the GC mid-init; on the pre-start
+    /// main thread it is uncontended and effectively free.
     fn new_for_tiered(context: &'ctx Context, path: &Path) -> Self {
         init_std_library();
 

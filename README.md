@@ -2,9 +2,9 @@
 <img style="display: block;" src="ash.png" alt="ASH Logo" width="250"/>
 </p>
 
-# ASH
+<h1 align="center">ASH</h1>
 
-A HashLink virtual machine written in Rust.
+<p align="center">A HashLink virtual machine written in Rust.</p>
 
 ASH executes [HashLink](https://hashlink.haxe.org/) bytecode (`.hl` files) compiled from [Haxe](https://haxe.org/). Execution is tiered: a bytecode interpreter runs everything, hot functions are promoted to Cranelift-compiled code, and the hottest are recompiled by LLVM.
 

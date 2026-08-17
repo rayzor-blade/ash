@@ -5,6 +5,7 @@ use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process;
+use std::sync::OnceLock;
 
 #[derive(Parser)]
 #[command(name = "ash_cli", about = "ASH - HashLink VM Interpreter")]
@@ -58,7 +59,23 @@ enum Mode {
     Hybrid,
 }
 
+/// Whether the crash handler should attempt a (deliberately unsafe) backtrace.
+///
+/// Read from `ASH_CRASH_BACKTRACE` exactly once, during `main`, before any
+/// handler can fire: `getenv` is not async-signal-safe, and neither is the
+/// capture itself (see [`crash_handler_siginfo`]).
+static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
+
 fn main() {
+    // Resolve the crash-time options before installing the handler, so the
+    // handler itself never touches the environment (getenv is not
+    // async-signal-safe and may be mid-mutation when the fault lands).
+    let _ = CRASH_BACKTRACE.set(
+        std::env::var("ASH_CRASH_BACKTRACE")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false),
+    );
+
     // Install signal handlers with sigaction for faulting address info
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -75,10 +92,178 @@ fn main() {
     }
 }
 
+/// `errno` for the current thread. A plain read of thread-local storage, so
+/// it is safe to consult from a signal handler.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+unsafe fn errno() -> i32 {
+    *libc::__error()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+unsafe fn errno() -> i32 {
+    *libc::__errno_location()
+}
+
+/// Write a byte slice straight to fd 2, retrying short writes and `EINTR`.
+///
+/// `write(2)` is async-signal-safe; `eprintln!` is not (it takes a lock and
+/// the formatting machinery can allocate).
+unsafe fn write_stderr(bytes: &[u8]) {
+    let mut off = 0usize;
+    while off < bytes.len() {
+        let n = libc::write(
+            libc::STDERR_FILENO,
+            bytes.as_ptr().add(off) as *const std::ffi::c_void,
+            bytes.len() - off,
+        );
+        if n > 0 {
+            off += n as usize;
+        } else if n < 0 && errno() == libc::EINTR {
+            continue;
+        } else {
+            return;
+        }
+    }
+}
+
+/// Append `src` to `buf` at `len`, truncating at the buffer's end.
+fn push_bytes(buf: &mut [u8], len: &mut usize, src: &[u8]) {
+    for &b in src {
+        if *len >= buf.len() {
+            return;
+        }
+        buf[*len] = b;
+        *len += 1;
+    }
+}
+
+/// Append `v` in decimal. Manual formatting: `format!` allocates.
+fn push_dec(buf: &mut [u8], len: &mut usize, v: u64) {
+    let mut digits = [0u8; 20];
+    let mut n = 0;
+    let mut v = v;
+    loop {
+        digits[n] = b'0' + (v % 10) as u8;
+        n += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        push_bytes(buf, len, &[digits[n]]);
+    }
+}
+
+/// Append `v` in hex, no `0x` prefix. Manual formatting: `format!` allocates.
+fn push_hex(buf: &mut [u8], len: &mut usize, v: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digits = [0u8; 16];
+    let mut n = 0;
+    let mut v = v;
+    loop {
+        digits[n] = HEX[(v & 0xf) as usize];
+        n += 1;
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        push_bytes(buf, len, &[digits[n]]);
+    }
+}
+
+// The `ucontext_t` a `SA_SIGINFO` handler receives on arm64 macOS. The `libc`
+// crate does not define these for Apple targets, so mirror the (stable)
+// `<sys/_types/_ucontext.h>` / `<mach/arm/_structs.h>` layout. Only the
+// register file is read, and only inside the crash handler.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct ArmThreadState64 {
+    x: [u64; 29],
+    fp: u64,
+    lr: u64,
+    sp: u64,
+    pc: u64,
+    cpsr: u32,
+    _pad: u32,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct ArmExceptionState64 {
+    far: u64,
+    esr: u32,
+    exception: u32,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct McontextArm64 {
+    es: ArmExceptionState64,
+    ss: ArmThreadState64,
+    // __darwin_arm_neon_state64 follows; unused here.
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[repr(C)]
+struct UContext64 {
+    uc_onstack: i32,
+    uc_sigmask: u32,
+    uc_stack_sp: *mut std::ffi::c_void,
+    uc_stack_size: usize,
+    uc_stack_flags: i32,
+    _pad: i32,
+    uc_link: *mut UContext64,
+    uc_mcsize: usize,
+    uc_mcontext: *mut McontextArm64,
+}
+
+/// Read `(pc, lr, fp, sp)` out of a signal context. Plain memory loads, so
+/// this is async-signal-safe.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
+    if ctx.is_null() {
+        return None;
+    }
+    let mc = (*(ctx as *const UContext64)).uc_mcontext;
+    if mc.is_null() {
+        return None;
+    }
+    let ss = &(*mc).ss;
+    Some((ss.pc, ss.lr, ss.fp, ss.sp))
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+unsafe fn signal_registers(_ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
+    None
+}
+
+/// Fatal-signal handler. **Everything here must be async-signal-safe.**
+///
+/// The handler runs on a thread that was interrupted at an arbitrary
+/// instruction — possibly inside `malloc` while it holds its own lock. So it
+/// allocates nothing and formats nothing: the report is assembled in a stack
+/// buffer with manual integer formatting and pushed out with a single
+/// `write(2)`, then the default disposition is restored and the signal
+/// re-raised so the process dies with the right status and the real faulting
+/// frame is still on top for a debugger or crash reporter.
+///
+/// This replaces an earlier version that called
+/// `std::backtrace::Backtrace::force_capture()` plus `eprintln!`: both
+/// allocate, so the handler reliably faulted a second time inside its own
+/// `RawVec` teardown and printed *that* stack — hiding the actual crash site.
+/// A backtrace is still available under `ASH_CRASH_BACKTRACE=1`, but it is
+/// strictly best-effort and formally unsafe (it can deadlock or double-fault
+/// exactly as before); use it only when the fault is known not to involve the
+/// allocator.
 unsafe extern "C" fn crash_handler_siginfo(
     sig: i32,
     info: *mut libc::siginfo_t,
-    _ctx: *mut std::ffi::c_void,
+    ctx: *mut std::ffi::c_void,
 ) {
     let fault_addr = if !info.is_null() {
         (*info).si_addr as usize
@@ -93,22 +278,51 @@ unsafe extern "C" fn crash_handler_siginfo(
         return; // unreachable — siglongjmp never returns
     }
 
-    let name = match sig {
-        libc::SIGSEGV => "SIGSEGV",
-        libc::SIGBUS => "SIGBUS",
-        libc::SIGABRT => "SIGABRT",
-        _ => "UNKNOWN",
+    let name: &[u8] = match sig {
+        libc::SIGSEGV => b"SIGSEGV",
+        libc::SIGBUS => b"SIGBUS",
+        libc::SIGABRT => b"SIGABRT",
+        _ => b"UNKNOWN",
     };
-    eprintln!(
-        "\n=== CRASH: {} (signal {}) fault_addr={:#x} ===",
-        name, sig, fault_addr
-    );
 
-    // Print backtrace
-    let bt = std::backtrace::Backtrace::force_capture();
-    eprintln!("{}", bt);
+    let mut buf = [0u8; 256];
+    let mut len = 0usize;
+    push_bytes(&mut buf, &mut len, b"\n=== CRASH: ");
+    push_bytes(&mut buf, &mut len, name);
+    push_bytes(&mut buf, &mut len, b" (signal ");
+    push_dec(&mut buf, &mut len, sig as u64);
+    push_bytes(&mut buf, &mut len, b") fault_addr=0x");
+    push_hex(&mut buf, &mut len, fault_addr as u64);
 
-    // Re-raise
+    // The faulting PC/LR/FP straight out of the signal context. Reading the
+    // context is just a memory load, so it is signal-safe — and it is the only
+    // way to name the faulting frame here, since symbolization is not. JIT
+    // frames have no symbol at all: cross-check the PC against the
+    // `[tiered] promoted findex=… addr=…` lines that `--jit-log` prints.
+    if let Some((pc, lr, fp, sp)) = signal_registers(ctx) {
+        push_bytes(&mut buf, &mut len, b" pc=0x");
+        push_hex(&mut buf, &mut len, pc);
+        push_bytes(&mut buf, &mut len, b" lr=0x");
+        push_hex(&mut buf, &mut len, lr);
+        push_bytes(&mut buf, &mut len, b" fp=0x");
+        push_hex(&mut buf, &mut len, fp);
+        push_bytes(&mut buf, &mut len, b" sp=0x");
+        push_hex(&mut buf, &mut len, sp);
+    }
+    push_bytes(&mut buf, &mut len, b" ===\n");
+    write_stderr(&buf[..len]);
+
+    // Opt-in, best-effort, and NOT async-signal-safe — see the doc comment.
+    if *CRASH_BACKTRACE.get().unwrap_or(&false) {
+        write_stderr(b"[ash] ASH_CRASH_BACKTRACE=1: capturing (unsafe in a signal handler)\n");
+        let bt = std::backtrace::Backtrace::force_capture();
+        let text = bt.to_string();
+        write_stderr(text.as_bytes());
+        write_stderr(b"\n");
+    }
+
+    // Restore the default disposition and re-raise, so the process dies from
+    // the original signal with the faulting frame intact.
     libc::signal(sig, libc::SIG_DFL);
     libc::raise(sig);
 }

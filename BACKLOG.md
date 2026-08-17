@@ -85,7 +85,20 @@ a third). Pins: cranelift 0.130.2, `wasmtime-internal-jit-icache-coherence`
   so a resumed longjmp into a Cranelift frame is unsound. Measured at 1.0% of
   functions (4.0% of opcodes) in `game.hl`; throw-only functions stay
   eligible because the interpreter's per-call setjmp wrapper guarantees the
-  jump exits the frame.
+  jump exits the frame. Three ways to lift the exclusion, cheapest first:
+  *(a)* **outline the trap region** so the setjmp lives in an interpreter or
+  LLVM stub and the protected body is a separate Cranelift function —
+  longjmp then always exits Cranelift frames, and AIR v2's first-class trap
+  regions already provide the structure for the transform; *(b)* adopt
+  Cranelift's **`try_call` / exception tables** (present since 0.134), whose
+  landing pads are real CFG edges the register allocator understands — this
+  requires moving the compiled tiers from longjmp to unwinding-based throws,
+  and would also let the LLVM tier drop `returns_twice`, which today
+  pessimizes optimization around every try/catch; *(c)* **fiber-based
+  unwinding**, sound because a fiber switch restores callee-saved registers
+  cooperatively (unlike longjmp), but grain-mismatched — it needs a
+  discardable fiber per active trap region, nested for nested traps, paying
+  setup cost even when nothing throws.
 - **Cross-tier FMA policy — emit explicit `fma`, do not rely on contraction.**
   Measured against a C port of `Mandelbrot.hx` (`clang -O2`, checksums for
   298² / 875×500): unfused `-ffp-contract=off` gives 22816350 / 112790102 and

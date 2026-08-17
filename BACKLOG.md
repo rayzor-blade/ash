@@ -5,11 +5,12 @@ code guarantees today; anything that should change lives here.
 
 **Last updated**: 2026-08-17
 
-**Status**: Heaps Base2D renders through the real init path under the
-interpreter (`ash_cli --mode interp examples/heaps_base2d/bin/game.hl`), with
-tiered promotion brokered by beadie, thread-safe GC, and a 0.05s tiered
-pre-warm. The full-JIT-everything path (`ash <file>.hl`) still has one open
-crash; see [JIT & tiering](#jit--tiering).
+**Status**: Heaps Base2D renders through the real init path, and hybrid mode
+(`ash_cli --mode hybrid examples/heaps_base2d/bin/game.hl`) sustains 19
+promoted functions with no crashes, backed by a beadie broker, a shared
+symbol table, thread-safe GC, and a 0.05s tiered pre-warm. The
+full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
+[JIT & tiering](#jit--tiering).
 
 ---
 
@@ -42,28 +43,17 @@ production path until the backends switch over.
 
 ## JIT & tiering
 
-- **Promotions do not stick on `game.hl`** — promoted code calls through
-  shared `functions_ptrs` / vtable / closure slots that still hold interpreter
-  stub sentinels (`findex + 1`, always `< 0x100000`), faulting at
-  `fault_addr = findex + 1`. Needs stub guards at every JIT indirect call
-  site, dispatching to interpreter re-entry (the `hlp_set_closure_runner`
-  bridge) instead of calling the sentinel.
-- **`ASH_JIT_NATIVE_TRAPS` defaults off** — unresolved natives compile to
-  call-time trap stubs (upstream `disabled_primitive` semantics) which yields
-  the first successful `game.hl` promotions, but must stay opt-in until the
-  stub guards above land.
-- **Missing std natives** referenced by Heaps: `hlp_string_compare`,
-  `hlp_alloc_enum_dyn`, `hlp_type_super`, `hlp_type_enum_eq`,
-  `hlp_sys_exe_path` (`hlp_haptic_close` can be a no-op). The interpreter
-  never notices because it resolves lazily; the JIT resolves eagerly.
-- **`FunctionLookupError` blacklist class** — functions reachable only
-  indirectly are never code-generated before MCJIT finalization, so their
-  addresses cannot be looked up. Affects ~9 findexes on `game.hl`.
+- **`FunctionLookupError` is the last blacklist class** — 47 occurrences on
+  `game.hl`. Functions reachable only indirectly are never code-generated
+  before MCJIT finalization, so `get_function_address` cannot find them.
+  Fixing it needs either eager declaration of indirectly-reachable callees
+  before finalization, or an execution engine that compiles on demand.
+- **27 std natives remain unimplemented** (file, process, and rnd families).
+  Each compiles to an `hlp_error` call-time trap, so they only fail if
+  actually called; implement as workloads demand them.
 - **Full-JIT `game.hl` crashes** in LLVM `SimplifyCFG` during MCJIT
   finalization after compiling ~5000 functions (malformed-IR family). Tiered
   promotion sidesteps it; AIR v2 lowering should remove the cause.
-- **`SIGABRT` in `hl_to_virtual`** (`std/src/obj.rs`) surfaces after
-  promotions land. Pre-existing, reproduces on baseline builds.
 - **Hybrid `test_mandelbrot_small` post-main `SIGSEGV`** (exit 139) after
   printing the correct checksum. Pre-existing, reproduces on baseline.
 - **MCJIT is legacy** — isolate the execution-engine surface
@@ -113,12 +103,6 @@ a third). Pins: cranelift 0.130.2, `wasmtime-internal-jit-icache-coherence`
   Unresolved}`, and `dlopen` each hdll on first lookup against it, resolving
   all of its `DEFINE_PRIM` exports in one pass. Startup then loads zero
   hdlls.
-- **Single shared symbol table for all tiers** — one canonical
-  name → address map consumed by the interpreter's `call_native`, the LLVM
-  tier's native resolution, and Cranelift's build-time `JITBuilder::symbol`.
-- **Per-call `dlsym` and `getenv` on the interpreter's hot path** — sampling
-  put `getenv` alone at roughly a quarter of interpretation time. Resolve
-  once into the table; gate every env read behind `OnceLock`.
 - **Stale `/usr/local/lib/libhl.dylib`** — a root-owned March build is
   preferred by C hdlls even though ash now detects it (canary symbol) and
   falls back to the embedded stdlib. Refresh it with

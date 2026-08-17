@@ -28,8 +28,28 @@ production path until the backends switch over.
 - **Optimization passes over the typed IR**, in payoff order established by
   the mandelbrot trace: static field-offset resolution, field-load GVN with
   HL alias classes (`(type, field-slot)`, varray data/length, enum params,
-  globals), inlining + escape analysis / scalar replacement, bounds-check
-  LICM, dominance-based null-check elimination, box/unbox forwarding.
+  globals), inlining, escape analysis and scalar replacement (below),
+  bounds-check LICM, dominance-based null-check elimination, box/unbox
+  forwarding.
+- **Scalar replacement of aggregates, and the inlining it depends on.** The
+  traced mandelbrot inner loop spends two heap allocations and three calls
+  per iteration because every `Complex` is a `New` plus a constructor call —
+  the float math is a minority of the work. Replacing a non-escaping `New`
+  with SSA values for its fields (and the same for `EnumAlloc`/`MakeEnum`
+  payloads, `vvirtual` boxes, and `ToDyn` boxing) is what turns that loop
+  into straight-line arithmetic, and it is the prerequisite that makes
+  vectorization possible on such loops at all.
+  **Ordering matters in HL: inlining must come first.** `new C(...)` passes
+  the fresh object to its constructor, so *every* allocation escapes by
+  definition until that constructor is inlined; escape analysis run before
+  inlining will find nothing. Other guards: `Ref`-taken values are cells and
+  cannot be scalarized; an object live across a trap-region boundary is
+  currently pinned to a cell by the conservative in-region rule, so SROA
+  inside `try`/`catch` stays blocked until liveness refinement lands.
+  Removing an allocation is always safe for the conservative GC — it strictly
+  reduces what must be traced — but partial scalarization (some fields
+  promoted while the object still exists) must keep the object's memory and
+  the promoted values coherent.
 - **JIT lowers from v2** instead of raw opcodes — the point at which
   malformed-IR crashes and verifier rejections become structurally impossible
   rather than blacklisted.

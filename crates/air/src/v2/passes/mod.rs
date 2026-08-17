@@ -23,6 +23,12 @@
 //!   private register through [`privatize`], and refuses the rewrite when
 //!   that is impossible (the value is a `Param`, whose register is fixed by
 //!   the calling convention).
+//!
+//! # Passes that grow the function
+//!
+//! [`TailRecursionElim`] is the first pass that changes a function's shape
+//! rather than only shrinking it, so it heads [`OptLevel::O3`], ahead of the
+//! O2 pipeline that cleans up after it.
 
 use super::analysis::{clobbers_all, write_class, AliasClass, CfgInfo};
 use super::ir::*;
@@ -33,12 +39,14 @@ pub mod fma;
 pub mod gvn;
 pub mod licm;
 pub mod nullcheck;
+pub mod tre;
 
 pub use dce::DeadCodeElim;
 pub use fma::FmaPeephole;
 pub use gvn::GlobalValueNumbering;
 pub use licm::LoopInvariantCodeMotion;
 pub use nullcheck::NullCheckElim;
+pub use tre::TailRecursionElim;
 
 // ---------------------------------------------------------------------------
 // pass interface
@@ -56,6 +64,8 @@ pub struct PassStats {
     pub fused: usize,
     /// Uses redirected to a different, equivalent value.
     pub replaced: usize,
+    /// Self-recursive tail calls turned into back edges.
+    pub tail_calls: usize,
 }
 
 impl PassStats {
@@ -68,6 +78,7 @@ impl PassStats {
         self.hoisted += other.hoisted;
         self.fused += other.fused;
         self.replaced += other.replaced;
+        self.tail_calls += other.tail_calls;
     }
 }
 
@@ -111,9 +122,15 @@ pub enum OptLevel {
     /// Cleanups that cannot grow the function: null-check elimination and
     /// dead-code elimination.
     O1,
-    /// The full pipeline: null-check elimination, GVN/CSE, LICM, the FMA
-    /// peephole, and dead-code elimination, run to a fixed point.
+    /// Rewrites that never grow the function: null-check elimination, GVN/CSE,
+    /// LICM, the FMA peephole, and dead-code elimination, run to a fixed
+    /// point.
     O2,
+    /// Everything in [`OptLevel::O2`], preceded by the passes that can grow a
+    /// function. Tail-recursion elimination is the first of them: it runs
+    /// before the O2 pipeline so GVN, LICM and DCE clean up the loop it
+    /// leaves behind.
+    O3,
 }
 
 /// Per-pass statistics of one [`PassManager::run`].
@@ -161,6 +178,14 @@ impl PassManager {
             OptLevel::O0 => vec![],
             OptLevel::O1 => vec![Box::new(NullCheckElim), Box::new(DeadCodeElim)],
             OptLevel::O2 => vec![
+                Box::new(NullCheckElim),
+                Box::new(GlobalValueNumbering),
+                Box::new(LoopInvariantCodeMotion),
+                Box::new(FmaPeephole),
+                Box::new(DeadCodeElim),
+            ],
+            OptLevel::O3 => vec![
+                Box::new(TailRecursionElim),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),
                 Box::new(LoopInvariantCodeMotion),

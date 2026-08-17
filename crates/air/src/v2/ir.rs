@@ -968,11 +968,18 @@ pub struct Function {
     /// this; when it is empty (no module info was supplied at lowering) those
     /// rewrites are inert.
     pub float_types: Vec<TypeRef>,
+    /// This function's own index in the module's function pool, when the
+    /// embedder said so.
+    ///
+    /// It is the identity a `Call` names, so it is what tells a self-recursive
+    /// call apart from any other:
+    /// [`tre`](super::passes::tre) is inert without it.
+    pub findex: Option<usize>,
 }
 
 impl Function {
-    /// An empty function over `reg_types`: no values, cells, blocks, natives
-    /// or float types.
+    /// An empty function over `reg_types`: no values, cells, blocks, natives,
+    /// float types or identity.
     pub fn new(reg_types: Vec<TypeRef>) -> Self {
         Function {
             values: Vec::new(),
@@ -981,7 +988,14 @@ impl Function {
             reg_types,
             natives: NativeTable::new(),
             float_types: Vec::new(),
+            findex: None,
         }
+    }
+
+    /// Tag the function with its module function index.
+    pub fn with_findex(mut self, findex: usize) -> Self {
+        self.findex = Some(findex);
+        self
     }
 
     pub fn new_value(&mut self, ty: TypeRef, reg: u32) -> ValueId {

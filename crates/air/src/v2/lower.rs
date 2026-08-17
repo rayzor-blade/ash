@@ -520,12 +520,24 @@ impl<M: ModuleInfo> ModuleBuilder<M> {
     }
 
     /// Lower one function, merging its native declarations into the module
-    /// table.
+    /// table. The result carries no [`Function::findex`]; use
+    /// [`ModuleBuilder::lower_at`] when the identity is known.
     pub fn lower(&mut self, ops: &[Opcode], reg_types: &[TypeRef]) -> Result<Function> {
         let f = lower_with(ops, reg_types, &self.info)?;
         self.natives.merge(&f.natives)?;
         self.lowered += 1;
         Ok(f)
+    }
+
+    /// Lower the function with index `findex`, tagging the result with it.
+    /// Self-recursion is only recognizable on a tagged function.
+    pub fn lower_at(
+        &mut self,
+        findex: usize,
+        ops: &[Opcode],
+        reg_types: &[TypeRef],
+    ) -> Result<Function> {
+        Ok(self.lower(ops, reg_types)?.with_findex(findex))
     }
 
     /// The union of native declarations seen so far.

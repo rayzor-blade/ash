@@ -19,14 +19,16 @@ full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
 The typed phi-SSA IR (`crates/air/src/v2`) is in place with lowering,
 verification, a serializer back to standard HL bytecode, a native-import
 declaration table, loop and alias-class analyses, and a pass manager running
-null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE. v1 remains
-the production path until the backends switch over.
+null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE at O2, plus
+tail-recursion elimination at O3. v1 remains the production path until the
+backends switch over.
 
 - **Remaining optimization passes over the typed IR**, in payoff order
   established by the mandelbrot trace: static field-offset resolution,
   inlining, escape analysis and scalar replacement (below), bounds-check
   elimination, box/unbox forwarding. (Field-load GVN with the HL alias
-  classes, dominance-based null-check elimination and LICM have landed.)
+  classes, dominance-based null-check elimination, LICM and tail-recursion
+  elimination have landed.)
 - **`Function::float_types` needs module info.** A `TypeRef` is an index into
   the module's type table, so `air` cannot tell floats apart on its own: the
   embedder answers `ModuleInfo::is_float`. Lowering through the bare `lower()`
@@ -60,14 +62,13 @@ the production path until the backends switch over.
   **Ordering matters in HL: inlining must come first.** `new C(...)` passes
   the fresh object to its constructor, so *every* allocation escapes by
   definition until that constructor is inlined; escape analysis run before
-  inlining will find nothing. Other guards: `Ref`-taken values are cells and
-  cannot be scalarized; an object live across a trap-region boundary is
-  currently pinned to a cell by the conservative in-region rule, so SROA
-  inside `try`/`catch` stays blocked until liveness refinement lands.
-  Removing an allocation is always safe for the conservative GC — it strictly
-  reduces what must be traced — but partial scalarization (some fields
-  promoted while the object still exists) must keep the object's memory and
-  the promoted values coherent.
+  inlining will find nothing.
+- **Tail-recursion elimination refuses cell parameters** rather than writing
+  through the cell: a pinned argument register is a memory slot whose address
+  may have escaped, and each real activation gets a fresh one. Narrowing this
+  to `Ref`-taken parameters only would let `Incr`/`Decr` counters through.
+  It also refuses when a non-argument `Param` is still read: the frame's
+  initial value cannot be named. Mutual recursion remains out of scope.
 - **JIT lowers from v2** instead of raw opcodes — the point at which
   malformed-IR crashes and verifier rejections become structurally impossible
   rather than blacklisted.
@@ -76,15 +77,6 @@ the production path until the backends switch over.
   registers actually live into the handler.
 - **Landing-pad design for exceptional-edge copies** — would lift the
   handler-block non-trivial-phi restriction.
-- **Tail-recursion elimination.** In phi-SSA this is a natural rewrite: a
-  `Call` to the enclosing function whose result flows straight into `Ret`
-  becomes a parallel copy of the arguments into the entry block's parameters
-  plus a jump to a loop header. It pays off on all three engines — the
-  interpreter recurses a host frame per HL call, so deep recursion costs
-  real stack there. Guards it must respect: a call inside a trap region is
-  not a tail call (the handler stays live), `Ref`-taken or `Incr`/`Decr`
-  parameters are cells and cannot be silently re-bound, and mutual recursion
-  is out of scope for a first cut.
 - **Loop vectorization.** Earlier analysis deferred this to LLVM's loop/SLP
   vectorizers, but that assumed LLVM was the only compiled backend. Cranelift
   has SIMD types and instructions (`i8x16`…`f64x2`, including a vector `fma`)

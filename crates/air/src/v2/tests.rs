@@ -14,7 +14,7 @@ use super::lower::{lower, lower_with, ModuleBuilder};
 use super::module::{ModuleTables, NativeImport, NativeTable, NoModuleInfo};
 use super::passes::{
     DeadCodeElim, FmaPeephole, GlobalValueNumbering, LoopInvariantCodeMotion, NullCheckElim,
-    OptLevel, Pass, PassManager, PassOptions, PassStats,
+    OptLevel, Pass, PassManager, PassOptions, PassStats, TailRecursionElim,
 };
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
@@ -76,17 +76,90 @@ fn assert_exact(ops: &[Opcode], reg_types: &[TypeRef]) -> Serialized {
 // mini interpreter over the serializable opcode subset used by fixtures
 // ---------------------------------------------------------------------------
 
+/// The functions a mini-interpreter run can call, keyed by findex.
+#[derive(Default)]
+struct MiniModule<'a> {
+    ints: Vec<i32>,
+    funs: HashMap<usize, (&'a [Opcode], usize)>,
+}
+
+impl<'a> MiniModule<'a> {
+    fn new(ints: &[i32]) -> Self {
+        MiniModule {
+            ints: ints.to_vec(),
+            funs: HashMap::new(),
+        }
+    }
+    fn with_fun(mut self, findex: usize, ops: &'a [Opcode], num_regs: usize) -> Self {
+        self.funs.insert(findex, (ops, num_regs));
+        self
+    }
+    fn call(&self, findex: usize, args: &[i64], fuel: &mut usize) -> i64 {
+        let (ops, num_regs) = *self
+            .funs
+            .get(&findex)
+            .unwrap_or_else(|| panic!("mini_eval: no body for findex {}", findex));
+        self.run(ops, args, num_regs, fuel)
+    }
+
+    fn run(&self, ops: &[Opcode], args: &[i64], num_regs: usize, fuel: &mut usize) -> i64 {
+        mini_run(self, ops, args, num_regs, fuel)
+    }
+}
+
 fn mini_eval(ops: &[Opcode], ints: &[i32], args: &[i64], num_regs: usize) -> i64 {
+    let m = MiniModule::new(ints);
+    let mut fuel = 100_000usize;
+    mini_run(&m, ops, args, num_regs, &mut fuel)
+}
+
+fn mini_run(
+    m: &MiniModule,
+    ops: &[Opcode],
+    args: &[i64],
+    num_regs: usize,
+    fuel: &mut usize,
+) -> i64 {
+    let ints = &m.ints;
     let mut regs = vec![0i64; num_regs];
     regs[..args.len()].copy_from_slice(args);
     let mut pc = 0usize;
-    let mut steps = 0usize;
     loop {
-        steps += 1;
-        assert!(steps < 100_000, "mini_eval: step limit exceeded");
+        *fuel = fuel.checked_sub(1).expect("mini_eval: step limit exceeded");
         assert!(pc < ops.len(), "mini_eval: pc {} out of bounds", pc);
         let jump = |off: i32| (pc as i64 + 1 + off as i64) as usize;
         match &ops[pc] {
+            Opcode::Call0 { dst, fun } => regs[dst.0 as usize] = m.call(fun.0, &[], fuel),
+            Opcode::Call1 { dst, fun, arg0 } => {
+                regs[dst.0 as usize] = m.call(fun.0, &[regs[arg0.0 as usize]], fuel)
+            }
+            Opcode::Call2 {
+                dst,
+                fun,
+                arg0,
+                arg1,
+            } => {
+                let a = [regs[arg0.0 as usize], regs[arg1.0 as usize]];
+                regs[dst.0 as usize] = m.call(fun.0, &a, fuel);
+            }
+            Opcode::Call3 {
+                dst,
+                fun,
+                arg0,
+                arg1,
+                arg2,
+            } => {
+                let a = [
+                    regs[arg0.0 as usize],
+                    regs[arg1.0 as usize],
+                    regs[arg2.0 as usize],
+                ];
+                regs[dst.0 as usize] = m.call(fun.0, &a, fuel);
+            }
+            Opcode::CallN { dst, fun, args } => {
+                let a: Vec<i64> = args.iter().map(|r| regs[r.0 as usize]).collect();
+                regs[dst.0 as usize] = m.call(fun.0, &a, fuel);
+            }
             Opcode::Int { dst, ptr } => regs[dst.0 as usize] = ints[ptr.0] as i64,
             Opcode::Bool { dst, value } => regs[dst.0 as usize] = *value as i64,
             Opcode::Mov { dst, src } => regs[dst.0 as usize] = regs[src.0 as usize],
@@ -3383,6 +3456,334 @@ fn passes_preserve_semantics() {
                 after,
                 "{}: optimization changed the result for {:?}\n{}",
                 c.name,
+                input,
+                ops_text(&out.ops)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tail-recursion elimination
+// ---------------------------------------------------------------------------
+
+/// `sum(n, acc) = n > 0 ? sum(n - 1, acc + n) : acc`, self-recursive at findex 0.
+fn fix_tail_sum() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            }, // zero
+            Opcode::JSGt {
+                a: Reg(0),
+                b: Reg(2),
+                offset: 1,
+            },
+            Opcode::Ret { ret: Reg(1) },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(0),
+            }, // acc += n
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            }, // one
+            Opcode::Sub {
+                dst: Reg(0),
+                a: Reg(0),
+                b: Reg(3),
+            }, // n -= 1
+            Opcode::Call2 {
+                dst: Reg(4),
+                fun: RefFun(0),
+                arg0: Reg(0),
+                arg1: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(4) },
+        ],
+        vec![t(0); 5],
+    )
+}
+
+/// `swap(a, b, n) = n > 0 ? swap(b, a, n - 1) : a`. The recursive call permutes
+/// its arguments, so de-SSA has to break a copy cycle on the back edge.
+fn fix_tail_swap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(0),
+            },
+            Opcode::JSGt {
+                a: Reg(2),
+                b: Reg(3),
+                offset: 1,
+            },
+            Opcode::Ret { ret: Reg(0) },
+            Opcode::Int {
+                dst: Reg(4),
+                ptr: RefInt(1),
+            },
+            Opcode::Sub {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(4),
+            },
+            Opcode::Call3 {
+                dst: Reg(5),
+                fun: RefFun(0),
+                arg0: Reg(1),
+                arg1: Reg(0),
+                arg2: Reg(2),
+            },
+            Opcode::Ret { ret: Reg(5) },
+        ],
+        vec![t(0); 6],
+    )
+}
+
+/// Same recursion, but `acc` is an `Incr` target, so it is a cell.
+fn fix_tail_cell_param() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            },
+            Opcode::JSGt {
+                a: Reg(0),
+                b: Reg(2),
+                offset: 1,
+            },
+            Opcode::Ret { ret: Reg(1) },
+            Opcode::Incr { dst: Reg(1) },
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            },
+            Opcode::Sub {
+                dst: Reg(0),
+                a: Reg(0),
+                b: Reg(3),
+            },
+            Opcode::Call2 {
+                dst: Reg(4),
+                fun: RefFun(0),
+                arg0: Reg(0),
+                arg1: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(4) },
+        ],
+        vec![t(0); 5],
+    )
+}
+
+/// The recursive call sits inside a `try`, so the handler has to stay live
+/// while the callee runs: it is not in tail position.
+fn fix_tail_in_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 3,
+            }, // handler at op 4
+            Opcode::Call1 {
+                dst: Reg(2),
+                fun: RefFun(0),
+                arg0: Reg(0),
+            },
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::Ret { ret: Reg(2) },
+            Opcode::Ret { ret: Reg(0) }, // handler
+        ],
+        vec![t(0), t(2), t(0)],
+    )
+}
+
+fn tre_stats(ops: &[Opcode], tys: &[TypeRef], findex: Option<usize>) -> (Function, PassStats) {
+    let mut f = lower(ops, tys).expect("lower");
+    if let Some(fx) = findex {
+        f.findex = Some(fx);
+    }
+    let stats = run_pass(&mut f, &TailRecursionElim, PassOptions::default());
+    verify(&f).unwrap_or_else(|e| panic!("verify after tre: {e}\n{}", f.dump()));
+    (f, stats)
+}
+
+fn count_calls(f: &Function, findex: usize) -> usize {
+    count_instrs(
+        f,
+        |i| matches!(i, Instr::Call { fun, .. } if *fun == findex),
+    )
+}
+
+#[test]
+fn tre_turns_a_self_tail_call_into_a_back_edge() {
+    let (ops, tys) = fix_tail_sum();
+    let (f, stats) = tre_stats(&ops, &tys, Some(0));
+    assert_eq!(stats.tail_calls, 1, "{}", f.dump());
+    assert_eq!(
+        count_calls(&f, 0),
+        0,
+        "the recursive call is gone\n{}",
+        f.dump()
+    );
+    // The header carries one phi per argument register, each on its own
+    // register, and the entry still defines the parameters.
+    let header = f
+        .blocks
+        .iter()
+        .find(|b| b.phis.len() == 2)
+        .unwrap_or_else(|| panic!("no loop header with two phis\n{}", f.dump()));
+    let mut regs: Vec<u32> = header.phis.iter().map(|p| f.value_reg(p.dst)).collect();
+    regs.sort_unstable();
+    assert_eq!(regs, vec![0, 1]);
+    // A back edge exists: some block now jumps to the header.
+    let hid = f
+        .blocks
+        .iter()
+        .position(|b| std::ptr::eq(b, header))
+        .expect("header is one of the blocks");
+    let preds = f.preds();
+    assert!(
+        preds[hid].len() >= 2,
+        "header should be entered from the entry and the back edge\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn tre_is_inert_without_a_function_identity() {
+    let (ops, tys) = fix_tail_sum();
+    let (f, stats) = tre_stats(&ops, &tys, None);
+    assert_eq!(stats, PassStats::default());
+    assert_eq!(count_calls(&f, 0), 1);
+}
+
+#[test]
+fn tre_refuses_a_call_to_another_function() {
+    let (ops, tys) = fix_tail_sum();
+    // The same body, but this function is findex 9: the call is not recursive.
+    let (f, stats) = tre_stats(&ops, &tys, Some(9));
+    assert_eq!(stats, PassStats::default());
+    assert_eq!(count_calls(&f, 0), 1);
+}
+
+#[test]
+fn tre_refuses_a_cell_parameter() {
+    let (ops, tys) = fix_tail_cell_param();
+    let (f, stats) = tre_stats(&ops, &tys, Some(0));
+    assert!(
+        f.cells.iter().any(|c| c.reg == 1),
+        "r1 must be pinned for this to be the negative control it claims to be"
+    );
+    assert_eq!(stats, PassStats::default(), "{}", f.dump());
+    assert_eq!(count_calls(&f, 0), 1);
+}
+
+#[test]
+fn tre_refuses_a_call_inside_a_trap_region() {
+    let (ops, tys) = fix_tail_in_trap();
+    let (f, stats) = tre_stats(&ops, &tys, Some(0));
+    assert!(
+        f.blocks.iter().any(|b| b.handler.is_some()),
+        "the fixture must actually open a trap region"
+    );
+    assert_eq!(stats, PassStats::default(), "{}", f.dump());
+    assert_eq!(count_calls(&f, 0), 1);
+}
+
+#[test]
+fn tre_fires_only_on_the_self_recursive_fixtures() {
+    let corpus: Vec<(&str, (Vec<Opcode>, Vec<TypeRef>))> = vec![
+        ("straight_line", fix_straight_line()),
+        ("diamond", fix_diamond()),
+        ("loop", fix_loop()),
+        ("loop_no_label", fix_loop_no_label()),
+        ("loop_invariant", fix_loop_invariant()),
+        ("switch", fix_switch()),
+        ("trap", fix_trap()),
+        ("nested_traps", fix_nested_traps()),
+        ("multi_endtrap", fix_multi_endtrap()),
+        ("incr", fix_incr()),
+        ("ref", fix_ref()),
+        ("setenumfield", fix_setenumfield()),
+        ("tail_sum", fix_tail_sum()),
+        ("tail_swap", fix_tail_swap()),
+        ("tail_cell_param", fix_tail_cell_param()),
+        ("tail_in_trap", fix_tail_in_trap()),
+    ];
+    let mut fired: Vec<&str> = Vec::new();
+    for (name, (ops, tys)) in &corpus {
+        let (_, stats) = tre_stats(ops, tys, Some(0));
+        if stats.tail_calls > 0 {
+            fired.push(name);
+        }
+    }
+    assert_eq!(
+        fired,
+        vec!["tail_sum", "tail_swap"],
+        "tail-recursion elimination fired on an unexpected set of fixtures"
+    );
+}
+
+#[test]
+fn tre_preserves_semantics_and_removes_the_recursion() {
+    for (name, (ops, tys), ints, inputs) in [
+        (
+            "tail_sum",
+            fix_tail_sum(),
+            vec![0, 1],
+            vec![vec![0i64, 0], vec![1, 0], vec![5, 100], vec![9, -3]],
+        ),
+        (
+            "tail_swap",
+            fix_tail_swap(),
+            vec![0, 1],
+            vec![
+                vec![7i64, 11, 0],
+                vec![7, 11, 1],
+                vec![7, 11, 2],
+                vec![7, 11, 5],
+            ],
+        ),
+    ] {
+        let mut f = lower(&ops, &tys).expect("lower");
+        f.findex = Some(0);
+        let stats = run_pass(&mut f, &TailRecursionElim, PassOptions::default());
+        assert_eq!(stats.tail_calls, 1, "{}: {}", name, f.dump());
+        verify(&f).unwrap_or_else(|e| panic!("{name}: verify: {e}\n{}", f.dump()));
+        let out = serialize(&f).expect("serialize");
+        assert!(
+            !out.ops.iter().any(|o| matches!(
+                o,
+                Opcode::Call0 { .. }
+                    | Opcode::Call1 { .. }
+                    | Opcode::Call2 { .. }
+                    | Opcode::Call3 { .. }
+                    | Opcode::Call4 { .. }
+                    | Opcode::CallN { .. }
+            )),
+            "{}: the serialized output still calls\n{}",
+            name,
+            ops_text(&out.ops)
+        );
+        // Re-lowering the output must still be valid IR.
+        let f2 = lower(&out.ops, &out.reg_types)
+            .unwrap_or_else(|e| panic!("{name}: re-lower: {e}\n{}", ops_text(&out.ops)));
+        verify(&f2).unwrap();
+
+        let m = MiniModule::new(&ints).with_fun(0, &ops, tys.len());
+        for input in &inputs {
+            let before = m.call(0, input, &mut 100_000);
+            let after = mini_eval(&out.ops, &ints, input, out.num_regs);
+            assert_eq!(
+                before,
+                after,
+                "{}: TRE changed the result for {:?}\n{}",
+                name,
                 input,
                 ops_text(&out.ops)
             );

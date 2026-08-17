@@ -72,9 +72,30 @@
 //! assumed: `serialize` rejects non-trivial phis at handler blocks, and
 //! `lower` rejects `IndirectCall`, which is a v1 hot-reload pass artifact
 //! rather than a bytecode opcode.
+//!
+//! ## Module declarations
+//!
+//! Lowering is handed a [`module::ModuleInfo`] — the embedder's view of the
+//! bytecode module — and records what it learns onto the function:
+//! [`ir::Function::natives`] holds one [`module::NativeImport`] per native the
+//! function references, and [`ir::Function::float_types`] holds the type refs
+//! that denote HL floats. Backends consume those declarations instead of
+//! re-deriving them, which is what lets Cranelift call `import_function`
+//! before its `FunctionBuilder` exists. [`lower::ModuleBuilder`] keeps the
+//! union of the declarations across every function it lowers.
+//!
+//! ## Passes
+//!
+//! [`passes::PassManager`] sequences the optimizations by opt level or from an
+//! explicit list, running to a fixed point and reporting per-pass statistics.
+//! Every pass preserves [`verify`], the trap-region invariants and the cell
+//! invariants; the rules each one commits to are documented on the pass
+//! itself.
 
 pub mod ir;
 pub mod lower;
+pub mod module;
+pub mod passes;
 pub mod serialize;
 pub mod verify;
 
@@ -85,6 +106,8 @@ pub use ir::{
     BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, Instr,
     MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,
 };
-pub use lower::lower;
+pub use lower::{lower, lower_with, ModuleBuilder};
+pub use module::{ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
+pub use passes::{OptLevel, Pass, PassManager, PassOptions, PassReport, PassStats};
 pub use serialize::{serialize, Serialized};
 pub use verify::verify;

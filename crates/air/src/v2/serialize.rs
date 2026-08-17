@@ -20,6 +20,17 @@
 //! which is always the case for plain lowered functions), `CallMethod`
 //! covers former `CallThis`, `FieldGet`/`FieldSet` cover former
 //! `GetThis`/`SetThis`.
+//!
+//! ## `Fma` is asymmetric by design
+//!
+//! HL bytecode has no fused multiply-add opcode, so `Fma { dst, a, b, c }` is
+//! emitted as `Mul tmp, a, b` + `Add dst, tmp, c` through a per-type
+//! temporary register appended to the register-type table. That restores the
+//! *unfused* arithmetic the input bytecode had — the interpreter path is
+//! numerically identical to the pre-fusion program — while backends that
+//! consume the IR directly emit a hardware FMA. `serialize(lower(ops))` is
+//! therefore behaviour-preserving but not instruction-identical once the FMA
+//! peephole has run.
 
 use super::ir::*;
 use crate::opcodes::{
@@ -254,6 +265,10 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
 
     let rg = |v: ValueId| Reg(f.value_reg(v));
     let cr = |c: CellId| Reg(f.cells[c.idx()].reg);
+    // One scratch register per float type, holding the product while `Fma` is
+    // split back into `Mul` + `Add`. Fresh registers are never read by
+    // anything else, so the split is correct for every operand aliasing.
+    let mut fma_temps: BTreeMap<TypeRef, u32> = BTreeMap::new();
 
     for (pos, entry) in entries.iter().enumerate() {
         starts[pos] = ops.len();
@@ -283,7 +298,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
             Entry::Real(b) => {
                 let blk = &f.blocks[*b];
                 for ins in &blk.instrs {
-                    emit_instr(f, ins, &rg, &cr, &mut ops)?;
+                    emit_instr(f, ins, &rg, &cr, &mut ops, &mut reg_types, &mut fma_temps)?;
                 }
                 if let Some(movs) = &inline[*b] {
                     for &(d, s) in movs {
@@ -531,11 +546,13 @@ fn cond_opcode(cond: CondKind, a: Reg, b: Option<Reg>) -> Result<Opcode> {
 }
 
 fn emit_instr(
-    _f: &Function,
+    f: &Function,
     ins: &Instr,
     rg: &dyn Fn(ValueId) -> Reg,
     cr: &dyn Fn(CellId) -> Reg,
     ops: &mut Vec<Opcode>,
+    reg_types: &mut Vec<TypeRef>,
+    fma_temps: &mut BTreeMap<TypeRef, u32>,
 ) -> Result<()> {
     match ins {
         Instr::Param { .. } => {}
@@ -582,6 +599,24 @@ fn emit_instr(
                 BinOp::And => Opcode::And { dst, a, b },
                 BinOp::Or => Opcode::Or { dst, a, b },
                 BinOp::Xor => Opcode::Xor { dst, a, b },
+            });
+        }
+        Instr::Fma { dst, a, b, c } => {
+            let ty = f.value_ty(*dst);
+            let tmp = *fma_temps.entry(ty).or_insert_with(|| {
+                let r = reg_types.len() as u32;
+                reg_types.push(ty);
+                r
+            });
+            ops.push(Opcode::Mul {
+                dst: Reg(tmp),
+                a: rg(*a),
+                b: rg(*b),
+            });
+            ops.push(Opcode::Add {
+                dst: rg(*dst),
+                a: Reg(tmp),
+                b: rg(*c),
             });
         }
         Instr::UnOp { op, dst, src } => {

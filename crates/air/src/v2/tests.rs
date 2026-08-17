@@ -9,10 +9,13 @@
 //! behavior, plus register-type-table preservation.
 
 use super::ir::*;
-use super::lower::lower;
+use super::lower::{lower, lower_with, ModuleBuilder};
+use super::module::{ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
+use super::passes::{FmaPeephole, OptLevel, Pass, PassManager, PassOptions, PassStats};
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
 use crate::opcodes::*;
+use std::collections::HashMap;
 
 fn t(n: u32) -> TypeRef {
     TypeRef(n)
@@ -792,12 +795,7 @@ fn lower_rejects_indirect_call() {
 // ---------------------------------------------------------------------------
 
 fn empty_func(reg_types: Vec<TypeRef>) -> Function {
-    Function {
-        values: vec![],
-        cells: vec![],
-        blocks: vec![],
-        reg_types,
-    }
+    Function::new(reg_types)
 }
 
 #[test]
@@ -1440,4 +1438,696 @@ fn condense_contracts_chains() {
     let c = condense_cfg(&f);
     // entry+cond contract; then/else/join stay: 4 nodes
     assert_eq!(c.num_nodes, 4);
+}
+
+// ---------------------------------------------------------------------------
+// module declarations: native imports and float types
+// ---------------------------------------------------------------------------
+
+/// Module info describing two natives (findex 5 and 7) and one float type.
+fn demo_module() -> ModuleTables {
+    let mut natives = NativeTable::new();
+    natives
+        .declare(NativeImport::new(5, "std", "alloc_bytes", vec![t(0)], t(2)))
+        .unwrap();
+    natives
+        .declare(NativeImport::new(7, "std", "sin", vec![t(1)], t(1)))
+        .unwrap();
+    ModuleTables::new()
+        .with_natives(natives)
+        .with_float_types([t(1)])
+}
+
+fn fix_calls_natives() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            // findex 5 is a native, findex 6 is a bytecode function.
+            Opcode::Call1 {
+                dst: Reg(2),
+                fun: RefFun(5),
+                arg0: Reg(0),
+            },
+            Opcode::Call1 {
+                dst: Reg(2),
+                fun: RefFun(6),
+                arg0: Reg(0),
+            },
+            Opcode::Call1 {
+                dst: Reg(2),
+                fun: RefFun(5),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0), t(0), t(2)],
+    )
+}
+
+#[test]
+fn lower_records_native_imports() {
+    let (ops, tys) = fix_calls_natives();
+    let f = lower_with(&ops, &tys, &demo_module()).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.natives.len(), 1, "only the referenced native is declared");
+    let imp = f.natives.get(5).expect("findex 5 declared");
+    assert_eq!(imp.lib, "std");
+    assert_eq!(imp.name, "alloc_bytes");
+    assert_eq!(imp.args, vec![t(0)]);
+    assert_eq!(imp.ret, t(2));
+    assert_eq!(imp.symbol(), "std@alloc_bytes");
+    assert!(
+        f.natives.get(6).is_none(),
+        "bytecode functions are not native imports"
+    );
+    assert!(!f.natives.get(5).unwrap().name.is_empty());
+}
+
+#[test]
+fn lower_records_closure_targets_as_imports() {
+    let ops = vec![
+        Opcode::StaticClosure {
+            dst: Reg(1),
+            fun: RefFun(7),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let f = lower_with(&ops, &[t(0), t(4)], &demo_module()).unwrap();
+    assert_eq!(f.natives.len(), 1);
+    assert_eq!(f.natives.get(7).unwrap().name, "sin");
+}
+
+#[test]
+fn lower_without_module_info_declares_nothing() {
+    let (ops, tys) = fix_calls_natives();
+    let f = lower(&ops, &tys).unwrap();
+    assert!(f.natives.is_empty());
+    assert!(f.float_types.is_empty());
+    let f2 = lower_with(&ops, &tys, &NoModuleInfo).unwrap();
+    assert!(f2.natives.is_empty());
+}
+
+#[test]
+fn lower_records_float_types() {
+    let (ops, tys) = fix_float_mul_add();
+    let f = lower_with(&ops, &tys, &demo_module()).unwrap();
+    assert_eq!(f.float_types, vec![t(1)]);
+    assert!(f.is_float(t(1)));
+    assert!(!f.is_float(t(0)));
+}
+
+#[test]
+fn module_builder_remembers_declarations_across_lowerings() {
+    let mut mb = ModuleBuilder::new(demo_module());
+    let (ops, tys) = fix_calls_natives();
+    let f1 = mb.lower(&ops, &tys).unwrap();
+    assert_eq!(mb.natives().len(), 1);
+
+    let ops2 = vec![
+        Opcode::Call1 {
+            dst: Reg(1),
+            fun: RefFun(7),
+            arg0: Reg(0),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let f2 = mb.lower(&ops2, &[t(1), t(1)]).unwrap();
+    assert_eq!(mb.lowered(), 2);
+    assert_eq!(
+        mb.natives().len(),
+        2,
+        "the module table is the union of both functions"
+    );
+    // Each function still carries only what it references.
+    assert_eq!(f1.natives.len(), 1);
+    assert_eq!(f2.natives.len(), 1);
+    assert!(mb.natives().contains(5) && mb.natives().contains(7));
+    let order: Vec<usize> = mb.natives().iter().map(|i| i.findex).collect();
+    assert_eq!(order, vec![5, 7], "declaration order is deterministic");
+}
+
+#[test]
+fn native_declarations_survive_the_round_trip() {
+    let (ops, tys) = fix_calls_natives();
+    let info = demo_module();
+    let f1 = lower_with(&ops, &tys, &info).unwrap();
+    verify(&f1).unwrap();
+    let out = serialize(&f1).unwrap();
+    let f2 = lower_with(&out.ops, &out.reg_types, &info).unwrap();
+    verify(&f2).unwrap();
+    assert_eq!(f1.natives, f2.natives);
+    assert_eq!(f1.float_types, f2.float_types);
+}
+
+#[test]
+fn verify_rejects_unsorted_float_types() {
+    let mut f = empty_func(vec![t(0)]);
+    let v = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Int { dst: v, idx: 0 }],
+        term: Terminator::Ret { value: v },
+        handler: None,
+    });
+    f.float_types = vec![t(3), t(1)];
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("float type table"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// float fixtures + IR-level float evaluator (the FMA rewrite is only visible
+// before serialization, which un-fuses it again)
+// ---------------------------------------------------------------------------
+
+/// `r3 = r0 * r1; r4 = r3 + r2; ret r4`
+fn fix_float_mul_add() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Mul {
+                dst: Reg(3),
+                a: Reg(0),
+                b: Reg(1),
+            },
+            Opcode::Add {
+                dst: Reg(4),
+                a: Reg(3),
+                b: Reg(2),
+            },
+            Opcode::Ret { ret: Reg(4) },
+        ],
+        vec![t(1); 5],
+    )
+}
+
+fn float_fn(ops: &[Opcode], tys: &[TypeRef]) -> Function {
+    let f = lower_with(ops, tys, &demo_module()).expect("lower");
+    verify(&f).expect("verify");
+    f
+}
+
+fn run_pass(f: &mut Function, pass: &dyn Pass, opts: PassOptions) -> PassStats {
+    let stats = pass.run(f, &opts).expect("pass failed");
+    verify(f).unwrap_or_else(|e| panic!("{} broke the IR: {e}\n{}", pass.name(), f.dump()));
+    stats
+}
+
+fn count_instrs(f: &Function, pred: impl Fn(&Instr) -> bool) -> usize {
+    f.blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| pred(i))
+        .count()
+}
+
+/// Evaluate a float function over the IR, so `Fma` semantics are observable.
+fn eval_f64(f: &Function, floats: &[f64], args: &[f64]) -> f64 {
+    let mut vals: HashMap<ValueId, f64> = HashMap::new();
+    let mut cur = BlockId(0);
+    let mut prev: Option<BlockId> = None;
+    for _ in 0..10_000 {
+        let blk = &f.blocks[cur.idx()];
+        let mut committed: Vec<(ValueId, f64)> = Vec::new();
+        for phi in &blk.phis {
+            let p = prev.expect("phi outside the entry block");
+            let src = phi
+                .incoming
+                .iter()
+                .find(|(b, _)| *b == p)
+                .expect("phi source for predecessor")
+                .1;
+            committed.push((phi.dst, vals[&src]));
+        }
+        for (d, v) in committed {
+            vals.insert(d, v);
+        }
+        for ins in &blk.instrs {
+            match ins {
+                Instr::Param { dst, reg } => {
+                    vals.insert(*dst, args.get(*reg as usize).copied().unwrap_or(0.0));
+                }
+                Instr::Float { dst, idx } => {
+                    vals.insert(*dst, floats[*idx]);
+                }
+                Instr::Copy { dst, src } => {
+                    let v = vals[src];
+                    vals.insert(*dst, v);
+                }
+                Instr::BinOp { op, dst, a, b } => {
+                    let (x, y) = (vals[a], vals[b]);
+                    let r = match op {
+                        BinOp::Add => x + y,
+                        BinOp::Sub => x - y,
+                        BinOp::Mul => x * y,
+                        BinOp::SDiv => x / y,
+                        other => panic!("eval_f64: unsupported op {:?}", other),
+                    };
+                    vals.insert(*dst, r);
+                }
+                Instr::UnOp {
+                    op: UnOp::Neg,
+                    dst,
+                    src,
+                } => {
+                    let v = -vals[src];
+                    vals.insert(*dst, v);
+                }
+                Instr::Fma { dst, a, b, c } => {
+                    let r = vals[a].mul_add(vals[b], vals[c]);
+                    vals.insert(*dst, r);
+                }
+                other => panic!("eval_f64: unsupported instruction {:?}", other),
+            }
+        }
+        match &blk.term {
+            Terminator::Ret { value } => return vals[value],
+            Terminator::Jump { target } => {
+                prev = Some(cur);
+                cur = *target;
+            }
+            Terminator::CondJump {
+                cond,
+                a,
+                b,
+                if_true,
+                if_false,
+            } => {
+                let x = vals[a];
+                let taken = match cond {
+                    CondKind::True => x != 0.0,
+                    CondKind::False => x == 0.0,
+                    CondKind::SLt => x < vals[&b.unwrap()],
+                    CondKind::SGte => x >= vals[&b.unwrap()],
+                    other => panic!("eval_f64: unsupported cond {:?}", other),
+                };
+                prev = Some(cur);
+                cur = if taken { *if_true } else { *if_false };
+            }
+            other => panic!("eval_f64: unsupported terminator {:?}", other),
+        }
+    }
+    panic!("eval_f64: step limit exceeded");
+}
+
+/// Float mini-interpreter over serialized opcodes.
+fn mini_eval_f64(ops: &[Opcode], args: &[f64], num_regs: usize) -> f64 {
+    let mut regs = vec![0f64; num_regs];
+    regs[..args.len()].copy_from_slice(args);
+    let mut pc = 0usize;
+    loop {
+        assert!(pc < ops.len(), "mini_eval_f64: pc out of bounds");
+        match &ops[pc] {
+            Opcode::Mov { dst, src } => regs[dst.0 as usize] = regs[src.0 as usize],
+            Opcode::Add { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] + regs[b.0 as usize]
+            }
+            Opcode::Sub { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] - regs[b.0 as usize]
+            }
+            Opcode::Mul { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] * regs[b.0 as usize]
+            }
+            Opcode::Neg { dst, src } => regs[dst.0 as usize] = -regs[src.0 as usize],
+            Opcode::Label | Opcode::Nop => {}
+            Opcode::Ret { ret } => return regs[ret.0 as usize],
+            other => panic!("mini_eval_f64: unsupported opcode {:?}", other),
+        }
+        pc += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FMA peephole
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fma_fuses_mul_into_add() {
+    let (ops, tys) = fix_float_mul_add();
+    let mut f = float_fn(&ops, &tys);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 1);
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Fma { .. })), 1);
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::BinOp { op: BinOp::Mul, .. })),
+        0,
+        "the multiply is consumed"
+    );
+}
+
+#[test]
+fn fma_fuses_when_product_is_the_right_addend() {
+    // r4 = r2 + (r0 * r1): the multiply feeds the second operand.
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 1);
+    let fma = f.blocks[1]
+        .instrs
+        .iter()
+        .find_map(|i| match i {
+            Instr::Fma { a, b, c, .. } => Some((*a, *b, *c)),
+            _ => None,
+        })
+        .expect("fused");
+    assert_eq!(f.value_reg(fma.0), 0);
+    assert_eq!(f.value_reg(fma.1), 1);
+    assert_eq!(f.value_reg(fma.2), 2, "the addend is the other operand");
+}
+
+#[test]
+fn fma_sub_with_product_as_minuend_negates_the_addend() {
+    // r4 = (r0 * r1) - r2  ->  n = -r2; r4 = fma(r0, r1, n)
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Sub {
+            dst: Reg(4),
+            a: Reg(3),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 1);
+    let body = &f.blocks[1].instrs;
+    assert!(
+        matches!(body[0], Instr::UnOp { op: UnOp::Neg, .. }),
+        "negation of the subtrahend comes first: {:?}",
+        body
+    );
+    assert!(matches!(body[1], Instr::Fma { .. }));
+    // Semantics: a*b - c, one rounding.
+    let args = [3.0e16, 3.0, 1.0];
+    assert_eq!(eval_f64(&f, &[], &args), args[0].mul_add(args[1], -args[2]));
+}
+
+#[test]
+fn fma_sub_with_product_as_subtrahend_negates_a_multiplicand() {
+    // r4 = r2 - (r0 * r1)  ->  n = -r0; r4 = fma(n, r1, r2)
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Sub {
+            dst: Reg(4),
+            a: Reg(2),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 1);
+    let body = &f.blocks[1].instrs;
+    assert!(
+        matches!(body[0], Instr::UnOp { op: UnOp::Neg, .. }),
+        "the multiply is replaced in place by the negation: {:?}",
+        body
+    );
+    let neg_dst = body[0].dst().unwrap();
+    assert!(
+        matches!(body[1], Instr::Fma { a, .. } if a == neg_dst),
+        "the negated multiplicand feeds the fma"
+    );
+    let args = [3.0e16, 3.0, 1.0];
+    assert_eq!(
+        eval_f64(&f, &[], &args),
+        (-args[0]).mul_add(args[1], args[2])
+    );
+}
+
+#[test]
+fn fma_refuses_when_the_product_has_two_uses() {
+    // r3 = r0 * r1; r4 = r3 + r2; r5 = r3 + r4 — r3 is used twice.
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(3),
+            b: Reg(2),
+        },
+        Opcode::Add {
+            dst: Reg(5),
+            a: Reg(3),
+            b: Reg(4),
+        },
+        Opcode::Ret { ret: Reg(5) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 6]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 0, "a two-use product must not be fused");
+    assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Fma { .. })), 0);
+}
+
+#[test]
+fn fma_refuses_non_float_types() {
+    let (ops, _) = fix_float_mul_add();
+    let tys = vec![t(0); 5]; // t(0) is not a declared float type
+    let mut f = lower_with(&ops, &tys, &demo_module()).unwrap();
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 0);
+}
+
+#[test]
+fn fma_refuses_across_blocks() {
+    // The multiply and the add live in different blocks.
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::JAlways { offset: 0 },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(3),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 0, "cross-block fusion is refused");
+}
+
+#[test]
+fn fma_refuses_when_an_operand_register_is_overwritten() {
+    // r3 = r0 * r1; r0 = r2 (clobbers an operand); r4 = r3 + r2
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(3),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Mov {
+            dst: Reg(0),
+            src: Reg(2),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(3),
+            b: Reg(2),
+        },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(
+        stats.fused, 0,
+        "operand register no longer holds the operand"
+    );
+}
+
+#[test]
+fn fma_is_inert_when_disabled() {
+    let (ops, tys) = fix_float_mul_add();
+    let mut f = float_fn(&ops, &tys);
+    let before = f.dump();
+    let opts = PassOptions {
+        fma: false,
+        ..PassOptions::default()
+    };
+    let stats = run_pass(&mut f, &FmaPeephole, opts);
+    assert_eq!(stats, PassStats::default());
+    assert_eq!(f.dump(), before, "strict-IEEE mode leaves the IR alone");
+
+    // The same pipeline through the manager.
+    let mut f2 = float_fn(&ops, &tys);
+    let pm = PassManager::new(OptLevel::O2).with_options(opts);
+    let report = pm.run(&mut f2).unwrap();
+    assert_eq!(report.stats_for("fma").fused, 0);
+    assert_eq!(count_instrs(&f2, |i| matches!(i, Instr::Fma { .. })), 0);
+}
+
+#[test]
+fn fma_result_matches_mul_add_and_differs_from_unfused() {
+    let (ops, tys) = fix_float_mul_add();
+    let mut f = float_fn(&ops, &tys);
+    // (1+e)^2 rounds to 1+2e, so the unfused sum cancels to zero while the
+    // fused one keeps the exact product's tail.
+    let args = [
+        1.0 + f64::EPSILON,
+        1.0 + f64::EPSILON,
+        -(1.0 + 2.0 * f64::EPSILON),
+    ];
+    let unfused = eval_f64(&f, &[], &args);
+    run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    let fused = eval_f64(&f, &[], &args);
+    assert_eq!(fused, args[0].mul_add(args[1], args[2]));
+    assert_ne!(
+        fused, unfused,
+        "the fixture must actually distinguish one rounding from two"
+    );
+    assert_eq!(unfused, args[0] * args[1] + args[2]);
+}
+
+#[test]
+fn fma_serializes_back_to_mul_add() {
+    let (ops, tys) = fix_float_mul_add();
+    let mut f = float_fn(&ops, &tys);
+    run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    let out = serialize(&f).unwrap();
+    assert_eq!(
+        out.ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::Mul { .. }))
+            .count(),
+        1,
+        "HL has no fma opcode: {}",
+        ops_text(&out.ops)
+    );
+    assert_eq!(
+        out.ops
+            .iter()
+            .filter(|o| matches!(o, Opcode::Add { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        out.num_regs > tys.len(),
+        "a scratch register carries the product"
+    );
+    // The un-fused output reproduces the original bytecode's arithmetic.
+    let args = [
+        1.0 + f64::EPSILON,
+        1.0 + f64::EPSILON,
+        -(1.0 + 2.0 * f64::EPSILON),
+    ];
+    assert_eq!(
+        mini_eval_f64(&out.ops, &args, out.num_regs),
+        args[0] * args[1] + args[2]
+    );
+    // And it re-lowers to a verifiable function.
+    let f2 = lower_with(&out.ops, &out.reg_types, &demo_module()).unwrap();
+    verify(&f2).unwrap();
+    check_cfg_equivalent(&f, &f2).unwrap();
+}
+
+#[test]
+fn fma_sub_forms_serialize_to_the_original_arithmetic() {
+    for (sub_ops, expect) in [
+        (
+            vec![
+                Opcode::Mul {
+                    dst: Reg(3),
+                    a: Reg(0),
+                    b: Reg(1),
+                },
+                Opcode::Sub {
+                    dst: Reg(4),
+                    a: Reg(3),
+                    b: Reg(2),
+                },
+                Opcode::Ret { ret: Reg(4) },
+            ],
+            0,
+        ),
+        (
+            vec![
+                Opcode::Mul {
+                    dst: Reg(3),
+                    a: Reg(0),
+                    b: Reg(1),
+                },
+                Opcode::Sub {
+                    dst: Reg(4),
+                    a: Reg(2),
+                    b: Reg(3),
+                },
+                Opcode::Ret { ret: Reg(4) },
+            ],
+            1,
+        ),
+    ] {
+        let args = [1.0 + f64::EPSILON, 1.0 + f64::EPSILON, 2.0];
+        let mut f = float_fn(&sub_ops, &vec![t(1); 5]);
+        let unfused_ir = eval_f64(&f, &[], &args);
+        run_pass(&mut f, &FmaPeephole, PassOptions::default());
+        let out = serialize(&f).unwrap();
+        assert_eq!(
+            mini_eval_f64(&out.ops, &args, out.num_regs),
+            unfused_ir,
+            "serialization restores the unfused arithmetic (form {})",
+            expect
+        );
+        let f2 = lower_with(&out.ops, &out.reg_types, &demo_module()).unwrap();
+        verify(&f2).unwrap();
+    }
+}
+
+#[test]
+fn fma_fuses_one_product_per_add() {
+    // r4 = r0*r1; r5 = r2*r2; r6 = r4 + r5 — one fusion, the other multiply
+    // survives as the addend. This is the `i*i + j*j` shape.
+    let ops = vec![
+        Opcode::Mul {
+            dst: Reg(4),
+            a: Reg(0),
+            b: Reg(1),
+        },
+        Opcode::Mul {
+            dst: Reg(5),
+            a: Reg(2),
+            b: Reg(2),
+        },
+        Opcode::Add {
+            dst: Reg(6),
+            a: Reg(4),
+            b: Reg(5),
+        },
+        Opcode::Ret { ret: Reg(6) },
+    ];
+    let mut f = float_fn(&ops, &vec![t(1); 7]);
+    let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
+    assert_eq!(stats.fused, 1);
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::BinOp { op: BinOp::Mul, .. })),
+        1,
+        "the addend multiply stays"
+    );
+    let args = [3.0, 4.0, 5.0];
+    assert_eq!(
+        eval_f64(&f, &[], &args),
+        args[0].mul_add(args[1], args[2] * args[2])
+    );
 }

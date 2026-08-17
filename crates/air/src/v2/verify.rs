@@ -266,6 +266,15 @@ pub fn verify(f: &Function) -> Result<()> {
                         bail!("b{}: BinOp operand/result type mismatch", b);
                     }
                 }
+                Instr::Fma { dst, a, b: mb, c } => {
+                    let ty = f.value_ty(*dst);
+                    if f.value_ty(*a) != ty || f.value_ty(*mb) != ty || f.value_ty(*c) != ty {
+                        bail!("b{}: Fma operand/result type mismatch", b);
+                    }
+                    if !f.is_float(ty) {
+                        bail!("b{}: Fma on non-float type {:?}", b, ty);
+                    }
+                }
                 Instr::UnOp { dst, src, .. } => {
                     if f.value_ty(*dst) != f.value_ty(*src) {
                         bail!("b{}: UnOp operand/result type mismatch", b);
@@ -297,6 +306,19 @@ pub fn verify(f: &Function) -> Result<()> {
 
     // ---- balanced trap regions (block-level dataflow) ----------------------
     verify_trap_regions(f, &succs)?;
+
+    // ---- module declarations -----------------------------------------------
+    for imp in f.natives.iter() {
+        if imp.name.is_empty() {
+            bail!("native declaration for findex {} has no name", imp.findex);
+        }
+        if f.natives.get(imp.findex) != Some(imp) {
+            bail!("native table is not keyed consistently by findex");
+        }
+    }
+    if f.float_types.windows(2).any(|w| w[0] >= w[1]) {
+        bail!("float type table must be sorted and duplicate-free");
+    }
 
     Ok(())
 }

@@ -12,14 +12,22 @@
 //! 5. CFG construction including exceptional edges to trap handlers.
 //! 6. Phi placement at iterated dominance frontiers + dominator-tree renaming
 //!    walk that converts ops to typed [`Instr`]s with [`ValueId`] operands.
+//! 7. Module-declaration recording: every native the function references gets
+//!    a [`NativeImport`] entry in [`Function::natives`], and the float type
+//!    refs among the register types land in [`Function::float_types`].
 
 use super::ir::*;
+use super::module::{ModuleInfo, NativeTable, NoModuleInfo};
 use crate::dominance::DominatorTree;
 use crate::opcodes::{Opcode, Reg};
 use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Lower HL opcodes to an AIR v2 function.
+/// Lower HL opcodes to an AIR v2 function without module declarations.
+///
+/// Convenience wrapper over [`lower_with`] with [`NoModuleInfo`]: the result
+/// has an empty native table and no float types, which makes every
+/// module-info-dependent rewrite inert.
 ///
 /// * `ops` — the function's opcode array (raw bytecode; `IndirectCall` is a
 ///   v1 pass artifact and is rejected).
@@ -27,6 +35,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 ///   register). Call return/argument types are not needed: destination
 ///   register types carry all result types.
 pub fn lower(ops: &[Opcode], reg_types: &[TypeRef]) -> Result<Function> {
+    lower_with(ops, reg_types, &NoModuleInfo)
+}
+
+/// Lower HL opcodes to an AIR v2 function, recording module declarations.
+///
+/// `info` is the embedder's view of the bytecode module. Lowering asks it for
+/// the native declaration behind every `findex` the function references
+/// (`Call*`, `StaticClosure`, `InstanceClosure`) and for the float type refs
+/// among the register types, and stores both on the returned function so
+/// backends never re-derive them.
+pub fn lower_with(
+    ops: &[Opcode],
+    reg_types: &[TypeRef],
+    info: &dyn ModuleInfo,
+) -> Result<Function> {
     if ops.is_empty() {
         bail!("cannot lower an empty function");
     }
@@ -352,11 +375,18 @@ pub fn lower(ops: &[Opcode], reg_types: &[TypeRef]) -> Result<Function> {
     }
 
     // ---- 6b. renaming walk + instruction building ------------------------
-    let mut func = Function {
-        values: Vec::new(),
-        cells,
-        blocks: Vec::new(),
-        reg_types: reg_types.to_vec(),
+    let mut func = Function::new(reg_types.to_vec());
+    func.cells = cells;
+    func.natives = collect_natives(ops, &reachable, info)?;
+    func.float_types = {
+        let mut fts: Vec<TypeRef> = reg_types
+            .iter()
+            .copied()
+            .filter(|&t| info.is_float(t))
+            .collect();
+        fts.sort_unstable();
+        fts.dedup();
+        fts
     };
 
     // Per-block phi state: (base reg, dst value, incoming).
@@ -464,6 +494,109 @@ pub fn lower(ops: &[Opcode], reg_types: &[TypeRef]) -> Result<Function> {
         });
     }
     Ok(func)
+}
+
+/// Lowers a whole module's functions against one [`ModuleInfo`], accumulating
+/// the native forward declarations across every lowering.
+///
+/// Each lowered [`Function`] carries the declarations *it* references; the
+/// builder additionally keeps the union in [`ModuleBuilder::natives`], which
+/// is the table a backend walks once to emit its module-level imports (LLVM
+/// `declare`s, Cranelift `import_function` calls, symbol-table bindings)
+/// before any function body is built.
+pub struct ModuleBuilder<M: ModuleInfo> {
+    info: M,
+    natives: NativeTable,
+    lowered: usize,
+}
+
+impl<M: ModuleInfo> ModuleBuilder<M> {
+    pub fn new(info: M) -> Self {
+        ModuleBuilder {
+            info,
+            natives: NativeTable::new(),
+            lowered: 0,
+        }
+    }
+
+    /// Lower one function, merging its native declarations into the module
+    /// table.
+    pub fn lower(&mut self, ops: &[Opcode], reg_types: &[TypeRef]) -> Result<Function> {
+        let f = lower_with(ops, reg_types, &self.info)?;
+        self.natives.merge(&f.natives)?;
+        self.lowered += 1;
+        Ok(f)
+    }
+
+    /// The union of native declarations seen so far.
+    pub fn natives(&self) -> &NativeTable {
+        &self.natives
+    }
+
+    /// Number of functions lowered through this builder.
+    pub fn lowered(&self) -> usize {
+        self.lowered
+    }
+
+    pub fn info(&self) -> &M {
+        &self.info
+    }
+
+    /// Consume the builder, yielding the accumulated declarations.
+    pub fn into_natives(self) -> NativeTable {
+        self.natives
+    }
+}
+
+/// Every function index a reachable op references, in first-reference order.
+/// `Call*` targets plus the closure-forming opcodes, which also need the
+/// callee declared.
+fn referenced_findexes(ops: &[Opcode], reachable: &[bool]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let push = |f: usize, out: &mut Vec<usize>| {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    };
+    for (i, op) in ops.iter().enumerate() {
+        if !reachable[i] {
+            continue;
+        }
+        match op {
+            Opcode::Call0 { fun, .. }
+            | Opcode::Call1 { fun, .. }
+            | Opcode::Call2 { fun, .. }
+            | Opcode::Call3 { fun, .. }
+            | Opcode::Call4 { fun, .. }
+            | Opcode::CallN { fun, .. }
+            | Opcode::StaticClosure { fun, .. }
+            | Opcode::InstanceClosure { fun, .. } => push(fun.0, &mut out),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Forward declarations for the natives among the referenced findexes.
+fn collect_natives(
+    ops: &[Opcode],
+    reachable: &[bool],
+    info: &dyn ModuleInfo,
+) -> Result<NativeTable> {
+    let mut table = NativeTable::new();
+    for findex in referenced_findexes(ops, reachable) {
+        if let Some(imp) = info.native(findex) {
+            if imp.findex != findex {
+                bail!(
+                    "module info returned native findex {} for lookup of findex {}",
+                    imp.findex,
+                    findex
+                );
+            }
+            table.declare(imp)?;
+        }
+    }
+    Ok(table)
 }
 
 // ---------------------------------------------------------------------------

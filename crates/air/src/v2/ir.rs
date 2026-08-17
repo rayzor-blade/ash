@@ -1,6 +1,7 @@
 //! Core AIR v2 data structures: typed SSA values, blocks, instructions,
 //! terminators, and the effect lattice.
 
+use super::module::NativeTable;
 use std::fmt;
 
 /// Reference to a type in the module type table.
@@ -245,6 +246,20 @@ pub enum Instr {
         a: ValueId,
         b: ValueId,
     },
+    /// `dst = a * b + c` computed with a **single rounding** of the exact
+    /// product-plus-addend, i.e. `f64::mul_add` semantics.
+    ///
+    /// Formed only by the FMA peephole (see
+    /// [`passes::fma`](super::passes::fma)) and only for float types. HL
+    /// bytecode has no fused opcode, so [`serialize`](super::serialize) lowers
+    /// it back to `Mul` + `Add`: the IR form exists for backends that consume
+    /// AIR directly and emit a hardware FMA.
+    Fma {
+        dst: ValueId,
+        a: ValueId,
+        b: ValueId,
+        c: ValueId,
+    },
     UnOp {
         op: UnOp,
         dst: ValueId,
@@ -457,6 +472,7 @@ impl Instr {
             | Instr::String { dst, .. }
             | Instr::Null { dst }
             | Instr::BinOp { dst, .. }
+            | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
@@ -532,6 +548,7 @@ impl Instr {
             | Instr::SetGlobal { src, .. }
             | Instr::CellSet { src, .. } => vec![*src],
             Instr::BinOp { a, b, .. } => vec![*a, *b],
+            Instr::Fma { a, b, c, .. } => vec![*a, *b, *c],
             Instr::Call { args, .. } | Instr::CallMethod { args, .. } => args.clone(),
             Instr::CallClosure { fun, args, .. } => {
                 let mut v = vec![*fun];
@@ -571,6 +588,7 @@ impl Instr {
             | Instr::String { .. }
             | Instr::Null { .. }
             | Instr::UnOp { .. }
+            | Instr::Fma { .. }
             | Instr::TypeConst { .. }
             | Instr::CellRef { .. }
             | Instr::RefOffset { .. }
@@ -643,6 +661,148 @@ impl Instr {
             Instr::BinOp { op, .. } => op.can_trap(),
             Instr::Cast { kind, .. } => *kind == CastKind::SafeCast,
             _ => false,
+        }
+    }
+
+    /// Rewrite every value this instruction reads. The order of visits
+    /// matches [`Instr::uses`].
+    pub fn map_uses(&mut self, m: &mut dyn FnMut(ValueId) -> ValueId) {
+        let mut one = |v: &mut ValueId| *v = m(*v);
+        match self {
+            Instr::Param { .. }
+            | Instr::Int { .. }
+            | Instr::Float { .. }
+            | Instr::Bool { .. }
+            | Instr::Bytes { .. }
+            | Instr::String { .. }
+            | Instr::Null { .. }
+            | Instr::StaticClosure { .. }
+            | Instr::GetGlobal { .. }
+            | Instr::New { .. }
+            | Instr::TypeConst { .. }
+            | Instr::EnumAlloc { .. }
+            | Instr::EndTrap { .. }
+            | Instr::CellGet { .. }
+            | Instr::CellIncr { .. }
+            | Instr::CellDecr { .. }
+            | Instr::CellRef { .. }
+            | Instr::Assert
+            | Instr::Asm { .. } => {}
+            Instr::Copy { src, .. }
+            | Instr::UnOp { src, .. }
+            | Instr::Cast { src, .. }
+            | Instr::GetType { src, .. }
+            | Instr::GetTID { src, .. }
+            | Instr::Unref { src, .. }
+            | Instr::RefData { src, .. }
+            | Instr::SetGlobal { src, .. }
+            | Instr::CellSet { src, .. } => one(src),
+            Instr::BinOp { a, b, .. } => {
+                one(a);
+                one(b);
+            }
+            Instr::Fma { a, b, c, .. } => {
+                one(a);
+                one(b);
+                one(c);
+            }
+            Instr::Call { args, .. } | Instr::CallMethod { args, .. } => {
+                args.iter_mut().for_each(one)
+            }
+            Instr::CallClosure { fun, args, .. } => {
+                one(fun);
+                args.iter_mut().for_each(one);
+            }
+            Instr::InstanceClosure { obj, .. } | Instr::VirtualClosure { obj, .. } => one(obj),
+            Instr::FieldGet { obj, .. } | Instr::DynGet { obj, .. } => one(obj),
+            Instr::FieldSet { obj, src, .. } | Instr::DynSet { obj, src, .. } => {
+                one(obj);
+                one(src);
+            }
+            Instr::NullCheck { value } => one(value),
+            Instr::MemGet { base, index, .. } => {
+                one(base);
+                one(index);
+            }
+            Instr::MemSet {
+                base, index, src, ..
+            } => {
+                one(base);
+                one(index);
+                one(src);
+            }
+            Instr::ArraySize { array, .. } => one(array),
+            Instr::SetRef { r, value } => {
+                one(r);
+                one(value);
+            }
+            Instr::RefOffset { base, offset, .. } => {
+                one(base);
+                one(offset);
+            }
+            Instr::MakeEnum { args, .. } => args.iter_mut().for_each(one),
+            Instr::EnumIndex { value, .. } | Instr::EnumField { value, .. } => one(value),
+            Instr::SetEnumField { value, src, .. } => {
+                one(value);
+                one(src);
+            }
+            Instr::Prefetch { value, .. } => one(value),
+        }
+    }
+
+    /// Rewrite the value this instruction defines, if any.
+    pub fn map_dst(&mut self, m: &mut dyn FnMut(ValueId) -> ValueId) {
+        match self {
+            Instr::Param { dst, .. }
+            | Instr::Copy { dst, .. }
+            | Instr::Int { dst, .. }
+            | Instr::Float { dst, .. }
+            | Instr::Bool { dst, .. }
+            | Instr::Bytes { dst, .. }
+            | Instr::String { dst, .. }
+            | Instr::Null { dst }
+            | Instr::BinOp { dst, .. }
+            | Instr::Fma { dst, .. }
+            | Instr::UnOp { dst, .. }
+            | Instr::Call { dst, .. }
+            | Instr::CallMethod { dst, .. }
+            | Instr::CallClosure { dst, .. }
+            | Instr::StaticClosure { dst, .. }
+            | Instr::InstanceClosure { dst, .. }
+            | Instr::VirtualClosure { dst, .. }
+            | Instr::GetGlobal { dst, .. }
+            | Instr::FieldGet { dst, .. }
+            | Instr::DynGet { dst, .. }
+            | Instr::Cast { dst, .. }
+            | Instr::MemGet { dst, .. }
+            | Instr::New { dst }
+            | Instr::ArraySize { dst, .. }
+            | Instr::TypeConst { dst, .. }
+            | Instr::GetType { dst, .. }
+            | Instr::GetTID { dst, .. }
+            | Instr::Unref { dst, .. }
+            | Instr::RefData { dst, .. }
+            | Instr::RefOffset { dst, .. }
+            | Instr::MakeEnum { dst, .. }
+            | Instr::EnumAlloc { dst, .. }
+            | Instr::EnumIndex { dst, .. }
+            | Instr::EnumField { dst, .. }
+            | Instr::CellGet { dst, .. }
+            | Instr::CellRef { dst, .. } => *dst = m(*dst),
+            Instr::SetGlobal { .. }
+            | Instr::FieldSet { .. }
+            | Instr::DynSet { .. }
+            | Instr::NullCheck { .. }
+            | Instr::EndTrap { .. }
+            | Instr::MemSet { .. }
+            | Instr::SetRef { .. }
+            | Instr::SetEnumField { .. }
+            | Instr::CellSet { .. }
+            | Instr::CellIncr { .. }
+            | Instr::CellDecr { .. }
+            | Instr::Assert
+            | Instr::Prefetch { .. }
+            | Instr::Asm { .. } => {}
         }
     }
 }
@@ -729,6 +889,51 @@ impl Terminator {
             Terminator::Throw { exc } | Terminator::Rethrow { exc } => vec![*exc],
         }
     }
+
+    /// Rewrite every value the terminator reads.
+    pub fn map_uses(&mut self, m: &mut dyn FnMut(ValueId) -> ValueId) {
+        match self {
+            Terminator::Ret { value } | Terminator::Switch { value, .. } => *value = m(*value),
+            Terminator::Jump { .. } | Terminator::Trap { .. } => {}
+            Terminator::CondJump { a, b, .. } => {
+                *a = m(*a);
+                if let Some(b) = b {
+                    *b = m(*b);
+                }
+            }
+            Terminator::Throw { exc } | Terminator::Rethrow { exc } => *exc = m(*exc),
+        }
+    }
+
+    /// Rewrite every branch target. The `Trap` handler edge is included: it is
+    /// an explicit operand of the terminator, unlike the implicit exceptional
+    /// edges induced by [`Block::handler`].
+    pub fn map_targets(&mut self, m: &mut dyn FnMut(BlockId) -> BlockId) {
+        match self {
+            Terminator::Ret { .. } | Terminator::Throw { .. } | Terminator::Rethrow { .. } => {}
+            Terminator::Jump { target } => *target = m(*target),
+            Terminator::CondJump {
+                if_true, if_false, ..
+            } => {
+                *if_true = m(*if_true);
+                *if_false = m(*if_false);
+            }
+            Terminator::Switch {
+                targets, default, ..
+            } => {
+                for t in targets.iter_mut() {
+                    *t = m(*t);
+                }
+                *default = m(*default);
+            }
+            Terminator::Trap {
+                handler, normal, ..
+            } => {
+                *handler = m(*handler);
+                *normal = m(*normal);
+            }
+        }
+    }
 }
 
 /// A basic block owning its phis, instructions and terminator.
@@ -752,11 +957,33 @@ pub struct Function {
     pub cells: Vec<CellData>,
     pub blocks: Vec<Block>,
     /// The original HL register-type table, preserved verbatim for the
-    /// serialize path.
+    /// serialize path. Registers appended by de-SSA or by passes follow it.
     pub reg_types: Vec<TypeRef>,
+    /// Forward declarations of every native this function calls, recorded
+    /// once at lowering time from the embedder's
+    /// [`ModuleInfo`](super::module::ModuleInfo). Each backend consumes these
+    /// entries directly instead of re-deriving them from bytecode.
+    pub natives: NativeTable,
+    /// Type refs that denote HL floats, sorted. Float-only rewrites consult
+    /// this; when it is empty (no module info was supplied at lowering) those
+    /// rewrites are inert.
+    pub float_types: Vec<TypeRef>,
 }
 
 impl Function {
+    /// An empty function over `reg_types`: no values, cells, blocks, natives
+    /// or float types.
+    pub fn new(reg_types: Vec<TypeRef>) -> Self {
+        Function {
+            values: Vec::new(),
+            cells: Vec::new(),
+            blocks: Vec::new(),
+            reg_types,
+            natives: NativeTable::new(),
+            float_types: Vec::new(),
+        }
+    }
+
     pub fn new_value(&mut self, ty: TypeRef, reg: u32) -> ValueId {
         let id = ValueId(self.values.len() as u32);
         self.values.push(ValueData { ty, reg });
@@ -772,6 +999,48 @@ impl Function {
     #[inline]
     pub fn value_reg(&self, v: ValueId) -> u32 {
         self.values[v.idx()].reg
+    }
+
+    /// True when `ty` is one of the module's float types.
+    #[inline]
+    pub fn is_float(&self, ty: TypeRef) -> bool {
+        self.float_types.binary_search(&ty).is_ok()
+    }
+
+    /// True when `v` holds a float.
+    #[inline]
+    pub fn value_is_float(&self, v: ValueId) -> bool {
+        self.is_float(self.value_ty(v))
+    }
+
+    /// Append a register of type `ty` to the register-type table and return
+    /// its index.
+    pub fn new_reg(&mut self, ty: TypeRef) -> u32 {
+        let r = self.reg_types.len() as u32;
+        self.reg_types.push(ty);
+        r
+    }
+
+    /// Number of reads of every value, counting instruction operands,
+    /// terminator operands and phi sources.
+    pub fn use_counts(&self) -> Vec<usize> {
+        let mut counts = vec![0usize; self.values.len()];
+        for blk in &self.blocks {
+            for phi in &blk.phis {
+                for &(_, v) in &phi.incoming {
+                    counts[v.idx()] += 1;
+                }
+            }
+            for ins in &blk.instrs {
+                for u in ins.uses() {
+                    counts[u.idx()] += 1;
+                }
+            }
+            for u in blk.term.uses() {
+                counts[u.idx()] += 1;
+            }
+        }
+        counts
     }
 
     /// True if the block contains an instruction that may raise, or ends in

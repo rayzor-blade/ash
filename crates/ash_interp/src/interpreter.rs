@@ -2973,11 +2973,27 @@ impl HLInterpreter {
                         frame.registers.set(dst.0, val);
                     } else {
                         let key = (obj_val.as_ptr(), field.0);
-                        let val = self
-                            .virtual_fields
-                            .get(&key)
-                            .copied()
-                            .unwrap_or_else(NanBoxedValue::null);
+                        let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
+                            v
+                        } else if let Some(hfield) =
+                            Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                        {
+                            let dst_type_idx = func.regs[dst.0 as usize].0;
+                            let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                            Self::dyn_get_field_by_hash(
+                                obj_val.as_ptr() as *mut c_void,
+                                hfield,
+                                dst_kind,
+                                dst_type_ptr,
+                                self.fn_dyn_getd,
+                                self.fn_dyn_getf,
+                                self.fn_dyn_geti64,
+                                self.fn_dyn_geti,
+                                self.fn_dyn_getp,
+                            )
+                        } else {
+                            NanBoxedValue::null()
+                        };
                         if std::env::var("ASH_DBG_FIELD").is_ok() {
                             eprintln!(
                                 "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
@@ -3048,11 +3064,27 @@ impl HLInterpreter {
                         frame.registers.set(dst.0, val);
                     } else {
                         let key = (obj_val.as_ptr(), field.0);
-                        let val = self
-                            .virtual_fields
-                            .get(&key)
-                            .copied()
-                            .unwrap_or_else(NanBoxedValue::null);
+                        let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
+                            v
+                        } else if let Some(hfield) =
+                            Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                        {
+                            let dst_type_idx = func.regs[dst.0 as usize].0;
+                            let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                            Self::dyn_get_field_by_hash(
+                                obj_val.as_ptr() as *mut c_void,
+                                hfield,
+                                dst_kind,
+                                dst_type_ptr,
+                                self.fn_dyn_getd,
+                                self.fn_dyn_getf,
+                                self.fn_dyn_geti64,
+                                self.fn_dyn_geti,
+                                self.fn_dyn_getp,
+                            )
+                        } else {
+                            NanBoxedValue::null()
+                        };
                         if std::env::var("ASH_DBG_FIELD").is_ok() {
                             eprintln!(
                                 "[GETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
@@ -3136,6 +3168,25 @@ impl HLInterpreter {
                         } else {
                             self.virtual_fields
                                 .insert((obj_val.as_ptr(), field.0), src_val);
+                            if let Some(hfield) =
+                                Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                            {
+                                let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                                let src_type_ptr =
+                                    self.c_type_factory.get(src_type_idx) as *mut c_void;
+                                Self::dyn_set_field_by_hash(
+                                    obj_ptr,
+                                    hfield,
+                                    src_val,
+                                    src_kind,
+                                    src_type_ptr,
+                                    self.fn_dyn_setd,
+                                    self.fn_dyn_setf,
+                                    self.fn_dyn_seti64,
+                                    self.fn_dyn_seti,
+                                    self.fn_dyn_setp,
+                                );
+                            }
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
                                 eprintln!(
                                     "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
@@ -3202,6 +3253,25 @@ impl HLInterpreter {
                         } else {
                             self.virtual_fields
                                 .insert((obj_val.as_ptr(), field.0), src_val);
+                            if let Some(hfield) =
+                                Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
+                            {
+                                let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                                let src_type_ptr =
+                                    self.c_type_factory.get(src_type_idx) as *mut c_void;
+                                Self::dyn_set_field_by_hash(
+                                    obj_ptr,
+                                    hfield,
+                                    src_val,
+                                    src_kind,
+                                    src_type_ptr,
+                                    self.fn_dyn_setd,
+                                    self.fn_dyn_setf,
+                                    self.fn_dyn_seti64,
+                                    self.fn_dyn_seti,
+                                    self.fn_dyn_setp,
+                                );
+                            }
                             if std::env::var("ASH_DBG_FIELD").is_ok() {
                                 eprintln!(
                                     "[SETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
@@ -6126,6 +6196,13 @@ impl HLInterpreter {
                     let f: unsafe extern "C" fn(f64, f64, f64) -> f64 =
                         std::mem::transmute(func_ptr);
                     f(gf(0), gf(1), gf(2)).to_bits() as i64
+                }
+                // --- 4 args ---
+                (4, false, 0b1111) => {
+                    // (f64, f64, f64, f64) -> i64  e.g. gl_clear_color(r, g, b, a)
+                    let f: unsafe extern "C" fn(f64, f64, f64, f64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gf(0), gf(1), gf(2), gf(3))
                 }
                 _ => {
                     return Err(anyhow!(

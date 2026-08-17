@@ -7,7 +7,7 @@ members = [
 [workspace.dependencies]
 anyhow = "1.0.91"
 inkwell = { version = "0.8.0", features = ["llvm21-1-prefer-static"] }
-beadie = { git = "https://github.com/darmie/beadie" }
+beadie = { git = "https://github.com/darmie/beadie", features = ["cranelift"] }
 flexstr = { version = "0.9" }
 num_enum = {version = "0.7.3"}
 ash_std ={ path = "std" }

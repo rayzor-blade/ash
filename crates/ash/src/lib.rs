@@ -6,6 +6,7 @@
 
 pub mod bytecode;
 pub mod c_types;
+pub mod cranelift;
 pub mod functions;
 pub mod hl_bindings {
     #![allow(non_upper_case_globals)]

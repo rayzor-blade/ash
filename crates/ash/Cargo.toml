@@ -22,6 +22,10 @@ ash_macro = {workspace=true}
 air = { path = "../air" }
 libc = "0.2.158"
 clap = { workspace = true }
+beadie = { workspace = true }
+cranelift-codegen = "0.130"
+cranelift-frontend = "0.130"
+cranelift-module = "0.130"
 
 [[bin]]
 name = "ash" 

@@ -36,6 +36,13 @@ pub unsafe extern "C" fn hlp_set_closure_runner(f: ClosureRunner) {
     CLOSURE_RUNNER = Some(f);
 }
 
+/// The registered interpreter re-entry runner, if any. Used by native code
+/// (e.g. virtual method dispatch fallback) that encounters a stub-sentinel
+/// function pointer it must not call directly.
+pub(crate) unsafe fn closure_runner() -> Option<ClosureRunner> {
+    CLOSURE_RUNNER
+}
+
 struct VmFiber {
     fiber: Box<Fiber>,
     id: u32,

@@ -1545,8 +1545,45 @@ impl HLInterpreter {
                 args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
             }
             let interp = &mut *ctx.interp;
-            match interp.call_function(&*ctx.bytecode, &*ctx.resolver, findex, &args_v) {
-                Ok(_) => std::ptr::null_mut(),
+            let bytecode = &*ctx.bytecode;
+            match interp.call_function(bytecode, &*ctx.resolver, findex, &args_v) {
+                Ok(v) => {
+                    // Box the result as a vdynamic* for the native caller.
+                    // Thread bodies ignore it, but the virtual-dispatch
+                    // fallback (hlp_vcall_virtual_hashed) needs real values —
+                    // silently returning null turned hasNext() into false.
+                    if v.is_void() || v.is_null() {
+                        std::ptr::null_mut()
+                    } else if v.is_ptr() {
+                        v.as_ptr() as *mut c_void
+                    } else {
+                        // Primitive: box via hlp_make_dyn with the callee's
+                        // declared return type.
+                        let ret_idx = interp
+                            .findex_to_func
+                            .get(&findex)
+                            .and_then(|&fi| {
+                                bytecode.types[bytecode.functions[fi].type_.0]
+                                    .fun
+                                    .as_ref()
+                                    .map(|f| f.ret.0)
+                            })
+                            .unwrap_or(0);
+                        let kind = bytecode.types[ret_idx].kind;
+                        let mut raw = interp.value_to_i64(v, kind);
+                        let c_t = interp.c_type_factory.get(ret_idx) as *mut c_void;
+                        if interp.fn_make_dyn.is_null() || c_t.is_null() {
+                            std::ptr::null_mut()
+                        } else {
+                            let make_dyn: unsafe extern "C" fn(
+                                *mut c_void,
+                                *mut c_void,
+                            )
+                                -> *mut c_void = std::mem::transmute(interp.fn_make_dyn);
+                            make_dyn(&mut raw as *mut i64 as *mut c_void, c_t)
+                        }
+                    }
+                }
                 Err(e) => {
                     eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
                     std::ptr::null_mut()
@@ -1570,6 +1607,89 @@ impl HLInterpreter {
                 f(fiber_closure_runner);
             }
         }
+
+        // Register the JIT stub-call bridge: tiered/promoted code guards every
+        // indirect call against interpreter stub sentinels (findex+1) left in
+        // shared functions_ptrs/vtable/closure slots and re-enters the
+        // interpreter through this bridge instead of SIGBUSing on them.
+        // Args/result are raw i64 words per the callee's declared bytecode
+        // signature (see ash::jit::stub_bridge for the encoding contract).
+        // Same raw-pointer-context justification as the closure runner above:
+        // JIT code only runs within execute_entrypoint's dynamic extent, on
+        // this OS thread.
+        unsafe extern "C" fn jit_stub_call_bridge(
+            findex: i32,
+            args: *const i64,
+            nargs: i32,
+        ) -> i64 {
+            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                eprintln!("[ash] stub bridge: no interpreter context registered");
+                return 0;
+            };
+            let interp = &mut *ctx.interp;
+            let bytecode = &*ctx.bytecode;
+            let resolver = &*ctx.resolver;
+            let findex = findex as usize;
+
+            // The callee's declared signature drives raw-word decoding.
+            let type_idx = if let Some(&fi) = interp.findex_to_func.get(&findex) {
+                bytecode.functions[fi].type_.0
+            } else if let Some(&ni) = interp.findex_to_native.get(&findex) {
+                bytecode.natives[ni].type_.0
+            } else {
+                eprintln!("[ash] stub bridge: unknown findex {}", findex);
+                return 0;
+            };
+            let Some(fun) = bytecode.types[type_idx].fun.as_ref() else {
+                eprintln!("[ash] stub bridge: findex {} has no function type", findex);
+                return 0;
+            };
+
+            let nargs = nargs.max(0) as usize;
+            let raw_args: &[i64] = if nargs == 0 || args.is_null() {
+                &[]
+            } else {
+                std::slice::from_raw_parts(args, nargs)
+            };
+            let mut vals: Vec<NanBoxedValue> = Vec::with_capacity(raw_args.len());
+            for (i, &raw) in raw_args.iter().enumerate() {
+                let kind = fun
+                    .args
+                    .get(i)
+                    .map(|a| bytecode.types[a.0].kind)
+                    .unwrap_or(hl::hl_type_kind_HDYN);
+                vals.push(interp.wrap_native_result(raw, kind));
+            }
+            let ret_kind = bytecode.types[fun.ret.0].kind;
+
+            match interp.call_function(bytecode, resolver, findex, &vals) {
+                Ok(v) => interp.value_to_i64(v, ret_kind),
+                Err(e) => {
+                    // Re-throw HL exceptions into the native trap chain so
+                    // the JIT caller's active Trap (or the compiled-call
+                    // guard trap) observes them with correct semantics.
+                    if let Some(hl_exc) = e.downcast_ref::<HLExceptionPropagation>() {
+                        let val = hl_exc.value;
+                        if val.is_ptr() && val.as_ptr() != 0 {
+                            let throw_fn = resolver
+                                .resolve_function("std", "hlp_throw")
+                                .unwrap_or(std::ptr::null_mut());
+                            if !throw_fn.is_null() {
+                                type FnThrow = unsafe extern "C" fn(*mut c_void) -> !;
+                                let f: FnThrow = std::mem::transmute(throw_fn);
+                                f(val.as_ptr() as *mut c_void);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "[ash] stub bridge: findex {} failed (returning 0): {:#}",
+                        findex, e
+                    );
+                    0
+                }
+            }
+        }
+        ash::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
 
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
@@ -2028,6 +2148,19 @@ impl HLInterpreter {
             return Err("non_strict_mode".to_string());
         }
         let func = &bytecode.functions[func_idx];
+        // Debug escape hatch: ASH_TIERED_SKIP_FINDEXES=1,2,3 excludes specific
+        // findexes from promotion (for bisecting a miscompiled hot function).
+        {
+            static SKIP: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+            let skip = SKIP.get_or_init(|| {
+                std::env::var("ASH_TIERED_SKIP_FINDEXES")
+                    .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+                    .unwrap_or_default()
+            });
+            if skip.contains(&(func.findex as usize)) {
+                return Err("skipped_by_env".to_string());
+            }
+        }
         // Static signature arg count; call_compiled_function marshals at most 8.
         let nargs = bytecode.types[func.type_.0]
             .fun

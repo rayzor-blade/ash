@@ -632,7 +632,9 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
 
     if (*t).nproto != 0 {
         let fptr = allocator
-            .allocate_immortal(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nproto as usize)
+            .allocate_immortal(
+                std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nproto as usize,
+            )
             .expect("Failed to allocate memory")
             .as_ptr() as *mut *mut std::os::raw::c_void;
         (*ot).vobj_proto = fptr;
@@ -659,7 +661,9 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     }
 
     (*t).methods = allocator
-        .allocate_immortal(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nmethods as usize)
+        .allocate_immortal(
+            std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nmethods as usize,
+        )
         .expect("Failed to allocate memory")
         .as_ptr() as *mut *mut std::os::raw::c_void;
 
@@ -1667,18 +1671,16 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
     let _obj_kind = (*(*obj).t).kind;
     let _vt_nfields = (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields;
 
-    #[cfg(debug_assertions)]
+    // Lazily initialize the virtual type (lookup + indexes + dataSize) —
+    // same pattern as hlp_alloc_virtual above. The interpreter initializes
+    // virtual types lazily, so promoted JIT code can reach one first (this
+    // used to be a debug panic "virtual not initialized", aborting the VM
+    // from JIT frames that cannot unwind). hlp_init_virtual ignores its
+    // module-context argument and is self-contained.
     {
-        if (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields != 0
-            && (*vt)
-                .__bindgen_anon_1
-                .virt
-                .as_ref()
-                .unwrap()
-                .lookup
-                .is_null()
-        {
-            panic!("virtual not initialized");
+        let virt = (*vt).__bindgen_anon_1.virt.as_ref().unwrap();
+        if virt.nfields != 0 && (virt.lookup.is_null() || virt.indexes.is_null()) {
+            hlp_init_virtual(vt, ptr::null_mut());
         }
     }
 
@@ -1932,6 +1934,177 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynamic {
     (*((*v).v.ptr as *mut vvirtual)).value
+}
+
+/// Invoke a resolved method pointer with `this` as the only argument.
+/// Stub sentinels (interpreter findex+1, < 0x100000) are routed through the
+/// registered closure runner (interpreter re-entry) instead of being called —
+/// calling one from native code is a guaranteed SIGBUS.
+unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynamic {
+    let addr = fun as usize;
+    if addr == 0 {
+        return ptr::null_mut();
+    }
+    if addr < 0x100000 {
+        if let Some(runner) = crate::fiber::closure_runner() {
+            let mut cl = vclosure {
+                t: crate::types::hlt_dyn(),
+                fun,
+                hasValue: 1,
+                stackCount: 0,
+                value: this as *mut c_void,
+            };
+            return runner(&mut cl, ptr::null_mut(), 0);
+        }
+        return ptr::null_mut();
+    }
+    let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic = std::mem::transmute(fun);
+    method_fn(this)
+}
+
+/// Resolve a virtual method call target by field hash, for JIT code.
+///
+/// `target` is whatever an HVIRTUAL-typed register held at runtime — a
+/// vvirtual, or (hybrid interpreter boundary) a plain HOBJ/HDYNOBJ. Unwraps
+/// vvirtual wrappers, resolves the method on the concrete value, writes the
+/// `this` pointer to `out_this`, and returns the raw method pointer — which
+/// may be an interpreter stub sentinel (findex+1): the JIT calls the result
+/// through its stub-guarded indirect call, so sentinels re-enter the
+/// interpreter with full, correctly-typed arguments.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_vresolve_method_hashed(
+    target: *mut vdynamic,
+    hfield: i32,
+    out_this: *mut *mut vdynamic,
+) -> *mut c_void {
+    if !out_this.is_null() {
+        *out_this = ptr::null_mut();
+    }
+    // Unwrap vvirtual wrappers to the concrete backing value.
+    let mut cur = target;
+    loop {
+        if cur.is_null() {
+            return ptr::null_mut();
+        }
+        let t = (*cur).t;
+        if t.is_null() {
+            return ptr::null_mut();
+        }
+        if (*t).kind == hl::hl_type_kind_HVIRTUAL {
+            cur = (*(cur as *mut vvirtual)).value;
+            continue;
+        }
+        break;
+    }
+    let t = (*cur).t;
+    match (*t).kind {
+        hl::hl_type_kind_HOBJ => {
+            let Some(tobj) = (*t).__bindgen_anon_1.obj.as_ref() else {
+                return ptr::null_mut();
+            };
+            let f = obj_resolve_field(tobj, hfield);
+            if f.is_null() || (*f).field_index >= 0 {
+                return ptr::null_mut();
+            }
+            let mut rt = tobj.rt;
+            if rt.is_null() || (*rt).methods.is_null() {
+                rt = hl_get_obj_proto(t);
+            }
+            if rt.is_null() || (*rt).methods.is_null() {
+                return ptr::null_mut();
+            }
+            let method_idx = (-(*f).field_index - 1) as usize;
+            if method_idx >= (*rt).nmethods as usize {
+                return ptr::null_mut();
+            }
+            if !out_this.is_null() {
+                *out_this = cur;
+            }
+            *(*rt).methods.add(method_idx)
+        }
+        hl::hl_type_kind_HDYNOBJ => {
+            // Dynamic object: the "method" is a closure-valued field.
+            let cl = hlp_dyn_getp(cur, hfield, crate::types::hlt_dyn()) as *mut vclosure;
+            if cl.is_null() {
+                return ptr::null_mut();
+            }
+            if !out_this.is_null() && (*cl).hasValue != 0 {
+                *out_this = (*cl).value as *mut vdynamic;
+            }
+            (*cl).fun
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
+/// Virtual method dispatch fallback used by JIT code, keyed by field hash.
+///
+/// `target` is whatever the HVIRTUAL-typed register held at runtime. At the
+/// hybrid interpreter/JIT boundary that is NOT guaranteed to be a vvirtual:
+/// the interpreter is dynamically typed and passes plain HOBJ (or HDYNOBJ)
+/// pointers through HVIRTUAL-typed slots. Dispatch on the runtime kind
+/// instead of trusting the static type (trusting it was a deterministic
+/// SIGBUS on game.hl: hl_type_obj's nfields/nproto ints read as a "fields"
+/// pointer, fault_addr 0x2d00000058).
+#[no_mangle]
+pub unsafe extern "C" fn hlp_vcall_virtual_hashed(
+    target: *mut vdynamic,
+    hfield: i32,
+) -> *mut vdynamic {
+    if target.is_null() {
+        return ptr::null_mut();
+    }
+    let t = (*target).t;
+    if t.is_null() {
+        return ptr::null_mut();
+    }
+    match (*t).kind {
+        hl::hl_type_kind_HVIRTUAL => {
+            let v = target as *mut vvirtual;
+            let obj = (*v).value;
+            if obj.is_null() {
+                ptr::null_mut()
+            } else {
+                hlp_vcall_virtual_hashed(obj, hfield)
+            }
+        }
+        hl::hl_type_kind_HOBJ => {
+            let Some(tobj) = (*t).__bindgen_anon_1.obj.as_ref() else {
+                return ptr::null_mut();
+            };
+            let f = obj_resolve_field(tobj, hfield);
+            if f.is_null() || (*f).field_index >= 0 {
+                return ptr::null_mut();
+            }
+            let mut rt = tobj.rt;
+            if rt.is_null() || (*rt).methods.is_null() {
+                rt = hl_get_obj_proto(t);
+            }
+            if rt.is_null() || (*rt).methods.is_null() {
+                return ptr::null_mut();
+            }
+            let method_idx = (-(*f).field_index - 1) as usize;
+            if method_idx >= (*rt).nmethods as usize {
+                return ptr::null_mut();
+            }
+            let method_ptr: *mut c_void = *(*rt).methods.add(method_idx);
+            vcall_fn_or_stub(method_ptr, target)
+        }
+        hl::hl_type_kind_HDYNOBJ => {
+            // Dynamic object: the "method" is a closure-valued field.
+            let cl = hlp_dyn_getp(target, hfield, crate::types::hlt_dyn()) as *mut vclosure;
+            if cl.is_null() {
+                return ptr::null_mut();
+            }
+            let this = if (*cl).hasValue != 0 {
+                (*cl).value as *mut vdynamic
+            } else {
+                ptr::null_mut()
+            };
+            vcall_fn_or_stub((*cl).fun, this)
+        }
+        _ => ptr::null_mut(),
+    }
 }
 
 /// Runtime helper for virtual method dispatch when vfields[field] is NULL.

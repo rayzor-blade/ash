@@ -28,17 +28,19 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
-/// Opt-in (ASH_JIT_NATIVE_TRAPS=1): compile unresolved natives to call-time
-/// trap stubs instead of failing the whole function compile. Unlocks tier
-/// promotion of functions referencing unimplemented std natives, but promoted
-/// code on game.hl currently SIGBUSes calling interpreter stub sentinels —
-/// keep off by default until JIT call sites guard against them.
+/// Compile unresolved natives to call-time trap stubs instead of failing the
+/// whole function compile — matching HashLink's disabled_primitive semantics
+/// (errors when called, not when compiled) and the interpreter's lazy
+/// resolution. Unlocks tier promotion of functions that merely reference
+/// unimplemented natives. Default ON since JIT indirect-call sites guard
+/// against interpreter stub sentinels (see build_stub_guarded_indirect_call);
+/// opt out with ASH_JIT_NATIVE_TRAPS=0 to restore compile-time failure.
 fn native_traps_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
+        !matches!(
             std::env::var("ASH_JIT_NATIVE_TRAPS").as_deref(),
-            Ok("1") | Ok("true")
+            Ok("0") | Ok("false")
         )
     })
 }
@@ -2213,11 +2215,11 @@ impl<'ctx> JITModule<'ctx> {
                     })
                     .collect();
 
-                // Indirect call through the loaded pointer
-                let result = self
-                    .builder
-                    .build_indirect_call(fn_type, fun_addr, &arg_vals, "icall")?;
-                if let Some(ret_val) = result.try_as_basic_value().basic() {
+                // Indirect call through the loaded pointer (stub-guarded:
+                // functions_ptrs may hold interpreter sentinels in hybrid mode)
+                if let Some(ret_val) =
+                    self.build_stub_guarded_indirect_call(fn_type, fun_addr, &arg_vals, "icall")?
+                {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -2251,12 +2253,74 @@ impl<'ctx> JITModule<'ctx> {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
 
                 if obj_type.kind == hl_type_kind_HVIRTUAL {
+                    // Compile-time hash of the virtual field name, for the
+                    // dynamic fallback (which resolves by hash, not slot).
+                    let field_hash = obj_type
+                        .virt
+                        .as_ref()
+                        .and_then(|v| v.fields.get(field.0))
+                        .map(|fld| hl_hash_utf8(&fld.name))
+                        .unwrap_or(0);
+
                     // HVIRTUAL dispatch: load function pointer from vfields[field]
                     let vvirt = self
                         .builder
                         .build_load(ptr_type, registers[args[0].0 as usize], "vvirt")?
                         .into_pointer_value();
 
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_parent()
+                        .unwrap();
+                    let nonnull_block = self.context.append_basic_block(function, "vcall_nonnull");
+                    let vfields_block = self.context.append_basic_block(function, "vcall_vfields");
+                    let direct_block = self.context.append_basic_block(function, "vcall_direct");
+                    let fallback_block =
+                        self.context.append_basic_block(function, "vcall_fallback");
+                    let merge_block = self.context.append_basic_block(function, "vcall_merge");
+
+                    // Runtime guard: at the hybrid interpreter/JIT boundary an
+                    // HVIRTUAL-typed register can hold a plain HOBJ/HDYNOBJ
+                    // pointer (the interpreter is dynamically typed). Only
+                    // trust the vvirtual layout after checking the header's
+                    // type kind; null or non-virtual goes to the hash-based
+                    // fallback helper. Trusting the static type here read
+                    // hl_type_obj ints as a vfields pointer — a deterministic
+                    // SIGBUS at 0x2d00000058 on game.hl.
+                    let vvirt_null = self.builder.build_is_null(vvirt, "vvirt_null")?;
+                    self.builder.build_conditional_branch(
+                        vvirt_null,
+                        fallback_block,
+                        nonnull_block,
+                    )?;
+
+                    self.builder.position_at_end(nonnull_block);
+                    let hdr_type = self
+                        .builder
+                        .build_load(ptr_type, vvirt, "vvirt_type")?
+                        .into_pointer_value();
+                    let hdr_kind = self
+                        .builder
+                        .build_load(self.context.i32_type(), hdr_type, "vvirt_kind")?
+                        .into_int_value();
+                    let is_virt = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        hdr_kind,
+                        self.context
+                            .i32_type()
+                            .const_int(hl_type_kind_HVIRTUAL as u64, false),
+                        "vvirt_is_virtual",
+                    )?;
+                    self.builder.build_conditional_branch(
+                        is_virt,
+                        vfields_block,
+                        fallback_block,
+                    )?;
+
+                    // --- vfields path: a real vvirtual; try the resolved slot ---
+                    self.builder.position_at_end(vfields_block);
                     // Load value (underlying object) from vvirtual offset 8
                     let value_gep = unsafe {
                         self.builder.build_gep(
@@ -2288,21 +2352,8 @@ impl<'ctx> JITModule<'ctx> {
 
                     // Check if vfield is null (type mismatch — need dynamic fallback)
                     let is_null = self.builder.build_is_null(fn_ptr, "vfield_null")?;
-                    let function = self
-                        .builder
-                        .get_insert_block()
-                        .unwrap()
-                        .get_parent()
-                        .unwrap();
-                    let direct_block = self.context.append_basic_block(function, "vcall_direct");
-                    let fallback_block =
-                        self.context.append_basic_block(function, "vcall_fallback");
-                    let merge_block = self.context.append_basic_block(function, "vcall_merge");
                     self.builder
                         .build_conditional_branch(is_null, fallback_block, direct_block)?;
-
-                    // --- Direct path: vfield is resolved, call directly ---
-                    self.builder.position_at_end(direct_block);
 
                     // Look up virtual field's declared function type to get correct param types.
                     // Extract type indices first to avoid borrow conflicts with self.
@@ -2341,29 +2392,6 @@ impl<'ctx> JITModule<'ctx> {
                             None
                         };
 
-                    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
-                    arg_vals.push(value.into());
-                    for (idx, arg) in args[1..].iter().enumerate() {
-                        let loaded = self.builder.build_load(
-                            reg_types[arg.0 as usize],
-                            registers[arg.0 as usize],
-                            "arg_val",
-                        )?;
-                        // Cast to match the virtual field's declared function param type
-                        if let Some(ref fn_args) = virt_fn_args {
-                            let param_idx = idx + 1; // +1 for 'this'
-                            if param_idx < fn_args.len() {
-                                let expected = fn_args[param_idx];
-                                if loaded.get_type() != expected {
-                                    let casted = self.cast_for_call(loaded, expected)?;
-                                    arg_vals.push(casted.into());
-                                    continue;
-                                }
-                            }
-                        }
-                        arg_vals.push(loaded.into());
-                    }
-
                     // Build fn_type from the virtual's declared types (not register types)
                     let mut arg_types: Vec<BasicMetadataTypeEnum> = Vec::with_capacity(args.len());
                     if let Some(ref fn_args) = virt_fn_args {
@@ -2385,13 +2413,47 @@ impl<'ctx> JITModule<'ctx> {
                     } else {
                         reg_types[dst.0 as usize].fn_type(&arg_types, false)
                     };
-                    let direct_result = self.builder.build_indirect_call(
+
+                    // Emit the tail (non-this) argument loads with casts to the
+                    // declared param types, in the current insert block.
+                    let build_tail_args =
+                        |this: &JITModule<'ctx>| -> Result<Vec<BasicMetadataValueEnum<'ctx>>> {
+                            let mut vals: Vec<BasicMetadataValueEnum> =
+                                Vec::with_capacity(args.len().saturating_sub(1));
+                            for (idx, arg) in args[1..].iter().enumerate() {
+                                let loaded = this.builder.build_load(
+                                    reg_types[arg.0 as usize],
+                                    registers[arg.0 as usize],
+                                    "arg_val",
+                                )?;
+                                // Cast to match the declared function param type
+                                if let Some(ref fn_args) = virt_fn_args {
+                                    let param_idx = idx + 1; // +1 for 'this'
+                                    if param_idx < fn_args.len() {
+                                        let expected = fn_args[param_idx];
+                                        if loaded.get_type() != expected {
+                                            let casted = this.cast_for_call(loaded, expected)?;
+                                            vals.push(casted.into());
+                                            continue;
+                                        }
+                                    }
+                                }
+                                vals.push(loaded.into());
+                            }
+                            Ok(vals)
+                        };
+
+                    // --- Direct path: vfield is resolved, call it (stub-guarded) ---
+                    self.builder.position_at_end(direct_block);
+                    let mut arg_vals: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+                    arg_vals.push(value.into());
+                    arg_vals.extend(build_tail_args(self)?);
+                    if let Some(ret_val) = self.build_stub_guarded_indirect_call(
                         fn_type,
                         fn_ptr,
                         &arg_vals,
                         "vcall_virt",
-                    )?;
-                    if let Some(ret_val) = direct_result.try_as_basic_value().basic() {
+                    )? {
                         let store_val = if ret_val.get_type() != reg_types[dst.0 as usize] {
                             self.cast_for_call(ret_val, reg_types[dst.0 as usize])?
                         } else {
@@ -2402,63 +2464,89 @@ impl<'ctx> JITModule<'ctx> {
                     }
                     self.builder.build_unconditional_branch(merge_block)?;
 
-                    // --- Fallback path: vfield is null, use dynamic dispatch helper ---
+                    // --- Fallback path: not a vvirtual, or vfield is null ---
+                    // Resolve the method pointer by field-name hash from the
+                    // value's RUNTIME kind (vvirtual chain/HOBJ/HDYNOBJ), then
+                    // call it with the full, correctly-typed argument list
+                    // through the stub-guarded indirect call — an interpreter
+                    // stub sentinel re-enters the interpreter via the bridge
+                    // with all arguments (the old hlp_vcall_virtual_0 helper
+                    // dropped every argument beyond `this`).
                     self.builder.position_at_end(fallback_block);
-                    // Call hlp_vcall_virtual_0(vvirt, field) -> vdynamic*
-                    // Then unbox the result to the destination register type
                     let i32_type = self.context.i32_type();
-                    let helper = self.declare_native(
-                        "hlp_vcall_virtual_0",
-                        &[ptr_type.into(), i32_type.into()],
+                    let resolve = self.declare_native(
+                        "hlp_vresolve_method_hashed",
+                        &[ptr_type.into(), i32_type.into(), ptr_type.into()],
                         Some(ptr_type.into()),
                     );
-                    let field_val = i32_type.const_int(field.0 as u64, false);
-                    let dyn_result = self
+                    // Entry-block slot for the resolved `this` out-param.
+                    let this_slot = {
+                        let saved = self.builder.get_insert_block();
+                        let entry = function.get_first_basic_block().unwrap();
+                        match entry.get_first_instruction() {
+                            Some(first) => self.builder.position_before(&first),
+                            None => self.builder.position_at_end(entry),
+                        }
+                        let slot = self.builder.build_alloca(ptr_type, "vcall_this_slot")?;
+                        if let Some(block) = saved {
+                            self.builder.position_at_end(block);
+                        }
+                        slot
+                    };
+                    let hash_val = i32_type.const_int(field_hash as u32 as u64, false);
+                    let method_ptr = self
                         .builder
-                        .build_call(helper, &[vvirt.into(), field_val.into()], "vcall_dyn")?
+                        .build_call(
+                            resolve,
+                            &[vvirt.into(), hash_val.into(), this_slot.into()],
+                            "vcall_resolve",
+                        )?
                         .try_as_basic_value()
                         .basic()
                         .unwrap()
                         .into_pointer_value();
-                    // Unbox vdynamic to destination type
-                    match dst_kind {
-                        k if k == hl_type_kind_HI32 || k == hl_type_kind_HBOOL => {
-                            // Load i32 from vdynamic.v (offset 8)
-                            let v_gep = unsafe {
-                                self.builder.build_gep(
-                                    self.context.i8_type(),
-                                    dyn_result,
-                                    &[self.context.i64_type().const_int(8, false)],
-                                    "dyn_v_gep",
-                                )?
-                            };
-                            let unboxed =
-                                self.builder.build_load(i32_type, v_gep, "unboxed_i32")?;
-                            self.builder
-                                .build_store(registers[dst.0 as usize], unboxed)?;
-                        }
-                        k if k == hl_type_kind_HF64 => {
-                            let v_gep = unsafe {
-                                self.builder.build_gep(
-                                    self.context.i8_type(),
-                                    dyn_result,
-                                    &[self.context.i64_type().const_int(8, false)],
-                                    "dyn_v_gep",
-                                )?
-                            };
-                            let unboxed = self.builder.build_load(
-                                self.context.f64_type(),
-                                v_gep,
-                                "unboxed_f64",
-                            )?;
-                            self.builder
-                                .build_store(registers[dst.0 as usize], unboxed)?;
-                        }
-                        _ => {
-                            // Pointer types: use the vdynamic* directly
-                            self.builder
-                                .build_store(registers[dst.0 as usize], dyn_result)?;
-                        }
+                    let resolve_failed = self
+                        .builder
+                        .build_is_null(method_ptr, "vcall_resolve_null")?;
+                    let vgo_block = self.context.append_basic_block(function, "vcall_resolved");
+                    let vfail_block = self
+                        .context
+                        .append_basic_block(function, "vcall_unresolved");
+                    self.builder.build_conditional_branch(
+                        resolve_failed,
+                        vfail_block,
+                        vgo_block,
+                    )?;
+
+                    // Resolved: call with this + args (sentinel-safe).
+                    self.builder.position_at_end(vgo_block);
+                    let this_val = self
+                        .builder
+                        .build_load(ptr_type, this_slot, "vcall_this")?
+                        .into_pointer_value();
+                    let mut fb_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
+                    fb_args.push(this_val.into());
+                    fb_args.extend(build_tail_args(self)?);
+                    if let Some(ret_val) = self.build_stub_guarded_indirect_call(
+                        fn_type, method_ptr, &fb_args, "vcall_fb",
+                    )? {
+                        let store_val = if ret_val.get_type() != reg_types[dst.0 as usize] {
+                            self.cast_for_call(ret_val, reg_types[dst.0 as usize])?
+                        } else {
+                            ret_val
+                        };
+                        self.builder
+                            .build_store(registers[dst.0 as usize], store_val)?;
+                    }
+                    self.builder.build_unconditional_branch(merge_block)?;
+
+                    // Unresolved: keep dst defined with a zero/null default.
+                    self.builder.position_at_end(vfail_block);
+                    if dst_kind != hl_type_kind_HVOID {
+                        self.builder.build_store(
+                            registers[dst.0 as usize],
+                            reg_types[dst.0 as usize].const_zero(),
+                        )?;
                     }
                     self.builder.build_unconditional_branch(merge_block)?;
 
@@ -2563,13 +2651,14 @@ impl<'ctx> JITModule<'ctx> {
                     }
 
                     // Indirect call through the vtable method pointer
-                    let result = self.builder.build_indirect_call(
+                    // (stub-guarded: vobj_proto slots may hold interpreter
+                    // sentinels in hybrid mode)
+                    if let Some(ret_val) = self.build_stub_guarded_indirect_call(
                         fn_type,
                         method_ptr,
                         &arg_vals,
                         "call_method",
-                    )?;
-                    if let Some(ret_val) = result.try_as_basic_value().basic() {
+                    )? {
                         self.builder
                             .build_store(registers[dst.0 as usize], ret_val)?;
                     }
@@ -2658,10 +2747,9 @@ impl<'ctx> JITModule<'ctx> {
                         reg_types[dst.0 as usize].fn_type(&arg_types, false)
                     };
 
-                    let result = self
-                        .builder
-                        .build_indirect_call(fn_type, fn_ptr, &arg_vals, "vcall")?;
-                    if let Some(ret_val) = result.try_as_basic_value().basic() {
+                    if let Some(ret_val) =
+                        self.build_stub_guarded_indirect_call(fn_type, fn_ptr, &arg_vals, "vcall")?
+                    {
                         self.builder
                             .build_store(registers[dst.0 as usize], ret_val)?;
                     }
@@ -2788,13 +2876,14 @@ impl<'ctx> JITModule<'ctx> {
                 }
 
                 // Indirect call through the vtable method pointer
-                let result = self.builder.build_indirect_call(
+                // (stub-guarded: vobj_proto slots may hold interpreter
+                // sentinels in hybrid mode)
+                if let Some(ret_val) = self.build_stub_guarded_indirect_call(
                     fn_type,
                     method_ptr,
                     &arg_vals,
                     "call_this",
-                )?;
-                if let Some(ret_val) = result.try_as_basic_value().basic() {
+                )? {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -3139,13 +3228,12 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.position_at_end(call_with_value_bb);
                 let mut args_with_value: Vec<BasicMetadataValueEnum> = vec![closure_value.into()];
                 args_with_value.extend(arg_vals.iter().cloned());
-                let result_with_value = self.builder.build_indirect_call(
+                if let Some(ret_val) = self.build_stub_guarded_indirect_call(
                     extended_fn_type,
                     fun_ptr,
                     &args_with_value,
                     "call_closure_hv",
-                )?;
-                if let Some(ret_val) = result_with_value.try_as_basic_value().basic() {
+                )? {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -3153,13 +3241,12 @@ impl<'ctx> JITModule<'ctx> {
 
                 // --- Call WITHOUT value (hasValue == 0) ---
                 self.builder.position_at_end(call_without_value_bb);
-                let result_without_value = self.builder.build_indirect_call(
+                if let Some(ret_val) = self.build_stub_guarded_indirect_call(
                     base_fn_type,
                     fun_ptr,
                     &arg_vals,
                     "call_closure",
-                )?;
-                if let Some(ret_val) = result_without_value.try_as_basic_value().basic() {
+                )? {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
                 }
@@ -4630,6 +4717,211 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         Ok(function)
+    }
+
+    /// Emit an indirect call guarded against interpreter stub sentinels.
+    ///
+    /// In hybrid mode, shared function-pointer slots (functions_ptrs, vtables,
+    /// closure `fun` fields) may still hold the interpreter's stub sentinel
+    /// (findex + 1, always < 0x100000). Calling one from native code is the
+    /// deterministic SIGBUS observed on game.hl right after tier promotion.
+    /// This wraps every JIT indirect call site: pointers below the sentinel
+    /// limit are routed to `ash_jit_call_stub`, which re-enters the
+    /// interpreter for that findex with the same arguments (raw i64 word
+    /// encoding; see jit/stub_bridge.rs for the contract).
+    ///
+    /// Returns the merged call result (None for void returns).
+    fn build_stub_guarded_indirect_call(
+        &self,
+        fn_type: FunctionType<'ctx>,
+        fn_ptr: PointerValue<'ctx>,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<Option<BasicValueEnum<'ctx>>> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+        let f64_type = self.context.f64_type();
+        let f32_type = self.context.f32_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_parent()
+            .unwrap();
+
+        let addr = self
+            .builder
+            .build_ptr_to_int(fn_ptr, i64_type, &format!("{}_addr", name))?;
+        // Null also takes the stub path: the bridge fails it gracefully
+        // (findex -1 lookup miss) instead of a null-call crash.
+        let is_stub = self.builder.build_int_compare(
+            IntPredicate::ULT,
+            addr,
+            i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+            &format!("{}_is_stub", name),
+        )?;
+
+        let direct_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_direct", name));
+        let stub_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_stub", name));
+        let merge_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_merge", name));
+        self.builder
+            .build_conditional_branch(is_stub, stub_bb, direct_bb)?;
+
+        // --- Direct path: a real code pointer, call it as before ---
+        self.builder.position_at_end(direct_bb);
+        let direct = self
+            .builder
+            .build_indirect_call(fn_type, fn_ptr, args, name)?;
+        let direct_val = direct.try_as_basic_value().basic();
+        self.builder.build_unconditional_branch(merge_bb)?;
+
+        // --- Stub path: spill args as raw i64 words, re-enter interpreter ---
+        self.builder.position_at_end(stub_bb);
+        let nargs = args.len() as u32;
+        // Hoist the spill buffer to the entry block so a guarded call inside
+        // a hot loop does not grow the stack per iteration.
+        let buf = {
+            let saved = self.builder.get_insert_block();
+            let entry = function.get_first_basic_block().unwrap();
+            match entry.get_first_instruction() {
+                Some(first) => self.builder.position_before(&first),
+                None => self.builder.position_at_end(entry),
+            }
+            let buf = self.builder.build_alloca(
+                i64_type.array_type(nargs.max(1)),
+                &format!("{}_argbuf", name),
+            )?;
+            if let Some(block) = saved {
+                self.builder.position_at_end(block);
+            }
+            buf
+        };
+        for (i, arg) in args.iter().enumerate() {
+            let val = BasicValueEnum::try_from(*arg)
+                .map_err(|_| anyhow!("non-basic argument in stub-guarded call"))?;
+            let word = match val {
+                BasicValueEnum::IntValue(iv) => {
+                    if iv.get_type().get_bit_width() < 64 {
+                        self.builder
+                            .build_int_z_extend(iv, i64_type, "stub_arg_zext")?
+                    } else {
+                        iv
+                    }
+                }
+                BasicValueEnum::FloatValue(fv) => {
+                    let as_f64 = if fv.get_type() == f32_type {
+                        self.builder.build_float_ext(fv, f64_type, "stub_arg_ext")?
+                    } else {
+                        fv
+                    };
+                    self.builder
+                        .build_bit_cast(as_f64, i64_type, "stub_arg_bits")?
+                        .into_int_value()
+                }
+                BasicValueEnum::PointerValue(pv) => {
+                    self.builder
+                        .build_ptr_to_int(pv, i64_type, "stub_arg_ptr")?
+                }
+                other => {
+                    return Err(anyhow!(
+                        "unsupported argument value {:?} in stub-guarded call",
+                        other
+                    ))
+                }
+            };
+            let slot = unsafe {
+                self.builder.build_gep(
+                    i64_type,
+                    buf,
+                    &[i64_type.const_int(i as u64, false)],
+                    "stub_arg_slot",
+                )?
+            };
+            self.builder.build_store(slot, word)?;
+        }
+
+        let stub_fn_type =
+            i64_type.fn_type(&[i64_type.into(), ptr_type.into(), i32_type.into()], false);
+        let stub_fn_ptr = i64_type
+            .const_int(
+                crate::jit::stub_bridge::ash_jit_call_stub as usize as u64,
+                false,
+            )
+            .const_to_pointer(ptr_type);
+        let raw = self
+            .builder
+            .build_indirect_call(
+                stub_fn_type,
+                stub_fn_ptr,
+                &[
+                    addr.into(),
+                    buf.into(),
+                    i32_type.const_int(nargs as u64, false).into(),
+                ],
+                &format!("{}_stub_call", name),
+            )?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+
+        // Decode the raw word back into the call's return type.
+        let stub_val: Option<BasicValueEnum> = match fn_type.get_return_type() {
+            None => None,
+            Some(BasicTypeEnum::IntType(t)) => Some(if t.get_bit_width() < 64 {
+                self.builder
+                    .build_int_truncate(raw, t, "stub_ret_trunc")?
+                    .into()
+            } else {
+                raw.into()
+            }),
+            Some(BasicTypeEnum::FloatType(t)) => {
+                let as_f64 = self
+                    .builder
+                    .build_bit_cast(raw, f64_type, "stub_ret_bits")?
+                    .into_float_value();
+                Some(if t == f32_type {
+                    self.builder
+                        .build_float_trunc(as_f64, f32_type, "stub_ret_f32")?
+                        .into()
+                } else {
+                    as_f64.into()
+                })
+            }
+            Some(BasicTypeEnum::PointerType(t)) => Some(
+                self.builder
+                    .build_int_to_ptr(raw, t, "stub_ret_ptr")?
+                    .into(),
+            ),
+            Some(other) => {
+                return Err(anyhow!(
+                    "unsupported return type {:?} in stub-guarded call",
+                    other
+                ))
+            }
+        };
+        self.builder.build_unconditional_branch(merge_bb)?;
+
+        // --- Merge ---
+        self.builder.position_at_end(merge_bb);
+        match (direct_val, stub_val) {
+            (Some(d), Some(s)) => {
+                let phi = self
+                    .builder
+                    .build_phi(d.get_type(), &format!("{}_result", name))?;
+                phi.add_incoming(&[(&d, direct_bb), (&s, stub_bb)]);
+                Ok(Some(phi.as_basic_value()))
+            }
+            _ => Ok(None),
+        }
     }
 
     pub(crate) fn init_native_func(

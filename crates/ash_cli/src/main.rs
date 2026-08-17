@@ -265,8 +265,18 @@ unsafe extern "C" fn crash_handler_siginfo(
     info: *mut libc::siginfo_t,
     ctx: *mut std::ffi::c_void,
 ) {
+    // `si_addr` is a plain field in Apple's `siginfo_t`, but on Linux the
+    // `libc` crate models the sigaction union with an accessor method, so the
+    // two spellings are not interchangeable.
     let fault_addr = if !info.is_null() {
-        (*info).si_addr as usize
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        {
+            (*info).si_addr as usize
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            (*info).si_addr() as usize
+        }
     } else {
         0
     };

@@ -325,12 +325,12 @@ pub unsafe extern "C" fn ustrlen(s: *const u16) -> usize {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn uprintf(_fmt: *const u16, ...) {
+pub unsafe extern "C" fn uprintf(_fmt: *const u16, _: ...) {
     // Stub: UTF-16 printf
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn usprintf(_out: *mut u16, _size: i32, _fmt: *const u16, ...) -> i32 {
+pub unsafe extern "C" fn usprintf(_out: *mut u16, _size: i32, _fmt: *const u16, _: ...) -> i32 {
     0
 }
 

@@ -18,28 +18,41 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
-/// sigjmp_buf on aarch64-apple-darwin is [c_int; 49]
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-pub type SigJmpBuf = [i32; 49];
+/// Backing store for a `sigjmp_buf`.
+///
+/// One generously-sized, pointer-aligned buffer for every platform rather than
+/// a per-target size, because `sigjmp_buf` is a libc internal and guessing it
+/// per (arch, libc) is how you get a silent stack smash. Known sizes:
+///
+/// | target                  | bytes |
+/// |-------------------------|-------|
+/// | aarch64-apple-darwin    |   196 |
+/// | x86_64-apple-darwin     |   152 |
+/// | x86_64 linux-gnu        |   200 |
+/// | aarch64 linux-gnu       |   312 |
+///
+/// 512 bytes covers all of them with room to spare; the cost is two slots.
+///
+/// The element type is `u64`, not `i32`: `sigsetjmp` saves registers and
+/// pointers, so the buffer must be at least pointer-aligned. An `[i32; N]`
+/// alias is only 4-byte aligned and left correct alignment to chance — it
+/// happened to work on Darwin because neighbouring atomics pushed the field
+/// to an 8-byte offset.
+pub type SigJmpBuf = [u64; 64];
 
-/// sigjmp_buf on x86_64-apple-darwin is [c_int; 38] (actually 37+1 for save mask)
-#[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-pub type SigJmpBuf = [i32; 38];
-
-/// Fallback for other platforms
-#[cfg(not(target_os = "macos"))]
-pub type SigJmpBuf = [i32; 64]; // generous
-
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-const SIGJMP_BUF_ZERO: SigJmpBuf = [0; 49];
-#[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-const SIGJMP_BUF_ZERO: SigJmpBuf = [0; 38];
-#[cfg(not(target_os = "macos"))]
 const SIGJMP_BUF_ZERO: SigJmpBuf = [0; 64];
 
 extern "C" {
-    pub fn sigsetjmp(buf: *mut i32, savemask: i32) -> i32;
-    pub fn siglongjmp(buf: *mut i32, val: i32) -> !;
+    /// glibc does **not** export a `sigsetjmp` symbol: `<setjmp.h>` defines it
+    /// as a macro over `__sigsetjmp`, so an `extern "C" { fn sigsetjmp }`
+    /// declaration fails to link on linux-gnu with an undefined reference.
+    /// Darwin, musl and bionic all export the plain name.
+    #[cfg_attr(
+        all(target_os = "linux", target_env = "gnu"),
+        link_name = "__sigsetjmp"
+    )]
+    pub fn sigsetjmp(buf: *mut u64, savemask: i32) -> i32;
+    pub fn siglongjmp(buf: *mut u64, val: i32) -> !;
 }
 
 /// One recovery point: a jump buffer plus the pthread that armed it.
@@ -95,7 +108,7 @@ pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
             slot.active.store(false, Ordering::Relaxed);
             slot.signal.store(sig, Ordering::Relaxed);
             slot.fault_addr.store(fault_addr, Ordering::Relaxed);
-            siglongjmp(slot.buf.get() as *mut i32, 1);
+            siglongjmp(slot.buf.get() as *mut u64, 1);
             // unreachable - siglongjmp never returns
         }
     }
@@ -105,7 +118,7 @@ pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
 #[inline(always)]
 unsafe fn arm_slot(index: usize) -> i32 {
     let slot = &SLOTS[index];
-    let result = sigsetjmp(slot.buf.get() as *mut i32, 1);
+    let result = sigsetjmp(slot.buf.get() as *mut u64, 1);
     if result == 0 {
         slot.owner.store(current_thread_id(), Ordering::Relaxed);
         slot.active.store(true, Ordering::Relaxed);

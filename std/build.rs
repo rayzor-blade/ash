@@ -1,7 +1,67 @@
 use std::env;
 use std::path::PathBuf;
 
+/// Pin bindgen to the same LLVM the crate graph already requires.
+///
+/// bindgen loads whatever `libclang` clang-sys finds first, and clang-sys
+/// prefers the HIGHEST version installed. A libclang newer than the bindgen
+/// release does not fail — it silently degrades every struct to an opaque
+/// `{ _address: u8 }` plus a size assertion, which surfaces hundreds of
+/// downstream `no field ...` / E0080 errors with nothing pointing at the real
+/// cause. (Observed on Ubuntu with libclang-21 and libclang-22 co-installed:
+/// bindgen 0.70 + libclang-22 produced 738 errors; pinning to 21 produced 5.)
+///
+/// inkwell already demands LLVM 21 via LLVM_SYS_211_PREFIX, so reuse it and
+/// keep the two halves of the build on one toolchain.
+pub fn pin_libclang() {
+    println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
+    println!("cargo:rerun-if-env-changed=LLVM_SYS_211_PREFIX");
+
+    if env::var_os("LIBCLANG_PATH").is_some() {
+        return; // explicit operator override wins
+    }
+    let Some(prefix) = env::var_os("LLVM_SYS_211_PREFIX") else {
+        return; // not set: leave clang-sys to its default search
+    };
+    let libdir = PathBuf::from(prefix).join("lib");
+    let has_libclang = ["libclang.so", "libclang.dylib", "libclang.dll"]
+        .iter()
+        .any(|n| libdir.join(n).exists())
+        || std::fs::read_dir(&libdir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("libclang-21.so")
+            })
+        });
+    if has_libclang {
+        #[allow(unused_unsafe)]
+        unsafe {
+            env::set_var("LIBCLANG_PATH", &libdir);
+        }
+    }
+}
+
+/// Fail loudly if bindgen degraded the core HL types to opaque blobs.
+/// Without this the failure mode is hundreds of unrelated-looking type errors
+/// in files nobody touched.
+pub fn assert_bindings_usable(bindings: &str) {
+    if !bindings.contains("pub kind: hl_type_kind") {
+        panic!(
+            "bindgen produced an opaque `hl_type` (no `kind` field).\n\
+             This means the loaded libclang is incompatible with the pinned \
+             bindgen release — bindgen degrades structs to `{{ _address: u8 }}` \
+             instead of erroring.\n\
+             Set LIBCLANG_PATH to an LLVM 21 lib directory, e.g.\n\
+             \x20   export LIBCLANG_PATH=/usr/lib/llvm-21/lib   (Linux)\n\
+             \x20   export LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib   (macOS)"
+        );
+    }
+}
+
 fn main() {
+    pin_libclang();
+
     // // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/path/to/lib");
 
@@ -23,6 +83,8 @@ fn main() {
         .generate()
         // Unwrap the Result and panic on failure.
         .expect("Unable to generate bindings");
+
+    assert_bindings_usable(&bindings.to_string());
 
     // Write the bindings to the $OUT_DIR/bindings.rs file.
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());

@@ -378,3 +378,18 @@ expectation = "exact"
 normalize = "default"
 compile = false
 sanity_interp = false
+
+# Edge cases for the Math primitives both JIT tiers emit as instructions rather
+# than calls (crates/ash/src/intrinsics.rs). The point of the case is that the
+# obvious instruction is wrong twice over: HashLink's round is floor(x + 0.5),
+# which disagrees with IEEE at negative halves, and the Int-returning forms
+# saturate on NaN and overflow where a plain fptosi is poison. Every engine must
+# agree with the interpreter here.
+[[case]]
+name = "MathIntrinsics"
+main = "MathIntrinsics"
+hl = "test_math_intrinsics.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"

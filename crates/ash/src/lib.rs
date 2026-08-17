@@ -8,6 +8,7 @@ pub mod bytecode;
 pub mod c_types;
 pub mod cranelift;
 pub mod functions;
+pub mod intrinsics;
 pub mod hl_bindings {
     #![allow(non_upper_case_globals)]
     #![allow(non_camel_case_types)]

@@ -955,25 +955,39 @@ impl<'ctx> JITModule<'ctx> {
             }
 
             Opcode::Call1 { dst, fun, arg0 } => {
-                let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
                 let arg0_val = self.builder.build_load(
                     reg_types[arg0.0 as usize],
                     registers[arg0.0 as usize],
                     "arg0_val",
                 )?;
-                let result = self
-                    .builder
-                    .build_call(function, &[arg0_val.into()], "call")?;
 
-                if result.try_as_basic_value().basic().is_some() {
-                    self.builder.build_store(
-                        registers[dst.0 as usize],
-                        result.try_as_basic_value().basic().unwrap(),
-                    );
-                }
+                // Machine-instruction primitives (Math.sqrt and friends) are
+                // emitted here rather than called. Every entry in the table is
+                // unary, which is why this is the only call arity that has to
+                // check. See crate::intrinsics.
+                let inlined = match self.native_intrinsic_for(fun.0) {
+                    Some(intr) => self.emit_native_intrinsic(intr, arg0_val)?,
+                    None => None,
+                };
 
-                if is_placeholder {
-                    self.add_pending_compilation(fun.0);
+                if let Some(v) = inlined {
+                    self.builder.build_store(registers[dst.0 as usize], v)?;
+                } else {
+                    let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
+                    let result = self
+                        .builder
+                        .build_call(function, &[arg0_val.into()], "call")?;
+
+                    if result.try_as_basic_value().basic().is_some() {
+                        self.builder.build_store(
+                            registers[dst.0 as usize],
+                            result.try_as_basic_value().basic().unwrap(),
+                        );
+                    }
+
+                    if is_placeholder {
+                        self.add_pending_compilation(fun.0);
+                    }
                 }
             }
             Opcode::Call2 {
@@ -4929,6 +4943,122 @@ impl<'ctx> JITModule<'ctx> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Emit `intr` inline over `arg`, or `Ok(None)` if the intrinsic
+    /// declaration could not be obtained.
+    ///
+    /// The saturating float→int conversions are not an optimization but a
+    /// correctness requirement: `ash_std` casts with Rust's `as`, which clamps
+    /// out-of-range values and maps NaN to zero, whereas `fptosi` is poison on
+    /// exactly those inputs. See [`crate::intrinsics`].
+    fn emit_native_intrinsic(
+        &self,
+        intr: crate::intrinsics::NativeIntrinsic,
+        arg: BasicValueEnum<'ctx>,
+    ) -> Result<Option<BasicValueEnum<'ctx>>> {
+        use crate::intrinsics::NativeIntrinsic as NI;
+        use inkwell::intrinsics::Intrinsic;
+
+        let f64_ty = self.context.f64_type();
+        let x = arg.into_float_value();
+
+        // `math_isnan` / `math_isfinite` are comparisons, not intrinsic calls.
+        match intr {
+            NI::IsNaN | NI::IsFinite => {
+                let pred = match intr {
+                    // x != x is true only for NaN.
+                    NI::IsNaN => FloatPredicate::UNO,
+                    // ORD additionally excludes NaN, which is what `is_finite`
+                    // means on top of the magnitude test below.
+                    _ => FloatPredicate::ONE,
+                };
+                let bit = if intr == NI::IsNaN {
+                    self.builder.build_float_compare(pred, x, x, "isnan")?
+                } else {
+                    let abs = self.call_float_intrinsic("llvm.fabs", x, "fabs")?;
+                    let inf = f64_ty.const_float(f64::INFINITY);
+                    let finite = self.builder.build_float_compare(
+                        FloatPredicate::ONE,
+                        abs,
+                        inf,
+                        "notinf",
+                    )?;
+                    let ord = self
+                        .builder
+                        .build_float_compare(FloatPredicate::ORD, x, x, "ord")?;
+                    self.builder.build_and(finite, ord, "isfinite")?
+                };
+                // HL bools are byte-wide in the ABI; the comparison yields i1.
+                let b = self
+                    .builder
+                    .build_int_z_extend(bit, self.context.bool_type(), "b")?;
+                return Ok(Some(b.into()));
+            }
+            _ => {}
+        }
+
+        // Everything else is floor/ceil/sqrt/fabs, optionally over x + 0.5, and
+        // optionally converted to i32 afterwards.
+        let base = match intr {
+            NI::Sqrt => self.call_float_intrinsic("llvm.sqrt", x, "sqrt")?,
+            NI::Abs => self.call_float_intrinsic("llvm.fabs", x, "fabs")?,
+            NI::Floor | NI::FloorToI32 => self.call_float_intrinsic("llvm.floor", x, "floor")?,
+            NI::Ceil | NI::CeilToI32 => self.call_float_intrinsic("llvm.ceil", x, "ceil")?,
+            NI::RoundHalfUp | NI::RoundHalfUpToI32 => {
+                let half = f64_ty.const_float(0.5);
+                let shifted = self.builder.build_float_add(x, half, "half")?;
+                self.call_float_intrinsic("llvm.floor", shifted, "floor")?
+            }
+            NI::IsNaN | NI::IsFinite => unreachable!("handled above"),
+        };
+
+        if !intr.returns_i32() {
+            return Ok(Some(base.into()));
+        }
+
+        let i32_ty = self.context.i32_type();
+        let Some(sat) = Intrinsic::find("llvm.fptosi.sat") else {
+            return Ok(None);
+        };
+        let Some(decl) = sat.get_declaration(&self.module, &[i32_ty.into(), f64_ty.into()]) else {
+            return Ok(None);
+        };
+        let call = self
+            .builder
+            .build_call(decl, &[base.into()], "fptosi_sat")?;
+        Ok(call.try_as_basic_value().basic())
+    }
+
+    /// Call a unary `f64 -> f64` LLVM intrinsic by name.
+    fn call_float_intrinsic(
+        &self,
+        name: &str,
+        x: inkwell::values::FloatValue<'ctx>,
+        label: &str,
+    ) -> Result<inkwell::values::FloatValue<'ctx>> {
+        use inkwell::intrinsics::Intrinsic;
+        let f64_ty = self.context.f64_type();
+        let intr =
+            Intrinsic::find(name).ok_or_else(|| anyhow!("LLVM intrinsic {name} not found"))?;
+        let decl = intr
+            .get_declaration(&self.module, &[f64_ty.into()])
+            .ok_or_else(|| anyhow!("no declaration for {name}"))?;
+        let call = self.builder.build_call(decl, &[x.into()], label)?;
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("{name} returned void"))?
+            .into_float_value())
+    }
+
+    /// The intrinsic replacing a one-argument call to `findex`, if that findex
+    /// is a native primitive this backend can emit directly.
+    fn native_intrinsic_for(&self, findex: usize) -> Option<crate::intrinsics::NativeIntrinsic> {
+        let FuncPtr::Native(native) = self.findexes.get(&findex)? else {
+            return None;
+        };
+        crate::intrinsics::lookup(native.lib.as_str(), native.name.as_str())
     }
 
     pub(crate) fn init_native_func(

@@ -1138,6 +1138,24 @@ impl Lowerer<'_, '_> {
             arg_vals.push(self.coerce(v, want)?);
         }
 
+        // Primitives that are single instructions here rather than calls into
+        // ash_std. Every entry in the table is unary, so a one-argument native
+        // call is the only shape worth checking. See crate::intrinsics.
+        if is_native && arg_vals.len() == 1 {
+            if let Some(intr) = self
+                .ctx
+                .native_index(target)
+                .map(|ni| &bytecode.natives[ni])
+                .and_then(|n| crate::intrinsics::lookup(n.lib.as_str(), n.name.as_str()))
+            {
+                let v = self.emit_native_intrinsic(intr, arg_vals[0]);
+                if self.class_of(dst) != AbiClass::Void {
+                    self.set_reg(dst, v)?;
+                }
+                return Ok(());
+            }
+        }
+
         let result = if is_native {
             let fref = *self
                 .native_refs
@@ -1162,6 +1180,55 @@ impl Lowerer<'_, '_> {
             }
         }
         Ok(())
+    }
+
+    /// Emit a native primitive as CLIF instructions.
+    ///
+    /// `fcvt_to_sint_sat`, not `fcvt_to_sint`: `ash_std` converts with Rust's
+    /// `as`, which clamps out-of-range values and maps NaN to zero, while the
+    /// non-saturating instruction traps on exactly those inputs. Likewise
+    /// `RoundHalfUp` is spelled `floor(x + 0.5)` rather than `nearest`, because
+    /// HashLink's rounding disagrees with IEEE's at negative halves. See
+    /// [`crate::intrinsics`].
+    fn emit_native_intrinsic(
+        &mut self,
+        intr: crate::intrinsics::NativeIntrinsic,
+        x: Value,
+    ) -> Value {
+        use crate::intrinsics::NativeIntrinsic as NI;
+
+        match intr {
+            NI::IsNaN => {
+                // Unordered is true only when an operand is NaN.
+                self.b.ins().fcmp(FloatCC::Unordered, x, x)
+            }
+            NI::IsFinite => {
+                let abs = self.b.ins().fabs(x);
+                let inf = self.b.ins().f64const(f64::INFINITY);
+                // Ordered-and-less-than is false for both NaN and infinity, so
+                // this single compare covers what is_finite means.
+                self.b.ins().fcmp(FloatCC::LessThan, abs, inf)
+            }
+            _ => {
+                let base = match intr {
+                    NI::Sqrt => self.b.ins().sqrt(x),
+                    NI::Abs => self.b.ins().fabs(x),
+                    NI::Floor | NI::FloorToI32 => self.b.ins().floor(x),
+                    NI::Ceil | NI::CeilToI32 => self.b.ins().ceil(x),
+                    NI::RoundHalfUp | NI::RoundHalfUpToI32 => {
+                        let half = self.b.ins().f64const(0.5);
+                        let shifted = self.b.ins().fadd(x, half);
+                        self.b.ins().floor(shifted)
+                    }
+                    NI::IsNaN | NI::IsFinite => unreachable!("handled above"),
+                };
+                if intr.returns_i32() {
+                    self.b.ins().fcvt_to_sint_sat(types::I32, base)
+                } else {
+                    base
+                }
+            }
+        }
     }
 
     /// Indirect call through `functions_ptrs[findex]`, guarded against the

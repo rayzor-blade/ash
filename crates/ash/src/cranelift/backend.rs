@@ -127,16 +127,23 @@ impl AshCraneliftBackend {
         ctx: &CraneliftTierContext,
         findex: usize,
     ) -> Result<(usize, LoweredMeta)> {
+        let _phase = crate::profile::scope("cranelift compile");
+        crate::profile::count("cranelift attempts", 1);
         let LoweredFunction {
             def,
             arg_kinds,
             ret_kind,
             num_ops,
-        } = lower_function(self, ctx, findex)?;
-        let code = self
-            .inner
-            .compile(bead, def)
-            .map_err(|e| anyhow!("cranelift compile failed: {e}"))?;
+        } = {
+            let _phase = crate::profile::scope("clif lower");
+            lower_function(self, ctx, findex)?
+        };
+        let code = {
+            let _phase = crate::profile::scope("clif codegen");
+            self.inner
+                .compile(bead, def)
+                .map_err(|e| anyhow!("cranelift compile failed: {e}"))?
+        };
         if code.is_null() {
             bail!("cranelift returned a null entry pointer");
         }

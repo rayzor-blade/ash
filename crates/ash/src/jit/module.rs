@@ -94,14 +94,18 @@ pub struct JITModule<'ctx> {
     pub(crate) hot_reload: bool,
 }
 
-/// Per-phase init timing, printed when ASH_TIERED_TIMING=1 is set.
+/// Per-phase init timing: printed inline when ASH_TIERED_TIMING=1, and always
+/// charged to the profiler's phase tree (which is itself inert unless
+/// ASH_PROFILE is set).
 macro_rules! phase_timer {
     ($enabled:expr, $label:expr, $start:expr) => {
+        let __elapsed = $start.elapsed();
+        crate::profile::record($label, __elapsed);
         if $enabled {
             eprintln!(
                 "[jit-init] {:<24} {:>8.1}ms",
                 $label,
-                $start.elapsed().as_secs_f64() * 1000.0
+                __elapsed.as_secs_f64() * 1000.0
             );
         }
     };
@@ -200,7 +204,28 @@ impl<'ctx> JITModule<'ctx> {
             .expect("Failed to initialize constants");
         phase_timer!(timing, "init_constants", t);
 
+        module.register_profile_names();
         module
+    }
+
+    /// Teach the profiler this module's findex → name mapping, so sampled
+    /// frames in generated code print as function names.
+    ///
+    /// A no-op unless profiling is on; the map is only built when it will be
+    /// read. `set_name_resolver` keeps the first registration, so a resolver
+    /// the embedder installed earlier wins over this one.
+    pub(crate) fn register_profile_names(&self) {
+        if !crate::profile::enabled() {
+            return;
+        }
+        let mut names: HashMap<u32, String> = HashMap::new();
+        for f in &self.bytecode.functions {
+            names.insert(f.findex as u32, f.name().to_string());
+        }
+        for n in &self.bytecode.natives {
+            names.insert(n.findex as u32, format!("{}@{}", n.lib, n.name));
+        }
+        crate::profile::set_name_resolver(move |fx| names.get(&fx).cloned());
     }
 
     /// Create LLVM module globals for the bytecode constant pools

@@ -269,6 +269,7 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub(crate) fn compile_function(&mut self, index: usize) -> Result<()> {
+        let _phase = crate::profile::scope("llvm lower");
         // Skip if already compiled (has entry block with instructions)
         if let Some(func) = self.func_cache.get(&index) {
             if func.count_basic_blocks() > 0
@@ -371,6 +372,8 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
+        let _phase = crate::profile::scope("llvm promote");
+        crate::profile::count("llvm promotions", 1);
         // Promotion currently targets bytecode functions only.
         if !self.findexes.contains_key(&findex) {
             return Err(anyhow!(
@@ -406,16 +409,20 @@ impl<'ctx> JITModule<'ctx> {
                 findex
             )
         })?;
-        let fn_addr = self
-            .execution_engine
-            .get_function_address(name)
-            .map_err(|e| {
-                anyhow!(
-                    "Strict promotion failed: get_function_address({}) -> {}",
-                    name,
-                    e
-                )
-            })?;
+        // Where MCJIT actually emits machine code: the address request is what
+        // forces codegen and relocation for everything reachable.
+        let fn_addr = {
+            let _phase = crate::profile::scope("mcjit codegen");
+            self.execution_engine
+                .get_function_address(name)
+                .map_err(|e| {
+                    anyhow!(
+                        "Strict promotion failed: get_function_address({}) -> {}",
+                        name,
+                        e
+                    )
+                })?
+        };
         if fn_addr == 0 {
             return Err(anyhow!(
                 "Strict promotion failed: zero function address for {}",
@@ -5127,10 +5134,16 @@ impl<'ctx> JITModule<'ctx> {
 
     pub fn execute_main(&mut self) -> Result<()> {
         // Compile any pending functions discovered during initialization
-        self.compile_pending_functions()?;
+        {
+            let _phase = crate::profile::scope("compile pending");
+            self.compile_pending_functions()?;
+        }
 
         // Compile remaining bytecode functions (e.g., virtual-dispatch-only methods)
-        self.compile_remaining_functions()?;
+        {
+            let _phase = crate::profile::scope("compile remaining");
+            self.compile_remaining_functions()?;
+        }
 
         let index = self.bytecode.entrypoint as usize;
         let function = *self
@@ -5138,11 +5151,18 @@ impl<'ctx> JITModule<'ctx> {
             .get(&index)
             .ok_or_else(|| anyhow!("Entrypoint function not found in cache"))?;
 
-        self.module.print_to_file("/tmp/ash_jit.ll").ok();
+        {
+            let _phase = crate::profile::scope("dump ir");
+            self.module.print_to_file("/tmp/ash_jit.ll").ok();
+        }
 
         // Populate functions_ptrs with actual function addresses from the JIT.
         // This must happen after compilation so the execution engine has allocated code.
-        self.setup_functions_ptrs()?;
+        // Requesting every address is what forces MCJIT to emit machine code.
+        {
+            let _phase = crate::profile::scope("mcjit codegen");
+            self.setup_functions_ptrs()?;
+        }
 
         // Register GC roots BEFORE init_constants (which allocates and might trigger GC)
         unsafe {
@@ -5164,14 +5184,23 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         // Materialize bytecode constants (pre-initialized globals like string literals)
-        self.init_constants()?;
+        {
+            let _phase = crate::profile::scope("init constants");
+            self.init_constants()?;
+        }
 
         // Pre-allocate class descriptors for HOBJ globals not populated by init_constants
-        self.init_class_descriptors()?;
+        {
+            let _phase = crate::profile::scope("init class descriptors");
+            self.init_class_descriptors()?;
+        }
 
-        unsafe {
-            self.execution_engine.run_function(function, &[]);
-        };
+        {
+            let _phase = crate::profile::scope("execute");
+            unsafe {
+                self.execution_engine.run_function(function, &[]);
+            };
+        }
 
         Ok(())
     }
@@ -5203,6 +5232,10 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub(crate) fn install_function_address(&mut self, findex: usize, addr: *mut c_void) {
+        // Every LLVM-compiled entry point passes through here, in both the
+        // whole-module and the tiered path, so this is the one place the
+        // profiler needs to learn about generated code.
+        crate::profile::register_jit_code(findex as u32, crate::profile::Tier::Llvm, addr as usize);
         if findex < self.functions_ptrs.len() {
             self.functions_ptrs[findex] = addr;
         }

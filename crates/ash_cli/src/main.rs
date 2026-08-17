@@ -86,7 +86,14 @@ fn main() {
         libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
     }
 
-    if let Err(e) = run() {
+    // Start profiling before any work happens, and on this thread: the sampler
+    // interrupts whichever thread calls init, and that must be the one that
+    // runs the program.
+    ash::profile::init();
+
+    let result = run();
+    ash::profile::report();
+    if let Err(e) = result {
         eprintln!("Error: {:#}", e);
         process::exit(1);
     }
@@ -377,16 +384,38 @@ fn run() -> Result<()> {
         anyhow::bail!("Bytecode file not found: {}", hl_path.display());
     }
 
-    init_std_library()?;
+    {
+        let _p = ash::profile::scope("init stdlib");
+        init_std_library()?;
+    }
 
-    let bytecode = BytecodeDecoder::decode(&hl_path)?;
+    let bytecode = {
+        let _p = ash::profile::scope("decode bytecode");
+        BytecodeDecoder::decode(&hl_path)?
+    };
     let mut native_resolver = NativeFunctionResolver::new();
+
+    // Give the profiler findex → name so sampled JIT frames and hot
+    // interpreted functions print as names. Built once, only when profiling.
+    if ash::profile::enabled() {
+        let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+        for f in &bytecode.functions {
+            names.insert(f.findex as u32, f.name().to_string());
+        }
+        for n in &bytecode.natives {
+            names.insert(n.findex as u32, format!("{}@{}", n.lib, n.name));
+        }
+        ash::profile::set_name_resolver(move |fx| names.get(&fx).cloned());
+    }
 
     // Discover and load external HDLL libraries from the .hl file's directory
     let search_dir = hl_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
+    {
+        let _p = ash::profile::scope("load hdlls");
+        native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
+    }
 
     // Debug: dump type info for Heaps investigation
     if std::env::var("ASH_DUMP_TYPES").is_ok() {
@@ -464,7 +493,10 @@ fn run() -> Result<()> {
     match cli.mode {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
-            let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
+            let result = {
+                let _p = ash::profile::scope("run");
+                interpreter.execute_entrypoint(&bytecode, &native_resolver)?
+            };
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
@@ -496,8 +528,14 @@ fn run() -> Result<()> {
                 hot_reload: cli.hot_reload,
                 tier_mode,
             };
-            interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
-            let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
+            {
+                let _p = ash::profile::scope("tiered prewarm");
+                interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
+            }
+            let result = {
+                let _p = ash::profile::scope("run");
+                interpreter.execute_entrypoint(&bytecode, &native_resolver)?
+            };
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(

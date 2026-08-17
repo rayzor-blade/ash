@@ -126,6 +126,9 @@ cargo run -p ash -- path/to/program.hl
 | `ASH_TIER` | Same values as `--jit-tier`; used when the flag is absent |
 | `ASH_TIER_LOG` | Log promotions, declines and tier crossings |
 | `ASH_TIERED_TIMING` | Break down tiered JIT startup cost by phase |
+| `ASH_PROFILE` | `phases`, `sample` or `all` — see [Profiling](#profiling) |
+| `ASH_PROFILE_HZ` | Sampling rate, default 997 |
+| `ASH_PROFILE_OUT` | Write the profile to a file instead of stderr |
 | `ASH_GC_STATS` | Print collection count, reclaimed blocks, live bytes and pause times |
 | `ASH_GC_HEAP_MB` | Heap reservation size (demand-committed, so this is a ceiling) |
 | `ASH_GC_TRIGGER_MB` | Floor for the adaptive collection threshold |
@@ -133,6 +136,47 @@ cargo run -p ash -- path/to/program.hl
 | `ASH_CRASH_BACKTRACE` | Capture a backtrace in the crash handler (best-effort; allocates in a signal handler) |
 | `ASH_JIT_NATIVE_TRAPS` | Compile unresolved natives to call-time traps instead of failing the function |
 | `ASH_LIBHL` | `system` or `embedded` — override stdlib selection |
+
+## Profiling
+
+`ASH_PROFILE` turns on a built-in profiler that works in every mode and on both
+binaries. It answers two separate questions:
+
+```bash
+ASH_PROFILE=phases ash_cli --mode hybrid program.hl   # where startup and compilation go
+ASH_PROFILE=sample ash_cli --mode hybrid program.hl   # where the running program goes
+ASH_PROFILE=all    ash_cli --mode hybrid program.hl   # both
+```
+
+**Phases** are nested named regions — decode, native resolution, each tier's
+lowering and codegen, execution — reported as a tree with total and self time,
+so a phase that is slow because of one child reads differently from one that is
+slow on its own. Background compilation appears under its own thread rather
+than nested inside whatever the main thread was doing.
+
+**Samples** come from interrupting the running thread and recording the program
+counter. Each one is classified, which is the point: it separates time spent in
+*generated code* from time the generated code hands back to the runtime.
+
+| Bucket | Meaning |
+|--------|---------|
+| `llvm` / `cranelift` | Inside code a JIT tier emitted |
+| `interp` | Inside the bytecode interpreter |
+| `runtime` | An `hlp_*` helper |
+| `gc` | Allocation and collection |
+| `native` | Any other resolved symbol |
+| `unknown` | Anonymous memory with no registered code range |
+
+Compiled functions register their entry points with the profiler as they are
+installed, so JIT frames resolve to Haxe function names — an external profiler
+sees only anonymous `mmap` memory there.
+
+Samples are attributed to a bucket by their own address, and a bare libc leaf
+is re-attributed to its caller, so the collector's `madvise` and lock traffic
+is charged to `gc` rather than to `native`. Because standard signals do not
+queue, a thread that is starved of CPU loses ticks instead of banking them; the
+report compares CPU against wall time and says so when that happens, since
+timings taken on a busy machine otherwise look like ordinary results.
 
 ## Crates
 

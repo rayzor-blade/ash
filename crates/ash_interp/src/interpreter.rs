@@ -474,6 +474,7 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
     match result {
         Ok(Ok((addr, meta))) => {
             ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
+            ash::profile::register_jit_code(findex as u32, ash::profile::Tier::Cranelift, addr);
             if ctx.tier_log {
                 eprintln!(
                     "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
@@ -566,6 +567,8 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 .expect("llvm_done mutex poisoned")
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
+            // (LLVM code registers itself with the profiler in
+            // install_function_address, which every promotion passes through.)
             if ctx.tier_log {
                 eprintln!(
                     "[tier] install findex={findex} tier=llvm addr={:#x} in {:.2}ms",
@@ -2909,8 +2912,13 @@ impl HLInterpreter {
         self.stack.push(frame);
         self.sync_gc_scan_roots();
 
-        // Main interpretation loop — always pop the frame even on error
+        // Main interpretation loop — always pop the frame even on error.
+        // The findex is published for the sampling profiler so a sample landing
+        // in the interpreter (or in a runtime helper it called) can be charged
+        // to the bytecode function being executed, not just to the loop.
+        let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.interpret_loop(bc, native_resolver, func_idx);
+        ash::profile::leave_interp(prev_findex);
         self.stack.pop();
         self.sync_gc_scan_roots();
         result

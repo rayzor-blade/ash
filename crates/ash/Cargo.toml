@@ -21,6 +21,9 @@ byteorder = {workspace=true}
 ash_macro = {workspace=true}
 air = { path = "../air" }
 libc = "0.2.158"
+# Symbolizing the sampling profiler's frames: dladdr returns mangled names, and
+# ash_std's are v0-mangled, which is not readable by inspection.
+rustc-demangle = "0.1"
 clap = { workspace = true }
 beadie = { workspace = true }
 cranelift-codegen = "0.130"

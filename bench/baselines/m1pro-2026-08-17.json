@@ -1,0 +1,3459 @@
+{
+  "binaries": {
+    "ash": "/Users/amaterasu/Vibranium/ash/target/debug/ash",
+    "ash_cli": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli"
+  },
+  "config": {
+    "benchmarks": [
+      "basic",
+      "tiered_hotloop",
+      "mandelbrot_small",
+      "array_push",
+      "gc",
+      "stdlib",
+      "jsonparse",
+      "jsonmin",
+      "jsonmin2",
+      "jsonmin3",
+      "jsonarr",
+      "mapiter",
+      "map_simple"
+    ],
+    "gc_heap_mb": null,
+    "gc_stats": true,
+    "include_slow": false,
+    "include_windowed": false,
+    "iterations": 5,
+    "manifest": "bench/benchmarks.toml",
+    "modes": [
+      "interp",
+      "hybrid-auto",
+      "hybrid-cranelift",
+      "hybrid-llvm",
+      "full-jit"
+    ],
+    "oracle": null,
+    "sequential": true,
+    "tier_log": false,
+    "timeout_scale": 1.0,
+    "warmups": 1
+  },
+  "generated_iso": "2026-08-17T23:52:14+0100",
+  "generated_unix": 1787007134,
+  "git": {
+    "branch": "main",
+    "commit": "8df35edab1856a14a5ec728307d5f6def52f2eda",
+    "dirty": true
+  },
+  "load": {
+    "at_end": {
+      "available": true,
+      "load1": 5.50830078125,
+      "load15": 5.30029296875,
+      "load5": 5.37646484375
+    },
+    "at_start": {
+      "available": true,
+      "load1": 2.39599609375,
+      "load15": 4.69140625,
+      "load5": 2.89794921875
+    },
+    "threshold": 0.4,
+    "warning_raised": false
+  },
+  "results": [
+    {
+      "benchmark": "basic",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_basic.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "startup",
+      "hl": "test_basic.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29196288,
+      "reference_source": "interp",
+      "samples_ms": [
+        15.575707890093327,
+        15.608249930664897,
+        14.876083005219698,
+        15.416166977956891,
+        14.716583071276546
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 15.608249930664897,
+        "mean_ms": 15.238558175042272,
+        "median_ms": 15.416166977956891,
+        "min_ms": 14.716583071276546,
+        "runs": 5,
+        "stddev_ms": 0.41404500633875985
+      }
+    },
+    {
+      "benchmark": "basic",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_basic.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "startup",
+      "hl": "test_basic.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33325056,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.306915881112218,
+        17.245874973013997,
+        18.395415972918272,
+        18.164832843467593,
+        22.531958995386958
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 22.531958995386958,
+        "mean_ms": 18.928999733179808,
+        "median_ms": 18.306915881112218,
+        "min_ms": 17.245874973013997,
+        "runs": 5,
+        "stddev_ms": 2.0657852857302257
+      }
+    },
+    {
+      "benchmark": "basic",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_basic.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "startup",
+      "hl": "test_basic.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33521664,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.47533313371241,
+        18.247000174596906,
+        18.295542104169726,
+        17.465541837736964,
+        17.81791588291526
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.295542104169726,
+        "mean_ms": 17.660266626626253,
+        "median_ms": 17.81791588291526,
+        "min_ms": 16.47533313371241,
+        "runs": 5,
+        "stddev_ms": 0.7440883016698642
+      }
+    },
+    {
+      "benchmark": "basic",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_basic.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "startup",
+      "hl": "test_basic.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33390592,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.07279186323285,
+        17.567875096574426,
+        18.216374795883894,
+        17.47399987652898,
+        17.834541155025363
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.216374795883894,
+        "mean_ms": 17.833116557449102,
+        "median_ms": 17.834541155025363,
+        "min_ms": 17.47399987652898,
+        "runs": 5,
+        "stddev_ms": 0.31766766521435025
+      }
+    },
+    {
+      "benchmark": "basic",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_basic.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "startup",
+      "hl": "test_basic.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 81887232,
+      "reference_source": "interp",
+      "samples_ms": [
+        912.1783750597388,
+        955.9618749190122,
+        909.5104581210762,
+        905.1447501406074,
+        898.0713752098382
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 955.9618749190122,
+        "mean_ms": 916.1733666900545,
+        "median_ms": 909.5104581210762,
+        "min_ms": 898.0713752098382,
+        "runs": 5,
+        "stddev_ms": 22.873522762985456
+      }
+    },
+    {
+      "benchmark": "tiered_hotloop",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_tiered_hotloop.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "jit",
+      "hl": "test_tiered_hotloop.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 27869184,
+      "reference_source": "interp",
+      "samples_ms": [
+        4656.508290907368,
+        4676.3252089731395,
+        4707.308541052043,
+        4676.747833145782,
+        4722.398000070825
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 4722.398000070825,
+        "mean_ms": 4687.857574829832,
+        "median_ms": 4676.747833145782,
+        "min_ms": 4656.508290907368,
+        "runs": 5,
+        "stddev_ms": 26.507454082750122
+      }
+    },
+    {
+      "benchmark": "tiered_hotloop",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_tiered_hotloop.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "jit",
+      "hl": "test_tiered_hotloop.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 53149696,
+      "reference_source": "interp",
+      "samples_ms": [
+        110.49358313903213,
+        107.06495912745595,
+        110.05474999547005,
+        109.49599999003112,
+        108.04208414629102
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 0.33,
+          "findex": 255,
+          "tier": "cranelift"
+        },
+        {
+          "compile_ms": 57.44,
+          "findex": 255,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 2,
+        "compiled_calls": 19919,
+        "cranelift": 1,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 1
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 110.49358313903213,
+        "mean_ms": 109.03027527965605,
+        "median_ms": 109.49599999003112,
+        "min_ms": 107.06495912745595,
+        "runs": 5,
+        "stddev_ms": 1.4358540258908443
+      }
+    },
+    {
+      "benchmark": "tiered_hotloop",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_tiered_hotloop.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "jit",
+      "hl": "test_tiered_hotloop.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 35667968,
+      "reference_source": "interp",
+      "samples_ms": [
+        64.60116687230766,
+        65.66366693004966,
+        64.57699998281896,
+        65.35016698762774,
+        64.3982500769198
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 0.35,
+          "findex": 255,
+          "tier": "cranelift"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 19918,
+        "cranelift": 1,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 1
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 65.66366693004966,
+        "mean_ms": 64.91805016994476,
+        "median_ms": 64.60116687230766,
+        "min_ms": 64.3982500769198,
+        "runs": 5,
+        "stddev_ms": 0.5544347771024253
+      }
+    },
+    {
+      "benchmark": "tiered_hotloop",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_tiered_hotloop.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "jit",
+      "hl": "test_tiered_hotloop.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 51036160,
+      "reference_source": "interp",
+      "samples_ms": [
+        141.89579198136926,
+        139.42808308638632,
+        139.166709035635,
+        140.02575003542006,
+        140.28579206205904
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 56.9,
+          "findex": 255,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 19689,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 1,
+        "succeeded": 1
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 141.89579198136926,
+        "mean_ms": 140.16042524017394,
+        "median_ms": 140.02575003542006,
+        "min_ms": 139.166709035635,
+        "runs": 5,
+        "stddev_ms": 1.0687783800476947
+      }
+    },
+    {
+      "benchmark": "tiered_hotloop",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_tiered_hotloop.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "jit",
+      "hl": "test_tiered_hotloop.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 81231872,
+      "reference_source": "interp",
+      "samples_ms": [
+        922.9944578837603,
+        927.5217500980943,
+        918.8342499546707,
+        921.5646251104772,
+        922.6893750019372
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 927.5217500980943,
+        "mean_ms": 922.7208916097879,
+        "median_ms": 922.6893750019372,
+        "min_ms": 918.8342499546707,
+        "runs": 5,
+        "stddev_ms": 3.1451156417646327
+      }
+    },
+    {
+      "benchmark": "mandelbrot_small",
+      "binary": "ash_cli",
+      "checksum": {
+        "accepted": true,
+        "label": "unfused",
+        "value": "22816350"
+      },
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mandelbrot_small.hl",
+      "detail": "checksum 22816350 (unfused)",
+      "exit_code": 0,
+      "expectation": "checksum",
+      "gc": {
+        "blocks_reclaimed": 9606,
+        "bytes_allocated_mb": 303.7,
+        "collections": 38,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 32,
+        "pause_max_ms": 0.72,
+        "pause_total_ms": 21.5,
+        "pause_total_ns": 21489004
+      },
+      "group": "fp",
+      "hl": "test_mandelbrot_small.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 37912576,
+      "reference_source": "manifest",
+      "samples_ms": [
+        14197.81337515451,
+        15083.179667126387,
+        14030.733707826585,
+        14068.66179103963,
+        14048.859416041523
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 120.0,
+      "wall_ms": {
+        "max_ms": 15083.179667126387,
+        "mean_ms": 14285.849591437727,
+        "median_ms": 14068.66179103963,
+        "min_ms": 14030.733707826585,
+        "runs": 5,
+        "stddev_ms": 450.52875128062885
+      }
+    },
+    {
+      "benchmark": "mandelbrot_small",
+      "binary": "ash_cli",
+      "checksum": {
+        "accepted": true,
+        "label": "unfused",
+        "value": "22816350"
+      },
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mandelbrot_small.hl",
+      "detail": "checksum 22816350 (unfused)",
+      "exit_code": 0,
+      "expectation": "checksum",
+      "gc": {
+        "blocks_reclaimed": 9606,
+        "bytes_allocated_mb": 303.7,
+        "collections": 38,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 32,
+        "pause_max_ms": 1.57,
+        "pause_total_ms": 23.0,
+        "pause_total_ns": 22967547
+      },
+      "group": "fp",
+      "hl": "test_mandelbrot_small.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 61161472,
+      "reference_source": "manifest",
+      "samples_ms": [
+        11629.668000154197,
+        11785.02054209821,
+        13344.323124969378,
+        16458.4934997838,
+        13864.098499994725
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 91.79,
+          "findex": 65,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.04,
+          "findex": 34,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 27,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 33,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 28,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 30,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 8,
+        "compiled_calls": 1233406,
+        "cranelift": 0,
+        "failed": 2,
+        "fallbacks": 2,
+        "llvm": 6,
+        "succeeded": 3
+      },
+      "timeout_secs": 120.0,
+      "wall_ms": {
+        "max_ms": 16458.4934997838,
+        "mean_ms": 13416.320733400062,
+        "median_ms": 13344.323124969378,
+        "min_ms": 11629.668000154197,
+        "runs": 5,
+        "stddev_ms": 1956.6407454972095
+      }
+    },
+    {
+      "benchmark": "mandelbrot_small",
+      "binary": "ash_cli",
+      "checksum": {
+        "accepted": true,
+        "label": "unfused",
+        "value": "22816350"
+      },
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mandelbrot_small.hl",
+      "detail": "checksum 22816350 (unfused)",
+      "exit_code": 0,
+      "expectation": "checksum",
+      "gc": {
+        "blocks_reclaimed": 9606,
+        "bytes_allocated_mb": 303.7,
+        "collections": 38,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 32,
+        "pause_max_ms": 1.58,
+        "pause_total_ms": 22.0,
+        "pause_total_ns": 22045920
+      },
+      "group": "fp",
+      "hl": "test_mandelbrot_small.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 42729472,
+      "reference_source": "manifest",
+      "samples_ms": [
+        13811.926041031256,
+        14447.049250127748,
+        13820.71500015445,
+        13904.936292208731,
+        13850.34304112196
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 120.0,
+      "wall_ms": {
+        "max_ms": 14447.049250127748,
+        "mean_ms": 13966.993924928829,
+        "median_ms": 13850.34304112196,
+        "min_ms": 13811.926041031256,
+        "runs": 5,
+        "stddev_ms": 270.8114040126473
+      }
+    },
+    {
+      "benchmark": "mandelbrot_small",
+      "binary": "ash_cli",
+      "checksum": {
+        "accepted": true,
+        "label": "unfused",
+        "value": "22816350"
+      },
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mandelbrot_small.hl",
+      "detail": "checksum 22816350 (unfused)",
+      "exit_code": 0,
+      "expectation": "checksum",
+      "gc": {
+        "blocks_reclaimed": 9606,
+        "bytes_allocated_mb": 303.7,
+        "collections": 38,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 32,
+        "pause_max_ms": 0.87,
+        "pause_total_ms": 21.8,
+        "pause_total_ns": 21801000
+      },
+      "group": "fp",
+      "hl": "test_mandelbrot_small.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 61128704,
+      "reference_source": "manifest",
+      "samples_ms": [
+        11584.445457905531,
+        11687.855666037649,
+        11626.515500014648,
+        11666.683292016387,
+        11629.755874862894
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 88.31,
+          "findex": 65,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.03,
+          "findex": 34,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 27,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 33,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 28,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 0.01,
+          "findex": 30,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 6,
+        "compiled_calls": 1233635,
+        "cranelift": 0,
+        "failed": 2,
+        "fallbacks": 2,
+        "llvm": 6,
+        "succeeded": 3
+      },
+      "timeout_secs": 120.0,
+      "wall_ms": {
+        "max_ms": 11687.855666037649,
+        "mean_ms": 11639.051158167422,
+        "median_ms": 11629.755874862894,
+        "min_ms": 11584.445457905531,
+        "runs": 5,
+        "stddev_ms": 39.9084650407288
+      }
+    },
+    {
+      "benchmark": "mandelbrot_small",
+      "binary": "ash",
+      "checksum": {
+        "accepted": true,
+        "label": "fused",
+        "value": "22825041"
+      },
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mandelbrot_small.hl",
+      "detail": "checksum 22825041 (fused)",
+      "exit_code": 0,
+      "expectation": "checksum",
+      "gc": {
+        "blocks_reclaimed": 8546,
+        "bytes_allocated_mb": 274.4,
+        "collections": 34,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 31,
+        "pause_max_ms": 0.66,
+        "pause_total_ms": 15.1,
+        "pause_total_ns": 15100124
+      },
+      "group": "fp",
+      "hl": "test_mandelbrot_small.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 92225536,
+      "reference_source": "manifest",
+      "samples_ms": [
+        1105.1417919807136,
+        1096.610500011593,
+        1119.494833983481,
+        1126.6758339479566,
+        1124.2317908909172
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 120.0,
+      "wall_ms": {
+        "max_ms": 1126.6758339479566,
+        "mean_ms": 1114.4309501629323,
+        "median_ms": 1119.494833983481,
+        "min_ms": 1096.610500011593,
+        "runs": 5,
+        "stddev_ms": 12.995128708123067
+      }
+    },
+    {
+      "benchmark": "array_push",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_array_push.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_array_push.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29065216,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.244000056758523,
+        15.94708301126957,
+        15.939833130687475,
+        16.417999984696507,
+        15.63775003887713
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.417999984696507,
+        "mean_ms": 16.03733324445784,
+        "median_ms": 15.94708301126957,
+        "min_ms": 15.63775003887713,
+        "runs": 5,
+        "stddev_ms": 0.302049852420253
+      }
+    },
+    {
+      "benchmark": "array_push",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_array_push.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_array_push.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33603584,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.81241612136364,
+        18.400375032797456,
+        17.924792133271694,
+        18.352624960243702,
+        19.10566701553762
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.10566701553762,
+        "mean_ms": 18.519175052642822,
+        "median_ms": 18.400375032797456,
+        "min_ms": 17.924792133271694,
+        "runs": 5,
+        "stddev_ms": 0.45417688728024225
+      }
+    },
+    {
+      "benchmark": "array_push",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_array_push.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_array_push.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33308672,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.41466617770493,
+        18.217749893665314,
+        18.413957906886935,
+        18.19825009442866,
+        18.20975006558001
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.41466617770493,
+        "mean_ms": 18.29087482765317,
+        "median_ms": 18.217749893665314,
+        "min_ms": 18.19825009442866,
+        "runs": 5,
+        "stddev_ms": 0.11289549031999663
+      }
+    },
+    {
+      "benchmark": "array_push",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_array_push.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_array_push.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33390592,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.041125033050776,
+        18.227916909381747,
+        22.239250130951405,
+        19.500124966725707,
+        18.249290995299816
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 22.239250130951405,
+        "mean_ms": 19.25154160708189,
+        "median_ms": 18.249290995299816,
+        "min_ms": 18.041125033050776,
+        "runs": 5,
+        "stddev_ms": 1.7681641611812258
+      }
+    },
+    {
+      "benchmark": "array_push",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_array_push.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_array_push.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 81952768,
+      "reference_source": "interp",
+      "samples_ms": [
+        924.2409581784159,
+        933.595959097147,
+        935.0702499505132,
+        926.3980421237648,
+        934.5673329662532
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 935.0702499505132,
+        "mean_ms": 930.7745084632188,
+        "median_ms": 933.595959097147,
+        "min_ms": 924.2409581784159,
+        "runs": 5,
+        "stddev_ms": 5.065575812792577
+      }
+    },
+    {
+      "benchmark": "gc",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_gc.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.6,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_gc.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29671424,
+      "reference_source": "interp",
+      "samples_ms": [
+        26.90520789474249,
+        26.618625037372112,
+        26.472165947780013,
+        26.92199987359345,
+        27.238083072006702
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 27.238083072006702,
+        "mean_ms": 26.831216365098953,
+        "median_ms": 26.90520789474249,
+        "min_ms": 26.472165947780013,
+        "runs": 5,
+        "stddev_ms": 0.2972243192712715
+      }
+    },
+    {
+      "benchmark": "gc",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_gc.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.6,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_gc.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 51331072,
+      "reference_source": "interp",
+      "samples_ms": [
+        78.07454187422991,
+        78.59749998897314,
+        78.51295918226242,
+        78.82695808075368,
+        79.16049985215068
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 58.29,
+          "findex": 16,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 79.16049985215068,
+        "mean_ms": 78.63449179567397,
+        "median_ms": 78.59749998897314,
+        "min_ms": 78.07454187422991,
+        "runs": 5,
+        "stddev_ms": 0.40106428125103394
+      }
+    },
+    {
+      "benchmark": "gc",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_gc.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.6,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_gc.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 34029568,
+      "reference_source": "interp",
+      "samples_ms": [
+        29.6942088752985,
+        29.64145806618035,
+        29.71712499856949,
+        29.508041916415095,
+        29.81816721148789
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 29.81816721148789,
+        "mean_ms": 29.675800213590264,
+        "median_ms": 29.6942088752985,
+        "min_ms": 29.508041916415095,
+        "runs": 5,
+        "stddev_ms": 0.11361910945092647
+      }
+    },
+    {
+      "benchmark": "gc",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_gc.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.6,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_gc.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 51494912,
+      "reference_source": "interp",
+      "samples_ms": [
+        79.28479206748307,
+        78.73241580091417,
+        79.18633287772536,
+        78.91566609032452,
+        80.2305000834167
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 58.71,
+          "findex": 16,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 80.2305000834167,
+        "mean_ms": 79.26994138397276,
+        "median_ms": 79.18633287772536,
+        "min_ms": 78.73241580091417,
+        "runs": 5,
+        "stddev_ms": 0.5797259430815356
+      }
+    },
+    {
+      "benchmark": "gc",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_gc.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.6,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "alloc",
+      "hl": "test_gc.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 81788928,
+      "reference_source": "interp",
+      "samples_ms": [
+        927.3060830309987,
+        931.2243750318885,
+        937.630790984258,
+        1024.193124845624,
+        938.3242498151958
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1024.193124845624,
+        "mean_ms": 951.735724741593,
+        "median_ms": 937.630790984258,
+        "min_ms": 927.3060830309987,
+        "runs": 5,
+        "stddev_ms": 40.76277255921639
+      }
+    },
+    {
+      "benchmark": "stdlib",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_stdlib.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.2,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "stdlib",
+      "hl": "test_stdlib.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29917184,
+      "reference_source": "interp",
+      "samples_ms": [
+        46.06104199774563,
+        46.836750116199255,
+        46.09191603958607,
+        46.27841687761247,
+        46.02208291180432
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 46.836750116199255,
+        "mean_ms": 46.25804158858955,
+        "median_ms": 46.09191603958607,
+        "min_ms": 46.02208291180432,
+        "runs": 5,
+        "stddev_ms": 0.3381574139012691
+      }
+    },
+    {
+      "benchmark": "stdlib",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_stdlib.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.2,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "stdlib",
+      "hl": "test_stdlib.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 69632000,
+      "reference_source": "interp",
+      "samples_ms": [
+        479.5684579294175,
+        479.94329198263586,
+        474.4282499887049,
+        482.84362512640655,
+        477.2264580242336
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 0.49,
+          "findex": 276,
+          "tier": "cranelift"
+        },
+        {
+          "compile_ms": 450.94,
+          "findex": 276,
+          "tier": "llvm"
+        },
+        {
+          "compile_ms": 446.92,
+          "findex": 240,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 3,
+        "compiled_calls": 21520,
+        "cranelift": 1,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 1
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 482.84362512640655,
+        "mean_ms": 478.8020166102797,
+        "median_ms": 479.5684579294175,
+        "min_ms": 474.4282499887049,
+        "runs": 5,
+        "stddev_ms": 3.1558184551286677
+      }
+    },
+    {
+      "benchmark": "stdlib",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_stdlib.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.2,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "stdlib",
+      "hl": "test_stdlib.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 36732928,
+      "reference_source": "interp",
+      "samples_ms": [
+        28.337957803159952,
+        28.531249845400453,
+        28.311291011050344,
+        28.57624995522201,
+        27.981291990727186
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 0.48,
+          "findex": 276,
+          "tier": "cranelift"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 21511,
+        "cranelift": 1,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 1
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 28.57624995522201,
+        "mean_ms": 28.34760812111199,
+        "median_ms": 28.337957803159952,
+        "min_ms": 27.981291990727186,
+        "runs": 5,
+        "stddev_ms": 0.23537254497112425
+      }
+    },
+    {
+      "benchmark": "stdlib",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_stdlib.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.2,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "stdlib",
+      "hl": "test_stdlib.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 67403776,
+      "reference_source": "interp",
+      "samples_ms": [
+        481.4532499294728,
+        482.31512517668307,
+        477.42941603064537,
+        477.2102921269834,
+        476.07883298769593
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [
+        {
+          "compile_ms": 455.13,
+          "findex": 276,
+          "tier": "llvm"
+        }
+      ],
+      "tiered": {
+        "attempted": 1,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 482.31512517668307,
+        "mean_ms": 478.8973832502961,
+        "median_ms": 477.42941603064537,
+        "min_ms": 476.07883298769593,
+        "runs": 5,
+        "stddev_ms": 2.7910053814101703
+      }
+    },
+    {
+      "benchmark": "stdlib",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_stdlib.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.2,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "stdlib",
+      "hl": "test_stdlib.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 92733440,
+      "reference_source": "interp",
+      "samples_ms": [
+        1287.9915828816593,
+        1282.3464579414576,
+        1281.950166914612,
+        1284.8139589186758,
+        1282.441999996081
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1287.9915828816593,
+        "mean_ms": 1283.9088333304971,
+        "median_ms": 1282.441999996081,
+        "min_ms": 1281.950166914612,
+        "runs": 5,
+        "stddev_ms": 2.545441378417365
+      }
+    },
+    {
+      "benchmark": "jsonparse",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonparse.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonparse.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29294592,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.041084192693233,
+        16.97229198180139,
+        16.274083172902465,
+        16.61137491464615,
+        15.973709058016539
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.97229198180139,
+        "mean_ms": 16.374508664011955,
+        "median_ms": 16.274083172902465,
+        "min_ms": 15.973709058016539,
+        "runs": 5,
+        "stddev_ms": 0.41693764438512815
+      }
+    },
+    {
+      "benchmark": "jsonparse",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonparse.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonparse.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33914880,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.787458073347807,
+        19.327000016346574,
+        18.518915865570307,
+        18.998624989762902,
+        18.75450019724667
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.327000016346574,
+        "mean_ms": 18.877299828454852,
+        "median_ms": 18.787458073347807,
+        "min_ms": 18.518915865570307,
+        "runs": 5,
+        "stddev_ms": 0.3035376455213937
+      }
+    },
+    {
+      "benchmark": "jsonparse",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonparse.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonparse.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 34062336,
+      "reference_source": "interp",
+      "samples_ms": [
+        19.183999858796597,
+        18.80387496203184,
+        18.299999879673123,
+        18.355665961280465,
+        18.552707973867655
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.183999858796597,
+        "mean_ms": 18.639249727129936,
+        "median_ms": 18.552707973867655,
+        "min_ms": 18.299999879673123,
+        "runs": 5,
+        "stddev_ms": 0.3629234975266479
+      }
+    },
+    {
+      "benchmark": "jsonparse",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonparse.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonparse.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33652736,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.750250106677413,
+        18.01420794799924,
+        19.029333954676986,
+        19.004832953214645,
+        17.91541720740497
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.029333954676986,
+        "mean_ms": 18.54280843399465,
+        "median_ms": 18.750250106677413,
+        "min_ms": 17.91541720740497,
+        "runs": 5,
+        "stddev_ms": 0.5399638902735522
+      }
+    },
+    {
+      "benchmark": "jsonparse",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonparse.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonparse.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 84705280,
+      "reference_source": "interp",
+      "samples_ms": [
+        1061.6809171624482,
+        1062.7166249323636,
+        1059.7580838948488,
+        1044.2317919805646,
+        1130.968292010948
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1130.968292010948,
+        "mean_ms": 1071.8711419962347,
+        "median_ms": 1061.6809171624482,
+        "min_ms": 1044.2317919805646,
+        "runs": 5,
+        "stddev_ms": 33.87764325685021
+      }
+    },
+    {
+      "benchmark": "jsonmin",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29261824,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.760208876803517,
+        16.56866609118879,
+        16.090499935671687,
+        16.446667024865746,
+        16.28958387300372
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.760208876803517,
+        "mean_ms": 16.431125160306692,
+        "median_ms": 16.446667024865746,
+        "min_ms": 16.090499935671687,
+        "runs": 5,
+        "stddev_ms": 0.25666838009106135
+      }
+    },
+    {
+      "benchmark": "jsonmin",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33669120,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.378540873527527,
+        18.82866700179875,
+        19.029292045161128,
+        18.08766694739461,
+        18.338875146582723
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.029292045161128,
+        "mean_ms": 18.532608402892947,
+        "median_ms": 18.378540873527527,
+        "min_ms": 18.08766694739461,
+        "runs": 5,
+        "stddev_ms": 0.38522318579920645
+      }
+    },
+    {
+      "benchmark": "jsonmin",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33767424,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.41866713948548,
+        18.916707951575518,
+        18.481832928955555,
+        18.055875087156892,
+        18.889959203079343
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.916707951575518,
+        "mean_ms": 18.552608462050557,
+        "median_ms": 18.481832928955555,
+        "min_ms": 18.055875087156892,
+        "runs": 5,
+        "stddev_ms": 0.35918917733334566
+      }
+    },
+    {
+      "benchmark": "jsonmin",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33587200,
+      "reference_source": "interp",
+      "samples_ms": [
+        19.101584097370505,
+        18.42995802871883,
+        19.057000055909157,
+        18.389625009149313,
+        17.8380839060992
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.101584097370505,
+        "mean_ms": 18.5632502194494,
+        "median_ms": 18.42995802871883,
+        "min_ms": 17.8380839060992,
+        "runs": 5,
+        "stddev_ms": 0.5261584763407876
+      }
+    },
+    {
+      "benchmark": "jsonmin",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 84672512,
+      "reference_source": "interp",
+      "samples_ms": [
+        1023.9292909391224,
+        1025.3650839440525,
+        1027.894833823666,
+        1001.6129580326378,
+        996.8015409540385
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1027.894833823666,
+        "mean_ms": 1015.1207415387034,
+        "median_ms": 1023.9292909391224,
+        "min_ms": 996.8015409540385,
+        "runs": 5,
+        "stddev_ms": 14.694963872619079
+      }
+    },
+    {
+      "benchmark": "jsonmin2",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin2.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin2.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29310976,
+      "reference_source": "interp",
+      "samples_ms": [
+        15.991708030924201,
+        16.233749920502305,
+        15.47983312048018,
+        16.022332943975925,
+        15.771875157952309
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.233749920502305,
+        "mean_ms": 15.899899834766984,
+        "median_ms": 15.991708030924201,
+        "min_ms": 15.47983312048018,
+        "runs": 5,
+        "stddev_ms": 0.2862345424572764
+      }
+    },
+    {
+      "benchmark": "jsonmin2",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin2.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin2.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33816576,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.88441720418632,
+        17.712416825816035,
+        18.56704195961356,
+        18.596375128254294,
+        17.759874928742647
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.596375128254294,
+        "mean_ms": 18.10402520932257,
+        "median_ms": 17.88441720418632,
+        "min_ms": 17.712416825816035,
+        "runs": 5,
+        "stddev_ms": 0.44068616137163585
+      }
+    },
+    {
+      "benchmark": "jsonmin2",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin2.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin2.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33554432,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.152917036786675,
+        18.537750001996756,
+        18.72220798395574,
+        18.113707890734076,
+        18.151249969378114
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.72220798395574,
+        "mean_ms": 18.335566576570272,
+        "median_ms": 18.152917036786675,
+        "min_ms": 18.113707890734076,
+        "runs": 5,
+        "stddev_ms": 0.27700381674859387
+      }
+    },
+    {
+      "benchmark": "jsonmin2",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin2.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin2.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33636352,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.834999995306134,
+        17.953291069716215,
+        18.026042031124234,
+        17.90783298201859,
+        18.61391682177782
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.834999995306134,
+        "mean_ms": 18.2672165799886,
+        "median_ms": 18.026042031124234,
+        "min_ms": 17.90783298201859,
+        "runs": 5,
+        "stddev_ms": 0.42674641881213393
+      }
+    },
+    {
+      "benchmark": "jsonmin2",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin2.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin2.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 84557824,
+      "reference_source": "interp",
+      "samples_ms": [
+        994.6515830233693,
+        998.9666249603033,
+        1047.6484159007668,
+        1034.8670419771224,
+        1055.048291804269
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1055.048291804269,
+        "mean_ms": 1026.2363915331662,
+        "median_ms": 1034.8670419771224,
+        "min_ms": 994.6515830233693,
+        "runs": 5,
+        "stddev_ms": 27.85825196138222
+      }
+    },
+    {
+      "benchmark": "jsonmin3",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin3.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin3.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29294592,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.254874877631664,
+        15.926416963338852,
+        15.684999991208315,
+        15.236833831295371,
+        15.781124820932746
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.254874877631664,
+        "mean_ms": 15.77685009688139,
+        "median_ms": 15.781124820932746,
+        "min_ms": 15.236833831295371,
+        "runs": 5,
+        "stddev_ms": 0.37113010549825787
+      }
+    },
+    {
+      "benchmark": "jsonmin3",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin3.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin3.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33669120,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.766917124390602,
+        17.599917016923428,
+        17.878915881738067,
+        18.408708972856402,
+        18.12612498179078
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.408708972856402,
+        "mean_ms": 17.956116795539856,
+        "median_ms": 17.878915881738067,
+        "min_ms": 17.599917016923428,
+        "runs": 5,
+        "stddev_ms": 0.31716606111849005
+      }
+    },
+    {
+      "benchmark": "jsonmin3",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin3.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin3.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33619968,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.802041955292225,
+        17.701457953080535,
+        18.088042037561536,
+        18.264832906425,
+        17.778791952878237
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.264832906425,
+        "mean_ms": 17.927033361047506,
+        "median_ms": 17.802041955292225,
+        "min_ms": 17.701457953080535,
+        "runs": 5,
+        "stddev_ms": 0.23901619090460965
+      }
+    },
+    {
+      "benchmark": "jsonmin3",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin3.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin3.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33701888,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.6082500256598,
+        17.989624990150332,
+        18.483708146959543,
+        18.64629192277789,
+        18.084000097587705
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.64629192277789,
+        "mean_ms": 18.162375036627054,
+        "median_ms": 18.084000097587705,
+        "min_ms": 17.6082500256598,
+        "runs": 5,
+        "stddev_ms": 0.4124531057903629
+      }
+    },
+    {
+      "benchmark": "jsonmin3",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonmin3.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonmin3.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 84590592,
+      "reference_source": "interp",
+      "samples_ms": [
+        1002.0942911505699,
+        1012.9262499976903,
+        1029.6428750734776,
+        1021.2398751173168,
+        1028.5647078417242
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1029.6428750734776,
+        "mean_ms": 1018.8935998361558,
+        "median_ms": 1021.2398751173168,
+        "min_ms": 1002.0942911505699,
+        "runs": 5,
+        "stddev_ms": 11.53698717480317
+      }
+    },
+    {
+      "benchmark": "jsonarr",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonarr.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonarr.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29458432,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.390458844602108,
+        17.343875020742416,
+        17.549667041748762,
+        17.653417075052857,
+        17.772208899259567
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 17.772208899259567,
+        "mean_ms": 17.541925376281142,
+        "median_ms": 17.549667041748762,
+        "min_ms": 17.343875020742416,
+        "runs": 5,
+        "stddev_ms": 0.17866650972024795
+      }
+    },
+    {
+      "benchmark": "jsonarr",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonarr.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonarr.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 34013184,
+      "reference_source": "interp",
+      "samples_ms": [
+        20.095375133678317,
+        19.832666963338852,
+        19.212833140045404,
+        18.641124945133924,
+        19.31420899927616
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 20.095375133678317,
+        "mean_ms": 19.419241836294532,
+        "median_ms": 19.31420899927616,
+        "min_ms": 18.641124945133924,
+        "runs": 5,
+        "stddev_ms": 0.5672695379075813
+      }
+    },
+    {
+      "benchmark": "jsonarr",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonarr.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonarr.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33898496,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.970125121995807,
+        19.082584185525775,
+        19.900500075891614,
+        19.80137499049306,
+        19.01270914822817
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.900500075891614,
+        "mean_ms": 19.353458704426885,
+        "median_ms": 19.082584185525775,
+        "min_ms": 18.970125121995807,
+        "runs": 5,
+        "stddev_ms": 0.4572502492826824
+      }
+    },
+    {
+      "benchmark": "jsonarr",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonarr.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonarr.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33914880,
+      "reference_source": "interp",
+      "samples_ms": [
+        19.709832966327667,
+        19.053166965022683,
+        19.69695813022554,
+        18.8447090331465,
+        19.27825016900897
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.709832966327667,
+        "mean_ms": 19.316583452746272,
+        "median_ms": 19.27825016900897,
+        "min_ms": 18.8447090331465,
+        "runs": 5,
+        "stddev_ms": 0.3849848145442875
+      }
+    },
+    {
+      "benchmark": "jsonarr",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_jsonarr.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "json",
+      "hl": "test_jsonarr.hl",
+      "mode": "full-jit",
+      "output_stable": true,
+      "peak_rss_bytes": 88129536,
+      "reference_source": "interp",
+      "samples_ms": [
+        1141.2925829645246,
+        1135.3137909900397,
+        1135.8544169925153,
+        1135.1915830746293,
+        1134.756791871041
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1141.2925829645246,
+        "mean_ms": 1136.48183317855,
+        "median_ms": 1135.3137909900397,
+        "min_ms": 1134.756791871041,
+        "runs": 5,
+        "stddev_ms": 2.71761844135507
+      }
+    },
+    {
+      "benchmark": "mapiter",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mapiter.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_mapiter.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29245440,
+      "reference_source": "interp",
+      "samples_ms": [
+        17.11641694419086,
+        16.728291986510158,
+        16.986458096653223,
+        16.891834093257785,
+        16.003709053620696
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 17.11641694419086,
+        "mean_ms": 16.745342034846544,
+        "median_ms": 16.891834093257785,
+        "min_ms": 16.003709053620696,
+        "runs": 5,
+        "stddev_ms": 0.4380649637250818
+      }
+    },
+    {
+      "benchmark": "mapiter",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mapiter.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_mapiter.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33669120,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.51016702130437,
+        18.186249770224094,
+        18.57916614972055,
+        17.933750059455633,
+        18.95741606131196
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.95741606131196,
+        "mean_ms": 18.43334981240332,
+        "median_ms": 18.51016702130437,
+        "min_ms": 17.933750059455633,
+        "runs": 5,
+        "stddev_ms": 0.3913013752363698
+      }
+    },
+    {
+      "benchmark": "mapiter",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mapiter.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_mapiter.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33538048,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.707375042140484,
+        19.039375009015203,
+        18.49816692993045,
+        18.331666942685843,
+        19.051209092140198
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.051209092140198,
+        "mean_ms": 18.725558603182435,
+        "median_ms": 18.707375042140484,
+        "min_ms": 18.331666942685843,
+        "runs": 5,
+        "stddev_ms": 0.3208259780213775
+      }
+    },
+    {
+      "benchmark": "mapiter",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mapiter.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_mapiter.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33587200,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.248290987685323,
+        18.061290960758924,
+        18.333416199311614,
+        18.73329095542431,
+        19.03991703875363
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.03991703875363,
+        "mean_ms": 18.48324122838676,
+        "median_ms": 18.333416199311614,
+        "min_ms": 18.061290960758924,
+        "runs": 5,
+        "stddev_ms": 0.3962650650553857
+      }
+    },
+    {
+      "benchmark": "mapiter",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_mapiter.hl",
+      "detail": "wrong on all 5 runs, and differently each time (unstable output): stdout differs from interp at line 3: expected 'val: 2', got 'val: 238732672'",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_mapiter.hl",
+      "mode": "full-jit",
+      "output_stable": false,
+      "peak_rss_bytes": 82591744,
+      "reference_source": "interp",
+      "samples_ms": [
+        967.2740828245878,
+        964.0027082059532,
+        986.3578749354929,
+        970.9345840383321,
+        968.3009590953588
+      ],
+      "signal": null,
+      "status": "INVALID",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 986.3578749354929,
+        "mean_ms": 971.374041819945,
+        "median_ms": 968.3009590953588,
+        "min_ms": 964.0027082059532,
+        "runs": 5,
+        "stddev_ms": 8.736395687309129
+      }
+    },
+    {
+      "benchmark": "map_simple",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode interp --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_map_simple.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_map_simple.hl",
+      "mode": "interp",
+      "output_stable": true,
+      "peak_rss_bytes": 29163520,
+      "reference_source": "interp",
+      "samples_ms": [
+        16.615666914731264,
+        16.17145794443786,
+        16.587874852120876,
+        15.997875016182661,
+        16.39937493018806
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 16.615666914731264,
+        "mean_ms": 16.354449931532145,
+        "median_ms": 16.39937493018806,
+        "min_ms": 15.997875016182661,
+        "runs": 5,
+        "stddev_ms": 0.26710086997468974
+      }
+    },
+    {
+      "benchmark": "map_simple",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier auto --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_map_simple.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_map_simple.hl",
+      "mode": "hybrid-auto",
+      "output_stable": true,
+      "peak_rss_bytes": 33472512,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.603958189487457,
+        18.899874994531274,
+        19.333291798830032,
+        19.49529186822474,
+        18.760000122711062
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.49529186822474,
+        "mean_ms": 19.018483394756913,
+        "median_ms": 18.899874994531274,
+        "min_ms": 18.603958189487457,
+        "runs": 5,
+        "stddev_ms": 0.3805139130114308
+      }
+    },
+    {
+      "benchmark": "map_simple",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier cranelift --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_map_simple.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_map_simple.hl",
+      "mode": "hybrid-cranelift",
+      "output_stable": true,
+      "peak_rss_bytes": 33341440,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.435833044350147,
+        18.602832918986678,
+        18.849208019673824,
+        18.623750191181898,
+        19.460333976894617
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 19.460333976894617,
+        "mean_ms": 18.794391630217433,
+        "median_ms": 18.623750191181898,
+        "min_ms": 18.435833044350147,
+        "runs": 5,
+        "stddev_ms": 0.4002691424887145
+      }
+    },
+    {
+      "benchmark": "map_simple",
+      "binary": "ash_cli",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash_cli --mode hybrid --jit-tier llvm --quiet /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_map_simple.hl",
+      "detail": "stdout matches interp",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_map_simple.hl",
+      "mode": "hybrid-llvm",
+      "output_stable": true,
+      "peak_rss_bytes": 33472512,
+      "reference_source": "interp",
+      "samples_ms": [
+        18.354958156123757,
+        18.31075013615191,
+        18.51695799268782,
+        18.584125209599733,
+        18.58354196883738
+      ],
+      "signal": null,
+      "status": "OK",
+      "tier_installs": [],
+      "tiered": {
+        "attempted": 0,
+        "compiled_calls": 0,
+        "cranelift": 0,
+        "failed": 0,
+        "fallbacks": 0,
+        "llvm": 0,
+        "succeeded": 0
+      },
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 18.584125209599733,
+        "mean_ms": 18.47006669268012,
+        "median_ms": 18.51695799268782,
+        "min_ms": 18.31075013615191,
+        "runs": 5,
+        "stddev_ms": 0.12914770416991
+      }
+    },
+    {
+      "benchmark": "map_simple",
+      "binary": "ash",
+      "checksum": null,
+      "command": "/Users/amaterasu/Vibranium/ash/target/debug/ash /Users/amaterasu/Vibranium/ash/crates/ash/test/tests/test_map_simple.hl",
+      "detail": "wrong on all 5 runs, and differently each time (unstable output): stdout differs from interp at line 3: expected 'value: 42', got 'value: 206960896'",
+      "exit_code": 0,
+      "expectation": "exact",
+      "gc": {
+        "blocks_reclaimed": 0,
+        "bytes_allocated_mb": 0.1,
+        "collections": 0,
+        "external_bytes_mb": 0.0,
+        "live_blocks": 0,
+        "pause_max_ms": 0.0,
+        "pause_total_ms": 0.0,
+        "pause_total_ns": 0
+      },
+      "group": "map",
+      "hl": "test_map_simple.hl",
+      "mode": "full-jit",
+      "output_stable": false,
+      "peak_rss_bytes": 82214912,
+      "reference_source": "interp",
+      "samples_ms": [
+        947.7712910156697,
+        961.0641661565751,
+        949.6349170804024,
+        1007.8980831895024,
+        943.2737911120057
+      ],
+      "signal": null,
+      "status": "INVALID",
+      "tier_installs": [],
+      "tiered": null,
+      "timeout_secs": 60.0,
+      "wall_ms": {
+        "max_ms": 1007.8980831895024,
+        "mean_ms": 961.928449710831,
+        "median_ms": 949.6349170804024,
+        "min_ms": 943.2737911120057,
+        "runs": 5,
+        "stddev_ms": 26.52124885124973
+      }
+    }
+  ],
+  "schema_version": 1,
+  "sweep_seconds": 518.85,
+  "system": {
+    "arch": "arm64",
+    "cpu_count": 10,
+    "cpu_model": "Apple M1 Pro",
+    "hostname": "Damilares-MacBook-Pro.local",
+    "os": "darwin",
+    "python": "3.11.9",
+    "ram_mb": 16384
+  }
+}

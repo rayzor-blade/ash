@@ -1,0 +1,211 @@
+# ASH benchmark corpus.
+#
+# Read by scripts/ash_bench.py. Two tables:
+#
+#   [[mode]]  — an execution configuration (which binary + which flags).
+#   [[bench]] — a program to run under every selected mode.
+#
+# Order in this file is the order the runner uses, and the order rows appear in
+# the table and the JSON. Keep it stable: a diff of two baseline files is only
+# readable if the rows line up.
+#
+# A bench may name a `parity_case`, in which case `hl`, `expectation`,
+# `normalize`, `timeout_secs` and `slow` default to that case's values in
+# crates/ash/test/tests/parity_cases.toml. That keeps the benchmark corpus and
+# the correctness corpus from drifting apart. Fields set here always win.
+
+schema_version = 1
+
+# ── Execution modes ─────────────────────────────────────────────────────────
+#
+# `binary` is either "ash_cli" (interpreter + optional tiered JIT) or "ash"
+# (the standalone full-JIT binary, which takes no flags).
+#
+# `default = false` keeps a mode out of the sweep unless it is named with
+# --modes. Use it for controls and policy variants that are interesting to
+# measure occasionally but would otherwise double the sweep time.
+
+[[mode]]
+name = "interp"
+binary = "ash_cli"
+args = ["--mode", "interp"]
+description = "Pure bytecode interpreter. The parity-validated reference."
+
+[[mode]]
+name = "hybrid-auto"
+binary = "ash_cli"
+args = ["--mode", "hybrid", "--jit-tier", "auto"]
+description = "Interpreter with the full ladder: interp -> Cranelift -> LLVM."
+
+[[mode]]
+name = "hybrid-cranelift"
+binary = "ash_cli"
+args = ["--mode", "hybrid", "--jit-tier", "cranelift"]
+description = "Ladder pinned to the Cranelift middle tier."
+
+[[mode]]
+name = "hybrid-llvm"
+binary = "ash_cli"
+args = ["--mode", "hybrid", "--jit-tier", "llvm"]
+description = "Ladder pinned to the LLVM top tier."
+
+[[mode]]
+name = "full-jit"
+binary = "ash"
+args = []
+description = "Standalone whole-module LLVM JIT (no interpreter)."
+
+[[mode]]
+name = "hybrid-off"
+binary = "ash_cli"
+args = ["--mode", "hybrid", "--jit-tier", "off"]
+default = false
+description = """Hybrid with promotion disabled. Control for `interp`: the \
+difference is the cost of carrying the tiering machinery without using it."""
+
+[[mode]]
+name = "hybrid-eager"
+binary = "ash_cli"
+args = [
+  "--mode", "hybrid", "--jit-tier", "auto",
+  "--jit-threshold", "1", "--jit-min-ops", "0", "--jit-max-args", "8",
+]
+default = false
+description = """Promote on the first call. This is the policy the superseded \
+scripts/run_perf_matrix.py used, kept so its historical numbers stay \
+comparable. Not the shipping default (--jit-threshold 100)."""
+
+# ── Benchmarks ──────────────────────────────────────────────────────────────
+
+# Process-startup floor. Nothing below this is measurable through the CLI, so
+# every other row should be read as "this number, minus roughly this one".
+[[bench]]
+name = "basic"
+parity_case = "test_basic"
+group = "startup"
+description = "Minimal program. Measures VM startup, not program work."
+
+# The tier ladder's designated exercise: a hot loop with a small callee that
+# crosses the promotion threshold well inside one run.
+[[bench]]
+name = "tiered_hotloop"
+parity_case = "TestTieredHotLoop"
+group = "jit"
+description = "Hot integer loop; the case the promotion counters are read on."
+
+# Floating-point kernel. `expectation = "checksum"` with an explicit accepted
+# set, because the answer legitimately differs by FMA policy — see
+# BACKLOG.md, "Cross-tier FMA policy". Recording *which* checksum came back
+# tells you whether the hot function ran compiled and under what fusion.
+[[bench]]
+name = "mandelbrot_small"
+parity_case = "MandelbrotSmall"
+group = "fp"
+description = "Mandelbrot 298x298, 1000 iterations."
+checksums = [
+  { value = "22816350", label = "unfused" },
+  { value = "22825041", label = "fused" },
+]
+
+[[bench]]
+name = "mandelbrot"
+parity_case = "Mandelbrot"
+group = "fp"
+description = "Mandelbrot 875x500, 1000 iterations. Minutes in interp mode."
+checksums = [
+  { value = "112790102", label = "unfused" },
+  { value = "112798515", label = "fused" },
+  # ash's own LLVM tier at 875x500. Same fusion *presence* as hxcpp, different
+  # fusion *pattern* — 72 units apart. BACKLOG.md documents the gap.
+  { value = "112798587", label = "fused-llvm" },
+]
+
+[[bench]]
+name = "array_push"
+parity_case = "test_array_push"
+group = "alloc"
+description = "Array growth and element stores."
+
+[[bench]]
+name = "gc"
+parity_case = "test_gc"
+group = "alloc"
+description = "Allocation churn. Run with --gc-stats to get collection counts."
+
+[[bench]]
+name = "stdlib"
+parity_case = "TestStdlib"
+group = "stdlib"
+description = "Broad stdlib exercise: strings, arrays, maps, enums, closures."
+
+[[bench]]
+name = "jsonparse"
+parity_case = "TestJsonParse"
+group = "json"
+
+[[bench]]
+name = "jsonmin"
+parity_case = "TestJsonMin"
+group = "json"
+
+[[bench]]
+name = "jsonmin2"
+parity_case = "TestJsonMin2"
+group = "json"
+
+[[bench]]
+name = "jsonmin3"
+parity_case = "TestJsonMin3"
+group = "json"
+
+# No parity case exists for this one, so it carries its own metadata. Its
+# reference output comes from a `interp` run (recorded as reference_source in
+# the JSON), not from the HashLink oracle.
+[[bench]]
+name = "jsonarr"
+hl = "test_jsonarr.hl"
+expectation = "exact"
+normalize = "json_ws"
+timeout_secs = 60
+group = "json"
+
+[[bench]]
+name = "mapiter"
+parity_case = "TestMapIter"
+group = "map"
+
+[[bench]]
+name = "map_simple"
+parity_case = "TestMapSimple"
+group = "map"
+
+# TestMapDebug / TestMapDebug2 / TestMapDebug3 are deliberately absent. They
+# are debugging scaffolds from the map bring-up, not workloads: each does a
+# handful of operations, so a run is entirely process startup and the numbers
+# only add noise to the table. They stay in the parity corpus, where they earn
+# their place.
+
+# ── Windowed / special cases ────────────────────────────────────────────────
+#
+# Excluded from the default sweep (`windowed = true`). See bench/README.md.
+
+# `hl` is resolved relative to crates/ash/test/tests, so four levels up lands
+# at the repo root.
+[[bench]]
+name = "heaps_game"
+hl = "../../../../examples/heaps_base2d/bin/game.hl"
+expectation = "exit_only"
+# Measured: the full-JIT binary takes ~156s of whole-module LLVM compilation
+# before it faults. A shorter box records TIMEOUT and hides the crash, which
+# is the one fact this entry exists to capture.
+timeout_secs = 200
+windowed = true
+group = "windowed"
+modes = ["full-jit"]
+modes_reason = """SDL event loop never returns under the interpreter, so every \
+hybrid/interp cell would record the time box rather than a runtime"""
+description = """Heaps Base2D sample. Not a benchmark: it opens an SDL window \
+and runs an event loop that never exits, so no mode yields a wall time that \
+means anything. It is carried under --include-windowed for exactly one \
+reason — to keep a dated, machine-readable record that `target/debug/ash` \
+still SIGSEGVs on it. See bench/README.md."""

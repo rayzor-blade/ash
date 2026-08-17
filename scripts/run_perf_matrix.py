@@ -1,235 +1,103 @@
 #!/usr/bin/env python3
-import argparse
-import json
+"""DEPRECATED — superseded by scripts/ash_bench.py.
+
+This script used to be the perf matrix. It measured two modes (`interp` and an
+eagerly-promoting `hybrid`), reported medians, and gated on `--min-speedup`. It
+did not check that a run produced the right answer, did not measure memory, and
+did not read the JIT or GC counters ASH already prints — so a configuration
+that got faster by getting something wrong looked like a win.
+
+`scripts/ash_bench.py` is the canonical tool now. It covers everything this
+script did and adds the correctness gate, peak RSS, the `[tiered]` / `[gc]`
+counters, per-run timeouts, and baseline regression gating.
+
+This file remains only so existing callers — notably
+.github/workflows/perf_smoke.yml — keep working. It translates the old flags
+and execs the new tool. Do not add features here; add them to ash_bench.py.
+
+Old flag -> new behaviour:
+
+  --repo-root      passed through
+  --out-json       passed through
+  --iterations     passed through
+  --warmups        passed through
+  --include-slow   passed through
+  --min-speedup    passed through
+  (implicit)       --modes interp,hybrid-eager, and the two-case corpus this
+                   script selected, so its historical numbers stay comparable.
+                   `hybrid-eager` is --jit-threshold 1, the promotion policy
+                   this script hardcoded — not ASH's shipping default.
+"""
+
+from __future__ import annotations
+
 import os
 import pathlib
-import platform
-import statistics
-import subprocess
-import time
+import sys
 
-try:
-    import tomllib  # Python 3.11+
-except ModuleNotFoundError as exc:
-    raise SystemExit(f"tomllib unavailable: {exc}")
+HERE = pathlib.Path(__file__).resolve().parent
+NEW = HERE / "ash_bench.py"
+
+# The corpus this script hardcoded: TestTieredHotLoop and MandelbrotSmall,
+# plus Mandelbrot under --include-slow.
+LEGACY_BENCHMARKS = "tiered_hotloop,mandelbrot_small"
+LEGACY_BENCHMARKS_SLOW = "tiered_hotloop,mandelbrot_small,mandelbrot"
+LEGACY_MODES = "interp,hybrid-eager"
 
 
-def run(cmd, timeout=None, cwd=None):
-    p = subprocess.run(
-        cmd,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-        text=True,
+VALUE_FLAGS = ("--repo-root", "--out-json", "--iterations", "--warmups",
+               "--min-speedup")
+
+
+def main(argv: list[str]) -> int:
+    if "-h" in argv or "--help" in argv:
+        print(__doc__)
+        return 0
+
+    print(
+        "run_perf_matrix.py is deprecated; forwarding to ash_bench.py. "
+        "See bench/README.md.",
+        file=sys.stderr,
     )
-    return p.returncode, p.stdout, p.stderr
 
+    passthrough: list[str] = []
+    include_slow = False
 
-def timed_run(cmd, timeout=None):
-    start = time.perf_counter()
-    p = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-        text=True,
-    )
-    elapsed_ms = (time.perf_counter() - start) * 1000.0
-    return p.returncode, p.stdout, p.stderr, elapsed_ms
-
-
-def must_ok(code, out, err, context):
-    if code != 0:
-        raise SystemExit(f"{context} failed (exit={code})\nstdout:\n{out}\nstderr:\n{err}")
-
-
-def load_cases(repo_root, include_slow):
-    tests_dir = repo_root / "crates" / "ash" / "test" / "tests"
-    cases_file = tests_dir / "parity_cases.toml"
-    data = tomllib.loads(cases_file.read_text(encoding="utf-8"))
-    by_name = {c["name"]: c for c in data.get("case", [])}
-
-    selected = ["TestTieredHotLoop", "MandelbrotSmall"]
-    if include_slow:
-        selected.append("Mandelbrot")
-
-    out = []
-    for name in selected:
-        c = by_name.get(name)
-        if not c:
-            continue
-        if c.get("slow", False) and not include_slow:
-            continue
-        out.append(c)
-    return out, tests_dir
-
-
-def build_ash_cli(repo_root):
-    build_target = os.environ.get("CARGO_BUILD_TARGET")
-    std_cmd = ["cargo", "build", "-q", "-p", "ash_std"]
-    cli_cmd = ["cargo", "build", "-q", "-p", "ash_cli"]
-    if build_target:
-        std_cmd.extend(["--target", build_target])
-        cli_cmd.extend(["--target", build_target])
-
-    code, out, err = run(std_cmd, cwd=repo_root)
-    must_ok(code, out, err, "cargo build -p ash_std")
-
-    code, out, err = run(cli_cmd, cwd=repo_root)
-    must_ok(code, out, err, "cargo build -p ash_cli")
-
-
-def ash_cli_path(repo_root):
-    target_root = repo_root / "target"
-    candidates = [target_root / "debug" / "ash_cli"]
-
-    host = platform.machine().lower()
-    if host:
-        if host in ("arm64", "aarch64"):
-            candidates.append(target_root / "aarch64-apple-darwin" / "debug" / "ash_cli")
-        elif host in ("x86_64", "amd64"):
-            candidates.append(target_root / "x86_64-apple-darwin" / "debug" / "ash_cli")
-
-    candidates.extend(sorted(target_root.glob("*/debug/ash_cli")))
-
-    for path in candidates:
-        if path.exists() and os.access(path, os.X_OK):
-            return path
-
-    searched = "\n".join(f"  - {p}" for p in candidates)
-    raise SystemExit(f"ash_cli binary not found. Searched:\n{searched}")
-
-
-def compile_case(tests_dir, case):
-    if not case.get("compile", True):
-        return
-    code, out, err = run(
-        [
-            "haxe",
-            "--cwd",
-            str(tests_dir),
-            "-main",
-            case["main"],
-            "-hl",
-            case["hl"],
-        ]
-    )
-    must_ok(code, out, err, f"compile case {case['name']}")
-
-
-def run_case(binary, hl_path, mode, timeout_secs):
-    cmd = [str(binary), "--mode", mode, "--quiet"]
-    if mode == "hybrid":
-        cmd.extend(["--jit-threshold", "1", "--jit-min-ops", "0", "--jit-max-args", "8"])
-    cmd.append(str(hl_path))
-    return timed_run(cmd, timeout=timeout_secs)
-
-
-def summarize(samples):
-    samples = list(samples)
-    if not samples:
-        return None
-    return {
-        "min_ms": min(samples),
-        "median_ms": statistics.median(samples),
-        "max_ms": max(samples),
-        "mean_ms": statistics.mean(samples),
-        "runs": len(samples),
-    }
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Run ASH perf smoke matrix")
-    parser.add_argument("--repo-root", default=".")
-    parser.add_argument("--out-json", required=True)
-    parser.add_argument("--iterations", type=int, default=5)
-    parser.add_argument("--warmups", type=int, default=1)
-    parser.add_argument("--include-slow", action="store_true")
-    parser.add_argument("--min-speedup", type=float, default=0.0)
-    args = parser.parse_args()
-
-    repo_root = pathlib.Path(args.repo_root).resolve()
-    out_json = pathlib.Path(args.out_json).resolve()
-
-    cases, tests_dir = load_cases(repo_root, args.include_slow)
-    if not cases:
-        raise SystemExit("no performance cases selected")
-
-    build_ash_cli(repo_root)
-    binary = ash_cli_path(repo_root)
-
-    results = {
-        "schema_version": 1,
-        "generated_unix": int(time.time()),
-        "iterations": args.iterations,
-        "warmups": args.warmups,
-        "include_slow": args.include_slow,
-        "cases": [],
-    }
-
-    threshold_failures = []
-
-    for case in cases:
-        compile_case(tests_dir, case)
-        hl_path = tests_dir / case["hl"]
-        timeout_secs = int(case.get("timeout_secs", 60))
-
-        # Warmups
-        for _ in range(max(0, args.warmups)):
-            for mode in ("interp", "hybrid"):
-                code, out, err, _ = run_case(binary, hl_path, mode, timeout_secs)
-                must_ok(code, out, err, f"warmup {case['name']} mode={mode}")
-
-        interp_samples = []
-        hybrid_samples = []
-
-        for _ in range(max(1, args.iterations)):
-            code, out, err, t_ms = run_case(binary, hl_path, "interp", timeout_secs)
-            must_ok(code, out, err, f"perf run {case['name']} mode=interp")
-            interp_samples.append(t_ms)
-
-            code, out, err, t_ms = run_case(binary, hl_path, "hybrid", timeout_secs)
-            must_ok(code, out, err, f"perf run {case['name']} mode=hybrid")
-            hybrid_samples.append(t_ms)
-
-        interp = summarize(interp_samples)
-        hybrid = summarize(hybrid_samples)
-        speedup = None
-        if interp and hybrid and hybrid["median_ms"] > 0:
-            speedup = interp["median_ms"] / hybrid["median_ms"]
-
-        case_result = {
-            "name": case["name"],
-            "hl": case["hl"],
-            "interp": interp,
-            "hybrid": hybrid,
-            "speedup_interp_over_hybrid": speedup,
-        }
-        results["cases"].append(case_result)
-
-        if args.min_speedup > 0 and speedup is not None and speedup < args.min_speedup:
-            threshold_failures.append(
-                f"{case['name']}: speedup {speedup:.3f} < min {args.min_speedup:.3f}"
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--include-slow":
+            include_slow = True
+            i += 1
+        elif a in VALUE_FLAGS:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"{a} requires a value")
+            passthrough.extend([a, argv[i + 1]])
+            i += 2
+        elif a.startswith("--") and a.split("=", 1)[0] in VALUE_FLAGS:
+            passthrough.append(a)
+            i += 1
+        else:
+            raise SystemExit(
+                f"run_perf_matrix.py: unknown option {a!r}. This is a "
+                f"compatibility shim — call scripts/ash_bench.py directly for "
+                f"anything new."
             )
 
-    out_json.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    cmd = [
+        sys.executable,
+        str(NEW),
+        "--modes", LEGACY_MODES,
+        "--benchmarks",
+        LEGACY_BENCHMARKS_SLOW if include_slow else LEGACY_BENCHMARKS,
+    ]
+    if include_slow:
+        cmd.append("--include-slow")
+    cmd.extend(passthrough)
 
-    print(f"perf results written: {out_json}")
-    for c in results["cases"]:
-        speedup = c["speedup_interp_over_hybrid"]
-        speedup_s = "n/a" if speedup is None else f"{speedup:.3f}x"
-        print(
-            f"{c['name']}: interp_med={c['interp']['median_ms']:.2f}ms "
-            f"hybrid_med={c['hybrid']['median_ms']:.2f}ms speedup={speedup_s}"
-        )
-
-    if threshold_failures:
-        raise SystemExit("\n".join(["performance threshold failures:"] + threshold_failures))
+    print(f"exec: {' '.join(cmd)}", file=sys.stderr)
+    os.execv(sys.executable, cmd)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main(sys.argv[1:]))

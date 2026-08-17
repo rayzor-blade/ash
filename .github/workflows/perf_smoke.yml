@@ -47,6 +47,14 @@ jobs:
       - name: Build embedded stdlib cdylib
         run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
+      # scripts/ash_bench.py is the canonical perf tool; scripts/run_perf_matrix.py
+      # is a shim that forwards here and exists only for out-of-tree callers.
+      # See bench/README.md.
+      #
+      # Modes are pinned to interp + hybrid-eager, and the corpus to the two
+      # cases this job has always run, so the numbers stay comparable with the
+      # history in this workflow's artifacts. `hybrid-eager` is
+      # --jit-threshold 1, the promotion policy the old script hardcoded.
       - name: Run perf smoke matrix
         run: |
           INCLUDE_SLOW="false"
@@ -58,22 +66,23 @@ jobs:
 
           MIN_SPEEDUP="${{ github.event.inputs.min_speedup || '0' }}"
 
+          BENCHES="tiered_hotloop,mandelbrot_small"
+          SLOW_FLAG=()
           if [[ "$INCLUDE_SLOW" == "true" ]]; then
-            ./scripts/run_perf_matrix.py \
-              --repo-root . \
-              --out-json target/perf/perf_smoke.json \
-              --iterations 5 \
-              --warmups 1 \
-              --include-slow \
-              --min-speedup "$MIN_SPEEDUP"
-          else
-            ./scripts/run_perf_matrix.py \
-              --repo-root . \
-              --out-json target/perf/perf_smoke.json \
-              --iterations 5 \
-              --warmups 1 \
-              --min-speedup "$MIN_SPEEDUP"
+            BENCHES="tiered_hotloop,mandelbrot_small,mandelbrot"
+            SLOW_FLAG=(--include-slow)
           fi
+
+          ./scripts/ash_bench.py \
+            --repo-root . \
+            --build \
+            --out-json target/perf/perf_smoke.json \
+            --modes interp,hybrid-eager \
+            --benchmarks "$BENCHES" \
+            --iterations 5 \
+            --warmups 1 \
+            "${SLOW_FLAG[@]}" \
+            --min-speedup "$MIN_SPEEDUP"
 
       - name: Upload perf smoke artifact
         uses: actions/upload-artifact@v4

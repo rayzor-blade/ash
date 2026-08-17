@@ -3963,7 +3963,7 @@ impl<'ctx> JITModule<'ctx> {
                     .into_int_value();
                 let ext =
                     self.builder
-                        .build_int_s_extend(val, self.context.i32_type(), "geti8_sext")?;
+                        .build_int_z_extend(val, self.context.i32_type(), "geti8_zext")?;
                 self.builder.build_store(registers[dst.0 as usize], ext)?;
             }
             Opcode::GetI16 { dst, bytes, index } => {
@@ -3990,7 +3990,7 @@ impl<'ctx> JITModule<'ctx> {
                     .into_int_value();
                 let ext =
                     self.builder
-                        .build_int_s_extend(val, self.context.i32_type(), "geti16_sext")?;
+                        .build_int_z_extend(val, self.context.i32_type(), "geti16_zext")?;
                 self.builder.build_store(registers[dst.0 as usize], ext)?;
             }
             Opcode::GetMem { dst, bytes, index } => {

@@ -166,8 +166,9 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(
     // Null-terminate the UTF-16 string
     *result.offset(j) = 0;
 
-    // Set the size of the UTF-8 string
-    *size = utf8_len;
+    // *size is the UTF-16 length in BYTES (callers compute chars as size>>1,
+    // matching upstream hl_utf8_to_utf16), not the UTF-8 source length.
+    *size = utf16_len * 2;
 
     result
 }
@@ -256,7 +257,8 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
     // Null-terminate the UTF-8 string
     *result.offset(j) = 0;
 
-    // Set the size of the UTF-8 string
+    // *size is the UTF-16 length in BYTES (callers compute chars as size>>1,
+    // matching upstream hl_utf8_to_utf16), not the UTF-8 source length.
     *size = j as i32;
 
     result

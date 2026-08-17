@@ -1356,6 +1356,67 @@ impl HLInterpreter {
         // Initialize constants (pre-populated globals) before running
         self.init_constants(bytecode, native_resolver)?;
 
+        // Register the fiber closure runner: ash_std's thread_create runs
+        // Haxe thread bodies on krio fibers, and their vclosure fun pointers
+        // are interpreter stubs (findex+1) natives cannot call — this shim
+        // re-enters the interpreter for them. Raw-pointer context is safe:
+        // fibers run on this same OS thread, strictly within
+        // execute_entrypoint's dynamic extent.
+        struct ClosureRunCtx {
+            interp: *mut HLInterpreter,
+            bytecode: *const DecodedBytecode,
+            resolver: *const NativeFunctionResolver,
+        }
+        static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
+        unsafe extern "C" fn fiber_closure_runner(
+            c: *mut c_void,
+            _args: *mut *mut c_void,
+            _nargs: i32,
+        ) -> *mut c_void {
+            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                return std::ptr::null_mut();
+            };
+            let cl = c as *const hl::_vclosure;
+            if cl.is_null() {
+                return std::ptr::null_mut();
+            }
+            let fun = (*cl).fun as usize;
+            if fun == 0 || fun >= 0x100000 {
+                eprintln!("[ash] fiber runner: unsupported closure fun={:#x}", fun);
+                return std::ptr::null_mut();
+            }
+            let findex = fun.wrapping_sub(1);
+            let mut args_v = Vec::new();
+            if (*cl).hasValue != 0 && !(*cl).value.is_null() {
+                args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
+            }
+            let interp = &mut *ctx.interp;
+            match interp.call_function(&*ctx.bytecode, &*ctx.resolver, findex, &args_v) {
+                Ok(_) => std::ptr::null_mut(),
+                Err(e) => {
+                    eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
+                    std::ptr::null_mut()
+                }
+            }
+        }
+        unsafe {
+            CLOSURE_RUN_CTX = Some(ClosureRunCtx {
+                interp: self as *mut _,
+                bytecode: bytecode as *const _,
+                resolver: native_resolver as *const _,
+            });
+            let set = native_resolver
+                .resolve_function("std", "hlp_set_closure_runner")
+                .unwrap_or(std::ptr::null_mut());
+            if !set.is_null() {
+                type SetRunner = unsafe extern "C" fn(
+                    unsafe extern "C" fn(*mut c_void, *mut *mut c_void, i32) -> *mut c_void,
+                );
+                let f: SetRunner = std::mem::transmute(set);
+                f(fiber_closure_runner);
+            }
+        }
+
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
 
@@ -1383,6 +1444,13 @@ impl HLInterpreter {
                     }
                 };
                 eprintln!("[ash] Entering VM event loop (findex={})", findex);
+                // SDL pumping + frame pacing lives in the stdlib (lock_wait is a
+                // pure counter check per HashLink !HL_THREADS semantics), so the
+                // VM loop drives it: one pump + ~16ms sleep per tick.
+                let pump = native_resolver
+                    .resolve_function("std", "hlp_pump_and_sleep")
+                    .unwrap_or(std::ptr::null_mut());
+                type FnPump = unsafe extern "C" fn();
                 loop {
                     let mut args = Vec::new();
                     if let Some(v) = bound {
@@ -1393,6 +1461,12 @@ impl HLInterpreter {
                         Err(e) => {
                             eprintln!("[ash] VM event loop error: {:#}", e);
                             break;
+                        }
+                    }
+                    if !pump.is_null() {
+                        unsafe {
+                            let f: FnPump = std::mem::transmute(pump);
+                            f();
                         }
                     }
                 }
@@ -2533,7 +2607,19 @@ impl HLInterpreter {
                 });
             }
             Opcode::CallMethod { dst, field, args } | Opcode::CallThis { dst, field, args } => {
-                // args[0] is 'this', remaining are actual arguments
+                // CallMethod: args[0] is 'this'. CallThis: the receiver is
+                // IMPLICITLY register 0 (HashLink OCallThis semantics) and
+                // args hold only the real arguments — prepend Reg(0), else
+                // method resolution runs against the first argument's type.
+                let args_with_this: Vec<Reg> = if matches!(op, Opcode::CallThis { .. }) {
+                    let mut v = Vec::with_capacity(args.len() + 1);
+                    v.push(Reg(0));
+                    v.extend(args.iter().copied());
+                    v
+                } else {
+                    args.clone()
+                };
+                let args = &args_with_this;
                 let arg_vals: Vec<NanBoxedValue> =
                     args.iter().map(|r| frame.registers.get(r.0)).collect();
                 let this_val = arg_vals[0];
@@ -3979,7 +4065,7 @@ impl HLInterpreter {
                     NanBoxedValue::from_i32(0)
                 } else {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
-                    NanBoxedValue::from_i32(unsafe { *(addr as *const i8) as i32 })
+                    NanBoxedValue::from_i32(unsafe { *(addr as *const u8) as i32 })
                 };
                 frame.registers.set(dst.0, val);
             }
@@ -3990,7 +4076,7 @@ impl HLInterpreter {
                     NanBoxedValue::from_i32(0)
                 } else {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
-                    NanBoxedValue::from_i32(unsafe { *(addr as *const i16) as i32 })
+                    NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
                 };
                 frame.registers.set(dst.0, val);
             }

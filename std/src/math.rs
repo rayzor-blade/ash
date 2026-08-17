@@ -11,18 +11,21 @@ pub unsafe extern "C" fn hlp_math_sqrt(x: c_double) -> c_double {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_floor(x: c_double) -> c_double {
-    x.floor()
+pub unsafe extern "C" fn hlp_math_floor(x: c_double) -> i32 {
+    // Upstream: DEFINE_PRIM(_I32, math_floor, _F64)
+    x.floor() as i32
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_ceil(x: c_double) -> c_double {
-    x.ceil()
+pub unsafe extern "C" fn hlp_math_ceil(x: c_double) -> i32 {
+    x.ceil() as i32
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_round(x: c_double) -> c_double {
-    x.round()
+pub unsafe extern "C" fn hlp_math_round(x: c_double) -> i32 {
+    // HashLink round = floor(x + 0.5) (half-away differs from Rust .round()
+    // for negative halves).
+    (x + 0.5).floor() as i32
 }
 
 #[no_mangle]
@@ -86,16 +89,17 @@ pub unsafe extern "C" fn hlp_math_isfinite(x: c_double) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_ffloor(x: c_double) -> i32 {
-    x.floor() as i32
+pub unsafe extern "C" fn hlp_math_ffloor(x: c_double) -> c_double {
+    // Upstream: DEFINE_PRIM(_F64, math_ffloor, _F64)
+    x.floor()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_fceil(x: c_double) -> i32 {
-    x.ceil() as i32
+pub unsafe extern "C" fn hlp_math_fceil(x: c_double) -> c_double {
+    x.ceil()
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_math_fround(x: c_double) -> i32 {
-    x.round() as i32
+pub unsafe extern "C" fn hlp_math_fround(x: c_double) -> c_double {
+    (x + 0.5).floor()
 }

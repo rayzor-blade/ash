@@ -20,15 +20,15 @@ The typed phi-SSA IR (`crates/air/src/v2`) is in place with lowering,
 verification, a serializer back to standard HL bytecode, a native-import
 declaration table, loop and alias-class analyses, and a pass manager running
 null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE at O2, plus
-tail-recursion elimination at O3. v1 remains the production path until the
-backends switch over.
+tail-recursion elimination and inlining at O3. v1 remains the production path
+until the backends switch over.
 
 - **Remaining optimization passes over the typed IR**, in payoff order
   established by the mandelbrot trace: static field-offset resolution,
-  inlining, escape analysis and scalar replacement (below), bounds-check
-  elimination, box/unbox forwarding. (Field-load GVN with the HL alias
-  classes, dominance-based null-check elimination, LICM and tail-recursion
-  elimination have landed.)
+  escape analysis and scalar replacement (below), bounds-check elimination,
+  box/unbox forwarding. (Field-load GVN with the HL alias classes,
+  dominance-based null-check elimination, LICM, tail-recursion elimination
+  and inlining have landed.)
 - **`Function::float_types` needs module info.** A `TypeRef` is an index into
   the module's type table, so `air` cannot tell floats apart on its own: the
   embedder answers `ModuleInfo::is_float`. Lowering through the bare `lower()`
@@ -63,6 +63,22 @@ backends switch over.
   the fresh object to its constructor, so *every* allocation escapes by
   definition until that constructor is inlined; escape analysis run before
   inlining will find nothing.
+- **Inlining refuses anything involving a trap region or a cell.** A call site
+  covered by a handler is refused because the inlined blocks would become new
+  exceptional predecessors of a handler that may carry phis; a callee with
+  cells is refused because a cell is a frame slot, and materializing it as a
+  caller register would share one slot across activations and lose the
+  frame's initial value. That last rule also excludes every callee using
+  `Incr`/`Decr` or `Ref`, which is broader than it needs to be — only
+  `Ref`-taken cells can actually escape an activation. Lifting the call-site
+  rule needs the landing-pad design below.
+- **Inlining gives every callee register a fresh caller register**, so the
+  register table grows with the total size of everything inlined. Same
+  trade-off as the private-register rule above, at a larger scale.
+- **Inlining's depth cap is per-run.** `PassOptions::inline_max_depth` bounds
+  nesting within one pass invocation; across manager rounds the count starts
+  over, and only `inline_max_function` bounds total growth. A depth mark
+  carried on the IR would make the cap exact.
 - **Tail-recursion elimination refuses cell parameters** rather than writing
   through the cell: a pinned argument register is a memory slot whose address
   may have escaped, and each real activation gets a fresh one. Narrowing this

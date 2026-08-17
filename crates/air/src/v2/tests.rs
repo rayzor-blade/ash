@@ -11,10 +11,10 @@
 use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
 use super::ir::*;
 use super::lower::{lower, lower_with, ModuleBuilder};
-use super::module::{ModuleTables, NativeImport, NativeTable, NoModuleInfo};
+use super::module::{CalleeBody, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
 use super::passes::{
-    DeadCodeElim, FmaPeephole, GlobalValueNumbering, LoopInvariantCodeMotion, NullCheckElim,
-    OptLevel, Pass, PassManager, PassOptions, PassStats, TailRecursionElim,
+    DeadCodeElim, FmaPeephole, GlobalValueNumbering, Inlining, LoopInvariantCodeMotion,
+    NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, TailRecursionElim,
 };
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
@@ -111,6 +111,13 @@ fn mini_eval(ops: &[Opcode], ints: &[i32], args: &[i64], num_regs: usize) -> i64
     let m = MiniModule::new(ints);
     let mut fuel = 100_000usize;
     mini_run(&m, ops, args, num_regs, &mut fuel)
+}
+
+/// `mini_eval` over a module, so `Call*` opcodes (self-recursion included) can
+/// be executed.
+fn mini_eval_in(m: &MiniModule, ops: &[Opcode], args: &[i64], num_regs: usize) -> i64 {
+    let mut fuel = 100_000usize;
+    mini_run(m, ops, args, num_regs, &mut fuel)
 }
 
 fn mini_run(
@@ -3783,6 +3790,413 @@ fn tre_preserves_semantics_and_removes_the_recursion() {
                 before,
                 after,
                 "{}: TRE changed the result for {:?}\n{}",
+                name,
+                input,
+                ops_text(&out.ops)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// inlining
+// ---------------------------------------------------------------------------
+
+/// `add(a, b) = a + b` — findex 7.
+fn fix_callee_add() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0); 3],
+    )
+}
+
+/// `poly(a, b) = (a + b) * a - b` — three instructions, for budget tests.
+fn fix_callee_poly() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
+            Opcode::Mul {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(0),
+            },
+            Opcode::Sub {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0); 3],
+    )
+}
+
+/// `max(a, b)` — two `Ret`s, so the continuation needs a phi.
+fn fix_callee_max() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::JSGt {
+                a: Reg(0),
+                b: Reg(1),
+                offset: 1,
+            },
+            Opcode::Ret { ret: Reg(1) },
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(0); 2],
+    )
+}
+
+/// A callee that opens a trap region, so lowering pins its exception register
+/// to a cell.
+fn fix_callee_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 2,
+            },
+            Opcode::NullCheck { reg: Reg(0) },
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(0), t(2)],
+    )
+}
+
+/// `outer(a) = inner(a) + a` — findex 7, calls findex 8.
+fn fix_callee_outer() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(8),
+                arg0: Reg(0),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(1),
+                b: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0); 3],
+    )
+}
+
+/// `inner(a) = a + a` — findex 8.
+fn fix_callee_inner() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(0),
+                b: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    )
+}
+
+/// `caller(a) = f7(a, 10)`.
+fn fix_caller_call2() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::Call2 {
+                dst: Reg(2),
+                fun: RefFun(7),
+                arg0: Reg(0),
+                arg1: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0); 3],
+    )
+}
+
+/// `caller(a) = f7(a)`, one argument.
+fn fix_caller_call1() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(7),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    )
+}
+
+/// The call sits inside a `try`.
+fn fix_caller_call_in_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 3,
+            }, // handler at op 4
+            Opcode::Call2 {
+                dst: Reg(2),
+                fun: RefFun(7),
+                arg0: Reg(0),
+                arg1: Reg(0),
+            },
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::Ret { ret: Reg(2) },
+            Opcode::Ret { ret: Reg(0) }, // handler
+        ],
+        vec![t(0), t(2), t(0)],
+    )
+}
+
+fn bodies(entries: &[(usize, (Vec<Opcode>, Vec<TypeRef>))]) -> ModuleTables {
+    let mut m = ModuleTables::new();
+    for (findex, (ops, reg_types)) in entries {
+        m = m.with_callee(
+            *findex,
+            CalleeBody::Bytecode {
+                ops: ops.clone(),
+                reg_types: reg_types.clone(),
+            },
+        );
+    }
+    m
+}
+
+fn any_call(f: &Function) -> usize {
+    count_instrs(f, |i| matches!(i, Instr::Call { .. }))
+}
+
+#[test]
+fn inline_replaces_a_direct_call_with_the_callee_body() {
+    let (ops, tys) = fix_caller_call2();
+    let info = bodies(&[(7, fix_callee_add())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats.inlined, 1, "{}", f.dump());
+    assert!(stats.added > 0);
+    assert_eq!(any_call(&f), 0, "the call must be gone\n{}", f.dump());
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::BinOp { op: BinOp::Add, .. })),
+        1,
+        "the callee's arithmetic is now the caller's\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn inline_is_inert_without_module_info() {
+    let (ops, tys) = fix_caller_call2();
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(
+        &mut f,
+        &Inlining::new(&NoModuleInfo),
+        PassOptions::default(),
+    );
+    assert_eq!(stats, PassStats::default());
+    assert_eq!(any_call(&f), 1);
+}
+
+#[test]
+fn inline_builds_a_phi_for_a_callee_with_several_returns() {
+    let (ops, tys) = fix_caller_call2();
+    let info = bodies(&[(7, fix_callee_max())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats.inlined, 1, "{}", f.dump());
+    assert_eq!(any_call(&f), 0);
+    let phis: usize = f.blocks.iter().map(|b| b.phis.len()).sum();
+    assert_eq!(
+        phis,
+        1,
+        "the continuation merges the two returns\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn inline_refuses_a_callee_past_the_budget() {
+    let (ops, tys) = fix_caller_call2();
+    let info = bodies(&[(7, fix_callee_poly())]);
+    for (budget, expected) in [(2usize, 0usize), (3, 1)] {
+        let mut f = lower(&ops, &tys).expect("lower");
+        let stats = run_pass(
+            &mut f,
+            &Inlining::new(&info),
+            PassOptions {
+                inline_max_callee: budget,
+                ..PassOptions::default()
+            },
+        );
+        assert_eq!(
+            stats.inlined,
+            expected,
+            "budget {} should give {} inlines\n{}",
+            budget,
+            expected,
+            f.dump()
+        );
+    }
+}
+
+#[test]
+fn inline_refuses_to_grow_the_caller_past_its_ceiling() {
+    let (ops, tys) = fix_caller_call2();
+    let info = bodies(&[(7, fix_callee_poly())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(
+        &mut f,
+        &Inlining::new(&info),
+        PassOptions {
+            inline_max_function: 2,
+            ..PassOptions::default()
+        },
+    );
+    assert_eq!(stats.inlined, 0, "{}", f.dump());
+    assert_eq!(any_call(&f), 1);
+}
+
+#[test]
+fn inline_refuses_a_callee_whose_trap_regions_cannot_be_preserved() {
+    let (ops, tys) = fix_caller_call1();
+    let callee = fix_callee_trap();
+    // The fixture must really contain a trap region.
+    let g = lower(&callee.0, &callee.1).expect("lower callee");
+    assert!(
+        !g.cells.is_empty() && g.blocks.iter().any(|b| b.handler.is_some()),
+        "the callee fixture must open a trap region"
+    );
+    let info = bodies(&[(7, callee)]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats, PassStats::default(), "{}", f.dump());
+    assert_eq!(any_call(&f), 1);
+}
+
+#[test]
+fn inline_refuses_a_call_site_inside_a_trap_region() {
+    let (ops, tys) = fix_caller_call_in_trap();
+    let info = bodies(&[(7, fix_callee_add())]);
+    let mut f = lower(&ops, &tys).expect("lower");
+    assert!(
+        f.blocks.iter().any(|b| b.handler.is_some()),
+        "the caller fixture must open a trap region"
+    );
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats, PassStats::default(), "{}", f.dump());
+    assert_eq!(any_call(&f), 1);
+}
+
+#[test]
+fn inline_caps_recursive_nesting_at_the_depth_budget() {
+    let (ops, tys) = fix_caller_call1();
+    let info = bodies(&[(7, fix_callee_outer()), (8, fix_callee_inner())]);
+    for (depth, expected_inlines, expected_calls) in [(1usize, 1usize, 1usize), (2, 2, 0)] {
+        let mut f = lower(&ops, &tys).expect("lower");
+        let stats = run_pass(
+            &mut f,
+            &Inlining::new(&info),
+            PassOptions {
+                inline_max_depth: depth,
+                ..PassOptions::default()
+            },
+        );
+        assert_eq!(
+            (stats.inlined, any_call(&f)),
+            (expected_inlines, expected_calls),
+            "depth {}\n{}",
+            depth,
+            f.dump()
+        );
+    }
+}
+
+#[test]
+fn inline_merges_the_callee_native_declarations() {
+    let (ops, tys) = fix_caller_call1();
+    // The callee calls a native, so inlining it makes the caller reference it.
+    let callee = (
+        vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(3),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    );
+    let mut nt = NativeTable::new();
+    nt.declare(NativeImport::new(3, "std", "abs", vec![t(0)], t(0)))
+        .unwrap();
+    let info = bodies(&[(7, callee)]).with_natives(nt);
+    let mut f = lower(&ops, &tys).expect("lower");
+    assert!(f.natives.is_empty());
+    run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(
+        f.natives.get(3).map(|i| i.symbol()),
+        Some("std@abs".to_string()),
+        "the caller now declares what the callee called\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn inline_preserves_semantics() {
+    let cases: Vec<(
+        &str,
+        (Vec<Opcode>, Vec<TypeRef>),
+        Vec<(usize, (Vec<Opcode>, Vec<TypeRef>))>,
+    )> = vec![
+        ("add", fix_caller_call2(), vec![(7usize, fix_callee_add())]),
+        ("max", fix_caller_call2(), vec![(7, fix_callee_max())]),
+        ("poly", fix_caller_call2(), vec![(7, fix_callee_poly())]),
+        (
+            "nested",
+            fix_caller_call1(),
+            vec![(7, fix_callee_outer()), (8, fix_callee_inner())],
+        ),
+    ];
+    let ints = vec![10, 1];
+    for (name, (ops, tys), callees) in cases {
+        let info = bodies(&callees);
+        let mut f = lower(&ops, &tys).expect("lower");
+        let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+        assert!(stats.inlined > 0, "{}: nothing inlined\n{}", name, f.dump());
+        let out = serialize(&f).expect("serialize");
+        let f2 = lower(&out.ops, &out.reg_types)
+            .unwrap_or_else(|e| panic!("{name}: re-lower: {e}\n{}", ops_text(&out.ops)));
+        verify(&f2).unwrap();
+
+        let mut m = MiniModule::new(&ints);
+        for (findex, (cops, ctys)) in &callees {
+            m = m.with_fun(*findex, cops, ctys.len());
+        }
+        for input in [vec![0i64], vec![3], vec![-4], vec![25]] {
+            let before = mini_eval_in(&m, &ops, &input, tys.len());
+            let after = mini_eval_in(&m, &out.ops, &input, out.num_regs);
+            assert_eq!(
+                before,
+                after,
+                "{}: inlining changed the result for {:?}\n{}",
                 name,
                 input,
                 ops_text(&out.ops)

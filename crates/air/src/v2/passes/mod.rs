@@ -26,17 +26,21 @@
 //!
 //! # Passes that grow the function
 //!
-//! [`TailRecursionElim`] is the first pass that changes a function's shape
-//! rather than only shrinking it, so it heads [`OptLevel::O3`], ahead of the
-//! O2 pipeline that cleans up after it.
+//! [`TailRecursionElim`] and [`Inlining`] head [`OptLevel::O3`], ahead of the
+//! O2 pipeline that cleans up after them. Inlining is what makes HL programs
+//! optimizable at all: `new C(...)` passes the fresh object straight into the
+//! constructor call, so nothing about an allocation is visible until that call
+//! is gone.
 
 use super::analysis::{clobbers_all, write_class, AliasClass, CfgInfo};
 use super::ir::*;
+use super::module::{ModuleInfo, NO_MODULE_INFO};
 use anyhow::{bail, Result};
 
 pub mod dce;
 pub mod fma;
 pub mod gvn;
+pub mod inline;
 pub mod licm;
 pub mod nullcheck;
 pub mod tre;
@@ -44,6 +48,7 @@ pub mod tre;
 pub use dce::DeadCodeElim;
 pub use fma::FmaPeephole;
 pub use gvn::GlobalValueNumbering;
+pub use inline::Inlining;
 pub use licm::LoopInvariantCodeMotion;
 pub use nullcheck::NullCheckElim;
 pub use tre::TailRecursionElim;
@@ -66,6 +71,10 @@ pub struct PassStats {
     pub replaced: usize,
     /// Self-recursive tail calls turned into back edges.
     pub tail_calls: usize,
+    /// Call sites replaced by the callee's body.
+    pub inlined: usize,
+    /// Instructions added to the function.
+    pub added: usize,
 }
 
 impl PassStats {
@@ -79,6 +88,8 @@ impl PassStats {
         self.fused += other.fused;
         self.replaced += other.replaced;
         self.tail_calls += other.tail_calls;
+        self.inlined += other.inlined;
+        self.added += other.added;
     }
 }
 
@@ -95,6 +106,21 @@ pub struct PassOptions {
     pub verify_each: bool,
     /// Upper bound on manager rounds when running to a fixed point.
     pub max_rounds: usize,
+    /// Largest callee, in instructions, that [`Inlining`] will copy. The
+    /// default (40) covers the shapes inlining exists for in HL — constructors,
+    /// field accessors, small arithmetic helpers — without pulling in whole
+    /// methods.
+    pub inline_max_callee: usize,
+    /// How many inlines deep one [`Inlining`] run nests. This is what caps
+    /// recursive inlining; the default (2) is one level of callee plus one
+    /// level of what that callee calls.
+    pub inline_max_depth: usize,
+    /// Ceiling on the caller's instruction count, checked before every inline.
+    /// Because it bounds the *function* rather than one step, repeated manager
+    /// rounds cannot grow a function without bound even though each round
+    /// starts its depth count over — which is what keeps the
+    /// inlining-versus-DCE fixed point terminating. Default 400.
+    pub inline_max_function: usize,
 }
 
 impl Default for PassOptions {
@@ -103,6 +129,9 @@ impl Default for PassOptions {
             fma: true,
             verify_each: false,
             max_rounds: 4,
+            inline_max_callee: 40,
+            inline_max_depth: 2,
+            inline_max_function: 400,
         }
     }
 }
@@ -127,9 +156,12 @@ pub enum OptLevel {
     /// point.
     O2,
     /// Everything in [`OptLevel::O2`], preceded by the passes that can grow a
-    /// function. Tail-recursion elimination is the first of them: it runs
-    /// before the O2 pipeline so GVN, LICM and DCE clean up the loop it
-    /// leaves behind.
+    /// function: tail-recursion elimination and inlining, in that order, so
+    /// that GVN, LICM and DCE clean up what they expose.
+    ///
+    /// Inlining needs callee bodies, which only [`PassManager::with_module`]
+    /// can supply — `PassManager::new(OptLevel::O3)` still builds the full
+    /// pipeline, but its inliner finds no callee and does nothing.
     O3,
 }
 
@@ -166,15 +198,27 @@ impl PassReport {
 
 /// Sequences passes over a function, either by opt level or from an explicit
 /// pass list, and reports what each one did.
-pub struct PassManager {
-    passes: Vec<Box<dyn Pass>>,
+///
+/// The lifetime is the module info the inliner borrows; a pipeline built
+/// without one is `PassManager<'static>`.
+pub struct PassManager<'m> {
+    passes: Vec<Box<dyn Pass + 'm>>,
     opts: PassOptions,
 }
 
-impl PassManager {
-    /// The pipeline for an optimization level.
+impl PassManager<'static> {
+    /// The pipeline for an optimization level, without module info. At
+    /// [`OptLevel::O3`] the inliner is present but inert.
     pub fn new(level: OptLevel) -> Self {
-        let passes: Vec<Box<dyn Pass>> = match level {
+        PassManager::with_module(level, &NO_MODULE_INFO)
+    }
+}
+
+impl<'m> PassManager<'m> {
+    /// The pipeline for an optimization level, with the module info the
+    /// inliner asks for callee bodies.
+    pub fn with_module(level: OptLevel, info: &'m dyn ModuleInfo) -> Self {
+        let passes: Vec<Box<dyn Pass + 'm>> = match level {
             OptLevel::O0 => vec![],
             OptLevel::O1 => vec![Box::new(NullCheckElim), Box::new(DeadCodeElim)],
             OptLevel::O2 => vec![
@@ -186,6 +230,7 @@ impl PassManager {
             ],
             OptLevel::O3 => vec![
                 Box::new(TailRecursionElim),
+                Box::new(Inlining::new(info)),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),
                 Box::new(LoopInvariantCodeMotion),
@@ -200,7 +245,7 @@ impl PassManager {
     }
 
     /// An explicit pipeline, run in the order given.
-    pub fn with_passes(passes: Vec<Box<dyn Pass>>) -> Self {
+    pub fn with_passes(passes: Vec<Box<dyn Pass + 'm>>) -> Self {
         PassManager {
             passes,
             opts: PassOptions::default(),

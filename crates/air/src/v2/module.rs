@@ -1,5 +1,5 @@
-//! Module-level declarations carried by the IR: native imports and the set of
-//! float types.
+//! Module-level declarations carried by the IR: native imports, the set of
+//! float types, and callee bodies.
 //!
 //! Lowering is handed a [`ModuleInfo`] — the embedder's view of the bytecode
 //! module — and records everything it learns from it into the function it
@@ -13,11 +13,17 @@
 //! * the process-global symbol table binds an address against the same
 //!   `(lib, name)` pair and `findex`.
 //!
+//! [`ModuleInfo::callee`] serves the same purpose for the one optimization
+//! that needs to see past the function it is given: inlining. `air` holds one
+//! function at a time and has no view of the module's function pool, so the
+//! embedder answers with the callee's body.
+//!
 //! `air` stays dependency-free: [`ModuleInfo`] is a trait the embedder
 //! implements (or a prebuilt [`ModuleTables`] it fills in), never a
 //! dependency on the bytecode crate.
 
-use super::ir::TypeRef;
+use super::ir::{Function, TypeRef};
+use crate::opcodes::Opcode;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 
@@ -151,12 +157,50 @@ impl<'a> IntoIterator for &'a NativeTable {
     }
 }
 
-/// The embedder's view of the bytecode module, consulted during lowering.
+/// The body of a bytecode function, in either of the two forms the embedder
+/// may find cheaper to produce.
 ///
-/// Both methods default to "nothing known", which makes lowering without
+/// [`CalleeBody::Bytecode`] is the form an embedder that keeps raw opcode
+/// arrays hands over; the inliner lowers it on demand.
+/// [`CalleeBody::Air`] is the form an embedder that already lowered the whole
+/// module hands over, which avoids re-lowering the same callee once per call
+/// site.
+#[derive(Debug, Clone)]
+pub enum CalleeBody {
+    /// Already lowered to AIR.
+    Air(Function),
+    /// Raw bytecode: the function's opcode array and register-type table.
+    Bytecode {
+        ops: Vec<Opcode>,
+        reg_types: Vec<TypeRef>,
+    },
+}
+
+impl CalleeBody {
+    /// The lowered body, tagged with `findex`.
+    ///
+    /// Bytecode is lowered against `info`, so a callee carries the same native
+    /// declarations and float types it would have been given had the embedder
+    /// lowered it itself — which is what lets the inliner merge them into the
+    /// caller.
+    pub fn into_function(self, findex: usize, info: &dyn ModuleInfo) -> Result<Function> {
+        let f = match self {
+            CalleeBody::Air(f) => f,
+            CalleeBody::Bytecode { ops, reg_types } => {
+                super::lower::lower_with(&ops, &reg_types, info)?
+            }
+        };
+        Ok(f.with_findex(findex))
+    }
+}
+
+/// The embedder's view of the bytecode module, consulted during lowering and
+/// by the inliner.
+///
+/// Every method defaults to "nothing known", which makes lowering without
 /// module info produce a function with an empty native table and no float
-/// types — every module-info-dependent rewrite is then inert rather than
-/// wrong.
+/// types, and makes inlining find no callee — every module-info-dependent
+/// rewrite is then inert rather than wrong.
 pub trait ModuleInfo {
     /// The native declaration for `findex`, or `None` when `findex` is a
     /// bytecode function.
@@ -172,21 +216,43 @@ pub trait ModuleInfo {
         let _ = ty;
         false
     }
+
+    /// The body of bytecode function `findex`, when the embedder can supply
+    /// one.
+    ///
+    /// `None` — the default — is the answer for a native, for a body the
+    /// embedder has not got, and for a function it does not want copied;
+    /// [`inline`](super::passes::inline) treats all three the same way and
+    /// leaves the call alone. Because the default answers `None`, a function
+    /// lowered through the bare [`lower`](super::lower::lower) wrapper is
+    /// never inlined into.
+    fn callee(&self, findex: usize) -> Option<CalleeBody> {
+        let _ = findex;
+        None
+    }
 }
 
 /// Module info that knows nothing: lowering records no natives and no float
-/// types.
+/// types, and no call is inlinable.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoModuleInfo;
 
 impl ModuleInfo for NoModuleInfo {}
 
-/// Prebuilt module info: a native table plus the float type refs. For callers
-/// that would rather fill in tables than implement [`ModuleInfo`].
+/// The shared "nothing known" instance, so a pipeline built without module
+/// info can still hold an inliner (an inert one).
+pub static NO_MODULE_INFO: NoModuleInfo = NoModuleInfo;
+
+/// Prebuilt module info: a native table, the float type refs, and the callee
+/// bodies the inliner may copy. For callers that would rather fill in tables
+/// than implement [`ModuleInfo`].
 #[derive(Debug, Clone, Default)]
 pub struct ModuleTables {
     pub natives: NativeTable,
     pub float_types: Vec<TypeRef>,
+    /// Bodies offered to the inliner, keyed by `findex`. A `findex` that is
+    /// absent is simply never inlined.
+    pub callees: BTreeMap<usize, CalleeBody>,
 }
 
 impl ModuleTables {
@@ -205,6 +271,12 @@ impl ModuleTables {
         self.float_types.dedup();
         self
     }
+
+    /// Offer one function body to the inliner.
+    pub fn with_callee(mut self, findex: usize, body: CalleeBody) -> Self {
+        self.callees.insert(findex, body);
+        self
+    }
 }
 
 impl ModuleInfo for ModuleTables {
@@ -213,6 +285,9 @@ impl ModuleInfo for ModuleTables {
     }
     fn is_float(&self, ty: TypeRef) -> bool {
         self.float_types.binary_search(&ty).is_ok()
+    }
+    fn callee(&self, findex: usize) -> Option<CalleeBody> {
+        self.callees.get(&findex).cloned()
     }
 }
 
@@ -228,6 +303,9 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn is_float(&self, ty: TypeRef) -> bool {
         (**self).is_float(ty)
+    }
+    fn callee(&self, findex: usize) -> Option<CalleeBody> {
+        (**self).callee(findex)
     }
 }
 

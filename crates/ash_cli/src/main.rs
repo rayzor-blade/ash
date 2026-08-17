@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ash::bytecode::BytecodeDecoder;
 use ash::native_lib::{init_std_library, NativeFunctionResolver};
-use ash_interp::interpreter::{HLInterpreter, TieredConfig};
+use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process;
@@ -39,6 +39,13 @@ struct Cli {
     /// Enable hot-reload support (converts direct calls to indirect dispatch)
     #[arg(long, default_value_t = false)]
     hot_reload: bool,
+
+    /// Which rungs of the interpreter -> Cranelift -> LLVM ladder to use.
+    /// `auto` (default) runs both JIT tiers; `cranelift` and `llvm` pin a
+    /// single tier for testing; `off` disables promotion. Overridden by the
+    /// ASH_TIER environment variable when this flag is left at its default.
+    #[arg(long, value_name = "auto|cranelift|llvm|off")]
+    jit_tier: Option<String>,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -212,6 +219,21 @@ fn run() -> Result<()> {
             }
         }
         Mode::Hybrid => {
+            // --jit-tier wins; ASH_TIER is the env fallback.
+            let tier_spec = cli
+                .jit_tier
+                .clone()
+                .or_else(|| std::env::var("ASH_TIER").ok());
+            let tier_mode = match tier_spec {
+                Some(s) => match TierMode::parse(&s) {
+                    Some(m) => m,
+                    None => anyhow::bail!(
+                        "invalid --jit-tier/ASH_TIER value '{}' (expected auto|cranelift|llvm|off)",
+                        s
+                    ),
+                },
+                None => TierMode::default(),
+            };
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             let cfg = TieredConfig {
                 enabled: true,
@@ -221,18 +243,21 @@ fn run() -> Result<()> {
                 log_promotions: cli.jit_log,
                 strict_mode: true,
                 hot_reload: cli.hot_reload,
+                tier_mode,
             };
             interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
             let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(
-                        "[tiered] attempted={} succeeded={} failed={} compiled_calls={} fallbacks={}",
+                        "[tiered] attempted={} succeeded={} failed={} compiled_calls={} fallbacks={} cranelift={} llvm={}",
                         stats.attempted_promotions,
                         stats.successful_promotions,
                         stats.failed_promotions,
                         stats.compiled_calls,
-                        stats.fallback_calls
+                        stats.fallback_calls,
+                        stats.cranelift_promotions,
+                        stats.llvm_promotions
                     );
                 }
             }

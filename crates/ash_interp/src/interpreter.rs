@@ -1,13 +1,12 @@
 use anyhow::{anyhow, Result};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use beadie::{Bead, BeadState, Beadie, SubmitResult, ThresholdPolicy};
+use beadie::{Bead, HotnessPolicy, ThresholdPolicy, TieredAdapter, TieredBound};
 
 use ash::bytecode::DecodedBytecode;
 use ash::c_types::CTypeFactory;
@@ -132,6 +131,46 @@ impl std::fmt::Display for HLExceptionPropagation {
 
 impl std::error::Error for HLExceptionPropagation {}
 
+/// Which rungs of the interpreter → Cranelift → LLVM ladder are active.
+///
+/// Selected with `--jit-tier` or `ASH_TIER`; `Auto` is the shipped ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TierMode {
+    /// Two tiers: Cranelift at `jit_threshold` (falling back to LLVM for
+    /// functions outside the Cranelift opcode subset), LLVM at
+    /// `jit_threshold * 100`.
+    #[default]
+    Auto,
+    /// One tier, Cranelift only. Functions outside the subset never promote —
+    /// useful for isolating the middle tier under test.
+    Cranelift,
+    /// One tier, LLVM only — the pre-ladder behaviour.
+    Llvm,
+    /// No promotion at all; pure interpretation.
+    Off,
+}
+
+impl TierMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(TierMode::Auto),
+            "cranelift" | "cl" => Some(TierMode::Cranelift),
+            "llvm" => Some(TierMode::Llvm),
+            "off" | "none" => Some(TierMode::Off),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            TierMode::Auto => "auto",
+            TierMode::Cranelift => "cranelift",
+            TierMode::Llvm => "llvm",
+            TierMode::Off => "off",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TieredConfig {
     pub enabled: bool,
@@ -141,6 +180,7 @@ pub struct TieredConfig {
     pub log_promotions: bool,
     pub strict_mode: bool,
     pub hot_reload: bool,
+    pub tier_mode: TierMode,
 }
 
 impl Default for TieredConfig {
@@ -154,6 +194,7 @@ impl Default for TieredConfig {
             log_promotions: false,
             strict_mode: true,
             hot_reload: false,
+            tier_mode: TierMode::Auto,
         }
     }
 }
@@ -165,6 +206,11 @@ pub struct TieredStats {
     pub failed_promotions: u64,
     pub compiled_calls: u64,
     pub fallback_calls: u64,
+    /// Functions whose installed code came from the Cranelift middle tier.
+    pub cranelift_promotions: u64,
+    /// Functions whose installed code came from the LLVM top tier (either as
+    /// a tier-0 fallback or as a tier-1 upgrade).
+    pub llvm_promotions: u64,
 }
 
 /// Marshaling metadata for a promoted function, cached findex-indexed on the
@@ -176,143 +222,362 @@ struct CompiledFunctionEntry {
     ret_kind: u32,
 }
 
-/// State shared between the interpreter thread and beadie's broker thread.
-/// Compile closures capture this via `Arc`; the broker writes marshaling
-/// metadata here before returning the code pointer to beadie.
+/// The pre-warmed LLVM JIT module, owned by whichever broker thread first
+/// claims it and then kept behind `TieredSharedCtx::llvm`.
+///
+/// `ManuallyDrop` because LLVM objects may throw foreign exceptions during
+/// drop on some platforms — the module is intentionally leaked at exit (same
+/// as the old worker's `std::mem::forget` on shutdown).
+struct LlvmModule(ManuallyDrop<JITModule<'static>>);
+
+// SAFETY: the module is only ever touched while `TieredSharedCtx::llvm` is
+// locked, so exactly one thread dereferences it at a time — the same
+// justification the old single-broker-thread hand-off relied on, now enforced
+// by the mutex instead of by there being only one broker.
+unsafe impl Send for LlvmModule {}
+
+enum LlvmState {
+    /// Handed off from the main thread's pre-warm, not yet claimed.
+    Pending(PrewarmedJit),
+    Ready(LlvmModule),
+    /// Pre-warm failed; the LLVM tier is unavailable for this run.
+    Unavailable,
+}
+
+/// Cranelift middle tier, built lazily on the broker thread at the first
+/// promotion (~1 ms; deliberately not part of startup).
+struct CraneliftTier {
+    backend: ash::cranelift::AshCraneliftBackend,
+    ctx: ash::cranelift::CraneliftTierContext,
+}
+
+/// Raw handles the Cranelift lowering needs; all process-lifetime shared
+/// arrays, captured once in `enable_tiered`.
+#[derive(Clone, Copy)]
+struct SharedArrayHandles {
+    globals_data: usize,
+    nglobals: usize,
+    functions_ptrs: usize,
+}
+
+/// State shared between the interpreter thread and beadie's tier brokers.
+/// Compile closures capture this via `Arc`.
 struct TieredSharedCtx {
     log_promotions: bool,
-    /// JIT module pre-warmed on the MAIN thread by `enable_tiered`, before any
-    /// bytecode runs. The broker adopts it on its first compile job. All
-    /// GC-allocating init (constants, obj runtimes, enum marks) happens during
-    /// pre-warm; the broker only compiles (pure LLVM + MCJIT finalization).
-    prewarmed: Mutex<Option<PrewarmedJit>>,
-    /// Compile results parked by the broker closure; the interpreter drains
-    /// an entry on its first `bead.compiled()` observation for that findex.
-    meta: Mutex<HashMap<usize, CompiledFunctionMeta>>,
-    /// Compile failures counted on the broker thread (bead goes to Deopt via
-    /// the broker's null-return handling).
+    /// `ASH_TIER_LOG=1` (or `--jit-log`): one line per installed function
+    /// naming the findex and the tier that produced it.
+    tier_log: bool,
+    mode: TierMode,
+    /// The LLVM top tier. Pre-warmed on the MAIN thread by `enable_tiered`,
+    /// before any bytecode runs, because module init GC-allocates (constants,
+    /// obj runtimes, enum marks) and a broker-side collection would scan the
+    /// wrong stack. Only compilation happens here.
+    llvm: Mutex<LlvmState>,
+    /// The Cranelift middle tier. `None` until first use, `Some(None)` once
+    /// construction has been tried and failed.
+    cranelift: Mutex<Option<Option<Arc<CraneliftTier>>>>,
+    arrays: SharedArrayHandles,
+    /// Set on the first tiered invocation: the decoded bytecode, which lives
+    /// for the whole process (owned by the CLI entry point).
+    bytecode: std::sync::atomic::AtomicUsize,
+    /// `max(findex) + 1`, matching the length of `functions_ptrs`.
+    max_findex: std::sync::atomic::AtomicUsize,
+    /// Findexes whose installed code already came from LLVM — a tier-1
+    /// upgrade for those would recompile identical code.
+    llvm_done: Mutex<HashSet<usize>>,
+    attempted: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
+    cranelift_promotions: std::sync::atomic::AtomicU64,
+    llvm_promotions: std::sync::atomic::AtomicU64,
+}
+
+impl TieredSharedCtx {
+    /// Publish the process-wide bytecode pointer (idempotent).
+    fn set_bytecode(&self, bytecode: &DecodedBytecode) {
+        use std::sync::atomic::Ordering;
+        if self.bytecode.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let max_findex = bytecode
+            .functions
+            .iter()
+            .map(|f| f.findex as usize)
+            .chain(bytecode.natives.iter().map(|n| n.findex as usize))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
+        self.max_findex.store(max_findex, Ordering::Release);
+        self.bytecode
+            .store(bytecode as *const _ as usize, Ordering::Release);
+    }
+
+    fn bytecode_ptr(&self) -> Option<&'static DecodedBytecode> {
+        let p = self.bytecode.load(std::sync::atomic::Ordering::Acquire);
+        if p == 0 {
+            None
+        } else {
+            // SAFETY: published by `set_bytecode` from the interpreter's own
+            // `&DecodedBytecode`, which the CLI keeps alive for the process.
+            Some(unsafe { &*(p as *const DecodedBytecode) })
+        }
+    }
 }
 
 /// Raw pointer to the JIT module pre-warmed on the main thread, handed off to
-/// beadie's broker thread. `Send` is sound the same way `SharedRuntimeHandles`
-/// is: exactly one consumer thread dereferences it after the handoff (the
-/// broker is a single persistent thread; the main thread never touches the
-/// module again).
+/// beadie's broker threads. `Send` is sound the same way `SharedRuntimeHandles`
+/// is: the main thread never touches the module again, and every consumer goes
+/// through `TieredSharedCtx::llvm`.
 struct PrewarmedJit(*mut ManuallyDrop<JITModule<'static>>);
 unsafe impl Send for PrewarmedJit {}
 
-/// Tiered promotion state built on the beadie broker.
+/// Tiered promotion state built on beadie's `TieredAdapter`.
 ///
-/// One `Arc<Bead>` per tierable findex (registered lazily on first call);
-/// beadie owns the hotness tick, the promotion CAS, and the background
-/// compile thread. The interpreter keeps only marshaling metadata and stats.
+/// One `TieredBound` per tierable findex (registered lazily on first call);
+/// beadie owns the hotness tick, the per-tier promotion CAS, and one
+/// background compile thread per tier. The interpreter keeps only marshaling
+/// metadata and stats.
 struct TieredRuntime {
     config: TieredConfig,
-    beadie: Beadie<ThresholdPolicy>,
-    /// findex-indexed beads. `None` = gate not yet run, or untierable.
-    beads: Vec<Option<Arc<Bead>>>,
+    adapter: TieredAdapter,
+    /// findex-indexed bounds. `None` = gate not yet run, or untierable.
+    beads: Vec<Option<TieredBound>>,
     /// findex-indexed: whether the one-time registration gate has run.
     gate_checked: Vec<bool>,
     /// findex-indexed cache of marshaling metadata for compiled functions.
     entries: Vec<Option<CompiledFunctionEntry>>,
-    /// Invocation count at which the compile job is submitted
-    /// (threshold minus queue-ahead; see `ThresholdPolicy::queue_at`).
-    promote_at: u32,
+    /// findex-indexed marshaling signature, derived from the bytecode and
+    /// therefore identical for every tier.
+    sigs: Vec<Option<(Arc<[u32]>, u32)>>,
     shared_ctx: Arc<TieredSharedCtx>,
-    /// Interp-side counters; broker-side failures live in `shared_ctx.failed`.
+    /// Interp-side counters; broker-side counters live in `shared_ctx`.
     stats: TieredStats,
 }
 
-thread_local! {
-    /// Per-broker-thread JIT module. Adopted from the main-thread pre-warm on
-    /// the first compile job; lives as long as the broker thread.
-    /// `ManuallyDrop` because LLVM objects may throw foreign exceptions during
-    /// drop on some platforms — the module is intentionally leaked on thread
-    /// exit (same as the old worker's `std::mem::forget` on shutdown).
-    static TIERED_JIT: RefCell<Option<ManuallyDrop<JITModule<'static>>>> =
-        const { RefCell::new(None) };
+/// Dispatch one compile job to the backend that owns `tier`.
+///
+/// Tier 0 in `Auto` mode tries Cranelift first and falls back to LLVM: a
+/// Cranelift decline must never leave the bead with null code, because
+/// beadie's primary broker treats a null tier-0 result as a permanent
+/// invalidation and the function would then never reach the LLVM tier either.
+fn tiered_compile_tier(
+    ctx: &TieredSharedCtx,
+    tier: usize,
+    findex: usize,
+    bead: &Arc<Bead>,
+) -> *mut () {
+    use std::sync::atomic::Ordering;
+    ctx.attempted.fetch_add(1, Ordering::Relaxed);
+    let code = match (ctx.mode, tier) {
+        (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
+        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex),
+        (TierMode::Auto, 0) => {
+            let cl = compile_with_cranelift(ctx, findex, bead);
+            if cl.is_null() {
+                compile_with_llvm(ctx, 0, findex)
+            } else {
+                cl
+            }
+        }
+        (TierMode::Auto, 1) => {
+            if ctx
+                .llvm_done
+                .lock()
+                .expect("llvm_done mutex poisoned")
+                .contains(&findex)
+            {
+                // Already LLVM code — nothing to upgrade to. A null here is
+                // harmless: the promotion broker keeps the current tier.
+                return std::ptr::null_mut();
+            }
+            compile_with_llvm(ctx, 1, findex)
+        }
+        _ => std::ptr::null_mut(),
+    };
+    if code.is_null() {
+        ctx.failed.fetch_add(1, Ordering::Relaxed);
+    }
+    code
 }
 
-/// Compile one function on beadie's broker thread.
-///
-/// Adopts the JIT module pre-warmed on the main thread by `enable_tiered`,
-/// then runs `promote_function_strict`. Module init must NEVER run here
-/// mid-program: it GC-allocates (constants, obj runtimes, enum marks), and a
-/// broker-side collection scans the wrong stack — reclaiming objects live
-/// only in main-thread frames/registers — while holding the GC lock across
-/// the multi-second init stalls the main thread's next allocation.
-/// MCJIT finalization (`get_function_address`) still happens here, on the
-/// same thread as before.
-///
-/// On success the marshaling metadata is parked in `ctx.meta` before the code
-/// pointer is returned — beadie installs the pointer with release ordering,
-/// so the interpreter's acquire load of `bead.compiled()` always finds the
-/// metadata. On failure returns null; the broker invalidates the bead
-/// (Deopt), which permanently blacklists it.
-fn tiered_compile(ctx: &TieredSharedCtx, findex: usize) -> *mut () {
-    let result: std::result::Result<CompiledFunctionMeta, String> = TIERED_JIT.with(|slot| {
-        let mut slot = slot.borrow_mut();
+/// Cranelift middle tier. Returns null when the function is outside the
+/// lowerable subset or lowering declines — the caller falls back to LLVM.
+fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>) -> *mut () {
+    use std::sync::atomic::Ordering;
+    let Some(bytecode) = ctx.bytecode_ptr() else {
+        return std::ptr::null_mut();
+    };
+
+    // Cheap static pre-flight before paying for a lowering attempt.
+    let Some(func) = bytecode
+        .functions
+        .iter()
+        .find(|f| f.findex as usize == findex)
+    else {
+        return std::ptr::null_mut();
+    };
+    if let Some(reason) = ash::cranelift::lowering_reject_reason(bytecode, func) {
+        if ctx.tier_log {
+            eprintln!("[tier] decline findex={findex} tier=cranelift reason={reason}");
+        }
+        return std::ptr::null_mut();
+    }
+
+    let tier = {
+        let mut slot = ctx.cranelift.lock().expect("cranelift mutex poisoned");
         if slot.is_none() {
-            match ctx
-                .prewarmed
-                .lock()
-                .expect("tiered prewarm mutex poisoned")
-                .take()
-            {
-                Some(pw) => {
-                    // Move the module out of its Box into the thread-local.
-                    *slot = Some(unsafe { *Box::from_raw(pw.0) });
-                    if ctx.log_promotions {
-                        eprintln!("[tiered] broker adopted pre-warmed JIT module");
-                    }
+            let built = (|| -> Result<Arc<CraneliftTier>> {
+                let t0 = std::time::Instant::now();
+                let backend = ash::cranelift::AshCraneliftBackend::new()?;
+                // SAFETY: `bytecode` is the process-lifetime decoded bytecode
+                // published by `set_bytecode`; the arrays are the shared
+                // runtime tables that outlive every tier.
+                let cl_ctx = unsafe {
+                    ash::cranelift::CraneliftTierContext::new(
+                        &backend,
+                        bytecode,
+                        ctx.arrays.globals_data as *mut c_void as *mut *mut c_void,
+                        ctx.arrays.nglobals,
+                        ctx.arrays.functions_ptrs as *mut c_void as *mut *mut c_void,
+                        ctx.max_findex.load(Ordering::Acquire),
+                    )?
+                };
+                if ctx.log_promotions {
+                    eprintln!(
+                        "[tiered] cranelift backend ready in {:.1}ms ({} native symbols registered)",
+                        t0.elapsed().as_secs_f64() * 1e3,
+                        backend.registered_symbols()
+                    );
                 }
-                None => {
-                    return Err("no pre-warmed JIT module (startup init failed)".to_string());
+                Ok(Arc::new(CraneliftTier {
+                    backend,
+                    ctx: cl_ctx,
+                }))
+            })();
+            *slot = Some(match built {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    eprintln!("[tiered] cranelift tier unavailable: {e:#}");
+                    None
                 }
-            }
+            });
         }
-        let module = slot.as_mut().expect("JIT module initialized above");
-        // Arm a broker-local recovery point: a hardware fault during
-        // compilation (e.g., a torn read of a type pointer the main thread is
-        // still initializing) longjmps back HERE — on this thread — and
-        // blacklists the findex, instead of crashing the process or, worse,
-        // being misrouted into the main thread's armed recovery context.
-        let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if unsafe { crate::native_recovery::arm_tiered_recovery() } != 0 {
-                // Drop the queue so the faulting transitive compile is not
-                // re-popped (and re-faulted) by every subsequent job.
-                module.clear_pending_compilations();
-                return Err(anyhow!(
-                    "native fault during promotion (sig={} fault_addr={:#x})",
-                    crate::native_recovery::last_tiered_recovery_signal(),
-                    crate::native_recovery::last_tiered_recovery_fault_addr()
-                ));
-            }
-            module.promote_function_strict(findex)
-        }));
-        crate::native_recovery::disarm_tiered_recovery();
-        match compile_result {
-            Ok(Ok(meta)) if meta.fn_addr != 0 => Ok(meta),
-            Ok(Ok(_)) => Err("promotion returned null fn_addr".to_string()),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err("promotion panicked".to_string()),
+        match slot.as_ref().and_then(|o| o.as_ref()) {
+            Some(t) => Arc::clone(t),
+            None => return std::ptr::null_mut(),
         }
-    });
+    };
+
+    let t0 = std::time::Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tier.backend.compile_findex(bead, &tier.ctx, findex)
+    }));
+    match result {
+        Ok(Ok((addr, meta))) => {
+            ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
+            if ctx.tier_log {
+                eprintln!(
+                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
+                    meta.num_ops,
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            addr as *mut ()
+        }
+        Ok(Err(e)) => {
+            if ctx.tier_log {
+                eprintln!("[tier] decline findex={findex} tier=cranelift reason={e:#}");
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            eprintln!("[tier] cranelift lowering panicked for findex={findex}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// LLVM top tier — the pre-existing `promote_function_strict` path.
+///
+/// Module init must NEVER run here mid-program: it GC-allocates (constants,
+/// obj runtimes, enum marks), and a broker-side collection scans the wrong
+/// stack — reclaiming objects live only in main-thread frames/registers —
+/// while holding the GC lock across the multi-second init stalls the main
+/// thread's next allocation. Only compilation and MCJIT finalization run here.
+///
+/// The `llvm` mutex is held across the whole armed region, so the single
+/// global tiered recovery slot stays owned by one thread at a time even
+/// though two broker threads can reach this function.
+fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut () {
+    // A tier-0 failure permanently invalidates the bead (beadie's primary
+    // broker); a tier-1 failure is silent and the bead keeps its current tier.
+    let on_fail = if tier == 0 { "blacklist" } else { "keep-tier" };
+    use std::sync::atomic::Ordering;
+    let t0 = std::time::Instant::now();
+    let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
+    if let LlvmState::Pending(_) = &*guard {
+        let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
+            unreachable!()
+        };
+        // Move the module out of its Box into the shared slot.
+        *guard = LlvmState::Ready(LlvmModule(unsafe { *Box::from_raw(pw.0) }));
+        if ctx.log_promotions {
+            eprintln!("[tiered] broker adopted pre-warmed JIT module");
+        }
+    }
+    let LlvmState::Ready(module) = &mut *guard else {
+        if ctx.log_promotions {
+            eprintln!("[tiered] {on_fail} findex={findex} reason=no pre-warmed JIT module");
+        }
+        return std::ptr::null_mut();
+    };
+    let module = &mut module.0;
+
+    // Arm a broker-local recovery point: a hardware fault during compilation
+    // (e.g., a torn read of a type pointer the main thread is still
+    // initializing) longjmps back HERE — on this thread — and blacklists the
+    // findex, instead of crashing the process or, worse, being misrouted into
+    // the main thread's armed recovery context.
+    let compile_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if unsafe { crate::native_recovery::arm_tiered_recovery() } != 0 {
+            // Drop the queue so the faulting transitive compile is not
+            // re-popped (and re-faulted) by every subsequent job.
+            module.clear_pending_compilations();
+            return Err(anyhow!(
+                "native fault during promotion (sig={} fault_addr={:#x})",
+                crate::native_recovery::last_tiered_recovery_signal(),
+                crate::native_recovery::last_tiered_recovery_fault_addr()
+            ));
+        }
+        module.promote_function_strict(findex)
+    }));
+    crate::native_recovery::disarm_tiered_recovery();
+    let result: std::result::Result<CompiledFunctionMeta, String> = match compile_result {
+        Ok(Ok(meta)) if meta.fn_addr != 0 => Ok(meta),
+        Ok(Ok(_)) => Err("promotion returned null fn_addr".to_string()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err("promotion panicked".to_string()),
+    };
+    drop(guard);
+
     match result {
         Ok(meta) => {
-            let fn_addr = meta.fn_addr;
-            ctx.meta
+            ctx.llvm_done
                 .lock()
-                .expect("tiered meta mutex poisoned")
-                .insert(findex, meta);
-            fn_addr as *mut ()
+                .expect("llvm_done mutex poisoned")
+                .insert(findex);
+            ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
+            if ctx.tier_log {
+                eprintln!(
+                    "[tier] install findex={findex} tier=llvm addr={:#x} in {:.2}ms",
+                    meta.fn_addr,
+                    t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
+            meta.fn_addr as *mut ()
         }
         Err(reason) => {
-            ctx.failed
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if ctx.log_promotions {
-                eprintln!("[tiered] blacklist findex={} reason={}", findex, reason);
+                eprintln!("[tiered] {on_fail} findex={findex} reason={reason}");
             }
             std::ptr::null_mut()
         }
@@ -452,8 +717,8 @@ impl Drop for HLInterpreter {
         // still-queued jobs fail the mark_compiling gate and are skipped —
         // no LLVM compiles for a process that is exiting.
         if let Some(tiered) = self.tiered_runtime.as_mut() {
-            for bead in tiered.beads.iter().flatten() {
-                bead.invalidate();
+            for bound in tiered.beads.iter().flatten() {
+                bound.bead().invalidate();
             }
         }
     }
@@ -625,6 +890,19 @@ impl HLInterpreter {
         _native_resolver: &NativeFunctionResolver,
         mut config: TieredConfig,
     ) -> Result<()> {
+        if config.tier_mode == TierMode::Off {
+            eprintln!("[tiered] disabled (--jit-tier=off)");
+            self.tiered_runtime = None;
+            return Ok(());
+        }
+        // Hot-reload swaps bytecode bodies underneath the interpreter; the
+        // Cranelift tier lowers from a bytecode snapshot it pins for the run,
+        // so it would keep executing stale code. The LLVM tier already has an
+        // indirect-call rewrite for this.
+        if config.hot_reload && config.tier_mode != TierMode::Llvm {
+            eprintln!("[tiered] hot-reload active: forcing --jit-tier=llvm");
+            config.tier_mode = TierMode::Llvm;
+        }
         config.enabled = true;
 
         let log_promotions = config.log_promotions;
@@ -743,29 +1021,69 @@ impl HLInterpreter {
             }
         };
 
-        // Beadie owns the hotness policy and the broker thread. Queue-ahead
-        // submits the compile job slightly before the threshold so code is
-        // ready by the time the function is truly hot.
+        // Beadie owns the per-tier hotness policies and one broker thread per
+        // tier. Queue-ahead submits the tier-0 compile job slightly before the
+        // threshold so code is ready by the time the function is truly hot;
+        // the LLVM tier fires two orders of magnitude later, once a function
+        // has proven worth the heavier compile.
         let threshold = u32::try_from(config.jit_threshold).unwrap_or(u32::MAX);
         let queue_ahead = (threshold / 5).max(1);
-        let policy = ThresholdPolicy::new(threshold).queue_ahead(queue_ahead);
-        let promote_at = policy.queue_at();
-        let beadie = Beadie::with_policy(policy);
+        let tier0: Box<dyn HotnessPolicy> =
+            Box::new(ThresholdPolicy::new(threshold).queue_ahead(queue_ahead));
+        let policies: Vec<Box<dyn HotnessPolicy>> = match config.tier_mode {
+            TierMode::Auto => vec![
+                tier0,
+                Box::new(ThresholdPolicy::new(threshold.saturating_mul(100))),
+            ],
+            _ => vec![tier0],
+        };
+        let adapter = TieredAdapter::new(policies);
+        eprintln!(
+            "[tiered] ladder: mode={} tier0={} {}",
+            config.tier_mode.name(),
+            threshold,
+            match config.tier_mode {
+                TierMode::Auto => format!("tier1={} (llvm)", threshold.saturating_mul(100)),
+                _ => "single tier".to_string(),
+            }
+        );
 
         let shared_ctx = Arc::new(TieredSharedCtx {
             log_promotions,
-            prewarmed: Mutex::new(prewarmed),
-            meta: Mutex::new(HashMap::new()),
+            tier_log: log_promotions || std::env::var("ASH_TIER_LOG").is_ok(),
+            mode: config.tier_mode,
+            llvm: Mutex::new(match prewarmed {
+                Some(pw) => LlvmState::Pending(pw),
+                None => LlvmState::Unavailable,
+            }),
+            cranelift: Mutex::new(None),
+            arrays: SharedArrayHandles {
+                globals_data: globals_data_ptr as usize,
+                nglobals,
+                functions_ptrs: unsafe {
+                    if shared.module_ctx.is_null() {
+                        0
+                    } else {
+                        (*shared.module_ctx).functions_ptrs as usize
+                    }
+                },
+            },
+            bytecode: std::sync::atomic::AtomicUsize::new(0),
+            max_findex: std::sync::atomic::AtomicUsize::new(0),
+            llvm_done: Mutex::new(HashSet::new()),
+            attempted: std::sync::atomic::AtomicU64::new(0),
             failed: std::sync::atomic::AtomicU64::new(0),
+            cranelift_promotions: std::sync::atomic::AtomicU64::new(0),
+            llvm_promotions: std::sync::atomic::AtomicU64::new(0),
         });
 
         self.tiered_runtime = Some(TieredRuntime {
             config,
-            beadie,
+            adapter,
             beads: Vec::new(),
             gate_checked: Vec::new(),
             entries: Vec::new(),
-            promote_at,
+            sigs: Vec::new(),
             shared_ctx,
             stats: TieredStats::default(),
         });
@@ -773,12 +1091,13 @@ impl HLInterpreter {
     }
 
     pub fn tiered_stats(&self) -> Option<TieredStats> {
+        use std::sync::atomic::Ordering;
         self.tiered_runtime.as_ref().map(|t| {
             let mut stats = t.stats.clone();
-            stats.failed_promotions += t
-                .shared_ctx
-                .failed
-                .load(std::sync::atomic::Ordering::Relaxed);
+            stats.attempted_promotions += t.shared_ctx.attempted.load(Ordering::Relaxed);
+            stats.failed_promotions += t.shared_ctx.failed.load(Ordering::Relaxed);
+            stats.cranelift_promotions = t.shared_ctx.cranelift_promotions.load(Ordering::Relaxed);
+            stats.llvm_promotions = t.shared_ctx.llvm_promotions.load(Ordering::Relaxed);
             stats
         })
     }
@@ -2034,13 +2353,15 @@ impl HLInterpreter {
         }
     }
 
-    /// beadie on_invoke semantics for one bytecode-function call.
+    /// beadie `TieredAdapter::on_invoke` semantics for one bytecode-function
+    /// call: tick the bead, let the adapter submit tier-0 and tier-1 compile
+    /// jobs when their policies fire, and return the currently installed code.
     ///
-    /// Fast path: an acquire load of `bead.compiled()` plus the cached
-    /// marshaling entry. Cold path: tick the bead; once the hotness policy
-    /// fires, submit the compile closure to beadie's broker thread. Returns
-    /// `Some(entry)` when compiled code should be dispatched, `None` to keep
-    /// interpreting.
+    /// The marshaling entry is rebuilt whenever the installed pointer changes,
+    /// which is exactly how a tier-1 upgrade (`swap_compiled`) is observed —
+    /// the signature itself comes from the bytecode and is tier-independent.
+    /// Returns `Some(entry)` when compiled code should be dispatched, `None`
+    /// to keep interpreting.
     fn tiered_on_invoke(
         &mut self,
         bytecode: &DecodedBytecode,
@@ -2057,13 +2378,27 @@ impl HLInterpreter {
                 tiered.beads.resize_with(findex + 1, || None);
                 tiered.gate_checked.resize(findex + 1, false);
                 tiered.entries.resize_with(findex + 1, || None);
+                tiered.sigs.resize_with(findex + 1, || None);
             }
             if !tiered.gate_checked[findex] {
                 tiered.gate_checked[findex] = true;
+                // Publish the bytecode the Cranelift tier lowers from.
+                tiered.shared_ctx.set_bytecode(bytecode);
                 match Self::tierable_reason(bytecode, func_idx, &tiered.config) {
                     Ok(()) => {
-                        let bead = tiered.beadie.register(findex as beadie::CoreHandle, None);
-                        tiered.beads[findex] = Some(bead);
+                        let bound = tiered.adapter.register(findex as beadie::CoreHandle, None);
+                        tiered.beads[findex] = Some(bound);
+                        let f = &bytecode.functions[func_idx];
+                        if let Some(tf) = bytecode.types[f.type_.0].fun.as_ref() {
+                            let arg_kinds: Arc<[u32]> = tf
+                                .args
+                                .iter()
+                                .map(|a| bytecode.types[a.0].kind)
+                                .collect::<Vec<_>>()
+                                .into();
+                            let ret_kind = bytecode.types[tf.ret.0].kind;
+                            tiered.sigs[findex] = Some((arg_kinds, ret_kind));
+                        }
                     }
                     Err(reason) => {
                         if tiered.config.log_promotions {
@@ -2075,67 +2410,44 @@ impl HLInterpreter {
             }
         }
 
-        let tiered = self.tiered_runtime.as_mut()?;
-        let bead = tiered.beads[findex].as_ref()?;
-
-        // Fast path: compiled code installed and marshaling entry cached.
-        if tiered.entries[findex].is_some() {
-            if bead.compiled().is_some() {
-                return tiered.entries[findex].clone();
-            }
-            // Deopt/reload cleared the code — drop the stale cache.
-            tiered.entries[findex] = None;
-        }
-
-        if bead.compiled().is_some() {
-            // First observation of freshly installed code: pull the
-            // marshaling metadata the compile closure parked for us.
-            let meta = tiered
-                .shared_ctx
-                .meta
-                .lock()
-                .expect("tiered meta mutex poisoned")
-                .remove(&findex)?;
-            let entry = CompiledFunctionEntry {
-                fn_addr: meta.fn_addr,
-                arg_kinds: meta.arg_kinds.into(),
-                ret_kind: meta.ret_kind,
-            };
-            tiered.stats.successful_promotions += 1;
-            if tiered.config.log_promotions {
-                eprintln!(
-                    "[tiered] promoted findex={} addr=0x{:x}",
-                    findex, entry.fn_addr
-                );
-            }
-            tiered.entries[findex] = Some(entry.clone());
-            return Some(entry);
-        }
-
-        // Cold path: tick every invocation; submit once the policy fires.
-        let (count, state) = bead.tick();
-        if state == BeadState::Interpreted && count >= tiered.promote_at {
+        // Immutable phase: tick + (possibly) submit compile jobs.
+        let code = {
+            let tiered = self.tiered_runtime.as_ref()?;
+            let bound = tiered.beads[findex].as_ref()?;
             let ctx = Arc::clone(&tiered.shared_ctx);
-            match tiered
-                .beadie
-                .submit(bead, move |_b| tiered_compile(&ctx, findex))
-            {
-                SubmitResult::Accepted => {
-                    tiered.stats.attempted_promotions += 1;
-                    if tiered.config.log_promotions {
-                        eprintln!("[tiered] queued findex={}", findex);
-                    }
-                }
-                SubmitResult::AlreadyQueued | SubmitResult::QueueFull => {}
-                SubmitResult::BrokerShutDown => {
-                    tiered.config.enabled = false;
-                    if tiered.config.log_promotions {
-                        eprintln!("[tiered] broker shut down; disabling tiered runtime");
-                    }
-                }
+            tiered.adapter.on_invoke(bound, move |tier, bead| {
+                tiered_compile_tier(&ctx, tier, findex, bead)
+            })?
+        };
+
+        let addr = code as usize;
+        let tiered = self.tiered_runtime.as_mut()?;
+        if let Some(entry) = tiered.entries[findex].as_ref() {
+            if entry.fn_addr == addr {
+                return Some(entry.clone());
             }
         }
-        None
+        // Freshly installed (or newly swapped-in) code.
+        let (arg_kinds, ret_kind) = tiered.sigs[findex].clone()?;
+        let entry = CompiledFunctionEntry {
+            fn_addr: addr,
+            arg_kinds,
+            ret_kind,
+        };
+        tiered.stats.successful_promotions += 1;
+        if tiered.config.log_promotions {
+            eprintln!(
+                "[tiered] promoted findex={} addr=0x{:x} gen={}",
+                findex,
+                addr,
+                tiered.beads[findex]
+                    .as_ref()
+                    .map(|b| b.generation())
+                    .unwrap_or(0)
+            );
+        }
+        tiered.entries[findex] = Some(entry.clone());
+        Some(entry)
     }
 
     /// One-time tierability gate, run at bead registration (not per call).
@@ -2184,6 +2496,14 @@ impl HLInterpreter {
         if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
             return Err(format!("unsupported_opcode op={:?}", bad));
         }
+        // Cranelift-only mode has no LLVM fallback, so a function the middle
+        // tier cannot lower must not register a bead at all — a null tier-0
+        // result would blacklist it instead of leaving it interpreted.
+        if config.tier_mode == TierMode::Cranelift {
+            if let Some(reason) = ash::cranelift::lowering_reject_reason(bytecode, func) {
+                return Err(format!("cranelift_{reason}"));
+            }
+        }
         Ok(())
     }
 
@@ -2204,8 +2524,8 @@ impl HLInterpreter {
             if let Some(slot) = tiered.entries.get_mut(findex) {
                 *slot = None;
             }
-            if let Some(bead) = tiered.beads.get(findex).and_then(|b| b.as_ref()) {
-                bead.invalidate();
+            if let Some(bound) = tiered.beads.get(findex).and_then(|b| b.as_ref()) {
+                bound.bead().invalidate();
             }
             if tiered.config.log_promotions {
                 eprintln!("[tiered] fallback findex={} reason={}", findex, reason);
@@ -2532,23 +2852,27 @@ impl HLInterpreter {
                                         for slot in tiered.entries.iter_mut() {
                                             *slot = None;
                                         }
-                                        tiered
-                                            .shared_ctx
-                                            .meta
-                                            .lock()
-                                            .expect("tiered meta mutex poisoned")
-                                            .clear();
-                                        tiered.beadie.reload_all();
+                                        // Reset every bead to the interpreter
+                                        // and clear all tier-promotion flags.
                                         for (findex, slot) in tiered.beads.iter_mut().enumerate() {
                                             let dead = slot
                                                 .as_ref()
-                                                .map(|b| !b.is_valid())
+                                                .map(|b| {
+                                                    b.reset_to_interpreter();
+                                                    !b.bead().is_valid()
+                                                })
                                                 .unwrap_or(false);
                                             if dead {
                                                 *slot = None;
                                                 tiered.gate_checked[findex] = false;
                                             }
                                         }
+                                        tiered
+                                            .shared_ctx
+                                            .llvm_done
+                                            .lock()
+                                            .expect("llvm_done mutex poisoned")
+                                            .clear();
                                     }
 
                                     // Re-initialize constants from the new bytecode so that

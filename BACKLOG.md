@@ -206,6 +206,40 @@ broker shape (backend on one thread, compile+finalize on another, execute on
 a third). Pins: cranelift 0.130.2, `wasmtime-internal-jit-icache-coherence`
 43.0.2.
 
+### The gate rejects essentially all real code — highest priority here
+
+The opcode gate excludes the object model, and Haxe code touches the object
+model constantly, so in practice the middle tier absorbs nothing. Measured on
+`test_mandelbrot_small` (`--jit-tier auto --jit-log`):
+
+```
+[tier] decline findex=65 tier=cranelift reason=unsupported_opcode GetThis
+[tier] decline findex=34 tier=cranelift reason=unsupported_opcode New
+[tier] decline findex=27 tier=cranelift reason=unsupported_opcode SetThis
+[tier] decline findex=33 tier=cranelift reason=unsupported_opcode New
+[tier] decline findex=28 tier=cranelift reason=unsupported_opcode SetThis
+[tier] decline findex=30 tier=cranelift reason=unsupported_opcode Field
+attempted=9 succeeded=3 failed=2 fallbacks=2 cranelift=0 llvm=6
+```
+
+Six candidates, six declines, `cranelift=0`. Every promotion therefore lands on
+LLVM, and LLVM's cost is paid *during the run* — the first install above took
+**152.57 ms**, against **1.36 ms** for the one function Cranelift does accept in
+`test_tiered_hotloop` (13 opcodes, no objects), where it delivers a 72×
+speedup. That is roughly a 110× difference in compile cost per function, and
+the tier that exists to absorb it currently absorbs none.
+
+Two of those six were then uncallable — `compiled invoke failed: Float native
+dispatch: 3 args, float_mask=0b110, ret_float=false not yet supported` — so
+their compile time bought nothing at all. The dispatch gap is tracked under
+[JIT & tiering](#jit--tiering); it is listed here too because it converts paid
+compile time into pure loss.
+
+This makes the [shared layout oracle](#cranelift-middle-tier) below the
+gating item for the whole tiering story, not a refinement of it: until
+`Field`/`SetField`/`GetThis`/`SetThis`/`New` lower here, there is no middle
+tier in any workload that allocates or reads a field.
+
 - **Build the tier**: `beadie` `TieredAdapter` ladder (interpreter → Cranelift
   `opt_level=speed` → LLVM), AIR v2 → CLIF lowering, `enable_probestack=false`
   and `preserve_frame_pointers=true`.

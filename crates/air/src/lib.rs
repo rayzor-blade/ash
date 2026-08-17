@@ -5,3 +5,4 @@ pub mod opcodes;
 pub mod pass;
 pub mod passes;
 pub mod ssa;
+pub mod v2;

@@ -1,0 +1,1443 @@
+//! AIR v2 test suite: lowering shape tests, verifier negative tests, and the
+//! round-trip property over a fixture corpus.
+//!
+//! Round-trip property: for every fixture, `serialize(lower(ops))` must
+//! produce a valid executable opcode sequence with identical structural
+//! semantics — proven by re-lowering the output, verifying it, and checking
+//! condensed-CFG isomorphism + dominance equivalence against the original,
+//! plus (where the mini interpreter covers the ops) identical input/output
+//! behavior, plus register-type-table preservation.
+
+use super::ir::*;
+use super::lower::lower;
+use super::serialize::{serialize, Serialized};
+use super::verify::{check_cfg_equivalent, condense_cfg, verify};
+use crate::opcodes::*;
+
+fn t(n: u32) -> TypeRef {
+    TypeRef(n)
+}
+
+fn ops_text(ops: &[Opcode]) -> String {
+    format!("{:?}", ops)
+}
+
+/// The round-trip harness: lower -> verify -> serialize -> re-lower ->
+/// verify -> CFG isomorphism + dominance equivalence + reg-type preservation.
+fn round_trip(ops: &[Opcode], reg_types: &[TypeRef]) -> (Function, Serialized, Function) {
+    let f1 = lower(ops, reg_types).expect("lower failed");
+    verify(&f1).unwrap_or_else(|e| panic!("verify(f1): {e}\n{}", f1.dump()));
+    let out = serialize(&f1).expect("serialize failed");
+    assert_eq!(
+        &out.reg_types[..reg_types.len()],
+        reg_types,
+        "original register types must be preserved verbatim"
+    );
+    assert_eq!(out.num_regs, out.reg_types.len());
+    for op in &out.ops {
+        assert!(
+            !matches!(op, Opcode::Nop | Opcode::IndirectCall { .. }),
+            "serializer must emit interpreter-compatible opcodes only, got {:?}",
+            op
+        );
+    }
+    let f2 = lower(&out.ops, &out.reg_types)
+        .unwrap_or_else(|e| panic!("re-lower failed: {e}\nops: {}", ops_text(&out.ops)));
+    verify(&f2).unwrap_or_else(|e| panic!("verify(f2): {e}\n{}", f2.dump()));
+    check_cfg_equivalent(&f1, &f2).unwrap_or_else(|e| {
+        panic!(
+            "CFG equivalence failed: {e}\nf1:\n{}\nf2:\n{}\nout: {}",
+            f1.dump(),
+            f2.dump(),
+            ops_text(&out.ops)
+        )
+    });
+    (f1, out, f2)
+}
+
+fn assert_exact(ops: &[Opcode], reg_types: &[TypeRef]) -> Serialized {
+    let (_, out, _) = round_trip(ops, reg_types);
+    assert_eq!(
+        ops_text(&out.ops),
+        ops_text(ops),
+        "expected byte-identical round trip"
+    );
+    out
+}
+
+// ---------------------------------------------------------------------------
+// mini interpreter over the serializable opcode subset used by fixtures
+// ---------------------------------------------------------------------------
+
+fn mini_eval(ops: &[Opcode], ints: &[i32], args: &[i64], num_regs: usize) -> i64 {
+    let mut regs = vec![0i64; num_regs];
+    regs[..args.len()].copy_from_slice(args);
+    let mut pc = 0usize;
+    let mut steps = 0usize;
+    loop {
+        steps += 1;
+        assert!(steps < 100_000, "mini_eval: step limit exceeded");
+        assert!(pc < ops.len(), "mini_eval: pc {} out of bounds", pc);
+        let jump = |off: i32| (pc as i64 + 1 + off as i64) as usize;
+        match &ops[pc] {
+            Opcode::Int { dst, ptr } => regs[dst.0 as usize] = ints[ptr.0] as i64,
+            Opcode::Bool { dst, value } => regs[dst.0 as usize] = *value as i64,
+            Opcode::Mov { dst, src } => regs[dst.0 as usize] = regs[src.0 as usize],
+            Opcode::Add { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] + regs[b.0 as usize]
+            }
+            Opcode::Sub { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] - regs[b.0 as usize]
+            }
+            Opcode::Mul { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] * regs[b.0 as usize]
+            }
+            Opcode::Neg { dst, src } => regs[dst.0 as usize] = -regs[src.0 as usize],
+            Opcode::Incr { dst } => regs[dst.0 as usize] += 1,
+            Opcode::Decr { dst } => regs[dst.0 as usize] -= 1,
+            Opcode::JTrue { cond, offset } => {
+                if regs[cond.0 as usize] != 0 {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JFalse { cond, offset } => {
+                if regs[cond.0 as usize] == 0 {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JSLt { a, b, offset } => {
+                if regs[a.0 as usize] < regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JSGte { a, b, offset } => {
+                if regs[a.0 as usize] >= regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JSGt { a, b, offset } => {
+                if regs[a.0 as usize] > regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JSLte { a, b, offset } => {
+                if regs[a.0 as usize] <= regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JEq { a, b, offset } => {
+                if regs[a.0 as usize] == regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JNotEq { a, b, offset } => {
+                if regs[a.0 as usize] != regs[b.0 as usize] {
+                    pc = jump(*offset);
+                    continue;
+                }
+            }
+            Opcode::JAlways { offset } => {
+                pc = jump(*offset);
+                continue;
+            }
+            Opcode::Switch { reg, offsets, .. } => {
+                let v = regs[reg.0 as usize];
+                if v >= 0 && (v as usize) < offsets.len() {
+                    pc = jump(offsets[v as usize]);
+                    continue;
+                }
+            }
+            Opcode::Label | Opcode::Nop => {}
+            Opcode::Ret { ret } => return regs[ret.0 as usize],
+            other => panic!("mini_eval: unsupported opcode {:?}", other),
+        }
+        pc += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fixtures
+// ---------------------------------------------------------------------------
+
+fn fix_straight_line() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(0),
+                b: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+        ],
+        vec![t(0); 3],
+    )
+}
+
+fn fix_diamond() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::JAlways { offset: 1 },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    )
+}
+
+/// sum 0..n with an explicit loop Label (as hlc emits).
+fn fix_loop() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // sum = 0
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            }, // i = 0
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            }, // one = 1
+            Opcode::Label,
+            Opcode::JSGte {
+                a: Reg(2),
+                b: Reg(0),
+                offset: 3,
+            }, // while i < n
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(2),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(3),
+            },
+            Opcode::JAlways { offset: -5 },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 4],
+    )
+}
+
+/// Same loop but without the Label — the serializer must add one.
+fn fix_loop_no_label() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(0),
+            },
+            Opcode::Int {
+                dst: Reg(3),
+                ptr: RefInt(1),
+            },
+            Opcode::JSGte {
+                a: Reg(2),
+                b: Reg(0),
+                offset: 3,
+            },
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(2),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(3),
+            },
+            Opcode::JAlways { offset: -4 },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 4],
+    )
+}
+
+/// Switch with fall-through default and a redundant trailing JAlways +0.
+fn fix_switch() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Switch {
+                reg: Reg(0),
+                offsets: vec![2, 4],
+                end: 0,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            }, // default arm (fallthrough)
+            Opcode::JAlways { offset: 4 },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(1),
+            }, // case 0
+            Opcode::JAlways { offset: 2 },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(2),
+            }, // case 1
+            Opcode::JAlways { offset: 0 },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    )
+}
+
+fn fix_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 4,
+            }, // handler at 5
+            Opcode::Null { dst: Reg(2) },
+            Opcode::NullCheck { reg: Reg(2) },
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::JAlways { offset: 1 }, // skip handler
+            Opcode::Ret { ret: Reg(0) },   // handler
+            Opcode::Ret { ret: Reg(0) },   // normal exit
+        ],
+        vec![t(0), t(2), t(2)],
+    )
+}
+
+fn fix_nested_traps() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 7,
+            }, // outer handler at 8
+            Opcode::Trap {
+                exc: Reg(2),
+                offset: 3,
+            }, // inner handler at 5
+            Opcode::NullCheck { reg: Reg(3) },
+            Opcode::EndTrap { exc: Reg(2) },
+            Opcode::JAlways { offset: 1 },   // -> 6
+            Opcode::Rethrow { exc: Reg(2) }, // inner handler, rethrows to outer
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::JAlways { offset: 1 }, // -> 9
+            Opcode::Ret { ret: Reg(0) },   // outer handler
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(0), t(2), t(2), t(2)],
+    )
+}
+
+/// One Trap with two EndTraps on different paths (early return in a try).
+fn fix_multi_endtrap() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Trap {
+                exc: Reg(1),
+                offset: 5,
+            }, // handler at 6
+            Opcode::JTrue {
+                cond: Reg(0),
+                offset: 2,
+            }, // -> 4
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::Ret { ret: Reg(2) },
+            Opcode::EndTrap { exc: Reg(1) },
+            Opcode::Ret { ret: Reg(2) },
+            Opcode::Ret { ret: Reg(2) }, // handler
+        ],
+        vec![t(1), t(2), t(0)],
+    )
+}
+
+fn fix_incr() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Incr { dst: Reg(0) },
+            Opcode::Incr { dst: Reg(0) },
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(0)],
+    )
+}
+
+fn fix_ref() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(0),
+                ptr: RefInt(0),
+            },
+            Opcode::Ref {
+                dst: Reg(1),
+                src: Reg(0),
+            },
+            Opcode::Int {
+                dst: Reg(2),
+                ptr: RefInt(1),
+            },
+            Opcode::Setref {
+                dst: Reg(1),
+                value: Reg(2),
+            },
+            Opcode::Unref {
+                dst: Reg(3),
+                src: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(3) },
+        ],
+        vec![t(0), t(9), t(0), t(0)],
+    )
+}
+
+fn fix_setenumfield() -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::EnumAlloc {
+                dst: Reg(0),
+                construct: RefEnumConstruct(1),
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::SetEnumField {
+                value: Reg(0),
+                field: RefField(0),
+                src: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(0) },
+        ],
+        vec![t(3), t(0)],
+    )
+}
+
+// ---------------------------------------------------------------------------
+// lowering shape tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lower_straight_line_shape() {
+    let (ops, tys) = fix_straight_line();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    // synthetic entry + one real block
+    assert_eq!(f.blocks.len(), 2);
+    assert!(f.blocks.iter().all(|b| b.phis.is_empty()));
+    assert!(f.cells.is_empty());
+    // Params carry register types
+    let params: Vec<_> = f.blocks[0]
+        .instrs
+        .iter()
+        .filter(|i| matches!(i, Instr::Param { .. }))
+        .collect();
+    assert_eq!(params.len(), 3);
+    for v in &f.values {
+        assert_eq!(v.ty, t(0));
+    }
+}
+
+#[test]
+fn lower_diamond_phi() {
+    let (ops, tys) = fix_diamond();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    // exactly one phi (for r1) at the join block, with 2 sources
+    let phis: Vec<_> = f.blocks.iter().flat_map(|b| b.phis.iter()).collect();
+    assert_eq!(phis.len(), 1);
+    assert_eq!(phis[0].incoming.len(), 2);
+    assert_eq!(f.value_reg(phis[0].dst), 1);
+}
+
+#[test]
+fn lower_loop_phi_at_header() {
+    let (ops, tys) = fix_loop();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    // loop header (block of the Label/JSGte run) has phis for sum and i
+    let header = f
+        .blocks
+        .iter()
+        .find(|b| !b.phis.is_empty())
+        .expect("expected a block with phis");
+    let mut regs: Vec<u32> = header.phis.iter().map(|p| f.value_reg(p.dst)).collect();
+    regs.sort_unstable();
+    assert_eq!(regs, vec![1, 2]);
+    for p in &header.phis {
+        assert_eq!(p.incoming.len(), 2, "entry edge + back edge");
+    }
+}
+
+#[test]
+fn lower_pinned_incr_cells() {
+    let (ops, tys) = fix_incr();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.cells.len(), 1);
+    assert_eq!(f.cells[0].reg, 0);
+    assert_eq!(f.cells[0].reason, PinReason::IncrDecr);
+    let incrs = f.blocks[1]
+        .instrs
+        .iter()
+        .filter(|i| matches!(i, Instr::CellIncr { .. }))
+        .count();
+    assert_eq!(incrs, 2);
+    // pinned registers get no phis and no Params
+    assert!(f.blocks.iter().all(|b| b.phis.is_empty()));
+    assert!(!f.blocks[0]
+        .instrs
+        .iter()
+        .any(|i| matches!(i, Instr::Param { reg: 0, .. })));
+}
+
+#[test]
+fn lower_pinned_ref_cell() {
+    let (ops, tys) = fix_ref();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.cells.len(), 1);
+    assert_eq!(f.cells[0].reg, 0);
+    assert_eq!(f.cells[0].reason, PinReason::RefTaken);
+    assert!(f.blocks[1]
+        .instrs
+        .iter()
+        .any(|i| matches!(i, Instr::CellRef { .. })));
+}
+
+#[test]
+fn lower_trap_regions_and_pinning() {
+    let (ops, tys) = fix_trap();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    // r1 pinned as trap exception, r2 pinned as written-in-region
+    let mut pins: Vec<(u32, PinReason)> = f.cells.iter().map(|c| (c.reg, c.reason)).collect();
+    pins.sort_by_key(|p| p.0);
+    assert_eq!(
+        pins,
+        vec![(1, PinReason::TrapExc), (2, PinReason::TrapWritten)]
+    );
+    // the protected block has a handler and an exceptional successor
+    let trap_block = f
+        .blocks
+        .iter()
+        .enumerate()
+        .find(|(_, b)| matches!(b.term, Terminator::Trap { .. }))
+        .map(|(i, _)| i)
+        .unwrap();
+    let (handler, normal) = match f.blocks[trap_block].term {
+        Terminator::Trap {
+            handler, normal, ..
+        } => (handler, normal),
+        _ => unreachable!(),
+    };
+    assert_eq!(f.blocks[normal.idx()].handler, Some(handler));
+    assert!(
+        f.succ_blocks(normal).contains(&handler),
+        "may-throw block must have an exceptional edge"
+    );
+}
+
+#[test]
+fn lower_nested_traps() {
+    let (ops, tys) = fix_nested_traps();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.cells.len(), 2); // both exception registers pinned
+                                  // the inner handler (Rethrow block) sits inside the outer region
+    let rethrow_block = f
+        .blocks
+        .iter()
+        .find(|b| matches!(b.term, Terminator::Rethrow { .. }))
+        .unwrap();
+    assert!(
+        rethrow_block.handler.is_some(),
+        "inner handler is covered by the outer trap"
+    );
+}
+
+#[test]
+fn lower_multi_endtrap_paths() {
+    let (ops, tys) = fix_multi_endtrap();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let endtraps = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::EndTrap { .. }))
+        .count();
+    assert_eq!(endtraps, 2, "one EndTrap per exit path");
+}
+
+#[test]
+fn lower_setenumfield_construct() {
+    let (ops, tys) = fix_setenumfield();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let sef = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::SetEnumField { construct, .. } => Some(*construct),
+            _ => None,
+        })
+        .expect("SetEnumField lowered");
+    assert_eq!(sef, 1, "construct resolved from the preceding EnumAlloc");
+
+    // MakeEnum variant
+    let ops2 = vec![
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        },
+        Opcode::MakeEnum {
+            dst: Reg(0),
+            construct: RefEnumConstruct(2),
+            args: vec![Reg(1)],
+        },
+        Opcode::SetEnumField {
+            value: Reg(0),
+            field: RefField(0),
+            src: Reg(1),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let f2 = lower(&ops2, &[t(3), t(0)]).unwrap();
+    let sef2 = f2
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::SetEnumField { construct, .. } => Some(*construct),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(sef2, 2, "construct resolved from the preceding MakeEnum");
+}
+
+#[test]
+fn lower_callthis_normalized() {
+    let ops = vec![
+        Opcode::CallThis {
+            dst: Reg(1),
+            field: RefField(2),
+            args: vec![Reg(2)],
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let tys = vec![t(5), t(0), t(0)];
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let cm = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::CallMethod { field, args, .. } => Some((*field, args.clone())),
+            _ => None,
+        })
+        .expect("CallThis lowers to CallMethod");
+    assert_eq!(cm.0, 2);
+    assert_eq!(cm.1.len(), 2, "receiver prepended");
+    assert_eq!(f.value_reg(cm.1[0]), 0, "receiver is reg0");
+}
+
+#[test]
+fn lower_virtualclosure_immediate_field() {
+    // field index 7 must NOT be treated as a register read (only 2 regs).
+    let ops = vec![
+        Opcode::VirtualClosure {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: Reg(7),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let tys = vec![t(5), t(6)];
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let field = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::VirtualClosure { field, .. } => Some(*field),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(field, 7);
+    let out = serialize(&f).unwrap();
+    assert!(out
+        .ops
+        .iter()
+        .any(|o| matches!(o, Opcode::VirtualClosure { field, .. } if field.0 == 7)));
+}
+
+#[test]
+fn lower_drops_unreachable() {
+    let ops = vec![
+        Opcode::Ret { ret: Reg(0) },
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let f = lower(&ops, &[t(0)]).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.blocks.len(), 2); // entry + one live block
+    let out = serialize(&f).unwrap();
+    assert_eq!(ops_text(&out.ops), ops_text(&[Opcode::Ret { ret: Reg(0) }]));
+}
+
+#[test]
+fn lower_switch_default_fallthrough() {
+    let (ops, tys) = fix_switch();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    let (targets, default) = f
+        .blocks
+        .iter()
+        .find_map(|b| match &b.term {
+            Terminator::Switch {
+                targets, default, ..
+            } => Some((targets.clone(), *default)),
+            _ => None,
+        })
+        .expect("switch lowered");
+    assert_eq!(targets.len(), 2);
+    // default is the block of the opcode right after the Switch
+    assert!(f.blocks[default.idx()]
+        .instrs
+        .iter()
+        .any(|i| matches!(i, Instr::Int { idx: 0, .. })));
+}
+
+#[test]
+fn lower_rejects_endtrap_without_trap() {
+    let ops = vec![Opcode::EndTrap { exc: Reg(0) }, Opcode::Ret { ret: Reg(0) }];
+    let err = lower(&ops, &[t(0)]).unwrap_err();
+    assert!(err.to_string().contains("no open trap region"), "{err}");
+}
+
+#[test]
+fn lower_rejects_ret_inside_trap() {
+    let ops = vec![
+        Opcode::Trap {
+            exc: Reg(1),
+            offset: 2,
+        },
+        Opcode::Ret { ret: Reg(0) },
+        Opcode::EndTrap { exc: Reg(1) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let err = lower(&ops, &[t(0), t(2)]).unwrap_err();
+    assert!(
+        err.to_string().contains("inside an open trap region"),
+        "{err}"
+    );
+}
+
+#[test]
+fn lower_rejects_indirect_call() {
+    let ops = vec![
+        Opcode::IndirectCall {
+            dst: Reg(0),
+            fun: RefFun(1),
+            args: vec![],
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    assert!(lower(&ops, &[t(0)]).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// verifier negative tests (hand-built malformed IR)
+// ---------------------------------------------------------------------------
+
+fn empty_func(reg_types: Vec<TypeRef>) -> Function {
+    Function {
+        values: vec![],
+        cells: vec![],
+        blocks: vec![],
+        reg_types,
+    }
+}
+
+#[test]
+fn verify_rejects_double_def() {
+    let mut f = empty_func(vec![t(0)]);
+    let v0 = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Int { dst: v0, idx: 0 },
+            Instr::Int { dst: v0, idx: 1 },
+        ],
+        term: Terminator::Ret { value: v0 },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("defined more than once"), "{err}");
+}
+
+#[test]
+fn verify_rejects_phi_arity() {
+    let mut f = empty_func(vec![t(0)]);
+    let p = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Jump { target: BlockId(1) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![Phi {
+            dst: p,
+            incoming: vec![],
+        }],
+        instrs: vec![],
+        term: Terminator::Ret { value: p },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("arity"), "{err}");
+}
+
+#[test]
+fn verify_rejects_copy_type_mismatch() {
+    let mut f = empty_func(vec![t(0), t(1)]);
+    let a = f.new_value(t(0), 0);
+    let b = f.new_value(t(1), 1);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Int { dst: a, idx: 0 },
+            Instr::Copy { dst: b, src: a },
+        ],
+        term: Terminator::Ret { value: b },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("Copy"), "{err}");
+}
+
+#[test]
+fn verify_rejects_use_before_def() {
+    let mut f = empty_func(vec![t(0), t(0)]);
+    let a = f.new_value(t(0), 0);
+    let b = f.new_value(t(0), 1);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Copy { dst: b, src: a }, // uses a before its def
+            Instr::Int { dst: a, idx: 0 },
+        ],
+        term: Terminator::Ret { value: b },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("not dominated"), "{err}");
+}
+
+#[test]
+fn verify_rejects_unreachable_block() {
+    let mut f = empty_func(vec![t(0)]);
+    let v = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Int { dst: v, idx: 0 }],
+        term: Terminator::Ret { value: v },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Ret { value: v },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("unreachable"), "{err}");
+}
+
+#[test]
+fn verify_rejects_param_outside_entry() {
+    let mut f = empty_func(vec![t(0)]);
+    let v = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Jump { target: BlockId(1) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Param { dst: v, reg: 0 }],
+        term: Terminator::Ret { value: v },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("non-entry"), "{err}");
+}
+
+#[test]
+fn verify_rejects_unbalanced_endtrap() {
+    let mut f = empty_func(vec![t(0), t(2)]);
+    f.cells.push(CellData {
+        reg: 1,
+        ty: t(2),
+        reason: PinReason::TrapExc,
+    });
+    let v = f.new_value(t(0), 0);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Int { dst: v, idx: 0 },
+            Instr::EndTrap { cell: CellId(0) },
+        ],
+        term: Terminator::Ret { value: v },
+        handler: None,
+    });
+    let err = verify(&f).unwrap_err();
+    assert!(err.to_string().contains("no open trap region"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// round-trip property tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn roundtrip_straight_line_exact() {
+    let (ops, tys) = fix_straight_line();
+    let out = assert_exact(&ops, &tys);
+    let ints = [7, 35];
+    assert_eq!(
+        mini_eval(&ops, &ints, &[], tys.len()),
+        mini_eval(&out.ops, &ints, &[], out.num_regs)
+    );
+}
+
+#[test]
+fn roundtrip_diamond_exact() {
+    let (ops, tys) = fix_diamond();
+    let out = assert_exact(&ops, &tys);
+    let ints = [10, 20];
+    for cond in [0i64, 1] {
+        assert_eq!(
+            mini_eval(&ops, &ints, &[cond], tys.len()),
+            mini_eval(&out.ops, &ints, &[cond], out.num_regs),
+            "cond={}",
+            cond
+        );
+    }
+}
+
+#[test]
+fn roundtrip_loop_exact() {
+    let (ops, tys) = fix_loop();
+    let out = assert_exact(&ops, &tys);
+    let ints = [0, 1];
+    for n in [0i64, 1, 5, 10] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[n], out.num_regs),
+            (0..n).sum::<i64>(),
+            "sum 0..{}",
+            n
+        );
+    }
+    assert!(
+        out.ops.iter().any(|o| matches!(o, Opcode::Label)),
+        "backward jump target keeps its Label"
+    );
+}
+
+#[test]
+fn roundtrip_label_added_for_backward_jump() {
+    let (ops, tys) = fix_loop_no_label();
+    let (_, out, _) = round_trip(&ops, &tys);
+    assert!(
+        out.ops.iter().any(|o| matches!(o, Opcode::Label)),
+        "serializer must add a Label for the backward jump: {}",
+        ops_text(&out.ops)
+    );
+    let ints = [0, 1];
+    for n in [0i64, 3, 7] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[n], out.num_regs),
+            (0..n).sum::<i64>()
+        );
+    }
+}
+
+#[test]
+fn roundtrip_switch_semantics() {
+    let (ops, tys) = fix_switch();
+    let (_, out, _) = round_trip(&ops, &tys);
+    let ints = [100, 200, 300];
+    for v in [0i64, 1, 2, 5, -1] {
+        assert_eq!(
+            mini_eval(&ops, &ints, &[v], tys.len()),
+            mini_eval(&out.ops, &ints, &[v], out.num_regs),
+            "switch value {}",
+            v
+        );
+    }
+    // Switch default must remain the fall-through in the output.
+    let sw_idx = out
+        .ops
+        .iter()
+        .position(|o| matches!(o, Opcode::Switch { .. }))
+        .unwrap();
+    assert!(
+        matches!(out.ops[sw_idx + 1], Opcode::Int { ptr: RefInt(0), .. }),
+        "default arm must follow the Switch"
+    );
+}
+
+#[test]
+fn roundtrip_trap_exact() {
+    let (ops, tys) = fix_trap();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
+fn roundtrip_nested_trap_exact() {
+    let (ops, tys) = fix_nested_traps();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
+fn roundtrip_multi_endtrap_exact() {
+    let (ops, tys) = fix_multi_endtrap();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
+fn roundtrip_incr_exact() {
+    let (ops, tys) = fix_incr();
+    let out = assert_exact(&ops, &tys);
+    let ints = [40];
+    assert_eq!(mini_eval(&out.ops, &ints, &[], out.num_regs), 42);
+}
+
+#[test]
+fn roundtrip_ref_exact() {
+    let (ops, tys) = fix_ref();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
+fn roundtrip_setenumfield_exact() {
+    let (ops, tys) = fix_setenumfield();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
+fn roundtrip_callthis_serializes_callmethod() {
+    let ops = vec![
+        Opcode::CallThis {
+            dst: Reg(1),
+            field: RefField(2),
+            args: vec![Reg(2)],
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let tys = vec![t(5), t(0), t(0)];
+    let (_, out, _) = round_trip(&ops, &tys);
+    let expected = vec![
+        Opcode::CallMethod {
+            dst: Reg(1),
+            field: RefField(2),
+            args: vec![Reg(0), Reg(2)],
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    assert_eq!(ops_text(&out.ops), ops_text(&expected));
+}
+
+#[test]
+fn roundtrip_getthis_setthis_field() {
+    let ops = vec![
+        Opcode::GetThis {
+            dst: Reg(1),
+            field: RefField(3),
+        },
+        Opcode::SetThis {
+            field: RefField(4),
+            src: Reg(1),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let tys = vec![t(5), t(0)];
+    let (_, out, _) = round_trip(&ops, &tys);
+    let expected = vec![
+        Opcode::Field {
+            dst: Reg(1),
+            obj: Reg(0),
+            field: RefField(3),
+        },
+        Opcode::SetField {
+            obj: Reg(0),
+            field: RefField(4),
+            src: Reg(1),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    assert_eq!(ops_text(&out.ops), ops_text(&expected));
+}
+
+#[test]
+fn roundtrip_idempotent() {
+    for (ops, tys) in [fix_diamond(), fix_loop(), fix_switch(), fix_trap()] {
+        let (_, out1, _) = round_trip(&ops, &tys);
+        let (_, out2, _) = round_trip(&out1.ops, &out1.reg_types);
+        assert_eq!(
+            ops_text(&out1.ops),
+            ops_text(&out2.ops),
+            "serialize(lower(.)) must be a fixpoint after one iteration"
+        );
+        assert_eq!(out1.reg_types, out2.reg_types);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// de-SSA / parallel-copy tests (hand-built IR with non-trivial phis)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dessa_nontrivial_phi_copies() {
+    // b0: v0=param r0; c1=Int(r1); if v0 -> b1 else b2
+    // b1: Jump b3      b2: d=Int(r2); Jump b3
+    // b3: p(r4) = phi[(b1,c1),(b2,d)]; Ret p       (both sources non-trivial)
+    let mut f = empty_func(vec![t(0); 5]);
+    let v0 = f.new_value(t(0), 0);
+    let c1 = f.new_value(t(0), 1);
+    let d = f.new_value(t(0), 2);
+    let p = f.new_value(t(0), 4);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Param { dst: v0, reg: 0 },
+            Instr::Int { dst: c1, idx: 0 },
+        ],
+        term: Terminator::CondJump {
+            cond: CondKind::True,
+            a: v0,
+            b: None,
+            if_true: BlockId(1),
+            if_false: BlockId(2),
+        },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Jump { target: BlockId(3) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Int { dst: d, idx: 1 }],
+        term: Terminator::Jump { target: BlockId(3) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![Phi {
+            dst: p,
+            incoming: vec![(BlockId(1), c1), (BlockId(2), d)],
+        }],
+        instrs: vec![],
+        term: Terminator::Ret { value: p },
+        handler: None,
+    });
+    verify(&f).unwrap_or_else(|e| panic!("{e}\n{}", f.dump()));
+    let out = serialize(&f).unwrap();
+    let movs = out
+        .ops
+        .iter()
+        .filter(|o| matches!(o, Opcode::Mov { .. }))
+        .count();
+    assert_eq!(
+        movs,
+        2,
+        "one copy per incoming edge: {}",
+        ops_text(&out.ops)
+    );
+    let ints = [11, 22];
+    for cond in [0i64, 1] {
+        let expect = if cond != 0 { 11 } else { 22 };
+        assert_eq!(mini_eval(&out.ops, &ints, &[cond], out.num_regs), expect);
+    }
+}
+
+#[test]
+fn dessa_swap_cycle_temp() {
+    // while i < n { (a, b) = (b, a); i++ } — a phi cycle needing a temp.
+    let mut f = empty_func(vec![t(0); 5]);
+    let vn = f.new_value(t(0), 0);
+    let va = f.new_value(t(0), 1);
+    let vb = f.new_value(t(0), 2);
+    let vi = f.new_value(t(0), 3);
+    let vone = f.new_value(t(0), 4);
+    let pa = f.new_value(t(0), 1);
+    let pb = f.new_value(t(0), 2);
+    let pi = f.new_value(t(0), 3);
+    let pi2 = f.new_value(t(0), 3);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Param { dst: vn, reg: 0 },
+            Instr::Int { dst: va, idx: 1 },
+            Instr::Int { dst: vb, idx: 2 },
+            Instr::Int { dst: vi, idx: 0 },
+            Instr::Int { dst: vone, idx: 3 },
+        ],
+        term: Terminator::Jump { target: BlockId(1) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![
+            Phi {
+                dst: pa,
+                incoming: vec![(BlockId(0), va), (BlockId(2), pb)],
+            },
+            Phi {
+                dst: pb,
+                incoming: vec![(BlockId(0), vb), (BlockId(2), pa)],
+            },
+            Phi {
+                dst: pi,
+                incoming: vec![(BlockId(0), vi), (BlockId(2), pi2)],
+            },
+        ],
+        instrs: vec![],
+        term: Terminator::CondJump {
+            cond: CondKind::SLt,
+            a: pi,
+            b: Some(vn),
+            if_true: BlockId(2),
+            if_false: BlockId(3),
+        },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::BinOp {
+            op: BinOp::Add,
+            dst: pi2,
+            a: pi,
+            b: vone,
+        }],
+        term: Terminator::Jump { target: BlockId(1) },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Ret { value: pa },
+        handler: None,
+    });
+    verify(&f).unwrap_or_else(|e| panic!("{e}\n{}", f.dump()));
+    let out = serialize(&f).unwrap();
+    // A temp register was appended, typed like the register it shadows.
+    assert_eq!(
+        out.num_regs,
+        6,
+        "swap cycle needs one temp: {}",
+        ops_text(&out.ops)
+    );
+    assert_eq!(out.reg_types[5], t(0));
+    // (a0, b0) = (7, 9): even iteration counts return a0, odd return b0.
+    let ints = [0, 7, 9, 1];
+    for (n, expect) in [(0i64, 7i64), (1, 9), (2, 7), (3, 9)] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[n], out.num_regs),
+            expect,
+            "n={}",
+            n
+        );
+    }
+}
+
+#[test]
+fn dessa_critical_edge_split() {
+    // b0 has two successors and b1 (the phi block) has two predecessors:
+    // the b0->b1 edge is critical and must get a dedicated copy block.
+    let mut f = empty_func(vec![t(0); 5]);
+    let v0 = f.new_value(t(0), 0);
+    let c1 = f.new_value(t(0), 1);
+    let d = f.new_value(t(0), 3);
+    let p = f.new_value(t(0), 4);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Param { dst: v0, reg: 0 },
+            Instr::Int { dst: c1, idx: 0 },
+        ],
+        term: Terminator::CondJump {
+            cond: CondKind::True,
+            a: v0,
+            b: None,
+            if_true: BlockId(1),
+            if_false: BlockId(2),
+        },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![Phi {
+            dst: p,
+            incoming: vec![(BlockId(0), c1), (BlockId(2), d)],
+        }],
+        instrs: vec![],
+        term: Terminator::Ret { value: p },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::Int { dst: d, idx: 1 }],
+        term: Terminator::Jump { target: BlockId(1) },
+        handler: None,
+    });
+    verify(&f).unwrap_or_else(|e| panic!("{e}\n{}", f.dump()));
+    let out = serialize(&f).unwrap();
+    let ints = [51, 62];
+    for (cond, expect) in [(1i64, 51i64), (0, 62)] {
+        assert_eq!(
+            mini_eval(&out.ops, &ints, &[cond], out.num_regs),
+            expect,
+            "cond={}: {}",
+            cond,
+            ops_text(&out.ops)
+        );
+    }
+}
+
+#[test]
+fn dessa_rejects_handler_phi_copies() {
+    // A non-trivial phi at a trap handler block cannot be materialized:
+    // there is no program point on the exceptional edge.
+    let mut f = empty_func(vec![t(0); 6]);
+    f.cells.push(CellData {
+        reg: 5,
+        ty: t(0),
+        reason: PinReason::TrapExc,
+    });
+    let v0 = f.new_value(t(0), 0);
+    let v1 = f.new_value(t(0), 1);
+    let p = f.new_value(t(0), 3);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Param { dst: v0, reg: 0 },
+            Instr::Param { dst: v1, reg: 1 },
+        ],
+        term: Terminator::Trap {
+            exc_cell: CellId(0),
+            handler: BlockId(2),
+            normal: BlockId(1),
+        },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![Instr::EndTrap { cell: CellId(0) }],
+        term: Terminator::Jump { target: BlockId(3) },
+        handler: Some(BlockId(2)),
+    });
+    f.blocks.push(Block {
+        phis: vec![Phi {
+            dst: p,
+            incoming: vec![(BlockId(0), v1)], // r3 != r1: needs a copy
+        }],
+        instrs: vec![],
+        term: Terminator::Ret { value: p },
+        handler: None,
+    });
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![],
+        term: Terminator::Ret { value: v0 },
+        handler: None,
+    });
+    verify(&f).unwrap_or_else(|e| panic!("{e}\n{}", f.dump()));
+    let err = serialize(&f).unwrap_err();
+    assert!(err.to_string().contains("handler"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// infrastructure self-tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mini_interp_sanity() {
+    let (ops, tys) = fix_loop();
+    let ints = [0, 1];
+    assert_eq!(mini_eval(&ops, &ints, &[5], tys.len()), 10);
+    let (ops, tys) = fix_switch();
+    let ints = [100, 200, 300];
+    assert_eq!(mini_eval(&ops, &ints, &[0], tys.len()), 200);
+    assert_eq!(mini_eval(&ops, &ints, &[1], tys.len()), 300);
+    assert_eq!(mini_eval(&ops, &ints, &[9], tys.len()), 100);
+}
+
+#[test]
+fn cfg_equiv_detects_difference() {
+    let (a_ops, a_tys) = fix_straight_line();
+    let (b_ops, b_tys) = fix_diamond();
+    let fa = lower(&a_ops, &a_tys).unwrap();
+    let fb = lower(&b_ops, &b_tys).unwrap();
+    assert!(check_cfg_equivalent(&fa, &fb).is_err());
+}
+
+#[test]
+fn condense_contracts_chains() {
+    let (ops, tys) = fix_straight_line();
+    let f = lower(&ops, &tys).unwrap();
+    let c = condense_cfg(&f);
+    assert_eq!(
+        c.num_nodes, 1,
+        "entry -> body chain contracts to a single node"
+    );
+
+    let (ops, tys) = fix_diamond();
+    let f = lower(&ops, &tys).unwrap();
+    let c = condense_cfg(&f);
+    // entry+cond contract; then/else/join stay: 4 nodes
+    assert_eq!(c.num_nodes, 4);
+}

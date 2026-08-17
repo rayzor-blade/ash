@@ -224,9 +224,6 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 
 ## Runtime & Heaps
 
-- **`hxd.Window.event` null-closure `Null access`** — thrown once per startup
-  during `sdl.Sdl.processEvents`, caught by `runMainLoop`; rendering
-  continues.
 - **`win_create_ex` argument-swap heuristic** (`crates/ash_sdl/src/sdl.rs`)
   papers over caller-side marshaling: it guesses based on value magnitude.
 - **~40 no-op stubs in `ash_sdl`** — controllers, joystick, haptics, cursors,

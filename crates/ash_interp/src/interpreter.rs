@@ -640,6 +640,8 @@ pub struct HLInterpreter {
     fn_alloc_virtual: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_closure_void
     fn_alloc_closure_void: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_alloc_closure_ptr (bound closures)
+    fn_alloc_closure_ptr: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_getd
     fn_dyn_getd: *mut c_void,
     /// Resolved stdlib function pointer: hlp_dyn_getf
@@ -764,6 +766,9 @@ impl HLInterpreter {
         let fn_alloc_closure_void = native_resolver
             .resolve_function("std", "hlp_alloc_closure_void")
             .unwrap_or(std::ptr::null_mut());
+        let fn_alloc_closure_ptr = native_resolver
+            .resolve_function("std", "hlp_alloc_closure_ptr")
+            .unwrap_or(std::ptr::null_mut());
         let fn_dyn_getd = native_resolver
             .resolve_function("std", "hlp_dyn_getd")
             .unwrap_or(std::ptr::null_mut());
@@ -849,6 +854,7 @@ impl HLInterpreter {
             fn_alloc_dynobj,
             fn_alloc_virtual,
             fn_alloc_closure_void,
+            fn_alloc_closure_ptr,
             fn_dyn_getd,
             fn_dyn_getf,
             fn_dyn_geti64,
@@ -1862,6 +1868,51 @@ impl HLInterpreter {
         // frame, which would otherwise strand the lock held forever.
         drop(guard);
         buf.as_ptr()
+    }
+
+    /// Allocate a bound closure (`InstanceClosure` / `VirtualClosure`) whose
+    /// `fun` field is the interpreter's stub sentinel (`findex + 1`).
+    ///
+    /// `closure_type` is the destination register's declared type — the
+    /// signature *without* the bound `this`, which is exactly what a
+    /// `vclosure.t` must carry. Leaving it null (as this used to) breaks every
+    /// later cast of the closure: `hl_dyn_castp` reads the source type out of
+    /// the value's header and bails on null, so `SafeCast` of a closure held
+    /// in a `Dynamic` field yielded null and the following `NullCheck` raised
+    /// "Null access" — heaps' `for( et in eventTargets ) et(e)` hit this on
+    /// every window event.
+    ///
+    /// Allocation goes through `hlp_alloc_closure_ptr`, the same helper the JIT
+    /// uses, so the closure lives in the GC heap and the bound value stays
+    /// traceable. The leaked `Box` fallback only runs if the stdlib helper is
+    /// unresolvable.
+    ///
+    /// # Safety
+    /// `alloc_closure_ptr`, when non-null, must be `hlp_alloc_closure_ptr`.
+    unsafe fn alloc_bound_closure(
+        alloc_closure_ptr: *mut c_void,
+        closure_type: *mut hl_type,
+        findex: usize,
+        value: *mut c_void,
+    ) -> NanBoxedValue {
+        let fun = (findex + 1) as *mut c_void;
+        if !alloc_closure_ptr.is_null() {
+            type FnAllocClosurePtr =
+                unsafe extern "C" fn(*mut hl_type, *mut c_void, *mut c_void) -> *mut _vclosure;
+            let f: FnAllocClosurePtr = std::mem::transmute(alloc_closure_ptr);
+            let c = f(closure_type, fun, value);
+            if !c.is_null() {
+                return NanBoxedValue::from_ptr(c as usize);
+            }
+        }
+        let closure = Box::new(_vclosure {
+            t: closure_type,
+            fun,
+            hasValue: 1,
+            stackCount: 0,
+            value,
+        });
+        NanBoxedValue::from_ptr(Box::into_raw(closure) as usize)
     }
 
     fn format_hl_exception(&self, val: NanBoxedValue) -> HLExceptionPropagation {
@@ -3517,9 +3568,9 @@ impl HLInterpreter {
                     .set(dst.0, NanBoxedValue::from_func_index(findex));
             }
             Opcode::InstanceClosure { dst, fun, obj } => {
-                // Create a heap-allocated _vclosure with the bound object.
-                // The closure's fun pointer is the stub sentinel (findex+1) so that
-                // CallClosure can extract the findex. The bound object is stored in
+                // Create a _vclosure with the bound object. The closure's fun
+                // pointer is the stub sentinel (findex+1) so that CallClosure
+                // can extract the findex. The bound object is stored in
                 // vclosure.value and prepended as the first argument on CallClosure.
                 let obj_val = frame.registers.get(obj.0);
                 let obj_ptr = if obj_val.is_null() || obj_val.is_void() {
@@ -3527,16 +3578,16 @@ impl HLInterpreter {
                 } else {
                     obj_val.as_ptr() as *mut std::ffi::c_void
                 };
-                let findex = fun.0;
-                let closure = Box::new(_vclosure {
-                    t: std::ptr::null_mut(),
-                    fun: (findex + 1) as *mut std::ffi::c_void,
-                    hasValue: 1,
-                    stackCount: 0,
-                    value: obj_ptr,
-                });
-                let addr = Box::into_raw(closure) as usize;
-                frame.registers.set(dst.0, NanBoxedValue::from_ptr(addr));
+                let closure_type = self.c_type_factory.get(func.regs[dst.0 as usize].0);
+                let value = unsafe {
+                    Self::alloc_bound_closure(
+                        self.fn_alloc_closure_ptr,
+                        closure_type,
+                        fun.0,
+                        obj_ptr,
+                    )
+                };
+                frame.registers.set(dst.0, value);
             }
             Opcode::VirtualClosure { dst, obj, field } => {
                 // Resolve the virtual method findex from the object's proto chain,
@@ -3567,15 +3618,16 @@ impl HLInterpreter {
                         }
                     };
                     if let Some(findex) = findex_opt {
-                        let closure = Box::new(_vclosure {
-                            t: std::ptr::null_mut(),
-                            fun: (findex + 1) as *mut std::ffi::c_void,
-                            hasValue: 1,
-                            stackCount: 0,
-                            value: obj_val.as_ptr() as *mut std::ffi::c_void,
-                        });
-                        let addr = Box::into_raw(closure) as usize;
-                        frame.registers.set(dst.0, NanBoxedValue::from_ptr(addr));
+                        let closure_type = self.c_type_factory.get(func.regs[dst.0 as usize].0);
+                        let value = unsafe {
+                            Self::alloc_bound_closure(
+                                self.fn_alloc_closure_ptr,
+                                closure_type,
+                                findex,
+                                obj_val.as_ptr() as *mut std::ffi::c_void,
+                            )
+                        };
+                        frame.registers.set(dst.0, value);
                     } else {
                         frame.registers.set(dst.0, NanBoxedValue::null());
                     }

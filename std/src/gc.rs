@@ -6,13 +6,204 @@ use std::cell::RefCell;
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use std::{collections::HashSet, mem};
 
-const HEAP_SIZE: usize = 1024 * 1024 * 512; // 512 MB
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
+
+/// Maximum heap reservation (virtual, demand-committed — NOT resident).
+const DEFAULT_HEAP_MB: usize = 512;
+/// First collection fires after this many bytes allocated (wren_lift
+/// gc_marksweep INITIAL_THRESHOLD pattern).
+const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
+/// Adaptive threshold bounds: live*2 clamped to [floor, ceiling].
+const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
+const TRIGGER_CEILING: usize = 64 * 1024 * 1024;
+/// Wall-clock heartbeat: any allocation this long after the last collection
+/// forces one, so long-idle processes deflate (wren_lift gc.rs:715-719).
+const HEARTBEAT: Duration = Duration::from_secs(30);
+/// Throttle for malloc_zone_pressure_relief (avoid per-alloc syscalls in
+/// stress mode).
+const PRESSURE_RELIEF_MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+// ── Env-gated config (OnceLock-cached — uncached getenv on the alloc hot
+// path cost wren_lift 30x throughput; gc.rs:38-46) ──────────────────────────
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
+}
+
+/// Maximum heap reservation in bytes (ASH_GC_HEAP_MB, default 512).
+fn heap_max_bytes() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| {
+        let mb = env_usize("ASH_GC_HEAP_MB").unwrap_or(DEFAULT_HEAP_MB).max(32);
+        (mb * 1024 * 1024 / BLOCK_SIZE) * BLOCK_SIZE
+    })
+}
+
+/// Adaptive-trigger floor in bytes (ASH_GC_TRIGGER_MB overrides).
+fn trigger_floor_bytes() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| {
+        env_usize("ASH_GC_TRIGGER_MB")
+            .map(|mb| (mb * 1024 * 1024).max(1024 * 1024))
+            .unwrap_or(DEFAULT_TRIGGER_FLOOR)
+    })
+}
+
+/// ASH_GC_STATS=1: per-collection trace lines + end-of-run summary.
+fn gc_stats_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("ASH_GC_STATS").map(|v| v != "0" && !v.is_empty()).unwrap_or(false)
+    })
+}
+
+/// ASH_GC_STRESS: collect at every Nth allocation (1 = every allocation).
+/// 0 / unset = disabled. Validation tool for root-coverage bugs.
+fn gc_stress_every() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| match std::env::var("ASH_GC_STRESS") {
+        Ok(v) if v == "0" || v.is_empty() => 0,
+        Ok(v) => v.trim().parse().unwrap_or(1),
+        Err(_) => 0,
+    })
+}
+
+// ── GC statistics (atomics — safe to read from atexit / any thread without
+// the GC lock; wren_lift GcStats gc.rs:527-539) ─────────────────────────────
+
+struct GcStatCounters {
+    collections: AtomicU64,
+    blocks_reclaimed: AtomicU64,
+    bytes_allocated: AtomicU64,
+    external_bytes: AtomicU64,
+    live_blocks: AtomicU64,
+    pause_ns_total: AtomicU64,
+    pause_ns_max: AtomicU64,
+}
+
+static GC_STATS: GcStatCounters = GcStatCounters {
+    collections: AtomicU64::new(0),
+    blocks_reclaimed: AtomicU64::new(0),
+    bytes_allocated: AtomicU64::new(0),
+    external_bytes: AtomicU64::new(0),
+    live_blocks: AtomicU64::new(0),
+    pause_ns_total: AtomicU64::new(0),
+    pause_ns_max: AtomicU64::new(0),
+};
+
+fn fmt_mb(bytes: u64) -> String {
+    format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+fn print_gc_stats_report() {
+    let n = GC_STATS.collections.load(Ordering::Relaxed);
+    let freed = GC_STATS.blocks_reclaimed.load(Ordering::Relaxed);
+    let alloc = GC_STATS.bytes_allocated.load(Ordering::Relaxed);
+    let ext = GC_STATS.external_bytes.load(Ordering::Relaxed);
+    let live = GC_STATS.live_blocks.load(Ordering::Relaxed);
+    let pt = GC_STATS.pause_ns_total.load(Ordering::Relaxed);
+    let pm = GC_STATS.pause_ns_max.load(Ordering::Relaxed);
+    eprintln!("[gc] ---- GC stats ----");
+    eprintln!("[gc] collections:      {}", n);
+    eprintln!(
+        "[gc] blocks reclaimed: {} ({})",
+        freed,
+        fmt_mb(freed * BLOCK_SIZE as u64)
+    );
+    eprintln!(
+        "[gc] bytes allocated:  {} (+ external {})",
+        fmt_mb(alloc),
+        fmt_mb(ext)
+    );
+    eprintln!(
+        "[gc] live at last gc:  {} blocks ({})",
+        live,
+        fmt_mb(live * BLOCK_SIZE as u64)
+    );
+    eprintln!(
+        "[gc] pause total:      {:.1}ms, max {:.2}ms, total {}ns",
+        pt as f64 / 1e6,
+        pm as f64 / 1e6,
+        pt
+    );
+}
+
+extern "C" fn gc_stats_atexit() {
+    print_gc_stats_report();
+}
+
+/// On-demand GC stats dump (also printed at exit when ASH_GC_STATS=1).
+#[no_mangle]
+pub extern "C" fn hlp_gc_print_stats() {
+    print_gc_stats_report();
+}
+
+// ── macOS return-to-OS hooks ────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    /// Asks all malloc zones to release free pages back to the OS
+    /// (forces MADV_FREE_REUSABLE internally — wren_lift gc.rs:1493-1515).
+    fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+}
+
+/// Demand-committed heap reservation: anonymous private mmap. Pages become
+/// resident only on first touch, and fully-free blocks are returned via
+/// madvise — RSS tracks live data, not configured capacity (wren_lift's
+/// nursery idiom, gc.rs:386-391, plus wlift_alloc::pressure_release).
+struct HeapMemory {
+    base: *mut u8,
+    len: usize,
+}
+
+impl HeapMemory {
+    fn new(len: usize) -> Self {
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        assert!(
+            ptr != libc::MAP_FAILED,
+            "GC heap reservation failed ({} bytes)",
+            len
+        );
+        HeapMemory {
+            base: ptr as *mut u8,
+            len,
+        }
+    }
+
+    #[inline(always)]
+    fn as_ptr(&self) -> *const u8 {
+        self.base
+    }
+
+    #[inline(always)]
+    fn as_mut_ptr(&self) -> *mut u8 {
+        self.base
+    }
+}
+
+impl Drop for HeapMemory {
+    fn drop(&mut self) {
+        unsafe {
+            libc::munmap(self.base as *mut c_void, self.len);
+        }
+    }
+}
 
 pub static mut GC: OnceLock<ImmixAllocator> = OnceLock::new();
 pub static HL_GLOBAL_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
@@ -203,7 +394,7 @@ pub unsafe extern "C" fn hlp_gc_unlock() {
 }
 
 struct ImmixHeap {
-    memory: Box<[u8; HEAP_SIZE]>,
+    memory: HeapMemory,
     free_blocks: Vec<usize>,
     used_blocks: HashSet<usize>,
     allocation_point: usize,
@@ -213,6 +404,32 @@ struct ImmixHeap {
     /// occupies if this is an allocation start, or 0 for continuation lines.
     /// Enables the GC to mark all lines of a multi-line object.
     alloc_sizes: Vec<u32>,
+    /// GC-heap bytes allocated since the last collection.
+    bytes_since_gc: usize,
+    /// Off-heap bytes charged via track_external since the last collection
+    /// (fiber stacks, JIT-side structures — wren_lift gc.rs:624-626).
+    external_since_gc: usize,
+    /// Collect when bytes_since_gc + external_since_gc reaches this.
+    /// Adaptive: live*2 clamped to [floor, ceiling] after each collection.
+    trigger_threshold: usize,
+    /// Wall-clock heartbeat anchor.
+    last_collect: Instant,
+    /// Throttle anchor for malloc_zone_pressure_relief.
+    last_pressure_relief: Instant,
+    /// Blocks currently madvised MADV_FREE_REUSABLE; must be MADV_FREE_REUSE'd
+    /// before reuse so live data can't be discarded under memory pressure.
+    reusable_blocks: HashSet<usize>,
+    /// True once the interpreter has registered scan ranges. The interpreter
+    /// roots its bytecode registers via a SNAPSHOT (sync_gc_scan_roots) that
+    /// is complete only at the moment it is published — values written to
+    /// registers after a snapshot are invisible until the next one. So in
+    /// interp mode byte-driven collections are DEFERRED to the next snapshot
+    /// publication (add_scan_range), where the root set is provably complete.
+    /// JIT mode never sets this: its roots are the native stack, which the
+    /// conservative scanner sees completely at any allocation point.
+    safepoint_mode: bool,
+    /// A trigger fired while in safepoint mode; collect at the next snapshot.
+    collect_pending: bool,
 }
 #[derive(Debug, Clone)]
 struct Block {
@@ -261,17 +478,28 @@ impl ImmixAllocator {
     }
 
     pub fn new() -> Self {
+        let heap_size = heap_max_bytes();
         let mut heap = ImmixHeap {
-            memory: Box::new([0; HEAP_SIZE]),
+            memory: HeapMemory::new(heap_size),
             free_blocks: Vec::new(),
             used_blocks: HashSet::new(),
             allocation_point: 0,
             current_block_end: 0,
             alloc_count: 0,
-            alloc_sizes: vec![0u32; HEAP_SIZE / LINE_SIZE],
+            alloc_sizes: vec![0u32; heap_size / LINE_SIZE],
+            bytes_since_gc: 0,
+            external_since_gc: 0,
+            trigger_threshold: INITIAL_TRIGGER_BYTES,
+            last_collect: Instant::now(),
+            last_pressure_relief: Instant::now(),
+            reusable_blocks: HashSet::new(),
+            safepoint_mode: false,
+            collect_pending: false,
         };
 
-        for i in (0..HEAP_SIZE).step_by(BLOCK_SIZE) {
+        // Reverse order so pop() hands out low addresses first — touched
+        // pages stay contiguous at the heap base.
+        for i in (0..heap_size).step_by(BLOCK_SIZE).rev() {
             heap.free_blocks.push(i);
         }
 
@@ -280,8 +508,14 @@ impl ImmixAllocator {
                 mark_bits: [false; LINES_PER_BLOCK],
                 evacuation_candidate: false,
             };
-            HEAP_SIZE / BLOCK_SIZE
+            heap_size / BLOCK_SIZE
         ];
+
+        if gc_stats_enabled() {
+            unsafe {
+                libc::atexit(gc_stats_atexit);
+            }
+        }
 
         ImmixAllocator {
             heap,
@@ -302,11 +536,103 @@ impl ImmixAllocator {
         }
     }
 
+    /// Byte-driven collection triggers, checked on every allocation
+    /// (wren_lift gc_marksweep.rs trigger + gc.rs:667-725 heartbeat):
+    /// 1. ASH_GC_STRESS: collect every Nth allocation (validation mode).
+    /// 2. Allocated + external bytes since last collect >= adaptive threshold.
+    /// 3. Wall-clock heartbeat so long-idle processes deflate.
+    ///
+    /// In interpreter (safepoint) mode a fired trigger is deferred to the
+    /// next root-snapshot publication instead of collecting immediately —
+    /// unless pressure is extreme (hard trigger), where collecting with a
+    /// possibly-stale snapshot matches the old exhaustion-path behavior.
+    fn maybe_collect(&mut self) {
+        // No automatic collections before the host runtime has entered user
+        // code (hlp_gc_set_stack_top): during bootstrap (constants/class
+        // descriptor init) both engines hold GC pointers in host-side Rust
+        // structures the conservative scanner cannot see. Bootstrap
+        // allocation is finite; the exhaustion backstop still applies.
+        if self.stack_top == 0 {
+            return;
+        }
+        let stress = gc_stress_every();
+        let pressure = self.heap.bytes_since_gc + self.heap.external_since_gc;
+        let due = if stress > 0 {
+            // alloc_count resets on every collection: collect on the Nth
+            // allocation since the last one (N=1 → every allocation).
+            self.heap.alloc_count + 1 >= stress
+        } else {
+            pressure >= self.heap.trigger_threshold
+                // Heartbeat: clock read only every 1024 allocations.
+                || (self.heap.alloc_count & 1023 == 0
+                    && self.heap.last_collect.elapsed() >= HEARTBEAT)
+        };
+        if !due {
+            return;
+        }
+        if self.heap.safepoint_mode {
+            let hard = self
+                .heap
+                .trigger_threshold
+                .saturating_mul(4)
+                .max(TRIGGER_CEILING);
+            if pressure < hard {
+                self.heap.collect_pending = true;
+                return;
+            }
+        }
+        self.collect_garbage();
+    }
+
+    /// Take a block off the free list, un-madvising it first if its pages
+    /// were marked reusable, and clearing any stale mark bits left by
+    /// conservative scans of stale pointers into freed blocks.
+    fn acquire_free_block(&mut self) -> Option<usize> {
+        let addr = self.heap.free_blocks.pop()?;
+        self.heap.used_blocks.insert(addr);
+        self.reclaim_block_pages(addr);
+        self.blocks[addr / BLOCK_SIZE].mark_bits = [false; LINES_PER_BLOCK];
+        Some(addr)
+    }
+
+    /// MADV_FREE_REUSE a block whose pages were previously handed back via
+    /// MADV_FREE_REUSABLE — without this, the kernel may discard the pages
+    /// under memory pressure AFTER we've written live data into them.
+    fn reclaim_block_pages(&mut self, addr: usize) {
+        if self.heap.reusable_blocks.remove(&addr) {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                libc::madvise(
+                    self.heap.memory.as_mut_ptr().add(addr) as *mut c_void,
+                    BLOCK_SIZE,
+                    libc::MADV_FREE_REUSE,
+                );
+            }
+        }
+    }
+
+    /// Allocate process-lifetime memory (runtime type structures:
+    /// hl_runtime_obj, vobj_proto, virtual lookup/index tables, mark bits).
+    /// Pinned as a persistent root: these structures are referenced only from
+    /// non-GC type memory the conservative scanner never sees, so an unpinned
+    /// allocation would be reclaimed by the first collection that runs while
+    /// no stack reference exists (surfaced by ASH_GC_STRESS).
+    pub fn allocate_immortal(&mut self, size: usize) -> Option<NonNull<u8>> {
+        let p = self.allocate(size)?;
+        self.roots
+            .borrow_mut()
+            .persistent_roots
+            .insert(p.as_ptr() as *mut hl::vdynamic);
+        Some(p)
+    }
+
     pub fn allocate(&mut self, size: usize) -> Option<NonNull<u8>> {
         let size = size.max(8);
         // Round up to LINE_SIZE (128 bytes) — Immix line-granularity allocation.
         // Each object gets its own line(s), preventing cross-object corruption.
         let aligned_size = (size + LINE_SIZE - 1) & !(LINE_SIZE - 1);
+
+        self.maybe_collect();
 
         if aligned_size > BLOCK_SIZE {
             return self.allocate_large(size);
@@ -316,20 +642,16 @@ impl ImmixAllocator {
             self.heap.allocation_point + aligned_size > self.heap.current_block_end;
 
         if needs_new_block {
-            if let Some(new_block) = self.heap.free_blocks.pop() {
-                self.heap.used_blocks.insert(new_block);
-                self.heap.allocation_point = new_block;
-                self.heap.current_block_end = new_block + BLOCK_SIZE;
-            } else {
-                self.collect_garbage();
-                if self.heap.free_blocks.is_empty() {
-                    return None; // Out of memory
+            let new_block = match self.acquire_free_block() {
+                Some(b) => b,
+                None => {
+                    // Exhaustion backstop trigger.
+                    self.collect_garbage();
+                    self.acquire_free_block()? // None = out of memory
                 }
-                let new_block = self.heap.free_blocks.pop().unwrap();
-                self.heap.used_blocks.insert(new_block);
-                self.heap.allocation_point = new_block;
-                self.heap.current_block_end = new_block + BLOCK_SIZE;
-            }
+            };
+            self.heap.allocation_point = new_block;
+            self.heap.current_block_end = new_block + BLOCK_SIZE;
         }
 
         let result = unsafe {
@@ -355,15 +677,10 @@ impl ImmixAllocator {
 
         self.heap.allocation_point += aligned_size;
         self.heap.alloc_count += 1;
-
-        // Proactive GC: collect every 4096 allocations to avoid OOM in tight loops
-        // (e.g., Heaps main loop allocating temp arrays each frame).
-        if self.heap.alloc_count % 4096 == 0 {
-            let free_ratio = self.heap.free_blocks.len() as f64 / (HEAP_SIZE / BLOCK_SIZE) as f64;
-            if free_ratio < 0.25 {
-                self.collect_garbage();
-            }
-        }
+        self.heap.bytes_since_gc += aligned_size;
+        GC_STATS
+            .bytes_allocated
+            .fetch_add(aligned_size as u64, Ordering::Relaxed);
 
         Some(result)
     }
@@ -400,7 +717,13 @@ impl ImmixAllocator {
                     .collect();
                 for block in removed {
                     self.heap.used_blocks.insert(block);
+                    self.reclaim_block_pages(block);
+                    self.blocks[block / BLOCK_SIZE].mark_bits = [false; LINES_PER_BLOCK];
                 }
+                self.heap.bytes_since_gc += blocks_needed * BLOCK_SIZE;
+                GC_STATS
+                    .bytes_allocated
+                    .fetch_add((blocks_needed * BLOCK_SIZE) as u64, Ordering::Relaxed);
                 // Record allocation size for GC multi-line marking
                 let num_lines = (size + LINE_SIZE - 1) / LINE_SIZE;
                 let start_line = start_addr / LINE_SIZE;
@@ -459,7 +782,7 @@ impl ImmixAllocator {
 
         // Check if the address is within the heap
         if addr < self.heap.memory.as_ptr() as usize
-            || addr >= (self.heap.memory.as_ptr() as usize + HEAP_SIZE)
+            || addr >= (self.heap.memory.as_ptr() as usize + self.heap.memory.len)
         {
             return false;
         }
@@ -539,7 +862,7 @@ impl ImmixAllocator {
     /// Returns list of newly-marked (block, line) pairs.
     fn conservative_scan_range(&mut self, start: usize, end: usize) -> Vec<(usize, usize)> {
         let heap_start = self.heap.memory.as_ptr() as usize;
-        let heap_end = heap_start + HEAP_SIZE;
+        let heap_end = heap_start + self.heap.memory.len;
         let mut newly_marked = Vec::new();
 
         let mut addr = start;
@@ -565,7 +888,7 @@ impl ImmixAllocator {
     /// When a new heap pointer is found, marks ALL lines of that allocation.
     fn conservative_trace(&mut self, initial: Vec<(usize, usize)>) {
         let heap_start = self.heap.memory.as_ptr() as usize;
-        let heap_end = heap_start + HEAP_SIZE;
+        let heap_end = heap_start + self.heap.memory.len;
         let mut worklist = initial;
 
         while let Some((block_idx, line_idx)) = worklist.pop() {
@@ -588,15 +911,76 @@ impl ImmixAllocator {
         }
     }
 
-    pub fn collect_garbage(&mut self) {
-        self.mark_roots();
-        self.sweep();
-        // eprintln!("[GC] collected: freed={freed} retained={retained} (was {used_before} used)");
+    /// Charge off-heap memory (fiber stacks, JIT structures) as allocation
+    /// pressure so it participates in the collection trigger. Reset after
+    /// every collection (wren_lift gc.rs:624-626, 1250).
+    pub fn track_external(&mut self, bytes: usize) {
+        self.heap.external_since_gc = self.heap.external_since_gc.saturating_add(bytes);
+        GC_STATS
+            .external_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
 
+    pub fn collect_garbage(&mut self) {
+        let t0 = Instant::now();
+        self.mark_roots();
+        let freed_blocks = self.sweep();
+        let pause = t0.elapsed();
+
+        let live_blocks = self.heap.used_blocks.len();
+        let live_bytes = live_blocks * BLOCK_SIZE;
+
+        // Adaptive threshold: next collection after ~live*2 bytes of new
+        // allocation (wren_lift gc_marksweep.rs:464-466), bounded so tiny
+        // programs don't collect constantly and big ones don't stall.
+        self.heap.trigger_threshold =
+            (live_bytes.saturating_mul(2)).clamp(trigger_floor_bytes(), TRIGGER_CEILING);
+
+        self.heap.bytes_since_gc = 0;
+        self.heap.external_since_gc = 0;
         self.heap.alloc_count = 0;
+        self.heap.collect_pending = false;
         // Reset so next allocation picks a fresh free block
         self.heap.allocation_point = 0;
         self.heap.current_block_end = 0;
+        self.heap.last_collect = Instant::now();
+
+        // Ask the malloc zones (Rust-side allocations: Vecs, boxes, side
+        // tables) to hand free pages back to the OS. Throttled — it is a
+        // whole-zone walk (wren_lift gc.rs:1493-1515).
+        #[cfg(target_os = "macos")]
+        if self.heap.last_pressure_relief.elapsed() >= PRESSURE_RELIEF_MIN_INTERVAL {
+            unsafe {
+                malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+            }
+            self.heap.last_pressure_relief = Instant::now();
+        }
+
+        // Stats (atomics — readable without the GC lock).
+        let n = GC_STATS.collections.fetch_add(1, Ordering::Relaxed) + 1;
+        GC_STATS
+            .blocks_reclaimed
+            .fetch_add(freed_blocks as u64, Ordering::Relaxed);
+        GC_STATS
+            .live_blocks
+            .store(live_blocks as u64, Ordering::Relaxed);
+        let pause_ns = pause.as_nanos() as u64;
+        GC_STATS
+            .pause_ns_total
+            .fetch_add(pause_ns, Ordering::Relaxed);
+        GC_STATS.pause_ns_max.fetch_max(pause_ns, Ordering::Relaxed);
+
+        if gc_stats_enabled() {
+            eprintln!(
+                "[gc] #{} pause={:.2}ms freed={} blocks live={} blocks ({}) next-trigger={}",
+                n,
+                pause_ns as f64 / 1e6,
+                freed_blocks,
+                live_blocks,
+                fmt_mb(live_bytes as u64),
+                fmt_mb(self.heap.trigger_threshold as u64),
+            );
+        }
     }
 
     pub fn mark_roots(&mut self) {
@@ -606,7 +990,7 @@ impl ImmixAllocator {
         // Mark explicit roots using conservative approach:
         // Just mark the memory lines, then conservative_trace will follow pointers.
         let heap_start = self.heap.memory.as_ptr() as usize;
-        let heap_end = heap_start + HEAP_SIZE;
+        let heap_end = heap_start + self.heap.memory.len;
         let mut all_newly_marked = Vec::new();
 
         for &global_ptr in &root_set.globals {
@@ -701,7 +1085,7 @@ impl ImmixAllocator {
 
     pub fn mark_memory(&mut self, ptr: *mut u8, size: usize) {
         let heap_start = self.heap.memory.as_ptr() as usize;
-        let heap_end = heap_start + HEAP_SIZE;
+        let heap_end = heap_start + self.heap.memory.len;
         let addr = ptr as usize;
 
         // Only mark memory within the heap range
@@ -734,7 +1118,7 @@ impl ImmixAllocator {
         let addr = ptr as usize;
 
         // Only mark objects within the heap
-        if addr < heap_start || addr >= heap_start + HEAP_SIZE {
+        if addr < heap_start || addr >= heap_start + self.heap.memory.len {
             return;
         }
 
@@ -814,7 +1198,7 @@ impl ImmixAllocator {
 
         // Only dereference pointers within the GC heap
         let heap_start = self.heap.memory.as_ptr() as usize;
-        let heap_end = heap_start + HEAP_SIZE;
+        let heap_end = heap_start + self.heap.memory.len;
         let addr = vd_ptr as usize;
         if addr < heap_start || addr >= heap_end {
             return; // Not a GC-managed pointer, skip
@@ -882,12 +1266,17 @@ impl ImmixAllocator {
         }
     }
 
-    pub fn sweep(&mut self) {
-        // Block-level collection: only reclaim entirely empty blocks.
-        // Partially-occupied blocks are retained intact — we do NOT zero individual
-        // dead lines, because conservative marking may miss some live objects whose
-        // data would be destroyed by zeroing.
+    /// Block-level collection: only reclaim entirely empty blocks.
+    /// Partially-occupied blocks are retained intact — we do NOT zero individual
+    /// dead lines, because conservative marking may miss some live objects whose
+    /// data would be destroyed by zeroing.
+    ///
+    /// Freed blocks' pages are returned to the OS via madvise (batched per
+    /// contiguous run) so RSS actually falls after a collection instead of
+    /// plateauing at high-water. Returns the number of blocks reclaimed.
+    pub fn sweep(&mut self) -> usize {
         let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
+        let mut freed: Vec<usize> = Vec::new();
         for block_addr in used_block_addrs {
             let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
@@ -907,8 +1296,44 @@ impl ImmixAllocator {
                 for l in base_line..base_line + LINES_PER_BLOCK {
                     self.heap.alloc_sizes[l] = 0;
                 }
+                freed.push(block_addr);
             }
         }
+
+        // Return fully-free pages to the OS. macOS: MADV_FREE_REUSABLE drops
+        // the pages from the process footprint immediately (the mechanism
+        // malloc_zone_pressure_relief uses internally); elsewhere MADV_DONTNEED.
+        // Safe: allocate() zeroes on reuse, and acquire_free_block REUSEs the
+        // range before live data is written. Batched one madvise per
+        // contiguous run to keep sweep cheap.
+        if !freed.is_empty() {
+            freed.sort_unstable();
+            let base = self.heap.memory.as_mut_ptr();
+            let mut run_start = freed[0];
+            let mut run_len = BLOCK_SIZE;
+            let mut advise = |start: usize, len: usize| unsafe {
+                #[cfg(target_os = "macos")]
+                let advice = libc::MADV_FREE_REUSABLE;
+                #[cfg(not(target_os = "macos"))]
+                let advice = libc::MADV_DONTNEED;
+                libc::madvise(base.add(start) as *mut c_void, len, advice);
+            };
+            for &addr in &freed[1..] {
+                if addr == run_start + run_len {
+                    run_len += BLOCK_SIZE;
+                } else {
+                    advise(run_start, run_len);
+                    run_start = addr;
+                    run_len = BLOCK_SIZE;
+                }
+            }
+            advise(run_start, run_len);
+            for &addr in &freed {
+                self.heap.reusable_blocks.insert(addr);
+            }
+        }
+
+        freed.len()
     }
 
     pub fn register_global(&mut self, ptr: *mut hl::vdynamic) {
@@ -932,17 +1357,24 @@ impl ImmixAllocator {
     }
 
     pub fn clear_scan_ranges(&mut self) {
+        self.heap.safepoint_mode = true;
         self.roots.borrow_mut().scan_ranges.clear();
     }
 
+    /// Register an interpreter root snapshot. This is the interpreter's
+    /// safepoint: the snapshot is complete at this instant, so a deferred
+    /// collection trigger is honored here.
     pub fn add_scan_range(&mut self, ptr: *const c_void, size: usize) {
-        if ptr.is_null() || size == 0 {
-            return;
+        self.heap.safepoint_mode = true;
+        if !ptr.is_null() && size != 0 {
+            self.roots
+                .borrow_mut()
+                .scan_ranges
+                .push((ptr as usize, size));
         }
-        self.roots
-            .borrow_mut()
-            .scan_ranges
-            .push((ptr as usize, size));
+        if self.heap.collect_pending {
+            self.collect_garbage();
+        }
     }
 
     pub fn alloc_virtual(&mut self, t: *mut hl::hl_type) -> Option<NonNull<hl::vvirtual>> {
@@ -1104,6 +1536,15 @@ pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
 pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
     let mut gc = gc_locked();
     gc.add_scan_range(ptr, size);
+}
+
+/// Charge off-heap memory (fiber stacks, native buffers, JIT structures) as
+/// GC allocation pressure. The charge participates in the byte-driven
+/// collection trigger and resets after every collection.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
+    let mut gc = gc_locked_init();
+    gc.track_external(bytes as usize);
 }
 
 // ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────

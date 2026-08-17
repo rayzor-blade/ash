@@ -632,7 +632,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
 
     if (*t).nproto != 0 {
         let fptr = allocator
-            .allocate(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nproto as usize)
+            .allocate_immortal(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nproto as usize)
             .expect("Failed to allocate memory")
             .as_ptr() as *mut *mut std::os::raw::c_void;
         (*ot).vobj_proto = fptr;
@@ -659,7 +659,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     }
 
     (*t).methods = allocator
-        .allocate(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nmethods as usize)
+        .allocate_immortal(std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nmethods as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut *mut std::os::raw::c_void;
 
@@ -705,7 +705,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         }
     }
     (*t).interfaces = allocator
-        .allocate(std::mem::size_of::<i32>() * (*t).ninterfaces as usize)
+        .allocate_immortal(std::mem::size_of::<i32>() * (*t).ninterfaces as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut i32;
     (*t).ninterfaces = 0;
@@ -765,7 +765,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
                             .nargs =>
                 {
                     let c = allocator
-                        .allocate(std::mem::size_of::<vclosure>())
+                        .allocate_immortal(std::mem::size_of::<vclosure>())
                         .expect("Failed to allocate memory")
                         .as_ptr() as *mut vclosure;
                     (*c).fun = *(*m).functions_ptrs.add(mid as usize);
@@ -902,8 +902,11 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
     }
 
     let mut gc = crate::gc::gc_locked_init();
+    // Runtime type structures are immortal and referenced only from type
+    // memory the GC never scans — allocate_immortal pins them (and, via
+    // conservative trace, everything they point to) as persistent roots.
     let t = gc
-        .allocate(std::mem::size_of::<hl_runtime_obj>())
+        .allocate_immortal(std::mem::size_of::<hl_runtime_obj>())
         .expect("Failed to allocate memory")
         .as_ptr() as *mut hl_runtime_obj;
     (*t).t = ot;
@@ -952,15 +955,15 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
     }
 
     (*t).lookup = gc
-        .allocate(std::mem::size_of::<hl_field_lookup>() * (*t).nlookup as usize)
+        .allocate_immortal(std::mem::size_of::<hl_field_lookup>() * (*t).nlookup as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut hl_field_lookup;
     (*t).fields_indexes = gc
-        .allocate(std::mem::size_of::<i32>() * (*t).nfields as usize)
+        .allocate_immortal(std::mem::size_of::<i32>() * (*t).nfields as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut i32;
     (*t).bindings = gc
-        .allocate(std::mem::size_of::<hl_runtime_binding>() * (*t).nbindings as usize)
+        .allocate_immortal(std::mem::size_of::<hl_runtime_binding>() * (*t).nbindings as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut hl_runtime_binding;
     (*t).toStringFun = None;
@@ -1109,7 +1112,10 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
     // Mark bits
     if (*t).hasPtr {
         let mark_size = hlp_mark_size((*t).size) as usize;
-        let mark = hlp_zalloc(mark_size.try_into().unwrap()) as *mut u32;
+        let mark = gc
+            .allocate_immortal(mark_size)
+            .expect("Failed to allocate memory")
+            .as_ptr() as *mut u32;
         ptr::write_bytes(mark as *mut u8, 0, mark_size);
         (*ot).mark_bits = mark;
         if !p.is_null() && !(*(*p).t).mark_bits.is_null() {
@@ -2594,14 +2600,15 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
 
         let mut allocator = crate::gc::gc_locked_init();
 
+        // Immortal: stored only into the (never-scanned) type's virt data.
         let l = allocator
-            .allocate(mem::size_of::<hl_field_lookup>() * virt.nfields as usize)
+            .allocate_immortal(mem::size_of::<hl_field_lookup>() * virt.nfields as usize)
             .unwrap()
             .cast::<hl_field_lookup>()
             .as_ptr();
 
         let indexes = allocator
-            .allocate(mem::size_of::<i32>() * virt.nfields as usize)
+            .allocate_immortal(mem::size_of::<i32>() * virt.nfields as usize)
             .unwrap()
             .cast::<i32>()
             .as_ptr();
@@ -2620,7 +2627,7 @@ pub extern "C" fn hlp_init_virtual(vt: *mut hl_type, _ctx: *mut hl_module_contex
 
         let mark_size = hlp_mark_size(size as i32);
         let mark = allocator
-            .allocate(mark_size as usize)
+            .allocate_immortal(mark_size as usize)
             .unwrap()
             .cast::<u32>()
             .as_ptr();

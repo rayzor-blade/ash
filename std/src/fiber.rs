@@ -105,6 +105,9 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     }));
     let (base, len) = fiber.stack_range();
     crate::gc::gc_register_fiber_stack(id, base as usize, len);
+    // Charge the off-heap stack as GC allocation pressure so dead fibers'
+    // stacks translate into collections (wren_lift core/fiber.rs:189-199).
+    crate::gc::hlp_gc_track_external(len as u64);
 
     FIBERS.push(VmFiber {
         fiber,

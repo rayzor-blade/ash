@@ -58,16 +58,20 @@
 //!   it), `Nop` and unreachable code are dropped, and `Label`s are re-derived
 //!   from actual backward edges.
 //!
-//! ## Current limitations (documented, checked with errors — not UB)
+//! ## Exception-safe values
 //!
-//! * Parallel copies cannot be inserted on exceptional edges (there is no
-//!   program point between "throw" and "handler entry"); `serialize` rejects
-//!   non-trivial phis at handler blocks. Plain `lower` output never produces
-//!   them because in-region-written registers are pinned to cells.
-//! * In-region pinning is conservative: *every* register written inside a trap
-//!   region becomes a cell. Liveness analysis can refine this later.
-//! * `IndirectCall` (a v1 hot-reload pass artifact, not a real bytecode op)
-//!   is rejected by `lower`.
+//! HL registers behave like memory slots across exceptional control flow, so
+//! every register written inside a trap region — together with `Ref`-taken
+//! registers, `Incr`/`Decr` targets, and registers that receive the caught
+//! exception — is pinned to a cell. Handler blocks therefore read their
+//! values through cells rather than phis, which is what keeps SSA sound
+//! across edges that have no program point for a copy (there is none between
+//! "throw" and "handler entry").
+//!
+//! Both directions of that invariant are enforced with errors rather than
+//! assumed: `serialize` rejects non-trivial phis at handler blocks, and
+//! `lower` rejects `IndirectCall`, which is a v1 hot-reload pass artifact
+//! rather than a bytecode opcode.
 
 pub mod ir;
 pub mod lower;

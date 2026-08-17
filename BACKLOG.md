@@ -38,8 +38,25 @@ production path until the backends switch over.
   registers actually live into the handler.
 - **Landing-pad design for exceptional-edge copies** — would lift the
   handler-block non-trivial-phi restriction.
-- Auto-vectorization is deliberately *not* planned here: with de-abstraction
-  done at the AIR level, LLVM's loop/SLP vectorizers handle it.
+- **Tail-recursion elimination.** In phi-SSA this is a natural rewrite: a
+  `Call` to the enclosing function whose result flows straight into `Ret`
+  becomes a parallel copy of the arguments into the entry block's parameters
+  plus a jump to a loop header. It pays off on all three engines — the
+  interpreter recurses a host frame per HL call, so deep recursion costs
+  real stack there. Guards it must respect: a call inside a trap region is
+  not a tail call (the handler stays live), `Ref`-taken or `Incr`/`Decr`
+  parameters are cells and cannot be silently re-bound, and mutual recursion
+  is out of scope for a first cut.
+- **Loop vectorization.** Earlier analysis deferred this to LLVM's loop/SLP
+  vectorizers, but that assumed LLVM was the only compiled backend. Cranelift
+  has SIMD types and instructions (`i8x16`…`f64x2`, including a vector `fma`)
+  and *no* vectorizing pass, so whatever the middle tier should vectorize,
+  AIR must vectorize. Prerequisites are mostly in place or planned: the alias
+  classes give memory-dependence information, loop analysis gives the trip
+  structure; still needed are unit-stride access detection over varray/Bytes
+  data and a cost model. Best targets are `Bytes`/varray loops (clean stride,
+  no cross-class aliasing) and pixel loops once inlining and scalar
+  replacement have de-abstracted them.
 
 ## JIT & tiering
 

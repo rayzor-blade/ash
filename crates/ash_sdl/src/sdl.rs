@@ -999,6 +999,22 @@ define_prim!(
 define_prim!(hlp_gctrl_get_id, "PXsdl_gctrl__i", sdl_gctrl_get_id);
 define_prim!(hlp_gctrl_get_name, "PXsdl_gctrl__B", sdl_gctrl_get_name);
 define_prim!(
+    hlp_haptic_open,
+    "PXsdl_gctrl__Xsdl_haptic_",
+    sdl_haptic_open
+);
+define_prim!(hlp_haptic_close, "PXsdl_haptic__v", sdl_haptic_close);
+define_prim!(
+    hlp_haptic_rumble_init,
+    "PXsdl_haptic__i",
+    sdl_haptic_rumble_init
+);
+define_prim!(
+    hlp_haptic_rumble_play,
+    "PXsdl_haptic_di_i",
+    sdl_haptic_rumble_play
+);
+define_prim!(
     hlp_surface_from,
     "PBiiiiiii_Xsdl_surface_",
     sdl_surface_from

@@ -55,6 +55,12 @@ pub fn hlt_i32() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HI32) as usize) as *mut hl_type
 }
 
+/// Persistent type singleton for HVOID (upstream &hlt_void).
+pub fn hlt_void() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HVOID) as usize) as *mut hl_type
+}
+
 pub static TSTR: [&str; 22] = [
     "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "array",
     "type", "null", "null", "dynobj", "null", "null", "null", "null", "null", "null",
@@ -453,6 +459,115 @@ pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut ven
     }
 
     v
+}
+
+/// Upstream hl_type_super (types.c): super type of HOBJ/HSTRUCT, else &hlt_void.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_type_super(t: *mut hl_type) -> *mut hl_type {
+    if !t.is_null() && ((*t).kind == hl_type_kind_HOBJ || (*t).kind == hl_type_kind_HSTRUCT) {
+        let obj = (*t).__bindgen_anon_1.obj;
+        if !obj.is_null() && !(*obj).super_.is_null() {
+            return (*obj).super_;
+        }
+    }
+    hlt_void()
+}
+
+/// Upstream hl_type_enum_eq (types.c): structural equality of two enum
+/// values — same type, same constructor, recursively equal parameters.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_type_enum_eq(a: *mut venum, b: *mut venum) -> bool {
+    if a == b {
+        return true;
+    }
+    if a.is_null() || b.is_null() || (*a).t != (*b).t {
+        return false;
+    }
+    if (*a).index != (*b).index {
+        return false;
+    }
+    let tenum = (*(*a).t).__bindgen_anon_1.tenum;
+    if tenum.is_null() {
+        return false;
+    }
+    let c = (*tenum).constructs.add((*a).index as usize);
+    for i in 0..(*c).nparams as usize {
+        let t = *(*c).params.add(i);
+        let offset = *(*c).offsets.add(i) as usize;
+        if (*t).kind == hl_type_kind_HENUM {
+            let pa = *((a as *mut u8).add(offset) as *mut *mut venum);
+            let pb = *((b as *mut u8).add(offset) as *mut *mut venum);
+            if !hlp_type_enum_eq(pa, pb) {
+                return false;
+            }
+        } else {
+            let pa = crate::cast::hlp_make_dyn((a as *mut u8).add(offset) as *mut c_void, t);
+            let pb = crate::cast::hlp_make_dyn((b as *mut u8).add(offset) as *mut c_void, t);
+            if !pa.is_null()
+                && !pb.is_null()
+                && !(*pa).t.is_null()
+                && !(*pb).t.is_null()
+                && (*(*pa).t).kind == hl_type_kind_HENUM
+                && (*(*pb).t).kind == hl_type_kind_HENUM
+            {
+                if !hlp_type_enum_eq(pa as *mut venum, pb as *mut venum) {
+                    return false;
+                }
+                continue;
+            }
+            if crate::cast::hlp_dyn_compare(pa, pb) != 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Upstream hl_alloc_enum_dyn (types.c): allocate an enum value from a
+/// dynamic argument array, allowing missing trailing nullable params.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_alloc_enum_dyn(
+    t: *mut hl_type,
+    index: i32,
+    args: *mut varray,
+    nargs: i32,
+) -> *mut venum {
+    if t.is_null() || args.is_null() {
+        return ptr::null_mut();
+    }
+    let tenum = (*t).__bindgen_anon_1.tenum;
+    if tenum.is_null() || index < 0 || index >= (*tenum).nconstructs {
+        return ptr::null_mut();
+    }
+    let c = (*tenum).constructs.add(index as usize);
+    if (*c).nparams < nargs || (*args).size < nargs {
+        return ptr::null_mut();
+    }
+    if nargs < (*c).nparams {
+        // allow missing params only if they are nullable (pointer-kinded)
+        for i in (nargs as usize)..(*c).nparams as usize {
+            if !hl_is_ptr(*(*c).params.add(i)) {
+                return ptr::null_mut();
+            }
+        }
+    }
+    let e = hlp_alloc_enum(t, index);
+    if e.is_null() {
+        return ptr::null_mut();
+    }
+    // hlp_alloc_enum only zeroes when hasptr; upstream always MEM_ZEROs.
+    // Zero the payload so missing nullable params read as null.
+    let payload = (*c).size as usize;
+    std::ptr::write_bytes(e.offset(1) as *mut u8, 0, payload);
+    for i in 0..nargs as usize {
+        crate::obj::hlp_write_dyn(
+            (e as *mut u8).add(*(*c).offsets.add(i) as usize) as *mut c_void,
+            *(*c).params.add(i),
+            *hl_aptr::<*mut vdynamic>(args).add(i),
+            false,
+        );
+    }
+    e
 }
 
 #[no_mangle]

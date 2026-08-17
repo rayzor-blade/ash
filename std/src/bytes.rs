@@ -82,6 +82,24 @@ pub unsafe extern "C" fn hlp_bytes_compare16(
     0
 }
 
+/// Upstream hl_string_compare (bytes.c): memcmp over len UTF-16 chars.
+/// Byte-wise memcmp, exactly like upstream — NOT a u16-wise compare.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_string_compare(
+    a: *const hl::vbyte,
+    b: *const hl::vbyte,
+    len: c_int,
+) -> c_int {
+    if a.is_null() || b.is_null() || len <= 0 {
+        return 0;
+    }
+    libc::memcmp(
+        a as *const std::ffi::c_void,
+        b as *const std::ffi::c_void,
+        (len as usize) * 2,
+    )
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_bytes_offset(bytes: *mut hl::vbyte, offset: c_int) -> *mut hl::vbyte {
     if bytes.is_null() {

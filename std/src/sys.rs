@@ -246,6 +246,25 @@ pub unsafe extern "C" fn hlp_sys_full_path(path: *const vbyte) -> *const vbyte {
     path
 }
 
+/// Upstream hl_sys_exe_path (sys.c). On macOS upstream uses
+/// _NSGetExecutablePath + pstrdup; with HL_UTF8PATH (all non-Windows
+/// targets, matching our hlp_sys_utf8_path() == true) the returned bytes
+/// are NUL-terminated UTF-8, GC-allocated.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
+    let Ok(exe) = std::env::current_exe() else {
+        return std::ptr::null_mut();
+    };
+    let bytes = exe.to_string_lossy().into_owned().into_bytes();
+    let out = crate::bytes::hlp_alloc_bytes(bytes.len() as i32 + 1);
+    if out.is_null() {
+        return std::ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
+    *(out as *mut u8).add(bytes.len()) = 0;
+    out
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_exists(path: *const vbyte) -> bool {
     if path.is_null() {

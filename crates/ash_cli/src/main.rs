@@ -490,6 +490,46 @@ fn run() -> Result<()> {
         std::process::exit(0);
     }
 
+    // Cross-check the compile-time field-offset oracle against the runtime
+    // before running anything. A disagreement would be silent corruption in
+    // compiled code, so it is worth being able to ask on any program.
+    //
+    // `ASH_VERIFY_LAYOUT=only` checks and exits, which is how the whole test
+    // corpus can be swept — several of those programs take minutes to
+    // interpret, and running them proves nothing about the type graph that
+    // decoding them has not already proved.
+    match std::env::var("ASH_VERIFY_LAYOUT").ok().as_deref() {
+        None | Some("") | Some("0") => {}
+        Some(mode) => {
+            let interpreter = HLInterpreter::new(&bytecode, &native_resolver);
+            let mismatches = interpreter.verify_layout_oracle(&bytecode, &native_resolver)?;
+            let objects = bytecode
+                .types
+                .iter()
+                .filter(|t| {
+                    t.kind == ash::hl_bindings::hl_type_kind_HOBJ
+                        || t.kind == ash::hl_bindings::hl_type_kind_HSTRUCT
+                })
+                .count();
+            if mismatches.is_empty() {
+                eprintln!(
+                    "[layout] oracle agrees with hlp_get_obj_rt across {objects} object types"
+                );
+            } else {
+                for m in &mismatches {
+                    eprintln!(
+                        "[layout] MISMATCH type[{}] {}: {}",
+                        m.type_index, m.name, m.detail
+                    );
+                }
+                anyhow::bail!("{} layout mismatches; refusing to run", mismatches.len());
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     match cli.mode {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);

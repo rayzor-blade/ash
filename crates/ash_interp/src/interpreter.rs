@@ -1099,6 +1099,41 @@ impl HLInterpreter {
         Ok(())
     }
 
+    /// Check the compile-time layout oracle against the runtime's own answers.
+    ///
+    /// [`ash::layout`] exists so field access can become a constant-offset load
+    /// instead of a call, which is only safe if it reproduces
+    /// `hlp_get_obj_rt` exactly — a disagreement is silent memory corruption
+    /// rather than a wrong answer. This forces every `HOBJ`/`HSTRUCT` runtime
+    /// object to be built and compares all of them.
+    ///
+    /// Run via `ASH_VERIFY_LAYOUT=1`. Not on by default: building every runtime
+    /// object costs startup time and allocates for types the program may never
+    /// touch.
+    pub fn verify_layout_oracle(
+        &self,
+        bytecode: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+    ) -> Result<Vec<ash::layout::LayoutMismatch>> {
+        type GetObjRt = unsafe extern "C" fn(
+            *mut ash::hl_bindings::hl_type,
+        ) -> *mut ash::hl_bindings::hl_runtime_obj;
+        let addr = native_resolver
+            .resolve_function("std", "hlp_get_obj_rt")
+            .map_err(|e| anyhow!("cannot verify layout without hlp_get_obj_rt: {e}"))?;
+        let get_obj_rt: GetObjRt = unsafe { std::mem::transmute(addr) };
+
+        Ok(unsafe {
+            ash::layout::verify_against_runtime(&bytecode.types, |ti| {
+                let t = self.c_type_factory.get(ti);
+                if t.is_null() {
+                    return None;
+                }
+                Some(get_obj_rt(t))
+            })
+        })
+    }
+
     pub fn tiered_stats(&self) -> Option<TieredStats> {
         use std::sync::atomic::Ordering;
         self.tiered_runtime.as_ref().map(|t| {

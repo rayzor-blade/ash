@@ -16,6 +16,7 @@ pub mod hl_bindings {
     include!(concat!(env!("OUT_DIR"), "/hl_bindings.rs"));
 }
 pub mod jit;
+pub mod layout;
 pub mod module;
 pub mod native_lib;
 pub mod opcodes;

@@ -1208,77 +1208,8 @@ impl<'ctx> JITModule<'ctx> {
 
                 match obj_type_.kind {
                     hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
-                        // Load hl_type* from object (first field at offset 0)
-                        let ptr_type = self.context.ptr_type(AddressSpace::default());
-                        let type_ptr = self
-                            .builder
-                            .build_load(ptr_type, obj_val, "obj_type_ptr")?
-                            .into_pointer_value();
-
-                        // Call hl_get_obj_rt with the TYPE pointer, not the object pointer
-                        let hl_get_obj_rt = self.declare_native(
-                            "hlp_get_obj_rt",
-                            &[self.context.ptr_type(AddressSpace::default()).into()],
-                            Some(self.context.ptr_type(AddressSpace::default()).into()),
-                        );
-
-                        let rt_obj = self
-                            .builder
-                            .build_call(hl_get_obj_rt, &[type_ptr.into()], "rt_obj")?
-                            .try_as_basic_value()
-                            .basic()
-                            .unwrap();
-
-                        // Get fields_indexes pointer from rt_obj (byte offset 40 in hl_runtime_obj)
-                        let fields_indexes_gep = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                rt_obj.into_pointer_value(),
-                                &[self.context.i64_type().const_int(40, false)],
-                                "fields_indexes_gep",
-                            )?
-                        };
-                        let fields_indexes = self
-                            .builder
-                            .build_load(ptr_type, fields_indexes_gep, "fields_indexes")?
-                            .into_pointer_value();
-
-                        // Get the byte offset for this field: fields_indexes[field] (array of i32)
-                        let field_offset_ptr = unsafe {
-                            self.builder.build_gep(
-                                self.context.i32_type(),
-                                fields_indexes,
-                                &[self.context.i32_type().const_int(field.0 as u64, false)],
-                                "field_offset_ptr",
-                            )?
-                        };
-                        let field_offset_i32 = self
-                            .builder
-                            .build_load(
-                                self.context.i32_type(),
-                                field_offset_ptr,
-                                "field_offset_i32",
-                            )?
-                            .into_int_value();
-
-                        // Zero-extend to i64 for proper pointer arithmetic on 64-bit
-                        let field_offset = self.builder.build_int_z_extend(
-                            field_offset_i32,
-                            self.context.i64_type(),
-                            "field_offset",
-                        )?;
-
-                        // Compute field pointer: (i8*)obj + field_offset
-                        let field_ptr = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                obj_val,
-                                &[field_offset],
-                                "field_ptr",
-                            )?
-                        };
-
-                        // Store the new value
+                        let field_ptr =
+                            self.build_field_ptr(f.regs[obj.0 as usize].0, field.0, obj_val)?;
                         self.builder.build_store(field_ptr, src_val)?;
                     }
                     hl_type_kind_HVIRTUAL => {
@@ -1432,75 +1363,11 @@ impl<'ctx> JITModule<'ctx> {
                 )?;
                 match obj_type_.kind {
                     hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
-                        // Load hl_type* from object (first field at offset 0)
-                        let ptr_type = self.context.ptr_type(AddressSpace::default());
-                        let obj_ptr = obj_val.into_pointer_value();
-                        let type_ptr = self
-                            .builder
-                            .build_load(ptr_type, obj_ptr, "obj_type_ptr")?
-                            .into_pointer_value();
-
-                        // Call hl_get_obj_rt with the TYPE pointer, not the object pointer
-                        let hl_get_obj_rt = self.declare_native(
-                            "hlp_get_obj_rt",
-                            &[self.context.ptr_type(AddressSpace::default()).into()],
-                            Some(self.context.ptr_type(AddressSpace::default()).into()),
-                        );
-                        let rt_obj = self
-                            .builder
-                            .build_call(hl_get_obj_rt, &[type_ptr.into()], "rt_obj")?
-                            .try_as_basic_value()
-                            .basic()
-                            .unwrap();
-
-                        // Get fields_indexes pointer from rt_obj (byte offset 40 in hl_runtime_obj)
-                        let fields_indexes_gep = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                rt_obj.into_pointer_value(),
-                                &[self.context.i64_type().const_int(40, false)],
-                                "fields_indexes_gep",
-                            )?
-                        };
-                        let fields_indexes = self
-                            .builder
-                            .build_load(ptr_type, fields_indexes_gep, "fields_indexes")?
-                            .into_pointer_value();
-
-                        // Get the byte offset: fields_indexes[field] (array of i32)
-                        let field_offset_ptr = unsafe {
-                            self.builder.build_gep(
-                                self.context.i32_type(),
-                                fields_indexes,
-                                &[self.context.i32_type().const_int(field.0 as u64, false)],
-                                "field_offset_ptr",
-                            )?
-                        };
-                        let field_offset_i32 = self
-                            .builder
-                            .build_load(
-                                self.context.i32_type(),
-                                field_offset_ptr,
-                                "field_offset_i32",
-                            )?
-                            .into_int_value();
-
-                        // Zero-extend to i64 for proper pointer arithmetic on 64-bit
-                        let field_offset = self.builder.build_int_z_extend(
-                            field_offset_i32,
-                            self.context.i64_type(),
-                            "field_offset",
+                        let field_ptr = self.build_field_ptr(
+                            f.regs[obj.0 as usize].0,
+                            field.0,
+                            obj_val.into_pointer_value(),
                         )?;
-
-                        // Compute field pointer: (i8*)obj + field_offset
-                        let field_ptr = unsafe {
-                            self.builder.build_gep(
-                                self.context.i8_type(),
-                                obj_ptr,
-                                &[field_offset],
-                                "field_ptr",
-                            )?
-                        };
 
                         // Load the field value using destination register type
                         let load_type = self.get_register_type(f.regs[dst.0 as usize].0)?;
@@ -4943,6 +4810,92 @@ impl<'ctx> JITModule<'ctx> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Address of `field_index` inside `obj_ptr`, whose static type is
+    /// `obj_type_index`.
+    ///
+    /// Prefers a constant offset from [`crate::layout`], which turns the whole
+    /// access into one `getelementptr` on a known constant. The fallback — load
+    /// the object's `hl_type*`, call `hlp_get_obj_rt`, load `fields_indexes`,
+    /// then load the offset out of it — costs a call and three dependent loads
+    /// per field access, and the call is opaque, so it also stops LLVM hoisting
+    /// or CSE-ing anything across it.
+    ///
+    /// Reading the offset from the object's *dynamic* type is what the fallback
+    /// does, and replacing that with a constant is sound because a subclass
+    /// inherits its parent's `fields_indexes` verbatim — see the module docs on
+    /// [`crate::layout`]. The oracle returns `None` for anything it cannot
+    /// reproduce exactly (packed fields), which lands back on the fallback.
+    fn build_field_ptr(
+        &self,
+        obj_type_index: usize,
+        field_index: usize,
+        obj_ptr: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>> {
+        let i8_ty = self.context.i8_type();
+
+        if let Some(offset) = crate::layout::field_offset(&self.types_, obj_type_index, field_index)
+        {
+            let off = self.context.i64_type().const_int(offset as u64, false);
+            return Ok(unsafe {
+                self.builder
+                    .build_gep(i8_ty, obj_ptr, &[off], "field_ptr")?
+            });
+        }
+
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let type_ptr = self
+            .builder
+            .build_load(ptr_type, obj_ptr, "obj_type_ptr")?
+            .into_pointer_value();
+        let hl_get_obj_rt =
+            self.declare_native("hlp_get_obj_rt", &[ptr_type.into()], Some(ptr_type.into()));
+        let rt_obj = self
+            .builder
+            .build_call(hl_get_obj_rt, &[type_ptr.into()], "rt_obj")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_get_obj_rt returned void"))?;
+
+        // hl_runtime_obj::fields_indexes sits at byte offset 40.
+        let fields_indexes_gep = unsafe {
+            self.builder.build_gep(
+                i8_ty,
+                rt_obj.into_pointer_value(),
+                &[self.context.i64_type().const_int(40, false)],
+                "fields_indexes_gep",
+            )?
+        };
+        let fields_indexes = self
+            .builder
+            .build_load(ptr_type, fields_indexes_gep, "fields_indexes")?
+            .into_pointer_value();
+        let field_offset_ptr = unsafe {
+            self.builder.build_gep(
+                self.context.i32_type(),
+                fields_indexes,
+                &[self.context.i32_type().const_int(field_index as u64, false)],
+                "field_offset_ptr",
+            )?
+        };
+        let field_offset_i32 = self
+            .builder
+            .build_load(
+                self.context.i32_type(),
+                field_offset_ptr,
+                "field_offset_i32",
+            )?
+            .into_int_value();
+        let field_offset = self.builder.build_int_z_extend(
+            field_offset_i32,
+            self.context.i64_type(),
+            "field_offset",
+        )?;
+        Ok(unsafe {
+            self.builder
+                .build_gep(i8_ty, obj_ptr, &[field_offset], "field_ptr")?
+        })
     }
 
     /// Emit `intr` inline over `arg`, or `Ok(None)` if the intrinsic

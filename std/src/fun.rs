@@ -322,7 +322,7 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
                 && !(*wrapped).t.is_null()
                 && (*(*wrapped).t).kind == hl_type_kind_HFUN
             {
-                if std::env::var("ASH_DBG_FUN").is_ok() {
+                if env_flag!("ASH_DBG_FUN") {
                     eprintln!(
                         "[FUN] resolve_closure_ptr unwrap c={:p} -> wrapped={:p}",
                         c, wrapped
@@ -561,7 +561,7 @@ pub unsafe extern "C" fn hlp_no_closure(c: *mut vdynamic) -> *mut vdynamic {
     if cl.is_null() {
         return ptr::null_mut();
     }
-    if std::env::var("ASH_DBG_FUN").is_ok() {
+    if env_flag!("ASH_DBG_FUN") {
         let tk = if (*cl).t.is_null() {
             0
         } else {
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn hlp_no_closure(c: *mut vdynamic) -> *mut vdynamic {
     let parent = (*(*cl).t).__bindgen_anon_1.fun.as_ref().unwrap().parent;
     let out_t = if parent.is_null() { (*cl).t } else { parent };
     let out = hlp_alloc_closure_void(out_t, (*cl).fun) as *mut vdynamic;
-    if std::env::var("ASH_DBG_FUN").is_ok() {
+    if env_flag!("ASH_DBG_FUN") {
         let tk = if out.is_null() || (*out).t.is_null() {
             0
         } else {

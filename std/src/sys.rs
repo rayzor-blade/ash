@@ -81,7 +81,7 @@ pub extern "C" fn hlp_setup_reload_check(path_utf16: *const u16) {
         .and_then(|m| m.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
 
-    if std::env::var("ASH_DBG_RELOAD").is_ok() {
+    if env_flag!("ASH_DBG_RELOAD") {
         eprintln!("[reload] registered path: {:?} mtime={:?}", path, mtime);
     }
 
@@ -130,7 +130,7 @@ pub extern "C" fn hlp_sys_check_reload(debug_alt_file: *const vbyte) -> bool {
 
     if current_mtime != state.last_mtime {
         state.last_mtime = current_mtime;
-        if std::env::var("ASH_DBG_RELOAD").is_ok() {
+        if env_flag!("ASH_DBG_RELOAD") {
             eprintln!(
                 "[reload] file changed: {:?} (old={:?} new={:?})",
                 check_path, state.last_mtime, current_mtime

@@ -584,7 +584,7 @@ pub unsafe extern "C" fn hlp_track_call(_mode: i32, _data: *mut c_void) {}
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
     // ASH_DEBUG_EXIT=1 prints the exit site backtrace (debugging aid).
-    if std::env::var_os("ASH_DEBUG_EXIT").is_some() {
+    if env_flag!(os "ASH_DEBUG_EXIT") {
         eprintln!("[ash] sys_exit({})", code);
         eprintln!("{}", std::backtrace::Backtrace::force_capture());
     }

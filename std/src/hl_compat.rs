@@ -61,7 +61,7 @@ pub unsafe extern "C" fn hl_alloc_array(t: *mut hl_type, size: i32) -> *mut varr
 #[no_mangle]
 pub unsafe extern "C" fn hl_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     let result = crate::obj::hlp_alloc_dynamic(t);
-    if std::env::var("ASH_DBG_ALLOC").is_ok() {
+    if env_flag!("ASH_DBG_ALLOC") {
         let kind = if !t.is_null() { (*t).kind } else { 999 };
         eprintln!("[hl_alloc_dynamic] t={:p} kind={} -> {:p}", t, kind, result);
     }
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_to_utf8(str: *const hl::uchar) -> *const u8 {
-    if std::env::var("ASH_DBG_SHADER").is_ok() {
+    if env_flag!("ASH_DBG_SHADER") {
         if !str.is_null() && (str as usize) > 0x10000 {
             let mut len = 0;
             while *str.add(len) != 0 && len < 200 {

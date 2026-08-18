@@ -592,8 +592,9 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
 /// Executes HL bytecode directly using a register-based architecture
 /// with NaN-boxed values. Tracks per-function call counts and signals
 /// when a function should be promoted to JIT compilation.
-/// Cache an env-var presence check (they sit on the native-call hot path;
-/// getenv per call was a measured tax).
+/// Cache an env-var presence check (these gate the opcode-dispatch and
+/// native-call hot paths, where macOS getenv takes a process-wide lock —
+/// `__findenv_locked` was 51.9% of samples on an nbody profile).
 macro_rules! env_flag {
     ($name:literal) => {{
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2916,7 +2917,7 @@ impl HLInterpreter {
         let using_reloaded = self.reloaded_bytecode.is_some();
         let bc: &DecodedBytecode = self.reloaded_bytecode.unwrap_or(bytecode);
         let func = &bc.functions[func_idx];
-        if using_reloaded && std::env::var("ASH_DBG_RELOAD").is_ok() {
+        if using_reloaded && env_flag!("ASH_DBG_RELOAD") {
             eprintln!(
                 "[reload-exec] func_idx={} name={} nops={} using=reloaded",
                 func_idx,
@@ -2976,7 +2977,7 @@ impl HLInterpreter {
             }
 
             let op = func.ops[pc].clone();
-            if std::env::var("ASH_TRACE_ASSERT").is_ok() {
+            if env_flag!("ASH_TRACE_ASSERT") {
                 eprintln!(
                     "[TRACE] f{} {} pc={} op={:?}",
                     func_idx,
@@ -3004,7 +3005,7 @@ impl HLInterpreter {
                     return Ok(value);
                 }
                 StepResult::Call { findex, args, dst } => {
-                    if std::env::var("ASH_TRACE_NATIVE").is_ok() {
+                    if env_flag!("ASH_TRACE_NATIVE") {
                         let is_bc = self.findex_to_func.contains_key(&findex);
                         let is_nat = self.findex_to_native.contains_key(&findex);
                         let depth = self.stack.len();
@@ -3586,7 +3587,7 @@ impl HLInterpreter {
                     let tptr = self.c_type_factory.get(type_idx) as *mut c_void;
                     let closure = unsafe { f(tptr, (findex + 1) as *mut c_void) };
                     if !closure.is_null() {
-                        if std::env::var("ASH_DBG_CLOSURE").is_ok() {
+                        if env_flag!("ASH_DBG_CLOSURE") {
                             eprintln!(
                                 "[STATICCLOSURE] findex={} type_idx={} -> {:p}",
                                 findex, type_idx, closure
@@ -3600,7 +3601,7 @@ impl HLInterpreter {
                 }
 
                 // Fallback to interpreter-local representation.
-                if std::env::var("ASH_DBG_CLOSURE").is_ok() {
+                if env_flag!("ASH_DBG_CLOSURE") {
                     eprintln!(
                         "[STATICCLOSURE-FALLBACK] findex={} type_idx={} alloc_fn={:p}",
                         findex, type_idx, self.fn_alloc_closure_void
@@ -3728,7 +3729,7 @@ impl HLInterpreter {
                 let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(obj.0);
-                if std::env::var("ASH_DBG_FIELD").is_ok() {
+                if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
                         "[FIELD] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} obj={:?}",
                         func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, obj_val
@@ -3744,7 +3745,7 @@ impl HLInterpreter {
                             obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
                         )
                     };
-                    if std::env::var("ASH_DBG_FIELD").is_ok() {
+                    if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
                             "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
                             func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
@@ -3758,7 +3759,7 @@ impl HLInterpreter {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
                                 func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
@@ -3788,7 +3789,7 @@ impl HLInterpreter {
                         } else {
                             NanBoxedValue::null()
                         };
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
                                 func_idx, frame.pc, obj_type_idx, field.0, val
@@ -3835,7 +3836,7 @@ impl HLInterpreter {
                             obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
                         )
                     };
-                    if std::env::var("ASH_DBG_FIELD").is_ok() {
+                    if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
                             "[GETTHIS-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
                             func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
@@ -3849,7 +3850,7 @@ impl HLInterpreter {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[GETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
                                 func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
@@ -3879,7 +3880,7 @@ impl HLInterpreter {
                         } else {
                             NanBoxedValue::null()
                         };
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[GETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
                                 func_idx, frame.pc, obj_type_idx, field.0, val
@@ -3917,7 +3918,7 @@ impl HLInterpreter {
                 let src_kind = bytecode.types[src_type_idx].kind;
                 let get_rt = self.fn_get_obj_rt;
                 let obj_val = frame.registers.get(obj.0);
-                if std::env::var("ASH_DBG_FIELD").is_ok() {
+                if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
                         "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
                         func_idx,
@@ -3935,7 +3936,7 @@ impl HLInterpreter {
                     let src_val = frame.registers.get(src.0);
                     if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
                                 func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
@@ -3952,7 +3953,7 @@ impl HLInterpreter {
                         {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
-                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
                                     "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
                                     func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
@@ -3981,7 +3982,7 @@ impl HLInterpreter {
                                     self.fn_dyn_setp,
                                 );
                             }
-                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
                                     "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
                                     func_idx, frame.pc, obj_type_idx, field.0, src_val
@@ -4020,7 +4021,7 @@ impl HLInterpreter {
                     let src_val = frame.registers.get(src.0);
                     if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
-                        if std::env::var("ASH_DBG_FIELD").is_ok() {
+                        if env_flag!("ASH_DBG_FIELD") {
                             eprintln!(
                                 "[SETTHIS-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
                                 func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
@@ -4037,7 +4038,7 @@ impl HLInterpreter {
                         {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
-                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
                                     "[SETTHIS-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
                                     func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
@@ -4066,7 +4067,7 @@ impl HLInterpreter {
                                     self.fn_dyn_setp,
                                 );
                             }
-                            if std::env::var("ASH_DBG_FIELD").is_ok() {
+                            if env_flag!("ASH_DBG_FIELD") {
                                 eprintln!(
                                     "[SETTHIS-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
                                     func_idx, frame.pc, obj_type_idx, field.0, src_val
@@ -4105,7 +4106,7 @@ impl HLInterpreter {
                         &mut self.utf16_strings,
                         &mut self.field_hash_cache,
                     )?;
-                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                    if env_flag!("ASH_DBG_DYN") {
                         let fname = bytecode
                             .strings
                             .get(field.0)
@@ -4131,7 +4132,7 @@ impl HLInterpreter {
                         self.fn_dyn_geti,
                         self.fn_dyn_getp,
                     );
-                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                    if env_flag!("ASH_DBG_DYN") {
                         eprintln!(
                             "[DYNGET] f{} pc={} dst_kind={} -> {:?}",
                             func_idx, frame.pc, dst_kind, out
@@ -4156,7 +4157,7 @@ impl HLInterpreter {
                     let src_val = frame.registers.get(src.0);
                     let src_type_idx = func.regs[src.0 as usize].0;
                     let src_kind = bytecode.types[src_type_idx].kind;
-                    if std::env::var("ASH_DBG_DYN").is_ok() {
+                    if env_flag!("ASH_DBG_DYN") {
                         let fname = bytecode
                             .strings
                             .get(field.0)
@@ -4482,7 +4483,7 @@ impl HLInterpreter {
                                 if src_kind == hl::hl_type_kind_HOBJ
                                     && dst_kind == hl::hl_type_kind_HOBJ
                                     && val.as_ptr() > 0x10000
-                                    && std::env::var("ASH_DBG_CAST").is_ok()
+                                    && env_flag!("ASH_DBG_CAST")
                                 {
                                     static CAST_COUNT: std::sync::atomic::AtomicU32 =
                                         std::sync::atomic::AtomicU32::new(0);
@@ -5288,7 +5289,7 @@ impl HLInterpreter {
                 bytecode, func, a as usize, va, ak, b as usize, vb, bk, op,
             )
         } {
-            if std::env::var("ASH_TRACE_EQ").is_ok() {
+            if env_flag!("ASH_TRACE_EQ") {
                 eprintln!(
                     "[CMP-HNULL] f{} op={:?} ak={} bk={} va={:?} vb={:?} -> {}",
                     func_idx, op, ak, bk, va, vb, result
@@ -5309,7 +5310,7 @@ impl HLInterpreter {
                     vb.as_ptr() as *const u16
                 };
                 let eq = unsafe { Self::utf16z_eq(pa, pb) };
-                if std::env::var("ASH_TRACE_EQ").is_ok() {
+                if env_flag!("ASH_TRACE_EQ") {
                     eprintln!(
                         "[CMP] f{} op={:?} ak={} bk={} (bytes) -> {}",
                         func_idx, op, ak, bk, eq
@@ -5331,7 +5332,7 @@ impl HLInterpreter {
                 if !pa.is_null() && !pb.is_null() {
                     let ta_name = self.dynamic_type_name(pa);
                     let tb_name = self.dynamic_type_name(pb);
-                    if std::env::var("ASH_TRACE_EQ").is_ok() {
+                    if env_flag!("ASH_TRACE_EQ") {
                         eprintln!(
                             "[CMP-OBJ] f{} op={:?} ta={:?} tb={:?} pa={:#x} pb={:#x}",
                             func_idx,
@@ -5351,7 +5352,7 @@ impl HLInterpreter {
                         let sb = unsafe {
                             self.try_extract_string_object_raw(vb.as_ptr() as *mut c_void)
                         };
-                        if std::env::var("ASH_TRACE_EQ").is_ok() {
+                        if env_flag!("ASH_TRACE_EQ") {
                             eprintln!(
                                 "[CMP-OBJ] f{} string-extract sa={} sb={}",
                                 func_idx,
@@ -5361,7 +5362,7 @@ impl HLInterpreter {
                         }
                         if let (Some((ab, al)), Some((bb, bl))) = (sa, sb) {
                             let eq = al == bl && unsafe { Self::utf16_len_eq(ab, bb, al as usize) };
-                            if std::env::var("ASH_TRACE_EQ").is_ok() {
+                            if env_flag!("ASH_TRACE_EQ") {
                                 eprintln!(
                                     "[CMP] f{} op={:?} ak={} bk={} (string-obj) -> {}",
                                     func_idx, op, ak, bk, eq
@@ -5384,7 +5385,7 @@ impl HLInterpreter {
                     vb.as_ptr() as *mut hl::vdynamic
                 };
                 let eq = unsafe { self.dynamic_eq(pa, pb) };
-                if std::env::var("ASH_TRACE_EQ").is_ok() {
+                if env_flag!("ASH_TRACE_EQ") {
                     eprintln!(
                         "[CMP] f{} op={:?} ak={} bk={} (dyn) -> {}",
                         func_idx, op, ak, bk, eq
@@ -5415,7 +5416,7 @@ impl HLInterpreter {
             }
         }
         let result = va.compare(vb, op).unwrap_or(false);
-        if std::env::var("ASH_TRACE_EQ").is_ok() && (op == CmpOp::Eq || op == CmpOp::NotEq) {
+        if env_flag!("ASH_TRACE_EQ") && (op == CmpOp::Eq || op == CmpOp::NotEq) {
             eprintln!(
                 "[CMP] f{} op={:?} ak={} bk={} va={:?} vb={:?} -> {}",
                 func_idx, op, ak, bk, va, vb, result
@@ -6589,7 +6590,7 @@ impl HLInterpreter {
         native_resolver: &NativeFunctionResolver,
         args: &[NanBoxedValue],
     ) -> Result<Option<NanBoxedValue>> {
-        let dbg = std::env::var("ASH_DBG_DYN").is_ok();
+        let dbg = env_flag!("ASH_DBG_DYN");
         if args.len() < 2
             || args[0].is_null()
             || args[0].is_void()

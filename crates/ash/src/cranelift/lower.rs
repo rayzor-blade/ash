@@ -252,17 +252,12 @@ pub fn lower_function(
         lo.finish();
     }
 
-    // `ASH_CL_DUMP=<findex>` (or `all`) prints the lowered CLIF. Reading the IR
-    // is the only practical way to tell a bad offset from a bad width from a
-    // bad base pointer once a function miscompiles.
-    if let Ok(want) = std::env::var("ASH_CL_DUMP") {
-        if want == "all" || want.split(',').any(|w| w.trim() == findex.to_string()) {
-            eprintln!(
-                "=== CLIF findex={findex} {} ===\n{}",
-                func.name(),
-                def.ctx.func.display()
-            );
-        }
+    if clif_dump_wanted(findex) {
+        eprintln!(
+            "=== CLIF findex={findex} {} ===\n{}",
+            func.name(),
+            def.ctx.func.display()
+        );
     }
 
     Ok(LoweredFunction {
@@ -271,6 +266,31 @@ pub fn lower_function(
         ret_kind,
         num_ops: func.ops.len(),
     })
+}
+
+/// `ASH_CL_DUMP=<findex>` (or `all`) prints the lowered CLIF. Reading the IR
+/// is the only practical way to tell a bad offset from a bad width from a
+/// bad base pointer once a function miscompiles.
+///
+/// The spec is parsed once: this is asked per lowered function, and macOS
+/// `getenv` takes a process-wide lock.
+fn clif_dump_wanted(findex: usize) -> bool {
+    static SPEC: std::sync::OnceLock<Option<(bool, Vec<String>)>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        std::env::var("ASH_CL_DUMP").ok().map(|want| {
+            let all = want == "all";
+            (all, want.split(',').map(|w| w.trim().to_string()).collect())
+        })
+    });
+    match spec {
+        Some((all, wanted)) => {
+            *all || {
+                let key = findex.to_string();
+                wanted.iter().any(|w| *w == key)
+            }
+        }
+        None => false,
+    }
 }
 
 /// Declare every native call target this function references, by its

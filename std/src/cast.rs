@@ -385,7 +385,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     if t.is_null() || to.is_null() {
         return ptr::null_mut();
     }
-    if std::env::var("ASH_DBG_SC").is_ok() {
+    if env_flag!("ASH_DBG_SC") {
         eprintln!(
             "[dyn_castp] pre-safe_cast t={:p} k={} to={:p} k={}",
             t,
@@ -446,7 +446,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             {
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
-                if std::env::var("ASH_DBG_SC").is_ok() {
+                if env_flag!("ASH_DBG_SC") {
                     eprintln!(
                         "[dyn_castp] castFun={:p} obj={:p} to={:p}",
                         cast_fn as *const (), obj_val, to
@@ -480,7 +480,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             {
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
-                if std::env::var("ASH_DBG_SC").is_ok() {
+                if env_flag!("ASH_DBG_SC") {
                     eprintln!(
                         "[dyn_castp] castFun={:p} obj={:p} to={:p}",
                         cast_fn as *const (), obj_val, to

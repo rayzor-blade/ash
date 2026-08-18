@@ -530,6 +530,48 @@ fn run() -> Result<()> {
         }
     }
 
+    // `ASH_VERIFY_OSR=only` reports which loops on-stack replacement would
+    // accept, and why it refused the rest, without running the program. Same
+    // reasoning as the layout sweep above: whether a static analysis accepts
+    // the right things should be a measurement over a whole corpus, not an
+    // assertion about one function.
+    if let Ok(mode) = std::env::var("ASH_VERIFY_OSR") {
+        if !mode.is_empty() && mode != "0" {
+            // `ASH_VERIFY_OSR=dump:<findex>` prints one function's opcodes with
+            // its analysis. Deciding whether a refusal is right needs to be
+            // done against the actual opcodes, not against an assumption about
+            // what the Haxe compiler emits.
+            if let Some(want) = mode
+                .strip_prefix("dump:")
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                for f in &bytecode.functions {
+                    if f.findex == want {
+                        let plan = ash::osr::analyze(&bytecode, f);
+                        eprintln!(
+                            "[osr] findex={} {} nregs={} back_edges={:?} refused={:?}",
+                            f.findex,
+                            f.name(),
+                            plan.nregs,
+                            plan.back_edges,
+                            plan.refusals
+                        );
+                        for (i, op) in f.ops.iter().enumerate() {
+                            eprintln!("[osr]   {i:>4}  {op:?}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            for line in ash::osr::report(&bytecode) {
+                eprintln!("[osr] {line}");
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     match cli.mode {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);

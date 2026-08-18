@@ -20,6 +20,7 @@ pub mod layout;
 pub mod module;
 pub mod native_lib;
 pub mod opcodes;
+pub mod osr;
 pub mod profile;
 pub mod reload;
 pub mod types;

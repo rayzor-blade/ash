@@ -132,6 +132,8 @@ fn mini_run(
     let mut regs = vec![0i64; num_regs];
     regs[..args.len()].copy_from_slice(args);
     let mut pc = 0usize;
+    // `(catch pc, exception register)` per open region, innermost last.
+    let mut traps: Vec<(usize, usize)> = Vec::new();
     loop {
         *fuel = fuel.checked_sub(1).expect("mini_eval: step limit exceeded");
         assert!(pc < ops.len(), "mini_eval: pc {} out of bounds", pc);
@@ -241,6 +243,35 @@ fn mini_run(
                     pc = jump(offsets[v as usize]);
                     continue;
                 }
+            }
+            // A register's address is just its index here, since the frame is a
+            // flat array. Enough to model pinning faithfully, which is what the
+            // cell tests need — Incr no longer pins on its own.
+            Opcode::Ref { dst, src } => regs[dst.0 as usize] = src.0 as i64,
+            Opcode::Setref { dst, value } => {
+                let slot = regs[dst.0 as usize] as usize;
+                regs[slot] = regs[value.0 as usize];
+            }
+            Opcode::Unref { dst, src } => {
+                let slot = regs[src.0 as usize] as usize;
+                regs[dst.0 as usize] = regs[slot];
+            }
+            Opcode::Trap { exc, offset } => traps.push((jump(*offset), exc.0 as usize)),
+            // Only pops the region. The operand is Haxe's `OEndTrap of bool`,
+            // a flag rather than a register, so writing through it here would
+            // clobber whichever local the flag's value collides with — the
+            // defect this models.
+            Opcode::EndTrap { .. } => {
+                traps.pop().expect("mini_eval: EndTrap with no open region");
+            }
+            Opcode::Throw { exc } | Opcode::Rethrow { exc } => {
+                let v = regs[exc.0 as usize];
+                let (catch_pc, exc_reg) = traps
+                    .pop()
+                    .expect("mini_eval: uncaught throw (no open trap region)");
+                regs[exc_reg] = v;
+                pc = catch_pc;
+                continue;
             }
             Opcode::Label | Opcode::Nop => {}
             Opcode::Ret { ret } => return regs[ret.0 as usize],
@@ -595,25 +626,53 @@ fn lower_loop_phi_at_header() {
 }
 
 #[test]
-fn lower_pinned_incr_cells() {
+fn lower_incr_stays_ssa_when_nothing_else_pins() {
     let (ops, tys) = fix_incr();
     let f = lower(&ops, &tys).unwrap();
     verify(&f).unwrap();
-    assert_eq!(f.cells.len(), 1);
-    assert_eq!(f.cells[0].reg, 0);
-    assert_eq!(f.cells[0].reason, PinReason::IncrDecr);
-    let incrs = f.blocks[1]
-        .instrs
+    // Incr reads and writes one register, which is an ordinary SSA def. It
+    // used to pin, which made every counted loop's induction variable a memory
+    // cell carrying a CellGet and a CellIncr per iteration that no pass could
+    // reason about.
+    assert!(f.cells.is_empty(), "Incr alone must not pin: {:?}", f.cells);
+    let incrs = f
+        .blocks
         .iter()
-        .filter(|i| matches!(i, Instr::CellIncr { .. }))
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::UnOp { op: UnOp::Incr, .. }))
         .count();
     assert_eq!(incrs, 2);
-    // pinned registers get no phis and no Params
-    assert!(f.blocks.iter().all(|b| b.phis.is_empty()));
-    assert!(!f.blocks[0]
-        .instrs
+    assert!(f
+        .blocks
         .iter()
-        .any(|i| matches!(i, Instr::Param { reg: 0, .. })));
+        .flat_map(|b| b.instrs.iter())
+        .all(|i| !matches!(i, Instr::CellIncr { .. })));
+}
+
+/// A counter whose address is taken is still a cell, and still uses the fused
+/// read-modify-write rather than a CellGet/UnOp/CellSet triple.
+#[test]
+fn lower_incr_on_a_ref_taken_register_keeps_the_fused_cell_op() {
+    let (mut ops, tys) = fix_incr();
+    // Take the register's address after the increments.
+    ops.insert(
+        3,
+        Opcode::Ref {
+            dst: Reg(0),
+            src: Reg(0),
+        },
+    );
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(f.cells.len(), 1);
+    assert_eq!(f.cells[0].reason, PinReason::RefTaken);
+    let incrs = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::CellIncr { .. }))
+        .count();
+    assert_eq!(incrs, 2, "pinned Incr must stay a fused CellIncr");
 }
 
 #[test]
@@ -1162,9 +1221,10 @@ fn endtrap_closes_the_region_the_trap_stack_names_not_its_operand() {
         f.dump()
     );
 
-    // The flag survives serialization unchanged. It has to: `ash_interp`
-    // reads that operand as a register to null out, so substituting the
-    // exception register would make it clear a live one.
+    // The flag survives serialization unchanged, so a round trip is
+    // byte-exact against the genhl input. Substituting the exception register
+    // would also re-arm the interpreter defect this operand once triggered:
+    // see `endtrap_must_not_write_through_its_flag_operand`.
     let out = serialize(&f).unwrap();
     let flags: Vec<u32> = out
         .ops
@@ -1175,6 +1235,55 @@ fn endtrap_closes_the_region_the_trap_stack_names_not_its_operand() {
         })
         .collect();
     assert_eq!(flags, vec![1, 1], "both EndTraps re-emit the flag verbatim");
+}
+
+#[test]
+fn endtrap_must_not_write_through_its_flag_operand() {
+    // `ash_interp` used to execute `OEndTrap` as "pop the region, then null
+    // `registers[exc]`". Because that operand is Haxe's `OEndTrap of bool` it
+    // is 0 or 1, so the clear landed on r0/r1 — whichever local happened to
+    // live there. A try that assigned a value and then exited *normally* lost
+    // it: `var acc = "s"; try { acc += "|a"; } catch (e) {}` printed `null`.
+    //
+    // The shape below is that bug reduced to arithmetic. r1 holds a running
+    // value across a trap region that never throws, and `EndTrap`'s flag
+    // operand is `1` — pointing straight at it.
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        },
+        Opcode::Trap {
+            exc: Reg(2),
+            offset: 2,
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(1),
+        },
+        // Flag operand `1` collides with the live accumulator in r1.
+        Opcode::EndTrap { exc: Reg(1) },
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(1),
+            b: Reg(3),
+        },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let tys = vec![t(0), t(0), t(2), t(0)];
+    let ints = [40, 2];
+
+    // 40 + 2. Nulling r1 at EndTrap would yield 2.
+    assert_eq!(
+        mini_eval(&ops, &ints, &[], 4),
+        42,
+        "EndTrap cleared the live register its flag operand collided with"
+    );
+
+    // And the value survives the round trip, so no backend can reintroduce it
+    // by rewriting the operand into a real register.
+    let out = assert_exact(&ops, &tys);
+    assert_eq!(mini_eval(&out.ops, &ints, &[], out.num_regs), 42);
 }
 
 #[test]
@@ -3036,14 +3145,24 @@ fn gvn_refuses_a_cell_load_across_a_cell_write() {
         },
         Opcode::Ret { ret: Reg(3) },
     ];
-    let tys = vec![t(0); 4];
+    // r0's address is taken, which is what makes it a cell. Incr alone no
+    // longer pins — it is an ordinary SSA def — so the pin has to be stated.
+    let mut ops = ops;
+    ops.insert(
+        0,
+        Opcode::Ref {
+            dst: Reg(4),
+            src: Reg(0),
+        },
+    );
+    let tys = vec![t(0); 5];
     let base_ops = ops.clone();
     let mut f = lower(&ops, &tys).unwrap();
     run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
     assert_eq!(
         count_instrs(&f, |i| matches!(i, Instr::CellGet { .. })),
         2,
-        "cells are memory: an Incr between two reads blocks reuse"
+        "cells are memory: a write between two reads blocks reuse"
     );
     let out = serialize(&f).unwrap();
     let ints = [40];
@@ -3784,6 +3903,12 @@ fn fix_tail_cell_param() -> (Vec<Opcode>, Vec<TypeRef>) {
                 offset: 1,
             },
             Opcode::Ret { ret: Reg(1) },
+            // r1 must be a cell for this negative control to mean anything,
+            // and Incr no longer pins on its own.
+            Opcode::Ref {
+                dst: Reg(4),
+                src: Reg(1),
+            },
             Opcode::Incr { dst: Reg(1) },
             Opcode::Int {
                 dst: Reg(3),

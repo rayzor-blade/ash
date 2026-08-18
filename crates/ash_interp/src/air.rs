@@ -15,7 +15,7 @@
 //!
 //! # Gating
 //!
-//! Off unless `ASH_AIR=v2`. Every backend is meant to end up consuming the
+//! Off unless `ASH_AIR=v2-serialize`. Every backend is meant to end up consuming the
 //! same serialized array, but the interpreter is the *reference* the other two
 //! are checked against, so switching it over by default would move the
 //! measuring stick at the same time as the thing being measured.
@@ -44,12 +44,15 @@ pub fn enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| match std::env::var("ASH_AIR") {
         Ok(v) => match v.as_str() {
-            "v2" => true,
-            "" | "0" | "off" => false,
+            // `v2` selects the SSA interpreter in `crate::ssa`, which executes
+            // the IR instead of serializing it. This path keeps its own
+            // spelling so the two can be compared against each other.
+            "v2-serialize" => true,
+            "v2" | "" | "0" | "off" => false,
             // A typo here would otherwise run unoptimized while looking like
             // it was on, which is a hard thing to notice from the output.
             other => {
-                eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|off); AIR is off");
+                eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off");
                 false
             }
         },

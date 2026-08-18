@@ -8,6 +8,7 @@ description = "HashLink bytecode interpreter for ASH VM"
 
 [dependencies]
 ash = { path = "../ash" }
+air = { path = "../air" }
 anyhow = { workspace = true }
 inkwell = { workspace = true }
 beadie = { workspace = true }

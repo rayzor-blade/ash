@@ -19,6 +19,7 @@ use inkwell::context::Context;
 
 use crate::air::Cache as AirCache;
 use crate::frame::InterpreterFrame;
+use crate::ssa::Cache as SsaCache;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp, NanBoxedValue};
 
 /// Function pointer types for stdlib functions resolved at runtime.
@@ -214,13 +215,27 @@ pub struct TieredStats {
     pub llvm_promotions: u64,
 }
 
-/// Marshaling metadata for a promoted function, cached findex-indexed on the
-/// interpreter side. Cloned per compiled call — kept cheap via `Arc<[u32]>`.
-#[derive(Debug, Clone)]
+/// Everything needed to call one promoted function, cached per findex.
+///
+/// `Copy`, deliberately. This is read on every invocation of every compiled
+/// function — ~10M times in one nbody run — and an `Arc<[u32]>` here cost an
+/// atomic increment and decrement per call for a value that never changes once
+/// the function is compiled. Promotion already refuses anything above eight
+/// arguments (`nargs > max_jit_args || nargs > 8`), so the kinds fit inline and
+/// the steady-state dispatch path touches no refcount and no allocation.
+#[derive(Debug, Clone, Copy)]
 struct CompiledFunctionEntry {
     fn_addr: usize,
-    arg_kinds: Arc<[u32]>,
+    arg_kinds: [u32; 8],
+    nargs: u8,
     ret_kind: u32,
+}
+
+impl CompiledFunctionEntry {
+    #[inline(always)]
+    fn args(&self) -> &[u32] {
+        &self.arg_kinds[..self.nargs as usize]
+    }
 }
 
 /// The pre-warmed LLVM JIT module, owned by whichever broker thread first
@@ -348,7 +363,7 @@ struct TieredRuntime {
     entries: Vec<Option<CompiledFunctionEntry>>,
     /// findex-indexed marshaling signature, derived from the bytecode and
     /// therefore identical for every tier.
-    sigs: Vec<Option<(Arc<[u32]>, u32)>>,
+    sigs: Vec<Option<([u32; 8], u8, u32)>>,
     shared_ctx: Arc<TieredSharedCtx>,
     /// Interp-side counters; broker-side counters live in `shared_ctx`.
     stats: TieredStats,
@@ -624,8 +639,11 @@ pub struct HLInterpreter {
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
     reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
     /// AIR v2 optimized bodies, filled on first execution of each function.
-    /// Inert unless `ASH_AIR=v2`; see `crate::air`.
+    /// Inert unless `ASH_AIR=v2-serialize`; see `crate::air`.
     air: AirCache,
+    /// AIR v2 SSA bodies executed directly, filled on first execution of each
+    /// function. Inert unless `ASH_AIR=v2`; see `crate::ssa`.
+    ssa: SsaCache,
     /// Map from findex → native array index
     findex_to_native: HashMap<usize, usize>,
     /// Per-native resolved function pointer cache (indexed by native array
@@ -853,6 +871,7 @@ impl HLInterpreter {
             findex_to_func,
             reloaded_bytecode: None,
             air: AirCache::default(),
+            ssa: SsaCache::default(),
             findex_to_native,
             native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
             c_type_factory,
@@ -2586,14 +2605,13 @@ impl HLInterpreter {
                         tiered.beads[findex] = Some(bound);
                         let f = &bytecode.functions[func_idx];
                         if let Some(tf) = bytecode.types[f.type_.0].fun.as_ref() {
-                            let arg_kinds: Arc<[u32]> = tf
-                                .args
-                                .iter()
-                                .map(|a| bytecode.types[a.0].kind)
-                                .collect::<Vec<_>>()
-                                .into();
+                            let mut arg_kinds = [0u32; 8];
+                            let nargs = tf.args.len().min(8);
+                            for (i, a) in tf.args.iter().take(8).enumerate() {
+                                arg_kinds[i] = bytecode.types[a.0].kind;
+                            }
                             let ret_kind = bytecode.types[tf.ret.0].kind;
-                            tiered.sigs[findex] = Some((arg_kinds, ret_kind));
+                            tiered.sigs[findex] = Some((arg_kinds, nargs as u8, ret_kind));
                         }
                     }
                     Err(reason) => {
@@ -2618,16 +2636,20 @@ impl HLInterpreter {
 
         let addr = code as usize;
         let tiered = self.tiered_runtime.as_mut()?;
+        // Steady state: the bead is already compiled and its entry is cached.
+        // This is the path ~10M invocations take, so it must be a compare and a
+        // copy — nothing refcounted, nothing rebuilt.
         if let Some(entry) = tiered.entries[findex].as_ref() {
             if entry.fn_addr == addr {
-                return Some(entry.clone());
+                return Some(*entry);
             }
         }
         // Freshly installed (or newly swapped-in) code.
-        let (arg_kinds, ret_kind) = tiered.sigs[findex].clone()?;
+        let (arg_kinds, nargs, ret_kind) = tiered.sigs[findex]?;
         let entry = CompiledFunctionEntry {
             fn_addr: addr,
             arg_kinds,
+            nargs,
             ret_kind,
         };
         tiered.stats.successful_promotions += 1;
@@ -2746,7 +2768,10 @@ impl HLInterpreter {
         self.sync_gc_scan_roots();
 
         let func_ptr = entry.fn_addr as *mut c_void;
-        let arg_kinds = &entry.arg_kinds;
+        // `args()`, not the raw array: the array is fixed at eight slots and
+        // only the first `nargs` are real. Iterating the whole thing would put
+        // trailing zero kinds into the float mask and misroute the call.
+        let arg_kinds = entry.args();
         let ret_kind = entry.ret_kind;
 
         let is_float_kind = |k: u32| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
@@ -2925,6 +2950,16 @@ impl HLInterpreter {
         // that resolves it below — register count, argument binding, the
         // dispatch loop — sees the same opcode array and the same `pc` means
         // the same instruction throughout the call.
+        //
+        // The SSA form is tried first and is a different shape of body
+        // entirely: a CFG over a value-indexed frame rather than an opcode
+        // array over a register file, so it takes its own entry path. A
+        // function it refuses falls through to the opcode dispatcher below,
+        // which is the reference either way.
+        self.ssa.prepare(bc, func_idx);
+        if let Some(prep) = self.ssa.body(func_idx) {
+            return self.execute_ssa_function(bc, native_resolver, func_idx, prep, args);
+        }
         self.air.prepare(bc, func_idx);
         let func = self.air.body(bc, func_idx);
         if using_reloaded && env_flag!("ASH_DBG_RELOAD") {
@@ -3102,6 +3137,7 @@ impl HLInterpreter {
                                     // functions; a findex may not even be the
                                     // same function in V2.
                                     self.air.invalidate();
+                                    self.ssa.invalidate();
 
                                     let leaked: &'static _ = Box::leak(Box::new(new_bc));
                                     self.reloaded_bytecode = Some(leaked);
@@ -3137,7 +3173,6 @@ impl HLInterpreter {
         func_idx: usize,
     ) -> Result<StepResult> {
         let func = self.air.body(bytecode, func_idx);
-        let fn_hash_gen = self.fn_hash_gen;
         let frame = self.stack.last_mut().unwrap();
 
         match op {
@@ -3416,281 +3451,29 @@ impl HLInterpreter {
                 });
             }
             Opcode::CallMethod { dst, field, args } | Opcode::CallThis { dst, field, args } => {
-                // CallMethod: args[0] is 'this'. CallThis: the receiver is
-                // IMPLICITLY register 0 (HashLink OCallThis semantics) and
-                // args hold only the real arguments — prepend Reg(0), else
-                // method resolution runs against the first argument's type.
-                let args_with_this: Vec<Reg> = if matches!(op, Opcode::CallThis { .. }) {
-                    let mut v = Vec::with_capacity(args.len() + 1);
-                    v.push(Reg(0));
-                    v.extend(args.iter().copied());
-                    v
-                } else {
-                    args.clone()
-                };
-                let args = &args_with_this;
-                let arg_vals: Vec<NanBoxedValue> =
-                    args.iter().map(|r| frame.registers.get(r.0)).collect();
-                let this_val = arg_vals[0];
-
-                if this_val.is_null() || this_val.is_void() {
-                    return Err(anyhow!(
-                        "CallMethod on null object (field={}, pc={})",
-                        field.0,
-                        frame.pc
-                    ));
-                }
-
-                // HVIRTUAL dispatch: ToVirtual is a no-op in the interpreter,
-                // so `this_val` holds the raw HOBJ pointer directly.
-                // Resolve the findex by matching the virtual field's hashed_name
-                // against the runtime object's proto chain.
-                let this_reg_type_idx = func.regs[args[0].0 as usize].0;
-                if this_reg_type_idx < bytecode.types.len()
-                    && bytecode.types[this_reg_type_idx].kind == hl::hl_type_kind_HVIRTUAL
-                {
-                    let virt_type = self.c_type_factory.get(this_reg_type_idx);
-                    let obj_ptr = this_val.as_ptr() as *const u8;
-                    let findex_opt = unsafe {
-                        // Get hashed_name of the virtual field
-                        let virt = (*virt_type).__bindgen_anon_1.virt.as_ref();
-                        if let Some(virt_data) = virt {
-                            if (field.0 as i32) < virt_data.nfields {
-                                let virt_field = &*virt_data.fields.add(field.0);
-                                let hname = virt_field.hashed_name;
-                                // Walk the runtime obj's proto chain for hname
-                                let mut obj_hl_type = *(obj_ptr as *const *mut hl_type);
-                                let mut found = None;
-                                'search: while !obj_hl_type.is_null()
-                                    && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
-                                        || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
-                                {
-                                    let obj = (*obj_hl_type).__bindgen_anon_1.obj;
-                                    for i in 0..(*obj).nproto as usize {
-                                        let pr = &*(*obj).proto.add(i);
-                                        if pr.hashed_name == hname {
-                                            found = Some(pr.findex as usize);
-                                            break 'search;
-                                        }
-                                    }
-                                    // Try super class
-                                    obj_hl_type = (*obj).super_ as *mut hl_type;
-                                }
-                                found
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(findex) = findex_opt {
-                        return Ok(StepResult::Call {
-                            findex,
-                            args: arg_vals,
-                            dst: dst.0,
-                        });
-                    }
-                }
-
-                // Try to resolve via vobj_proto (set up by hlp_get_obj_proto)
-                let obj_ptr = this_val.as_ptr() as *const u8;
-                let findex = unsafe {
-                    let type_ptr = *(obj_ptr as *const *mut hl_type);
-                    if !type_ptr.is_null() {
-                        let vobj_proto = (*type_ptr).vobj_proto;
-                        if !vobj_proto.is_null() && vobj_proto as usize > 1 {
-                            let method_ptr = *vobj_proto.add(field.0);
-                            // Extract findex from stub pointer (findex+1)
-                            (method_ptr as usize).wrapping_sub(1)
-                        } else {
-                            // Fallback: resolve from bytecode type proto
-                            self.resolve_method_findex_from_bytecode(
-                                bytecode, func, &args[0], field.0,
-                            )
-                            .ok_or_else(|| {
-                                anyhow!("Cannot resolve method field={} on type", field.0)
-                            })?
-                        }
-                    } else {
-                        self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field.0)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "Cannot resolve method field={} (null type header)",
-                                    field.0
-                                )
-                            })?
-                    }
-                };
-
-                return Ok(StepResult::Call {
-                    findex,
-                    args: arg_vals,
-                    dst: dst.0,
-                });
+                return self.op_call_method(
+                    bytecode,
+                    func,
+                    func_idx,
+                    matches!(op, Opcode::CallThis { .. }),
+                    dst.0,
+                    field.0,
+                    args,
+                );
             }
             Opcode::CallClosure { dst, fun, args } => {
-                let closure_val = frame.registers.get(fun.0);
-                let mut arg_vals: Vec<NanBoxedValue> =
-                    args.iter().map(|r| frame.registers.get(r.0)).collect();
-
-                if closure_val.is_null() || closure_val.is_void() {
-                    return Err(anyhow!("CallClosure on null closure (pc={})", frame.pc));
-                }
-
-                // The closure value might be:
-                // 1. A TAG_FUNC: raw function index (from StaticClosure with no capture)
-                // 2. A TAG_PTR to a _vclosure struct (InstanceClosure with bound value)
-                let findex = if closure_val.is_func() {
-                    closure_val.as_func_index()
-                } else {
-                    let raw = closure_val.as_ptr();
-                    if self.findex_to_func.contains_key(&raw)
-                        || self.findex_to_native.contains_key(&raw)
-                    {
-                        raw
-                    } else {
-                        // It's a pointer to a _vclosure struct
-                        let cl_ptr = raw as *const _vclosure;
-                        if cl_ptr.is_null()
-                            || !(cl_ptr as usize).is_multiple_of(std::mem::align_of::<_vclosure>())
-                        {
-                            return Err(anyhow!(
-                                "CallClosure invalid closure value: {:?}",
-                                closure_val
-                            ));
-                        }
-                        unsafe {
-                            let fun_ptr = (*cl_ptr).fun;
-                            // Extract findex from stub pointer (findex+1)
-                            let fi = (fun_ptr as usize).wrapping_sub(1);
-                            // If the closure has a bound value, prepend it as the first arg
-                            if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
-                                let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
-                                arg_vals.insert(0, bound);
-                            }
-                            fi
-                        }
-                    }
-                };
-
-                return Ok(StepResult::Call {
-                    findex,
-                    args: arg_vals,
-                    dst: dst.0,
-                });
+                return self.op_call_closure(bytecode, func, func_idx, dst.0, fun.0, args);
             }
 
             // ===== Closures =====
             Opcode::StaticClosure { dst, fun } => {
-                // Materialize a real vclosure* so std natives such as
-                // hl.Api.noClosure / Reflect.callMethod can consume it.
-                let findex = fun.0;
-                let type_idx = if let Some(&fidx) = self.findex_to_func.get(&findex) {
-                    bytecode.functions[fidx].type_.0
-                } else if let Some(&nidx) = self.findex_to_native.get(&findex) {
-                    bytecode.natives[nidx].type_.0
-                } else {
-                    usize::MAX
-                };
-
-                if type_idx != usize::MAX && !self.fn_alloc_closure_void.is_null() {
-                    type FnAllocClosureVoid =
-                        unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut _vclosure;
-                    let f: FnAllocClosureVoid =
-                        unsafe { std::mem::transmute(self.fn_alloc_closure_void) };
-                    let tptr = self.c_type_factory.get(type_idx) as *mut c_void;
-                    let closure = unsafe { f(tptr, (findex + 1) as *mut c_void) };
-                    if !closure.is_null() {
-                        if env_flag!("ASH_DBG_CLOSURE") {
-                            eprintln!(
-                                "[STATICCLOSURE] findex={} type_idx={} -> {:p}",
-                                findex, type_idx, closure
-                            );
-                        }
-                        frame
-                            .registers
-                            .set(dst.0, NanBoxedValue::from_ptr(closure as usize));
-                        return Ok(StepResult::Continue);
-                    }
-                }
-
-                // Fallback to interpreter-local representation.
-                if env_flag!("ASH_DBG_CLOSURE") {
-                    eprintln!(
-                        "[STATICCLOSURE-FALLBACK] findex={} type_idx={} alloc_fn={:p}",
-                        findex, type_idx, self.fn_alloc_closure_void
-                    );
-                }
-                frame
-                    .registers
-                    .set(dst.0, NanBoxedValue::from_func_index(findex));
+                return self.op_static_closure(bytecode, func, func_idx, dst.0, fun.0);
             }
             Opcode::InstanceClosure { dst, fun, obj } => {
-                // Create a _vclosure with the bound object. The closure's fun
-                // pointer is the stub sentinel (findex+1) so that CallClosure
-                // can extract the findex. The bound object is stored in
-                // vclosure.value and prepended as the first argument on CallClosure.
-                let obj_val = frame.registers.get(obj.0);
-                let obj_ptr = if obj_val.is_null() || obj_val.is_void() {
-                    std::ptr::null_mut()
-                } else {
-                    obj_val.as_ptr() as *mut std::ffi::c_void
-                };
-                let closure_type = self.c_type_factory.get(func.regs[dst.0 as usize].0);
-                let value = unsafe {
-                    Self::alloc_bound_closure(
-                        self.fn_alloc_closure_ptr,
-                        closure_type,
-                        fun.0,
-                        obj_ptr,
-                    )
-                };
-                frame.registers.set(dst.0, value);
+                return self.op_instance_closure(bytecode, func, func_idx, dst.0, fun.0, obj.0);
             }
             Opcode::VirtualClosure { dst, obj, field } => {
-                // Resolve the virtual method findex from the object's proto chain,
-                // then create a vclosure with the object as bound value.
-                let obj_val = frame.registers.get(obj.0);
-                if obj_val.is_null() || obj_val.is_void() {
-                    frame.registers.set(dst.0, NanBoxedValue::null());
-                } else {
-                    let obj_ptr = obj_val.as_ptr() as *const u8;
-                    // The virtual field index into the interface's field table
-                    // We need to look up the method findex from the object's runtime type.
-                    // For now, look up via the object's proto chain by field index.
-                    let findex_opt: Option<usize> = unsafe {
-                        let obj_hl_type = *(obj_ptr as *const *mut hl::hl_type);
-                        if !obj_hl_type.is_null()
-                            && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
-                                || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
-                        {
-                            let obj_data = (*obj_hl_type).__bindgen_anon_1.obj;
-                            let fi = field.0 as usize;
-                            if fi < (*obj_data).nproto as usize {
-                                Some((*(*obj_data).proto.add(fi)).findex as usize)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some(findex) = findex_opt {
-                        let closure_type = self.c_type_factory.get(func.regs[dst.0 as usize].0);
-                        let value = unsafe {
-                            Self::alloc_bound_closure(
-                                self.fn_alloc_closure_ptr,
-                                closure_type,
-                                findex,
-                                obj_val.as_ptr() as *mut std::ffi::c_void,
-                            )
-                        };
-                        frame.registers.set(dst.0, value);
-                    } else {
-                        frame.registers.set(dst.0, NanBoxedValue::null());
-                    }
-                }
+                return self.op_virtual_closure(bytecode, func, func_idx, dst.0, obj.0, field.0);
             }
 
             // ===== Globals =====
@@ -3737,102 +3520,7 @@ impl HLInterpreter {
 
             // ===== Fields =====
             Opcode::Field { dst, obj, field } => {
-                // Extract c_type info before borrowing frame mutably
-                let obj_type_idx = func.regs[obj.0 as usize].0;
-                let obj_kind = bytecode.types[obj_type_idx].kind;
-                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
-                let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
-                let get_rt = self.fn_get_obj_rt;
-                let obj_val = frame.registers.get(obj.0);
-                if env_flag!("ASH_DBG_FIELD") {
-                    eprintln!(
-                        "[FIELD] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} obj={:?}",
-                        func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, obj_val
-                    );
-                }
-                if obj_val.is_null() || obj_val.is_void() {
-                    frame.registers.set(dst.0, NanBoxedValue::null());
-                } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT
-                {
-                    let obj_ptr = obj_val.as_ptr() as *mut u8;
-                    let val = unsafe {
-                        Self::read_obj_field(
-                            obj_ptr, field.0, dst_kind, obj_c_type, obj_kind, get_rt,
-                        )
-                    };
-                    if env_flag!("ASH_DBG_FIELD") {
-                        eprintln!(
-                            "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
-                            func_idx, frame.pc, obj_type_idx, obj_kind, field.0, dst_kind, val
-                        );
-                    }
-                    frame.registers.set(dst.0, val);
-                } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                    if let Some(offset) =
-                        unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
-                    {
-                        let obj_ptr = obj_val.as_ptr() as *mut u8;
-                        let addr = unsafe { obj_ptr.add(offset) };
-                        let val = unsafe { Self::read_value_at(addr, dst_kind) };
-                        if env_flag!("ASH_DBG_FIELD") {
-                            eprintln!(
-                                "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
-                                func_idx, frame.pc, obj_type_idx, field.0, offset, dst_kind, val
-                            );
-                        }
-                        frame.registers.set(dst.0, val);
-                    } else {
-                        let key = (obj_val.as_ptr(), field.0);
-                        let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
-                            v
-                        } else if let Some(hfield) =
-                            Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
-                        {
-                            let dst_type_idx = func.regs[dst.0 as usize].0;
-                            let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                            Self::dyn_get_field_by_hash(
-                                obj_val.as_ptr() as *mut c_void,
-                                hfield,
-                                dst_kind,
-                                dst_type_ptr,
-                                self.fn_dyn_getd,
-                                self.fn_dyn_getf,
-                                self.fn_dyn_geti64,
-                                self.fn_dyn_geti,
-                                self.fn_dyn_getp,
-                            )
-                        } else {
-                            NanBoxedValue::null()
-                        };
-                        if env_flag!("ASH_DBG_FIELD") {
-                            eprintln!(
-                                "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
-                                func_idx, frame.pc, obj_type_idx, field.0, val
-                            );
-                        }
-                        frame.registers.set(dst.0, val);
-                    }
-                } else if let Some(hfield) =
-                    Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
-                {
-                    let obj_ptr = obj_val.as_ptr() as *mut c_void;
-                    let dst_type_idx = func.regs[dst.0 as usize].0;
-                    let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                    let out = Self::dyn_get_field_by_hash(
-                        obj_ptr,
-                        hfield,
-                        dst_kind,
-                        dst_type_ptr,
-                        self.fn_dyn_getd,
-                        self.fn_dyn_getf,
-                        self.fn_dyn_geti64,
-                        self.fn_dyn_geti,
-                        self.fn_dyn_getp,
-                    );
-                    frame.registers.set(dst.0, out);
-                } else {
-                    frame.registers.set(dst.0, NanBoxedValue::null());
-                }
+                return self.op_field_get(bytecode, func, func_idx, dst.0, obj.0, field.0);
             }
             Opcode::GetThis { dst, field } => {
                 let obj_type_idx = func.regs[0].0;
@@ -3926,103 +3614,7 @@ impl HLInterpreter {
                 }
             }
             Opcode::SetField { obj, field, src } => {
-                let obj_type_idx = func.regs[obj.0 as usize].0;
-                let obj_kind = bytecode.types[obj_type_idx].kind;
-                let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
-                let src_type_idx = func.regs[src.0 as usize].0;
-                let src_kind = bytecode.types[src_type_idx].kind;
-                let get_rt = self.fn_get_obj_rt;
-                let obj_val = frame.registers.get(obj.0);
-                if env_flag!("ASH_DBG_FIELD") {
-                    eprintln!(
-                        "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
-                        func_idx,
-                        frame.pc,
-                        obj_type_idx,
-                        obj_kind,
-                        field.0,
-                        src_type_idx,
-                        src_kind,
-                        obj_val,
-                        frame.registers.get(src.0)
-                    );
-                }
-                if !obj_val.is_null() && !obj_val.is_void() {
-                    let src_val = frame.registers.get(src.0);
-                    if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
-                        let obj_ptr = obj_val.as_ptr() as *mut u8;
-                        if env_flag!("ASH_DBG_FIELD") {
-                            eprintln!(
-                                "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
-                                func_idx, frame.pc, obj_type_idx, obj_kind, field.0, src_kind, src_val
-                            );
-                        }
-                        unsafe {
-                            Self::write_obj_field(
-                                obj_ptr, field.0, src_kind, src_val, obj_c_type, obj_kind, get_rt,
-                            );
-                        }
-                    } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                        if let Some(offset) =
-                            unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
-                        {
-                            let obj_ptr = obj_val.as_ptr() as *mut u8;
-                            let addr = unsafe { obj_ptr.add(offset) };
-                            if env_flag!("ASH_DBG_FIELD") {
-                                eprintln!(
-                                    "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
-                                    func_idx, frame.pc, obj_type_idx, field.0, offset, src_kind, src_val
-                                );
-                            }
-                            unsafe { Self::write_value_at(addr, src_kind, src_val) };
-                        } else {
-                            self.virtual_fields
-                                .insert((obj_val.as_ptr(), field.0), src_val);
-                            if let Some(hfield) =
-                                Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
-                            {
-                                let obj_ptr = obj_val.as_ptr() as *mut c_void;
-                                let src_type_ptr =
-                                    self.c_type_factory.get(src_type_idx) as *mut c_void;
-                                Self::dyn_set_field_by_hash(
-                                    obj_ptr,
-                                    hfield,
-                                    src_val,
-                                    src_kind,
-                                    src_type_ptr,
-                                    self.fn_dyn_setd,
-                                    self.fn_dyn_setf,
-                                    self.fn_dyn_seti64,
-                                    self.fn_dyn_seti,
-                                    self.fn_dyn_setp,
-                                );
-                            }
-                            if env_flag!("ASH_DBG_FIELD") {
-                                eprintln!(
-                                    "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
-                                    func_idx, frame.pc, obj_type_idx, field.0, src_val
-                                );
-                            }
-                        }
-                    } else if let Some(hfield) =
-                        Self::resolve_typed_field_hash(bytecode, obj_type_idx, field.0)
-                    {
-                        let obj_ptr = obj_val.as_ptr() as *mut c_void;
-                        let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                        Self::dyn_set_field_by_hash(
-                            obj_ptr,
-                            hfield,
-                            src_val,
-                            src_kind,
-                            src_type_ptr,
-                            self.fn_dyn_setd,
-                            self.fn_dyn_setf,
-                            self.fn_dyn_seti64,
-                            self.fn_dyn_seti,
-                            self.fn_dyn_setp,
-                        );
-                    }
-                }
+                return self.op_field_set(bytecode, func, func_idx, obj.0, field.0, src.0);
             }
             Opcode::SetThis { field, src } => {
                 let obj_type_idx = func.regs[0].0;
@@ -4110,93 +3702,10 @@ impl HLInterpreter {
                 }
             }
             Opcode::DynGet { dst, obj, field } => {
-                let obj_val = frame.registers.get(obj.0);
-                if obj_val.is_null() || obj_val.is_void() {
-                    frame.registers.set(dst.0, NanBoxedValue::null());
-                } else {
-                    let hfield = hash_field_name(
-                        bytecode,
-                        field.0,
-                        fn_hash_gen,
-                        &mut self.utf16_strings,
-                        &mut self.field_hash_cache,
-                    )?;
-                    if env_flag!("ASH_DBG_DYN") {
-                        let fname = bytecode
-                            .strings
-                            .get(field.0)
-                            .map(String::as_str)
-                            .unwrap_or("<oob>");
-                        eprintln!(
-                            "[DYNGET] f{} pc={} obj={:?} field={} name={} hash={}",
-                            func_idx, frame.pc, obj_val, field.0, fname, hfield
-                        );
-                    }
-                    let obj_ptr = obj_val.as_ptr() as *mut c_void;
-                    let dst_type_idx = func.regs[dst.0 as usize].0;
-                    let dst_kind = bytecode.types[dst_type_idx].kind;
-                    let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                    let out = Self::dyn_get_field_by_hash(
-                        obj_ptr,
-                        hfield,
-                        dst_kind,
-                        dst_type_ptr,
-                        self.fn_dyn_getd,
-                        self.fn_dyn_getf,
-                        self.fn_dyn_geti64,
-                        self.fn_dyn_geti,
-                        self.fn_dyn_getp,
-                    );
-                    if env_flag!("ASH_DBG_DYN") {
-                        eprintln!(
-                            "[DYNGET] f{} pc={} dst_kind={} -> {:?}",
-                            func_idx, frame.pc, dst_kind, out
-                        );
-                    }
-                    frame.registers.set(dst.0, out);
-                }
+                return self.op_dyn_get(bytecode, func, func_idx, dst.0, obj.0, field.0);
             }
             Opcode::DynSet { obj, field, src } => {
-                let obj_val = frame.registers.get(obj.0);
-                if obj_val.is_null() || obj_val.is_void() {
-                    // no-op
-                } else {
-                    let hfield = hash_field_name(
-                        bytecode,
-                        field.0,
-                        fn_hash_gen,
-                        &mut self.utf16_strings,
-                        &mut self.field_hash_cache,
-                    )?;
-                    let obj_ptr = obj_val.as_ptr() as *mut c_void;
-                    let src_val = frame.registers.get(src.0);
-                    let src_type_idx = func.regs[src.0 as usize].0;
-                    let src_kind = bytecode.types[src_type_idx].kind;
-                    if env_flag!("ASH_DBG_DYN") {
-                        let fname = bytecode
-                            .strings
-                            .get(field.0)
-                            .map(String::as_str)
-                            .unwrap_or("<oob>");
-                        eprintln!(
-                            "[DYNSET] f{} pc={} obj={:?} field={} name={} hash={} src_ty={} src_kind={} src={:?}",
-                            func_idx, frame.pc, obj_val, field.0, fname, hfield, src_type_idx, src_kind, src_val
-                        );
-                    }
-                    let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                    Self::dyn_set_field_by_hash(
-                        obj_ptr,
-                        hfield,
-                        src_val,
-                        src_kind,
-                        src_type_ptr,
-                        self.fn_dyn_setd,
-                        self.fn_dyn_setf,
-                        self.fn_dyn_seti64,
-                        self.fn_dyn_seti,
-                        self.fn_dyn_setp,
-                    );
-                }
+                return self.op_dyn_set(bytecode, func, func_idx, obj.0, field.0, src.0);
             }
 
             // ===== Conditional Jumps =====
@@ -4361,53 +3870,7 @@ impl HLInterpreter {
 
             // ===== Casting =====
             Opcode::ToDyn { dst, src } => {
-                // Box a value into a vdynamic* for native code consumption.
-                // Pointer types (HOBJ, HDYN, etc.) already have a vdynamic header - pass through.
-                // Primitive types (HI32, HF64, HBOOL, HBYTES) need hlp_make_dyn wrapping.
-                let src_type_ref = &func.regs[src.0 as usize];
-                let src_kind = bytecode.types[src_type_ref.0].kind;
-                let val = frame.registers.get(src.0);
-
-                let needs_boxing = matches!(
-                    src_kind,
-                    hl::hl_type_kind_HI32
-                        | hl::hl_type_kind_HI64
-                        | hl::hl_type_kind_HF32
-                        | hl::hl_type_kind_HF64
-                        | hl::hl_type_kind_HBOOL
-                        | hl::hl_type_kind_HBYTES
-                        | hl::hl_type_kind_HUI8
-                        | hl::hl_type_kind_HUI16
-                );
-
-                if needs_boxing && !self.fn_make_dyn.is_null() {
-                    let c_type_ptr = self.c_type_factory.get(src_type_ref.0);
-                    // Create a stack slot holding the raw value for hlp_make_dyn
-                    let mut data: i64 = if val.is_i32() {
-                        val.as_i32() as i64
-                    } else if val.is_f64() {
-                        val.as_f64().to_bits() as i64
-                    } else if val.is_bool() {
-                        val.as_bool() as i64
-                    } else {
-                        // Pointer-like (HBYTES, etc.)
-                        val.as_ptr() as i64
-                    };
-                    let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
-                        unsafe { std::mem::transmute(self.fn_make_dyn) };
-                    let dyn_ptr = unsafe {
-                        make_dyn(
-                            &mut data as *mut i64 as *mut c_void,
-                            c_type_ptr as *mut c_void,
-                        )
-                    };
-                    frame
-                        .registers
-                        .set(dst.0, NanBoxedValue::from_ptr(dyn_ptr as usize));
-                } else {
-                    // Already a pointer type with vdynamic header, or no make_dyn available
-                    frame.registers.set(dst.0, val);
-                }
+                return self.op_to_dyn(bytecode, func, func_idx, dst.0, src.0);
             }
             Opcode::ToSFloat { dst, src } => {
                 let val = frame.registers.get(src.0);
@@ -4437,202 +3900,7 @@ impl HLInterpreter {
                 frame.registers.set(dst.0, NanBoxedValue::from_i32(i));
             }
             Opcode::SafeCast { dst, src } => {
-                let val = frame.registers.get(src.0);
-                let dst_type_idx = func.regs[dst.0 as usize].0;
-                let dst_kind = bytecode.types[dst_type_idx].kind;
-
-                let result = if val.is_null() || val.is_void() {
-                    match dst_kind {
-                        hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
-                            NanBoxedValue::from_i32(0)
-                        }
-                        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
-                        hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
-                            NanBoxedValue::from_f64(0.0)
-                        }
-                        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
-                        _ => val,
-                    }
-                } else if val.is_ptr() && val.as_ptr() != 0 {
-                    if Self::is_unboxable_primitive_kind(dst_kind) {
-                        // Primitive destination: unbox from vdynamic
-                        unsafe {
-                            Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
-                                .unwrap_or(val)
-                        }
-                    } else {
-                        let src_type_idx = func.regs[src.0 as usize].0;
-                        let src_kind = bytecode.types[src_type_idx].kind;
-
-                        if (src_kind == hl::hl_type_kind_HDYN || src_kind == hl::hl_type_kind_HNULL)
-                            && !self.fn_dyn_castp.is_null()
-                        {
-                            // HDYN/HNULL → concrete type: use hlp_dyn_castp
-                            let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                            let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
-                            type FnCastp = unsafe extern "C" fn(
-                                *mut c_void,
-                                *mut c_void,
-                                *mut c_void,
-                            )
-                                -> *mut c_void;
-                            let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
-                            let mut data = val.as_ptr() as *mut c_void;
-                            let result_ptr = unsafe {
-                                castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
-                            };
-                            if result_ptr.is_null() {
-                                NanBoxedValue::null()
-                            } else {
-                                NanBoxedValue::from_ptr(result_ptr as usize)
-                            }
-                        } else {
-                            // For HOBJ→HOBJ: call hlp_dyn_castp for type-safe cast
-                            // (validates supertype chain, returns null on mismatch).
-                            // For other pointer casts: plain copy.
-                            let src_type_idx = func.regs[src.0 as usize].0;
-                            let src_kind = bytecode.types[src_type_idx].kind;
-
-                            {
-                                // Debug: trace HOBJ→HOBJ super chain
-                                if src_kind == hl::hl_type_kind_HOBJ
-                                    && dst_kind == hl::hl_type_kind_HOBJ
-                                    && val.as_ptr() > 0x10000
-                                    && env_flag!("ASH_DBG_CAST")
-                                {
-                                    static CAST_COUNT: std::sync::atomic::AtomicU32 =
-                                        std::sync::atomic::AtomicU32::new(0);
-                                    let c = CAST_COUNT
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    if c >= 9 && c < 12 {
-                                        // trace casts #9+
-                                        let obj_ptr = val.as_ptr() as *const hl::vdynamic;
-                                        let header_t = unsafe { (*obj_ptr).t };
-                                        let dst_c = self.c_type_factory.get(dst_type_idx);
-                                        eprintln!(
-                                            "[SafeCast-HOBJ#{}] src_tidx={} dst_tidx={} header={:p} dst_c={:p}",
-                                            c, src_type_idx, dst_type_idx, header_t, dst_c
-                                        );
-                                        if !header_t.is_null() && (header_t as usize) >= 0x10000 {
-                                            unsafe {
-                                                let mut cur = header_t;
-                                                for d in 0..8 {
-                                                    if cur.is_null() || (cur as usize) < 0x10000 {
-                                                        break;
-                                                    }
-                                                    let k = (*cur).kind;
-                                                    if k != hl::hl_type_kind_HOBJ {
-                                                        eprintln!("  [{d}] kind={k} (not HOBJ)");
-                                                        break;
-                                                    }
-                                                    let obj = (*cur).__bindgen_anon_1.obj;
-                                                    if obj.is_null() || (obj as usize) < 0x10000 {
-                                                        eprintln!("  [{d}] obj={obj:p} (invalid)");
-                                                        break;
-                                                    }
-                                                    let name_ptr = (*obj).name;
-                                                    let name = if !name_ptr.is_null()
-                                                        && (name_ptr as usize) > 0x10000
-                                                    {
-                                                        let mut len = 0;
-                                                        while *name_ptr.add(len) != 0 && len < 100 {
-                                                            len += 1;
-                                                        }
-                                                        String::from_utf16_lossy(
-                                                            std::slice::from_raw_parts(
-                                                                name_ptr, len,
-                                                            ),
-                                                        )
-                                                    } else {
-                                                        "?".into()
-                                                    };
-                                                    let sup = (*obj).super_;
-                                                    eprintln!("  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}");
-                                                    if sup.is_null() || (sup as usize) < 0x10000 {
-                                                        break;
-                                                    }
-                                                    cur = sup;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                // For HOBJ→HOBJ SafeCast: check if source has __cast proto.
-                                // In the interpreter, castFun can't be called (it's a stub
-                                // pointer), so we call the __cast bytecode function directly.
-                                if src_kind == hl::hl_type_kind_HOBJ
-                                    && dst_kind == hl::hl_type_kind_HOBJ
-                                {
-                                    // Look up __cast proto findex from the object's runtime type
-                                    let obj_ptr = val.as_ptr() as *const hl::vdynamic;
-                                    let header_t = unsafe { (*obj_ptr).t };
-                                    let cast_findex = if !header_t.is_null()
-                                        && (header_t as usize) >= 0x10000
-                                        && unsafe { (*header_t).kind } == hl::hl_type_kind_HOBJ
-                                    {
-                                        unsafe {
-                                            let obj_t = (*header_t).__bindgen_anon_1.obj;
-                                            if !obj_t.is_null() && (obj_t as usize) >= 0x10000 {
-                                                // Hash "__cast" using same algorithm as hlp_hash_gen
-                                                let cast_hash = {
-                                                    let chars: &[u16] =
-                                                        &[0x5F, 0x5F, 0x63, 0x61, 0x73, 0x74]; // __cast
-                                                    let mut h: i32 = 0;
-                                                    for &c in chars {
-                                                        h = h
-                                                            .wrapping_mul(223)
-                                                            .wrapping_add(c as i32);
-                                                    }
-                                                    h.wrapping_rem(0x1FFFFF7B)
-                                                };
-                                                // Search proto array in hl_type_obj
-                                                let mut found: Option<usize> = None;
-                                                let nproto = (*obj_t).nproto;
-                                                let proto_ptr = (*obj_t).proto;
-                                                if !proto_ptr.is_null()
-                                                    && (proto_ptr as usize) >= 0x10000
-                                                {
-                                                    for i in 0..nproto as usize {
-                                                        let proto = &*proto_ptr.add(i);
-                                                        if proto.hashed_name == cast_hash {
-                                                            found = Some(proto.findex as usize);
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                found
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    };
-
-                                    if let Some(findex) = cast_findex {
-                                        // Call __cast(obj, dst_type) via StepResult::Call
-                                        let dst_c_type = self.c_type_factory.get(dst_type_idx);
-                                        let type_val = NanBoxedValue::from_ptr(dst_c_type as usize);
-                                        // Store args in registers and dispatch as a call
-                                        frame.registers.set(dst.0, val); // temp: store obj in dst
-                                        return Ok(StepResult::Call {
-                                            findex,
-                                            args: vec![val, type_val],
-                                            dst: dst.0,
-                                        });
-                                    } else {
-                                        val // no __cast, just copy
-                                    }
-                                } else {
-                                    val // non-HOBJ cast, just copy
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    val
-                };
-                frame.registers.set(dst.0, result);
+                return self.op_safe_cast(bytecode, func, func_idx, dst.0, src.0);
             }
             Opcode::UnsafeCast { dst, src } => {
                 let val = frame.registers.get(src.0);
@@ -4646,277 +3914,15 @@ impl HLInterpreter {
 
             // ===== Object Creation =====
             Opcode::New { dst } => {
-                let type_idx = func.regs[dst.0 as usize].0;
-                let type_kind = bytecode.types[type_idx].kind;
-                let c_type_ptr = self.c_type_factory.get(type_idx);
-
-                let obj = match type_kind {
-                    hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
-                        if c_type_ptr.is_null() || self.fn_alloc_obj.is_null() {
-                            std::ptr::null_mut()
-                        } else {
-                            let f: FnAllocObj = unsafe { std::mem::transmute(self.fn_alloc_obj) };
-                            unsafe { f(c_type_ptr as *mut c_void) }
-                        }
-                    }
-                    hl::hl_type_kind_HDYNOBJ => {
-                        if self.fn_alloc_dynobj.is_null() {
-                            std::ptr::null_mut()
-                        } else {
-                            let f: FnAllocDynObj =
-                                unsafe { std::mem::transmute(self.fn_alloc_dynobj) };
-                            unsafe { f() }
-                        }
-                    }
-                    hl::hl_type_kind_HVIRTUAL => {
-                        if c_type_ptr.is_null() || self.fn_alloc_virtual.is_null() {
-                            std::ptr::null_mut()
-                        } else {
-                            let f: FnAllocVirtual =
-                                unsafe { std::mem::transmute(self.fn_alloc_virtual) };
-                            unsafe { f(c_type_ptr as *mut c_void) }
-                        }
-                    }
-                    _ => std::ptr::null_mut(),
-                };
-
-                if obj.is_null() {
-                    frame.registers.set(dst.0, NanBoxedValue::null());
-                } else {
-                    frame
-                        .registers
-                        .set(dst.0, NanBoxedValue::from_ptr(obj as usize));
-                }
+                return self.op_new(bytecode, func, func_idx, dst.0);
             }
 
             // ===== Array Operations =====
             Opcode::GetArray { dst, array, index } => {
-                let arr_val = frame.registers.get(array.0);
-                let idx = frame.registers.get(index.0).as_i32().max(0) as usize;
-                let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
-                let val = if arr_val.is_null() || arr_val.is_void() {
-                    NanBoxedValue::null()
-                } else if !arr_val.is_ptr() {
-                    return Err(anyhow!(
-                        "GetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
-                        array.0,
-                        func.name(),
-                        frame.pc,
-                        arr_val,
-                        bytecode.types[func.regs[array.0 as usize].0].kind
-                    ));
-                } else {
-                    // varray: t@0, at@8, size@16, data@24
-                    let arr_ptr = arr_val.as_ptr() as *const u8;
-                    if (arr_ptr as usize) < 0x1000
-                        || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
-                    {
-                        static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 =
-                            std::sync::atomic::AtomicU32::new(0);
-                        let c = BAD_ARR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if c == 0 || c == 100 || c == 10000 {
-                            eprintln!(
-                                "[WARN] GetArray invalid ptr={:#x} count={} in {} pc={}",
-                                arr_ptr as usize,
-                                c + 1,
-                                func.name(),
-                                frame.pc
-                            );
-                        }
-                        frame.registers.set(dst.0, NanBoxedValue::null());
-                        self.stack.last_mut().unwrap().pc += 1;
-                        return Ok(StepResult::Continue);
-                    }
-                    unsafe {
-                        let size = *(arr_ptr.add(16) as *const i32);
-                        if idx >= size.max(0) as usize {
-                            return Err(anyhow!(
-                                "GetArray: index {} out of bounds (size={}) in {} at pc={} arr=r{} val={:?}",
-                                idx,
-                                size,
-                                func.name(),
-                                frame.pc,
-                                array.0,
-                                arr_val
-                            ));
-                        }
-                        let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null()
-                            && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>())
-                        {
-                            return Err(anyhow!(
-                                "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
-                                at,
-                                func.name(),
-                                frame.pc,
-                                array.0,
-                                arr_val,
-                                idx,
-                                frame.registers.get(4),
-                                frame.registers.get(6),
-                                frame.registers.get(16)
-                            ));
-                        }
-                        let at_kind = if at.is_null() {
-                            hl::hl_type_kind_HDYN
-                        } else {
-                            (*at).kind
-                        };
-                        let data = arr_ptr.add(24);
-                        match at_kind {
-                            k if k == hl::hl_type_kind_HUI8 => {
-                                NanBoxedValue::from_i32(*data.add(idx) as i32)
-                            }
-                            k if k == hl::hl_type_kind_HUI16 => {
-                                NanBoxedValue::from_i32(*(data.add(idx * 2) as *const u16) as i32)
-                            }
-                            k if k == hl::hl_type_kind_HBOOL => {
-                                NanBoxedValue::from_bool(*(data.add(idx * 2) as *const u16) != 0)
-                            }
-                            k if k == hl::hl_type_kind_HI32 => {
-                                NanBoxedValue::from_i32(*(data.add(idx * 4) as *const i32))
-                            }
-                            k if k == hl::hl_type_kind_HI64 => {
-                                NanBoxedValue::from_i64(*(data.add(idx * 8) as *const i64))
-                            }
-                            k if k == hl::hl_type_kind_HF32 => {
-                                NanBoxedValue::from_f64(*(data.add(idx * 4) as *const f32) as f64)
-                            }
-                            k if k == hl::hl_type_kind_HF64 => {
-                                NanBoxedValue::from_f64(*(data.add(idx * 8) as *const f64))
-                            }
-                            k => {
-                                let ptr_val = *(data.add(idx * 8) as *const usize);
-                                if ptr_val == 0 {
-                                    match dst_kind {
-                                        hl::hl_type_kind_HI32
-                                        | hl::hl_type_kind_HUI8
-                                        | hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(0),
-                                        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
-                                        hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
-                                            NanBoxedValue::from_f64(0.0)
-                                        }
-                                        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
-                                        _ => NanBoxedValue::null(),
-                                    }
-                                } else if (k == hl::hl_type_kind_HDYN
-                                    || k == hl::hl_type_kind_HNULL)
-                                    && Self::is_primitive_or_bytes_kind(dst_kind)
-                                {
-                                    Self::unbox_dynamic_to_kind(
-                                        ptr_val as *mut hl::vdynamic,
-                                        dst_kind,
-                                    )
-                                    .unwrap_or_else(|| NanBoxedValue::from_ptr(ptr_val))
-                                } else {
-                                    NanBoxedValue::from_ptr(ptr_val)
-                                }
-                            }
-                        }
-                    }
-                };
-                frame.registers.set(dst.0, val);
+                return self.op_get_array(bytecode, func, func_idx, dst.0, array.0, index.0);
             }
             Opcode::SetArray { array, index, src } => {
-                let arr_val = frame.registers.get(array.0);
-                let idx = frame.registers.get(index.0).as_i32().max(0) as usize;
-                let src_val = frame.registers.get(src.0);
-                if !arr_val.is_null() && !arr_val.is_void() {
-                    if !arr_val.is_ptr() {
-                        return Err(anyhow!(
-                            "SetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
-                            array.0,
-                            func.name(),
-                            frame.pc,
-                            arr_val,
-                            bytecode.types[func.regs[array.0 as usize].0].kind
-                        ));
-                    }
-                    let arr_ptr = arr_val.as_ptr() as *mut u8;
-                    unsafe {
-                        let size = *(arr_ptr.add(16) as *const i32);
-                        if idx >= size.max(0) as usize {
-                            return Err(anyhow!(
-                                "SetArray: index {} out of bounds (size={}) in {} at pc={} (arr=r{} val={:?} src={:?})",
-                                idx,
-                                size,
-                                func.name(),
-                                frame.pc,
-                                array.0,
-                                arr_val,
-                                src_val
-                            ));
-                        }
-                        let at = *(arr_ptr.add(8) as *const *mut hl_type);
-                        if !at.is_null()
-                            && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>())
-                        {
-                            return Err(anyhow!(
-                                "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
-                                at,
-                                func.name(),
-                                frame.pc,
-                                array.0,
-                                arr_val,
-                                idx,
-                                src_val,
-                                frame.registers.get(4),
-                                frame.registers.get(6),
-                                frame.registers.get(16)
-                            ));
-                        }
-                        let at_kind = if at.is_null() {
-                            hl::hl_type_kind_HDYN
-                        } else {
-                            (*at).kind
-                        };
-                        let data = arr_ptr.add(24);
-                        match at_kind {
-                            k if k == hl::hl_type_kind_HUI8 => {
-                                *data.add(idx) = src_val.as_i32() as u8
-                            }
-                            k if k == hl::hl_type_kind_HUI16 => {
-                                *(data.add(idx * 2) as *mut u16) = src_val.as_i32() as u16
-                            }
-                            k if k == hl::hl_type_kind_HBOOL => {
-                                *(data.add(idx * 2) as *mut u16) = src_val.as_bool() as u16
-                            }
-                            k if k == hl::hl_type_kind_HI32 => {
-                                *(data.add(idx * 4) as *mut i32) = src_val.as_i32()
-                            }
-                            k if k == hl::hl_type_kind_HI64 => {
-                                *(data.add(idx * 8) as *mut i64) = src_val.as_i64_lossy()
-                            }
-                            k if k == hl::hl_type_kind_HF32 => {
-                                *(data.add(idx * 4) as *mut f32) = src_val.as_f64() as f32
-                            }
-                            k if k == hl::hl_type_kind_HF64 => {
-                                *(data.add(idx * 8) as *mut f64) = src_val.as_f64()
-                            }
-                            k => {
-                                let ptr_val = if src_val.is_null() || src_val.is_void() {
-                                    0usize
-                                } else if (k == hl::hl_type_kind_HDYN
-                                    || k == hl::hl_type_kind_HNULL)
-                                    && !src_val.is_ptr()
-                                {
-                                    // Arrays of dyn/null store vdynamic*. Box primitives before write.
-                                    let src_type_idx = func.regs[src.0 as usize].0;
-                                    let src_t = self.c_type_factory.get(src_type_idx);
-                                    let boxed = self.box_value_as_dynamic_with_type(src_val, src_t);
-                                    if boxed.is_null() || boxed.is_void() {
-                                        0usize
-                                    } else {
-                                        boxed.as_ptr()
-                                    }
-                                } else {
-                                    src_val.as_ptr()
-                                };
-                                *(data.add(idx * 8) as *mut usize) = ptr_val;
-                            }
-                        }
-                    }
-                }
+                return self.op_set_array(bytecode, func, func_idx, array.0, index.0, src.0);
             }
             Opcode::ArraySize { dst, array } => {
                 // Read array size: varray layout has size (i32) at offset 16.
@@ -5189,9 +4195,13 @@ impl HLInterpreter {
                 let target_pc = (frame.pc as i64 + 1 + *offset as i64) as usize;
                 frame.trap_stack.push((target_pc, exc.0));
             }
-            Opcode::EndTrap { exc } => {
+            // The operand is Haxe's `OEndTrap of bool` — a flag, not a
+            // register, which is why the JIT ignores it too. Clearing
+            // `registers[exc]` nulled whichever local happened to live in r0
+            // or r1, so a `try` that assigned and then exited normally lost
+            // the assignment.
+            Opcode::EndTrap { exc: _ } => {
                 frame.trap_stack.pop();
-                frame.registers.set(exc.0, NanBoxedValue::null());
             }
             Opcode::Throw { exc } => {
                 let val = frame.registers.get(exc.0);
@@ -5256,6 +4266,2210 @@ impl HLInterpreter {
     }
 
     /// Helper: perform integer binary op on two registers.
+    /// Write an array element.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_set_array(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        array: u32,
+        index: u32,
+        src: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let arr_val = frame.registers.get(array);
+        let idx = frame.registers.get(index).as_i32().max(0) as usize;
+        let src_val = frame.registers.get(src);
+        if !arr_val.is_null() && !arr_val.is_void() {
+            if !arr_val.is_ptr() {
+                return Err(anyhow!(
+                        "SetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
+                        array,
+                        func.name(),
+                        frame.pc,
+                        arr_val,
+                        bytecode.types[func.regs[array as usize].0].kind
+                    ));
+            }
+            let arr_ptr = arr_val.as_ptr() as *mut u8;
+            unsafe {
+                let size = *(arr_ptr.add(16) as *const i32);
+                if idx >= size.max(0) as usize {
+                    return Err(anyhow!(
+                            "SetArray: index {} out of bounds (size={}) in {} at pc={} (arr=r{} val={:?} src={:?})",
+                            idx,
+                            size,
+                            func.name(),
+                            frame.pc,
+                            array,
+                            arr_val,
+                            src_val
+                        ));
+                }
+                let at = *(arr_ptr.add(8) as *const *mut hl_type);
+                if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
+                    return Err(anyhow!(
+                            "SetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} src={:?} r4={:?} r6={:?} r16={:?})",
+                            at,
+                            func.name(),
+                            frame.pc,
+                            array,
+                            arr_val,
+                            idx,
+                            src_val,
+                            frame.registers.get(4),
+                            frame.registers.get(6),
+                            frame.registers.get(16)
+                        ));
+                }
+                let at_kind = if at.is_null() {
+                    hl::hl_type_kind_HDYN
+                } else {
+                    (*at).kind
+                };
+                let data = arr_ptr.add(24);
+                match at_kind {
+                    k if k == hl::hl_type_kind_HUI8 => *data.add(idx) = src_val.as_i32() as u8,
+                    k if k == hl::hl_type_kind_HUI16 => {
+                        *(data.add(idx * 2) as *mut u16) = src_val.as_i32() as u16
+                    }
+                    k if k == hl::hl_type_kind_HBOOL => {
+                        *(data.add(idx * 2) as *mut u16) = src_val.as_bool() as u16
+                    }
+                    k if k == hl::hl_type_kind_HI32 => {
+                        *(data.add(idx * 4) as *mut i32) = src_val.as_i32()
+                    }
+                    k if k == hl::hl_type_kind_HI64 => {
+                        *(data.add(idx * 8) as *mut i64) = src_val.as_i64_lossy()
+                    }
+                    k if k == hl::hl_type_kind_HF32 => {
+                        *(data.add(idx * 4) as *mut f32) = src_val.as_f64() as f32
+                    }
+                    k if k == hl::hl_type_kind_HF64 => {
+                        *(data.add(idx * 8) as *mut f64) = src_val.as_f64()
+                    }
+                    k => {
+                        let ptr_val = if src_val.is_null() || src_val.is_void() {
+                            0usize
+                        } else if (k == hl::hl_type_kind_HDYN || k == hl::hl_type_kind_HNULL)
+                            && !src_val.is_ptr()
+                        {
+                            // Arrays of dyn/null store vdynamic*. Box primitives before write.
+                            let src_type_idx = func.regs[src as usize].0;
+                            let src_t = self.c_type_factory.get(src_type_idx);
+                            let boxed = self.box_value_as_dynamic_with_type(src_val, src_t);
+                            if boxed.is_null() || boxed.is_void() {
+                                0usize
+                            } else {
+                                boxed.as_ptr()
+                            }
+                        } else {
+                            src_val.as_ptr()
+                        };
+                        *(data.add(idx * 8) as *mut usize) = ptr_val;
+                    }
+                }
+            }
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Read an array element.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_get_array(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        array: u32,
+        index: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let arr_val = frame.registers.get(array);
+        let idx = frame.registers.get(index).as_i32().max(0) as usize;
+        let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
+        let val = if arr_val.is_null() || arr_val.is_void() {
+            NanBoxedValue::null()
+        } else if !arr_val.is_ptr() {
+            return Err(anyhow!(
+                "GetArray: array reg r{} is not pointer in {} at pc={} (val={:?}, type_kind={})",
+                array,
+                func.name(),
+                frame.pc,
+                arr_val,
+                bytecode.types[func.regs[array as usize].0].kind
+            ));
+        } else {
+            // varray: t@0, at@8, size@16, data@24
+            let arr_ptr = arr_val.as_ptr() as *const u8;
+            if (arr_ptr as usize) < 0x1000
+                || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
+            {
+                static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                let c = BAD_ARR_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if c == 0 || c == 100 || c == 10000 {
+                    eprintln!(
+                        "[WARN] GetArray invalid ptr={:#x} count={} in {} pc={}",
+                        arr_ptr as usize,
+                        c + 1,
+                        func.name(),
+                        frame.pc
+                    );
+                }
+                frame.registers.set(dst, NanBoxedValue::null());
+                self.stack.last_mut().unwrap().pc += 1;
+                return Ok(StepResult::Continue);
+            }
+            unsafe {
+                let size = *(arr_ptr.add(16) as *const i32);
+                if idx >= size.max(0) as usize {
+                    return Err(anyhow!(
+                            "GetArray: index {} out of bounds (size={}) in {} at pc={} arr=r{} val={:?}",
+                            idx,
+                            size,
+                            func.name(),
+                            frame.pc,
+                            array,
+                            arr_val
+                        ));
+                }
+                let at = *(arr_ptr.add(8) as *const *mut hl_type);
+                if !at.is_null() && !(at as usize).is_multiple_of(std::mem::align_of::<hl_type>()) {
+                    return Err(anyhow!(
+                            "GetArray: invalid at pointer {:p} in {} at pc={} (arr=r{} val={:?} idx={} r4={:?} r6={:?} r16={:?})",
+                            at,
+                            func.name(),
+                            frame.pc,
+                            array,
+                            arr_val,
+                            idx,
+                            frame.registers.get(4),
+                            frame.registers.get(6),
+                            frame.registers.get(16)
+                        ));
+                }
+                let at_kind = if at.is_null() {
+                    hl::hl_type_kind_HDYN
+                } else {
+                    (*at).kind
+                };
+                let data = arr_ptr.add(24);
+                match at_kind {
+                    k if k == hl::hl_type_kind_HUI8 => {
+                        NanBoxedValue::from_i32(*data.add(idx) as i32)
+                    }
+                    k if k == hl::hl_type_kind_HUI16 => {
+                        NanBoxedValue::from_i32(*(data.add(idx * 2) as *const u16) as i32)
+                    }
+                    k if k == hl::hl_type_kind_HBOOL => {
+                        NanBoxedValue::from_bool(*(data.add(idx * 2) as *const u16) != 0)
+                    }
+                    k if k == hl::hl_type_kind_HI32 => {
+                        NanBoxedValue::from_i32(*(data.add(idx * 4) as *const i32))
+                    }
+                    k if k == hl::hl_type_kind_HI64 => {
+                        NanBoxedValue::from_i64(*(data.add(idx * 8) as *const i64))
+                    }
+                    k if k == hl::hl_type_kind_HF32 => {
+                        NanBoxedValue::from_f64(*(data.add(idx * 4) as *const f32) as f64)
+                    }
+                    k if k == hl::hl_type_kind_HF64 => {
+                        NanBoxedValue::from_f64(*(data.add(idx * 8) as *const f64))
+                    }
+                    k => {
+                        let ptr_val = *(data.add(idx * 8) as *const usize);
+                        if ptr_val == 0 {
+                            match dst_kind {
+                                hl::hl_type_kind_HI32
+                                | hl::hl_type_kind_HUI8
+                                | hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(0),
+                                hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
+                                hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                                    NanBoxedValue::from_f64(0.0)
+                                }
+                                hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
+                                _ => NanBoxedValue::null(),
+                            }
+                        } else if (k == hl::hl_type_kind_HDYN || k == hl::hl_type_kind_HNULL)
+                            && Self::is_primitive_or_bytes_kind(dst_kind)
+                        {
+                            Self::unbox_dynamic_to_kind(ptr_val as *mut hl::vdynamic, dst_kind)
+                                .unwrap_or_else(|| NanBoxedValue::from_ptr(ptr_val))
+                        } else {
+                            NanBoxedValue::from_ptr(ptr_val)
+                        }
+                    }
+                }
+            }
+        };
+        frame.registers.set(dst, val);
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Allocate a value of the destination's type.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_new(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let type_idx = func.regs[dst as usize].0;
+        let type_kind = bytecode.types[type_idx].kind;
+        let c_type_ptr = self.c_type_factory.get(type_idx);
+
+        let obj = match type_kind {
+            hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
+                if c_type_ptr.is_null() || self.fn_alloc_obj.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    let f: FnAllocObj = unsafe { std::mem::transmute(self.fn_alloc_obj) };
+                    unsafe { f(c_type_ptr as *mut c_void) }
+                }
+            }
+            hl::hl_type_kind_HDYNOBJ => {
+                if self.fn_alloc_dynobj.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    let f: FnAllocDynObj = unsafe { std::mem::transmute(self.fn_alloc_dynobj) };
+                    unsafe { f() }
+                }
+            }
+            hl::hl_type_kind_HVIRTUAL => {
+                if c_type_ptr.is_null() || self.fn_alloc_virtual.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    let f: FnAllocVirtual = unsafe { std::mem::transmute(self.fn_alloc_virtual) };
+                    unsafe { f(c_type_ptr as *mut c_void) }
+                }
+            }
+            _ => std::ptr::null_mut(),
+        };
+
+        if obj.is_null() {
+            frame.registers.set(dst, NanBoxedValue::null());
+        } else {
+            frame
+                .registers
+                .set(dst, NanBoxedValue::from_ptr(obj as usize));
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Checked cast, unboxing nullables and validating object hierarchies.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_safe_cast(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        src: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let val = frame.registers.get(src);
+        let dst_type_idx = func.regs[dst as usize].0;
+        let dst_kind = bytecode.types[dst_type_idx].kind;
+
+        let result = if val.is_null() || val.is_void() {
+            match dst_kind {
+                hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
+                    NanBoxedValue::from_i32(0)
+                }
+                hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(0),
+                hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => NanBoxedValue::from_f64(0.0),
+                hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(false),
+                _ => val,
+            }
+        } else if val.is_ptr() && val.as_ptr() != 0 {
+            if Self::is_unboxable_primitive_kind(dst_kind) {
+                // Primitive destination: unbox from vdynamic
+                unsafe {
+                    Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
+                        .unwrap_or(val)
+                }
+            } else {
+                let src_type_idx = func.regs[src as usize].0;
+                let src_kind = bytecode.types[src_type_idx].kind;
+
+                if (src_kind == hl::hl_type_kind_HDYN || src_kind == hl::hl_type_kind_HNULL)
+                    && !self.fn_dyn_castp.is_null()
+                {
+                    // HDYN/HNULL → concrete type: use hlp_dyn_castp
+                    let src_c_type = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                    let dst_c_type = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                    type FnCastp =
+                        unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void;
+                    let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                    let mut data = val.as_ptr() as *mut c_void;
+                    let result_ptr = unsafe {
+                        castp(&mut data as *mut _ as *mut c_void, src_c_type, dst_c_type)
+                    };
+                    if result_ptr.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(result_ptr as usize)
+                    }
+                } else {
+                    // For HOBJ→HOBJ: call hlp_dyn_castp for type-safe cast
+                    // (validates supertype chain, returns null on mismatch).
+                    // For other pointer casts: plain copy.
+                    let src_type_idx = func.regs[src as usize].0;
+                    let src_kind = bytecode.types[src_type_idx].kind;
+
+                    {
+                        // Debug: trace HOBJ→HOBJ super chain
+                        if src_kind == hl::hl_type_kind_HOBJ
+                            && dst_kind == hl::hl_type_kind_HOBJ
+                            && val.as_ptr() > 0x10000
+                            && env_flag!("ASH_DBG_CAST")
+                        {
+                            static CAST_COUNT: std::sync::atomic::AtomicU32 =
+                                std::sync::atomic::AtomicU32::new(0);
+                            let c = CAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if c >= 9 && c < 12 {
+                                // trace casts #9+
+                                let obj_ptr = val.as_ptr() as *const hl::vdynamic;
+                                let header_t = unsafe { (*obj_ptr).t };
+                                let dst_c = self.c_type_factory.get(dst_type_idx);
+                                eprintln!(
+                                        "[SafeCast-HOBJ#{}] src_tidx={} dst_tidx={} header={:p} dst_c={:p}",
+                                        c, src_type_idx, dst_type_idx, header_t, dst_c
+                                    );
+                                if !header_t.is_null() && (header_t as usize) >= 0x10000 {
+                                    unsafe {
+                                        let mut cur = header_t;
+                                        for d in 0..8 {
+                                            if cur.is_null() || (cur as usize) < 0x10000 {
+                                                break;
+                                            }
+                                            let k = (*cur).kind;
+                                            if k != hl::hl_type_kind_HOBJ {
+                                                eprintln!("  [{d}] kind={k} (not HOBJ)");
+                                                break;
+                                            }
+                                            let obj = (*cur).__bindgen_anon_1.obj;
+                                            if obj.is_null() || (obj as usize) < 0x10000 {
+                                                eprintln!("  [{d}] obj={obj:p} (invalid)");
+                                                break;
+                                            }
+                                            let name_ptr = (*obj).name;
+                                            let name = if !name_ptr.is_null()
+                                                && (name_ptr as usize) > 0x10000
+                                            {
+                                                let mut len = 0;
+                                                while *name_ptr.add(len) != 0 && len < 100 {
+                                                    len += 1;
+                                                }
+                                                String::from_utf16_lossy(
+                                                    std::slice::from_raw_parts(name_ptr, len),
+                                                )
+                                            } else {
+                                                "?".into()
+                                            };
+                                            let sup = (*obj).super_;
+                                            eprintln!("  [{d}] type={cur:p} obj={obj:p} name={name} super={sup:p}");
+                                            if sup.is_null() || (sup as usize) < 0x10000 {
+                                                break;
+                                            }
+                                            cur = sup;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // For HOBJ→HOBJ SafeCast: check if source has __cast proto.
+                        // In the interpreter, castFun can't be called (it's a stub
+                        // pointer), so we call the __cast bytecode function directly.
+                        if src_kind == hl::hl_type_kind_HOBJ && dst_kind == hl::hl_type_kind_HOBJ {
+                            // Look up __cast proto findex from the object's runtime type
+                            let obj_ptr = val.as_ptr() as *const hl::vdynamic;
+                            let header_t = unsafe { (*obj_ptr).t };
+                            let cast_findex = if !header_t.is_null()
+                                && (header_t as usize) >= 0x10000
+                                && unsafe { (*header_t).kind } == hl::hl_type_kind_HOBJ
+                            {
+                                unsafe {
+                                    let obj_t = (*header_t).__bindgen_anon_1.obj;
+                                    if !obj_t.is_null() && (obj_t as usize) >= 0x10000 {
+                                        // Hash "__cast" using same algorithm as hlp_hash_gen
+                                        let cast_hash = {
+                                            let chars: &[u16] =
+                                                &[0x5F, 0x5F, 0x63, 0x61, 0x73, 0x74]; // __cast
+                                            let mut h: i32 = 0;
+                                            for &c in chars {
+                                                h = h.wrapping_mul(223).wrapping_add(c as i32);
+                                            }
+                                            h.wrapping_rem(0x1FFFFF7B)
+                                        };
+                                        // Search proto array in hl_type_obj
+                                        let mut found: Option<usize> = None;
+                                        let nproto = (*obj_t).nproto;
+                                        let proto_ptr = (*obj_t).proto;
+                                        if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
+                                            for i in 0..nproto as usize {
+                                                let proto = &*proto_ptr.add(i);
+                                                if proto.hashed_name == cast_hash {
+                                                    found = Some(proto.findex as usize);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        found
+                                    } else {
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            };
+
+                            if let Some(findex) = cast_findex {
+                                // Call __cast(obj, dst_type) via StepResult::Call
+                                let dst_c_type = self.c_type_factory.get(dst_type_idx);
+                                let type_val = NanBoxedValue::from_ptr(dst_c_type as usize);
+                                // Store args in registers and dispatch as a call
+                                frame.registers.set(dst, val); // temp: store obj in dst
+                                return Ok(StepResult::Call {
+                                    findex,
+                                    args: vec![val, type_val],
+                                    dst: dst,
+                                });
+                            } else {
+                                val // no __cast, just copy
+                            }
+                        } else {
+                            val // non-HOBJ cast, just copy
+                        }
+                    }
+                }
+            }
+        } else {
+            val
+        };
+        frame.registers.set(dst, result);
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Box a value into a vdynamic for native consumption.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_to_dyn(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        src: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // Box a value into a vdynamic* for native code consumption.
+        // Pointer types (HOBJ, HDYN, etc.) already have a vdynamic header - pass through.
+        // Primitive types (HI32, HF64, HBOOL, HBYTES) need hlp_make_dyn wrapping.
+        let src_type_ref = &func.regs[src as usize];
+        let src_kind = bytecode.types[src_type_ref.0].kind;
+        let val = frame.registers.get(src);
+
+        let needs_boxing = matches!(
+            src_kind,
+            hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HI64
+                | hl::hl_type_kind_HF32
+                | hl::hl_type_kind_HF64
+                | hl::hl_type_kind_HBOOL
+                | hl::hl_type_kind_HBYTES
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+        );
+
+        if needs_boxing && !self.fn_make_dyn.is_null() {
+            let c_type_ptr = self.c_type_factory.get(src_type_ref.0);
+            // Create a stack slot holding the raw value for hlp_make_dyn
+            let mut data: i64 = if val.is_i32() {
+                val.as_i32() as i64
+            } else if val.is_f64() {
+                val.as_f64().to_bits() as i64
+            } else if val.is_bool() {
+                val.as_bool() as i64
+            } else {
+                // Pointer-like (HBYTES, etc.)
+                val.as_ptr() as i64
+            };
+            let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+                unsafe { std::mem::transmute(self.fn_make_dyn) };
+            let dyn_ptr = unsafe {
+                make_dyn(
+                    &mut data as *mut i64 as *mut c_void,
+                    c_type_ptr as *mut c_void,
+                )
+            };
+            frame
+                .registers
+                .set(dst, NanBoxedValue::from_ptr(dyn_ptr as usize));
+        } else {
+            // Already a pointer type with vdynamic header, or no make_dyn available
+            frame.registers.set(dst, val);
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Write a field by name hash on a dynamic value.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_dyn_set(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        obj: u32,
+        field: usize,
+        src: u32,
+    ) -> Result<StepResult> {
+        let fn_hash_gen = self.fn_hash_gen;
+        let frame = self.stack.last_mut().unwrap();
+        let obj_val = frame.registers.get(obj);
+        if obj_val.is_null() || obj_val.is_void() {
+            // no-op
+        } else {
+            let hfield = hash_field_name(
+                bytecode,
+                field,
+                fn_hash_gen,
+                &mut self.utf16_strings,
+                &mut self.field_hash_cache,
+            )?;
+            let obj_ptr = obj_val.as_ptr() as *mut c_void;
+            let src_val = frame.registers.get(src);
+            let src_type_idx = func.regs[src as usize].0;
+            let src_kind = bytecode.types[src_type_idx].kind;
+            if env_flag!("ASH_DBG_DYN") {
+                let fname = bytecode
+                    .strings
+                    .get(field)
+                    .map(String::as_str)
+                    .unwrap_or("<oob>");
+                eprintln!(
+                        "[DYNSET] f{} pc={} obj={:?} field={} name={} hash={} src_ty={} src_kind={} src={:?}",
+                        func_idx, frame.pc, obj_val, field, fname, hfield, src_type_idx, src_kind, src_val
+                    );
+            }
+            let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+            Self::dyn_set_field_by_hash(
+                obj_ptr,
+                hfield,
+                src_val,
+                src_kind,
+                src_type_ptr,
+                self.fn_dyn_setd,
+                self.fn_dyn_setf,
+                self.fn_dyn_seti64,
+                self.fn_dyn_seti,
+                self.fn_dyn_setp,
+            );
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Read a field by name hash off a dynamic value.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_dyn_get(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        obj: u32,
+        field: usize,
+    ) -> Result<StepResult> {
+        let fn_hash_gen = self.fn_hash_gen;
+        let frame = self.stack.last_mut().unwrap();
+        let obj_val = frame.registers.get(obj);
+        if obj_val.is_null() || obj_val.is_void() {
+            frame.registers.set(dst, NanBoxedValue::null());
+        } else {
+            let hfield = hash_field_name(
+                bytecode,
+                field,
+                fn_hash_gen,
+                &mut self.utf16_strings,
+                &mut self.field_hash_cache,
+            )?;
+            if env_flag!("ASH_DBG_DYN") {
+                let fname = bytecode
+                    .strings
+                    .get(field)
+                    .map(String::as_str)
+                    .unwrap_or("<oob>");
+                eprintln!(
+                    "[DYNGET] f{} pc={} obj={:?} field={} name={} hash={}",
+                    func_idx, frame.pc, obj_val, field, fname, hfield
+                );
+            }
+            let obj_ptr = obj_val.as_ptr() as *mut c_void;
+            let dst_type_idx = func.regs[dst as usize].0;
+            let dst_kind = bytecode.types[dst_type_idx].kind;
+            let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+            let out = Self::dyn_get_field_by_hash(
+                obj_ptr,
+                hfield,
+                dst_kind,
+                dst_type_ptr,
+                self.fn_dyn_getd,
+                self.fn_dyn_getf,
+                self.fn_dyn_geti64,
+                self.fn_dyn_geti,
+                self.fn_dyn_getp,
+            );
+            if env_flag!("ASH_DBG_DYN") {
+                eprintln!(
+                    "[DYNGET] f{} pc={} dst_kind={} -> {:?}",
+                    func_idx, frame.pc, dst_kind, out
+                );
+            }
+            frame.registers.set(dst, out);
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Write `obj.field` for any object representation.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_field_set(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        obj: u32,
+        field: usize,
+        src: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let obj_type_idx = func.regs[obj as usize].0;
+        let obj_kind = bytecode.types[obj_type_idx].kind;
+        let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
+        let src_type_idx = func.regs[src as usize].0;
+        let src_kind = bytecode.types[src_type_idx].kind;
+        let get_rt = self.fn_get_obj_rt;
+        let obj_val = frame.registers.get(obj);
+        if env_flag!("ASH_DBG_FIELD") {
+            eprintln!(
+                    "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
+                    func_idx,
+                    frame.pc,
+                    obj_type_idx,
+                    obj_kind,
+                    field,
+                    src_type_idx,
+                    src_kind,
+                    obj_val,
+                    frame.registers.get(src)
+                );
+        }
+        if !obj_val.is_null() && !obj_val.is_void() {
+            let src_val = frame.registers.get(src);
+            if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+                let obj_ptr = obj_val.as_ptr() as *mut u8;
+                if env_flag!("ASH_DBG_FIELD") {
+                    eprintln!(
+                            "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
+                            func_idx, frame.pc, obj_type_idx, obj_kind, field, src_kind, src_val
+                        );
+                }
+                unsafe {
+                    Self::write_obj_field(
+                        obj_ptr, field, src_kind, src_val, obj_c_type, obj_kind, get_rt,
+                    );
+                }
+            } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+                if let Some(offset) =
+                    unsafe { Self::resolve_virtual_field_offset(obj_c_type, field) }
+                {
+                    let obj_ptr = obj_val.as_ptr() as *mut u8;
+                    let addr = unsafe { obj_ptr.add(offset) };
+                    if env_flag!("ASH_DBG_FIELD") {
+                        eprintln!(
+                                "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
+                                func_idx, frame.pc, obj_type_idx, field, offset, src_kind, src_val
+                            );
+                    }
+                    unsafe { Self::write_value_at(addr, src_kind, src_val) };
+                } else {
+                    self.virtual_fields
+                        .insert((obj_val.as_ptr(), field), src_val);
+                    if let Some(hfield) =
+                        Self::resolve_typed_field_hash(bytecode, obj_type_idx, field)
+                    {
+                        let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                        let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                        Self::dyn_set_field_by_hash(
+                            obj_ptr,
+                            hfield,
+                            src_val,
+                            src_kind,
+                            src_type_ptr,
+                            self.fn_dyn_setd,
+                            self.fn_dyn_setf,
+                            self.fn_dyn_seti64,
+                            self.fn_dyn_seti,
+                            self.fn_dyn_setp,
+                        );
+                    }
+                    if env_flag!("ASH_DBG_FIELD") {
+                        eprintln!(
+                            "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
+                            func_idx, frame.pc, obj_type_idx, field, src_val
+                        );
+                    }
+                }
+            } else if let Some(hfield) =
+                Self::resolve_typed_field_hash(bytecode, obj_type_idx, field)
+            {
+                let obj_ptr = obj_val.as_ptr() as *mut c_void;
+                let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
+                Self::dyn_set_field_by_hash(
+                    obj_ptr,
+                    hfield,
+                    src_val,
+                    src_kind,
+                    src_type_ptr,
+                    self.fn_dyn_setd,
+                    self.fn_dyn_setf,
+                    self.fn_dyn_seti64,
+                    self.fn_dyn_seti,
+                    self.fn_dyn_setp,
+                );
+            }
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Read `obj.field` for any object representation.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_field_get(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        obj: u32,
+        field: usize,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // Extract c_type info before borrowing frame mutably
+        let obj_type_idx = func.regs[obj as usize].0;
+        let obj_kind = bytecode.types[obj_type_idx].kind;
+        let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
+        let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
+        let get_rt = self.fn_get_obj_rt;
+        let obj_val = frame.registers.get(obj);
+        if env_flag!("ASH_DBG_FIELD") {
+            eprintln!(
+                "[FIELD] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} obj={:?}",
+                func_idx, frame.pc, obj_type_idx, obj_kind, field, dst_kind, obj_val
+            );
+        }
+        if obj_val.is_null() || obj_val.is_void() {
+            frame.registers.set(dst, NanBoxedValue::null());
+        } else if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
+            let obj_ptr = obj_val.as_ptr() as *mut u8;
+            let val = unsafe {
+                Self::read_obj_field(obj_ptr, field, dst_kind, obj_c_type, obj_kind, get_rt)
+            };
+            if env_flag!("ASH_DBG_FIELD") {
+                eprintln!(
+                    "[GETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} dst_kind={} -> {:?}",
+                    func_idx, frame.pc, obj_type_idx, obj_kind, field, dst_kind, val
+                );
+            }
+            frame.registers.set(dst, val);
+        } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
+            if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field) } {
+                let obj_ptr = obj_val.as_ptr() as *mut u8;
+                let addr = unsafe { obj_ptr.add(offset) };
+                let val = unsafe { Self::read_value_at(addr, dst_kind) };
+                if env_flag!("ASH_DBG_FIELD") {
+                    eprintln!(
+                        "[GETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} dst_kind={} -> {:?}",
+                        func_idx, frame.pc, obj_type_idx, field, offset, dst_kind, val
+                    );
+                }
+                frame.registers.set(dst, val);
+            } else {
+                let key = (obj_val.as_ptr(), field);
+                let val = if let Some(v) = self.virtual_fields.get(&key).copied() {
+                    v
+                } else if let Some(hfield) =
+                    Self::resolve_typed_field_hash(bytecode, obj_type_idx, field)
+                {
+                    let dst_type_idx = func.regs[dst as usize].0;
+                    let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                    Self::dyn_get_field_by_hash(
+                        obj_val.as_ptr() as *mut c_void,
+                        hfield,
+                        dst_kind,
+                        dst_type_ptr,
+                        self.fn_dyn_getd,
+                        self.fn_dyn_getf,
+                        self.fn_dyn_geti64,
+                        self.fn_dyn_geti,
+                        self.fn_dyn_getp,
+                    )
+                } else {
+                    NanBoxedValue::null()
+                };
+                if env_flag!("ASH_DBG_FIELD") {
+                    eprintln!(
+                        "[GETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} -> {:?}",
+                        func_idx, frame.pc, obj_type_idx, field, val
+                    );
+                }
+                frame.registers.set(dst, val);
+            }
+        } else if let Some(hfield) = Self::resolve_typed_field_hash(bytecode, obj_type_idx, field) {
+            let obj_ptr = obj_val.as_ptr() as *mut c_void;
+            let dst_type_idx = func.regs[dst as usize].0;
+            let dst_type_ptr = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+            let out = Self::dyn_get_field_by_hash(
+                obj_ptr,
+                hfield,
+                dst_kind,
+                dst_type_ptr,
+                self.fn_dyn_getd,
+                self.fn_dyn_getf,
+                self.fn_dyn_geti64,
+                self.fn_dyn_geti,
+                self.fn_dyn_getp,
+            );
+            frame.registers.set(dst, out);
+        } else {
+            frame.registers.set(dst, NanBoxedValue::null());
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Materialize a vclosure for a virtual method of an object.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_virtual_closure(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        obj: u32,
+        field: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // Resolve the virtual method findex from the object's proto chain,
+        // then create a vclosure with the object as bound value.
+        let obj_val = frame.registers.get(obj);
+        if obj_val.is_null() || obj_val.is_void() {
+            frame.registers.set(dst, NanBoxedValue::null());
+        } else {
+            let obj_ptr = obj_val.as_ptr() as *const u8;
+            // The virtual field index into the interface's field table
+            // We need to look up the method findex from the object's runtime type.
+            // For now, look up via the object's proto chain by field index.
+            let findex_opt: Option<usize> = unsafe {
+                let obj_hl_type = *(obj_ptr as *const *mut hl::hl_type);
+                if !obj_hl_type.is_null()
+                    && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
+                        || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
+                {
+                    let obj_data = (*obj_hl_type).__bindgen_anon_1.obj;
+                    let fi = field as usize;
+                    if fi < (*obj_data).nproto as usize {
+                        Some((*(*obj_data).proto.add(fi)).findex as usize)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(findex) = findex_opt {
+                let closure_type = self.c_type_factory.get(func.regs[dst as usize].0);
+                let value = unsafe {
+                    Self::alloc_bound_closure(
+                        self.fn_alloc_closure_ptr,
+                        closure_type,
+                        findex,
+                        obj_val.as_ptr() as *mut std::ffi::c_void,
+                    )
+                };
+                frame.registers.set(dst, value);
+            } else {
+                frame.registers.set(dst, NanBoxedValue::null());
+            }
+        }
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Materialize a vclosure bound to an object.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_instance_closure(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        fun: usize,
+        obj: u32,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // Create a _vclosure with the bound object. The closure's fun
+        // pointer is the stub sentinel (findex+1) so that CallClosure
+        // can extract the findex. The bound object is stored in
+        // vclosure.value and prepended as the first argument on CallClosure.
+        let obj_val = frame.registers.get(obj);
+        let obj_ptr = if obj_val.is_null() || obj_val.is_void() {
+            std::ptr::null_mut()
+        } else {
+            obj_val.as_ptr() as *mut std::ffi::c_void
+        };
+        let closure_type = self.c_type_factory.get(func.regs[dst as usize].0);
+        let value = unsafe {
+            Self::alloc_bound_closure(self.fn_alloc_closure_ptr, closure_type, fun, obj_ptr)
+        };
+        frame.registers.set(dst, value);
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Materialize a vclosure for a bare function index.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_static_closure(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        fun: usize,
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // Materialize a real vclosure* so std natives such as
+        // hl.Api.noClosure / Reflect.callMethod can consume it.
+        let findex = fun;
+        let type_idx = if let Some(&fidx) = self.findex_to_func.get(&findex) {
+            bytecode.functions[fidx].type_.0
+        } else if let Some(&nidx) = self.findex_to_native.get(&findex) {
+            bytecode.natives[nidx].type_.0
+        } else {
+            usize::MAX
+        };
+
+        if type_idx != usize::MAX && !self.fn_alloc_closure_void.is_null() {
+            type FnAllocClosureVoid =
+                unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut _vclosure;
+            let f: FnAllocClosureVoid = unsafe { std::mem::transmute(self.fn_alloc_closure_void) };
+            let tptr = self.c_type_factory.get(type_idx) as *mut c_void;
+            let closure = unsafe { f(tptr, (findex + 1) as *mut c_void) };
+            if !closure.is_null() {
+                if env_flag!("ASH_DBG_CLOSURE") {
+                    eprintln!(
+                        "[STATICCLOSURE] findex={} type_idx={} -> {:p}",
+                        findex, type_idx, closure
+                    );
+                }
+                frame
+                    .registers
+                    .set(dst, NanBoxedValue::from_ptr(closure as usize));
+                return Ok(StepResult::Continue);
+            }
+        }
+
+        // Fallback to interpreter-local representation.
+        if env_flag!("ASH_DBG_CLOSURE") {
+            eprintln!(
+                "[STATICCLOSURE-FALLBACK] findex={} type_idx={} alloc_fn={:p}",
+                findex, type_idx, self.fn_alloc_closure_void
+            );
+        }
+        frame
+            .registers
+            .set(dst, NanBoxedValue::from_func_index(findex));
+
+        Ok(StepResult::Continue)
+    }
+
+    /// Resolve and stage a call through a closure value.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_call_closure(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        dst: u32,
+        fun: u32,
+        args: &[Reg],
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        let closure_val = frame.registers.get(fun);
+        let mut arg_vals: Vec<NanBoxedValue> =
+            args.iter().map(|r| frame.registers.get(r.0)).collect();
+
+        if closure_val.is_null() || closure_val.is_void() {
+            return Err(anyhow!("CallClosure on null closure (pc={})", frame.pc));
+        }
+
+        // The closure value might be:
+        // 1. A TAG_FUNC: raw function index (from StaticClosure with no capture)
+        // 2. A TAG_PTR to a _vclosure struct (InstanceClosure with bound value)
+        let findex = if closure_val.is_func() {
+            closure_val.as_func_index()
+        } else {
+            let raw = closure_val.as_ptr();
+            if self.findex_to_func.contains_key(&raw) || self.findex_to_native.contains_key(&raw) {
+                raw
+            } else {
+                // It's a pointer to a _vclosure struct
+                let cl_ptr = raw as *const _vclosure;
+                if cl_ptr.is_null()
+                    || !(cl_ptr as usize).is_multiple_of(std::mem::align_of::<_vclosure>())
+                {
+                    return Err(anyhow!(
+                        "CallClosure invalid closure value: {:?}",
+                        closure_val
+                    ));
+                }
+                unsafe {
+                    let fun_ptr = (*cl_ptr).fun;
+                    // Extract findex from stub pointer (findex+1)
+                    let fi = (fun_ptr as usize).wrapping_sub(1);
+                    // If the closure has a bound value, prepend it as the first arg
+                    if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
+                        let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
+                        arg_vals.insert(0, bound);
+                    }
+                    fi
+                }
+            }
+        };
+
+        Ok(StepResult::Call {
+            findex,
+            args: arg_vals,
+            dst,
+        })
+    }
+
+    /// Resolve and stage a method call through the receiver's vtable slot.
+    ///
+    /// Extracted from `execute_opcode` so the SSA dispatcher in
+    /// [`crate::ssa`] runs the same semantics rather than a copy of them:
+    /// register operands are plain indices into the active frame, which is
+    /// the SSA value frame there and the HL register file here.
+    #[allow(clippy::too_many_arguments, unused_variables)]
+    fn op_call_method(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        op_is_this: bool,
+        dst: u32,
+        field: usize,
+        args: &[Reg],
+    ) -> Result<StepResult> {
+        let frame = self.stack.last_mut().unwrap();
+        // CallMethod: args[0] is 'this'. CallThis: the receiver is
+        // IMPLICITLY register 0 (HashLink OCallThis semantics) and
+        // args hold only the real arguments — prepend Reg(0), else
+        // method resolution runs against the first argument's type.
+        let args_with_this: Vec<Reg> = if op_is_this {
+            let mut v = Vec::with_capacity(args.len() + 1);
+            v.push(Reg(0));
+            v.extend(args.iter().copied());
+            v
+        } else {
+            args.to_vec()
+        };
+        let args = &args_with_this;
+        let arg_vals: Vec<NanBoxedValue> = args.iter().map(|r| frame.registers.get(r.0)).collect();
+        let this_val = arg_vals[0];
+
+        if this_val.is_null() || this_val.is_void() {
+            return Err(anyhow!(
+                "CallMethod on null object (field={}, pc={})",
+                field,
+                frame.pc
+            ));
+        }
+
+        // HVIRTUAL dispatch: ToVirtual is a no-op in the interpreter,
+        // so `this_val` holds the raw HOBJ pointer directly.
+        // Resolve the findex by matching the virtual field's hashed_name
+        // against the runtime object's proto chain.
+        let this_reg_type_idx = func.regs[args[0].0 as usize].0;
+        if this_reg_type_idx < bytecode.types.len()
+            && bytecode.types[this_reg_type_idx].kind == hl::hl_type_kind_HVIRTUAL
+        {
+            let virt_type = self.c_type_factory.get(this_reg_type_idx);
+            let obj_ptr = this_val.as_ptr() as *const u8;
+            let findex_opt = unsafe {
+                // Get hashed_name of the virtual field
+                let virt = (*virt_type).__bindgen_anon_1.virt.as_ref();
+                if let Some(virt_data) = virt {
+                    if (field as i32) < virt_data.nfields {
+                        let virt_field = &*virt_data.fields.add(field);
+                        let hname = virt_field.hashed_name;
+                        // Walk the runtime obj's proto chain for hname
+                        let mut obj_hl_type = *(obj_ptr as *const *mut hl_type);
+                        let mut found = None;
+                        'search: while !obj_hl_type.is_null()
+                            && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
+                                || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
+                        {
+                            let obj = (*obj_hl_type).__bindgen_anon_1.obj;
+                            for i in 0..(*obj).nproto as usize {
+                                let pr = &*(*obj).proto.add(i);
+                                if pr.hashed_name == hname {
+                                    found = Some(pr.findex as usize);
+                                    break 'search;
+                                }
+                            }
+                            // Try super class
+                            obj_hl_type = (*obj).super_ as *mut hl_type;
+                        }
+                        found
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(findex) = findex_opt {
+                return Ok(StepResult::Call {
+                    findex,
+                    args: arg_vals,
+                    dst: dst,
+                });
+            }
+        }
+
+        // Try to resolve via vobj_proto (set up by hlp_get_obj_proto)
+        let obj_ptr = this_val.as_ptr() as *const u8;
+        let findex = unsafe {
+            let type_ptr = *(obj_ptr as *const *mut hl_type);
+            if !type_ptr.is_null() {
+                let vobj_proto = (*type_ptr).vobj_proto;
+                if !vobj_proto.is_null() && vobj_proto as usize > 1 {
+                    let method_ptr = *vobj_proto.add(field);
+                    // Extract findex from stub pointer (findex+1)
+                    (method_ptr as usize).wrapping_sub(1)
+                } else {
+                    // Fallback: resolve from bytecode type proto
+                    self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                        .ok_or_else(|| anyhow!("Cannot resolve method field={} on type", field))?
+                }
+            } else {
+                self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                    .ok_or_else(|| {
+                        anyhow!("Cannot resolve method field={} (null type header)", field)
+                    })?
+            }
+        };
+
+        Ok(StepResult::Call {
+            findex,
+            args: arg_vals,
+            dst,
+        })
+    }
+
+    // =====================================================================
+    // AIR v2 SSA dispatch
+    //
+    // See `crate::ssa` for the design. In short: the frame is
+    // `values.len() + cells.len()` slots, a `ValueId` indexes it directly, and
+    // the shared `op_*` methods above run the per-instruction semantics so this
+    // dispatcher never holds a second copy of them.
+    // =====================================================================
+
+    /// Run one function from its prepared SSA IR.
+    fn execute_ssa_function(
+        &mut self,
+        bc: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        func_idx: usize,
+        prep: &'static crate::ssa::Prepared,
+        args: &[NanBoxedValue],
+    ) -> Result<NanBoxedValue> {
+        if self.stack.len() >= self.max_stack_depth {
+            return Err(anyhow!("Stack overflow (depth {})", self.stack.len()));
+        }
+
+        let ir = prep.ir;
+        let mut frame = InterpreterFrame::new(func_idx, ir.values.len() + ir.cells.len());
+
+        // A pinned argument register never gets a `Param`: lowering emits those
+        // only for registers it promoted to SSA. On the serialize path that is
+        // harmless because a cell *is* its HL register and the caller already
+        // bound it; here the cell is a frame slot of its own, so the binding has
+        // to happen explicitly or an argument taken by `Ref` reads as void.
+        for (ci, cell) in ir.cells.iter().enumerate() {
+            if let Some(v) = args.get(cell.reg as usize) {
+                frame.registers.set(prep.cell_base + ci as u32, *v);
+            }
+        }
+
+        self.stack.push(frame);
+        self.sync_gc_scan_roots();
+
+        let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
+        let result = self.ssa_loop(bc, native_resolver, func_idx, prep, args);
+        ash::profile::leave_interp(prev_findex);
+        self.stack.pop();
+        self.sync_gc_scan_roots();
+        result
+    }
+
+    /// Block-at-a-time dispatch over the SSA CFG.
+    fn ssa_loop(
+        &mut self,
+        bc: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        func_idx: usize,
+        prep: &'static crate::ssa::Prepared,
+        args: &[NanBoxedValue],
+    ) -> Result<NanBoxedValue> {
+        let ir = prep.ir;
+        let func = prep.shim;
+        let mut block = 0usize;
+        // Which edge control arrived on. Phi sources are keyed by it, and the
+        // exceptional edge into a handler sets it too, so a handler that does
+        // carry phis resolves them against the block that threw.
+        let mut prev_block: Option<u32> = None;
+        let mut phi_buf: Vec<(u32, NanBoxedValue)> = Vec::new();
+
+        'blocks: loop {
+            let blk = ir
+                .blocks
+                .get(block)
+                .ok_or_else(|| anyhow!("SSA block {} out of range in {}", block, func.name()))?;
+            // Published for the same reason the opcode loop publishes `pc`:
+            // it is the only record of where a frame is when something below
+            // it fails.
+            self.stack.last_mut().unwrap().pc = block;
+
+            // A phi group is a parallel copy. Read every source before writing
+            // any destination, or `x, y = y, x` collapses into `x, y = y, y`.
+            if !blk.phis.is_empty() {
+                phi_buf.clear();
+                let frame = self.stack.last().unwrap();
+                for phi in &blk.phis {
+                    if let Some(pb) = prev_block {
+                        if let Some(&(_, v)) = phi.incoming.iter().find(|(b, _)| b.0 == pb) {
+                            phi_buf.push((phi.dst.0, frame.registers.get(v.0)));
+                        }
+                    }
+                }
+                let frame = self.stack.last_mut().unwrap();
+                for (dst, v) in phi_buf.drain(..) {
+                    frame.registers.set(dst, v);
+                }
+            }
+
+            for ins in &blk.instrs {
+                match self.ssa_step(bc, native_resolver, func_idx, prep, args, ins)? {
+                    None => {}
+                    // A call raised and this frame's innermost trap caught it.
+                    Some(handler) => {
+                        prev_block = Some(block as u32);
+                        block = handler;
+                        continue 'blocks;
+                    }
+                }
+            }
+
+            let get = |s: &Self, v: air::v2::ValueId| s.stack.last().unwrap().registers.get(v.0);
+            match &blk.term {
+                air::v2::Terminator::Ret { value } => return Ok(get(self, *value)),
+                air::v2::Terminator::Jump { target } => {
+                    prev_block = Some(block as u32);
+                    block = target.idx();
+                }
+                air::v2::Terminator::CondJump {
+                    cond,
+                    a,
+                    b,
+                    if_true,
+                    if_false,
+                } => {
+                    let taken = self.ssa_cond(bc, func, func_idx, *cond, *a, *b);
+                    prev_block = Some(block as u32);
+                    block = if taken { if_true.idx() } else { if_false.idx() };
+                }
+                air::v2::Terminator::Switch {
+                    value,
+                    targets,
+                    default,
+                } => {
+                    let idx = get(self, *value).as_i32();
+                    prev_block = Some(block as u32);
+                    block = if idx >= 0 && (idx as usize) < targets.len() {
+                        targets[idx as usize].idx()
+                    } else {
+                        default.idx()
+                    };
+                }
+                air::v2::Terminator::Throw { exc } | air::v2::Terminator::Rethrow { exc } => {
+                    let val = get(self, *exc);
+                    let frame = self.stack.last_mut().unwrap();
+                    match frame.trap_stack.pop() {
+                        Some((handler, cell_slot)) => {
+                            frame.registers.set(cell_slot, val);
+                            prev_block = Some(block as u32);
+                            block = handler;
+                        }
+                        None => return Err(anyhow::Error::new(self.format_hl_exception(val))),
+                    }
+                }
+                air::v2::Terminator::Trap {
+                    exc_cell,
+                    handler,
+                    normal,
+                } => {
+                    let slot = prep.cell_base + exc_cell.0;
+                    self.stack
+                        .last_mut()
+                        .unwrap()
+                        .trap_stack
+                        .push((handler.idx(), slot));
+                    prev_block = Some(block as u32);
+                    block = normal.idx();
+                }
+            }
+        }
+    }
+
+    /// Evaluate a `CondJump` condition.
+    fn ssa_cond(
+        &self,
+        bc: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        cond: air::v2::CondKind,
+        a: air::v2::ValueId,
+        b: Option<air::v2::ValueId>,
+    ) -> bool {
+        use air::v2::CondKind as C;
+        let va = self.stack.last().unwrap().registers.get(a.0);
+        let cmp = |op: CmpOp| {
+            let b = b.expect("binary condition without a second operand");
+            self.compare_regs_in(bc, func, func_idx, a.0, b.0, op)
+        };
+        match cond {
+            C::True => va.to_bool(),
+            C::False => !va.to_bool(),
+            C::Null => va.is_null(),
+            C::NotNull => !va.is_null(),
+            C::SLt => cmp(CmpOp::SLt),
+            C::SGte => cmp(CmpOp::SGte),
+            C::SGt => cmp(CmpOp::SGt),
+            C::SLte => cmp(CmpOp::SLte),
+            C::ULt => cmp(CmpOp::ULt),
+            C::UGte => cmp(CmpOp::UGte),
+            // The reference dispatcher reads the NaN-aware forms as their
+            // plain negations, and parity with it is the bar.
+            C::NotLt => cmp(CmpOp::SGte),
+            C::NotGte => cmp(CmpOp::SLt),
+            C::Eq => cmp(CmpOp::Eq),
+            C::NotEq => cmp(CmpOp::NotEq),
+        }
+    }
+
+    /// Execute one SSA instruction.
+    ///
+    /// `Ok(None)` continues in the same block. `Ok(Some(b))` means a call threw
+    /// and this frame's innermost trap caught it, so control resumes at `b`.
+    /// `Err` propagates, which is what the reference does for everything a
+    /// non-call instruction raises — including `NullCheck`, whose exception
+    /// escapes its own frame's traps there too.
+    #[allow(clippy::too_many_arguments)]
+    fn ssa_step(
+        &mut self,
+        bc: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        func_idx: usize,
+        prep: &'static crate::ssa::Prepared,
+        args: &[NanBoxedValue],
+        ins: &air::v2::Instr,
+    ) -> Result<Option<usize>> {
+        use air::v2::Instr as I;
+        let func = prep.shim;
+        let cell_base = prep.cell_base;
+
+        macro_rules! get {
+            ($v:expr) => {
+                self.stack.last().unwrap().registers.get($v.0)
+            };
+        }
+        macro_rules! set {
+            ($v:expr, $val:expr) => {{
+                let val = $val;
+                self.stack.last_mut().unwrap().registers.set($v.0, val)
+            }};
+        }
+        /// Static HL kind of a value, via the shim's per-value type table.
+        macro_rules! kind {
+            ($v:expr) => {
+                bc.types[func.regs[$v.0 as usize].0].kind
+            };
+        }
+
+        match ins {
+            // ---- values -----------------------------------------------
+            I::Param { dst, reg } => {
+                // Registers past the argument list are the HL default, which is
+                // what a fresh frame slot already holds.
+                let v = args
+                    .get(*reg as usize)
+                    .copied()
+                    .unwrap_or_else(NanBoxedValue::void);
+                set!(dst, v);
+            }
+            I::Copy { dst, src } => {
+                let v = get!(src);
+                set!(dst, v);
+            }
+            I::Int { dst, idx } => set!(dst, NanBoxedValue::from_i32(bc.ints[*idx])),
+            I::Float { dst, idx } => set!(dst, NanBoxedValue::from_f64(bc.floats[*idx])),
+            I::Bool { dst, value } => set!(dst, NanBoxedValue::from_bool(*value)),
+            I::Bytes { dst, idx } => {
+                set!(dst, NanBoxedValue::from_bytes_ptr(bc.bytes_pos[*idx]))
+            }
+            I::String { dst, idx } => {
+                // HashLink strings are UTF-16 internally; the cache owns the
+                // null-terminated buffers the pointer refers to.
+                let utf16_ptr = if let Some(cached) = self.utf16_strings.get(idx) {
+                    cached.as_ptr()
+                } else {
+                    let s = bc
+                        .strings
+                        .get(*idx)
+                        .ok_or_else(|| anyhow!("String constant out of bounds: {}", idx))?;
+                    let mut buf: Vec<u16> = s.encode_utf16().collect();
+                    buf.push(0);
+                    self.utf16_strings.insert(*idx, buf);
+                    self.utf16_strings[idx].as_ptr()
+                };
+                set!(dst, NanBoxedValue::from_bytes_ptr(utf16_ptr as usize));
+            }
+            I::Null { dst } => set!(dst, NanBoxedValue::null()),
+
+            // ---- arithmetic -------------------------------------------
+            I::BinOp { op, dst, a, b } => {
+                use air::v2::BinOp as B;
+                let va = get!(a);
+                let vb = get!(b);
+                let r = match op {
+                    B::Add => va
+                        .binary_int_op(vb, IntBinOp::Add)
+                        .or_else(|| va.binary_float_op(vb, FloatBinOp::Add)),
+                    B::Sub => va
+                        .binary_int_op(vb, IntBinOp::Sub)
+                        .or_else(|| va.binary_float_op(vb, FloatBinOp::Sub)),
+                    B::Mul => va
+                        .binary_int_op(vb, IntBinOp::Mul)
+                        .or_else(|| va.binary_float_op(vb, FloatBinOp::Mul)),
+                    B::SDiv => va
+                        .binary_int_op(vb, IntBinOp::SDiv)
+                        .or_else(|| va.binary_float_op(vb, FloatBinOp::SDiv)),
+                    B::SMod => va
+                        .binary_int_op(vb, IntBinOp::SMod)
+                        .or_else(|| va.binary_float_op(vb, FloatBinOp::SMod)),
+                    B::UDiv => va.binary_int_op(vb, IntBinOp::UDiv),
+                    B::UMod => {
+                        let r = vb.as_i32() as u32;
+                        if r == 0 {
+                            return Err(anyhow!("UMod: division by zero"));
+                        }
+                        Some(NanBoxedValue::from_i32(((va.as_i32() as u32) % r) as i32))
+                    }
+                    B::Shl => va.binary_int_op(vb, IntBinOp::Shl),
+                    B::SShr => va.binary_int_op(vb, IntBinOp::SShr),
+                    B::UShr => va.binary_int_op(vb, IntBinOp::UShr),
+                    B::And => va.binary_int_op(vb, IntBinOp::And),
+                    B::Or => va.binary_int_op(vb, IntBinOp::Or),
+                    B::Xor => va.binary_int_op(vb, IntBinOp::Xor),
+                };
+                let r = r.ok_or_else(|| {
+                    anyhow!(
+                        "{:?}: incompatible types {:?}, {:?} in {} (dst=v{}, a=v{}, b=v{})",
+                        op,
+                        va,
+                        vb,
+                        func.name(),
+                        dst.0,
+                        a.0,
+                        b.0
+                    )
+                })?;
+                set!(dst, r);
+            }
+            I::Fma { dst, a, b, c } => {
+                // Deliberately two roundings, not `mul_add`. The FMA peephole
+                // exists for backends that emit a hardware fused multiply-add;
+                // this interpreter is the bit-exact reference the others are
+                // measured against, and it rounds every operation — fusing here
+                // would move the measuring stick.
+                let r = get!(a).as_f64() * get!(b).as_f64() + get!(c).as_f64();
+                set!(dst, NanBoxedValue::from_f64(r));
+            }
+            I::UnOp { op, dst, src } => {
+                let v = get!(src);
+                let r = match op {
+                    // Mirrors the opcode arms exactly, including leaving a
+                    // non-numeric value untouched rather than erroring.
+                    air::v2::UnOp::Incr => {
+                        if v.is_i32() {
+                            NanBoxedValue::from_i32(v.as_i32().wrapping_add(1))
+                        } else if v.is_f64() {
+                            NanBoxedValue::from_f64(v.as_f64() + 1.0)
+                        } else {
+                            v
+                        }
+                    }
+                    air::v2::UnOp::Decr => {
+                        if v.is_i32() {
+                            NanBoxedValue::from_i32(v.as_i32().wrapping_sub(1))
+                        } else if v.is_f64() {
+                            NanBoxedValue::from_f64(v.as_f64() - 1.0)
+                        } else {
+                            v
+                        }
+                    }
+                    air::v2::UnOp::Neg => {
+                        if v.is_i32() {
+                            NanBoxedValue::from_i32(v.as_i32().wrapping_neg())
+                        } else if v.is_f64() {
+                            NanBoxedValue::from_f64(-v.as_f64())
+                        } else {
+                            return Err(anyhow!("Neg: unsupported type {:?}", v));
+                        }
+                    }
+                    air::v2::UnOp::Not => {
+                        if v.is_i32() {
+                            NanBoxedValue::from_i32(!v.as_i32())
+                        } else if v.is_bool() {
+                            NanBoxedValue::from_bool(!v.as_bool())
+                        } else {
+                            return Err(anyhow!("Not: unsupported type {:?}", v));
+                        }
+                    }
+                };
+                set!(dst, r);
+            }
+
+            // ---- calls -------------------------------------------------
+            I::Call { dst, fun, args: a } => {
+                let argv: Vec<NanBoxedValue> = a.iter().map(|v| get!(v)).collect();
+                return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);
+            }
+            I::CallMethod {
+                dst,
+                field,
+                args: a,
+            } => {
+                let regs: Vec<Reg> = a.iter().map(|v| Reg(v.0)).collect();
+                let staged =
+                    self.op_call_method(bc, func, func_idx, false, dst.0, *field, &regs)?;
+                return self.ssa_staged_call(bc, native_resolver, func, staged);
+            }
+            I::CallClosure { dst, fun, args: a } => {
+                let regs: Vec<Reg> = a.iter().map(|v| Reg(v.0)).collect();
+                let staged = self.op_call_closure(bc, func, func_idx, dst.0, fun.0, &regs)?;
+                return self.ssa_staged_call(bc, native_resolver, func, staged);
+            }
+            I::StaticClosure { dst, fun } => {
+                self.op_static_closure(bc, func, func_idx, dst.0, *fun)?;
+            }
+            I::InstanceClosure { dst, fun, obj } => {
+                self.op_instance_closure(bc, func, func_idx, dst.0, *fun, obj.0)?;
+            }
+            I::VirtualClosure { dst, obj, field } => {
+                self.op_virtual_closure(bc, func, func_idx, dst.0, obj.0, *field as u32)?;
+            }
+
+            // ---- globals and fields ------------------------------------
+            I::GetGlobal { dst, global } => {
+                let mut val = self
+                    .globals
+                    .get(*global)
+                    .copied()
+                    .unwrap_or_else(NanBoxedValue::null);
+                // Native stdlib may have written a global_value slot without
+                // going through SetGlobal.
+                if val.is_null() {
+                    let (gd, nglobals) = self.c_type_factory.globals_data();
+                    if !gd.is_null() && *global < nglobals {
+                        let raw = unsafe { *gd.add(*global) };
+                        if !raw.is_null() {
+                            val = NanBoxedValue::from_ptr(raw as usize);
+                            self.globals[*global] = val;
+                        }
+                    }
+                }
+                set!(dst, val);
+            }
+            I::SetGlobal { global, src } => {
+                let val = get!(src);
+                if *global >= self.globals.len() {
+                    self.globals.resize(*global + 1, NanBoxedValue::null());
+                }
+                self.globals[*global] = val;
+                let (gd, nglobals) = self.c_type_factory.globals_data();
+                if !gd.is_null() && *global < nglobals {
+                    unsafe {
+                        *gd.add(*global) = if val.is_null() || val.is_void() {
+                            std::ptr::null_mut()
+                        } else {
+                            val.as_ptr() as *mut c_void
+                        };
+                    }
+                }
+            }
+            I::FieldGet {
+                dst, obj, field, ..
+            } => {
+                self.op_field_get(bc, func, func_idx, dst.0, obj.0, *field)?;
+            }
+            I::FieldSet {
+                obj, field, src, ..
+            } => {
+                self.op_field_set(bc, func, func_idx, obj.0, *field, src.0)?;
+            }
+            I::DynGet { dst, obj, field } => {
+                self.op_dyn_get(bc, func, func_idx, dst.0, obj.0, *field)?;
+            }
+            I::DynSet { obj, field, src } => {
+                self.op_dyn_set(bc, func, func_idx, obj.0, *field, src.0)?;
+            }
+
+            // ---- casts -------------------------------------------------
+            I::Cast { kind, dst, src } => {
+                use air::v2::CastKind as K;
+                match kind {
+                    K::ToDyn => {
+                        self.op_to_dyn(bc, func, func_idx, dst.0, src.0)?;
+                    }
+                    K::SafeCast => {
+                        self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
+                    }
+                    K::ToSFloat => {
+                        let v = get!(src);
+                        let f = if v.is_i32() {
+                            v.as_i32() as f64
+                        } else {
+                            v.as_f64()
+                        };
+                        set!(dst, NanBoxedValue::from_f64(f));
+                    }
+                    K::ToUFloat => {
+                        let v = get!(src);
+                        let f = if v.is_i32() {
+                            (v.as_i32() as u32) as f64
+                        } else {
+                            v.as_f64()
+                        };
+                        set!(dst, NanBoxedValue::from_f64(f));
+                    }
+                    K::ToInt => {
+                        let v = get!(src);
+                        let i = if v.is_f64() {
+                            v.as_f64() as i32
+                        } else {
+                            v.as_i32()
+                        };
+                        set!(dst, NanBoxedValue::from_i32(i));
+                    }
+                    // ToVirtual is a no-op here for the same reason it is in the
+                    // opcode dispatcher: virtual dispatch resolves off the raw
+                    // object at the call site.
+                    K::UnsafeCast | K::ToVirtual => {
+                        let v = get!(src);
+                        set!(dst, v);
+                    }
+                }
+            }
+            I::NullCheck { value } => {
+                if get!(value).is_null() {
+                    return Err(anyhow::Error::new(HLExceptionPropagation {
+                        value: NanBoxedValue::null(),
+                        message: Some("Null access".to_string()),
+                    }));
+                }
+            }
+
+            // ---- memory ------------------------------------------------
+            I::MemGet {
+                kind,
+                dst,
+                base,
+                index,
+            } => match kind {
+                air::v2::MemAccess::Array => {
+                    self.op_get_array(bc, func, func_idx, dst.0, base.0, index.0)?;
+                }
+                k => {
+                    let b = get!(base);
+                    let idx = get!(index).as_i32();
+                    let val = if b.is_null() || b.is_void() || idx < 0 {
+                        NanBoxedValue::from_i32(0)
+                    } else {
+                        let addr = (b.as_ptr() as *const u8).wrapping_add(idx as usize);
+                        match k {
+                            air::v2::MemAccess::I8 => {
+                                NanBoxedValue::from_i32(unsafe { *addr as i32 })
+                            }
+                            air::v2::MemAccess::I16 => {
+                                NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
+                            }
+                            _ => Self::read_value_from_ptr(addr, kind!(dst)),
+                        }
+                    };
+                    set!(dst, val);
+                }
+            },
+            I::MemSet {
+                kind,
+                base,
+                index,
+                src,
+            } => match kind {
+                air::v2::MemAccess::Array => {
+                    self.op_set_array(bc, func, func_idx, base.0, index.0, src.0)?;
+                }
+                k => {
+                    let b = get!(base);
+                    let idx = get!(index).as_i32();
+                    let v = get!(src);
+                    if !b.is_null() && !b.is_void() && idx >= 0 {
+                        let addr = (b.as_ptr() as *mut u8).wrapping_add(idx as usize);
+                        match k {
+                            air::v2::MemAccess::I8 => unsafe { *addr = v.as_i32() as u8 },
+                            air::v2::MemAccess::I16 => unsafe {
+                                *(addr as *mut u16) = v.as_i32() as u16
+                            },
+                            _ => {
+                                if (addr as usize) < 0x1000 {
+                                    eprintln!(
+                                        "[CRASH GUARD] SetMem bad addr={:p} base={:?} idx={} in {}",
+                                        addr,
+                                        b,
+                                        idx,
+                                        func.name()
+                                    );
+                                } else {
+                                    Self::write_value_to_ptr(addr, v, kind!(src));
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+
+            // ---- allocation and type queries ---------------------------
+            I::New { dst } => {
+                self.op_new(bc, func, func_idx, dst.0)?;
+            }
+            I::ArraySize { dst, array } => {
+                let arr = get!(array);
+                let size = if kind!(array) == hl::hl_type_kind_HARRAY
+                    && !arr.is_null()
+                    && !arr.is_void()
+                {
+                    // varray: t@0, at@8, size@16
+                    unsafe { *((arr.as_ptr() as *const u8).add(16) as *const i32) }
+                } else {
+                    0i32
+                };
+                set!(dst, NanBoxedValue::from_i32(size));
+            }
+            I::TypeConst { dst, ty } => {
+                let p = self.c_type_factory.get(ty.0 as usize);
+                set!(dst, NanBoxedValue::from_ptr(p as usize));
+            }
+            I::GetType { dst, src } => {
+                let v = get!(src);
+                let src_ty = func.regs[src.0 as usize].0;
+                let ptr: usize = if v.is_ptr() && !v.is_null() && v.as_ptr() != 0 {
+                    match bc.types[src_ty].kind {
+                        hl::hl_type_kind_HDYN
+                        | hl::hl_type_kind_HOBJ
+                        | hl::hl_type_kind_HSTRUCT
+                        | hl::hl_type_kind_HVIRTUAL
+                        | hl::hl_type_kind_HENUM
+                        | hl::hl_type_kind_HDYNOBJ
+                        | hl::hl_type_kind_HNULL => unsafe { *(v.as_ptr() as *const usize) },
+                        _ => self.c_type_factory.get(src_ty) as usize,
+                    }
+                } else {
+                    self.c_type_factory.get(src_ty) as usize
+                };
+                set!(dst, NanBoxedValue::from_ptr(ptr));
+            }
+            I::GetTID { dst, src } => {
+                let v = get!(src);
+                let k = if v.is_ptr() && !v.is_null() && v.as_ptr() != 0 {
+                    unsafe { *(v.as_ptr() as *const u32) as i32 }
+                } else {
+                    bc.types[func.regs[src.0 as usize].0].kind as i32
+                };
+                set!(dst, NanBoxedValue::from_i32(k));
+            }
+
+            // ---- references --------------------------------------------
+            I::Unref { dst, src } => {
+                let p = get!(src).as_ptr() as *const i64;
+                let r = if p.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    let raw = unsafe { *p };
+                    match kind!(dst) {
+                        hl::hl_type_kind_HI32 | hl::hl_type_kind_HUI8 | hl::hl_type_kind_HUI16 => {
+                            NanBoxedValue::from_i32(raw as i32)
+                        }
+                        hl::hl_type_kind_HF64 | hl::hl_type_kind_HF32 => {
+                            NanBoxedValue::from_f64(f64::from_bits(raw as u64))
+                        }
+                        // Low 32 bits only: a native writes a c_int here, and
+                        // the NaN tag bits would make the full i64 always true.
+                        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool((raw as i32) != 0),
+                        _ => NanBoxedValue::from_ptr(raw as usize),
+                    }
+                };
+                set!(dst, r);
+            }
+            I::SetRef { r, value } => {
+                let p = get!(r).as_ptr() as *mut NanBoxedValue;
+                if !p.is_null() {
+                    let v = get!(value);
+                    unsafe { *p = v };
+                }
+            }
+            I::RefData { dst, src } => {
+                let v = get!(src);
+                set!(dst, v);
+            }
+            I::RefOffset { dst, base, offset } => {
+                let r =
+                    NanBoxedValue::from_ptr(get!(base).as_ptr() + get!(offset).as_i32() as usize);
+                set!(dst, r);
+            }
+
+            // ---- enums -------------------------------------------------
+            I::MakeEnum {
+                dst,
+                construct,
+                args: a,
+            } => {
+                let c_type_ptr = self.c_type_factory.get(func.regs[dst.0 as usize].0);
+                let val = Self::alloc_enum_value(self.fn_alloc_enum, c_type_ptr, *construct as i32);
+                if !val.is_null() {
+                    let argv: Vec<NanBoxedValue> = a.iter().map(|v| get!(v)).collect();
+                    unsafe {
+                        let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
+                        let c = &*(*tenum).constructs.add(*construct);
+                        let base = val as *mut u8;
+                        for (i, v) in argv.into_iter().enumerate() {
+                            if i >= c.nparams as usize {
+                                break;
+                            }
+                            let offset = *c.offsets.add(i) as usize;
+                            let param_kind = (*(*c.params.add(i))).kind;
+                            Self::write_value_to_ptr(base.add(offset), v, param_kind);
+                        }
+                    }
+                }
+                set!(
+                    dst,
+                    if val.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(val as usize)
+                    }
+                );
+            }
+            I::EnumAlloc { dst, construct } => {
+                let c_type_ptr = self.c_type_factory.get(func.regs[dst.0 as usize].0);
+                let val = Self::alloc_enum_value(self.fn_alloc_enum, c_type_ptr, *construct as i32);
+                set!(
+                    dst,
+                    if val.is_null() {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(val as usize)
+                    }
+                );
+            }
+            I::EnumIndex { dst, value } => {
+                let v = get!(value);
+                let index = if v.is_null() || v.is_void() {
+                    0i32
+                } else {
+                    // venum: t@0, index@8
+                    unsafe { *(v.as_ptr() as *const u8).add(8).cast::<i32>() }
+                };
+                set!(dst, NanBoxedValue::from_i32(index));
+            }
+            I::EnumField {
+                dst,
+                value,
+                construct,
+                field,
+            } => {
+                let v = get!(value);
+                let c_type_ptr = self.c_type_factory.get(func.regs[value.0 as usize].0);
+                let r = if v.is_null() || v.is_void() || c_type_ptr.is_null() {
+                    NanBoxedValue::null()
+                } else {
+                    unsafe {
+                        let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
+                        if tenum.is_null() || *construct >= (*tenum).nconstructs as usize {
+                            NanBoxedValue::null()
+                        } else {
+                            let c = &*(*tenum).constructs.add(*construct);
+                            if *field >= c.nparams as usize {
+                                NanBoxedValue::null()
+                            } else {
+                                let offset = *c.offsets.add(*field) as usize;
+                                let param_kind = (*(*c.params.add(*field))).kind;
+                                Self::read_value_from_ptr(
+                                    (v.as_ptr() as *const u8).add(offset),
+                                    param_kind,
+                                )
+                            }
+                        }
+                    }
+                };
+                set!(dst, r);
+            }
+            I::SetEnumField {
+                value, field, src, ..
+            } => {
+                let v = get!(value);
+                let src_val = get!(src);
+                let c_type_ptr = self.c_type_factory.get(func.regs[value.0 as usize].0);
+                if !v.is_null() && !v.is_void() && !c_type_ptr.is_null() {
+                    unsafe {
+                        let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
+                        if !tenum.is_null() {
+                            // The construct comes off the live venum, not the
+                            // instruction: that is what the reference does, and
+                            // the two disagree when a register is reused.
+                            let ci = *(v.as_ptr() as *const u8).add(8).cast::<i32>() as usize;
+                            if ci < (*tenum).nconstructs as usize {
+                                let c = &*(*tenum).constructs.add(ci);
+                                if *field < c.nparams as usize {
+                                    let offset = *c.offsets.add(*field) as usize;
+                                    let param_kind = (*(*c.params.add(*field))).kind;
+                                    Self::write_value_to_ptr(
+                                        (v.as_ptr() as *mut u8).add(offset),
+                                        src_val,
+                                        param_kind,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- cells (pinned registers) -------------------------------
+            I::CellGet { dst, cell } => {
+                let v = self.stack.last().unwrap().registers.get(cell_base + cell.0);
+                set!(dst, v);
+            }
+            I::CellSet { cell, src } => {
+                let v = get!(src);
+                self.stack
+                    .last_mut()
+                    .unwrap()
+                    .registers
+                    .set(cell_base + cell.0, v);
+            }
+            I::CellIncr { cell } => {
+                let frame = self.stack.last_mut().unwrap();
+                let slot = cell_base + cell.0;
+                let v = frame.registers.get(slot);
+                if v.is_i32() {
+                    frame
+                        .registers
+                        .set(slot, NanBoxedValue::from_i32(v.as_i32().wrapping_add(1)));
+                } else if v.is_f64() {
+                    frame
+                        .registers
+                        .set(slot, NanBoxedValue::from_f64(v.as_f64() + 1.0));
+                }
+            }
+            I::CellDecr { cell } => {
+                let frame = self.stack.last_mut().unwrap();
+                let slot = cell_base + cell.0;
+                let v = frame.registers.get(slot);
+                if v.is_i32() {
+                    frame
+                        .registers
+                        .set(slot, NanBoxedValue::from_i32(v.as_i32().wrapping_sub(1)));
+                } else if v.is_f64() {
+                    frame
+                        .registers
+                        .set(slot, NanBoxedValue::from_f64(v.as_f64() - 1.0));
+                }
+            }
+            I::CellRef { dst, cell } => {
+                // Address of the cell's frame slot, exactly as `Ref` takes the
+                // address of a register slot: natives write through it and the
+                // cell is updated in place. The slot is stable across nested
+                // calls because the frame's `Vec` is its own allocation.
+                let frame = self.stack.last_mut().unwrap();
+                let p = frame.registers.slot_ptr(cell_base + cell.0) as usize;
+                frame.registers.set(dst.0, NanBoxedValue::from_ptr(p));
+            }
+
+            // ---- trap regions -------------------------------------------
+            I::EndTrap { cell, .. } => {
+                let frame = self.stack.last_mut().unwrap();
+                frame.trap_stack.pop();
+                frame
+                    .registers
+                    .set(cell_base + cell.0, NanBoxedValue::null());
+            }
+
+            // ---- misc ---------------------------------------------------
+            I::Assert => return Err(anyhow!("Assert hit in {}", func.name())),
+            I::Prefetch { .. } | I::Asm { .. } => {}
+        }
+
+        Ok(None)
+    }
+
+    /// Perform a staged call produced by one of the shared `op_call_*` methods.
+    fn ssa_staged_call(
+        &mut self,
+        bc: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        func: &HLFunction,
+        staged: StepResult,
+    ) -> Result<Option<usize>> {
+        match staged {
+            StepResult::Call { findex, args, dst } => {
+                self.ssa_call(bc, native_resolver, func, findex, args, dst)
+            }
+            // The closure paths answer `Continue` when they resolved to a value
+            // rather than a call (a null receiver, say).
+            _ => Ok(None),
+        }
+    }
+
+    /// Call `findex`, store the coerced result, and let this frame's innermost
+    /// trap catch an exception coming back out.
+    fn ssa_call(
+        &mut self,
+        bc: &DecodedBytecode,
+        native_resolver: &NativeFunctionResolver,
+        func: &HLFunction,
+        findex: usize,
+        args: Vec<NanBoxedValue>,
+        dst: u32,
+    ) -> Result<Option<usize>> {
+        match self.call_function(bc, native_resolver, findex, &args) {
+            Ok(ret) => {
+                let dst_kind = bc.types[func.regs[dst as usize].0].kind;
+                let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
+                self.stack.last_mut().unwrap().registers.set(dst, coerced);
+                Ok(None)
+            }
+            Err(e) => {
+                if let Some(exc_val) = e.downcast_ref::<HLExceptionPropagation>().map(|x| x.value) {
+                    let frame = self.stack.last_mut().unwrap();
+                    if let Some((handler, cell_slot)) = frame.trap_stack.pop() {
+                        frame.registers.set(cell_slot, exc_val);
+                        return Ok(Some(handler));
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
     fn int_binop(
         &mut self,
         func: &HLFunction,
@@ -5293,10 +6507,29 @@ impl HLInterpreter {
         b: u32,
         op: CmpOp,
     ) -> bool {
+        let func = self.air.body(bytecode, func_idx);
+        self.compare_regs_in(bytecode, func, func_idx, a, b, op)
+    }
+
+    /// [`compare_regs`](Self::compare_regs) against an explicit function.
+    ///
+    /// The comparison is type-directed — HNULL unboxing, string-object and
+    /// dynamic equality all depend on the operands' static kinds — so the SSA
+    /// dispatcher in [`crate::ssa`] passes its value-type view here instead of
+    /// having a second implementation of those rules.
+    #[allow(clippy::too_many_arguments)]
+    fn compare_regs_in(
+        &self,
+        bytecode: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        a: u32,
+        b: u32,
+        op: CmpOp,
+    ) -> bool {
         let frame = self.stack.last().unwrap();
         let va = frame.registers.get(a);
         let vb = frame.registers.get(b);
-        let func = self.air.body(bytecode, func_idx);
         let ak = bytecode.types[func.regs[a as usize].0].kind;
         let bk = bytecode.types[func.regs[b as usize].0].kind;
         if let Some(result) = unsafe {

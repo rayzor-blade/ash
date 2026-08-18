@@ -145,9 +145,14 @@ pub fn lower_with(
         if !reachable[i] {
             continue;
         }
-        if let Opcode::Incr { dst } | Opcode::Decr { dst } = op {
-            pin(dst.0, PinReason::IncrDecr, &mut pin_reason);
-        }
+        // Incr/Decr no longer pin. They read and write one register, which is
+        // an ordinary SSA def — pinning them made every counted loop's
+        // induction variable a memory cell, so the loop carried a CellGet and
+        // a CellIncr per iteration and no pass could reason about it. A
+        // counter that is genuinely pinned for another reason (its address is
+        // taken, or it is written inside a trap region) still is, and the
+        // lowering below goes through the same use/def macros either way.
+        let _ = op;
     }
     for (i, op) in ops.iter().enumerate() {
         if !reachable[i] {
@@ -918,15 +923,26 @@ fn convert_ops(
                 instrs.push(Instr::UnOp { op, dst: d, src: s });
                 finish_def!(pin);
             }
-            Opcode::Incr { dst } => {
-                instrs.push(Instr::CellIncr {
-                    cell: cell_for!(*dst),
-                });
-            }
-            Opcode::Decr { dst } => {
-                instrs.push(Instr::CellDecr {
-                    cell: cell_for!(*dst),
-                });
+            Opcode::Incr { dst } | Opcode::Decr { dst } => {
+                let is_incr = matches!(&ops[i], Opcode::Incr { .. });
+                if cell_of.contains_key(&dst.0) {
+                    // Still pinned for some other reason. Keep the fused cell
+                    // read-modify-write: splitting it into CellGet/UnOp/CellSet
+                    // would cost two extra instructions per iteration and buy
+                    // nothing, since no pass can promote a cell anyway.
+                    let cell = cell_for!(*dst);
+                    instrs.push(if is_incr {
+                        Instr::CellIncr { cell }
+                    } else {
+                        Instr::CellDecr { cell }
+                    });
+                } else {
+                    let op = if is_incr { UnOp::Incr } else { UnOp::Decr };
+                    let s = use_reg!(*dst);
+                    let (d, pin) = def_reg!(*dst);
+                    instrs.push(Instr::UnOp { op, dst: d, src: s });
+                    finish_def!(pin);
+                }
             }
             Opcode::Call0 { dst, fun } => {
                 let (d, pin) = def_reg!(*dst);

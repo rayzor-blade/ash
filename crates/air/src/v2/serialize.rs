@@ -621,10 +621,23 @@ fn emit_instr(
         }
         Instr::UnOp { op, dst, src } => {
             let (dst, src) = (rg(*dst), rg(*src));
-            ops.push(match op {
-                UnOp::Neg => Opcode::Neg { dst, src },
-                UnOp::Not => Opcode::Not { dst, src },
-            });
+            match op {
+                UnOp::Neg => ops.push(Opcode::Neg { dst, src }),
+                UnOp::Not => ops.push(Opcode::Not { dst, src }),
+                // HL's Incr/Decr read and write one register, so they can only
+                // be emitted directly when de-SSA landed both ends in the same
+                // one. Otherwise the move has to be made explicit first.
+                UnOp::Incr | UnOp::Decr => {
+                    if dst != src {
+                        ops.push(Opcode::Mov { dst, src });
+                    }
+                    ops.push(if matches!(op, UnOp::Incr) {
+                        Opcode::Incr { dst }
+                    } else {
+                        Opcode::Decr { dst }
+                    });
+                }
+            }
         }
         Instr::Call { dst, fun, args } => {
             let dst = rg(*dst);

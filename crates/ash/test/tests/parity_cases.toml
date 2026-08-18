@@ -201,6 +201,15 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+name = "TestTrapLocals"
+main = "TestTrapLocals"
+hl = "test_trap_locals.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 name = "TestIndexOf"
 main = "TestIndexOf"
 hl = "test_indexof.hl"

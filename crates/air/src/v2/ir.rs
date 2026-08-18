@@ -105,6 +105,12 @@ impl BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// `dst = src + 1`. HL spells this `Incr`, which reads and writes one
+    /// register; as SSA it is an ordinary def, which is what keeps a loop
+    /// counter a value rather than a memory cell.
+    Incr,
+    /// `dst = src - 1`.
+    Decr,
 }
 
 /// Conversion / cast kinds, mirroring the HL conversion opcodes.

@@ -331,6 +331,50 @@ pub fn optimize_full(
     Ok((out, ir, report))
 }
 
+/// Lower, optimize and verify one function, stopping short of serialization.
+///
+/// This is the entry point for a backend that *consumes* the typed SSA form —
+/// the SSA interpreter in `ash_interp::ssa` is the first. Serializing for such
+/// a consumer would be pure loss: the opcode array it produces has thrown away
+/// the types, the effect lattice and the resolved field slots the IR carries,
+/// and it costs a pass over the whole function to do it.
+pub fn prepare_ir(
+    m: &AshModule,
+    f: &HLFunction,
+    level: OptLevel,
+    opts: &PassOptions,
+) -> Result<(Function, PassReport), PipelineError> {
+    let fail = |stage: Stage, cause: String, panicked: bool| PipelineError {
+        findex: f.findex,
+        name: f.name(),
+        stage,
+        cause,
+        panicked,
+    };
+
+    macro_rules! stage {
+        ($stage:expr, $body:expr) => {
+            match guard(|| $body) {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => return Err(fail($stage, format!("{e:#}"), false)),
+                Err(p) => return Err(fail($stage, p, true)),
+            }
+        };
+    }
+
+    let mut ir = stage!(Stage::Lower, lower_with(&f.ops, &reg_types_of(f), m))
+        .with_findex(f.findex as usize);
+
+    let pm = PassManager::with_module(level, m).with_options(*opts);
+    let report = stage!(Stage::Optimize, pm.run(&mut ir));
+
+    // The consumer executes this IR directly, so verification is the only
+    // thing standing between a pass bug and a wrong answer at run time.
+    stage!(Stage::Verify, verify(&ir));
+
+    Ok((ir, report))
+}
+
 // ---------------------------------------------------------------------------
 // the round-trip sweep
 // ---------------------------------------------------------------------------

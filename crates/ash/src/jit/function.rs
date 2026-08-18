@@ -240,6 +240,16 @@ impl<'ctx> JITModule<'ctx> {
         self.pending_compilations.clear();
     }
 
+    /// The findexes that resolve to natives, which the hot-reload rewrite must
+    /// leave as direct calls: a native's address never changes, so there is
+    /// nothing to patch and an indirect hop would only cost.
+    fn native_findexes(&self) -> std::collections::HashSet<usize> {
+        self.findexes
+            .iter()
+            .filter_map(|(k, v)| matches!(v, FuncPtr::Native(_)).then_some(*k))
+            .collect()
+    }
+
     fn compile_pending_functions(&mut self) -> Result<()> {
         while let Some(index) = self.pending_compilations.pop() {
             if let Err(e) = self.compile_function(index) {
@@ -288,38 +298,13 @@ impl<'ctx> JITModule<'ctx> {
             .clone();
 
         if let FuncPtr::Fun(mut f) = fun_ptr {
-            // When hot-reload is enabled, rewrite direct calls to bytecode functions
-            // into IndirectCall opcodes that dispatch through functions_ptrs[findex].
-            // This runs BEFORE the optimizer so IndirectCall flows through SSA/copy prop.
-            if self.hot_reload {
-                let native_set: std::collections::HashSet<usize> = self
-                    .findexes
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        if matches!(v, FuncPtr::Native(_)) {
-                            Some(*k)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let rewrite = air::passes::IndirectCallRewritePass::new(native_set);
-                rewrite.run(&mut f.ops);
-            }
-
-            // Run AIR optimization passes on bytecode before LLVM emission.
-            // Skip optimization for functions containing Trap opcodes — exception
-            // control flow (longjmp) creates implicit CFG edges that the AIR
-            // optimizer can't model, leading to incorrect SSA phi placement.
-            let has_trap = f
-                .ops
-                .iter()
-                .any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
-            if !has_trap {
-                let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
-                let num_regs = f.regs.len();
-                let _eliminated = pass_manager.run(&mut f.ops, num_regs);
-            }
+            // Bytecode optimization before LLVM emission, plus the hot-reload
+            // rewrite that turns direct calls to bytecode functions into
+            // IndirectCall dispatch through functions_ptrs[findex]. Which
+            // pipeline runs, and where the rewrite sits relative to it, is
+            // decided in jit::air.
+            let natives = self.hot_reload.then(|| self.native_findexes());
+            crate::jit::air::optimize(&self.bytecode, &mut f, natives.as_ref());
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
@@ -478,33 +463,9 @@ impl<'ctx> JITModule<'ctx> {
             FuncPtr::Fun(f) => {
                 let mut f = f.clone();
 
-                // Indirect call rewrite for hot-reload
-                if self.hot_reload {
-                    let native_set: std::collections::HashSet<usize> = self
-                        .findexes
-                        .iter()
-                        .filter_map(|(k, v)| {
-                            if matches!(v, FuncPtr::Native(_)) {
-                                Some(*k)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    let rewrite = air::passes::IndirectCallRewritePass::new(native_set);
-                    rewrite.run(&mut f.ops);
-                }
-
-                // Run AIR optimization passes (skip for Trap-containing functions)
-                let has_trap = f
-                    .ops
-                    .iter()
-                    .any(|op| matches!(op, air::opcodes::Opcode::Trap { .. }));
-                if !has_trap {
-                    let pass_manager = air::pass::PassManager::new(air::pass::OptLevel::O2);
-                    let num_regs = f.regs.len();
-                    let _eliminated = pass_manager.run(&mut f.ops, num_regs);
-                }
+                // Same optimize-then-emit sequence as compile_function.
+                let natives = self.hot_reload.then(|| self.native_findexes());
+                crate::jit::air::optimize(&self.bytecode, &mut f, natives.as_ref());
 
                 let function = self.create_function_declaration(&f)?;
                 let basic_block = self.context.append_basic_block(function, "entry");

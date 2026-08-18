@@ -38,7 +38,7 @@ use super::{abi_class, entry_return_class, first_unsupported_opcode, AbiClass};
 use crate::hl_bindings as hl;
 use crate::jit::stub_bridge::{ash_jit_call_stub, STUB_SENTINEL_LIMIT};
 use crate::opcodes::{Opcode, Reg};
-use crate::types::{HLFunction, HLTypeFun};
+use crate::types::{HLFunction, HLTypeFun, TypeRef};
 
 /// A lowered function plus the marshaling metadata the interpreter needs.
 pub struct LoweredFunction {
@@ -56,6 +56,19 @@ pub struct LoweredFunction {
 pub fn lowering_reject_reason(
     bytecode: &crate::bytecode::DecodedBytecode,
     func: &HLFunction,
+) -> Option<String> {
+    reject_reason_for_ops(bytecode, func, &func.ops)
+}
+
+/// [`lowering_reject_reason`] against an opcode array that is not the
+/// function's own — the AIR v2 serialization of it (see [`super::air`]).
+///
+/// The signature checks read `func`, which optimization cannot change; only
+/// the opcode subset check looks at `ops`.
+pub fn reject_reason_for_ops(
+    bytecode: &crate::bytecode::DecodedBytecode,
+    func: &HLFunction,
+    ops: &[Opcode],
 ) -> Option<String> {
     let tf = match bytecode
         .types
@@ -83,7 +96,7 @@ pub fn lowering_reject_reason(
     if bytecode.types[tf.ret.0].kind == hl::hl_type_kind_HF32 {
         return Some("f32_in_signature".to_string());
     }
-    if let Some(op) = first_unsupported_opcode(&func.ops) {
+    if let Some(op) = first_unsupported_opcode(ops) {
         return Some(format!("unsupported_opcode {}", opcode_name(op)));
     }
     None
@@ -218,6 +231,12 @@ pub fn lower_function(
         bail!("{reason}");
     }
 
+    // The AIR v2 stage decides what this compile actually lowers. With
+    // `ASH_AIR` off — the default — `body` borrows the function's own arrays
+    // and nothing below can tell the difference.
+    let body = super::air::body_for(ctx, func);
+    let (ops, regs) = (&body.ops[..], &body.regs[..]);
+
     let tf = bytecode.types[func.type_.0]
         .fun
         .as_ref()
@@ -233,12 +252,13 @@ pub fn lower_function(
         .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
 
     // Imports must be declared before a FunctionBuilder borrows `ctx.func`.
-    let native_refs = import_native_targets(backend, ctx, func, &mut def)?;
+    let native_refs = import_native_targets(backend, ctx, ops, &mut def)?;
 
     {
         let mut lo = Lowerer {
             ctx,
-            func,
+            ops,
+            regs,
             b: def.builder(),
             vars: Vec::new(),
             reg_ty: Vec::new(),
@@ -264,7 +284,10 @@ pub fn lower_function(
         def,
         arg_kinds,
         ret_kind,
-        num_ops: func.ops.len(),
+        // The count of what was compiled, not of what the bytecode held: the
+        // promotion log's `ops=` is there to be read against the compile time
+        // next to it.
+        num_ops: ops.len(),
     })
 }
 
@@ -298,12 +321,12 @@ fn clif_dump_wanted(findex: usize) -> bool {
 fn import_native_targets(
     backend: &AshCraneliftBackend,
     ctx: &CraneliftTierContext,
-    func: &HLFunction,
+    ops: &[Opcode],
     def: &mut CraneliftFunctionDef,
 ) -> Result<HashMap<usize, FuncRef>> {
     let bytecode = ctx.bytecode();
     let mut refs: HashMap<usize, FuncRef> = HashMap::new();
-    for op in &func.ops {
+    for op in ops {
         let target = match op {
             Opcode::Call0 { fun, .. }
             | Opcode::Call1 { fun, .. }
@@ -338,7 +361,14 @@ fn import_native_targets(
 
 struct Lowerer<'a, 'b> {
     ctx: &'a CraneliftTierContext,
-    func: &'a HLFunction,
+    /// The opcode array being compiled — the bytecode function's own, or AIR
+    /// v2's optimized serialization of it. Nothing here may read the function
+    /// through `ctx` instead: jump offsets, register ids and opcode indices
+    /// are only consistent *within* one array.
+    ops: &'a [Opcode],
+    /// Register types indexed by register id, matching `ops`. Longer than the
+    /// bytecode function's own table when the serializer appended temporaries.
+    regs: &'a [TypeRef],
     b: FunctionBuilder<'b>,
     /// One Cranelift variable per HL register.
     vars: Vec<Variable>,
@@ -354,7 +384,7 @@ struct Lowerer<'a, 'b> {
 
 impl Lowerer<'_, '_> {
     fn run(&mut self) -> Result<()> {
-        let ops = &self.func.ops;
+        let ops = self.ops;
         self.prepare_registers()?;
         self.prepare_blocks();
 
@@ -443,7 +473,7 @@ impl Lowerer<'_, '_> {
     }
 
     fn prepare_registers(&mut self) -> Result<()> {
-        for (i, r) in self.func.regs.iter().enumerate() {
+        for (i, r) in self.regs.iter().enumerate() {
             let kind = self.ctx.type_kind(r.0)?;
             let class = abi_class(kind);
             // HVOID registers exist in bytecode but never carry a value; give
@@ -461,7 +491,7 @@ impl Lowerer<'_, '_> {
     /// A block starts at opcode 0, at every jump target, and immediately
     /// after every terminator.
     fn prepare_blocks(&mut self) {
-        let ops = &self.func.ops;
+        let ops = self.ops;
         let n = ops.len();
         let mut starts = vec![false; n + 1];
         starts[0] = true;
@@ -596,7 +626,6 @@ impl Lowerer<'_, '_> {
     /// tier is there to handle.
     fn static_field_offset(&self, obj: Reg, field_index: usize) -> Result<(i32, Type)> {
         let type_index = self
-            .func
             .regs
             .get(obj.0 as usize)
             .ok_or_else(|| anyhow!("field access on out-of-range register {}", obj.0))?
@@ -665,7 +694,7 @@ impl Lowerer<'_, '_> {
     // ── Opcode dispatch ──────────────────────────────────────────────────────
 
     fn lower_op(&mut self, i: usize) -> Result<()> {
-        let op = self.func.ops[i].clone();
+        let op = self.ops[i].clone();
         match &op {
             Opcode::Label | Opcode::Nop => {}
 
@@ -1111,7 +1140,7 @@ impl Lowerer<'_, '_> {
             // Boxed values compare by content via hlp_dyn_compare; every
             // other pointer kind compares by identity — same split the LLVM
             // tier makes.
-            let kind = self.ctx.reg_kind(self.func, a)?;
+            let kind = self.ctx.reg_kind(self.regs, a)?;
             if kind == hl::hl_type_kind_HDYN || kind == hl::hl_type_kind_HNULL {
                 let res = self.call_dyn_compare(va, vb)?;
                 self.b.ins().icmp_imm(icc, res, 0)

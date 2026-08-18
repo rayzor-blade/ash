@@ -17,6 +17,7 @@ use ash::opcodes::{Opcode, Reg};
 use ash::types::{HLFunction, ValueTypeKind};
 use inkwell::context::Context;
 
+use crate::air::Cache as AirCache;
 use crate::frame::InterpreterFrame;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp, NanBoxedValue};
 
@@ -622,6 +623,9 @@ pub struct HLInterpreter {
     /// Hot-reloaded bytecode (replaces the original for function lookup).
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
     reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
+    /// AIR v2 optimized bodies, filled on first execution of each function.
+    /// Inert unless `ASH_AIR=v2`; see `crate::air`.
+    air: AirCache,
     /// Map from findex → native array index
     findex_to_native: HashMap<usize, usize>,
     /// Per-native resolved function pointer cache (indexed by native array
@@ -848,6 +852,7 @@ impl HLInterpreter {
             max_stack_depth: 1000,
             findex_to_func,
             reloaded_bytecode: None,
+            air: AirCache::default(),
             findex_to_native,
             native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
             c_type_factory,
@@ -2916,7 +2921,12 @@ impl HLInterpreter {
         // Use reloaded bytecode if available (hot-reload swapped function bodies)
         let using_reloaded = self.reloaded_bytecode.is_some();
         let bc: &DecodedBytecode = self.reloaded_bytecode.unwrap_or(bytecode);
-        let func = &bc.functions[func_idx];
+        // Decide this function's body before the frame exists, so every site
+        // that resolves it below — register count, argument binding, the
+        // dispatch loop — sees the same opcode array and the same `pc` means
+        // the same instruction throughout the call.
+        self.air.prepare(bc, func_idx);
+        let func = self.air.body(bc, func_idx);
         if using_reloaded && env_flag!("ASH_DBG_RELOAD") {
             eprintln!(
                 "[reload-exec] func_idx={} name={} nops={} using=reloaded",
@@ -2968,7 +2978,7 @@ impl HLInterpreter {
         func_idx: usize,
     ) -> Result<NanBoxedValue> {
         loop {
-            let func = &bytecode.functions[func_idx];
+            let func = self.air.body(bytecode, func_idx);
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
 
@@ -3088,6 +3098,11 @@ impl HLInterpreter {
                                         );
                                     }
 
+                                    // Bodies optimized from V1 describe V1's
+                                    // functions; a findex may not even be the
+                                    // same function in V2.
+                                    self.air.invalidate();
+
                                     let leaked: &'static _ = Box::leak(Box::new(new_bc));
                                     self.reloaded_bytecode = Some(leaked);
                                 }
@@ -3121,7 +3136,7 @@ impl HLInterpreter {
         op: &Opcode,
         func_idx: usize,
     ) -> Result<StepResult> {
-        let func = &bytecode.functions[func_idx];
+        let func = self.air.body(bytecode, func_idx);
         let fn_hash_gen = self.fn_hash_gen;
         let frame = self.stack.last_mut().unwrap();
 
@@ -5281,7 +5296,7 @@ impl HLInterpreter {
         let frame = self.stack.last().unwrap();
         let va = frame.registers.get(a);
         let vb = frame.registers.get(b);
-        let func = &bytecode.functions[func_idx];
+        let func = self.air.body(bytecode, func_idx);
         let ak = bytecode.types[func.regs[a as usize].0].kind;
         let bk = bytecode.types[func.regs[b as usize].0].kind;
         if let Some(result) = unsafe {

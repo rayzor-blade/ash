@@ -572,6 +572,50 @@ fn run() -> Result<()> {
         }
     }
 
+    // `ASH_VERIFY_AIR=only` pushes every function through the AIR v2 pipeline
+    // (lower -> optimize -> verify -> serialize) and reports what survived,
+    // without running the program. Same reasoning as the two sweeps above: v2
+    // is 8k lines that has only ever seen its own unit tests, so whether it can
+    // round-trip real bytecode is a measurement over a corpus, and it has to be
+    // answerable before any engine is switched over to consume its output.
+    //
+    // `ASH_AIR_LEVEL=O0..O3` picks the opt level (default O2); O0 measures the
+    // lower/serialize identity alone. `ASH_VERIFY_AIR=dump:<findex>` prints one
+    // function's opcodes, IR and serialization.
+    if let Ok(mode) = std::env::var("ASH_VERIFY_AIR") {
+        if !mode.is_empty() && mode != "0" {
+            let level = match std::env::var("ASH_AIR_LEVEL") {
+                Ok(s) if !s.is_empty() => match ash::air_pipeline::parse_level(&s) {
+                    Some(l) => l,
+                    None => anyhow::bail!("invalid ASH_AIR_LEVEL '{s}' (expected O0|O1|O2|O3)"),
+                },
+                _ => ash::air_pipeline::AirOptLevel::O2,
+            };
+            let mut opts = ash::air_pipeline::AirPassOptions::default();
+            // Off by default: the per-pass verifier attaches a full IR dump to
+            // its error, which would bury a report with thousands of rows.
+            opts.verify_each = std::env::var("ASH_AIR_VERIFY_EACH")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false);
+
+            if let Some(want) = mode
+                .strip_prefix("dump:")
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                for line in ash::air_pipeline::dump(&bytecode, want, level, &opts) {
+                    eprintln!("[air] {line}");
+                }
+                return Ok(());
+            }
+            for line in ash::air_pipeline::report(&bytecode, level, &opts) {
+                eprintln!("[air] {line}");
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     match cli.mode {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);

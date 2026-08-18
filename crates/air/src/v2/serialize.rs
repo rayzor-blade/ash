@@ -730,7 +730,11 @@ fn emit_instr(
             });
         }
         Instr::NullCheck { value } => ops.push(Opcode::NullCheck { reg: rg(*value) }),
-        Instr::EndTrap { cell } => ops.push(Opcode::EndTrap { exc: cr(*cell) }),
+        // The operand is the bool flag it came in as, never a register: see
+        // `Instr::EndTrap`. `cell` is IR bookkeeping and is not encoded.
+        Instr::EndTrap { flag, .. } => ops.push(Opcode::EndTrap {
+            exc: Reg(*flag as u32),
+        }),
         Instr::MemGet {
             kind,
             dst,

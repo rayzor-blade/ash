@@ -338,11 +338,23 @@ pub enum Instr {
     NullCheck {
         value: ValueId,
     },
-    /// Ends the innermost trap region. Writes null into the trap's exception
-    /// cell (matching `ash_interp`). Must be the last instruction of its
+    /// Ends the innermost trap region. Must be the last instruction of its
     /// block.
+    ///
+    /// `cell` is the exception cell of the region being closed, derived from
+    /// the trap stack during lowering — *not* from the bytecode operand.
+    /// `OEndTrap`'s single operand is Haxe's `OEndTrap of bool`, a flag, not a
+    /// register: HashLink's JIT (`jit.c`, `case OEndTrap`) never reads it and
+    /// simply pops `trap_current` to its `prev`. Across the ash corpus it only
+    /// ever holds 0 or 1, which no register index would.
+    ///
+    /// `flag` carries that operand through unchanged so serialization is
+    /// byte-exact. It matters because `ash_interp` *does* read it, as a
+    /// register to null out — so inventing a value here would make the
+    /// interpreter clear a live register.
     EndTrap {
         cell: CellId,
+        flag: bool,
     },
     MemGet {
         kind: MemAccess,
@@ -1179,7 +1191,10 @@ mod tests {
         assert_eq!(cg.effect(), Effect::ReadMem);
         assert!(!cg.may_throw());
 
-        let et = Instr::EndTrap { cell: CellId(0) };
+        let et = Instr::EndTrap {
+            cell: CellId(0),
+            flag: true,
+        };
         assert_eq!(et.effect(), Effect::ClobberAll);
         assert!(!et.may_throw(), "EndTrap clobbers but never throws");
 

@@ -75,6 +75,63 @@ null-check elimination, GVN/CSE, LICM, the FMA peephole and DCE at O2, plus
 tail-recursion elimination, inlining and scalar replacement of aggregates at
 O3. v1 remains the production path until the backends switch over.
 
+**Round-trip status: 19623 of 19623 functions**, over all 43
+`crates/ash/test/tests/*.hl` plus `examples/heaps_base2d/bin/game.hl` (5094
+functions, 1129 object types), at O2 via `ASH_VERIFY_AIR=only`. Every function
+lowers, verifies, optimizes, re-verifies and serializes; no function needs
+refusing. The identity round trip (lower → serialize, no passes) changes
+opcode counts on 19 of those 5094 functions, and every delta is an accounted
+normalization: the `GetThis`/`SetThis`/`CallThis` rewrites (matched
+loss/gain pairs), zero-offset `JAlways` elision, unreachable `EndTrap`s after
+a `Throw`, and one genuine self-move (`Mov r131, r131`, findex 5470).
+
+Three defects were found by that sweep and fixed; each is worth knowing about
+because two of them changed what the IR *means*, not just what it accepts:
+
+- **GVN leaked value numbers across dominator-tree siblings** (883 of the 931
+  failures). The dominator-scoped table only ever removed the keys a block
+  added; when a block *shadowed* an existing key — which happens whenever a
+  reuse is refused, e.g. a load clobbered on the way in — the shadowing
+  binding survived the block's `Undo` and a sibling subtree then rewrote uses
+  to a value that does not dominate them. The table now records what each
+  binding displaced and restores it, unwinding in reverse.
+- **`OEndTrap`'s operand is a bool, not a register.** It is Haxe's
+  `OEndTrap of bool`; hashlink's `jit.c` never reads it and simply pops
+  `trap_current` to its `prev`. Across the corpus it only ever holds 0 or 1.
+  Lowering had been reading it as the exception register, which failed
+  outright when it named an unpinned register (41 functions) and silently
+  paired the wrong regions when it named a pinned one (51 functions). The
+  region an `EndTrap` closes now comes from the trap stack, and the flag is
+  carried through `Instr::EndTrap::flag` so serialization stays byte-exact.
+- **`OMov` between differently-typed registers is an unsafe cast.** HL's
+  `OMov` is an untyped register move — `jit.c` handles it in the same switch
+  arm as `OUnsafeCast`, and both ash engines implement the two identically.
+  Haxe emits it across reference types; every mismatched `Mov` in the corpus
+  is `HOBJ`→`HOBJ`, `HOBJ`/`HVIRTUAL`/`HDYNOBJ`→`HDYN`, never a width or
+  scalar change. Lowering it to `Instr::Copy` claimed src and dst share a
+  type, which the verifier rightly rejected (41 functions) and which would
+  have let copy propagation hand every use of `dst` a value of the wrong
+  type. It now lowers to `Cast { UnsafeCast }`.
+
+- **The serializer normalizes a type-changing `Mov` to `UnsafeCast`.** One
+  more entry in the documented normalization list, and the only one that is
+  not opcode-count-neutral in kind. Safe because all three engines already
+  implement the two identically, but it does mean the identity round trip is
+  not byte-exact for those 41 functions.
+- **`ash_interp` treats `OEndTrap`'s operand as a register and nulls it**
+  (`interpreter.rs`, `Opcode::EndTrap` → `registers.set(exc.0, null)`). Since
+  the operand is a bool flag, this clears r1 (or r0 when the flag is 0) after
+  every `try` block. It has not bitten the test corpus — Haxe evidently keeps
+  nothing live in r0/r1 across an `EndTrap` in these programs — but it is a
+  live miscompile waiting for a program that does, and it is why the AIR
+  serializer preserves the flag verbatim rather than inventing a register.
+  The JIT (`jit/function.rs`) correctly ignores the operand.
+- **`air` cannot tell a pointer type from a scalar one.** `ModuleInfo` offers
+  `is_float` and nothing else, so v2 cannot itself distinguish the benign
+  reference-upcast `Mov` above from a hypothetical width-changing one; it
+  models both as `UnsafeCast`, which is what HL does in either case. A
+  `ModuleInfo::kind_of` would let the verifier hold a real rule here, and
+  would also serve the unbox/box-forwarding passes below.
 - **Remaining optimization passes over the typed IR**, in payoff order
   established by the mandelbrot trace: static field-offset resolution,
   bounds-check elimination, box/unbox forwarding. (Field-load GVN with the HL

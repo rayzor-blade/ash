@@ -435,7 +435,10 @@ fn fix_nested_traps() -> (Vec<Opcode>, Vec<TypeRef>) {
                 offset: 3,
             }, // inner handler at 5
             Opcode::NullCheck { reg: Reg(3) },
-            Opcode::EndTrap { exc: Reg(2) },
+            // Both EndTraps carry the flag genhl emits, not an exception
+            // register: which region each one closes is fixed by the trap
+            // stack, so the inner and outer operands are identical.
+            Opcode::EndTrap { exc: Reg(1) },
             Opcode::JAlways { offset: 1 },   // -> 6
             Opcode::Rethrow { exc: Reg(2) }, // inner handler, rethrows to outer
             Opcode::EndTrap { exc: Reg(1) },
@@ -1012,7 +1015,10 @@ fn verify_rejects_unbalanced_endtrap() {
         phis: vec![],
         instrs: vec![
             Instr::Int { dst: v, idx: 0 },
-            Instr::EndTrap { cell: CellId(0) },
+            Instr::EndTrap {
+                cell: CellId(0),
+                flag: true,
+            },
         ],
         term: Terminator::Ret { value: v },
         handler: None,
@@ -1126,6 +1132,72 @@ fn roundtrip_nested_trap_exact() {
 }
 
 #[test]
+fn endtrap_closes_the_region_the_trap_stack_names_not_its_operand() {
+    // `OEndTrap`'s operand is Haxe's `OEndTrap of bool` — HashLink's jit.c
+    // never reads it, it just pops `trap_current`. Lowering must therefore
+    // take the region being closed from the trap stack. Reading it as a
+    // register instead made lowering fail outright on functions where the
+    // operand named an unpinned register, and mis-pair the regions where it
+    // happened to name a pinned one.
+    let (ops, tys) = fix_nested_traps();
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+
+    // The inner region's exception register is r2, the outer's is r1. The
+    // first EndTrap closes the inner one even though its operand says `1`.
+    let cell_reg = |c: CellId| f.cells[c.idx()].reg;
+    let closed: Vec<u32> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::EndTrap { cell, .. } => Some(cell_reg(*cell)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        closed,
+        vec![2, 1],
+        "inner region (r2) closes first, then the outer (r1):\n{}",
+        f.dump()
+    );
+
+    // The flag survives serialization unchanged. It has to: `ash_interp`
+    // reads that operand as a register to null out, so substituting the
+    // exception register would make it clear a live one.
+    let out = serialize(&f).unwrap();
+    let flags: Vec<u32> = out
+        .ops
+        .iter()
+        .filter_map(|o| match o {
+            Opcode::EndTrap { exc } => Some(exc.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![1, 1], "both EndTraps re-emit the flag verbatim");
+}
+
+#[test]
+fn endtrap_lowers_when_its_operand_names_an_unpinned_register() {
+    // The shape that made lowering bail with "r1 expected to be pinned":
+    // a function whose only trap pins r2, with `EndTrap`'s flag operand
+    // pointing at r1, which nothing pins.
+    let ops = vec![
+        Opcode::Trap {
+            exc: Reg(2),
+            offset: 2,
+        },
+        Opcode::NullCheck { reg: Reg(3) },
+        Opcode::EndTrap { exc: Reg(1) },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let tys = vec![t(0), t(0), t(2), t(2)];
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_exact(&ops, &tys);
+}
+
+#[test]
 fn roundtrip_multi_endtrap_exact() {
     let (ops, tys) = fix_multi_endtrap();
     assert_exact(&ops, &tys);
@@ -1149,6 +1221,75 @@ fn roundtrip_ref_exact() {
 fn roundtrip_setenumfield_exact() {
     let (ops, tys) = fix_setenumfield();
     assert_exact(&ops, &tys);
+}
+
+#[test]
+fn mov_between_different_types_lowers_to_an_unsafe_cast() {
+    // Haxe emits `OMov` across reference types (HOBJ -> HDYN and friends);
+    // every mismatched Mov in the ash corpus is one of those. HL treats OMov
+    // as a raw register move — hashlink's jit.c runs it through the same arm
+    // as OUnsafeCast — so the honest model is a reinterpreting cast. Calling
+    // it a Copy asserts src and dst share a type, which the verifier rejects
+    // and which would let copy propagation hand every use of dst a value of
+    // the wrong type.
+    let ops = vec![
+        Opcode::Mov {
+            dst: Reg(1),
+            src: Reg(0),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    // r0 and r1 are different types; r2 shares r0's.
+    let tys = vec![t(5), t(9), t(5)];
+    let f = lower(&ops, &tys).unwrap();
+    verify(&f).unwrap();
+    assert_eq!(
+        count_instrs(&f, |i| matches!(
+            i,
+            Instr::Cast {
+                kind: CastKind::UnsafeCast,
+                ..
+            }
+        )),
+        1,
+        "the type-changing Mov became a cast:\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::Copy { .. })),
+        0,
+        "and is not also a copy:\n{}",
+        f.dump()
+    );
+    let out = serialize(&f).unwrap();
+    assert_eq!(
+        ops_text(&out.ops),
+        ops_text(&[
+            Opcode::UnsafeCast {
+                dst: Reg(1),
+                src: Reg(0)
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ]),
+        "serializes as the cast HL already treats it as"
+    );
+
+    // A same-type Mov is still a plain Copy, and still round-trips verbatim.
+    let same = vec![
+        Opcode::Mov {
+            dst: Reg(2),
+            src: Reg(0),
+        },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    let g = lower(&same, &tys).unwrap();
+    assert_eq!(
+        count_instrs(&g, |i| matches!(i, Instr::Copy { .. })),
+        1,
+        "same-type Mov stays a copy:\n{}",
+        g.dump()
+    );
+    assert_exact(&same, &tys);
 }
 
 #[test]
@@ -1459,7 +1600,10 @@ fn dessa_rejects_handler_phi_copies() {
     });
     f.blocks.push(Block {
         phis: vec![],
-        instrs: vec![Instr::EndTrap { cell: CellId(0) }],
+        instrs: vec![Instr::EndTrap {
+            cell: CellId(0),
+            flag: true,
+        }],
         term: Terminator::Jump { target: BlockId(3) },
         handler: Some(BlockId(2)),
     });
@@ -2809,6 +2953,63 @@ fn gvn_refuses_a_load_clobbered_on_the_loop_back_edge() {
         "without the clobber the load is redundant:\n{}",
         g.dump()
     );
+}
+
+#[test]
+fn gvn_does_not_leak_a_binding_into_a_sibling_subtree() {
+    // A diamond. The dominating load is in the head; the *left* arm clobbers
+    // the field and reloads, so its reload cannot reuse the head's value —
+    // but it does become the better candidate for the rest of the left arm,
+    // so it takes over the table entry. The right arm is a sibling in the
+    // dominator tree and the left arm's value does not reach it: it must fall
+    // back to the head's load, never the left arm's.
+    let ops = vec![
+        Opcode::Field {
+            dst: Reg(2),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 0: head, dominates both arms
+        Opcode::JSLt {
+            a: Reg(3),
+            b: Reg(0),
+            offset: 3,
+        }, // 1 -> 5 (right arm); falls through to the left arm
+        Opcode::SetField {
+            obj: Reg(1),
+            field: RefField(0),
+            src: Reg(3),
+        }, // 2: left arm clobbers
+        Opcode::Field {
+            dst: Reg(4),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 3: left reload, cannot reuse op 0
+        Opcode::Ret { ret: Reg(4) }, // 4
+        Opcode::Field {
+            dst: Reg(5),
+            obj: Reg(1),
+            field: RefField(0),
+        }, // 5: right arm, redundant with op 0 only
+        Opcode::Ret { ret: Reg(5) }, // 6
+    ];
+    let tys = vec![t(0), t(5), t(0), t(0), t(0), t(0)];
+    let mut f = lower(&ops, &tys).unwrap();
+    // run_pass verifies, which is the assertion that matters: rewriting the
+    // right arm's load to the left arm's value is a dominance violation.
+    let stats = run_pass(&mut f, &GlobalValueNumbering, PassOptions::default());
+    assert_eq!(
+        stats.eliminated,
+        1,
+        "only the right arm's load is redundant:\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        count_instrs(&f, |i| matches!(i, Instr::FieldGet { .. })),
+        2,
+        "the head's load and the left arm's reload both survive:\n{}",
+        f.dump()
+    );
+    serialize(&f).unwrap();
 }
 
 #[test]

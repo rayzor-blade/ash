@@ -9,17 +9,18 @@ use anyhow::{anyhow, bail, Result};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use beadie::{Bead, CraneliftBackend, CraneliftConfig, CraneliftFunctionDef, JitBackend};
 use cranelift_codegen::ir::{Function, Signature};
 use cranelift_codegen::isa::CallConv;
 
+use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
 use crate::native_lib::NativeFunctionResolver;
 use crate::opcodes::Reg;
-use crate::types::HLFunction;
+use crate::types::TypeRef;
 
 use super::lower::{lower_function, LoweredFunction};
 
@@ -195,6 +196,12 @@ pub struct CraneliftTierContext {
     dyn_compare: usize,
     hl_error: usize,
     call_conv: CallConv,
+    /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
+    /// path touches it. Building it is O(functions + natives), so it is held
+    /// per context rather than rebuilt per compile — that is the difference
+    /// between a constant and a per-promotion cost on a module with 20k
+    /// functions.
+    air_module: OnceLock<AshModule<'static>>,
 }
 
 // SAFETY: `bytecode` points at the `DecodedBytecode` owned by the process
@@ -261,12 +268,23 @@ impl CraneliftTierContext {
             dyn_compare,
             hl_error,
             call_conv: backend.default_call_conv(),
+            air_module: OnceLock::new(),
         })
     }
 
     pub fn bytecode(&self) -> &DecodedBytecode {
         // SAFETY: see the type-level contract.
         unsafe { &*self.bytecode }
+    }
+
+    /// The module view AIR v2 lowers against.
+    pub fn air_module(&self) -> &AshModule<'static> {
+        self.air_module.get_or_init(|| {
+            // SAFETY: the same contract `bytecode` is held to — the decoded
+            // bytecode outlives this context and is never mutated after
+            // decoding — which is exactly what the `'static` claims.
+            AshModule::new(unsafe { &*self.bytecode })
+        })
     }
 
     pub fn call_conv(&self) -> CallConv {
@@ -293,9 +311,12 @@ impl CraneliftTierContext {
             .ok_or_else(|| anyhow!("type index {type_idx} out of range"))
     }
 
-    pub fn reg_kind(&self, func: &HLFunction, reg: Reg) -> Result<hl::hl_type_kind> {
-        let tr = func
-            .regs
+    /// Kind of the register at `reg` in a register-type table. The table is
+    /// passed in rather than read off an `HLFunction` because the array being
+    /// compiled may be AIR v2's serialization, whose table can be longer than
+    /// the function's own (see [`super::air::Body`]).
+    pub fn reg_kind(&self, regs: &[TypeRef], reg: Reg) -> Result<hl::hl_type_kind> {
+        let tr = regs
             .get(reg.0 as usize)
             .ok_or_else(|| anyhow!("register {} out of range", reg.0))?;
         self.type_kind(tr.0)

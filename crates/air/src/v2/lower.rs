@@ -209,6 +209,31 @@ pub fn lower_with(
         }
     }
 
+    // ---- 3b. EndTrap -> the region it closes ------------------------------
+    // `OEndTrap`'s operand is a bool, not a register (see `Instr::EndTrap`),
+    // so the exception cell has to come from the trap stack: the innermost
+    // still-open region at that op, which `stack_at` already tracks.
+    let mut endtrap_cell: HashMap<usize, CellId> = HashMap::new();
+    for (i, op) in ops.iter().enumerate() {
+        if !reachable[i] || !matches!(op, Opcode::EndTrap { .. }) {
+            continue;
+        }
+        // `stack_at[i]` is the stack on entry to op i, so the region being
+        // closed is still on top. The dataflow in step 1 already rejected an
+        // EndTrap with nothing open, and every entry is a Trap op index.
+        let open = stack_at[i].as_ref().expect("reachable op has a trap stack");
+        let trap_idx = *open
+            .last()
+            .ok_or_else(|| anyhow!("EndTrap at op {} with no open trap region", i))?;
+        let Opcode::Trap { exc, .. } = &ops[trap_idx] else {
+            bail!("trap stack entry at op {} is not a Trap", trap_idx);
+        };
+        let cell = *cell_of
+            .get(&exc.0)
+            .ok_or_else(|| anyhow!("trap exception r{} expected to be pinned", exc.0))?;
+        endtrap_cell.insert(i, cell);
+    }
+
     // ---- 4. basic-block partition over reachable ops ---------------------
     let mut leader = vec![false; n];
     leader[0] = true;
@@ -448,6 +473,7 @@ pub fn lower_with(
                 reg_types,
                 &cell_of,
                 &construct_of,
+                &endtrap_cell,
                 &blk_of,
                 &mut func,
                 &mut stacks,
@@ -623,6 +649,7 @@ fn convert_ops(
     reg_types: &[TypeRef],
     cell_of: &HashMap<u32, CellId>,
     construct_of: &HashMap<usize, usize>,
+    endtrap_cell: &HashMap<usize, CellId>,
     blk_of: &dyn Fn(usize) -> Result<BlockId>,
     func: &mut Function,
     stacks: &mut [Vec<ValueId>],
@@ -788,7 +815,24 @@ fn convert_ops(
             Opcode::Mov { dst, src } => {
                 let s = use_reg!(*src);
                 let (d, pin) = def_reg!(*dst);
-                instrs.push(Instr::Copy { dst: d, src: s });
+                // `OMov` is an *untyped* register move: hashlink's jit.c
+                // handles it in the same switch arm as `OUnsafeCast`, and both
+                // ash engines implement the two with identical code. Haxe
+                // emits it across reference types (HOBJ -> HDYN and friends),
+                // so when the register types differ this is a reinterpreting
+                // cast, not a copy. Calling it `Copy` would claim src and dst
+                // have one type, which is what the verifier rejects — and,
+                // worse, would let copy propagation feed a value of the wrong
+                // type to every use of `dst`.
+                if func.value_ty(s) == func.value_ty(d) {
+                    instrs.push(Instr::Copy { dst: d, src: s });
+                } else {
+                    instrs.push(Instr::Cast {
+                        kind: CastKind::UnsafeCast,
+                        dst: d,
+                        src: s,
+                    });
+                }
                 finish_def!(pin);
             }
             Opcode::Int { dst, ptr } => {
@@ -1149,8 +1193,14 @@ fn convert_ops(
                 instrs.push(Instr::NullCheck { value: v });
             }
             Opcode::EndTrap { exc } => {
+                // `exc` is the bool operand, carried through verbatim; the
+                // cell comes from the trap stack.
+                let cell = *endtrap_cell
+                    .get(&i)
+                    .ok_or_else(|| anyhow!("EndTrap at op {} has no resolved trap region", i))?;
                 instrs.push(Instr::EndTrap {
-                    cell: cell_for!(*exc),
+                    cell,
+                    flag: exc.0 != 0,
                 });
             }
             Opcode::GetI8 { dst, bytes, index }

@@ -13,11 +13,15 @@
 //!   `arg_kinds`/`float_mask` marshaling contract.
 //! - [`backend`]: `CraneliftBackend` construction (production flag set,
 //!   bulk symbol registration) and the compile entry point.
+//! - [`air`]: the `ASH_AIR` gate deciding whether a compile lowers the
+//!   bytecode as decoded or AIR v2's optimized serialization of it.
 //! - [`lower`]: HL bytecode → CLIF lowering for the v1 opcode subset.
 
+pub mod air;
 pub mod backend;
 pub mod lower;
 
+pub use air::{AirMode, Body};
 pub use backend::{AshCraneliftBackend, CraneliftTierContext};
 pub use lower::{lowering_reject_reason, LoweredFunction};
 

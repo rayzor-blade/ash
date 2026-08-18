@@ -160,20 +160,27 @@ impl Pass for GlobalValueNumbering {
         let mut table: HashMap<Key, ValueId> = HashMap::new();
         enum Item {
             Visit(usize),
-            Undo(Vec<Key>),
+            /// Bindings this block made, each with whatever it shadowed.
+            Undo(Vec<(Key, Option<ValueId>)>),
         }
         let mut walk = vec![Item::Visit(cfg.dom.rpo[0])];
         while let Some(item) = walk.pop() {
             let b = match item {
-                Item::Undo(keys) => {
-                    for k in keys {
-                        table.remove(&k);
+                Item::Undo(entries) => {
+                    // Reverse order: a block may bind the same key twice, and
+                    // only unwinding last-to-first restores the state the
+                    // block was entered with.
+                    for (k, prev) in entries.into_iter().rev() {
+                        match prev {
+                            Some(v) => table.insert(k, v),
+                            None => table.remove(&k),
+                        };
                     }
                     continue;
                 }
                 Item::Visit(b) => b,
             };
-            let mut added: Vec<Key> = Vec::new();
+            let mut added: Vec<(Key, Option<ValueId>)> = Vec::new();
             for k in 0..f.blocks[b].instrs.len() {
                 let ins = f.blocks[b].instrs[k].clone();
                 let Some(dst) = ins.dst() else { continue };
@@ -223,9 +230,17 @@ impl Pass for GlobalValueNumbering {
                         }
                     }
                 }
-                if table.insert(key.clone(), dst).is_none() {
-                    added.push(key);
-                }
+                // Bind the key to this definition, remembering what it
+                // shadowed. Reaching here means the entry already in the table
+                // (if any) could not be reused — a clobbered load, a type
+                // mismatch, a handler phi, a register that would not
+                // privatize. `dst` is the better candidate for the rest of
+                // *this* subtree, but it dominates nothing outside it, so the
+                // shadowed binding has to come back when the subtree is done.
+                // Dropping it on the floor here is what let a sibling block
+                // rewrite a use to a value that does not dominate it.
+                let prev = table.insert(key.clone(), dst);
+                added.push((key, prev));
             }
             walk.push(Item::Undo(added));
             for &child in cfg.dom.dom_children[b].iter().rev() {

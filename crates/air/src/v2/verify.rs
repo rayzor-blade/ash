@@ -78,7 +78,7 @@ pub fn verify(f: &Function) -> Result<()> {
                 | Instr::CellIncr { cell }
                 | Instr::CellDecr { cell }
                 | Instr::CellRef { cell, .. }
-                | Instr::EndTrap { cell } => check_c(*cell, "cell op", b)?,
+                | Instr::EndTrap { cell, .. } => check_c(*cell, "cell op", b)?,
                 _ => {}
             }
         }
@@ -377,7 +377,7 @@ fn verify_trap_regions(f: &Function, _succs: &[Vec<usize>]) -> Result<()> {
 
         // Normal flow: apply a trailing EndTrap, then the terminator.
         let mut s1 = s0.clone();
-        if let Some(Instr::EndTrap { cell }) = blk.instrs.last() {
+        if let Some(Instr::EndTrap { cell, .. }) = blk.instrs.last() {
             match s1.pop() {
                 None => bail!("b{}: EndTrap with no open trap region", b),
                 Some((_, exc)) => {

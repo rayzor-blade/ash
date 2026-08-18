@@ -99,6 +99,13 @@ pub struct ObjLayout {
     /// `fields_indexes`: inherited fields first, in super-chain order, then
     /// this type's own.
     pub field_offsets: Vec<i32>,
+    /// The declared `hl_type_kind` of each field, in the same order.
+    ///
+    /// A backend must size the load or store from *this*, not from the width of
+    /// the register the value happens to live in. The two usually agree, but
+    /// where they do not, using the register's width writes past the field and
+    /// silently corrupts its neighbour.
+    pub field_kinds: Vec<u32>,
     /// Instance size including trailing padding.
     pub size: i32,
     /// Trailing padding included in `size`. A subclass resumes laying out at
@@ -123,6 +130,22 @@ pub fn field_offset(types: &[HLType], type_index: usize, field_index: usize) -> 
         .field_offsets
         .get(field_index)
         .copied()
+}
+
+/// Byte offset *and* declared kind of `field_index` within `type_index`.
+///
+/// Prefer this over [`field_offset`] when emitting the access: the kind is what
+/// the load or store must be sized from.
+pub fn field_offset_and_kind(
+    types: &[HLType],
+    type_index: usize,
+    field_index: usize,
+) -> Option<(i32, u32)> {
+    let l = object_layout(types, type_index)?;
+    Some((
+        *l.field_offsets.get(field_index)?,
+        *l.field_kinds.get(field_index)?,
+    ))
 }
 
 /// Super chains are shallow in practice; this only exists so a malformed or
@@ -185,6 +208,10 @@ fn compute(
         Some(p) => p.field_offsets.clone(),
         None => Vec::new(),
     };
+    let mut field_kinds = match &parent {
+        Some(p) => p.field_kinds.clone(),
+        None => Vec::new(),
+    };
 
     for f in &obj.fields {
         let ft = types.get(f.type_.0)?;
@@ -196,6 +223,7 @@ fn compute(
         }
         size += pad_struct(size, ft.kind);
         field_offsets.push(size);
+        field_kinds.push(ft.kind);
         let sz = type_size(ft.kind);
         size += sz;
         if sz > largest_field as i32 {
@@ -214,6 +242,7 @@ fn compute(
 
     Some(ObjLayout {
         field_offsets,
+        field_kinds,
         size,
         pad_size,
         largest_field,

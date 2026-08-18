@@ -156,9 +156,16 @@ pub fn entry_return_class(kind: hl::hl_type_kind) -> AbiClass {
 ///   a `longjmp` resumed *into* a Cranelift frame is unsound. (Throwing
 ///   *out* of a frame is fine — that is what `NullCheck` does — because the
 ///   interpreter's per-call `setjmp` wrapper guarantees the jump exits.)
-/// - `Field`/`SetField`/`GetThis`/`SetThis`/`CallMethod`/`CallThis`/
-///   `CallClosure`/`Dyn*`/`ToDyn`/`SafeCast`/`ToVirtual`/`New`/`EnumAlloc`/
-///   `MakeEnum`/enum + array + memory ops: object-model layout.
+/// - `CallMethod`/`CallThis`/`CallClosure`/`Dyn*`/`ToDyn`/`SafeCast`/
+///   `ToVirtual`/`New`/`EnumAlloc`/`MakeEnum`/enum + array + memory ops:
+///   object-model layout decisions this tier still does not make.
+///
+/// `Field`/`SetField`/`GetThis`/`SetThis` used to be on that list and are not
+/// any more: [`crate::layout`] resolves their offsets at compile time, so this
+/// tier consumes the same numbers the LLVM tier does rather than deciding
+/// anything itself. They were also what made the gate reject essentially all
+/// real code — Haxe programs touch fields constantly, so the middle tier was
+/// declining every candidate and leaving LLVM to pay for every promotion.
 /// - `Ref`/`Unref`/`Setref`: register address-taking has no CLIF `Variable`
 ///   equivalent without pinning registers to stack slots.
 /// - `Prefetch`/`Asm`: x86-only.
@@ -201,6 +208,13 @@ pub fn is_cranelift_lowerable(op: &Opcode) -> bool {
             // Globals
             | Opcode::GetGlobal { .. }
             | Opcode::SetGlobal { .. }
+            // NOTE: Field/SetField/GetThis/SetThis are lowered (see
+            // `Lowerer::lower_field_load`) but NOT admitted here yet. Turning
+            // them on makes six programs diverge from the interpreter at
+            // `--jit-threshold 1`, three at 10, and none at the default 100 —
+            // a threshold-dependent failure, so the defect is in a function
+            // that only becomes eligible once field access is allowed, not in
+            // the offsets themselves. See BACKLOG.md.
             // Control flow
             | Opcode::JTrue { .. }
             | Opcode::JFalse { .. }

@@ -217,6 +217,41 @@ broker shape (backend on one thread, compile+finalize on another, execute on
 a third). Pins: cranelift 0.130.2, `wasmtime-internal-jit-icache-coherence`
 43.0.2.
 
+### A failed compiled invoke re-runs the function — side effects double
+
+Found while enabling field access below; independent of it, and the more
+serious of the two. `call_function` dispatches to compiled code and, when the
+invoke returns `Err`, records a fallback and calls `execute_hl_function`
+anyway:
+
+```rust
+match self.call_compiled_function(findex, &entry, args) {
+    Ok(v)  => return Ok(v),
+    Err(e) => self.record_tiered_fallback(findex, ...),   // falls through
+}
+self.execute_hl_function(...)                             // runs it AGAIN
+```
+
+That is only sound if a failed invoke is guaranteed to have done nothing. It is
+not: the compiled function can run to completion and fail afterwards (return
+marshaling), or fail partway through. Anything it did already — printing,
+allocating, mutating a field — happens a second time. The observable symptom is
+output duplicated in place:
+
+```
+alloc: 100alloc: 100
+palette done: 1001palette done: 1001
+```
+
+Reproduced with `[tiered] fallback findex=29 reason=compiled invoke failed: HL
+exception: Null access`, where the function had already printed before failing.
+
+The fix is to make the fallback honest about what it can retry. A compiled
+invoke that failed *before entering* the function (bad signature, no entry
+point) is safe to retry; one that failed *inside* it is not, and must propagate
+rather than re-execute. Until the two are distinguishable, any tier that
+declines mid-call can corrupt program output.
+
 ### The gate rejects essentially all real code — highest priority here
 
 The opcode gate excludes the object model, and Haxe code touches the object
@@ -246,10 +281,29 @@ their compile time bought nothing at all. The dispatch gap is tracked under
 [JIT & tiering](#jit--tiering); it is listed here too because it converts paid
 compile time into pure loss.
 
-This makes the [shared layout oracle](#cranelift-middle-tier) below the
-gating item for the whole tiering story, not a refinement of it: until
-`Field`/`SetField`/`GetThis`/`SetThis`/`New` lower here, there is no middle
-tier in any workload that allocates or reads a field.
+The shared layout oracle now exists (`crates/ash/src/layout.rs`, verified
+against `hlp_get_obj_rt` across 44 programs), and
+`Field`/`SetField`/`GetThis`/`SetThis` are lowered against it in
+`cranelift/lower.rs`. They are **not** admitted by `is_cranelift_lowerable`
+yet, because turning them on diverges from the interpreter in a
+threshold-dependent way:
+
+| `--jit-threshold` | programs differing from interp |
+|---|---|
+| 1 | 6 of 41 |
+| 10 | 3 of 41 |
+| 100 (shipping default) | 0 of 41 |
+
+A defect that disappears as the threshold rises is not in the offsets — those
+are checked independently — it is in some function that only becomes eligible
+for this tier once field access is allowed, and that runs during early
+initialization. Part of the symptom is the double-execution bug above; the
+underlying `Null access` needs running down first. `ASH_CL_DUMP=<findex>`
+prints the lowered CLIF, which is how the null-check-then-load shape was read.
+
+Enabling this is worth real speed — Cranelift went from **0 installs to 3** on
+`mandelbrot_small` with the gate open — but not at the price of correctness
+that holds only at one threshold setting. `New` remains unlowered regardless.
 
 - **Build the tier**: `beadie` `TieredAdapter` ladder (interpreter → Cranelift
   `opt_level=speed` → LLVM), AIR v2 → CLIF lowering, `enable_probestack=false`

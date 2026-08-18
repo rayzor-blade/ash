@@ -252,6 +252,19 @@ pub fn lower_function(
         lo.finish();
     }
 
+    // `ASH_CL_DUMP=<findex>` (or `all`) prints the lowered CLIF. Reading the IR
+    // is the only practical way to tell a bad offset from a bad width from a
+    // bad base pointer once a function miscompiles.
+    if let Ok(want) = std::env::var("ASH_CL_DUMP") {
+        if want == "all" || want.split(',').any(|w| w.trim() == findex.to_string()) {
+            eprintln!(
+                "=== CLIF findex={findex} {} ===\n{}",
+                func.name(),
+                def.ctx.func.display()
+            );
+        }
+    }
+
     Ok(LoweredFunction {
         def,
         arg_kinds,
@@ -524,6 +537,73 @@ impl Lowerer<'_, '_> {
         self.reg_class[r.0 as usize]
     }
 
+    /// `dst = obj.field`, loading exactly as many bytes as the field holds and
+    /// then widening to whatever the destination register is.
+    fn lower_field_load(&mut self, dst: Reg, obj: Reg, field_index: usize) -> Result<()> {
+        let (off, field_ty) = self.static_field_offset(obj, field_index)?;
+        let base = self.reg_val(obj);
+        let raw = self.b.ins().load(field_ty, MemFlags::trusted(), base, off);
+        let want = self.ty_of(dst);
+        let v = if field_ty == want {
+            raw
+        } else {
+            self.coerce(raw, want)?
+        };
+        self.set_reg(dst, v)
+    }
+
+    /// `obj.field = src`, narrowing to the field's width first so the store
+    /// cannot spill into the neighbouring field.
+    fn lower_field_store(&mut self, obj: Reg, field_index: usize, src: Reg) -> Result<()> {
+        let (off, field_ty) = self.static_field_offset(obj, field_index)?;
+        let base = self.reg_val(obj);
+        let raw = self.reg_val(src);
+        let v = if self.b.func.dfg.value_type(raw) == field_ty {
+            raw
+        } else {
+            self.coerce(raw, field_ty)?
+        };
+        self.b.ins().store(MemFlags::trusted(), v, base, off);
+        Ok(())
+    }
+
+    /// Compile-time byte offset and machine type of `field_index` within the
+    /// object held in `obj`.
+    ///
+    /// Errors decline the function rather than falling back to a runtime
+    /// lookup: this tier exists to be cheap, and the cases that need one
+    /// (`HVIRTUAL`, `HDYNOBJ`, packed fields) are exactly the cases the LLVM
+    /// tier is there to handle.
+    fn static_field_offset(&self, obj: Reg, field_index: usize) -> Result<(i32, Type)> {
+        let type_index = self
+            .func
+            .regs
+            .get(obj.0 as usize)
+            .ok_or_else(|| anyhow!("field access on out-of-range register {}", obj.0))?
+            .0;
+        let bytecode = self.ctx.bytecode();
+        let kind = bytecode
+            .types
+            .get(type_index)
+            .ok_or_else(|| anyhow!("field access on unknown type {type_index}"))?
+            .kind;
+        if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
+            bail!("field access needs a runtime lookup for type kind {kind}");
+        }
+        let (offset, field_kind) =
+            crate::layout::field_offset_and_kind(&bytecode.types, type_index, field_index)
+                .ok_or_else(|| {
+                    anyhow!("no static layout for type {type_index} field {field_index}")
+                })?;
+        // The access must be as wide as the FIELD, not as wide as the register
+        // the value lives in. Where those differ, sizing from the register
+        // writes past the field and corrupts whatever is laid out next to it.
+        let ty = abi_class(field_kind)
+            .clif_type()
+            .ok_or_else(|| anyhow!("field of kind {field_kind} has no machine type"))?;
+        Ok((offset, ty))
+    }
+
     fn ty_of(&self, r: Reg) -> Type {
         self.reg_ty[r.0 as usize]
     }
@@ -666,6 +746,19 @@ impl Lowerer<'_, '_> {
                 let r = self.b.ins().iadd_imm(v, -1);
                 self.set_reg(*dst, r)?;
             }
+
+            // Field access, but only where the layout oracle can resolve the
+            // offset at compile time — which is what makes it lowerable here at
+            // all. This tier deliberately makes no object-model layout
+            // decisions of its own; it consumes the same offsets the LLVM tier
+            // does. Anything the oracle declines (HPACKED) or that needs the
+            // dynamic type (HVIRTUAL, HDYNOBJ) declines the whole function, and
+            // it keeps interpreting until the LLVM tier takes it.
+            Opcode::Field { dst, obj, field } => self.lower_field_load(*dst, *obj, field.0)?,
+            Opcode::SetField { obj, field, src } => self.lower_field_store(*obj, field.0, *src)?,
+            // `this` is register 0 by construction.
+            Opcode::GetThis { dst, field } => self.lower_field_load(*dst, Reg(0), field.0)?,
+            Opcode::SetThis { field, src } => self.lower_field_store(Reg(0), field.0, *src)?,
 
             Opcode::GetGlobal { dst, global } => {
                 if self.class_of(*dst) != AbiClass::Ptr {

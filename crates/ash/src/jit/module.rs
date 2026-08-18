@@ -111,6 +111,20 @@ macro_rules! phase_timer {
     };
 }
 
+/// Register LLVM's MCJIT implementation before an execution engine is asked for.
+///
+/// `create_jit_execution_engine` initializes the native target but does not do
+/// this, leaving it to the static initializer inside LLVM's MCJIT library.
+/// Nothing in this crate references that object, so a link-time-optimized build
+/// garbage-collects it and every engine creation then fails at runtime with
+/// "JIT has not been linked in." — a release-only failure that does not
+/// reproduce under `cargo build`. Calling it explicitly makes the binary
+/// independent of how aggressively the linker prunes.
+fn link_in_mcjit() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(inkwell::execution_engine::ExecutionEngine::link_in_mc_jit);
+}
+
 fn timing_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| std::env::var("ASH_TIERED_TIMING").is_ok())
@@ -126,6 +140,7 @@ impl<'ctx> JITModule<'ctx> {
         phase_timer!(timing, "decode", t);
         t = std::time::Instant::now();
 
+        link_in_mcjit();
         let module = context.create_module("Hashlink");
         let execution_engine = module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
@@ -355,6 +370,7 @@ impl<'ctx> JITModule<'ctx> {
         phase_timer!(timing, "tiered decode", t);
         t = std::time::Instant::now();
 
+        link_in_mcjit();
         let llvm_module = context.create_module("Hashlink");
         let execution_engine = llvm_module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)

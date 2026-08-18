@@ -77,7 +77,10 @@ Release builds use `make` (host target with LTO) or `make all` (every installed 
 
 ### Rebuilding after `std/` changes
 
-`ash_std` is a cdylib embedded via `include_bytes!` in `build.rs`, so a stale copy will be linked unless it is rebuilt and the embedding crate is cleaned:
+`ash_std` is a cdylib embedded into the binaries via `include_bytes!`, and
+nothing in cargo's dependency graph records that — the embedding crate does not
+link it. So it must be built first, by hand, and `ash` must be cleaned to make
+its build script run again:
 
 ```bash
 cargo build -p ash_std
@@ -85,7 +88,20 @@ cargo clean -p ash
 cargo build -p ash -p ash_cli
 ```
 
-`build.rs` reads the cdylib from `target/<triple>/debug/`. If the toolchain writes it to `target/debug/` instead — which happens when no explicit target is configured — copy it across before rebuilding `ash`.
+**Release builds need the same two steps**, and the ordering matters more:
+
+```bash
+cargo build --release -p ash_std
+cargo build --release -p ash -p ash_cli
+```
+
+`build.rs` prefers a cdylib matching the profile being built and falls back to
+the debug one, because `ash_std` may only have been built in debug. That
+fallback is load-bearing but easy to get wrong: the embedded runtime is
+everything compiled code calls into — the collector, field access, strings — so
+a release binary that falls back runs its entire runtime at the dev profile's
+`opt-level` while looking optimized. The build script prints a `cargo:warning`
+when it happens.
 
 ## CLI
 

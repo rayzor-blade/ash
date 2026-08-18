@@ -19,13 +19,24 @@ full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
 Measured with the built-in profiler (`ASH_PROFILE=sample`, see the README), so
 these are shares of observed execution rather than estimates. Both rows are the
 whole-program JIT, where every function is LLVM-compiled at `-O3` and nothing
-is left interpreted — that is, the best code ash currently produces.
+is left interpreted — that is, the best code ash currently produces. Debug and
+release builds are given side by side because the obvious objection to the
+first column is that it was taken at `opt-level = 1`.
 
-| | nbody | mandelbrot (875×500) |
-|---|---|---|
-| Generated code (`llvm`) | 45.6% | 15.4% |
-| `hlp_get_obj_rt` | **44.8%** | 13.7% |
-| GC (mark, sweep, allocate, lock, `madvise`) | ~0% | **53.6%** |
+| | nbody (dbg) | nbody (rel) | mandelbrot (dbg) | mandelbrot (rel) |
+|---|---|---|---|---|
+| Generated code (`llvm`) | 45.6% | 48.5% | 15.4% | 16.5% |
+| `hlp_get_obj_rt` | **44.8%** | **43.3%** | 13.7% | 14.0% |
+| GC (mark, sweep, allocate, lock, `madvise`) | ~0% | ~0% | **53.6%** | **51.8%** |
+
+**A correct release build does not move any of this** — the end-to-end times
+land between 0.98× and 1.04×, and the shares above shift by at most three
+points. That is the expected result once the costs are named: optimization
+level cannot delete a call, a mutex, or a heap line. `hlp_get_obj_rt` is about
+five instructions behind a cached pointer, so compiling it better is worth
+nothing against 1.76 billion invocations of it; the allocator takes a reentrant
+mutex per allocation; and a 24-byte `Complex` occupies a whole 128-byte GC
+line either way.
 
 The two benchmarks isolate different costs, which is why both are worth
 keeping. nbody's hot loop only reads and writes fields of long-lived objects,
@@ -42,16 +53,16 @@ where it does now. The three items that would move these numbers —
 `Complex` allocations never happen, and the [GC](#gc) work below — are already
 listed separately; this section exists to rank them.
 
-Two caveats on the figures. They come from a `target/debug` build, where
-`[profile.dev] opt-level = 1` applies to `ash_std` — so the runtime and GC
-halves are lightly optimized while the JIT-generated half is not, which
-overstates their share by an unmeasured amount. And `target/release/ash`
-currently embeds a *debug* `ash_std` (there is no `target/release/libash_std.dylib`),
-so a release build does not settle the question either; see
-[Build & tooling](#build--tooling). Re-measure once that is fixed. The
-*ordering* is robust to this — a call per field access and two allocations per
-iteration are architectural, not artifacts of an optimization level — but the
-percentages will move.
+Getting the release column required fixing the release build first, which had
+been producing an optimized compiler around an unoptimized runtime. Three
+defects, all now closed: `[profile.release]` lived in `crates/ash/Cargo.toml`
+rather than the workspace root, so cargo discarded it with only a warning;
+`ash_std` was not built for the release profile, so the embedded runtime came
+from the debug tree (the build script now says so loudly instead of falling
+back in silence); and once fat LTO actually applied, every release binary died
+at startup with `JIT has not been linked in.` because nothing referenced
+LLVM's MCJIT registration object and the linker collected it — fixed by
+calling `link_in_mc_jit` explicitly.
 
 ---
 

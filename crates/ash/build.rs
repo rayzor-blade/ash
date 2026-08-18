@@ -118,6 +118,25 @@ fn main() {
         )
     });
 
+    // Falling back to a debug cdylib in a release build is legal but almost
+    // never intended: the embedded runtime is everything the JIT calls into —
+    // the GC, hlp_get_obj_rt, string handling — so a "release" binary built
+    // this way runs its whole runtime at the dev profile's opt-level while
+    // looking like an optimized build. It has to say so.
+    let embedded_profile = if lib_path.components().any(|c| c.as_os_str() == "release") {
+        "release"
+    } else {
+        "debug"
+    };
+    if profile == "release" && embedded_profile != "release" {
+        println!(
+            "cargo:warning=embedding a DEBUG ash_std into a release build of ash ({}). \
+             The runtime the JIT calls into will not be optimized. Build the runtime \
+             first: cargo build --release -p ash_std",
+            lib_path.display()
+        );
+    }
+
     println!("lib_path {:?}", lib_path);
 
     // Read the library file into a byte array

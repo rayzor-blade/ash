@@ -47,8 +47,12 @@ pub fn enabled() -> bool {
             // `v2` selects the SSA interpreter in `crate::ssa`, which executes
             // the IR instead of serializing it. This path keeps its own
             // spelling so the two can be compared against each other.
-            "v2-serialize" => true,
-            "v2" | "" | "0" | "off" => false,
+            // Default on. AIR v2's optimizations reach the interpreter in flat
+            // register form, which is the execution model HL bytecode is built
+            // for; the direct-SSA interpreter stays reachable as `v2` and as
+            // the differential oracle, but it measured slower.
+            "" | "v2-serialize" => true,
+            "v2" | "0" | "off" => false,
             // A typo here would otherwise run unoptimized while looking like
             // it was on, which is a hard thing to notice from the output.
             other => {

@@ -58,9 +58,13 @@ pub(crate) fn mode() -> AirMode {
     *MODE.get_or_init(|| {
         let raw = std::env::var("ASH_AIR").unwrap_or_default();
         match raw.to_ascii_lowercase().as_str() {
-            "v2" | "2" => AirMode::V2,
+            // v2 is the default: it is the IR the project is built around, and
+            // leaving v1 in front of it made every new analysis get written
+            // against the opcode array instead, which entrenched the thing we
+            // are removing. v1 stays reachable as a bisect switch only.
+            "" | "v2" | "2" => AirMode::V2,
             "none" => AirMode::None,
-            "" | "off" | "0" | "v1" | "1" => AirMode::V1,
+            "off" | "0" | "v1" | "1" => AirMode::V1,
             other => {
                 eprintln!("[air] unknown ASH_AIR='{other}' (expected v2|v1|off|none); using v1");
                 AirMode::V1

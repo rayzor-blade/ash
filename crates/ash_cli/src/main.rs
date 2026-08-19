@@ -607,6 +607,28 @@ fn run() -> Result<()> {
         }
     }
 
+    // `ASH_REACH=only` reports how much of the module can actually be entered.
+    // A `.hl` links the whole stdlib, so any sweep that iterates bc.functions
+    // is mostly measuring code that cannot run.
+    if let Ok(mode) = std::env::var("ASH_REACH") {
+        if !mode.is_empty() && mode != "0" {
+            for line in ash::reachable::report(&bytecode) {
+                eprintln!("[reach] {line}");
+            }
+            if let Some(fx) = std::env::var("ASH_REACH_WHY")
+                .ok()
+                .and_then(|v| v.trim().parse::<i32>().ok())
+            {
+                for line in ash::reachable::why(&bytecode, fx) {
+                    eprintln!("[reach] why({fx}) {line}");
+                }
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     // `ASH_VERIFY_OSR=only` reports which loops on-stack replacement would
     // accept. Computed over AIR, so loop discovery, dominance and the
     // address-escape question all come from the IR that already models them.

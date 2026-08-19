@@ -69,6 +69,17 @@ fn logging() -> bool {
     *CELL.get_or_init(|| std::env::var("ASH_AIR_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
+/// A findex to print raw and optimized opcodes for (`ASH_AIR_DUMP`).
+///
+/// Aggregate op counts hide the thing that matters to an interpreter: which
+/// *function* grew. A pipeline can shrink a module by twenty instructions and
+/// still lose, if the ones it added landed in the innermost loop. This prints
+/// one function's before and after so that question can be answered directly.
+fn dump_findex() -> Option<i32> {
+    static CELL: OnceLock<Option<i32>> = OnceLock::new();
+    *CELL.get_or_init(|| std::env::var("ASH_AIR_DUMP").ok().and_then(|v| v.trim().parse().ok()))
+}
+
 /// Opt level from `ASH_AIR_LEVEL`, defaulting to `O2` as the sweep does.
 fn level() -> AirOptLevel {
     static CELL: OnceLock<AirOptLevel> = OnceLock::new();
@@ -188,6 +199,16 @@ impl Cache {
                         raw.regs.len(),
                         opt.regs.len()
                     );
+                }
+                if dump_findex() == Some(raw.findex) {
+                    eprintln!("[air] === findex={} {} raw ===", raw.findex, raw.name());
+                    for (i, op) in raw.ops.iter().enumerate() {
+                        eprintln!("[air] raw {i:4}  {op:?}");
+                    }
+                    eprintln!("[air] === findex={} {} optimized ===", raw.findex, raw.name());
+                    for (i, op) in opt.ops.iter().enumerate() {
+                        eprintln!("[air] opt {i:4}  {op:?}");
+                    }
                 }
                 self.optimized += 1;
                 Body::Ready(Box::leak(Box::new(opt)))

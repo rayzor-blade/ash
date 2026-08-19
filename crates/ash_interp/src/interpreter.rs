@@ -708,16 +708,14 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
 /// Cache an env-var presence check (these gate the opcode-dispatch and
 /// native-call hot paths, where macOS getenv takes a process-wide lock —
 /// `__findenv_locked` was 51.9% of samples on an nbody profile).
-/// Whether to attempt compiling OSR entry points (`ASH_OSR=1`).
+/// Whether to compile and enter OSR entry points (`ASH_OSR=0` to disable).
 ///
-/// Off by default because the entry cannot yet be reached. The code is built
-/// and verifies, but MCJIT emits a module's object once, so a function added
-/// after that finalization has no address -- `get_function_address` answers
-/// "not found". Attempting it anyway is not free: the compile runs the whole
-/// middle end before the lookup fails, which cost nbody 0.35s for nothing.
+/// On by default. A failed compile is recorded as a zero and never retried, so
+/// the worst case for a loop that cannot be entered is one wasted compile; the
+/// interpreter carries on either way.
 fn osr_compile_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CELL.get_or_init(|| std::env::var("ASH_OSR").is_ok_and(|v| v != "0" && !v.is_empty()))
+    *CELL.get_or_init(|| !matches!(std::env::var("ASH_OSR").as_deref(), Ok("0") | Ok("off")))
 }
 
 /// Whether to report OSR decisions (`ASH_OSR_LOG`).

@@ -622,6 +622,36 @@ impl<'ctx> JITModule<'ctx> {
         if let Err(e) = osr_module.verify() {
             return Err(anyhow!("osr module {name} failed verification: {}", e));
         }
+        // Bind every symbol this module leaves undefined to the address the
+        // host already has for it. MCJIT resolves across the modules it holds,
+        // but only for symbols that are actually defined somewhere it can see;
+        // a bytecode function that was never compiled has no definition, and
+        // the call lands on a null pointer. Resolving them explicitly is what
+        // rayzor does with its runtime symbols.
+        let mut unresolved: Vec<String> = Vec::new();
+        for f in osr_module.get_functions() {
+            if f.count_basic_blocks() != 0 {
+                continue; // defined here
+            }
+            let Ok(sym) = f.get_name().to_str() else {
+                continue;
+            };
+            if sym.starts_with("llvm.") {
+                continue; // intrinsic, lowered by the backend
+            }
+            match self.execution_engine.get_function_address(sym) {
+                Ok(a) if a != 0 => self.execution_engine.add_global_mapping(&f, a as usize),
+                _ => unresolved.push(sym.to_string()),
+            }
+        }
+        if !unresolved.is_empty() {
+            return Err(anyhow!(
+                "osr module {name} has {} unresolved symbol(s): {}",
+                unresolved.len(),
+                unresolved.join(", ")
+            ));
+        }
+
         self.execution_engine
             .add_module(&osr_module)
             .map_err(|()| anyhow!("osr module {name} rejected by the engine"))?;
@@ -746,6 +776,14 @@ impl<'ctx> JITModule<'ctx> {
                 "osr entry for findex {findex} pc {header_pc} failed verification"
             ));
         }
+
+        // Bring in whatever the body calls. Lowering queues each callee it
+        // could not find in the (deliberately empty) cache, and without this
+        // they stay declarations that resolve to nothing -- the first version
+        // left `Fun_16`, `Fun_20` and `Fun_23` undefined and jumped through a
+        // null pointer. Compiling them here duplicates their code into this
+        // module, which is the price of the module being self-contained.
+        self.compile_pending_functions()?;
 
         {
             let _p = crate::profile::scope("llvm middle-end (osr)");

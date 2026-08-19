@@ -96,10 +96,32 @@ impl TrapContext {
 }
 
 impl ImmixAllocator {
+    /// Arm a trap, reusing a retired context when one is available.
+    ///
+    /// Every interpreter call into compiled code arms one of these, so on a
+    /// call-heavy program this was a malloc and a free per call -- around a
+    /// third of nbody's hybrid run went to GC-lock and allocator traffic, and
+    /// this is a large part of it. Traps nest strictly, so a plain stack of
+    /// retired contexts is enough and never grows past the nesting depth.
     pub fn setup_trap(&self) -> *mut TrapContext {
-        let mut new_trap = Box::new(TrapContext::new());
-        new_trap.prev = self.current_trap.borrow().clone();
-        let trap_ptr = Box::into_raw(new_trap);
+        let prev = *self.current_trap.borrow();
+        let trap_ptr = match self.trap_pool.borrow_mut().pop() {
+            Some(reused) => {
+                // A reused context must look exactly like a fresh one; a stale
+                // `caught` or a leftover exception would be read by the next
+                // throw as though it belonged to this trap.
+                unsafe {
+                    *reused = TrapContext::new();
+                    (*reused).prev = prev;
+                }
+                reused
+            }
+            None => {
+                let mut fresh = Box::new(TrapContext::new());
+                fresh.prev = prev;
+                Box::into_raw(fresh)
+            }
+        };
         *self.current_trap.borrow_mut() = trap_ptr;
         trap_ptr
     }
@@ -109,7 +131,15 @@ impl ImmixAllocator {
         if !current.is_null() {
             unsafe {
                 *self.current_trap.borrow_mut() = (*current).prev;
-                let _ = Box::from_raw(current);
+                // Drop anything the context owns before retiring it, so a
+                // caught exception value is not kept alive by the pool.
+                (*current).exception_value = None;
+                let mut pool = self.trap_pool.borrow_mut();
+                if pool.len() < 64 {
+                    pool.push(current);
+                } else {
+                    let _ = Box::from_raw(current);
+                }
             }
         }
     }

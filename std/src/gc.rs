@@ -456,6 +456,13 @@ pub struct ImmixAllocator {
     pub(crate) exception_handler:
         Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
     pub(crate) current_trap: RefCell<*mut TrapContext>,
+    /// Retired trap contexts, kept for the next `setup_trap`.
+    ///
+    /// Traps nest strictly, so these come back in the order they were handed
+    /// out. Every interpreter call into compiled code arms one -- ten million
+    /// of them on nbody -- and each was a `Box::new` and a `Box::from_raw`
+    /// around a `jmp_buf`.
+    pub(crate) trap_pool: RefCell<Vec<*mut TrapContext>>,
     pub(crate) exc_value: RefCell<*mut vdynamic>,
     stack_top: usize,
     globals_range: Option<(*const *mut c_void, usize)>,
@@ -533,6 +540,7 @@ impl ImmixAllocator {
             current_exception: None,
             exception_handler: None,
             current_trap: RefCell::new(std::ptr::null_mut()),
+            trap_pool: RefCell::new(Vec::new()),
             exc_value: RefCell::new(std::ptr::null_mut()),
             fiber_stacks: Vec::new(),
             stack_top: 0,

@@ -653,6 +653,127 @@ impl Lowerer<'_, '_> {
         Ok((offset, ty))
     }
 
+    /// The declared HL type kind of a register.
+    fn reg_kind(&self, r: Reg) -> Result<u32> {
+        let type_index = self
+            .regs
+            .get(r.0 as usize)
+            .ok_or_else(|| anyhow!("out-of-range register {}", r.0))?
+            .0;
+        Ok(self
+            .ctx
+            .bytecode()
+            .types
+            .get(type_index)
+            .ok_or_else(|| anyhow!("register {} has unknown type {type_index}", r.0))?
+            .kind)
+    }
+
+    /// An index register widened to pointer width for address arithmetic.
+    ///
+    /// HL indices are signed 32-bit, so this sign-extends: a negative index is
+    /// out of bounds and neither tier bounds-checks, but sign-extending at
+    /// least computes the same wrong address the LLVM tier does instead of a
+    /// wildly different one four gigabytes away.
+    fn index_as_addr(&mut self, index: Reg) -> Result<Value> {
+        let v = self.reg_val(index);
+        let have = self.b.func.dfg.value_type(v);
+        Ok(match have.bits().cmp(&64) {
+            std::cmp::Ordering::Less => self.b.ins().sextend(types::I64, v),
+            std::cmp::Ordering::Equal => v,
+            std::cmp::Ordering::Greater => bail!("index register wider than a pointer"),
+        })
+    }
+
+    /// `dst = array[index]`, with the element stride taken from `dst`'s kind —
+    /// the same rule the LLVM tier applies, via the same table.
+    fn lower_array_load(&mut self, dst: Reg, array: Reg, index: Reg) -> Result<()> {
+        let kind = self.reg_kind(dst)?;
+        let ty = abi_class(kind)
+            .clif_type()
+            .ok_or_else(|| anyhow!("array element of kind {kind} has no machine type"))?;
+        let stride = crate::layout::array_elem_size(kind) as i64;
+        let base = self.reg_val(array);
+        let idx = self.index_as_addr(index)?;
+        let byte_off = self.b.ins().imul_imm(idx, stride);
+        let addr = self.b.ins().iadd(base, byte_off);
+        let raw = self.b.ins().load(
+            ty,
+            MemFlags::trusted(),
+            addr,
+            crate::layout::VARRAY_DATA_OFFSET,
+        );
+        let want = self.ty_of(dst);
+        let v = if ty == want { raw } else { self.coerce(raw, want)? };
+        self.set_reg(dst, v)
+    }
+
+    /// `array[index] = src`, stride from `src`'s kind, and the store narrowed
+    /// to the element width so it cannot spill into the next element.
+    fn lower_array_store(&mut self, array: Reg, index: Reg, src: Reg) -> Result<()> {
+        let kind = self.reg_kind(src)?;
+        let ty = abi_class(kind)
+            .clif_type()
+            .ok_or_else(|| anyhow!("array element of kind {kind} has no machine type"))?;
+        let stride = crate::layout::array_elem_size(kind) as i64;
+        let base = self.reg_val(array);
+        let idx = self.index_as_addr(index)?;
+        let byte_off = self.b.ins().imul_imm(idx, stride);
+        let addr = self.b.ins().iadd(base, byte_off);
+        let raw = self.reg_val(src);
+        let v = if self.b.func.dfg.value_type(raw) == ty {
+            raw
+        } else {
+            self.coerce(raw, ty)?
+        };
+        self.b.ins().store(
+            MemFlags::trusted(),
+            v,
+            addr,
+            crate::layout::VARRAY_DATA_OFFSET,
+        );
+        Ok(())
+    }
+
+    /// `dst = array.size`, the element count in the `varray` header.
+    fn lower_array_size(&mut self, dst: Reg, array: Reg) -> Result<()> {
+        let base = self.reg_val(array);
+        let raw = self.b.ins().load(
+            types::I32,
+            MemFlags::trusted(),
+            base,
+            crate::layout::VARRAY_SIZE_OFFSET,
+        );
+        let want = self.ty_of(dst);
+        let v = if want == types::I32 {
+            raw
+        } else {
+            self.coerce(raw, want)?
+        };
+        self.set_reg(dst, v)
+    }
+
+    /// `dst = bytes[index]`. Unlike an array this is a raw byte offset with no
+    /// stride and no header, so the index is added to the base as-is.
+    fn lower_mem_load(&mut self, dst: Reg, bytes: Reg, index: Reg) -> Result<()> {
+        let want = self.ty_of(dst);
+        let base = self.reg_val(bytes);
+        let idx = self.index_as_addr(index)?;
+        let addr = self.b.ins().iadd(base, idx);
+        let v = self.b.ins().load(want, MemFlags::trusted(), addr, 0);
+        self.set_reg(dst, v)
+    }
+
+    /// `bytes[index] = src`, sized by the source register.
+    fn lower_mem_store(&mut self, bytes: Reg, index: Reg, src: Reg) -> Result<()> {
+        let base = self.reg_val(bytes);
+        let idx = self.index_as_addr(index)?;
+        let addr = self.b.ins().iadd(base, idx);
+        let v = self.reg_val(src);
+        self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+        Ok(())
+    }
+
     fn ty_of(&self, r: Reg) -> Type {
         self.reg_ty[r.0 as usize]
     }
@@ -807,6 +928,18 @@ impl Lowerer<'_, '_> {
             Opcode::SetField { obj, field, src } => self.lower_field_store(*obj, field.0, *src)?,
             // `this` is register 0 by construction.
             Opcode::GetThis { dst, field } => self.lower_field_load(*dst, Reg(0), field.0)?,
+            // Array and byte access, on the same terms as field access: the
+            // stride comes from `crate::layout`, shared with the LLVM tier, so
+            // this tier still decides nothing about the object model itself.
+            Opcode::GetArray { dst, array, index } => {
+                self.lower_array_load(*dst, *array, *index)?
+            }
+            Opcode::SetArray { array, index, src } => {
+                self.lower_array_store(*array, *index, *src)?
+            }
+            Opcode::ArraySize { dst, array } => self.lower_array_size(*dst, *array)?,
+            Opcode::GetMem { dst, bytes, index } => self.lower_mem_load(*dst, *bytes, *index)?,
+            Opcode::SetMem { bytes, index, src } => self.lower_mem_store(*bytes, *index, *src)?,
             Opcode::SetThis { field, src } => self.lower_field_store(Reg(0), field.0, *src)?,
 
             Opcode::GetGlobal { dst, global } => {

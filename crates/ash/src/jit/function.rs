@@ -1506,16 +1506,12 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                 };
 
-                // Element size from destination type kind
+                // Element size from the destination register's
+                // kind, via the table `crate::layout` shares with the Cranelift
+                // tier so the two cannot index an array differently.
                 let dst_type_idx = f.regs[dst.0 as usize].0;
                 let dst_kind = self.types_[dst_type_idx].kind;
-                let elem_size: u64 = match dst_kind {
-                    hl_type_kind_HUI8 => 1,
-                    hl_type_kind_HUI16 | hl_type_kind_HBOOL => 2,
-                    hl_type_kind_HI32 | hl_type_kind_HF32 => 4,
-                    hl_type_kind_HI64 | hl_type_kind_HF64 => 8,
-                    _ => 8, // All pointer types = 8
-                };
+                let elem_size: u64 = crate::layout::array_elem_size(dst_kind) as u64;
 
                 let elem_size_val = i32_type.const_int(elem_size, false);
                 let byte_offset =
@@ -4186,16 +4182,12 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                 };
 
-                // Element size from source type kind
+                // Element size from the source register's
+                // kind, via the table `crate::layout` shares with the Cranelift
+                // tier so the two cannot index an array differently.
                 let src_type_idx = f.regs[src.0 as usize].0;
                 let src_kind = self.types_[src_type_idx].kind;
-                let elem_size: u64 = match src_kind {
-                    hl_type_kind_HUI8 => 1,
-                    hl_type_kind_HUI16 | hl_type_kind_HBOOL => 2,
-                    hl_type_kind_HI32 | hl_type_kind_HF32 => 4,
-                    hl_type_kind_HI64 | hl_type_kind_HF64 => 8,
-                    _ => 8, // All pointer types = 8
-                };
+                let elem_size: u64 = crate::layout::array_elem_size(src_kind) as u64;
 
                 let elem_size_val = i32_type.const_int(elem_size, false);
                 let byte_offset =

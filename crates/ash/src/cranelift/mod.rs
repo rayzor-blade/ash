@@ -218,6 +218,14 @@ pub fn is_cranelift_lowerable(op: &Opcode) -> bool {
             | Opcode::SetField { .. }
             | Opcode::GetThis { .. }
             | Opcode::SetThis { .. }
+            // Array and byte access, admitted on the same grounds as fields:
+            // the element stride comes from `crate::layout::array_elem_size`,
+            // shared with the LLVM tier, so neither invents a number.
+            | Opcode::GetArray { .. }
+            | Opcode::SetArray { .. }
+            | Opcode::ArraySize { .. }
+            | Opcode::GetMem { .. }
+            | Opcode::SetMem { .. }
             // Field access was lowered but refused here for a long time: it
             // made programs diverge at a low `--jit-threshold` and not at the
             // default, which read like a miscompile in a function that only

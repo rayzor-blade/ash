@@ -74,6 +74,34 @@ fn type_size(kind: u32) -> i32 {
     }
 }
 
+/// Byte stride between elements of a `varray` holding values of `kind`.
+///
+/// The same sizes as [`type_size`] for every kind that can actually be an
+/// array element — `HBOOL` is 2 here too — and a machine word for the pointer
+/// kinds. It differs only for `HVOID` and `HPACKED`, which `type_size` calls
+/// zero and which cannot be array elements at all; a stride is meaningless
+/// there, and answering with a word keeps a nonsense program from computing
+/// every index as the same address.
+///
+/// Shared so the two compiled tiers cannot drift: each used to carry its own
+/// copy of this table, which is the shape of bug that only shows up once the
+/// tiers disagree about one element kind on one program.
+pub fn array_elem_size(kind: u32) -> i32 {
+    match kind {
+        hl_type_kind_HVOID | hl_type_kind_HPACKED => HL_WSIZE,
+        _ => type_size(kind),
+    }
+}
+
+/// Byte offset of a `varray`'s first element.
+///
+/// `varray` is `{ hl_type *t; hl_type *at; int size; int pad; }`, so the data
+/// begins after 24 bytes.
+pub const VARRAY_DATA_OFFSET: i32 = 24;
+
+/// Byte offset of a `varray`'s element count.
+pub const VARRAY_SIZE_OFFSET: i32 = 16;
+
 /// Padding to insert before a field of `kind` at byte `size`, mirroring
 /// `hlp_pad_struct`.
 fn pad_struct(size: i32, kind: u32) -> i32 {
@@ -467,5 +495,40 @@ mod tests {
         types.push(object("A", None, &[("x", 0)]));
         assert_eq!(field_offset(&types, 5, 0), Some(8));
         assert_eq!(field_offset(&types, 5, 1), None);
+    }
+
+    /// The stride table is shared by both compiled tiers, so its values are
+    /// load-bearing in two places at once. `HBOOL` is the one that surprises:
+    /// two bytes, not one.
+    #[test]
+    fn array_strides_match_the_runtime() {
+        assert_eq!(array_elem_size(hl_type_kind_HUI8), 1);
+        assert_eq!(array_elem_size(hl_type_kind_HUI16), 2);
+        assert_eq!(array_elem_size(hl_type_kind_HBOOL), 2);
+        assert_eq!(array_elem_size(hl_type_kind_HI32), 4);
+        assert_eq!(array_elem_size(hl_type_kind_HF32), 4);
+        assert_eq!(array_elem_size(hl_type_kind_HI64), 8);
+        assert_eq!(array_elem_size(hl_type_kind_HF64), 8);
+    }
+
+    /// A pointer element is a machine word, and so are the two kinds that
+    /// cannot be array elements at all -- a zero stride would make every index
+    /// name the same address.
+    #[test]
+    fn array_strides_are_never_zero() {
+        for kind in [
+            hl_type_kind_HVOID,
+            hl_type_kind_HPACKED,
+            hl_type_kind_HOBJ,
+        ] {
+            assert_eq!(array_elem_size(kind), 8, "kind {kind}");
+        }
+    }
+
+    /// The header offsets the tiers index against.
+    #[test]
+    fn varray_header_offsets() {
+        assert_eq!(VARRAY_SIZE_OFFSET, 16);
+        assert_eq!(VARRAY_DATA_OFFSET, 24);
     }
 }

@@ -157,6 +157,42 @@ impl Inlining<'_> {
     }
 }
 
+/// True when every use of `v` is a `Ret` returning it.
+///
+/// This is the shape HL constructors have. `new C(...)` emits `New` then a call
+/// to a constructor that returns whatever sits in some register it never wrote,
+/// and the caller discards it — so the value being returned is the frame's
+/// initial value, and nothing observes it. Refusing to inline on account of
+/// that read is what kept every allocation escaping into its constructor, which
+/// in turn is why scalar replacement and loop-escape analysis both found
+/// nothing to do.
+fn only_returned(g: &Function, v: ValueId) -> bool {
+    for blk in &g.blocks {
+        if blk.instrs.iter().any(|i| i.uses().contains(&v)) {
+            return false;
+        }
+        for phi in &blk.phis {
+            if phi.dst == v || phi.incoming.iter().any(|&(_, s)| s == v) {
+                return false;
+            }
+        }
+        match &blk.term {
+            Terminator::Ret { value } if *value == v => {}
+            other if other.uses().contains(&v) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// Whether `v`'s type has null as its default, so a dropped parameter can be
+/// materialized as `Null` rather than refused.
+fn is_nullable(g: &Function, v: ValueId) -> bool {
+    // Conservative: only kinds AIR itself models as pointers. A numeric
+    // default would need a constant-pool entry the pass cannot mint.
+    !g.is_float(g.value_ty(v))
+}
+
 /// Every check that does not depend on the rewrite itself.
 fn fits(
     f: &Function,
@@ -192,8 +228,9 @@ fn fits(
         return false;
     }
     // Entry binding: arguments must match their parameters, and parameters of
-    // the callee's other registers must be dead.
+    // the callee's other registers must be dead — or dead enough, see below.
     let counts = g.use_counts();
+    let dst_dead = f.use_counts()[dst.idx()] == 0;
     for ins in &g.blocks[0].instrs {
         let Instr::Param { dst: pv, reg } = ins else {
             continue;
@@ -205,7 +242,15 @@ fn fits(
                 }
             }
             None => {
-                if counts[pv.idx()] > 0 {
+                if counts[pv.idx()] > 0 && !only_returned(g, *pv) {
+                    return false;
+                }
+                // Read only by `Ret`: the callee hands back its frame's
+                // initial value for that register, which is the HL default.
+                // Inlining it is sound as long as the caller cannot observe
+                // the difference, so the result must be dead and the type must
+                // be one whose default is null.
+                if counts[pv.idx()] > 0 && (!dst_dead || !is_nullable(g, *pv)) {
                     return false;
                 }
             }
@@ -267,9 +312,17 @@ fn inline_at(f: &mut Function, b: BlockId, k: usize, g: &Function) -> Result<()>
                         dst: map_val(*pv),
                         src: a,
                     }),
-                    // A dead parameter of a non-argument register: `fits`
-                    // proved nothing reads it.
-                    None => {}
+                    // A parameter of a non-argument register. `fits` proved
+                    // either that nothing reads it, or that the only reader is
+                    // a `Ret` whose value the caller discards — in which case
+                    // it still needs a definition for the continuation phi to
+                    // name, and the callee's own semantics say that value is
+                    // the frame default.
+                    None => {
+                        if g.use_counts()[pv.idx()] > 0 {
+                            instrs.push(Instr::Null { dst: map_val(*pv) });
+                        }
+                    }
                 }
                 continue;
             }

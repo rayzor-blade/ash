@@ -1021,6 +1021,14 @@ pub fn escape_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> 
         let counts = air::v2::passes::escape::summarize(&func);
         if !counts.is_empty() {
             funcs_with_loop_allocs += 1;
+            totals
+                .entry(format!(
+                    "  ^ findex={} {} :: {:?}",
+                    f.findex,
+                    f.name(),
+                    counts
+                ))
+                .or_insert(0);
         }
         for (k, v) in counts {
             *totals.entry(k.to_string()).or_insert(0) += v;

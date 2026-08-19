@@ -530,16 +530,37 @@ fn run() -> Result<()> {
         }
     }
 
-    // `ASH_VERIFY_OSR=only` reports which loops on-stack replacement would
-    // accept, and why it refused the rest, without running the program. Same
-    // reasoning as the layout sweep above: whether a static analysis accepts
-    // the right things should be a measurement over a whole corpus, not an
-    // assertion about one function.
-    // `ASH_ESCAPE=only` reports how many allocations inside loops could be
-    // hoisted out of them, and why the rest cannot. mandelbrot spends 52% of
-    // its time in the collector for 196.5M allocations against a 3.7MB live
-    // set, so the size of this number decides whether hoisting is worth
-    // building.
+    // `ASH_VERIFY_AIR=only` pushes every function through the AIR v2 pipeline
+    // and reports what round-trips; `ASH_VERIFY_AIR=dump:<findex>` prints one
+    // function's IR before and after optimization, which is how a pass that
+    // fires zero times gets diagnosed.
+    if let Ok(mode) = std::env::var("ASH_VERIFY_AIR") {
+        if !mode.is_empty() && mode != "0" {
+            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
+                _ => ash::air_pipeline::AirOptLevel::O2,
+            };
+            let opts = ash::air_pipeline::AirPassOptions::default();
+            if let Some(want) = mode
+                .strip_prefix("dump:")
+                .and_then(|s| s.parse::<i32>().ok())
+            {
+                for line in ash::air_pipeline::dump(&bytecode, want, level, &opts) {
+                    eprintln!("[air] {line}");
+                }
+                return Ok(());
+            }
+            for line in ash::air_pipeline::report(&bytecode, level, &opts) {
+                eprintln!("[air] {line}");
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     // `ASH_VERIFY_TRAPS=only` reports where exception handlers are active and
     // how many call sites an explicit-edge lowering would have to check. The
     // handler map comes from AIR v2's Block::handler, which derives it by

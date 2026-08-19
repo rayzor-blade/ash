@@ -42,25 +42,24 @@ use ash::types::{HLFunction, TypeRef};
 /// a process-wide lock (the same reason `env_flag!` exists in `interpreter`).
 pub fn enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| match std::env::var("ASH_AIR") {
-        Ok(v) => match v.as_str() {
-            // `v2` selects the SSA interpreter in `crate::ssa`, which executes
-            // the IR instead of serializing it. This path keeps its own
-            // spelling so the two can be compared against each other.
-            // Default on. AIR v2's optimizations reach the interpreter in flat
-            // register form, which is the execution model HL bytecode is built
-            // for; the direct-SSA interpreter stays reachable as `v2` and as
-            // the differential oracle, but it measured slower.
-            "" | "v2-serialize" => true,
-            "v2" | "0" | "off" => false,
-            // A typo here would otherwise run unoptimized while looking like
-            // it was on, which is a hard thing to notice from the output.
-            other => {
-                eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off");
-                false
-            }
-        },
-        Err(_) => false,
+    // Default ON, and that has to include the variable being UNSET — which is
+    // how it is in every normal run. An earlier attempt to make v2 the default
+    // changed only the empty-string arm, a value the environment never actually
+    // produces, so the interpreter went on executing raw bytecode while the
+    // gate reported itself as on. That is exactly the failure the typo arm
+    // below was written to prevent, arriving through the one path it did not
+    // cover.
+    //
+    // `v2` selects the SSA interpreter in `crate::ssa`, which executes the IR
+    // instead of serializing it; it stays reachable for differential testing
+    // but measured slower, so the flat serialized form is the default.
+    *CELL.get_or_init(|| match std::env::var("ASH_AIR").as_deref() {
+        Err(_) | Ok("") | Ok("v2-serialize") => true,
+        Ok("v2") | Ok("0") | Ok("off") => false,
+        Ok(other) => {
+            eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off");
+            false
+        }
     })
 }
 

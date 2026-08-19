@@ -42,7 +42,7 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Serialization result: standard HL bytecode plus the register-type table
 /// (original registers preserved verbatim, copy temporaries appended).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Serialized {
     pub ops: Vec<Opcode>,
     pub reg_types: Vec<TypeRef>,

@@ -32,7 +32,7 @@
 
 use std::sync::OnceLock;
 
-use ash::air_pipeline::{optimize_with, AirOptLevel, AshModule};
+use ash::air_pipeline::{optimized, AshModule};
 use ash::bytecode::DecodedBytecode;
 use ash::types::{HLFunction, TypeRef};
 
@@ -80,20 +80,6 @@ fn dump_findex() -> Option<i32> {
     *CELL.get_or_init(|| std::env::var("ASH_AIR_DUMP").ok().and_then(|v| v.trim().parse().ok()))
 }
 
-/// Opt level from `ASH_AIR_LEVEL`, defaulting to `O2` as the sweep does.
-fn level() -> AirOptLevel {
-    static CELL: OnceLock<AirOptLevel> = OnceLock::new();
-    *CELL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
-        Ok(s) if !s.is_empty() => match ash::air_pipeline::parse_level(&s) {
-            Some(l) => l,
-            None => {
-                eprintln!("[air] ignoring ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O2");
-                AirOptLevel::O2
-            }
-        },
-        _ => AirOptLevel::O2,
-    })
-}
 
 /// What a function executes, decided once on its first call.
 #[derive(Clone, Copy)]
@@ -175,7 +161,7 @@ impl Cache {
 
         let m = self.module.expect("module cached just above").1;
         let raw = &bc.functions[func_idx];
-        self.bodies[func_idx] = match optimize_with(m, raw, level()) {
+        self.bodies[func_idx] = match optimized(m, raw).map(|o| o.ser.clone()) {
             Ok(ser) => {
                 let mut opt = raw.clone();
                 opt.ops = ser.ops;

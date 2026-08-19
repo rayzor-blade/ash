@@ -28,6 +28,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 
@@ -275,6 +276,86 @@ pub fn optimize(
 }
 
 /// [`optimize`] against a module view built once.
+/// The one optimization level, from `ASH_AIR_LEVEL`.
+///
+/// One, because there is now one optimized AIR per function and every consumer
+/// reads it. The tiers each used to pick their own -- `ash_interp::air::level`,
+/// `jit::air::level`, `CraneliftAirConfig::level` -- which was only possible
+/// while each was optimizing a private copy.
+///
+/// O3 is the default. O2 leaves the interpreter *slower* than no pipeline at
+/// all (2.33s against 2.12s on mandelbrot_small, measured); the passes that
+/// pay -- inlining, scalar replacement, allocation hoisting -- are the ones O3
+/// adds. Shipping the level that loses was a decision nobody made.
+pub fn default_level() -> OptLevel {
+    static CELL: OnceLock<OptLevel> = OnceLock::new();
+    *CELL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
+        Ok(s) if !s.is_empty() => parse_level(&s).unwrap_or_else(|| {
+            eprintln!("[air] ignoring ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O3");
+            OptLevel::O3
+        }),
+        _ => OptLevel::O3,
+    })
+}
+
+/// One function's AIR, lowered and optimized exactly once.
+///
+/// Bytecode lowers to AIR once and every consumer reads that. Before this,
+/// five callers each ran the pipeline from scratch -- the interpreter, the SSA
+/// interpreter, the Cranelift tier, the LLVM tier and the OSR eligibility
+/// check -- so a function that ran interpreted and then promoted twice was
+/// optimized three times over, into three separately renumbered opcode arrays.
+/// That is why an opcode index meant different things in different tiers,
+/// which is a property on-stack replacement needs to hold.
+///
+/// `ser` is the flat form, kept only for the consumers that still read
+/// opcodes. It is a *product* of the IR, not a stage the IR passes through on
+/// its way to a backend: a backend composes CLIF or LLVM IR from `ir`.
+pub struct Optimized {
+    pub ir: Function,
+    pub ser: Serialized,
+}
+
+static OPTIMIZED: OnceLock<Mutex<HashMap<i32, Arc<Optimized>>>> = OnceLock::new();
+
+fn optimized_cache() -> &'static Mutex<HashMap<i32, Arc<Optimized>>> {
+    OPTIMIZED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The optimized AIR for `f`, computing it on first ask.
+///
+/// Shared across threads because the tiers are: the interpreter asks on the
+/// main thread while a broker compiles on another. The pipeline runs outside
+/// the lock -- it is the expensive part, and holding a process-wide lock
+/// across it would serialize the brokers against the interpreter.
+pub fn optimized(m: &AshModule, f: &HLFunction) -> Result<Arc<Optimized>, PipelineError> {
+    let level = default_level();
+    let opts = &PassOptions::default();
+    if let Some(hit) = optimized_cache()
+        .lock()
+        .expect("air cache poisoned")
+        .get(&f.findex)
+    {
+        return Ok(Arc::clone(hit));
+    }
+    let (ser, ir, _report) = optimize_full(m, f, level, opts)?;
+    let entry = Arc::new(Optimized { ir, ser });
+    let mut cache = optimized_cache().lock().expect("air cache poisoned");
+    // Another thread may have won the race; theirs is as good as ours and
+    // already visible to whoever took it.
+    Ok(Arc::clone(
+        cache.entry(f.findex).or_insert_with(|| Arc::clone(&entry)),
+    ))
+}
+
+/// Drop every cached function, e.g. after a hot reload replaced the bytecode.
+pub fn invalidate_optimized() {
+    optimized_cache()
+        .lock()
+        .expect("air cache poisoned")
+        .clear();
+}
+
 pub fn optimize_with(
     m: &AshModule,
     f: &HLFunction,

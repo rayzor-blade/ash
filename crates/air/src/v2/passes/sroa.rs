@@ -135,6 +135,15 @@ struct Uses {
     field_ty: BTreeMap<usize, TypeRef>,
 }
 
+/// `ASH_SROA_WHY=1` reports why each allocation was refused. A pass that fires
+/// zero times is indistinguishable from one that is not running, and the
+/// difference matters.
+fn why(alloc: ValueId, reason: &str) {
+    if std::env::var("ASH_SROA_WHY").is_ok() {
+        eprintln!("[sroa] refused v{}: {}", alloc.idx(), reason);
+    }
+}
+
 /// Classify every use of the allocation and of its copies, or `None` when the
 /// pointer escapes.
 fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Uses> {
@@ -154,10 +163,12 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Uses> {
             // A phi merge and any terminator operand escape outright.
             for phi in &blk.phis {
                 if phi.incoming.iter().any(|&(_, v)| aliases.contains(&v)) {
+                    why(alloc, "phi merge");
                     return None;
                 }
             }
             if blk.term.uses().iter().any(|u| aliases.contains(u)) {
+                why(alloc, "terminator operand");
                 return None;
             }
             for (k, ins) in blk.instrs.iter().enumerate() {
@@ -165,6 +176,7 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Uses> {
                     continue;
                 }
                 if blk.handler.is_some() {
+                    why(alloc, "inside a trap region");
                     return None;
                 }
                 match (ins, shape) {

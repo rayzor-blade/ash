@@ -246,6 +246,11 @@ impl<'m> PassManager<'m> {
             OptLevel::O3 => vec![
                 Box::new(TailRecursionElim),
                 Box::new(Inlining::new(info)),
+                // SROA stays directly after the inliner. Moving it behind
+                // NullCheckElim and GVN was tried and changed nothing:
+                // measured with ASH_SROA_WHY, every refusal on this corpus is
+                // "phi merge", and those phis are real loop-carried merges
+                // rather than inliner artifacts the cleanup could remove.
                 Box::new(ScalarReplacement),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),

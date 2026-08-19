@@ -582,6 +582,45 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
 /// The `llvm` mutex is held across the whole armed region, so the single
 /// global tiered recovery slot stays owned by one thread at a time even
 /// though two broker threads can reach this function.
+/// Compile an entry point into `findex` that begins at `header_pc`.
+///
+/// Synchronous, unlike ordinary promotion. A hot loop is already running when
+/// this is asked for, and an answer that arrives after it finishes is no
+/// answer; the loop has by definition gone round ten thousand times, so paying
+/// the compile on this thread is cheap against what remains.
+///
+/// `body` is the interpreter's own opcode array. Both sides run AIR, which
+/// renumbers opcodes, so a `header_pc` measured against one body would name a
+/// different instruction in a separately optimized copy.
+fn compile_osr_with_llvm(
+    ctx: &TieredSharedCtx,
+    findex: usize,
+    header_pc: usize,
+    body: &HLFunction,
+) -> u64 {
+    let Ok(mut guard) = ctx.llvm.lock() else {
+        return 0;
+    };
+    if let LlvmState::Pending(_) = &*guard {
+        let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
+            unreachable!()
+        };
+        *guard = LlvmState::Ready(LlvmModule(unsafe { *Box::from_raw(pw.0) }));
+    }
+    let LlvmState::Ready(module) = &mut *guard else {
+        return 0;
+    };
+    match module.0.compile_osr_entry(findex, header_pc, body) {
+        Ok(addr) => addr,
+        Err(e) => {
+            if osr_logging() {
+                eprintln!("[osr] compile failed findex={findex} pc={header_pc}: {e}");
+            }
+            0
+        }
+    }
+}
+
 fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut () {
     // A tier-0 failure permanently invalidates the bead (beadie's primary
     // broker); a tier-1 failure is silent and the bead keeps its current tier.
@@ -669,6 +708,18 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
 /// Cache an env-var presence check (these gate the opcode-dispatch and
 /// native-call hot paths, where macOS getenv takes a process-wide lock —
 /// `__findenv_locked` was 51.9% of samples on an nbody profile).
+/// Whether to attempt compiling OSR entry points (`ASH_OSR=1`).
+///
+/// Off by default because the entry cannot yet be reached. The code is built
+/// and verifies, but MCJIT emits a module's object once, so a function added
+/// after that finalization has no address -- `get_function_address` answers
+/// "not found". Attempting it anyway is not free: the compile runs the whole
+/// middle end before the lookup fails, which cost nbody 0.35s for nothing.
+fn osr_compile_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| std::env::var("ASH_OSR").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
 /// Whether to report OSR decisions (`ASH_OSR_LOG`).
 fn osr_logging() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -699,6 +750,10 @@ pub struct HLInterpreter {
     max_stack_depth: usize,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
+    /// Compiled OSR entry addresses by `(findex, header_pc)`. A zero means the
+    /// compile was tried and failed, which is recorded so it is not retried on
+    /// every subsequent iteration of a loop that is by definition hot.
+    osr_entries: std::collections::HashMap<(usize, usize), u64>,
 
     /// Argument buffers, recycled the same way as [`Self::reg_pool`].
     ///
@@ -968,6 +1023,7 @@ impl HLInterpreter {
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
             hot_loops: std::collections::HashSet::new(),
+            osr_entries: std::collections::HashMap::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
             ssa: SsaCache::default(),
@@ -2687,6 +2743,27 @@ impl HLInterpreter {
         )
         .ok()
         .map(|(f, _)| ash::osr::analyze(&f));
+        // `eligible()` is only true when no header was refused, so it gates any
+        // header in this function without needing the block-id-to-pc mapping:
+        // a refusal anywhere clears it.
+        if osr_compile_enabled() && plan.as_ref().is_some_and(|p| p.eligible()) {
+            let body = self.air.body(bytecode, func_idx);
+            let addr = match self.tiered_runtime.as_ref() {
+                Some(t) => {
+                    let ctx = t.shared_ctx.clone();
+                    compile_osr_with_llvm(&ctx, findex, header_pc, body)
+                }
+                None => 0,
+            };
+            self.osr_entries.insert((findex, header_pc), addr);
+            if osr_logging() {
+                if addr != 0 {
+                    eprintln!("[osr] compiled entry findex={findex} pc={header_pc} at {addr:#x}");
+                } else {
+                    eprintln!("[osr] no entry for findex={findex} pc={header_pc}");
+                }
+            }
+        }
         if osr_logging() {
             match &plan {
                 Some(p) if p.eligible() => eprintln!(

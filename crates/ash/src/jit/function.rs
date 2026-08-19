@@ -538,6 +538,160 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
+    /// Compile an entry point that begins at `header_pc` instead of at the
+    /// top of the function, taking the live register file as a buffer.
+    ///
+    /// This is what lets a loop be entered while an interpreter frame for its
+    /// function is already running. Promotion counts calls, so a loop inside a
+    /// function called once is invisible to it -- nbody's `main` runs ten
+    /// million iterations in a single invocation, and without this the loop
+    /// stays interpreted and pays a boundary crossing per call it makes.
+    ///
+    /// `body` is the caller's own opcode array, not one this module derives.
+    /// Both sides run AIR, which renumbers opcodes, so a `header_pc` computed
+    /// against the interpreter's body would name a different instruction in a
+    /// separately-optimized copy. Taking the body removes the question.
+    ///
+    /// The buffer holds one 64-bit slot per register in the interpreter's
+    /// representation, which is what `value_to_i64` already produces for the
+    /// ordinary call boundary.
+    pub fn compile_osr_entry(
+        &mut self,
+        findex: usize,
+        header_pc: usize,
+        body: &HLFunction,
+    ) -> Result<u64> {
+        let _phase = crate::profile::scope("llvm osr entry");
+        if header_pc >= body.ops.len() {
+            return Err(anyhow!("osr header {header_pc} past end of findex {findex}"));
+        }
+        let name = format!("osr_{findex}_{header_pc}");
+        if let Ok(addr) = self.execution_engine.get_function_address(&name) {
+            if addr != 0 {
+                return Ok(addr as u64);
+            }
+        }
+
+        // `(ptr) -> ret`, where ret is the function's own return type.
+        let type_fun = self.bytecode.types[body.type_.0]
+            .fun
+            .clone()
+            .ok_or_else(|| anyhow!("findex {findex} has no function type"))?;
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let ret_any = self.get_or_create_any_type(type_fun.ret.0)?;
+        let fn_ty = match ret_any {
+            AnyTypeEnum::VoidType(t) => t.fn_type(&[ptr_ty.into()], false),
+            AnyTypeEnum::IntType(t) => t.fn_type(&[ptr_ty.into()], false),
+            AnyTypeEnum::FloatType(t) => t.fn_type(&[ptr_ty.into()], false),
+            AnyTypeEnum::PointerType(t) => t.fn_type(&[ptr_ty.into()], false),
+            _ => ptr_ty.fn_type(&[ptr_ty.into()], false),
+        };
+        let function = self.module.add_function(&name, fn_ty, None);
+
+        let entry = self.context.append_basic_block(function, "osr_entry");
+        self.builder.position_at_end(entry);
+        let (registers, reg_types) = self.allocate_registers(body)?;
+
+        // Reconstruct the register file from the transferred buffer. Every
+        // register is restored, not just the ones the analysis calls live: a
+        // slot the loop never reads costs one load, and deciding wrongly which
+        // those are costs correctness.
+        let buf = function
+            .get_nth_param(0)
+            .ok_or_else(|| anyhow!("osr entry has no buffer parameter"))?
+            .into_pointer_value();
+        let i64_ty = self.context.i64_type();
+        for (i, slot_ty) in reg_types.iter().enumerate() {
+            let slot = unsafe {
+                self.builder.build_gep(
+                    i64_ty,
+                    buf,
+                    &[i64_ty.const_int(i as u64, false)],
+                    "osr_slot",
+                )?
+            };
+            let raw = self
+                .builder
+                .build_load(i64_ty, slot, "osr_raw")?
+                .into_int_value();
+            let v: BasicValueEnum<'ctx> = match *slot_ty {
+                BasicTypeEnum::IntType(t) => {
+                    if t.get_bit_width() >= 64 {
+                        raw.into()
+                    } else {
+                        self.builder
+                            .build_int_truncate(raw, t, "osr_trunc")?
+                            .into()
+                    }
+                }
+                BasicTypeEnum::FloatType(t) => {
+                    if t == self.context.f64_type() {
+                        self.builder.build_bit_cast(raw, t, "osr_f64")?
+                    } else {
+                        let n = self.builder.build_int_truncate(
+                            raw,
+                            self.context.i32_type(),
+                            "osr_f32bits",
+                        )?;
+                        self.builder.build_bit_cast(n, t, "osr_f32")?
+                    }
+                }
+                BasicTypeEnum::PointerType(t) => {
+                    self.builder.build_int_to_ptr(raw, t, "osr_ptr")?.into()
+                }
+                _ => continue,
+            };
+            self.builder.build_store(registers[i], v)?;
+        }
+
+        self.translate_opcodes_from(body, &registers, &reg_types, header_pc)?;
+
+        // The fall-through exit block is left unterminated by lowering; the
+        // ordinary path closes it the same way. Without this the function
+        // fails verification for a block with no terminator, which is what an
+        // OSR entry hit first.
+        if self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_terminator()
+            .is_none()
+        {
+            match function.get_type().get_return_type() {
+                Some(ret_type) => {
+                    self.builder.build_return(Some(&ret_type.const_zero()))?;
+                }
+                None => {
+                    self.builder.build_return(None)?;
+                }
+            }
+        }
+
+        if !function.verify(true) {
+            unsafe { function.delete() };
+            return Err(anyhow!(
+                "osr entry for findex {findex} pc {header_pc} failed verification"
+            ));
+        }
+
+        // Optimize before asking for the address, because asking is what forces
+        // codegen -- the same ordering the promotion path needs.
+        {
+            let _p = crate::profile::scope("llvm middle-end (osr)");
+            self.shield_trap_functions_from_optimization();
+            super::module::run_middle_end(&self.module)?;
+        }
+        let addr = self
+            .execution_engine
+            .get_function_address(&name)
+            .map_err(|e| anyhow!("osr entry {name}: get_function_address failed: {e}"))?;
+        if addr == 0 {
+            return Err(anyhow!("osr entry {name}: zero address"));
+        }
+        crate::profile::count("osr entries compiled", 1);
+        Ok(addr as u64)
+    }
+
     fn create_function_declaration(&mut self, f: &HLFunction) -> Result<FunctionValue<'ctx>> {
         let type_fun = self.bytecode.types[f.type_.0]
             .fun
@@ -722,6 +876,23 @@ impl<'ctx> JITModule<'ctx> {
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
     ) -> Result<()> {
+        self.translate_opcodes_from(f, registers, reg_types, 0)
+    }
+
+    /// Lower `f`, entering at opcode `entry_pc` rather than at the top.
+    ///
+    /// Every block is still emitted, so a jump backwards from inside the loop
+    /// to code above `entry_pc` lands somewhere real; only the branch out of
+    /// the entry block changes. That is what makes an OSR entry a normal
+    /// compile with one edge moved, rather than a second lowering path that
+    /// could disagree with the first.
+    fn translate_opcodes_from(
+        &mut self,
+        f: &HLFunction,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        entry_pc: usize,
+    ) -> Result<()> {
         let function = self
             .builder
             .get_insert_block()
@@ -741,8 +912,9 @@ impl<'ctx> JITModule<'ctx> {
         // Exit block (fallthrough after last opcode)
         opcode_blocks.push(self.context.append_basic_block(function, "exit"));
 
-        // Branch from entry block to first opcode block
-        self.builder.build_unconditional_branch(opcode_blocks[0])?;
+        // Branch from the entry block to wherever this compilation starts.
+        self.builder
+            .build_unconditional_branch(opcode_blocks[entry_pc.min(num_ops)])?;
 
         // Emit IR for each opcode
         for (i, op) in f.ops.iter().enumerate() {

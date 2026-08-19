@@ -96,52 +96,12 @@ impl TrapContext {
 }
 
 impl ImmixAllocator {
-    /// Arm a trap, reusing a retired context when one is available.
-    ///
-    /// Every interpreter call into compiled code arms one of these, so on a
-    /// call-heavy program this was a malloc and a free per call -- around a
-    /// third of nbody's hybrid run went to GC-lock and allocator traffic, and
-    /// this is a large part of it. Traps nest strictly, so a plain stack of
-    /// retired contexts is enough and never grows past the nesting depth.
     pub fn setup_trap(&self) -> *mut TrapContext {
-        let prev = *self.current_trap.borrow();
-        let trap_ptr = match self.trap_pool.borrow_mut().pop() {
-            Some(reused) => {
-                // A reused context must look exactly like a fresh one; a stale
-                // `caught` or a leftover exception would be read by the next
-                // throw as though it belonged to this trap.
-                unsafe {
-                    *reused = TrapContext::new();
-                    (*reused).prev = prev;
-                }
-                reused
-            }
-            None => {
-                let mut fresh = Box::new(TrapContext::new());
-                fresh.prev = prev;
-                Box::into_raw(fresh)
-            }
-        };
-        *self.current_trap.borrow_mut() = trap_ptr;
-        trap_ptr
+        setup_trap()
     }
 
     pub fn remove_trap(&self) {
-        let current = *self.current_trap.borrow();
-        if !current.is_null() {
-            unsafe {
-                *self.current_trap.borrow_mut() = (*current).prev;
-                // Drop anything the context owns before retiring it, so a
-                // caught exception value is not kept alive by the pool.
-                (*current).exception_value = None;
-                let mut pool = self.trap_pool.borrow_mut();
-                if pool.len() < 64 {
-                    pool.push(current);
-                } else {
-                    let _ = Box::from_raw(current);
-                }
-            }
-        }
+        remove_trap()
     }
 
     pub fn throw(&self, exception: VDynamicException) -> ! {
@@ -273,30 +233,33 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
         eprintln!("[ash] hlp_throw: null");
     }
     let mut buf_copy: hl::jmp_buf = mem::zeroed();
-    let saved_lock_depth;
-    {
-        let gc = crate::gc::gc_locked();
-        let current = *gc.current_trap.borrow();
-
+    // Read and pop the trap chain without the GC lock: it is this thread's
+    // state, and a longjmp cannot leave the thread that set it up.
+    let saved_lock_depth = crate::gc::with_exc(|st| {
+        let current = st.current_trap;
         if !current.is_null() && (*current).has_jmpbuf {
             // JIT path: store exception, pop trap, longjmp back to setjmp site
-            *gc.exc_value.borrow_mut() = v;
-            saved_lock_depth = (*current).saved_lock_depth;
-            // Copy jmp_buf to stack BEFORE freeing the TrapContext — longjmp reads from it
+            st.exc_value = v;
+            let depth = (*current).saved_lock_depth;
+            // Copy jmp_buf to stack BEFORE retiring the TrapContext — longjmp
+            // reads from it, and a retired context may be handed straight back
+            // out by the next setup_trap.
             std::ptr::copy_nonoverlapping(
                 &(*current).buf as *const hl::jmp_buf,
                 &mut buf_copy as *mut hl::jmp_buf,
                 1,
             );
-            *gc.current_trap.borrow_mut() = (*current).prev;
-            let _ = Box::from_raw(current);
+            st.current_trap = (*current).prev;
+            (*current).exception_value = None;
+            retire_trap(st, current);
+            depth
         } else {
             // No active setjmp trap: this is an uncaught native exception.
-            *gc.exc_value.borrow_mut() = v;
+            st.exc_value = v;
             eprintln!("hlp_throw called without active trap; aborting");
             std::process::abort();
         }
-    } // GcRef dropped here: hlp_throw's own lock hold is released normally.
+    });
 
     // The frames between the setjmp site and this longjmp are abandoned, so
     // any GcGuards they hold never run Drop. Restore the lock depth recorded
@@ -305,13 +268,70 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     hl::_longjmp(buf_copy.as_mut_ptr(), 1);
 }
 
+/// Arm a trap on this thread, reusing a retired context when one is available.
+///
+/// Every interpreter call into compiled code arms one, so this was a malloc
+/// and a free per call, under the global GC lock taken twice. Both are gone:
+/// the state is thread-local (a `longjmp` cannot cross threads) and the
+/// contexts are pooled. Traps nest strictly, so the pool never grows past the
+/// nesting depth.
+pub(crate) fn setup_trap() -> *mut TrapContext {
+    crate::gc::with_exc(|st| {
+        let prev = st.current_trap;
+        let trap_ptr = match st.trap_pool.pop() {
+            Some(reused) => {
+                // A reused context must look exactly like a fresh one; a stale
+                // `caught` or a leftover exception would be read by the next
+                // throw as though it belonged to this trap.
+                unsafe {
+                    *reused = TrapContext::new();
+                    (*reused).prev = prev;
+                }
+                reused
+            }
+            None => {
+                let mut fresh = Box::new(TrapContext::new());
+                fresh.prev = prev;
+                Box::into_raw(fresh)
+            }
+        };
+        st.current_trap = trap_ptr;
+        trap_ptr
+    })
+}
+
+/// Pop the innermost trap and retire its context.
+pub(crate) fn remove_trap() {
+    crate::gc::with_exc(|st| {
+        let current = st.current_trap;
+        if current.is_null() {
+            return;
+        }
+        unsafe {
+            st.current_trap = (*current).prev;
+            // Drop what the context owns before retiring it, so a caught
+            // exception value is not kept alive by the pool.
+            (*current).exception_value = None;
+            retire_trap(st, current);
+        }
+    })
+}
+
+/// Return a context to the pool, or free it if the pool is full.
+unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
+    if st.trap_pool.len() < 64 {
+        st.trap_pool.push(trap);
+    } else {
+        drop(Box::from_raw(trap));
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     // Depth held by this thread OUTSIDE this call — i.e. at the setjmp site
     // the caller (JIT code) is about to establish.
     let outer_depth = crate::gc::gc_lock_held_depth();
-    let gc = crate::gc::gc_locked();
-    let trap = gc.setup_trap();
+    let trap = setup_trap();
     (*trap).has_jmpbuf = true;
     (*trap).saved_lock_depth = outer_depth;
     (*trap).buf.as_mut_ptr().cast()
@@ -319,21 +339,17 @@ pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_remove_trap_jit() {
-    let gc = crate::gc::gc_locked();
-    gc.remove_trap();
+    remove_trap();
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
-    let gc = crate::gc::gc_locked();
-    let v = *gc.exc_value.borrow();
-    v
+    crate::gc::with_exc(|st| st.exc_value)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_clear_exc_value() {
-    let gc = crate::gc::gc_locked();
-    *gc.exc_value.borrow_mut() = std::ptr::null_mut();
+    crate::gc::with_exc(|st| st.exc_value = std::ptr::null_mut());
 }
 
 #[no_mangle]

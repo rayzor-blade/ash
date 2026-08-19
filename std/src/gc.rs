@@ -455,15 +455,8 @@ pub struct ImmixAllocator {
     pub(crate) current_exception: Option<Box<HLException>>,
     pub(crate) exception_handler:
         Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
-    pub(crate) current_trap: RefCell<*mut TrapContext>,
-    /// Retired trap contexts, kept for the next `setup_trap`.
-    ///
-    /// Traps nest strictly, so these come back in the order they were handed
-    /// out. Every interpreter call into compiled code arms one -- ten million
-    /// of them on nbody -- and each was a `Box::new` and a `Box::from_raw`
-    /// around a `jmp_buf`.
-    pub(crate) trap_pool: RefCell<Vec<*mut TrapContext>>,
-    pub(crate) exc_value: RefCell<*mut vdynamic>,
+
+
     stack_top: usize,
     globals_range: Option<(*const *mut c_void, usize)>,
     /// Registered fiber stacks for conservative scanning. id 0 is the main
@@ -539,9 +532,8 @@ impl ImmixAllocator {
             })),
             current_exception: None,
             exception_handler: None,
-            current_trap: RefCell::new(std::ptr::null_mut()),
-            trap_pool: RefCell::new(Vec::new()),
-            exc_value: RefCell::new(std::ptr::null_mut()),
+
+
             fiber_stacks: Vec::new(),
             stack_top: 0,
             globals_range: None,
@@ -1604,13 +1596,53 @@ pub(crate) unsafe fn gc_remove_persistent(ptr: *mut hl::vdynamic) {
     gc.roots.borrow_mut().persistent_roots.remove(&ptr);
 }
 
+/// Per-thread exception state: the trap chain, the pending exception value,
+/// and retired trap contexts.
+///
+/// This used to live in the GC singleton, so arming a trap took the global GC
+/// lock -- twice per call, since removing one takes it again, and the
+/// interpreter arms a trap on every call into compiled code. On nbody that
+/// lock traffic was around 15% of the run, for state no other thread may
+/// touch: a `longjmp` cannot cross threads, so a trap chain is only ever read
+/// by the thread that built it.
+///
+/// Fibers are why this is per *thread* rather than per fiber: they share an
+/// OS thread and each needs its own chain, which the scheduler gets by
+/// swapping these cells in and out at a switch (see [`gc_swap_exc_state`]).
+/// That still works — the swap happens on the thread whose state it is.
+///
+/// Neither cell was ever a scanned root; `mark_roots` does not look at them.
+pub(crate) struct ExcState {
+    pub(crate) current_trap: *mut TrapContext,
+    pub(crate) exc_value: *mut vdynamic,
+    /// Retired contexts, reused by the next `setup_trap`. Traps nest strictly,
+    /// so these come back in the order they were handed out.
+    pub(crate) trap_pool: Vec<*mut TrapContext>,
+}
+
+thread_local! {
+    static EXC_STATE: RefCell<ExcState> = const {
+        RefCell::new(ExcState {
+            current_trap: std::ptr::null_mut(),
+            exc_value: std::ptr::null_mut(),
+            trap_pool: Vec::new(),
+        })
+    };
+}
+
+/// Run `f` against this thread's exception state.
+pub(crate) fn with_exc<R>(f: impl FnOnce(&mut ExcState) -> R) -> R {
+    EXC_STATE.with(|c| f(&mut c.borrow_mut()))
+}
+
 /// Swap the live exception-state cells (trap chain head + exception value)
 /// with the given values — the fiber scheduler's per-fiber state switch.
 pub(crate) unsafe fn gc_swap_exc_state(
     trap: &mut *mut crate::error::TrapContext,
     exc: &mut *mut hl::vdynamic,
 ) {
-    let gc = gc_locked();
-    std::mem::swap(&mut *gc.current_trap.borrow_mut(), trap);
-    std::mem::swap(&mut *gc.exc_value.borrow_mut(), exc);
+    with_exc(|st| {
+        std::mem::swap(&mut st.current_trap, trap);
+        std::mem::swap(&mut st.exc_value, exc);
+    });
 }

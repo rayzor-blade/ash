@@ -169,7 +169,9 @@ pub fn entry_return_class(kind: hl::hl_type_kind) -> AbiClass {
 /// tier consumes the same numbers the LLVM tier does rather than deciding
 /// anything itself. They were also what made the gate reject essentially all
 /// real code — Haxe programs touch fields constantly, so the middle tier was
-/// declining every candidate and leaving LLVM to pay for every promotion.
+/// declining every candidate and leaving LLVM to pay for every promotion. They
+/// are now admitted as well as lowered; the corpus agrees with the interpreter
+/// on all 42 programs at thresholds 1, 10 and 100 and under every tier.
 /// - `Ref`/`Unref`/`Setref`: register address-taking has no CLIF `Variable`
 ///   equivalent without pinning registers to stack slots.
 /// - `Prefetch`/`Asm`: x86-only.
@@ -212,13 +214,17 @@ pub fn is_cranelift_lowerable(op: &Opcode) -> bool {
             // Globals
             | Opcode::GetGlobal { .. }
             | Opcode::SetGlobal { .. }
-            // NOTE: Field/SetField/GetThis/SetThis are lowered (see
-            // `Lowerer::lower_field_load`) but NOT admitted here yet. Turning
-            // them on makes six programs diverge from the interpreter at
-            // `--jit-threshold 1`, three at 10, and none at the default 100 —
-            // a threshold-dependent failure, so the defect is in a function
-            // that only becomes eligible once field access is allowed, not in
-            // the offsets themselves. See BACKLOG.md.
+            | Opcode::Field { .. }
+            | Opcode::SetField { .. }
+            | Opcode::GetThis { .. }
+            | Opcode::SetThis { .. }
+            // Field access was lowered but refused here for a long time: it
+            // made programs diverge at a low `--jit-threshold` and not at the
+            // default, which read like a miscompile in a function that only
+            // became eligible once fields were allowed. It was — but not in the
+            // offsets. The defect was two global stores that disagreed, and
+            // compiled code reading the one the interpreter treated as a
+            // fallback. See `HLInterpreter::init_constants`.
             // Control flow
             | Opcode::JTrue { .. }
             | Opcode::JFalse { .. }

@@ -2600,14 +2600,40 @@ impl HLInterpreter {
             }
         }
 
-        // Sync globals_data → self.globals for any entries set by native code
-        // (e.g., hlp_alloc_obj may write to global_value slots during binding setup)
+        // Reconcile the two global stores into one view.
+        //
+        // There are two: `self.globals`, which the interpreter reads first, and
+        // `globals_data`, the flat C array that native and *compiled* code
+        // read. Neither was complete. Native code writes global_value slots
+        // during binding setup that the interpreter never saw, and the constant
+        // loop above writes `self.globals` for every constant but `globals_data`
+        // only for class descriptors -- so a plain constant like the "\n" that
+        // `Sys.println` appends lived in one store and was null in the other.
+        //
+        // The interpreter never noticed, because it falls back to `globals_data`
+        // only when its own slot is null. Compiled code has no such fallback:
+        // Cranelift's GetGlobal loads the `globals_data` slot address directly,
+        // so it read null where the interpreter read a string. That is what kept
+        // the tier's field-access gate shut -- the defect was never in the field
+        // offsets, it was that admitting Field made these functions eligible at
+        // all.
+        //
+        // Whichever store has a value wins; a slot set in both is left alone.
         let (gd, nglobals) = self.c_type_factory.globals_data();
         if !gd.is_null() {
-            for i in 0..nglobals.min(self.globals.len()) {
+            let n = nglobals.min(self.globals.len());
+            for i in 0..n {
                 let raw = unsafe { *gd.add(i) };
                 if !raw.is_null() && self.globals[i].is_null() {
                     self.globals[i] = NanBoxedValue::from_ptr(raw as usize);
+                }
+            }
+            for i in 0..n {
+                if unsafe { *gd.add(i) }.is_null() {
+                    let v = self.globals[i];
+                    if !v.is_null() && !v.is_void() {
+                        unsafe { *gd.add(i) = v.as_ptr() as *mut c_void };
+                    }
                 }
             }
         }

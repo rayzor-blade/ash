@@ -158,6 +158,122 @@ fn has_candidate(f: &Function, cfg: &CfgInfo, forest: &LoopForest, l: LoopId) ->
 }
 
 /// Move every hoistable instruction of `l` into `ph`, to a fixed point.
+
+/// Move allocations the loop cannot let escape into the preheader, so one
+/// object serves every iteration instead of one per iteration.
+///
+/// The judgement is [`super::escape`]'s: the pointer must not outlive the
+/// iteration, and every field the loop reads must be written first on every
+/// path that reaches the read, so no iteration can observe what the previous
+/// one left behind. What remains here is the mechanics — the same
+/// `privatize` / remove / push as ordinary hoisting, and the same refusal to
+/// cross a trap-region boundary.
+///
+/// The allocation is what moves; the field writes stay in the loop and
+/// re-initialize the object each time round. That is what makes this cheaper
+/// than scalar replacement, which has to understand the object rather than
+/// merely outlive it.
+
+/// Hoists loop allocations that cannot escape the iteration.
+///
+/// Separate from [`LoopInvariantCodeMotion`], and scheduled after it and after
+/// [`super::sroa`], because the two compete for the same allocations and SROA's
+/// outcome is strictly better: it removes the object, this only stops
+/// re-creating it. SROA needs a later manager round to see past a loop's dead
+/// header phi, and hoisting first would take the allocation before it got
+/// there. Running last means this only ever sees what SROA has already
+/// declined.
+pub struct LoopAllocHoisting;
+
+impl Pass for LoopAllocHoisting {
+    fn name(&self) -> &'static str {
+        "loop-alloc-hoist"
+    }
+
+    fn run(&self, f: &mut Function, _opts: &PassOptions) -> Result<PassStats> {
+        let mut stats = PassStats::default();
+        let mut skip: HashSet<BlockId> = HashSet::new();
+
+        for _ in 0..MAX_ROUNDS {
+            let cfg = CfgInfo::build(f);
+            let forest = LoopForest::analyze(f, &cfg);
+            if forest.is_empty() {
+                break;
+            }
+            let target = forest.innermost_first().into_iter().find(|&l| {
+                !skip.contains(&forest.get(l).header)
+                    && !super::escape::hoistable_allocs(f, &forest, l).is_empty()
+            });
+            let Some(l) = target else { break };
+            let header = forest.get(l).header;
+
+            let ph = match existing_preheader(f, &cfg, &forest, l) {
+                Some(p) => p,
+                None => match create_preheader(f, &cfg, &forest, l)? {
+                    Some(_) => continue,
+                    None => {
+                        skip.insert(header);
+                        continue;
+                    }
+                },
+            };
+            let n = hoist_allocs_into(f, &forest, l, ph);
+            if n == 0 {
+                skip.insert(header);
+            }
+            stats.hoisted += n;
+        }
+        Ok(stats)
+    }
+}
+
+pub(super) fn hoist_allocs_into(
+    f: &mut Function,
+    forest: &LoopForest,
+    l: LoopId,
+    ph: BlockId,
+) -> usize {
+    let ph_handler = f.blocks[ph.idx()].handler;
+    let mut claims = RegClaims::build(f);
+    let is_param = param_values(f);
+    let mut moved = 0usize;
+
+    loop {
+        if matches!(
+            f.blocks[ph.idx()].instrs.last(),
+            Some(Instr::EndTrap { .. })
+        ) {
+            break;
+        }
+        // Recomputed each round: moving one allocation shifts the indices of
+        // the rest, and takes it out of the loop so it is not offered twice.
+        let handlers = handler_blocks(f);
+        let cands = super::escape::hoistable_allocs(f, forest, l);
+        let mut pick = None;
+        for &(b, k) in &cands {
+            if f.blocks[b.idx()].handler != ph_handler {
+                continue;
+            }
+            let Some(dst) = f.blocks[b.idx()].instrs.get(k).and_then(|i| i.dst()) else {
+                continue;
+            };
+            if feeds_handler_phi(f, &handlers, dst) {
+                continue;
+            }
+            pick = Some((b, k, dst));
+            break;
+        }
+        let Some((b, k, dst)) = pick else { break };
+        if !privatize(f, dst, &mut claims, is_param[dst.idx()]) {
+            break;
+        }
+        let ins = f.blocks[b.idx()].instrs.remove(k);
+        f.blocks[ph.idx()].instrs.push(ins);
+        moved += 1;
+    }
+    moved
+}
+
 fn hoist_into(
     f: &mut Function,
     cfg: &CfgInfo,
@@ -214,7 +330,7 @@ fn hoist_into(
 }
 
 /// An existing block usable as the loop's preheader without changing the CFG.
-fn existing_preheader(
+pub(super) fn existing_preheader(
     f: &Function,
     cfg: &CfgInfo,
     forest: &LoopForest,
@@ -240,7 +356,7 @@ fn existing_preheader(
 
 /// Insert a preheader in front of the loop header, moving every entry edge on
 /// to it. Returns `None` when the loop's shape forbids it.
-fn create_preheader(
+pub(super) fn create_preheader(
     f: &mut Function,
     cfg: &CfgInfo,
     forest: &LoopForest,

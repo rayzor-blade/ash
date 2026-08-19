@@ -168,6 +168,10 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Uses> {
         for (b, blk) in f.blocks.iter().enumerate() {
             // A phi merge and any terminator operand escape outright.
             for phi in &blk.phis {
+                // NOTE: a dead phi is still treated as an escape here. Skipping
+                // it lets this pass fire a round earlier, but the phi survives
+                // naming values the rewrite removed, and the verifier rightly
+                // rejects that. Ignoring dead phis requires deleting them too.
                 if phi.incoming.iter().any(|&(_, v)| aliases.contains(&v)) {
                     why(alloc, "phi merge");
                     return None;

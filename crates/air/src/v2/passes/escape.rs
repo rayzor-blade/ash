@@ -101,7 +101,7 @@ pub fn analyze_alloc_escapes(f: &Function, forest: &LoopForest, l: LoopId) -> Ve
 ///
 /// Phis are followed transitively, so a chain of phis feeding nothing is
 /// correctly reported as feeding nothing.
-fn transitively_used(f: &Function) -> HashSet<ValueId> {
+pub(crate) fn transitively_used(f: &Function) -> HashSet<ValueId> {
     let mut live: HashSet<ValueId> = HashSet::new();
     for block in &f.blocks {
         for ins in &block.instrs {

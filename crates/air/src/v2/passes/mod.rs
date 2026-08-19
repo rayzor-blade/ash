@@ -52,7 +52,7 @@ pub use dce::DeadCodeElim;
 pub use fma::FmaPeephole;
 pub use gvn::GlobalValueNumbering;
 pub use inline::Inlining;
-pub use licm::LoopInvariantCodeMotion;
+pub use licm::{LoopAllocHoisting, LoopInvariantCodeMotion};
 pub use nullcheck::NullCheckElim;
 pub use sroa::ScalarReplacement;
 pub use tre::TailRecursionElim;
@@ -218,6 +218,16 @@ impl PassReport {
 /// without one is `PassManager<'static>`.
 pub struct PassManager<'m> {
     passes: Vec<Box<dyn Pass + 'm>>,
+    /// Passes run once, after the main pipeline reaches its fixed point.
+    ///
+    /// For a pass that must only see what the others have already declined.
+    /// Allocation hoisting is the case: it competes with scalar replacement
+    /// for the same allocations, and SROA's answer — remove the object —
+    /// beats hoisting's — stop re-creating it. SROA needs a later round to see
+    /// past a loop's dead header phi, so a hoister running inside the loop
+    /// would take the allocation before SROA got there and quietly settle for
+    /// the weaker result.
+    final_passes: Vec<Box<dyn Pass + 'm>>,
     opts: PassOptions,
 }
 
@@ -259,8 +269,16 @@ impl<'m> PassManager<'m> {
                 Box::new(DeadCodeElim),
             ],
         };
+        // Allocation hoisting runs after the fixed point, never inside it —
+        // see `PassManager::final_passes`.
+        let final_passes: Vec<Box<dyn Pass + 'm>> = if matches!(level, OptLevel::O3) {
+            vec![Box::new(LoopAllocHoisting)]
+        } else {
+            Vec::new()
+        };
         PassManager {
             passes,
+            final_passes,
             opts: PassOptions::default(),
         }
     }
@@ -269,6 +287,7 @@ impl<'m> PassManager<'m> {
     pub fn with_passes(passes: Vec<Box<dyn Pass + 'm>>) -> Self {
         PassManager {
             passes,
+            final_passes: Vec::new(),
             opts: PassOptions::default(),
         }
     }
@@ -319,6 +338,20 @@ impl<'m> PassManager<'m> {
             }
             if !round_changed {
                 break;
+            }
+        }
+
+        // The fixed point is reached; now the last-resort passes get their turn.
+        for pass in &self.final_passes {
+            let stats = pass.run(f, &self.opts)?;
+            if self.opts.verify_each {
+                super::verify::verify(f).map_err(|e| {
+                    anyhow::anyhow!("{} broke the IR: {e}\n{}", pass.name(), f.dump())
+                })?;
+            }
+            match report.per_pass.iter_mut().find(|(n, _)| *n == pass.name()) {
+                Some((_, acc)) => acc.merge(stats),
+                None => report.per_pass.push((pass.name(), stats)),
             }
         }
         Ok(report)

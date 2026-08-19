@@ -663,6 +663,16 @@ impl<'ctx> JITModule<'ctx> {
             return Err(anyhow!("osr entry {name}: zero address"));
         }
         crate::profile::count("osr entries compiled", 1);
+        // Register the entry so samples inside it are charged to the function
+        // it belongs to. Without this the sampler has no symbol for the
+        // address range and reports the time as `unknown` -- which on nbody was
+        // 59.5% of the run, i.e. all of the work OSR had just moved into
+        // compiled code.
+        crate::profile::register_jit_code(
+            findex as u32,
+            crate::profile::Tier::Llvm,
+            addr as usize,
+        );
         return Ok(addr as u64);
     }
 

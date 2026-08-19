@@ -146,6 +146,67 @@ number that only restates what mandelbrot_small already measures"""
 description = """N-body, 10M integration steps. Verbatim from HaxeBenchmarks, \
 so the number is comparable with the official Haxe targets."""
 
+# ── Call latency ────────────────────────────────────────────────────────────
+#
+# Four kernels, identical but for how the step is reached: inline, static call,
+# vtable dispatch, closure. Same 100M iterations, same -1737346944 checksum, so
+# any pair is directly comparable and a disagreeing checksum means a kernel
+# stopped doing the work rather than got faster.
+#
+# The accumulator is `sum * 31 + (i % 8)`. An earlier `sum + (i % 8)` was
+# associative, so LLVM reassociated the reduction, vectorized it, and -- the
+# callee being pure -- eliminated the call by PRE: baseline and call kernel both
+# read ~5.2ms, which measures the optimizer, not a call. zyntax's LLVM tier
+# publishes 1.8ms on that same shape for the same reason. A multiply chain is a
+# true loop-carried dependency and survives.
+#
+# Ported from zyntax's bench_inlined_call / bench_free_function_call so the
+# numbers line up against it and against wren_lift.
+
+[[bench]]
+name = "inlined_call"
+hl = "bench_inlined_call.hl"
+expectation = "checksum"
+checksum_marker = "BenchInlinedCall"
+checksums = [{ value = "-1737346944", label = "reference" }]
+timeout_secs = 120
+group = "call"
+description = """Baseline: the step written inline. Everything else in this \
+group is read as a delta against it."""
+
+[[bench]]
+name = "free_call"
+hl = "bench_free_call.hl"
+expectation = "checksum"
+checksum_marker = "BenchFreeCall"
+checksums = [{ value = "-1737346944", label = "reference" }]
+timeout_secs = 120
+group = "call"
+description = """Static call. Small and pure, so the inliner is expected to \
+take it: a delta near zero says the call was removed, not that calls are free."""
+
+[[bench]]
+name = "method_call"
+hl = "bench_method_call.hl"
+expectation = "checksum"
+checksum_marker = "BenchMethodCall"
+checksums = [{ value = "-1737346944", label = "reference" }]
+timeout_secs = 120
+group = "call"
+description = """Vtable dispatch. The receiver comes from Sys.time() with two \
+subclasses live, because a provable receiver let LLVM devirtualize, inline and \
+vectorize -- 100M dispatches in 6.04ms, the baseline's own time."""
+
+[[bench]]
+name = "closure_call"
+hl = "bench_closure_call.hl"
+expectation = "checksum"
+checksum_marker = "BenchClosureCall"
+checksums = [{ value = "-1737346944", label = "reference" }]
+timeout_secs = 120
+group = "call"
+description = "Indirect call through a closure: target in a register, no vtable slot."
+
 [[bench]]
 name = "array_push"
 parity_case = "test_array_push"

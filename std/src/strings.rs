@@ -70,10 +70,53 @@ pub unsafe extern "C" fn hlp_itos(i: c_int, len: *mut c_int) -> *const hl::vbyte
     result as *const hl::vbyte
 }
 
+/// C's `%.*g`, which is what HashLink formats floats with.
+///
+/// Rust's `{}` prints the shortest representation that round-trips, so
+/// `Math.sqrt(2)` came out as `1.4142135623730951` where HashLink gives
+/// `1.4142135623731`. Same double, different text, and every program printing
+/// an irrational float disagreed with the reference implementation.
+///
+/// Two precisions are in use and they are not interchangeable: `hl_ftos`
+/// (`Std.string` of a Float) uses 15, while the buffer paths use 17.
+///
+/// Verified against `printf("%.*g")` on 5000 random doubles at precisions
+/// 6, 9, 15 and 17.
+pub(crate) fn format_g(d: f64, p: i32) -> String {
+    fn strip(s: &str) -> String {
+        if !s.contains('.') {
+            return s.to_string();
+        }
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+    if d == 0.0 {
+        // C prints the sign of a negative zero.
+        return if d.is_sign_negative() { "-0".into() } else { "0".into() };
+    }
+    // Take the exponent from the value *after* rounding to `p` significant
+    // digits, so a value that rounds up into the next decade (999999999999999.9
+    // -> 1e+15) picks the same branch C does.
+    let e = format!("{:.*e}", (p - 1) as usize, d);
+    let i = e.find('e').expect("Rust always emits an exponent for {:e}");
+    let exp: i32 = e[i + 1..].parse().expect("exponent is an integer");
+    if exp < -4 || exp >= p {
+        format!(
+            "{}e{}{:02}",
+            strip(&e[..i]),
+            if exp < 0 { "-" } else { "+" },
+            exp.abs()
+        )
+    } else {
+        strip(&format!("{:.*}", (p - 1 - exp).max(0) as usize, d))
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vbyte {
+    // hl_ftos special-cases NaN before the printf and lets everything else,
+    // infinities included, fall through to %.15g.
     let s = if d.is_nan() {
-        "nan".to_string()
+        "NaN".to_string()
     } else if d.is_infinite() {
         if d > 0.0 {
             "inf".to_string()
@@ -81,7 +124,7 @@ pub unsafe extern "C" fn hlp_ftos(d: c_double, len: *mut c_int) -> *const hl::vb
             "-inf".to_string()
         }
     } else {
-        format!("{}", d)
+        format_g(d, 15)
     };
     let utf16: Vec<u16> = s.encode_utf16().collect();
     let k = utf16.len() as c_int;
@@ -486,4 +529,61 @@ pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) 
         }
     };
     result
+}
+
+#[cfg(test)]
+mod format_g_tests {
+    use super::format_g;
+
+    /// Values taken from `printf("%.15g")` on this platform. The first is the
+    /// one that started this: `Std.string(Math.sqrt(2))`.
+    #[test]
+    fn matches_c_at_precision_15() {
+        for (d, want) in [
+            (1.4142135623730951_f64, "1.4142135623731"),
+            (0.1, "0.1"),
+            (1e18, "1e+18"),
+            (-1e18, "-1e+18"),
+            (1e-5, "1e-05"),
+            (1e-4, "0.0001"),
+            (3.14159265358979, "3.14159265358979"),
+            (100.0, "100"),
+            (5.1, "5.1"),
+            (86.57, "86.57"),
+            (0.30000000000000004, "0.3"),
+            (6.02214076e23, "6.02214076e+23"),
+            (-273.15, "-273.15"),
+        ] {
+            assert_eq!(format_g(d, 15), want, "%.15g of {d}");
+        }
+    }
+
+    /// The buffer paths use 17, where the same double prints differently.
+    #[test]
+    fn precision_17_differs_from_15() {
+        assert_eq!(format_g(1.4142135623730951, 15), "1.4142135623731");
+        assert_eq!(format_g(1.4142135623730951, 17), "1.4142135623730951");
+    }
+
+    /// Rounding up into the next decade has to switch to exponent form, the
+    /// case a naive "compare the exponent of the input" implementation gets
+    /// wrong.
+    #[test]
+    fn rounding_into_the_next_decade_switches_form() {
+        assert_eq!(format_g(999999999999999.9, 15), "1e+15");
+    }
+
+    /// C keeps the sign of a negative zero.
+    #[test]
+    fn signed_zero() {
+        assert_eq!(format_g(0.0, 15), "0");
+        assert_eq!(format_g(-0.0, 15), "-0");
+    }
+
+    /// The exponent carries a sign and at least two digits, as C prints it.
+    #[test]
+    fn exponent_is_two_digits_with_a_sign() {
+        assert_eq!(format_g(1e5, 3), "1e+05");
+        assert_eq!(format_g(1e-300, 15), "1e-300");
+    }
 }

@@ -307,7 +307,9 @@ pub unsafe extern "C" fn hlp_buffer_addr(
         }
         hl_type_kind_HF64 => {
             let value = *(data as *mut f64);
-            let s = str_to_uchar_ptr(&format!("{}", value));
+            // hl_buffer_addr uses %.17g here, not the %.15g that Std.string
+            // goes through. The two precisions are deliberate upstream.
+            let s = str_to_uchar_ptr(&crate::strings::format_g(value, 17));
             hlp_buffer_str(b, s);
         }
         hl_type_kind_HBYTES => {
@@ -421,7 +423,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             return;
         }
         hl_type_kind_HF64 => {
-            let _str = format!("{}", (*v).v.d);
+            let _str = crate::strings::format_g((*v).v.d, 17);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);

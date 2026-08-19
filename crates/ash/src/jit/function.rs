@@ -391,6 +391,19 @@ impl<'ctx> JITModule<'ctx> {
         self.compile_pending_functions_strict()?;
         self.compile_function(findex)?;
         self.compile_pending_functions_strict()?;
+
+        // Optimize before asking for the address, because asking is what
+        // forces codegen. Without this the tiered LLVM tier shipped raw
+        // lowering output -- no mem2reg, no inlining, no GVN, no LICM -- and
+        // lost to Cranelift on nbody by 1.5s, which is not a thing a top tier
+        // should do. Only the whole-module path ran the middle end.
+        {
+            let _phase = crate::profile::scope("llvm middle-end (promote)");
+            let excluded = self.shield_trap_functions_from_optimization();
+            crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
+            super::module::run_middle_end(&self.module)?;
+        }
+
         let function = *self.func_cache.get(&findex).ok_or_else(|| {
             anyhow!(
                 "Strict promotion failed: function {} missing from cache",

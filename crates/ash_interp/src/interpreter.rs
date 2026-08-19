@@ -3143,7 +3143,13 @@ impl HLInterpreter {
                 return Ok(NanBoxedValue::void());
             }
 
-            let op = func.ops[pc].clone();
+            // Borrowed, not cloned. `Cache::body` hands back a reference tied
+            // to `bytecode` rather than to `self`, so the dispatch loop never
+            // needed a copy -- and `Opcode` carries a `Vec<Reg>` in its CallN,
+            // CallMethod, CallThis, CallClosure and Switch variants, so the
+            // copy was a heap allocation per dispatch on exactly those. The
+            // sampler charged 2% of a whole nbody run to `Opcode::clone`.
+            let op = &func.ops[pc];
             if env_flag!("ASH_TRACE_ASSERT") {
                 eprintln!(
                     "[TRACE] f{} {} pc={} op={:?}",
@@ -3153,7 +3159,7 @@ impl HLInterpreter {
                     op
                 );
             }
-            let result = self.execute_opcode(bytecode, &op, func_idx)?;
+            let result = self.execute_opcode(bytecode, op, func_idx)?;
 
             match result {
                 StepResult::Continue => {

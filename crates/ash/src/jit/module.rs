@@ -62,6 +62,8 @@ pub struct CompiledFunctionMeta {
 
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
+    /// Alias metadata for emitted loads and stores; see [`super::tbaa`].
+    pub(crate) tbaa: super::tbaa::TbaaTree<'ctx>,
     pub(crate) module: Module<'ctx>,
     pub(crate) builder: Builder<'ctx>,
     pub(crate) execution_engine: ExecutionEngine<'ctx>,
@@ -206,6 +208,7 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
+            tbaa: super::tbaa::TbaaTree::new(context),
             module,
             builder: context.create_builder(),
             execution_engine,
@@ -433,6 +436,7 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
+            tbaa: super::tbaa::TbaaTree::new(context),
             module: llvm_module,
             builder: context.create_builder(),
             execution_engine,

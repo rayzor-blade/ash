@@ -72,6 +72,22 @@ pub enum FuncPtr {
 }
 
 impl<'ctx> JITModule<'ctx> {
+    /// Tag an access as touching the object field at `field_index` of
+    /// `type_index`. Keyed by byte offset — see [`super::tbaa`] for why that
+    /// is the sound key under inheritance.
+    fn tbaa_field(
+        &self,
+        inst: Option<inkwell::values::InstructionValue<'ctx>>,
+        type_index: usize,
+        field_index: usize,
+    ) {
+        if let Some(inst) = inst {
+            if let Some(off) = crate::layout::field_offset(&self.types_, type_index, field_index) {
+                self.tbaa.tag(inst, self.tbaa.obj_field(self.context, off));
+            }
+        }
+    }
+
     #[inline(always)]
     fn current_stack_addr() -> usize {
         // Portable stack probe: address of a local variable approximates current SP.
@@ -1171,7 +1187,8 @@ impl<'ctx> JITModule<'ctx> {
                     hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
                         let field_ptr =
                             self.build_field_ptr(f.regs[obj.0 as usize].0, field.0, obj_val)?;
-                        self.builder.build_store(field_ptr, src_val)?;
+                        let st = self.builder.build_store(field_ptr, src_val)?;
+                        self.tbaa_field(Some(st), f.regs[obj.0 as usize].0, field.0);
                     }
                     hl_type_kind_HVIRTUAL => {
                         let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -1334,6 +1351,11 @@ impl<'ctx> JITModule<'ctx> {
                         let load_type = self.get_register_type(f.regs[dst.0 as usize].0)?;
                         let field_val =
                             self.builder.build_load(load_type, field_ptr, "field_val")?;
+                        self.tbaa_field(
+                            field_val.as_instruction_value(),
+                            f.regs[obj.0 as usize].0,
+                            field.0,
+                        );
 
                         self.builder
                             .build_store(registers[dst.0 as usize], field_val)?;
@@ -1524,6 +1546,9 @@ impl<'ctx> JITModule<'ctx> {
                 let element_val =
                     self.builder
                         .build_load(reg_types[dst.0 as usize], slot, "getarr_val")?;
+                if let Some(i) = element_val.as_instruction_value() {
+                    self.tbaa.tag(i, self.tbaa.payload());
+                }
                 self.builder
                     .build_store(registers[dst.0 as usize], element_val)?;
             }
@@ -4058,6 +4083,9 @@ impl<'ctx> JITModule<'ctx> {
                 let val = self
                     .builder
                     .build_load(reg_types[dst.0 as usize], addr, "getmem_val")?;
+                if let Some(i) = val.as_instruction_value() {
+                    self.tbaa.tag(i, self.tbaa.payload());
+                }
                 self.builder.build_store(registers[dst.0 as usize], val)?;
             }
             Opcode::SetI8 { bytes, index, src } => {
@@ -4149,7 +4177,8 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder
                         .build_gep(self.context.i8_type(), base, &[idx], "setmem_addr")?
                 };
-                self.builder.build_store(addr, src_val)?;
+                let st = self.builder.build_store(addr, src_val)?;
+                self.tbaa.tag(st, self.tbaa.payload());
             }
 
             // --- Array operations ---
@@ -4197,7 +4226,8 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder
                         .build_gep(i8_type, data_ptr, &[byte_offset], "setarr_slot")?
                 };
-                self.builder.build_store(slot, src_val)?;
+                let st = self.builder.build_store(slot, src_val)?;
+                self.tbaa.tag(st, self.tbaa.payload());
             }
             Opcode::ArraySize { dst, array } => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -4217,6 +4247,9 @@ impl<'ctx> JITModule<'ctx> {
                 let size =
                     self.builder
                         .build_load(self.context.i32_type(), size_gep, "arrsize_val")?;
+                if let Some(i) = size.as_instruction_value() {
+                    self.tbaa.tag(i, self.tbaa.array_len());
+                }
                 self.builder.build_store(registers[dst.0 as usize], size)?;
             }
 

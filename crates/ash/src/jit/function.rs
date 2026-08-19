@@ -5195,6 +5195,13 @@ impl<'ctx> JITModule<'ctx> {
             .get(&index)
             .ok_or_else(|| anyhow!("Entrypoint function not found in cache"))?;
 
+        // Optimize before anything asks for an address: requesting one forces
+        // codegen, and a pass run afterwards would be too late.
+        {
+            let _phase = crate::profile::scope("llvm middle-end");
+            super::module::run_middle_end(&self.module)?;
+        }
+
         {
             let _phase = crate::profile::scope("dump ir");
             self.module.print_to_file("/tmp/ash_jit.ll").ok();

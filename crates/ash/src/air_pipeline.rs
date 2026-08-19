@@ -1001,3 +1001,35 @@ impl Drop for SilentPanics {
         }
     }
 }
+
+/// Report, per program, how many loop allocations the escape analysis would
+/// hoist and why it refuses the rest.
+///
+/// A measurement rather than a claim, in the same spirit as ASH_VERIFY_LAYOUT:
+/// "allocation hoisting is worth building" should be answerable before the
+/// hoisting itself is built.
+pub fn escape_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> Vec<String> {
+    use std::collections::HashMap;
+    let m = AshModule::new(bc);
+    let opts = PassOptions::default();
+    let mut totals: HashMap<String, usize> = HashMap::new();
+    let mut funcs_with_loop_allocs = 0usize;
+    for f in &bc.functions {
+        let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
+            continue;
+        };
+        let counts = air::v2::passes::escape::summarize(&func);
+        if !counts.is_empty() {
+            funcs_with_loop_allocs += 1;
+        }
+        for (k, v) in counts {
+            *totals.entry(k.to_string()).or_insert(0) += v;
+        }
+    }
+    let mut out: Vec<String> = totals.iter().map(|(k, v)| format!("{v:>6}  {k}")).collect();
+    out.sort_by(|a, b| b.cmp(a));
+    out.push(format!(
+        "{funcs_with_loop_allocs} functions contain an allocation inside a loop"
+    ));
+    out
+}

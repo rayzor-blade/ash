@@ -535,6 +535,28 @@ fn run() -> Result<()> {
     // reasoning as the layout sweep above: whether a static analysis accepts
     // the right things should be a measurement over a whole corpus, not an
     // assertion about one function.
+    // `ASH_ESCAPE=only` reports how many allocations inside loops could be
+    // hoisted out of them, and why the rest cannot. mandelbrot spends 52% of
+    // its time in the collector for 196.5M allocations against a 3.7MB live
+    // set, so the size of this number decides whether hoisting is worth
+    // building.
+    if let Ok(mode) = std::env::var("ASH_ESCAPE") {
+        if !mode.is_empty() && mode != "0" {
+            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
+                _ => ash::air_pipeline::AirOptLevel::O2,
+            };
+            for line in ash::air_pipeline::escape_report(&bytecode, level) {
+                eprintln!("[escape] {line}");
+            }
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     if let Ok(mode) = std::env::var("ASH_VERIFY_OSR") {
         if !mode.is_empty() && mode != "0" {
             // `ASH_VERIFY_OSR=dump:<findex>` prints one function's opcodes with

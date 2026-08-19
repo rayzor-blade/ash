@@ -39,6 +39,7 @@ use super::module::{ModuleInfo, NO_MODULE_INFO};
 use anyhow::{bail, Result};
 
 pub mod dce;
+pub mod escape;
 pub mod fma;
 pub mod gvn;
 pub mod inline;

@@ -125,6 +125,58 @@ fn link_in_mcjit() {
     ONCE.call_once(inkwell::execution_engine::ExecutionEngine::link_in_mc_jit);
 }
 
+/// Run LLVM's middle-end over the module before MCJIT emits code.
+///
+/// `create_jit_execution_engine(OptimizationLevel::Aggressive)` sets only the
+/// *codegen* level — instruction selection, scheduling, machine peepholes. It
+/// runs no IR passes at all, and ash never called `run_passes`, so until now
+/// nothing had ever promoted an HL register out of its `alloca`: every one
+/// stayed a stack slot with loads and stores around it, and the backend's
+/// load/store optimizer was the only cleanup. That is the shape the lowering
+/// produces on purpose — one alloca per register makes lowering simple — but it
+/// depends on mem2reg to be worth anything, and mem2reg was never running.
+///
+/// `ASH_LLVM_PASSES` overrides the pipeline; `off` skips it, which is the
+/// bisect switch when a miscompile is suspected.
+pub(crate) fn run_middle_end(module: &inkwell::module::Module<'_>) -> Result<()> {
+    use inkwell::passes::PassBuilderOptions;
+    use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
+    use inkwell::OptimizationLevel;
+
+    // DEFAULT OFF. The pipeline is worth 1.78x on compute-bound code (nbody
+    // 2.79s -> 1.57s), but it currently miscompiles exception handling: with it
+    // on, test_stdlib reports "nested: none, outer caught" where the inner
+    // catch must fire, and test_trap_locals drops a statement from inside the
+    // try. HL exceptions are setjmp/longjmp, and a value live across a setjmp
+    // has to survive a return the optimizer cannot see; marking the setjmp
+    // returns_twice is evidently not enough on its own. Until that is fixed,
+    // this is opt-in: ASH_LLVM_PASSES=default<O2> to measure, and the
+    // exception tests must pass before it becomes the default.
+    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| "off".to_string());
+    if spec == "off" {
+        return Ok(());
+    }
+
+    Target::initialize_native(&InitializationConfig::default())
+        .map_err(|e| anyhow!("target init for middle-end: {e}"))?;
+    let triple = inkwell::targets::TargetMachine::get_default_triple();
+    let target = Target::from_triple(&triple).map_err(|e| anyhow!("target from triple: {}", e))?;
+    let machine = target
+        .create_target_machine(
+            &triple,
+            &inkwell::targets::TargetMachine::get_host_cpu_name().to_string_lossy(),
+            &inkwell::targets::TargetMachine::get_host_cpu_features().to_string_lossy(),
+            OptimizationLevel::Aggressive,
+            RelocMode::Default,
+            CodeModel::JITDefault,
+        )
+        .ok_or_else(|| anyhow!("could not create target machine for middle-end"))?;
+
+    module
+        .run_passes(&spec, &machine, PassBuilderOptions::create())
+        .map_err(|e| anyhow!("run_passes({spec}): {}", e))
+}
+
 fn timing_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| std::env::var("ASH_TIERED_TIMING").is_ok())

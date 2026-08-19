@@ -14,6 +14,24 @@ impl RegisterFile {
         }
     }
 
+    /// Build a register file on a recycled buffer.
+    ///
+    /// Every call used to allocate one: `vec![void; register_count]` is a
+    /// malloc per invocation, on top of the one for the argument list. Calls
+    /// nest, so the buffers come back in the order they were handed out and a
+    /// plain stack of them is enough to keep the allocator out of the call
+    /// path entirely.
+    pub fn from_buffer(mut buf: Vec<NanBoxedValue>, register_count: usize) -> Self {
+        buf.clear();
+        buf.resize(register_count, NanBoxedValue::void());
+        Self { registers: buf }
+    }
+
+    /// Hand the buffer back so the next call can have it.
+    pub fn into_buffer(self) -> Vec<NanBoxedValue> {
+        self.registers
+    }
+
     #[inline(always)]
     pub fn get(&self, index: u32) -> NanBoxedValue {
         self.registers[index as usize]
@@ -73,5 +91,24 @@ impl InterpreterFrame {
             pc: 0,
             trap_stack: Vec::new(),
         }
+    }
+
+    /// Same, on a recycled register buffer. See [`RegisterFile::from_buffer`].
+    pub fn with_buffer(
+        function_index: usize,
+        register_count: usize,
+        buf: Vec<NanBoxedValue>,
+    ) -> Self {
+        Self {
+            function_index,
+            registers: RegisterFile::from_buffer(buf, register_count),
+            pc: 0,
+            trap_stack: Vec::new(),
+        }
+    }
+
+    /// Reclaim the register buffer when the frame is finished with.
+    pub fn into_buffer(self) -> Vec<NanBoxedValue> {
+        self.registers.into_buffer()
     }
 }

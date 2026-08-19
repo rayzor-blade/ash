@@ -113,6 +113,56 @@ enum StepResult {
     },
 }
 
+/// What a findex resolves to, held in a dense table indexed by findex.
+///
+/// Functions and natives share one numbering, so one indexed load decides
+/// both questions the call path used to ask two hash maps.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CallTarget {
+    /// No function or native carries this findex.
+    Missing,
+    /// Index into `bytecode.functions`.
+    Func(u32),
+    /// Index into `bytecode.natives`.
+    Native(u32),
+}
+
+/// How many recycled buffers either pool keeps.
+///
+/// Pops and pushes are not balanced: the `Call0..CallN` arms take a buffer from
+/// the pool, but `op_call_method` and `op_call_closure` build their own and the
+/// trampoline reclaims those too, so a dispatch-heavy program returns more than
+/// it borrows. Measured RSS does not move without this cap, because a real
+/// program mixes the two, but nothing in the design bounds it -- the cap does,
+/// and a buffer arriving at a full pool is simply dropped.
+///
+/// 64 is far past any sane call depth; the pool only has to cover the calls in
+/// flight, not the calls ever made.
+const POOL_CAP: usize = 64;
+
+/// Index into `bytecode.functions` for a findex, if it names one.
+///
+/// Free functions rather than methods on purpose: `func_of(&self.targets, ..)` would
+/// borrow all of `self`, and the call path holds a `&mut` frame from
+/// `self.stack` across the lookup. Taking the table alone keeps the borrow
+/// field-disjoint, which is what the two HashMap fields gave for free.
+#[inline(always)]
+fn func_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
+    match targets.get(findex) {
+        Some(CallTarget::Func(i)) => Some(*i as usize),
+        _ => None,
+    }
+}
+
+/// Index into `bytecode.natives` for a findex, if it names one.
+#[inline(always)]
+fn native_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
+    match targets.get(findex) {
+        Some(CallTarget::Native(i)) => Some(*i as usize),
+        _ => None,
+    }
+}
+
 /// Carries a thrown HL exception value up through the Rust call stack.
 /// Distinguishable from other errors so callers can catch it via downcast.
 #[derive(Debug, Clone)]
@@ -633,8 +683,31 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
-    /// Map from findex → function array index (for bytecode functions)
-    findex_to_func: HashMap<usize, usize>,
+    /// Argument buffers, recycled the same way as [`Self::reg_pool`].
+    ///
+    /// `StepResult::Call` owns its arguments, so every call above arity zero
+    /// used to malloc a `Vec` for them and free it on return. The trampoline
+    /// hands the buffer back once the callee has copied the arguments into its
+    /// own registers, which is the only span they need to survive.
+    arg_pool: Vec<Vec<NanBoxedValue>>,
+
+    /// Register buffers from finished frames, ready for the next call.
+    ///
+    /// Calls nest, so buffers come back in the order they were handed out and
+    /// the depth of this stack is the depth of the call stack -- it cannot run
+    /// away. Frames discarded by an exception unwind are reclaimed too; missing
+    /// them would only cost a malloc, but the unwind path is where a long-lived
+    /// program would otherwise leak its whole call depth of buffers.
+    reg_pool: Vec<Vec<NanBoxedValue>>,
+
+    /// findex → what to run, as a dense table.
+    ///
+    /// This was two `HashMap<usize, usize>`, consulted on every call: the
+    /// interpreter paid a hash and a probe to answer a question about a dense
+    /// integer. findexes number the functions and natives of one module
+    /// consecutively, so an indexed load answers it instead. See
+    /// [`CallTarget`].
+    targets: Vec<CallTarget>,
     /// Hot-reloaded bytecode (replaces the original for function lookup).
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
     reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
@@ -644,8 +717,6 @@ pub struct HLInterpreter {
     /// AIR v2 SSA bodies executed directly, filled on first execution of each
     /// function. Inert unless `ASH_AIR=v2`; see `crate::ssa`.
     ssa: SsaCache,
-    /// Map from findex → native array index
-    findex_to_native: HashMap<usize, usize>,
     /// Per-native resolved function pointer cache (indexed by native array
     /// index). Backed by the process-global symbol table on first miss;
     /// kills the per-call format!/table-lock on the native hot path.
@@ -754,14 +825,22 @@ impl Drop for HLInterpreter {
 
 impl HLInterpreter {
     pub fn new(bytecode: &DecodedBytecode, native_resolver: &NativeFunctionResolver) -> Self {
-        // Build findex lookup tables
-        let mut findex_to_func = HashMap::new();
+        // Build the dense findex table. Sized to the largest findex actually
+        // seen rather than to functions.len() + natives.len(): the two share
+        // one numbering, and nothing guarantees it has no gaps.
+        let max_findex = bytecode
+            .functions
+            .iter()
+            .map(|f| f.findex)
+            .chain(bytecode.natives.iter().map(|n| n.findex))
+            .max()
+            .unwrap_or(-1);
+        let mut targets = vec![CallTarget::Missing; (max_findex + 1).max(0) as usize];
         for (i, f) in bytecode.functions.iter().enumerate() {
-            findex_to_func.insert(f.findex as usize, i);
+            targets[f.findex as usize] = CallTarget::Func(i as u32);
         }
-        let mut findex_to_native = HashMap::new();
         for (i, n) in bytecode.natives.iter().enumerate() {
-            findex_to_native.insert(n.findex as usize, i);
+            targets[n.findex as usize] = CallTarget::Native(i as u32);
         }
 
         // Initialize globals
@@ -868,11 +947,12 @@ impl HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
             max_stack_depth: 1000,
-            findex_to_func,
+            targets,
+            reg_pool: Vec::new(),
+            arg_pool: Vec::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
             ssa: SsaCache::default(),
-            findex_to_native,
             native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
             c_type_factory,
             fn_alloc_obj,
@@ -2098,10 +2178,8 @@ impl HLInterpreter {
                     } else {
                         // Primitive: box via hlp_make_dyn with the callee's
                         // declared return type.
-                        let ret_idx = interp
-                            .findex_to_func
-                            .get(&findex)
-                            .and_then(|&fi| {
+                        let ret_idx = func_of(&interp.targets, findex)
+                            .and_then(|fi| {
                                 bytecode.types[bytecode.functions[fi].type_.0]
                                     .fun
                                     .as_ref()
@@ -2179,9 +2257,9 @@ impl HLInterpreter {
             let findex = findex as usize;
 
             // The callee's declared signature drives raw-word decoding.
-            let type_idx = if let Some(&fi) = interp.findex_to_func.get(&findex) {
+            let type_idx = if let Some(fi) = func_of(&interp.targets, findex) {
                 bytecode.functions[fi].type_.0
-            } else if let Some(&ni) = interp.findex_to_native.get(&findex) {
+            } else if let Some(ni) = native_of(&interp.targets, findex) {
                 bytecode.natives[ni].type_.0
             } else {
                 HLInterpreter::raise_stub_bridge_failure(
@@ -2264,7 +2342,16 @@ impl HLInterpreter {
                     if let Some(v) = bound {
                         args.push(v);
                     }
-                    match self.call_function(bytecode, native_resolver, findex, &args) {
+                    // The callee has copied the arguments into its own
+                    // registers by the time this returns, so the buffer can go
+                    // back before the result is even examined.
+                    let call_result =
+                        self.call_function(bytecode, native_resolver, findex, &args);
+                    if self.arg_pool.len() < POOL_CAP {
+                        args.clear();
+                        self.arg_pool.push(args);
+                    }
+                    match call_result {
                         Ok(_) => {}
                         Err(e) => {
                             eprintln!("[ash] VM event loop error: {:#}", e);
@@ -2539,7 +2626,7 @@ impl HLInterpreter {
         self.ensure_gc_runtime_initialized();
 
         // Check if it's a bytecode function or native
-        if let Some(&func_idx) = self.findex_to_func.get(&findex) {
+        if let Some(func_idx) = func_of(&self.targets, findex) {
             // Hybrid tiered call path: tick the bead and dispatch to compiled
             // code once beadie's broker has installed it.
             if self.tiered_runtime.is_some() {
@@ -2561,7 +2648,7 @@ impl HLInterpreter {
                 }
             }
             self.execute_hl_function(bytecode, native_resolver, func_idx, args)
-        } else if let Some(&native_idx) = self.findex_to_native.get(&findex) {
+        } else if let Some(native_idx) = native_of(&self.targets, findex) {
             self.call_native(bytecode, native_resolver, native_idx, args)
         } else {
             Err(anyhow!("Function findex {} not found", findex))
@@ -2812,7 +2899,11 @@ impl HLInterpreter {
                 trap_installed = true;
                 let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
-                    self.stack.truncate(stack_depth);
+                    for f in self.stack.drain(stack_depth..) {
+                        if self.reg_pool.len() < POOL_CAP {
+                            self.reg_pool.push(f.into_buffer());
+                        }
+                    }
                     self.sync_gc_scan_roots();
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
@@ -2977,7 +3068,8 @@ impl HLInterpreter {
 
         // Create frame with registers
         let reg_count = func.regs.len();
-        let mut frame = InterpreterFrame::new(func_idx, reg_count);
+        let buf = self.reg_pool.pop().unwrap_or_default();
+        let mut frame = InterpreterFrame::with_buffer(func_idx, reg_count, buf);
 
         // Bind arguments to first N registers
         let type_fun = bc.types[func.type_.0]
@@ -3000,7 +3092,11 @@ impl HLInterpreter {
         let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.interpret_loop(bc, native_resolver, func_idx);
         ash::profile::leave_interp(prev_findex);
-        self.stack.pop();
+        if let Some(f) = self.stack.pop() {
+            if self.reg_pool.len() < POOL_CAP {
+                self.reg_pool.push(f.into_buffer());
+            }
+        }
         self.sync_gc_scan_roots();
         result
     }
@@ -3049,10 +3145,14 @@ impl HLInterpreter {
                 StepResult::Return(value) => {
                     return Ok(value);
                 }
-                StepResult::Call { findex, args, dst } => {
+                StepResult::Call {
+                    findex,
+                    mut args,
+                    dst,
+                } => {
                     if env_flag!("ASH_TRACE_NATIVE") {
-                        let is_bc = self.findex_to_func.contains_key(&findex);
-                        let is_nat = self.findex_to_native.contains_key(&findex);
+                        let is_bc = func_of(&self.targets, findex).is_some();
+                        let is_nat = native_of(&self.targets, findex).is_some();
                         let depth = self.stack.len();
                         eprintln!(
                             "[trace] call findex={} bc={} nat={} args={} depth={}",
@@ -3379,17 +3479,24 @@ impl HLInterpreter {
 
             // ===== Function Calls =====
             Opcode::Call0 { dst, fun } => {
+                // An empty Vec never allocated, but taking one keeps every
+                // Call arm symmetrical with the trampoline's reclaim.
+                let mut args = self.arg_pool.pop().unwrap_or_default();
+                args.clear();
                 return Ok(StepResult::Call {
                     findex: fun.0,
-                    args: vec![],
+                    args,
                     dst: dst.0,
                 });
             }
             Opcode::Call1 { dst, fun, arg0 } => {
                 let a0 = frame.registers.get(arg0.0);
+                let mut args = self.arg_pool.pop().unwrap_or_default();
+                args.clear();
+                args.push(a0);
                 return Ok(StepResult::Call {
                     findex: fun.0,
-                    args: vec![a0],
+                    args,
                     dst: dst.0,
                 });
             }
@@ -3401,9 +3508,13 @@ impl HLInterpreter {
             } => {
                 let a0 = frame.registers.get(arg0.0);
                 let a1 = frame.registers.get(arg1.0);
+                let mut args = self.arg_pool.pop().unwrap_or_default();
+                args.clear();
+                args.push(a0);
+                args.push(a1);
                 return Ok(StepResult::Call {
                     findex: fun.0,
-                    args: vec![a0, a1],
+                    args,
                     dst: dst.0,
                 });
             }
@@ -3417,9 +3528,14 @@ impl HLInterpreter {
                 let a0 = frame.registers.get(arg0.0);
                 let a1 = frame.registers.get(arg1.0);
                 let a2 = frame.registers.get(arg2.0);
+                let mut args = self.arg_pool.pop().unwrap_or_default();
+                args.clear();
+                args.push(a0);
+                args.push(a1);
+                args.push(a2);
                 return Ok(StepResult::Call {
                     findex: fun.0,
-                    args: vec![a0, a1, a2],
+                    args,
                     dst: dst.0,
                 });
             }
@@ -3435,15 +3551,22 @@ impl HLInterpreter {
                 let a1 = frame.registers.get(arg1.0);
                 let a2 = frame.registers.get(arg2.0);
                 let a3 = frame.registers.get(arg3.0);
+                let mut args = self.arg_pool.pop().unwrap_or_default();
+                args.clear();
+                args.push(a0);
+                args.push(a1);
+                args.push(a2);
+                args.push(a3);
                 return Ok(StepResult::Call {
                     findex: fun.0,
-                    args: vec![a0, a1, a2, a3],
+                    args,
                     dst: dst.0,
                 });
             }
             Opcode::CallN { dst, fun, args } => {
-                let arg_vals: Vec<NanBoxedValue> =
-                    args.iter().map(|r| frame.registers.get(r.0)).collect();
+                let mut arg_vals = self.arg_pool.pop().unwrap_or_default();
+                arg_vals.clear();
+                arg_vals.extend(args.iter().map(|r| frame.registers.get(r.0)));
                 return Ok(StepResult::Call {
                     findex: fun.0,
                     args: arg_vals,
@@ -5321,9 +5444,9 @@ impl HLInterpreter {
         // Materialize a real vclosure* so std natives such as
         // hl.Api.noClosure / Reflect.callMethod can consume it.
         let findex = fun;
-        let type_idx = if let Some(&fidx) = self.findex_to_func.get(&findex) {
+        let type_idx = if let Some(fidx) = func_of(&self.targets, findex) {
             bytecode.functions[fidx].type_.0
-        } else if let Some(&nidx) = self.findex_to_native.get(&findex) {
+        } else if let Some(nidx) = native_of(&self.targets, findex) {
             bytecode.natives[nidx].type_.0
         } else {
             usize::MAX
@@ -5395,7 +5518,7 @@ impl HLInterpreter {
             closure_val.as_func_index()
         } else {
             let raw = closure_val.as_ptr();
-            if self.findex_to_func.contains_key(&raw) || self.findex_to_native.contains_key(&raw) {
+            if func_of(&self.targets, raw).is_some() || native_of(&self.targets, raw).is_some() {
                 raw
             } else {
                 // It's a pointer to a _vclosure struct
@@ -5576,7 +5699,9 @@ impl HLInterpreter {
         }
 
         let ir = prep.ir;
-        let mut frame = InterpreterFrame::new(func_idx, ir.values.len() + ir.cells.len());
+        let buf = self.reg_pool.pop().unwrap_or_default();
+        let mut frame =
+            InterpreterFrame::with_buffer(func_idx, ir.values.len() + ir.cells.len(), buf);
 
         // A pinned argument register never gets a `Param`: lowering emits those
         // only for registers it promoted to SSA. On the serialize path that is
@@ -5595,7 +5720,11 @@ impl HLInterpreter {
         let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.ssa_loop(bc, native_resolver, func_idx, prep, args);
         ash::profile::leave_interp(prev_findex);
-        self.stack.pop();
+        if let Some(f) = self.stack.pop() {
+            if self.reg_pool.len() < POOL_CAP {
+                self.reg_pool.push(f.into_buffer());
+            }
+        }
         self.sync_gc_scan_roots();
         result
     }
@@ -6447,10 +6576,18 @@ impl HLInterpreter {
         native_resolver: &NativeFunctionResolver,
         func: &HLFunction,
         findex: usize,
-        args: Vec<NanBoxedValue>,
+        mut args: Vec<NanBoxedValue>,
         dst: u32,
     ) -> Result<Option<usize>> {
-        match self.call_function(bc, native_resolver, findex, &args) {
+        // Same reclaim as the serialize trampoline: the callee has copied the
+        // arguments into its own registers, so the buffer goes back to the pool
+        // before the result is examined.
+        let call_result = self.call_function(bc, native_resolver, findex, &args);
+        if self.arg_pool.len() < POOL_CAP {
+            args.clear();
+            self.arg_pool.push(args);
+        }
+        match call_result {
             Ok(ret) => {
                 let dst_kind = bc.types[func.regs[dst as usize].0].kind;
                 let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
@@ -7308,7 +7445,11 @@ impl HLInterpreter {
                 trap_installed = true;
                 let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
                 if jumped != 0 {
-                    self.stack.truncate(stack_depth);
+                    for f in self.stack.drain(stack_depth..) {
+                        if self.reg_pool.len() < POOL_CAP {
+                            self.reg_pool.push(f.into_buffer());
+                        }
+                    }
                     self.sync_gc_scan_roots();
                     if !fn_get_exc.is_null() {
                         type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
@@ -7809,7 +7950,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         findex: usize,
     ) -> Option<(Vec<u32>, usize)> {
-        if let Some(&fidx) = self.findex_to_func.get(&findex) {
+        if let Some(fidx) = func_of(&self.targets, findex) {
             let t_idx = bytecode.functions[fidx].type_.0;
             let tf = bytecode.types[t_idx].fun.as_ref()?;
             let arg_kinds = tf
@@ -7819,7 +7960,7 @@ impl HLInterpreter {
                 .collect::<Vec<_>>();
             return Some((arg_kinds, tf.ret.0));
         }
-        if let Some(&nidx) = self.findex_to_native.get(&findex) {
+        if let Some(nidx) = native_of(&self.targets, findex) {
             let t_idx = bytecode.natives[nidx].type_.0;
             let tf = bytecode.types[t_idx].fun.as_ref()?;
             let arg_kinds = tf

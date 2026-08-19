@@ -299,7 +299,7 @@ impl<'ctx> JITModule<'ctx> {
     /// Create LLVM module globals for the bytecode constant pools
     /// (strings, ints, floats, bytes). Compiled code references these
     /// directly via Opcode::String/Int/Float/Bytes.
-    fn create_constant_pool_globals(&mut self) {
+    pub(crate) fn create_constant_pool_globals(&mut self) {
         self.string_globals = self
             .bytecode
             .strings
@@ -517,7 +517,7 @@ impl<'ctx> JITModule<'ctx> {
     /// `func_cache` by generated name instead of resolving lazily. Currently
     /// only std/alloc_obj (Opcode::New emits a call to
     /// "std_hlp_alloc_obj_caller" fetched from func_cache).
-    fn init_required_natives(&mut self) -> Result<()> {
+    pub(crate) fn init_required_natives(&mut self) -> Result<()> {
         let required: Vec<_> = self
             .bytecode
             .natives

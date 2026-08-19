@@ -572,6 +572,79 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
+        // Build into a module of its own, and hand that to the engine.
+        //
+        // The first attempt added the entry to the main module, which MCJIT
+        // had already emitted -- a module's object is produced once, so the
+        // new function had no address and `get_function_address` answered "not
+        // found". That is not a limitation of MCJIT: it holds several modules
+        // and resolves symbols across them. The entry just has to arrive as a
+        // module rather than as an afterthought to a finished one.
+        //
+        // `func_cache` is emptied for the duration so calls in the body become
+        // declarations in this module, which the engine resolves by name
+        // against the module that defines them. The constant pools are rebuilt
+        // rather than cleared: they are read by index and hold immutable
+        // values, so a private copy is correct and a missing one is not.
+        let osr_module = self.context.create_module(&name);
+        // The builder is shared, and whatever it last pointed at belongs to the
+        // module about to be swapped out. `generate_native_caller_with_addr`
+        // opens by saving `get_insert_block()`, which asserts on anything that
+        // is not a live block, so leave it pointing at nothing.
+        self.builder.clear_insertion_position();
+        let host_module = std::mem::replace(&mut self.module, osr_module);
+        let host_funcs = std::mem::take(&mut self.func_cache);
+        let host_ints = std::mem::take(&mut self.int_globals);
+        let host_floats = std::mem::take(&mut self.float_globals);
+        let host_strings = std::mem::take(&mut self.string_globals);
+        let host_bytes = std::mem::take(&mut self.bytes_globals);
+        let host_types = std::mem::take(&mut self.type_info_globals);
+        self.create_constant_pool_globals();
+        // `Opcode::New` fetches a pre-created native caller out of `func_cache`
+        // by generated name, so emptying the cache is not enough on its own --
+        // the new module needs its own copy of those declarations.
+        let natives_ready = self.init_required_natives();
+
+        let built = natives_ready.and_then(|()| self.build_osr_body(findex, header_pc, body, &name));
+
+        self.builder.clear_insertion_position();
+        let osr_module = std::mem::replace(&mut self.module, host_module);
+        self.func_cache = host_funcs;
+        self.int_globals = host_ints;
+        self.float_globals = host_floats;
+        self.string_globals = host_strings;
+        self.bytes_globals = host_bytes;
+        self.type_info_globals = host_types;
+        built?;
+
+        // The verifier catches a reference to a value left behind in the host
+        // module, which is the failure this swap could produce.
+        if let Err(e) = osr_module.verify() {
+            return Err(anyhow!("osr module {name} failed verification: {}", e));
+        }
+        self.execution_engine
+            .add_module(&osr_module)
+            .map_err(|()| anyhow!("osr module {name} rejected by the engine"))?;
+        let addr = self
+            .execution_engine
+            .get_function_address(&name)
+            .map_err(|e| anyhow!("osr entry {name}: get_function_address failed: {e}"))?;
+        if addr == 0 {
+            return Err(anyhow!("osr entry {name}: zero address"));
+        }
+        crate::profile::count("osr entries compiled", 1);
+        return Ok(addr as u64);
+    }
+
+    /// Emit the OSR entry function itself, into whatever module is current.
+    fn build_osr_body(
+        &mut self,
+        findex: usize,
+        header_pc: usize,
+        body: &HLFunction,
+        name: &str,
+    ) -> Result<()> {
+
         // `(ptr) -> ret`, where ret is the function's own return type.
         let type_fun = self.bytecode.types[body.type_.0]
             .fun
@@ -586,7 +659,7 @@ impl<'ctx> JITModule<'ctx> {
             AnyTypeEnum::PointerType(t) => t.fn_type(&[ptr_ty.into()], false),
             _ => ptr_ty.fn_type(&[ptr_ty.into()], false),
         };
-        let function = self.module.add_function(&name, fn_ty, None);
+        let function = self.module.add_function(name, fn_ty, None);
 
         let entry = self.context.append_basic_block(function, "osr_entry");
         self.builder.position_at_end(entry);
@@ -674,22 +747,11 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
 
-        // Optimize before asking for the address, because asking is what forces
-        // codegen -- the same ordering the promotion path needs.
         {
             let _p = crate::profile::scope("llvm middle-end (osr)");
-            self.shield_trap_functions_from_optimization();
             super::module::run_middle_end(&self.module)?;
         }
-        let addr = self
-            .execution_engine
-            .get_function_address(&name)
-            .map_err(|e| anyhow!("osr entry {name}: get_function_address failed: {e}"))?;
-        if addr == 0 {
-            return Err(anyhow!("osr entry {name}: zero address"));
-        }
-        crate::profile::count("osr entries compiled", 1);
-        Ok(addr as u64)
+        Ok(())
     }
 
     fn create_function_declaration(&mut self, f: &HLFunction) -> Result<FunctionValue<'ctx>> {

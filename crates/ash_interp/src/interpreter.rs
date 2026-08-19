@@ -2781,6 +2781,121 @@ impl HLInterpreter {
         }
     }
 
+    /// Hand this frame to a compiled entry that resumes at `header_pc`.
+    ///
+    /// Returns the function's result, because the compiled code runs the loop
+    /// and everything after it: control does not come back to the interpreter
+    /// for this invocation. `None` means no entry was available and the
+    /// interpreter should carry on.
+    ///
+    /// The trap is armed exactly as the ordinary call boundary arms one. The
+    /// analysis refuses a function whose own trap regions are live, but the
+    /// compiled code can still call something that throws, and a throw that
+    /// crosses this frame has to find a jmp_buf here or it lands somewhere
+    /// that no longer exists.
+    fn try_osr_transfer(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        header_pc: usize,
+    ) -> Result<Option<NanBoxedValue>> {
+        let findex = self.bytecode_findex(func_idx);
+        let Some(&addr) = self.osr_entries.get(&(findex, header_pc)) else {
+            return Ok(None);
+        };
+        if addr == 0 {
+            return Ok(None);
+        }
+        let body = self.air.body(bytecode, func_idx);
+        let Some(fun_ty) = bytecode.types[body.type_.0].fun.as_ref() else {
+            return Ok(None);
+        };
+        let ret_kind = bytecode.types[fun_ty.ret.0].kind;
+
+        // The register file, in the same representation the ordinary call
+        // boundary marshals arguments into.
+        let mut buf: Vec<u64> = Vec::with_capacity(body.regs.len());
+        {
+            let frame = self.stack.last().expect("frame for the running function");
+            for (i, reg) in body.regs.iter().enumerate() {
+                let kind = bytecode.types[reg.0].kind;
+                let v = frame.registers.get(i as u32);
+                buf.push(self.value_to_i64(v, kind) as u64);
+            }
+        }
+
+        if osr_logging() {
+            eprintln!(
+                "[osr] entering findex={findex} pc={header_pc} regs={} at {addr:#x}",
+                buf.len()
+            );
+        }
+
+        let stack_depth = self.stack.len();
+        let fn_setup_trap = self.fn_setup_trap_jit;
+        let fn_remove_trap = self.fn_remove_trap_jit;
+        let mut trap_installed = false;
+        if !fn_setup_trap.is_null() {
+            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
+            let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
+            let jmp_buf = unsafe { setup() };
+            if !jmp_buf.is_null() {
+                trap_installed = true;
+                if unsafe { call_setjmp_opaque(jmp_buf) } != 0 {
+                    // Threw out of the transfer. The frames the abandoned Rust
+                    // activations pushed are still here; drop them and let the
+                    // exception carry on up.
+                    for f in self.stack.drain(stack_depth..) {
+                        if self.reg_pool.len() < POOL_CAP {
+                            self.reg_pool.push(f.into_buffer());
+                        }
+                    }
+                    let fn_get_exc = self.fn_get_exc_value;
+                    let fn_clear_exc = self.fn_clear_exc_value;
+                    if !fn_get_exc.is_null() {
+                        type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
+                        let exc_ptr =
+                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
+                        if !exc_ptr.is_null() {
+                            if !fn_clear_exc.is_null() {
+                                type FnClearExc = unsafe extern "C" fn();
+                                unsafe {
+                                    (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
+                                };
+                            }
+                            return Err(anyhow::Error::new(
+                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
+                            ));
+                        }
+                    }
+                    return Err(anyhow!(
+                        "osr transfer longjmp without exception: findex {findex}"
+                    ));
+                }
+            }
+        }
+
+        let raw = unsafe {
+            if matches!(ret_kind, hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64) {
+                type FnF64 = unsafe extern "C" fn(*mut u64) -> f64;
+                let f: FnF64 = std::mem::transmute(addr as usize);
+                f(buf.as_mut_ptr()).to_bits() as i64
+            } else {
+                type FnI64 = unsafe extern "C" fn(*mut u64) -> i64;
+                let f: FnI64 = std::mem::transmute(addr as usize);
+                f(buf.as_mut_ptr())
+            }
+        };
+
+        if trap_installed && !fn_remove_trap.is_null() {
+            type FnRemoveTrap = unsafe extern "C" fn();
+            let remove: FnRemoveTrap = unsafe { std::mem::transmute(fn_remove_trap) };
+            unsafe { remove() };
+        }
+
+        Ok(Some(self.wrap_native_result(raw, ret_kind)))
+    }
+
     /// The findex of a function by its index in `bytecode.functions`.
     fn bytecode_findex(&self, func_idx: usize) -> usize {
         self.targets
@@ -3328,6 +3443,12 @@ impl HLInterpreter {
                     };
                     if hot {
                         self.note_hot_loop(bytecode, func_idx, next_pc);
+                        // The moment the loop is found hot is the moment to
+                        // enter it, so nothing is checked on the iterations
+                        // that follow -- there are none.
+                        if let Some(ret) = self.try_osr_transfer(bytecode, func_idx, next_pc)? {
+                            return Ok(ret);
+                        }
                     }
                 }
                 StepResult::JumpAbs(target_pc) => {

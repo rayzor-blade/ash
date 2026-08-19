@@ -540,6 +540,53 @@ fn run() -> Result<()> {
     // its time in the collector for 196.5M allocations against a 3.7MB live
     // set, so the size of this number decides whether hoisting is worth
     // building.
+    // `ASH_VERIFY_TRAPS=only` checks the JIT-side trap-region scan against
+    // AIR v2's dataflow answer for every function, and reports how many call
+    // sites an explicit-edge lowering would have to check. Two independent
+    // derivations agreeing is the evidence that replacing setjmp with branches
+    // is safe; the check-site count is the evidence that it is affordable.
+    if let Ok(mode) = std::env::var("ASH_VERIFY_TRAPS") {
+        if !mode.is_empty() && mode != "0" {
+            let mut with_traps = 0usize;
+            let mut unbalanced = 0usize;
+            let (mut checks, mut covered) = (0usize, 0usize);
+            for f in &bytecode.functions {
+                let has_trap = f
+                    .ops
+                    .iter()
+                    .any(|o| matches!(o, ash::opcodes::Opcode::Trap { .. }));
+                match ash::traps::analyze(&f.ops) {
+                    ash::traps::TrapShape::Nested(_) => {
+                        if has_trap {
+                            with_traps += 1;
+                        }
+                    }
+                    other => {
+                        unbalanced += 1;
+                        eprintln!("[traps] findex={} {} {:?}", f.findex, f.name(), other);
+                    }
+                }
+                let (c, cv) = ash::traps::check_sites(&f.ops);
+                checks += c;
+                covered += cv;
+            }
+            eprintln!(
+                "[traps] {with_traps} functions with trap regions, {unbalanced} unresolvable"
+            );
+            eprintln!(
+                "[traps] {checks} may-throw sites, {covered} inside a handler ({:.1}%)",
+                if checks == 0 {
+                    0.0
+                } else {
+                    covered as f64 * 100.0 / checks as f64
+                }
+            );
+            if mode == "only" {
+                return Ok(());
+            }
+        }
+    }
+
     if let Ok(mode) = std::env::var("ASH_ESCAPE") {
         if !mode.is_empty() && mode != "0" {
             let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {

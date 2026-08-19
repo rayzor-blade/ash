@@ -5263,6 +5263,11 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub fn execute_main(&mut self) -> Result<()> {
+        // Everything up to `execute` is compilation, grouped so the report
+        // gives one number for it rather than four the reader has to add up --
+        // and so `execute` sits beside it as a sibling instead of being nested
+        // inside a phase named for the thing it is not.
+        let compile_phase = crate::profile::scope("compile");
         // Compile any pending functions discovered during initialization
         {
             let _phase = crate::profile::scope("compile pending");
@@ -5290,9 +5295,20 @@ impl<'ctx> JITModule<'ctx> {
             super::module::run_middle_end(&self.module)?;
         }
 
-        {
-            let _phase = crate::profile::scope("dump ir");
-            self.module.print_to_file("/tmp/ash_jit.ll").ok();
+        // Off unless asked for. This wrote the whole module to /tmp on every
+        // run -- around 940KB and 13ms of it, inside the region the profiler
+        // reports as compile time, on a binary whose compile time is the thing
+        // most worth measuring. `ASH_DUMP_IR=1` restores the old path,
+        // `ASH_DUMP_IR=<path>` chooses another.
+        if let Ok(spec) = std::env::var("ASH_DUMP_IR") {
+            if !spec.is_empty() && spec != "0" {
+                let _phase = crate::profile::scope("dump ir");
+                let path = if spec == "1" { "/tmp/ash_jit.ll" } else { &spec };
+                match self.module.print_to_file(path) {
+                    Ok(()) => eprintln!("[ash] LLVM IR written to {path}"),
+                    Err(e) => eprintln!("[ash] could not write {path}: {e}"),
+                }
+            }
         }
 
         // Populate functions_ptrs with actual function addresses from the JIT.
@@ -5323,6 +5339,9 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         // Materialize bytecode constants (pre-initialized globals like string literals)
+        // Compilation ends here; what follows is runtime setup and the run.
+        drop(compile_phase);
+
         {
             let _phase = crate::profile::scope("init constants");
             self.init_constants()?;

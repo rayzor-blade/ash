@@ -29,7 +29,7 @@ pub fn main() {
     // The whole-module compile happens inside execute_main, so the two are
     // separated here rather than in the callee.
     {
-        let _p = ash::profile::scope("compile + run");
+        let _p = ash::profile::scope("compile + setup + run");
         module.execute_main().expect("Failed to execute main");
     }
     ash::profile::report();

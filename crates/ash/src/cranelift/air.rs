@@ -88,25 +88,16 @@ pub fn parse_mode(v: &str) -> Option<AirMode> {
 pub fn config() -> &'static AirConfig {
     static CONFIG: OnceLock<AirConfig> = OnceLock::new();
     CONFIG.get_or_init(|| {
-        let mode = match std::env::var("ASH_AIR") {
-            Err(_) => AirMode::Off,
-            Ok(v) => parse_mode(&v).unwrap_or_else(|| {
-                eprintln!("[air] ignoring ASH_AIR='{v}' (expected v2|off); AIR is off");
-                AirMode::Off
-            }),
+        // One reader for this variable, in air_pipeline. This one answered
+        // Off when ASH_AIR was unset, so the tier had never compiled optimized
+        // AIR in a default run -- the same defect the interpreter's gate had.
+        let mode = if air_pipeline::air_enabled() {
+            AirMode::V2
+        } else {
+            AirMode::Off
         };
-        let level = match std::env::var("ASH_AIR_LEVEL") {
-            Ok(s) if !s.is_empty() => match air_pipeline::parse_level(&s) {
-                Some(l) => l,
-                None => {
-                    eprintln!(
-                        "[air] ignoring ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O2"
-                    );
-                    AirOptLevel::O2
-                }
-            },
-            _ => AirOptLevel::O2,
-        };
+        // One level for the whole pipeline; see air_pipeline::default_level.
+        let level = air_pipeline::default_level();
         AirConfig {
             mode,
             level,
@@ -177,7 +168,19 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
     // the bytecode was. Falling back keeps the tier's accepted set exactly
     // what it is with AIR off.
     if let Some(reason) = reject_reason_for_ops(ctx.bytecode(), func, &s.ops) {
-        return decline(format!("optimized array refused: {reason}"));
+        // Fall back to the raw opcodes, which is what the comment above always
+        // claimed and what the code did not do: `decline` refuses the function
+        // outright, so a normalization the gate happens to exclude cost the
+        // tier the whole function rather than just the optimization. Measured
+        // on test_stdlib at --jit-threshold 1, turning AIR on took Cranelift
+        // from 27 installs to 17 for exactly this reason.
+        if cfg.log {
+            eprintln!(
+                "[air] findex={} optimized array refused ({reason}); using raw opcodes",
+                func.findex
+            );
+        }
+        return Body::bytecode(func);
     }
 
     if cfg.log {

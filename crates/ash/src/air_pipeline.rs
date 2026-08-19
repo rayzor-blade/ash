@@ -276,6 +276,30 @@ pub fn optimize(
 }
 
 /// [`optimize`] against a module view built once.
+/// Whether AIR runs at all, from `ASH_AIR`. The one reader of that variable.
+///
+/// There were four, and they disagreed. `ash_interp::air` treated unset as on;
+/// `ash::jit::air` treated unset as V2; `ash::cranelift::air` treated unset as
+/// **Off**, so the Cranelift tier had never once compiled optimized AIR in a
+/// default run; and `ash_interp::ssa` matched only the exact string "v2".
+/// Every one of them was a private `OnceLock` reading the same variable to a
+/// different conclusion, which is how a flag ends up meaning four things.
+///
+/// On unless explicitly disabled. `ASH_AIR=0` and `ASH_AIR=off` turn it off;
+/// `ASH_AIR=v2` selects the direct-SSA interpreter in `ash_interp::ssa`, which
+/// is a *consumer* choice and does not change whether AIR runs.
+pub fn air_enabled() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| match std::env::var("ASH_AIR").as_deref() {
+        Ok("0") | Ok("off") | Ok("none") => false,
+        Err(_) | Ok("") | Ok("v2") | Ok("2") | Ok("v2-serialize") => true,
+        Ok(other) => {
+            eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is on");
+            true
+        }
+    })
+}
+
 /// The one optimization level, from `ASH_AIR_LEVEL`.
 ///
 /// One, because there is now one optimized AIR per function and every consumer

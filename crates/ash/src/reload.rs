@@ -510,6 +510,12 @@ pub fn take_reload_pending() -> bool {
 /// Called by the interpreter when `take_reload_pending` returns true.
 /// This runs on the interpreter's thread, outside any native call stack.
 pub fn do_reload() -> Option<DecodedBytecode> {
+    // The optimized-AIR cache is keyed by findex, and a reload gives the same
+    // findex a different body. Without this the cache serves the old one and
+    // the reload silently does nothing -- the diff reports changed functions,
+    // functions_ptrs is patched, and what it is patched with is the previous
+    // body recompiled.
+    crate::air_pipeline::invalidate_optimized();
     let mut guard = match RELOAD_CTX.lock() {
         Ok(g) => g,
         Err(_) => return None,

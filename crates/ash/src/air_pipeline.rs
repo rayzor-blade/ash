@@ -340,9 +340,44 @@ pub struct Optimized {
     pub ser: Serialized,
 }
 
-static OPTIMIZED: OnceLock<Mutex<HashMap<i32, Arc<Optimized>>>> = OnceLock::new();
+/// What a cached entry was produced under.
+///
+/// Part of the key, not an assumption. Two consumers legitimately want
+/// different pipelines from the same function, and serving one the other's
+/// result is silent and wrong rather than loud:
+///
+/// * a hot-reload build runs at O2 with callee bodies hidden, deliberately --
+///   inlining across a reload boundary means an edit to a callee stops taking
+///   effect between iterations (`jit::air::run_v2`);
+/// * `ASH_AIR_FMA=0` turns off the FMA peephole, which is the one pass whose
+///   output is observable as a different *number* rather than different code.
+///
+/// Keying on findex alone would have let whichever consumer asked first decide
+/// both for everyone else.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct AirConfigKey {
+    pub level: OptLevel,
+    pub fma: bool,
+    /// Whether the inliner may see callee bodies.
+    pub callees_visible: bool,
+}
 
-fn optimized_cache() -> &'static Mutex<HashMap<i32, Arc<Optimized>>> {
+impl AirConfigKey {
+    /// The configuration a normal run uses.
+    pub fn standard() -> Self {
+        Self {
+            level: default_level(),
+            fma: PassOptions::default().fma,
+            callees_visible: true,
+        }
+    }
+}
+
+type CacheKey = (i32, AirConfigKey);
+
+static OPTIMIZED: OnceLock<Mutex<HashMap<CacheKey, Arc<Optimized>>>> = OnceLock::new();
+
+fn optimized_cache() -> &'static Mutex<HashMap<CacheKey, Arc<Optimized>>> {
     OPTIMIZED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -353,22 +388,34 @@ fn optimized_cache() -> &'static Mutex<HashMap<i32, Arc<Optimized>>> {
 /// the lock -- it is the expensive part, and holding a process-wide lock
 /// across it would serialize the brokers against the interpreter.
 pub fn optimized(m: &AshModule, f: &HLFunction) -> Result<Arc<Optimized>, PipelineError> {
-    let level = default_level();
-    let opts = &PassOptions::default();
+    optimized_with_config(m, f, AirConfigKey::standard())
+}
+
+/// [`optimized`] under an explicit configuration, for the consumers that need
+/// one that is not the default.
+pub fn optimized_with_config(
+    m: &AshModule,
+    f: &HLFunction,
+    cfg: AirConfigKey,
+) -> Result<Arc<Optimized>, PipelineError> {
+    let key = (f.findex, cfg);
     if let Some(hit) = optimized_cache()
         .lock()
         .expect("air cache poisoned")
-        .get(&f.findex)
+        .get(&key)
     {
         return Ok(Arc::clone(hit));
     }
-    let (ser, ir, _report) = optimize_full(m, f, level, opts)?;
+    let mut opts = PassOptions::default();
+    opts.fma = cfg.fma;
+    // The pipeline runs outside the lock: it is the expensive part, and holding
+    // a process-wide lock across it would serialize the brokers against the
+    // interpreter.
+    let (ser, ir, _report) = optimize_full(m, f, cfg.level, &opts)?;
     let entry = Arc::new(Optimized { ir, ser });
     let mut cache = optimized_cache().lock().expect("air cache poisoned");
-    // Another thread may have won the race; theirs is as good as ours and
-    // already visible to whoever took it.
     Ok(Arc::clone(
-        cache.entry(f.findex).or_insert_with(|| Arc::clone(&entry)),
+        cache.entry(key).or_insert_with(|| Arc::clone(&entry)),
     ))
 }
 

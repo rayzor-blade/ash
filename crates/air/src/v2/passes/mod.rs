@@ -154,7 +154,7 @@ pub trait Pass {
     fn run(&self, f: &mut Function, opts: &PassOptions) -> Result<PassStats>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OptLevel {
     /// Nothing runs; the IR is left exactly as lowered.
     O0,

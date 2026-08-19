@@ -8,7 +8,6 @@ pub mod air_pipeline;
 pub mod bytecode;
 pub mod c_types;
 pub mod cranelift;
-pub mod functions;
 pub mod intrinsics;
 pub mod hl_bindings {
     #![allow(non_upper_case_globals)]
@@ -18,7 +17,6 @@ pub mod hl_bindings {
 }
 pub mod jit;
 pub mod layout;
-pub mod module;
 pub mod native_lib;
 pub mod opcodes;
 pub mod osr;
@@ -26,7 +24,6 @@ pub mod profile;
 pub mod reachable;
 pub mod reload;
 pub mod types;
-pub mod values;
 
 use hl_bindings as hl;
 

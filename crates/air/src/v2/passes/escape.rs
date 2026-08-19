@@ -65,6 +65,7 @@ pub struct AllocEscapeInfo {
 
 /// Analyze every `New` in `l` for whether its result outlives one iteration.
 pub fn analyze_alloc_escapes(f: &Function, forest: &LoopForest, l: LoopId) -> Vec<AllocEscapeInfo> {
+    let cfg = CfgInfo::build(f);
     let lp = forest.get(l);
     let in_loop: HashSet<BlockId> = (0..f.blocks.len())
         .map(|i| BlockId(i as u32))
@@ -83,7 +84,7 @@ pub fn analyze_alloc_escapes(f: &Function, forest: &LoopForest, l: LoopId) -> Ve
         for (k, ins) in f.blocks[b.idx()].instrs.iter().enumerate() {
             let Instr::New { dst } = ins else { continue };
             let dst = *dst;
-            let reason = escape_reason(f, &in_loop, &live, dst, b, k);
+            let reason = escape_reason(f, &cfg, &in_loop, &live, dst, b, k);
             out.push(AllocEscapeInfo {
                 value: dst,
                 location: (b, k),
@@ -127,17 +128,20 @@ fn transitively_used(f: &Function) -> HashSet<ValueId> {
 /// `Some(reason)` when `v` may outlive one iteration of the loop.
 fn escape_reason(
     f: &Function,
+    cfg: &CfgInfo,
     in_loop: &HashSet<BlockId>,
     live: &HashSet<ValueId>,
     v: ValueId,
     def_block: BlockId,
     def_idx: usize,
 ) -> Option<&'static str> {
-    // Fields the loop reads, and fields written in the defining block ahead of
-    // any branch. The read set must be covered by the written set, or a later
+    // Fields the loop reads, and fields written in a block that dominates every
+    // read. The read set must be covered by the written set, or a later
     // iteration could see what the previous one left behind.
     let mut read_fields: HashSet<usize> = HashSet::new();
-    let mut written_in_def_block: HashSet<usize> = HashSet::new();
+    let mut written_dominating: HashSet<usize> = HashSet::new();
+    let mut read_blocks: HashMap<usize, Vec<BlockId>> = HashMap::new();
+    let mut write_blocks: HashMap<usize, Vec<BlockId>> = HashMap::new();
 
     for b in 0..f.blocks.len() {
         let bid = BlockId(b as u32);
@@ -168,15 +172,15 @@ fn escape_reason(
                 // being used as an object.
                 Instr::FieldGet { obj, field, .. } if *obj == v => {
                     read_fields.insert(*field);
+                    read_blocks.entry(*field).or_default().push(bid);
                 }
                 // Writing a field is fine as long as the value being stored is
                 // not the object itself, which would publish it.
                 Instr::FieldSet {
                     obj, field, src, ..
                 } if *obj == v && *src != v => {
-                    if bid == def_block && k > def_idx {
-                        written_in_def_block.insert(*field);
-                    }
+                    let _ = (def_block, def_idx, k);
+                    write_blocks.entry(*field).or_default().push(bid);
                 }
                 _ => return Some("passed to a call, stored, or otherwise published"),
             }
@@ -187,8 +191,21 @@ fn escape_reason(
         }
     }
 
-    if !read_fields.is_subset(&written_in_def_block) {
-        return Some("a field is read that the allocation's block does not write first");
+    for &fd in &read_fields {
+        let writes = write_blocks.get(&fd).map(|v| v.as_slice()).unwrap_or(&[]);
+        let reads = read_blocks.get(&fd).map(|v| v.as_slice()).unwrap_or(&[]);
+        // Every read must be dominated by some write of the same field. A write
+        // in the same block counts, since the classifier only admits reads and
+        // writes of this object and program order within a block is total.
+        let covered = reads
+            .iter()
+            .all(|&r| writes.iter().any(|&w| w == r || cfg.dominates(w, r)));
+        if covered {
+            written_dominating.insert(fd);
+        }
+    }
+    if !read_fields.is_subset(&written_dominating) {
+        return Some("a field is read that no write dominates");
     }
     None
 }

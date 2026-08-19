@@ -100,8 +100,14 @@ struct Plan {
     remove: Vec<(usize, usize)>,
     /// `(field read, the value it becomes)`, in dominance order.
     rewrites: Vec<(ValueId, ValueId)>,
-    /// Phis to create, in the order their value ids were reserved.
-    phis: Vec<(BlockId, Phi)>,
+    /// Phis to create, in the order their value ids were reserved, each with
+    /// the type of the field it carries.
+    ///
+    /// The type is recorded here rather than read back from the phi's first
+    /// incoming value: a field phi's incoming can name *another* field phi, and
+    /// in a nested loop that one may not have been minted yet, so looking it up
+    /// during `apply` indexes past the end of the value table.
+    phis: Vec<(BlockId, Phi, TypeRef)>,
     /// Distinct field slots promoted.
     fields: usize,
 }
@@ -418,6 +424,7 @@ fn plan_for(
                 dst: phi_dst[&(b, fd)],
                 incoming: inc,
             },
+            *uses.field_ty.get(&fd)?,
         ));
     }
 
@@ -441,8 +448,8 @@ fn plan_for(
 
 fn apply(f: &mut Function, plan: Plan) -> Result<()> {
     // Mint the phi values in the order their ids were reserved.
-    for (b, phi) in &plan.phis {
-        let ty = f.value_ty(phi.incoming[0].1);
+    for (b, phi, ty) in &plan.phis {
+        let ty = *ty;
         let reg = f.new_reg(ty);
         let v = f.new_value(ty, reg);
         if v != phi.dst {

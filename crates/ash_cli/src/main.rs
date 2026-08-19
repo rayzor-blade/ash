@@ -373,6 +373,9 @@ unsafe extern "C" fn crash_handler_siginfo(
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Startup diagnostics go to stderr, which the parity harness compares
+    // against an oracle's. --quiet has to reach them.
+    ash::native_lib::set_quiet(cli.quiet);
 
     let hl_path = cli.file.unwrap_or_else(|| {
         let mut cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

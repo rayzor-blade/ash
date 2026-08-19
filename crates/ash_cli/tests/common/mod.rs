@@ -30,6 +30,18 @@ pub struct ParityCase {
     pub normalize: NormalizeKind,
     pub compile: bool,
     pub sanity_interp: bool,
+    /// Judge this case against ash's own interpreter rather than an external
+    /// oracle.
+    ///
+    /// For behaviour Haxe leaves to the target, an external oracle asserts its
+    /// own target's answer, not a correct one. `MathIntrinsics` is the case:
+    /// ash saturates an out-of-range float->int by design (ash_std casts with
+    /// Rust's `as`), where the eval target wraps, and ash formats floats with
+    /// HashLink's %.15g where eval prints 17 digits. Neither is a bug in ash,
+    /// and pinning either to eval asserts the wrong thing. What the case is
+    /// actually for -- its own header says so -- is that every engine agrees
+    /// with the interpreter, which is exactly what this expresses.
+    pub oracle_is_interp: bool,
     /// Override the oracle's exit code for comparison (e.g. when HL is known to fail).
     pub expected_exit: Option<i32>,
 }
@@ -264,6 +276,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 normalize: NormalizeKind::Default,
                 compile: true,
                 sanity_interp: true,
+                oracle_is_interp: false,
                 expected_exit: None,
             });
             continue;
@@ -315,6 +328,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             }
             "compile" => c.compile = parse_bool(value),
             "sanity_interp" => c.sanity_interp = parse_bool(value),
+            "oracle_is_interp" => c.oracle_is_interp = parse_bool(value),
             "expected_exit" => {
                 c.expected_exit = Some(value.trim().parse::<i32>().unwrap_or_else(|_| {
                     panic!("invalid expected_exit '{}', line {}", value, lineno + 1)

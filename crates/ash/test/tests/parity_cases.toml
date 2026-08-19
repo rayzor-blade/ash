@@ -402,3 +402,12 @@ slow = false
 timeout_secs = 60
 expectation = "exact"
 normalize = "default"
+# Judged against ash's interpreter, not the eval target. Two of the values
+# here are ones Haxe leaves to the target, so an external oracle asserts its
+# own answer rather than a correct one: ash saturates an out-of-range
+# float->int by design (the header of MathIntrinsics.hx says so, and
+# intrinsics.rs implements it) where eval wraps, and ash formats floats with
+# HashLink's %.15g where eval prints seventeen digits. The property this case
+# exists to defend is the one its own header states -- every engine agrees
+# with the interpreter -- and that is what this now checks.
+oracle_is_interp = true

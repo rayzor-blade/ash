@@ -1130,7 +1130,11 @@ impl HLInterpreter {
         // collection scan the wrong stack, reclaiming objects live only in
         // main-thread frames. Compilation itself (pure LLVM + MCJIT
         // finalization) stays on the broker thread, same as before.
-        eprintln!("[tiered] pre-warming JIT module on main thread (one-time startup cost)...");
+        // Startup narration, gated: stderr is compared against an oracle's by
+        // the parity harness, and no oracle narrates ash's tiering.
+        if config.log_promotions {
+            eprintln!("[tiered] pre-warming JIT module on main thread (one-time startup cost)...");
+        }
         let prewarm_start = std::time::Instant::now();
         let prewarmed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let context: &'static Context = Box::leak(Box::new(Context::create()));
@@ -1139,10 +1143,12 @@ impl HLInterpreter {
             Box::into_raw(Box::new(ManuallyDrop::new(jit)))
         })) {
             Ok(ptr) => {
-                eprintln!(
-                    "[tiered] JIT module ready in {:.2}s",
-                    prewarm_start.elapsed().as_secs_f64()
-                );
+                if config.log_promotions {
+                    eprintln!(
+                        "[tiered] JIT module ready in {:.2}s",
+                        prewarm_start.elapsed().as_secs_f64()
+                    );
+                }
                 Some(PrewarmedJit(ptr))
             }
             Err(_) => {
@@ -1168,7 +1174,8 @@ impl HLInterpreter {
             _ => vec![tier0],
         };
         let adapter = TieredAdapter::new(policies);
-        eprintln!(
+        if config.log_promotions {
+            eprintln!(
             "[tiered] ladder: mode={} tier0={} {}",
             config.tier_mode.name(),
             threshold,
@@ -1176,7 +1183,8 @@ impl HLInterpreter {
                 TierMode::Auto => format!("tier1={} (llvm)", threshold.saturating_mul(100)),
                 _ => "single tier".to_string(),
             }
-        );
+            );
+        }
 
         let shared_ctx = Arc::new(TieredSharedCtx {
             log_promotions,
@@ -2329,7 +2337,12 @@ impl HLInterpreter {
         let get_loop = native_resolver
             .resolve_function("std", "hlp_sys_get_loop")
             .unwrap_or(std::ptr::null_mut());
-        eprintln!("[ash] Post-main: hlp_sys_get_loop={:p}", get_loop);
+        // Diagnostic, not output. It was unconditional, so every run printed a
+        // pointer to stderr -- which the parity harness compares against an
+        // oracle that will never print it.
+        if env_flag!("ASH_TRACE_NATIVE") {
+            eprintln!("[ash] Post-main: hlp_sys_get_loop={:p}", get_loop);
+        }
         if !get_loop.is_null() {
             type FnGetLoop = unsafe extern "C" fn() -> *mut c_void;
             let get: FnGetLoop = unsafe { std::mem::transmute(get_loop) };

@@ -263,9 +263,35 @@ fn run_parity_matrix(mode: AshMode) {
             continue;
         }
 
-        let mut oracle = oracle_dir
-            .as_ref()
-            .and_then(|d| load_oracle_record(d, &case));
+        // A case may name ash's own interpreter as its oracle, for behaviour
+        // Haxe leaves to the target. Checked first: an external oracle would
+        // assert its target's answer over ash's, which for these cases is the
+        // wrong question. Under `AshMode::Interp` this compares the run with
+        // itself and so only checks that it succeeds; the guarantee it carries
+        // is that every *other* mode matches the interpreter.
+        let mut oracle = if case.oracle_is_interp {
+            let r = run_ash(&ash_cli, &hl_path, AshMode::Interp, timeout);
+            if r.timed_out {
+                failures.push(format!(
+                    "[INTERP ORACLE TIMEOUT][{}][{}] exceeded {}s",
+                    mode_name, case.name, case.timeout_secs
+                ));
+                continue;
+            }
+            Some(OracleRecord {
+                source: "ash-interp".to_string(),
+                stdout: String::from_utf8_lossy(&r.output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&r.output.stderr).to_string(),
+                exit_code: status_code(&r.output),
+            })
+        } else {
+            None
+        };
+        oracle = oracle.or_else(|| {
+            oracle_dir
+                .as_ref()
+                .and_then(|d| load_oracle_record(d, &case))
+        });
 
         if oracle.is_none() && use_local_hl && command_exists("hl") {
             let local_hl = run_hashlink(&hl_path, timeout);

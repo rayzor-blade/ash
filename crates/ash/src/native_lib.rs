@@ -8,6 +8,24 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use tempfile::TempDir;
 
+/// Whether to suppress ash's own startup diagnostics.
+///
+/// These lines go to stderr, and stderr is compared against an oracle's by the
+/// parity harness -- which no oracle will ever match, because they are ash
+/// talking about itself. Thirty-one cases failed on nothing else. `--quiet`
+/// already means "do not narrate"; it just was not reaching here.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Silence the startup diagnostics. Called by the CLI when `--quiet` is given.
+pub fn set_quiet(on: bool) {
+    QUIET.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn quiet() -> bool {
+    QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+
 static STD_INIT: Once = Once::new();
 pub static mut STD_LIBRARY: Option<Library> = None;
 
@@ -57,13 +75,15 @@ pub fn init_std_library() -> Result<()> {
                 system_libhl
             } else {
                 if system_libhl.exists() && force != "embedded" {
-                    eprintln!(
-                        "[ash] WARNING: {} exists but is STALE (missing canary symbol) — \
-                         using embedded ash_std instead. C hdlls may still bind the stale \
-                         copy; refresh it with: sudo cp <target>/libash_std.dylib {}",
-                        system_libhl.display(),
-                        system_libhl.display()
-                    );
+                    if !quiet() {
+                        eprintln!(
+                            "[ash] WARNING: {} exists but is STALE (missing canary symbol) — \
+                             using embedded ash_std instead. C hdlls may still bind the stale \
+                             copy; refresh it with: sudo cp <target>/libash_std.dylib {}",
+                            system_libhl.display(),
+                            system_libhl.display()
+                        );
+                    }
                 }
                 // Fallback 1: dlopen a real on-disk build artifact directly.
                 // Extracting a fresh temp copy every run forces the kernel to
@@ -90,7 +110,9 @@ pub fn init_std_library() -> Result<()> {
                 }
                 if let Some(found) = candidates.iter().find(|c| c.exists()) {
                     let canonical = found.canonicalize().unwrap_or_else(|_| found.clone());
-                    eprintln!("[ash] Loading on-disk ash_std at {}", canonical.display());
+                    if !quiet() {
+                        eprintln!("[ash] Loading on-disk ash_std at {}", canonical.display());
+                    }
                     canonical
                 } else {
                     // Last resort: extract the embedded library to a temp file

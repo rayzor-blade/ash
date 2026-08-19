@@ -397,20 +397,6 @@ mod tests {
         assert!(!is_cranelift_lowerable(&Opcode::EndTrap { exc: r }));
         assert!(!is_cranelift_lowerable(&Opcode::Throw { exc: r }));
         assert!(!is_cranelift_lowerable(&Opcode::Rethrow { exc: r }));
-        assert!(!is_cranelift_lowerable(&Opcode::Field {
-            dst: r,
-            obj: r,
-            field: RefField(0)
-        }));
-        assert!(!is_cranelift_lowerable(&Opcode::SetField {
-            obj: r,
-            field: RefField(0),
-            src: r
-        }));
-        assert!(!is_cranelift_lowerable(&Opcode::GetThis {
-            dst: r,
-            field: RefField(0)
-        }));
         assert!(!is_cranelift_lowerable(&Opcode::CallMethod {
             dst: r,
             field: RefField(0),
@@ -431,11 +417,6 @@ mod tests {
             src: r
         }));
         assert!(!is_cranelift_lowerable(&Opcode::New { dst: r }));
-        assert!(!is_cranelift_lowerable(&Opcode::GetArray {
-            dst: r,
-            array: r,
-            index: r
-        }));
         assert!(!is_cranelift_lowerable(&Opcode::Ref { dst: r, src: r }));
         assert!(!is_cranelift_lowerable(&Opcode::Setref {
             dst: r,
@@ -445,6 +426,59 @@ mod tests {
             mode: 0,
             value: 0,
             reg: r
+        }));
+    }
+
+    /// Memory access the layout oracle can resolve at compile time.
+    ///
+    /// These were all on the rejected list once, for the same reason: they were
+    /// object-model decisions the tier would have had to make for itself. They
+    /// are admitted now because it does not make them -- `crate::layout` hands
+    /// it the same field offsets and array strides the LLVM tier gets. If that
+    /// sharing is ever undone, this test and the one above are the pair that
+    /// should start disagreeing.
+    #[test]
+    fn opcode_gate_accepts_statically_resolvable_memory() {
+        use crate::opcodes::{RefField, Reg};
+        let r = Reg(0);
+        assert!(is_cranelift_lowerable(&Opcode::Field {
+            dst: r,
+            obj: r,
+            field: RefField(0)
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::SetField {
+            obj: r,
+            field: RefField(0),
+            src: r
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::GetThis {
+            dst: r,
+            field: RefField(0)
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::SetThis {
+            field: RefField(0),
+            src: r
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::GetArray {
+            dst: r,
+            array: r,
+            index: r
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::SetArray {
+            array: r,
+            index: r,
+            src: r
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::ArraySize { dst: r, array: r }));
+        assert!(is_cranelift_lowerable(&Opcode::GetMem {
+            dst: r,
+            bytes: r,
+            index: r
+        }));
+        assert!(is_cranelift_lowerable(&Opcode::SetMem {
+            bytes: r,
+            index: r,
+            src: r
         }));
     }
 }

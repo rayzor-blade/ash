@@ -113,14 +113,6 @@ enum StepResult {
     },
 }
 
-/// Back-edges in one invocation before its loop counts as hot.
-///
-/// Chosen so a loop that matters is noticed early relative to its own length
-/// but a short one never is: ten thousand iterations is already more work than
-/// a promotion costs, and nbody's `main` reaches it in the first thousandth of
-/// its run.
-const OSR_BACKEDGE_THRESHOLD: u32 = 10_000;
-
 /// What a findex resolves to, held in a dense table indexed by findex.
 ///
 /// Functions and natives share one numbering, so one indexed load decides
@@ -582,45 +574,6 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
 /// The `llvm` mutex is held across the whole armed region, so the single
 /// global tiered recovery slot stays owned by one thread at a time even
 /// though two broker threads can reach this function.
-/// Compile an entry point into `findex` that begins at `header_pc`.
-///
-/// Synchronous, unlike ordinary promotion. A hot loop is already running when
-/// this is asked for, and an answer that arrives after it finishes is no
-/// answer; the loop has by definition gone round ten thousand times, so paying
-/// the compile on this thread is cheap against what remains.
-///
-/// `body` is the interpreter's own opcode array. Both sides run AIR, which
-/// renumbers opcodes, so a `header_pc` measured against one body would name a
-/// different instruction in a separately optimized copy.
-fn compile_osr_with_llvm(
-    ctx: &TieredSharedCtx,
-    findex: usize,
-    header_pc: usize,
-    body: &HLFunction,
-) -> u64 {
-    let Ok(mut guard) = ctx.llvm.lock() else {
-        return 0;
-    };
-    if let LlvmState::Pending(_) = &*guard {
-        let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
-            unreachable!()
-        };
-        *guard = LlvmState::Ready(LlvmModule(unsafe { *Box::from_raw(pw.0) }));
-    }
-    let LlvmState::Ready(module) = &mut *guard else {
-        return 0;
-    };
-    match module.0.compile_osr_entry(findex, header_pc, body) {
-        Ok(addr) => addr,
-        Err(e) => {
-            if osr_logging() {
-                eprintln!("[osr] compile failed findex={findex} pc={header_pc}: {e}");
-            }
-            0
-        }
-    }
-}
-
 fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut () {
     // A tier-0 failure permanently invalidates the bead (beadie's primary
     // broker); a tier-1 failure is silent and the bead keeps its current tier.
@@ -708,12 +661,8 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
 /// Cache an env-var presence check (these gate the opcode-dispatch and
 /// native-call hot paths, where macOS getenv takes a process-wide lock —
 /// `__findenv_locked` was 51.9% of samples on an nbody profile).
-/// Whether to compile and enter OSR entry points (`ASH_OSR=0` to disable).
-///
-/// On by default. A failed compile is recorded as a zero and never retried, so
-/// the worst case for a loop that cannot be entered is one wasted compile; the
-/// interpreter carries on either way.
-fn osr_compile_enabled() -> bool {
+/// Whether to take an OSR entry when one is installed (`ASH_OSR=0` to disable).
+fn osr_transfer_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| !matches!(std::env::var("ASH_OSR").as_deref(), Ok("0") | Ok("off")))
 }
@@ -748,10 +697,6 @@ pub struct HLInterpreter {
     max_stack_depth: usize,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
-    /// Compiled OSR entry addresses by `(findex, header_pc)`. A zero means the
-    /// compile was tried and failed, which is recorded so it is not retried on
-    /// every subsequent iteration of a loop that is by definition hot.
-    osr_entries: std::collections::HashMap<(usize, usize), u64>,
 
     /// Argument buffers, recycled the same way as [`Self::reg_pool`].
     ///
@@ -1021,7 +966,6 @@ impl HLInterpreter {
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
             hot_loops: std::collections::HashSet::new(),
-            osr_entries: std::collections::HashMap::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
             ssa: SsaCache::default(),
@@ -2722,96 +2666,102 @@ impl HLInterpreter {
     /// iterations live in a single invocation, and the profiler charges 22.7%
     /// of the whole run to `call_function` -- the boundary crossings from that
     /// interpreted loop into compiled `advance`.
+    /// Feed a hot loop's back-edges into the ordinary promotion machinery.
+    ///
+    /// This is the whole of the interpreter's part in OSR. Promotion counts
+    /// invocations, so a loop inside a function called once never crosses a
+    /// threshold however long it runs -- nbody's `main` is ten million
+    /// iterations of a single call. Ticking the bead from a back-edge makes it
+    /// promotable on the same terms as any other function: through the ladder,
+    /// Cranelift and then LLVM, compiled on the broker.
+    ///
+    /// It deliberately does not compile anything itself. An earlier version
+    /// did, and that was the mistake: OSR is not a way to get code compiled,
+    /// it is a way for a frame that is already running to pick up code the
+    /// tiering has already produced. Compiling here bypassed the ladder,
+    /// ignored `--jit-tier`, blocked the main thread, and left no path to tier
+    /// up afterwards -- one error with four symptoms.
     fn note_hot_loop(&mut self, bytecode: &DecodedBytecode, func_idx: usize, header_pc: usize) {
         let findex = self.bytecode_findex(func_idx);
+
+        // Tick the bead. The returned entry is the function's *normal* entry
+        // point and is deliberately dropped: calling it would restart the
+        // function from the top, which is the one thing a mid-loop transfer
+        // must not do. Only the tick matters here.
+        let _ = self.tiered_on_invoke(bytecode, findex, func_idx);
+
         if !self.hot_loops.insert((findex, header_pc)) {
             return;
         }
-        // Consult the static analysis before anything else. A loop can be hot
-        // and still be one no transfer may enter: a live trap region, or a
-        // register whose address escaped. `osr::analyze` answers both from the
-        // IR rather than from a scan of the opcode array.
-        let m = ash::air_pipeline::AshModule::new(bytecode);
-        let opts = ash::air_pipeline::AirPassOptions::default();
-        let plan = ash::air_pipeline::prepare_ir(
-            &m,
-            &bytecode.functions[func_idx],
-            ash::air_pipeline::AirOptLevel::O2,
-            &opts,
-        )
-        .ok()
-        .map(|(f, _)| ash::osr::analyze(&f));
-        // `eligible()` is only true when no header was refused, so it gates any
-        // header in this function without needing the block-id-to-pc mapping:
-        // a refusal anywhere clears it.
-        if osr_compile_enabled() && plan.as_ref().is_some_and(|p| p.eligible()) {
-            let body = self.air.body(bytecode, func_idx);
-            let addr = match self.tiered_runtime.as_ref() {
-                Some(t) => {
-                    let ctx = t.shared_ctx.clone();
-                    compile_osr_with_llvm(&ctx, findex, header_pc, body)
-                }
-                None => 0,
-            };
-            self.osr_entries.insert((findex, header_pc), addr);
-            if osr_logging() {
-                if addr != 0 {
-                    eprintln!("[osr] compiled entry findex={findex} pc={header_pc} at {addr:#x}");
-                } else {
-                    eprintln!("[osr] no entry for findex={findex} pc={header_pc}");
-                }
-            }
-        }
+        // Report eligibility once, the first time this header is seen hot.
+        // `osr::analyze` answers from the IR whether a transfer may enter at
+        // all: a live trap region or a register whose address escaped means no.
         if osr_logging() {
+            let m = ash::air_pipeline::AshModule::new(bytecode);
+            let opts = ash::air_pipeline::AirPassOptions::default();
+            let plan = ash::air_pipeline::prepare_ir(
+                &m,
+                &bytecode.functions[func_idx],
+                ash::air_pipeline::AirOptLevel::O2,
+                &opts,
+            )
+            .ok()
+            .map(|(f, _)| ash::osr::analyze(&f));
             match &plan {
-                Some(p) if p.eligible() => eprintln!(
-                    "[osr] hot loop findex={findex} header_pc={header_pc} ELIGIBLE headers={:?}",
-                    p.entry_headers
-                ),
+                Some(p) if p.eligible() => {
+                    eprintln!("[osr] hot loop findex={findex} pc={header_pc} ELIGIBLE")
+                }
                 Some(p) => eprintln!(
-                    "[osr] hot loop findex={findex} header_pc={header_pc} refused: {:?}",
+                    "[osr] hot loop findex={findex} pc={header_pc} refused: {:?}",
                     p.refusals
                 ),
-                None => eprintln!(
-                    "[osr] hot loop findex={findex} header_pc={header_pc} refused: no IR"
-                ),
+                None => eprintln!("[osr] hot loop findex={findex} pc={header_pc} refused: no IR"),
             }
         }
     }
 
-    /// Hand this frame to a compiled entry that resumes at `header_pc`.
+    /// Take an OSR entry if the tiering has installed one for this header.
+    ///
+    /// The entry is looked up on the bead, not compiled here: `Bead::osr_entry`
+    /// is a binary search over the table a tier-up installed alongside its
+    /// code. beadie only lets entries be attached by `swap_compiled_with_osr`
+    /// -- the tier-up path -- and not by the first install, which is the
+    /// library saying that OSR belongs between tiers rather than in front of
+    /// them.
     ///
     /// Returns the function's result, because the compiled code runs the loop
-    /// and everything after it: control does not come back to the interpreter
-    /// for this invocation. `None` means no entry was available and the
-    /// interpreter should carry on.
-    ///
-    /// The trap is armed exactly as the ordinary call boundary arms one. The
-    /// analysis refuses a function whose own trap regions are live, but the
-    /// compiled code can still call something that throws, and a throw that
-    /// crosses this frame has to find a jmp_buf here or it lands somewhere
-    /// that no longer exists.
+    /// and everything after it; control does not come back for this
+    /// invocation. `None` means no entry is installed yet and the interpreter
+    /// should carry on.
     fn try_osr_transfer(
         &mut self,
         bytecode: &DecodedBytecode,
         func_idx: usize,
         header_pc: usize,
     ) -> Result<Option<NanBoxedValue>> {
-        let findex = self.bytecode_findex(func_idx);
-        let Some(&addr) = self.osr_entries.get(&(findex, header_pc)) else {
-            return Ok(None);
-        };
-        if addr == 0 {
+        if !osr_transfer_enabled() {
             return Ok(None);
         }
+        let findex = self.bytecode_findex(func_idx);
+        let site = header_pc as u64;
+        let addr = {
+            let tiered = self.tiered_runtime.as_ref();
+            let Some(bound) = tiered.and_then(|t| t.beads.get(findex)).and_then(|b| b.as_ref())
+            else {
+                return Ok(None);
+            };
+            match bound.bead().osr_entry(site) {
+                Some(p) if !p.is_null() => p as u64,
+                _ => return Ok(None),
+            }
+        };
+
         let body = self.air.body(bytecode, func_idx);
         let Some(fun_ty) = bytecode.types[body.type_.0].fun.as_ref() else {
             return Ok(None);
         };
         let ret_kind = bytecode.types[fun_ty.ret.0].kind;
 
-        // The register file, in the same representation the ordinary call
-        // boundary marshals arguments into.
         let mut buf: Vec<u64> = Vec::with_capacity(body.regs.len());
         {
             let frame = self.stack.last().expect("frame for the running function");
@@ -2821,7 +2771,6 @@ impl HLInterpreter {
                 buf.push(self.value_to_i64(v, kind) as u64);
             }
         }
-
         if osr_logging() {
             eprintln!(
                 "[osr] entering findex={findex} pc={header_pc} regs={} at {addr:#x}",
@@ -2829,6 +2778,9 @@ impl HLInterpreter {
             );
         }
 
+        // Armed exactly as the ordinary call boundary arms one: the compiled
+        // code can call something that throws, and a throw crossing this frame
+        // needs a jmp_buf here.
         let stack_depth = self.stack.len();
         let fn_setup_trap = self.fn_setup_trap_jit;
         let fn_remove_trap = self.fn_remove_trap_jit;
@@ -2840,9 +2792,6 @@ impl HLInterpreter {
             if !jmp_buf.is_null() {
                 trap_installed = true;
                 if unsafe { call_setjmp_opaque(jmp_buf) } != 0 {
-                    // Threw out of the transfer. The frames the abandoned Rust
-                    // activations pushed are still here; drop them and let the
-                    // exception carry on up.
                     for f in self.stack.drain(stack_depth..) {
                         if self.reg_pool.len() < POOL_CAP {
                             self.reg_pool.push(f.into_buffer());
@@ -2891,6 +2840,7 @@ impl HLInterpreter {
             unsafe { remove() };
         }
 
+        ash::profile::count("osr transfers", 1);
         Ok(Some(self.wrap_native_result(raw, ret_kind)))
     }
 
@@ -3432,7 +3382,13 @@ impl HLInterpreter {
                         let next_pc = (frame.pc as i64) + 1 + (offset as i64);
                         let hot = if offset < 0 {
                             frame.backedges = frame.backedges.wrapping_add(1);
-                            frame.backedges == OSR_BACKEDGE_THRESHOLD
+                            // Every 64th, not once. Promotion is driven by a
+                            // count crossing a threshold, and there are two of
+                            // them to cross -- Cranelift then LLVM -- so a
+                            // single signal would stall the ladder at the
+                            // first. The mask keeps the cost on the hot path
+                            // to an add and a test.
+                            frame.backedges & 63 == 0
                         } else {
                             false
                         };
@@ -3441,9 +3397,6 @@ impl HLInterpreter {
                     };
                     if hot {
                         self.note_hot_loop(bytecode, func_idx, next_pc);
-                        // The moment the loop is found hot is the moment to
-                        // enter it, so nothing is checked on the iterations
-                        // that follow -- there are none.
                         if let Some(ret) = self.try_osr_transfer(bytecode, func_idx, next_pc)? {
                             return Ok(ret);
                         }

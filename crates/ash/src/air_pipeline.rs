@@ -591,6 +591,12 @@ pub fn trip(m: &AshModule, f: &HLFunction, level: OptLevel, opts: &PassOptions) 
 }
 
 /// Sweep every bytecode function in the module.
+/// Round-trips every declared function, reachable or not.
+///
+/// Unlike the behavioural reports this deliberately does *not* restrict itself
+/// to [`crate::reachable`]: it asks whether the IR can represent a function at
+/// all, and a function this program never calls is one another program will.
+/// Narrowing it would hide exactly the lowering bugs it exists to find.
 pub fn sweep(bc: &DecodedBytecode, level: OptLevel, opts: &PassOptions) -> SweepStats {
     let m = AshModule::new(bc);
     let mut st = SweepStats {
@@ -1014,7 +1020,12 @@ pub fn escape_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> 
     let opts = PassOptions::default();
     let mut totals: HashMap<String, usize> = HashMap::new();
     let mut funcs_with_loop_allocs = 0usize;
+    // Only what the program can enter; see `crate::reachable`.
+    let reach = crate::reachable::analyze(bc);
     for f in &bc.functions {
+        if !reach.is_live(f.findex) {
+            continue;
+        }
         let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
             continue;
         };
@@ -1059,7 +1070,12 @@ pub fn trap_report(
     let m = AshModule::new(bc);
     let opts = PassOptions::default();
     let (mut with_handlers, mut sites, mut covered) = (0usize, 0usize, 0usize);
+    // Only what the program can enter; see `crate::reachable`.
+    let reach = crate::reachable::analyze(bc);
     for f in &bc.functions {
+        if !reach.is_live(f.findex) {
+            continue;
+        }
         let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
             continue;
         };
@@ -1091,7 +1107,16 @@ pub fn osr_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> Vec
     let mut eligible = 0usize;
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut considered = 0usize;
+    // Restricted to what the program can actually enter. A .hl links the whole
+    // stdlib, so counting every declared function put ~93% of the denominator
+    // in code that never runs and made the eligibility rate meaningless.
+    let reach = crate::reachable::analyze(bc);
+    let mut skipped = 0usize;
     for f in &bc.functions {
+        if !reach.is_live(f.findex) {
+            skipped += 1;
+            continue;
+        }
         let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
             continue;
         };
@@ -1114,7 +1139,8 @@ pub fn osr_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> Vec
         .map(|(k, v)| format!("{v:>6}  refused: {k}"))
         .collect();
     out.push(format!(
-        "{eligible} of {considered} functions eligible for OSR"
+        "{eligible} of {considered} reachable functions eligible for OSR \
+         ({skipped} unreachable skipped)"
     ));
     out
 }

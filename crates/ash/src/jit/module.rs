@@ -143,16 +143,14 @@ pub(crate) fn run_middle_end(module: &inkwell::module::Module<'_>) -> Result<()>
     use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
     use inkwell::OptimizationLevel;
 
-    // DEFAULT OFF. The pipeline is worth 1.78x on compute-bound code (nbody
-    // 2.79s -> 1.57s), but it currently miscompiles exception handling: with it
-    // on, test_stdlib reports "nested: none, outer caught" where the inner
-    // catch must fire, and test_trap_locals drops a statement from inside the
-    // try. HL exceptions are setjmp/longjmp, and a value live across a setjmp
-    // has to survive a return the optimizer cannot see; marking the setjmp
-    // returns_twice is evidently not enough on its own. Until that is fixed,
-    // this is opt-in: ASH_LLVM_PASSES=default<O2> to measure, and the
-    // exception tests must pass before it becomes the default.
-    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| "off".to_string());
+    // O2 rather than O3: measured on this corpus O3 costs more compile time
+    // than it returns (nbody 1.57s at O2 against 1.70s at O3, and it is slower
+    // still on short programs where compilation dominates).
+    //
+    // Functions that can catch are excluded upstream — see
+    // `shield_trap_functions_from_optimization`, which is what makes running
+    // this safe at all.
+    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| "default<O2>".to_string());
     if spec == "off" {
         return Ok(());
     }

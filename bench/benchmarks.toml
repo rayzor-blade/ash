@@ -116,8 +116,12 @@ checksums = [
   { value = "112790102", label = "unfused" },
   { value = "112798515", label = "fused" },
   # ash's own LLVM tier at 875x500. Same fusion *presence* as hxcpp, different
-  # fusion *pattern* — 72 units apart. BACKLOG.md documents the gap.
+  # fusion *pattern*. BACKLOG.md documents the gap.
   { value = "112798587", label = "fused-llvm" },
+  # With LLVM's middle-end running, mem2reg puts more multiply/add pairs in one
+  # block, so ash's `contract` flag fuses more of them. A third fusion pattern,
+  # not a wrong answer.
+  { value = "112798288", label = "fused-llvm-opt" },
 ]
 
 # Object field access with no allocation in the hot loop, which makes it the

@@ -5176,6 +5176,54 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// Opt functions containing `Trap` out of the LLVM middle-end.
+    ///
+    /// HL exceptions are setjmp/longjmp, and `longjmp` restores the machine
+    /// registers to their state at the `setjmp`. A value the optimizer has
+    /// promoted out of its alloca into an SSA value therefore reverts on the
+    /// exceptional return, while one left in memory survives — the same reason
+    /// C requires `volatile` on locals modified between `setjmp` and `longjmp`.
+    /// Marking the setjmp call `returns_twice` (which this backend does) tells
+    /// LLVM the call has two returns; it does not stop `mem2reg` promoting the
+    /// allocas around it, which is the transform that actually breaks HL
+    /// semantics. Observed as a dropped statement inside a `try` and a lost
+    /// inner catch once the pipeline was switched on.
+    ///
+    /// `optnone` is the narrow fix: a function that can catch keeps its
+    /// registers in memory, and every function that cannot — measured at ~99%
+    /// of the corpus — is optimized normally. The alternative, making the
+    /// register allocas volatile, would cost the same functions the same
+    /// optimization while being harder to reason about.
+    ///
+    /// Returns how many functions were excluded.
+    fn shield_trap_functions_from_optimization(&self) -> usize {
+        let noinline = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
+            0,
+        );
+        let optnone = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("optnone"),
+            0,
+        );
+        let mut n = 0;
+        for (findex, fv) in &self.func_cache {
+            let has_trap = match self.findexes.get(findex) {
+                Some(FuncPtr::Fun(f)) => f
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, Opcode::Trap { .. } | Opcode::EndTrap { .. })),
+                _ => false,
+            };
+            if has_trap {
+                // LLVM's verifier requires noinline alongside optnone.
+                fv.add_attribute(inkwell::attributes::AttributeLoc::Function, noinline);
+                fv.add_attribute(inkwell::attributes::AttributeLoc::Function, optnone);
+                n += 1;
+            }
+        }
+        n
+    }
+
     pub fn execute_main(&mut self) -> Result<()> {
         // Compile any pending functions discovered during initialization
         {
@@ -5199,6 +5247,8 @@ impl<'ctx> JITModule<'ctx> {
         // codegen, and a pass run afterwards would be too late.
         {
             let _phase = crate::profile::scope("llvm middle-end");
+            let excluded = self.shield_trap_functions_from_optimization();
+            crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             super::module::run_middle_end(&self.module)?;
         }
 

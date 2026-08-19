@@ -81,6 +81,14 @@ pub struct InterpreterFrame {
     /// Active exception traps: (target_pc, exc_reg).
     /// target_pc is the absolute opcode index of the catch block.
     pub trap_stack: Vec<(usize, u32)>,
+    /// Backward jumps taken in this invocation.
+    ///
+    /// Promotion counts calls, so a hot loop inside a function called once
+    /// can never reach the threshold -- nbody's `main` is exactly that shape,
+    /// ten million iterations in a single invocation. Counting back-edges is
+    /// what notices it. A plain `u32` on the frame keeps the probe to an
+    /// increment and a compare on the interpreter's hottest path.
+    pub backedges: u32,
 }
 
 impl InterpreterFrame {
@@ -90,6 +98,7 @@ impl InterpreterFrame {
             registers: RegisterFile::new(register_count),
             pc: 0,
             trap_stack: Vec::new(),
+            backedges: 0,
         }
     }
 
@@ -104,6 +113,7 @@ impl InterpreterFrame {
             registers: RegisterFile::from_buffer(buf, register_count),
             pc: 0,
             trap_stack: Vec::new(),
+            backedges: 0,
         }
     }
 

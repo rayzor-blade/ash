@@ -113,6 +113,14 @@ enum StepResult {
     },
 }
 
+/// Back-edges in one invocation before its loop counts as hot.
+///
+/// Chosen so a loop that matters is noticed early relative to its own length
+/// but a short one never is: ten thousand iterations is already more work than
+/// a promotion costs, and nbody's `main` reaches it in the first thousandth of
+/// its run.
+const OSR_BACKEDGE_THRESHOLD: u32 = 10_000;
+
 /// What a findex resolves to, held in a dense table indexed by findex.
 ///
 /// Functions and natives share one numbering, so one indexed load decides
@@ -661,6 +669,12 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
 /// Cache an env-var presence check (these gate the opcode-dispatch and
 /// native-call hot paths, where macOS getenv takes a process-wide lock —
 /// `__findenv_locked` was 51.9% of samples on an nbody profile).
+/// Whether to report OSR decisions (`ASH_OSR_LOG`).
+fn osr_logging() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| std::env::var("ASH_OSR_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
+}
+
 macro_rules! env_flag {
     ($name:literal) => {{
         static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -683,6 +697,9 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
+    /// Loop headers seen to be hot, as `(findex, header_pc)`.
+    hot_loops: std::collections::HashSet<(usize, usize)>,
+
     /// Argument buffers, recycled the same way as [`Self::reg_pool`].
     ///
     /// `StepResult::Call` owns its arguments, so every call above arity zero
@@ -950,6 +967,7 @@ impl HLInterpreter {
             targets,
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
+            hot_loops: std::collections::HashSet::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
             ssa: SsaCache::default(),
@@ -2642,6 +2660,58 @@ impl HLInterpreter {
     }
 
     /// Call a function by its findex.
+    /// Record that `func_idx` has a loop whose header is `header_pc` and which
+    /// has gone round enough times to be worth compiling.
+    ///
+    /// Promotion counts calls, so this is the only signal that reaches a
+    /// function invoked once. nbody's `main` is the case: its ten million
+    /// iterations live in a single invocation, and the profiler charges 22.7%
+    /// of the whole run to `call_function` -- the boundary crossings from that
+    /// interpreted loop into compiled `advance`.
+    fn note_hot_loop(&mut self, bytecode: &DecodedBytecode, func_idx: usize, header_pc: usize) {
+        let findex = self.bytecode_findex(func_idx);
+        if !self.hot_loops.insert((findex, header_pc)) {
+            return;
+        }
+        // Consult the static analysis before anything else. A loop can be hot
+        // and still be one no transfer may enter: a live trap region, or a
+        // register whose address escaped. `osr::analyze` answers both from the
+        // IR rather than from a scan of the opcode array.
+        let m = ash::air_pipeline::AshModule::new(bytecode);
+        let opts = ash::air_pipeline::AirPassOptions::default();
+        let plan = ash::air_pipeline::prepare_ir(
+            &m,
+            &bytecode.functions[func_idx],
+            ash::air_pipeline::AirOptLevel::O2,
+            &opts,
+        )
+        .ok()
+        .map(|(f, _)| ash::osr::analyze(&f));
+        if osr_logging() {
+            match &plan {
+                Some(p) if p.eligible() => eprintln!(
+                    "[osr] hot loop findex={findex} header_pc={header_pc} ELIGIBLE headers={:?}",
+                    p.entry_headers
+                ),
+                Some(p) => eprintln!(
+                    "[osr] hot loop findex={findex} header_pc={header_pc} refused: {:?}",
+                    p.refusals
+                ),
+                None => eprintln!(
+                    "[osr] hot loop findex={findex} header_pc={header_pc} refused: no IR"
+                ),
+            }
+        }
+    }
+
+    /// The findex of a function by its index in `bytecode.functions`.
+    fn bytecode_findex(&self, func_idx: usize) -> usize {
+        self.targets
+            .iter()
+            .position(|t| matches!(t, CallTarget::Func(i) if *i as usize == func_idx))
+            .unwrap_or(func_idx)
+    }
+
     pub fn call_function(
         &mut self,
         bytecode: &DecodedBytecode,
@@ -3166,10 +3236,22 @@ impl HLInterpreter {
                     self.stack.last_mut().unwrap().pc += 1;
                 }
                 StepResult::Jump(offset) => {
-                    let frame = self.stack.last_mut().unwrap();
                     // offset is relative to the NEXT instruction
-                    let next_pc = (frame.pc as i64) + 1 + (offset as i64);
-                    frame.pc = next_pc as usize;
+                    let (next_pc, hot) = {
+                        let frame = self.stack.last_mut().unwrap();
+                        let next_pc = (frame.pc as i64) + 1 + (offset as i64);
+                        let hot = if offset < 0 {
+                            frame.backedges = frame.backedges.wrapping_add(1);
+                            frame.backedges == OSR_BACKEDGE_THRESHOLD
+                        } else {
+                            false
+                        };
+                        frame.pc = next_pc as usize;
+                        (next_pc as usize, hot)
+                    };
+                    if hot {
+                        self.note_hot_loop(bytecode, func_idx, next_pc);
+                    }
                 }
                 StepResult::JumpAbs(target_pc) => {
                     self.stack.last_mut().unwrap().pc = target_pc;

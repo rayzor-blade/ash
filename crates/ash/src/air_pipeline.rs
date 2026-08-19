@@ -1033,3 +1033,80 @@ pub fn escape_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> 
     ));
     out
 }
+
+/// Where exception handlers are active, taken from AIR v2 rather than scanned
+/// off the opcode array.
+///
+/// `Block::handler` is derived by dataflow over the CFG, so it answers the
+/// question a program-order scan cannot: a region with more than one normal
+/// exit — `try { if (c) return a; ... return b; }` — is live or not depending
+/// on the path taken, and five of the Heaps sample's functions are shaped that
+/// way. This is the supplier an explicit-edge exception lowering should use.
+///
+/// Returns `(functions with handlers, may-throw sites, sites inside a handler)`.
+pub fn trap_report(
+    bc: &crate::bytecode::DecodedBytecode,
+    level: OptLevel,
+) -> (usize, usize, usize) {
+    let m = AshModule::new(bc);
+    let opts = PassOptions::default();
+    let (mut with_handlers, mut sites, mut covered) = (0usize, 0usize, 0usize);
+    for f in &bc.functions {
+        let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
+            continue;
+        };
+        let mut any = false;
+        for block in &func.blocks {
+            let handled = block.handler.is_some();
+            any |= handled;
+            for ins in &block.instrs {
+                if ins.may_throw() {
+                    sites += 1;
+                    if handled {
+                        covered += 1;
+                    }
+                }
+            }
+        }
+        if any {
+            with_handlers += 1;
+        }
+    }
+    (with_handlers, sites, covered)
+}
+
+/// Per-program OSR eligibility, computed over AIR rather than the opcode array.
+pub fn osr_report(bc: &crate::bytecode::DecodedBytecode, level: OptLevel) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let m = AshModule::new(bc);
+    let opts = PassOptions::default();
+    let mut eligible = 0usize;
+    let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+    let mut considered = 0usize;
+    for f in &bc.functions {
+        let Ok((func, _)) = prepare_ir(&m, f, level, &opts) else {
+            continue;
+        };
+        considered += 1;
+        let plan = crate::osr::analyze(&func);
+        if plan.eligible() {
+            eligible += 1;
+            continue;
+        }
+        for r in &plan.refusals {
+            // A function with no loop is the common case and says nothing.
+            if matches!(r, crate::osr::OsrRefusal::NoBackEdge) {
+                continue;
+            }
+            *reasons.entry(format!("{r:?}")).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<String> = reasons
+        .iter()
+        .map(|(k, v)| format!("{v:>6}  refused: {k}"))
+        .collect();
+    out.push(format!(
+        "{eligible} of {considered} functions eligible for OSR"
+    ));
+    out
+}

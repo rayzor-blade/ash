@@ -1,404 +1,188 @@
 //! # On-stack replacement eligibility
 //!
-//! Decides, statically, whether a function's hot loop can be entered by
-//! compiled code *while an interpreter frame for it is already running*, and
-//! at which opcode.
+//! Decides which loops can be entered by compiled code *while an interpreter
+//! frame for the function is already running*, and at which point.
 //!
-//! ## Why this exists
+//! Promotion is driven by call counts, so a hot loop inside a function called
+//! once can never be promoted. nbody is the shape: its 10M iterations live in
+//! `main`, invoked exactly once. Counting back-edges fixes that, but only for
+//! loops a transfer can safely enter — which is what this decides.
 //!
-//! Promotion is driven by call counts, so a hot loop inside a function that is
-//! called once can never be promoted. nbody is the canonical shape: its 10M
-//! iterations live in `main`, which is invoked exactly once, so the loop is
-//! interpreted forever while the compiled `advance` is re-entered across the
-//! interpreter boundary on every iteration. Counting *back-edges* instead of
-//! calls fixes that, but only if the running frame can be handed to compiled
-//! code mid-flight — which is what OSR is.
+//! ## Derived from AIR, not from the opcode array
 //!
-//! ## Refusing is the default
+//! An earlier version of this module walked the opcode array and built its own
+//! CFG, dominator tree and reachability. All of that already exists in
+//! [`air::v2::analysis`], better: `LoopForest` finds natural loops with their
+//! headers and latches, and `CfgInfo` answers dominance. More importantly the
+//! IR answers two questions the opcode array cannot answer directly:
 //!
-//! A transfer moves live state from one execution engine to another at a point
-//! neither was designed around, so this module's job is mostly to say no. Every
-//! refusal is detected here, at compile time, from the bytecode alone — never
-//! discovered during the transfer. [`analyze`] returns every reason it found
-//! rather than the first, because the list is a diagnostic: `ASH_VERIFY_OSR`
-//! prints it per function, and "which loops would OSR accept?" should be a
-//! measurement, not a guess.
-//!
-//! The refusals and their reasons:
-//!
-//! * **[`OsrRefusal::Trap`]** — HL exceptions are setjmp/longjmp. A frame that
-//!   transfers while a trap region is active leaves an interpreter `jmp_buf`
-//!   armed for a frame that no longer exists, and nothing sound owns the
-//!   matching `EndTrap`. Refused for the whole function, not just for loops
-//!   inside the region: a back-edge outside the region can still be reached
-//!   with one active.
-//! * **[`OsrRefusal::RefTaken`]** — `Ref`/`Setref` take the address of an
-//!   interpreter register. Those addresses would dangle the moment the frame's
-//!   values move into compiled code's own slots.
-//! * **[`OsrRefusal::IrreducibleTarget`]** — the back-edge target must be a
-//!   block leader that dominates the jump. A target that does not is either an
-//!   irreducible loop or a jump into the middle of a block, and compiled code
-//!   has no block boundary there to enter at.
-//! * **[`OsrRefusal::UnrepresentableRegType`]** — every live register has to
-//!   survive the round trip through a flat `i64` buffer. Kinds whose layout the
-//!   [`crate::layout`] oracle itself declines are refused here rather than
-//!   guessed at, so there is one answer to "what is this type's shape", not
-//!   two.
-//!
-//! `Prefetch`/`Asm` are refused because they are x86-only and unlowered, and
-//! `IndirectCall` because it is a hot-reload rewrite artifact rather than
-//! something a bytecode file contains.
+//! * **Which registers escape by address.** AIR pins those to *cells*
+//!   ([`PinReason::RefTaken`]), so "does a reference to this frame outlive the
+//!   transfer" is a property of the IR rather than a reachability search.
+//! * **Where trap regions are live.** `Block::handler` is a dataflow result, so
+//!   a region with several normal exits resolves correctly, where a
+//!   program-order scan cannot decide it at all.
 
-use std::collections::HashMap;
+use air::v2::analysis::{CfgInfo, LoopForest};
+use air::v2::ir::{BlockId, Function, Instr, PinReason, Terminator};
 
-use air::cfg::CFG;
-use air::dominance::DominatorTree;
-use air::opcode_info;
-
-use crate::bytecode::DecodedBytecode;
-use crate::hl::{hl_type_kind_HOBJ, hl_type_kind_HPACKED, hl_type_kind_HSTRUCT};
-use crate::opcodes::Opcode;
-use crate::types::HLFunction;
-
-/// The largest register file a transfer will marshal.
+/// The largest live-in set a transfer will marshal.
 ///
-/// The buffer is built in the transferring Rust frame so the conservative
-/// collector scans it; a heap allocation would hide those roots. That means the
-/// cap is a real limit rather than a tuning knob, and a function above it is
-/// refused rather than promoted to a heap buffer.
-pub const MAX_OSR_REGS: usize = 64;
+/// The buffer is built in the transferring frame so the conservative collector
+/// scans it; a heap allocation would hide those roots. zyntax caps its
+/// equivalent at 128 and reports nbody's headers needing 3 to 99, so this is
+/// sized from a working implementation rather than guessed.
+pub const MAX_OSR_LIVE_INS: usize = 128;
 
-/// Why a function, or one of its back-edges, cannot be entered by OSR.
+/// Why a loop cannot be entered mid-flight.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum OsrRefusal {
-    /// Contains `Trap`/`EndTrap`; setjmp state cannot be transferred.
+    /// The function can catch. HL exceptions are setjmp/longjmp, so a frame
+    /// that transfers while a region is live leaves an armed `jmp_buf` for a
+    /// frame that no longer exists, and nothing sound owns the matching
+    /// `EndTrap`. Lifting this is what the explicit-edge exception work is for.
     Trap,
-    /// A register's address escapes via `Ref`/`Setref`.
+    /// A register's address escapes; AIR models those as cells. Once the frame
+    /// moves, an outstanding pointer to it reads stale values.
     RefTaken,
-    /// x86-only opcodes that no tier lowers.
-    PrefetchAsm,
-    /// A hot-reload pass artifact, not real bytecode.
-    IndirectCall,
-    /// No backward jump, so there is no loop to enter.
+    /// The function has no loop to enter.
     NoBackEdge,
-    /// A register kind that cannot round-trip through the transfer buffer.
-    UnrepresentableRegType(u32),
-    /// Back-edge target is not a dominating block leader.
-    IrreducibleTarget(usize),
-    /// Register file exceeds [`MAX_OSR_REGS`].
-    TooManyRegs(usize),
+    /// More than one latch, so several paths reach the header carrying
+    /// different state. v1 takes only the single-entry case.
+    MultipleLatches(usize),
+    /// More live-ins than [`MAX_OSR_LIVE_INS`].
+    TooManyLiveIns(usize),
 }
 
 /// What [`analyze`] concluded about one function.
 #[derive(Clone, Debug)]
 pub struct OsrPlan {
-    /// Empty means the function is eligible.
+    /// Empty means eligible.
     pub refusals: Vec<OsrRefusal>,
-    /// `(jump opcode index, target opcode index)` for each accepted back-edge.
-    pub back_edges: Vec<(usize, usize)>,
-    /// `hl_type_kind` per register, in register order.
-    pub reg_kinds: Vec<u32>,
-    pub nregs: usize,
+    /// Header block of each loop that may be entered.
+    pub entry_headers: Vec<u32>,
 }
 
 impl OsrPlan {
-    /// Whether any back-edge in this function may transfer.
     pub fn eligible(&self) -> bool {
-        self.refusals.is_empty() && !self.back_edges.is_empty()
-    }
-
-    /// Whether `pc` is an accepted back-edge target.
-    ///
-    /// The probe consults this before doing anything expensive, so a function
-    /// that was refused costs one lookup per back-edge and nothing more.
-    pub fn eligible_target(&self, pc: usize) -> bool {
-        self.eligible() && self.back_edges.iter().any(|&(_, t)| t == pc)
+        self.refusals.is_empty() && !self.entry_headers.is_empty()
     }
 }
 
-/// Whether a register of this kind survives the round trip through the flat
-/// `i64` transfer buffer.
+/// Blocks reachable from any of `seeds`, following CFG successors.
 ///
-/// `HPACKED` never does — its value is inline aggregate data, not a word. An
-/// `HOBJ`/`HSTRUCT` register is a pointer and is fine regardless of what the
-/// layout oracle says about its *fields*; the check that matters for those is
-/// on the field access itself, which is already compiled.
-fn representable(kind: u32) -> bool {
-    kind != hl_type_kind_HPACKED
-}
-
-/// Which blocks are reachable from any of `seeds`, following CFG successors.
-///
-/// `seeds` themselves count as reachable: an instruction can reach its own
-/// block again through a loop, and for the `Ref` question "the block containing
-/// it" is precisely a place the reference is already live.
-fn reachable_from(cfg: &CFG, seeds: &[usize]) -> Vec<bool> {
-    let mut seen = vec![false; cfg.blocks.len()];
+/// Seeds count as reachable: a block can reach itself around a loop, and for
+/// the address-escape question the block holding the `CellRef` is already a
+/// place the pointer is live.
+fn reachable_from(cfg: &CfgInfo, seeds: &[BlockId]) -> Vec<bool> {
+    let mut seen = vec![false; cfg.succs.len()];
     let mut work: Vec<usize> = Vec::new();
-    for &s in seeds {
-        if s < seen.len() && !seen[s] {
-            seen[s] = true;
-            work.push(s);
+    for s in seeds {
+        if s.idx() < seen.len() && !seen[s.idx()] {
+            seen[s.idx()] = true;
+            work.push(s.idx());
         }
     }
     while let Some(b) = work.pop() {
-        let Some(block) = cfg.blocks.get(b) else {
-            continue;
-        };
-        for &succ in &block.successors {
-            if succ < seen.len() && !seen[succ] {
-                seen[succ] = true;
-                work.push(succ);
+        for succ in &cfg.succs[b] {
+            if succ.idx() < seen.len() && !seen[succ.idx()] {
+                seen[succ.idx()] = true;
+                work.push(succ.idx());
             }
         }
     }
     seen
 }
 
-/// Static OSR analysis for one function.
+/// Static OSR analysis for one AIR function.
 ///
-/// Collects every refusal rather than stopping at the first, so the verifier
-/// can report why a function was rejected instead of only that it was.
-pub fn analyze(bc: &DecodedBytecode, f: &HLFunction) -> OsrPlan {
+/// Collects every refusal rather than stopping at the first, so a report can
+/// say why a function was rejected instead of only that it was.
+pub fn analyze(f: &Function) -> OsrPlan {
     let mut refusals = Vec::new();
-    let nregs = f.regs.len();
 
-    let reg_kinds: Vec<u32> = f
-        .regs
+    if f.blocks
         .iter()
-        .map(|r| bc.types.get(r.0).map(|t| t.kind).unwrap_or(0))
-        .collect();
-
-    if nregs > MAX_OSR_REGS {
-        refusals.push(OsrRefusal::TooManyRegs(nregs));
-    }
-    for &k in &reg_kinds {
-        if !representable(k) {
-            refusals.push(OsrRefusal::UnrepresentableRegType(k));
-            break;
-        }
+        .any(|b| b.handler.is_some() || matches!(b.term, Terminator::Trap { .. }))
+    {
+        refusals.push(OsrRefusal::Trap);
     }
 
-    for op in &f.ops {
-        match op {
-            Opcode::Trap { .. } | Opcode::EndTrap { .. } => {
-                if !refusals.contains(&OsrRefusal::Trap) {
-                    refusals.push(OsrRefusal::Trap);
-                }
-            }
-            // Ref/Setref are handled per-target below, not per-function: a
-            // reference taken in code that cannot run before a given loop
-            // header is no hazard to entering at that header.
-            Opcode::Prefetch { .. } | Opcode::Asm { .. } => {
-                if !refusals.contains(&OsrRefusal::PrefetchAsm) {
-                    refusals.push(OsrRefusal::PrefetchAsm);
-                }
-            }
-            Opcode::IndirectCall { .. } => {
-                if !refusals.contains(&OsrRefusal::IndirectCall) {
-                    refusals.push(OsrRefusal::IndirectCall);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Collect backward jumps. `Trap` also carries an offset, but a function
-    // containing one is already refused above.
-    let mut raw_back_edges: Vec<(usize, usize)> = Vec::new();
-    for (i, op) in f.ops.iter().enumerate() {
-        if matches!(op, Opcode::Trap { .. }) {
-            continue;
-        }
-        if let Some(off) = opcode_info::jump_offset(op) {
-            if off < 0 {
-                let target = i as i64 + 1 + off as i64;
-                if target >= 0 && (target as usize) < f.ops.len() {
-                    raw_back_edges.push((i, target as usize));
-                }
-            }
-        }
-        // Switch offsets are forward in HL output, but do not assume it.
-        if let Opcode::Switch { offsets, .. } = op {
-            for &off in offsets {
-                if off < 0 {
-                    let target = i as i64 + 1 + off as i64;
-                    if target >= 0 && (target as usize) < f.ops.len() {
-                        raw_back_edges.push((i, target as usize));
-                    }
-                }
-            }
-        }
-    }
-
-    if raw_back_edges.is_empty() {
+    let cfg = CfgInfo::build(f);
+    let forest = LoopForest::analyze(f, &cfg);
+    if forest.is_empty() {
         refusals.push(OsrRefusal::NoBackEdge);
         return OsrPlan {
             refusals,
-            back_edges: Vec::new(),
-            reg_kinds,
-            nregs,
+            entry_headers: Vec::new(),
         };
     }
 
-    // A target is usable only if compiled code has a block boundary there and
-    // the edge is a genuine loop back-edge (target dominates the jump).
-    let cfg = CFG::build(&f.ops);
-    let dom = DominatorTree::build(&cfg);
-
-    // Blocks from which a taken register address could still be outstanding.
-    //
-    // Entering compiled code freezes the interpreter's register file: it stops
-    // being written, but a pointer produced earlier by `Ref` still aims at it,
-    // so anything reading through that pointer afterwards sees a stale value.
-    // The hazard therefore exists only if a `Ref`/`Setref` can execute *before*
-    // arrival at the header — which is a reachability question, not a
-    // whole-function one. Refusing per function instead costs about a third of
-    // all loop-bearing functions, including nbody's `main`, whose single `Ref`
-    // sits past the end of every loop it would disqualify.
-    let ref_blocks: Vec<usize> = f
-        .ops
+    // Where an address of the frame is taken. Entering compiled code freezes
+    // the interpreter's slots, so a pointer produced *before* arrival at a
+    // header would then read stale values — but one taken only in code the
+    // header cannot reach is no hazard to entering there. Refusing per function
+    // instead costs about a fifth of all loop-bearing functions, nbody's `main`
+    // among them, whose single `Ref` sits past the end of every loop it would
+    // disqualify.
+    let ref_seeds: Vec<BlockId> = f
+        .blocks
         .iter()
         .enumerate()
-        .filter(|(_, op)| matches!(op, Opcode::Ref { .. } | Opcode::Setref { .. }))
-        .filter_map(|(i, _)| cfg.block_of.get(i).copied())
+        .filter(|(_, b)| {
+            b.instrs.iter().any(|i| match i {
+                Instr::CellRef { cell, .. } => f
+                    .cells
+                    .get(cell.idx())
+                    .is_some_and(|c| c.reason == PinReason::RefTaken),
+                _ => false,
+            })
+        })
+        .map(|(i, _)| BlockId(i as u32))
         .collect();
-    let ref_reaches = reachable_from(&cfg, &ref_blocks);
+    let ref_reaches = reachable_from(&cfg, &ref_seeds);
 
-    let mut targets_seen: HashMap<usize, usize> = HashMap::new();
-    let mut back_edges = Vec::new();
-
-    for &(from, target) in &raw_back_edges {
-        let (Some(&tb), Some(&fb)) = (cfg.block_of.get(target), cfg.block_of.get(from)) else {
-            refusals.push(OsrRefusal::IrreducibleTarget(target));
-            continue;
-        };
-        let is_leader = cfg
-            .blocks
-            .get(tb)
-            .map(|b| b.start == target)
-            .unwrap_or(false);
-        if !is_leader || !dom.dominates(tb, fb) {
-            refusals.push(OsrRefusal::IrreducibleTarget(target));
+    let mut entry_headers = Vec::new();
+    for l in forest.innermost_first() {
+        let lp = forest.get(l);
+        if lp.latches.len() != 1 {
+            refusals.push(OsrRefusal::MultipleLatches(lp.header.0 as usize));
             continue;
         }
-        if ref_reaches.get(tb).copied().unwrap_or(true) {
+        if ref_reaches[lp.header.idx()] {
             if !refusals.contains(&OsrRefusal::RefTaken) {
                 refusals.push(OsrRefusal::RefTaken);
             }
             continue;
         }
-        *targets_seen.entry(target).or_insert(0) += 1;
-        back_edges.push((from, target));
+        entry_headers.push(lp.header.0);
     }
-
-    // More than one back-edge into the same header means several paths reach it
-    // with different live state. v1 takes only the single-entry case.
-    back_edges.retain(|&(_, t)| targets_seen.get(&t) == Some(&1));
-    if back_edges.is_empty() && !refusals.iter().any(|r| matches!(r, OsrRefusal::NoBackEdge)) {
+    if entry_headers.is_empty() && !refusals.iter().any(|r| matches!(r, OsrRefusal::NoBackEdge)) {
         refusals.push(OsrRefusal::NoBackEdge);
     }
 
     OsrPlan {
         refusals,
-        back_edges,
-        reg_kinds,
-        nregs,
+        entry_headers,
     }
-}
-
-/// One line per function, for `ASH_VERIFY_OSR=only`.
-///
-/// Deliberately a measurement rather than a claim: it answers "which loops
-/// would OSR accept, across a whole program" in the time it takes to decode,
-/// the same way `ASH_VERIFY_LAYOUT=only` does for field offsets.
-pub fn report(bc: &DecodedBytecode) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut eligible = 0usize;
-    for f in &bc.functions {
-        let plan = analyze(bc, f);
-        // The entrypoint is the function most likely to hold a long-running
-        // loop and least likely to be promoted by call count, so it is worth
-        // spotting at a glance — it is the whole reason OSR exists.
-        let mark = if f.findex as usize == bc.entrypoint as usize {
-            " <ENTRYPOINT>"
-        } else {
-            ""
-        };
-        if plan.eligible() {
-            eligible += 1;
-            out.push(format!(
-                "findex={:<6} {:<28} nregs={:<4} back_edges={:?}  ELIGIBLE{}",
-                f.findex,
-                f.name(),
-                plan.nregs,
-                plan.back_edges,
-                mark
-            ));
-        } else if plan
-            .refusals
-            .iter()
-            .any(|r| !matches!(r, OsrRefusal::NoBackEdge))
-        {
-            // Functions with no loop at all are the common case and say
-            // nothing; report only a function that had a reason beyond that.
-            // Back-edges are printed even when refused, because "this loop is
-            // hot but we declined it, for X" is the line worth reading.
-            out.push(format!(
-                "findex={:<6} {:<28} nregs={:<4} back_edges={:?} refused={:?}{}",
-                f.findex,
-                f.name(),
-                plan.nregs,
-                plan.back_edges,
-                plan.refusals,
-                mark
-            ));
-        }
-    }
-    out.push(format!(
-        "{} of {} functions eligible for OSR",
-        eligible,
-        bc.functions.len()
-    ));
-    out
-}
-
-/// Kinds that are pointers into the heap, for the transfer buffer's benefit.
-pub fn is_heap_kind(kind: u32) -> bool {
-    matches!(kind, k if k == hl_type_kind_HOBJ || k == hl_type_kind_HSTRUCT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opcodes::Reg;
+    use air::opcodes::{Opcode, RefInt, Reg};
+    use air::v2::lower::lower;
+    use air::v2::TypeRef;
 
-    fn plan_of(ops: Vec<Opcode>, kinds: Vec<u32>) -> OsrPlan {
-        // analyze() only reads bc.types through f.regs, so a minimal stand-in
-        // is enough and keeps these tests independent of the decoder.
-        let mut bc = DecodedBytecode::default();
-        bc.types = kinds
-            .iter()
-            .map(|&k| crate::types::HLType {
-                kind: k,
-                ..Default::default()
-            })
-            .collect();
-        let f = HLFunction {
-            findex: 0,
-            ops,
-            regs: (0..kinds.len()).map(crate::types::TypeRef).collect(),
-            ..Default::default()
-        };
-        analyze(&bc, &f)
+    fn tys(n: usize) -> Vec<TypeRef> {
+        vec![TypeRef(0); n]
     }
 
-    /// A simple counted loop: the shape OSR exists for.
-    fn simple_loop() -> Vec<Opcode> {
+    fn counted_loop() -> Vec<Opcode> {
         vec![
             Opcode::Int {
                 dst: Reg(0),
-                ptr: air::opcodes::RefInt(0),
+                ptr: RefInt(0),
             },
             Opcode::Incr { dst: Reg(0) },
             Opcode::JSLt {
@@ -411,121 +195,63 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_simple_back_edge() {
-        let p = plan_of(simple_loop(), vec![crate::hl::hl_type_kind_HI32]);
+    fn a_counted_loop_is_eligible() {
+        let f = lower(&counted_loop(), &tys(1)).unwrap();
+        let p = analyze(&f);
         assert!(p.eligible(), "refusals: {:?}", p.refusals);
-        assert_eq!(p.back_edges, vec![(2, 1)]);
-        assert!(p.eligible_target(1));
-        assert!(!p.eligible_target(0));
+        assert_eq!(p.entry_headers.len(), 1);
     }
 
     #[test]
-    fn refuses_a_function_with_no_loop() {
-        let p = plan_of(
-            vec![Opcode::Ret { ret: Reg(0) }],
-            vec![crate::hl::hl_type_kind_HI32],
-        );
-        assert!(!p.eligible());
-        assert!(p.refusals.contains(&OsrRefusal::NoBackEdge));
+    fn a_function_without_a_loop_is_refused() {
+        let f = lower(&[Opcode::Ret { ret: Reg(0) }], &tys(1)).unwrap();
+        assert!(analyze(&f).refusals.contains(&OsrRefusal::NoBackEdge));
     }
 
-    /// Trap anywhere disqualifies the whole function, not just the region: a
-    /// back-edge outside it can still run with a trap armed.
+    /// A reference taken before the loop can still be live inside it.
     #[test]
-    fn refuses_any_function_containing_a_trap() {
-        let mut ops = simple_loop();
-        ops.insert(
-            0,
-            Opcode::Trap {
-                exc: Reg(0),
-                offset: 1,
-            },
-        );
-        let p = plan_of(ops, vec![crate::hl::hl_type_kind_HI32]);
-        assert!(p.refusals.contains(&OsrRefusal::Trap));
-        assert!(!p.eligible());
-    }
-
-    #[test]
-    fn refuses_when_a_register_address_escapes() {
-        let mut ops = simple_loop();
+    fn a_ref_taken_before_the_loop_refuses() {
+        let mut ops = counted_loop();
         ops.insert(
             0,
             Opcode::Ref {
-                dst: Reg(0),
+                dst: Reg(1),
                 src: Reg(0),
             },
         );
-        let p = plan_of(ops, vec![crate::hl::hl_type_kind_HI32]);
-        assert!(p.refusals.contains(&OsrRefusal::RefTaken));
+        let f = lower(&ops, &tys(2)).unwrap();
+        assert!(analyze(&f).refusals.contains(&OsrRefusal::RefTaken));
     }
 
-    /// A reference taken *after* every loop cannot dangle across a transfer
-    /// into one, so it must not disqualify it. This is nbody's `main`: twenty
-    /// unrolled hot loops and a single `Ref` past the end of all of them,
-    /// which a whole-function refusal would throw away entirely.
+    /// One taken only after every loop cannot dangle across a transfer into
+    /// one. This is nbody's `main`: twenty hot loops and a single `Ref` past
+    /// the end of all of them.
     #[test]
-    fn accepts_a_loop_whose_only_ref_comes_after_it() {
-        let mut ops = simple_loop();
-        // simple_loop is [Int, Incr, JSLt(-2), Ret]; put the Ref before Ret.
+    fn a_ref_taken_after_every_loop_does_not_refuse() {
+        let mut ops = counted_loop();
         ops.insert(
             3,
             Opcode::Ref {
-                dst: Reg(0),
+                dst: Reg(1),
                 src: Reg(0),
             },
         );
-        let p = plan_of(ops, vec![crate::hl::hl_type_kind_HI32]);
+        let f = lower(&ops, &tys(2)).unwrap();
+        let p = analyze(&f);
         assert!(
             !p.refusals.contains(&OsrRefusal::RefTaken),
-            "refusals: {:?}",
+            "{:?}",
             p.refusals
         );
-        assert_eq!(p.back_edges, vec![(2, 1)]);
+        assert!(p.eligible());
     }
 
+    /// Incr pins nothing now, so a plain counter must not be mistaken for an
+    /// escaping one — the regression this guards is exactly the over-broad
+    /// refusal the opcode-array version had.
     #[test]
-    fn refuses_an_oversized_register_file() {
-        let kinds = vec![crate::hl::hl_type_kind_HI32; MAX_OSR_REGS + 1];
-        let p = plan_of(simple_loop(), kinds);
-        assert!(matches!(
-            p.refusals.first(),
-            Some(OsrRefusal::TooManyRegs(_))
-        ));
-    }
-
-    #[test]
-    fn refuses_packed_registers() {
-        let p = plan_of(simple_loop(), vec![hl_type_kind_HPACKED]);
-        assert!(p
-            .refusals
-            .iter()
-            .any(|r| matches!(r, OsrRefusal::UnrepresentableRegType(_))));
-    }
-
-    /// Two back-edges into one header means several paths reach it with
-    /// different live state; v1 takes only the single-entry case.
-    #[test]
-    fn refuses_a_header_with_two_back_edges() {
-        let ops = vec![
-            Opcode::Int {
-                dst: Reg(0),
-                ptr: air::opcodes::RefInt(0),
-            },
-            Opcode::Incr { dst: Reg(0) },
-            Opcode::JSLt {
-                a: Reg(0),
-                b: Reg(0),
-                offset: -2,
-            },
-            Opcode::JSGt {
-                a: Reg(0),
-                b: Reg(0),
-                offset: -3,
-            },
-            Opcode::Ret { ret: Reg(0) },
-        ];
-        let p = plan_of(ops, vec![crate::hl::hl_type_kind_HI32]);
-        assert!(p.back_edges.is_empty(), "got {:?}", p.back_edges);
+    fn a_loop_counter_alone_does_not_refuse() {
+        let f = lower(&counted_loop(), &tys(1)).unwrap();
+        assert!(!analyze(&f).refusals.contains(&OsrRefusal::RefTaken));
     }
 }

@@ -1,16 +1,18 @@
 //! Which bytecode optimizer the LLVM tier runs before emission.
 //!
-//! Two pipelines exist. [`AirMode::V1`] is `air::pass::PassManager`: three
-//! passes that rewrite the opcode array in place, never changing its length or
-//! the register count. [`AirMode::V2`] is [`crate::air_pipeline`], the typed
-//! phi-SSA pipeline every backend is meant to share —
-//! `lower -> optimize -> verify -> serialize` — which hands back a *new*
-//! opcode array and a *new* register-type table.
+//! [`AirMode::V2`] is [`crate::air_pipeline`], the typed phi-SSA pipeline every
+//! backend shares — `lower -> optimize -> verify -> serialize` — which hands
+//! back a *new* opcode array and a *new* register-type table. It is the
+//! default, and `ASH_AIR=none` is the only way to skip it.
 //!
-//! v2 is off by default, so an unset `ASH_AIR` reproduces today's codegen
-//! exactly. `ASH_AIR=v2` turns it on; a function v2 refuses falls back to v1
-//! rather than losing optimization, so switching it on can only ever be v1
-//! plus whatever v2 additionally manages.
+//! AIR v1 used to sit in front of it: three passes rewriting the opcode array
+//! in place, skipping any function containing a `try`. It is removed. It was
+//! not carrying much — v2 refused zero functions across the test corpus and the
+//! Heaps sample, so the fallback never fired — and keeping it as the default
+//! had a cost beyond its own: every new analysis got written against the opcode
+//! array, because the opcode array was what actually ran. A function v2 refuses
+//! is now left unoptimized and counted, so the gap is visible and gets closed
+//! in v2 rather than papered over by a second pipeline.
 //!
 //! # Why v2 needs no `has_trap` skip
 //!
@@ -44,8 +46,6 @@ pub(crate) enum AirMode {
     /// No bytecode optimization at all. Only reachable via `ASH_AIR=none`;
     /// it exists so a miscompile can be bisected against "neither pipeline".
     None,
-    /// AIR v1, skipped for trap-containing functions. The default.
-    V1,
     /// AIR v2, falling back to v1 per refused function.
     V2,
 }
@@ -64,10 +64,19 @@ pub(crate) fn mode() -> AirMode {
             // are removing. v1 stays reachable as a bisect switch only.
             "" | "v2" | "2" => AirMode::V2,
             "none" => AirMode::None,
-            "off" | "0" | "v1" | "1" => AirMode::V1,
+            // v1 is gone. It optimized three things in place, skipped every
+            // function containing a `try`, and its presence in front of v2 was
+            // what kept new analysis being written against the opcode array.
+            // Measured across the corpus and the Heaps sample, v2 refused zero
+            // functions, so there was nothing left for it to catch.
+            "off" | "0" => AirMode::None,
+            "v1" | "1" => {
+                eprintln!("[air] ASH_AIR=v1: AIR v1 has been removed; using v2");
+                AirMode::V2
+            }
             other => {
-                eprintln!("[air] unknown ASH_AIR='{other}' (expected v2|v1|off|none); using v1");
-                AirMode::V1
+                eprintln!("[air] unknown ASH_AIR='{other}' (expected v2|off|none); using v2");
+                AirMode::V2
             }
         }
     })
@@ -127,33 +136,24 @@ pub(crate) fn optimize(
             rewrite_indirect(f, indirect_call_natives);
             return;
         }
-        // Refused. Fall through to today's v1 path, which wants the opposite
-        // order; `run_v2` leaves `f` untouched on failure, so this is clean.
+        // Refused. Fall through to v1, which wants the opposite order;
+        // `run_v2` leaves `f` untouched on failure, so this is clean.
+        //
+        // Counted, not silent: v1 exists only to catch what v2 cannot yet
+        // handle, and a refusal that nobody sees is a gap that never gets
+        // closed. `ASH_PROFILE=phases` reports the total.
+        // Refused: the function is left unoptimized rather than handed to a
+        // second pipeline. Counted so the gap is visible and can be closed in
+        // v2, which is where the fix belongs.
+        crate::profile::count("air v2 refused (left unoptimized)", 1);
     }
     rewrite_indirect(f, indirect_call_natives);
-    run_v1(f);
 }
 
 fn rewrite_indirect(f: &mut HLFunction, natives: Option<&HashSet<usize>>) {
     if let Some(natives) = natives {
         IndirectCallRewritePass::new(natives.clone()).run(&mut f.ops);
     }
-}
-
-/// AIR v1: three in-place passes at O2.
-fn run_v1(f: &mut HLFunction) {
-    if mode() == AirMode::None {
-        return;
-    }
-    // `air::cfg::CFG` has no notion of `Trap` — the opcode appears nowhere in
-    // it — so a trap handler is left with no incoming edge and SSA phis land in
-    // the wrong places. Skipping these functions is v1's workaround for that,
-    // and it is why v1 leaves every `try` block unoptimized.
-    if f.ops.iter().any(|op| matches!(op, Opcode::Trap { .. })) {
-        return;
-    }
-    let num_regs = f.regs.len();
-    air::pass::PassManager::new(air::pass::OptLevel::O2).run(&mut f.ops, num_regs);
 }
 
 /// AIR v2. Returns whether `f` was rewritten; on `false` it is untouched and

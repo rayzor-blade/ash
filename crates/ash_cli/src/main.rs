@@ -540,45 +540,27 @@ fn run() -> Result<()> {
     // its time in the collector for 196.5M allocations against a 3.7MB live
     // set, so the size of this number decides whether hoisting is worth
     // building.
-    // `ASH_VERIFY_TRAPS=only` checks the JIT-side trap-region scan against
-    // AIR v2's dataflow answer for every function, and reports how many call
-    // sites an explicit-edge lowering would have to check. Two independent
-    // derivations agreeing is the evidence that replacing setjmp with branches
-    // is safe; the check-site count is the evidence that it is affordable.
+    // `ASH_VERIFY_TRAPS=only` reports where exception handlers are active and
+    // how many call sites an explicit-edge lowering would have to check. The
+    // handler map comes from AIR v2's Block::handler, which derives it by
+    // dataflow over the CFG — the only form that resolves a region with more
+    // than one normal exit.
     if let Ok(mode) = std::env::var("ASH_VERIFY_TRAPS") {
         if !mode.is_empty() && mode != "0" {
-            let mut with_traps = 0usize;
-            let mut unbalanced = 0usize;
-            let (mut checks, mut covered) = (0usize, 0usize);
-            for f in &bytecode.functions {
-                let has_trap = f
-                    .ops
-                    .iter()
-                    .any(|o| matches!(o, ash::opcodes::Opcode::Trap { .. }));
-                match ash::traps::analyze(&f.ops) {
-                    ash::traps::TrapShape::Nested(_) => {
-                        if has_trap {
-                            with_traps += 1;
-                        }
-                    }
-                    other => {
-                        unbalanced += 1;
-                        eprintln!("[traps] findex={} {} {:?}", f.findex, f.name(), other);
-                    }
-                }
-                let (c, cv) = ash::traps::check_sites(&f.ops);
-                checks += c;
-                covered += cv;
-            }
+            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
+                _ => ash::air_pipeline::AirOptLevel::O2,
+            };
+            let (funcs, sites, covered) = ash::air_pipeline::trap_report(&bytecode, level);
+            eprintln!("[traps] {funcs} functions have a block under a handler");
             eprintln!(
-                "[traps] {with_traps} functions with trap regions, {unbalanced} unresolvable"
-            );
-            eprintln!(
-                "[traps] {checks} may-throw sites, {covered} inside a handler ({:.1}%)",
-                if checks == 0 {
+                "[traps] {sites} may-throw sites, {covered} inside a handler ({:.1}%)",
+                if sites == 0 {
                     0.0
                 } else {
-                    covered as f64 * 100.0 / checks as f64
+                    covered as f64 * 100.0 / sites as f64
                 }
             );
             if mode == "only" {
@@ -604,80 +586,19 @@ fn run() -> Result<()> {
         }
     }
 
+    // `ASH_VERIFY_OSR=only` reports which loops on-stack replacement would
+    // accept. Computed over AIR, so loop discovery, dominance and the
+    // address-escape question all come from the IR that already models them.
     if let Ok(mode) = std::env::var("ASH_VERIFY_OSR") {
         if !mode.is_empty() && mode != "0" {
-            // `ASH_VERIFY_OSR=dump:<findex>` prints one function's opcodes with
-            // its analysis. Deciding whether a refusal is right needs to be
-            // done against the actual opcodes, not against an assumption about
-            // what the Haxe compiler emits.
-            if let Some(want) = mode
-                .strip_prefix("dump:")
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                for f in &bytecode.functions {
-                    if f.findex == want {
-                        let plan = ash::osr::analyze(&bytecode, f);
-                        eprintln!(
-                            "[osr] findex={} {} nregs={} back_edges={:?} refused={:?}",
-                            f.findex,
-                            f.name(),
-                            plan.nregs,
-                            plan.back_edges,
-                            plan.refusals
-                        );
-                        for (i, op) in f.ops.iter().enumerate() {
-                            eprintln!("[osr]   {i:>4}  {op:?}");
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            for line in ash::osr::report(&bytecode) {
-                eprintln!("[osr] {line}");
-            }
-            if mode == "only" {
-                return Ok(());
-            }
-        }
-    }
-
-    // `ASH_VERIFY_AIR=only` pushes every function through the AIR v2 pipeline
-    // (lower -> optimize -> verify -> serialize) and reports what survived,
-    // without running the program. Same reasoning as the two sweeps above: v2
-    // is 8k lines that has only ever seen its own unit tests, so whether it can
-    // round-trip real bytecode is a measurement over a corpus, and it has to be
-    // answerable before any engine is switched over to consume its output.
-    //
-    // `ASH_AIR_LEVEL=O0..O3` picks the opt level (default O2); O0 measures the
-    // lower/serialize identity alone. `ASH_VERIFY_AIR=dump:<findex>` prints one
-    // function's opcodes, IR and serialization.
-    if let Ok(mode) = std::env::var("ASH_VERIFY_AIR") {
-        if !mode.is_empty() && mode != "0" {
-            let level = match std::env::var("ASH_AIR_LEVEL") {
-                Ok(s) if !s.is_empty() => match ash::air_pipeline::parse_level(&s) {
-                    Some(l) => l,
-                    None => anyhow::bail!("invalid ASH_AIR_LEVEL '{s}' (expected O0|O1|O2|O3)"),
-                },
+            let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
+                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
                 _ => ash::air_pipeline::AirOptLevel::O2,
             };
-            let mut opts = ash::air_pipeline::AirPassOptions::default();
-            // Off by default: the per-pass verifier attaches a full IR dump to
-            // its error, which would bury a report with thousands of rows.
-            opts.verify_each = std::env::var("ASH_AIR_VERIFY_EACH")
-                .map(|v| v != "0" && !v.is_empty())
-                .unwrap_or(false);
-
-            if let Some(want) = mode
-                .strip_prefix("dump:")
-                .and_then(|s| s.parse::<i32>().ok())
-            {
-                for line in ash::air_pipeline::dump(&bytecode, want, level, &opts) {
-                    eprintln!("[air] {line}");
-                }
-                return Ok(());
-            }
-            for line in ash::air_pipeline::report(&bytecode, level, &opts) {
-                eprintln!("[air] {line}");
+            for line in ash::air_pipeline::osr_report(&bytecode, level) {
+                eprintln!("[osr] {line}");
             }
             if mode == "only" {
                 return Ok(());

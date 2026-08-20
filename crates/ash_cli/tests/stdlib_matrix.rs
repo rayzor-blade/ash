@@ -183,34 +183,43 @@ fn hybrid_promotions_observable() {
     );
 
     let hl_path = tests_dir.join(&case.hl);
-    let run = run_ash(
-        &ash_cli,
-        &hl_path,
-        AshMode::Hybrid {
-            jit_threshold: 1,
-            jit_max_args: 8,
-            jit_min_ops: 0,
-            jit_log: true,
-        },
-        Some(Duration::from_secs(120)),
-    );
-    assert!(!run.timed_out, "hybrid observability run timed out");
-    assert!(
-        run.output.status.success(),
-        "hybrid observability run failed:\n{}",
-        render_output(&run.output)
-    );
-
-    let stderr = String::from_utf8_lossy(&run.output.stderr);
-    let attempted = parse_metric(&stderr, "attempted").unwrap_or(0);
-    let succeeded = parse_metric(&stderr, "succeeded").unwrap_or(0);
-    let compiled_calls = parse_metric(&stderr, "compiled_calls").unwrap_or(0);
-    assert!(
-        attempted > 0 && succeeded > 0 && compiled_calls > 0,
-        "expected visible hybrid promotions, got attempted={} succeeded={} compiled_calls={}\nstderr:\n{}",
-        attempted,
-        succeeded,
-        compiled_calls,
-        stderr
-    );
+    // Promotion is ASYNC: an install can land after the program's final
+    // call, in which case compiled_calls is legitimately zero for that run —
+    // the counters are a race by design. This probe asserts the machinery
+    // CAN be observed working, so it retries a bounded number of times; a
+    // real regression still fails every attempt.
+    let mut last: Option<(u64, u64, u64, String)> = None;
+    for _ in 0..3 {
+        let run = run_ash(
+            &ash_cli,
+            &hl_path,
+            AshMode::Hybrid {
+                jit_threshold: 1,
+                jit_max_args: 8,
+                jit_min_ops: 0,
+                jit_log: true,
+            },
+            Some(Duration::from_secs(120)),
+        );
+        assert!(!run.timed_out, "hybrid observability run timed out");
+        assert!(
+            run.output.status.success(),
+            "hybrid observability run failed:\n{}",
+            render_output(&run.output)
+        );
+        let stderr = String::from_utf8_lossy(&run.output.stderr).into_owned();
+        let attempted = parse_metric(&stderr, "attempted").unwrap_or(0);
+        let succeeded = parse_metric(&stderr, "succeeded").unwrap_or(0);
+        let compiled_calls = parse_metric(&stderr, "compiled_calls").unwrap_or(0);
+        if attempted > 0 && succeeded > 0 && compiled_calls > 0 {
+            last = None;
+            break;
+        }
+        last = Some((attempted, succeeded, compiled_calls, stderr));
+    }
+    if let Some((attempted, succeeded, compiled_calls, stderr)) = last {
+        panic!(
+            "expected visible hybrid promotions in 3 attempts, last got attempted={attempted} succeeded={succeeded} compiled_calls={compiled_calls}\nstderr:\n{stderr}"
+        );
+    }
 }

@@ -749,10 +749,20 @@ fn produce_cranelift_osr_entries(
             &opt,
             pc,
         ) {
-            Ok(addr) => entries.push(OsrEntry {
-                site: pc as u64,
-                code: addr as *mut (),
-            }),
+            Ok(addr) => {
+                // Without this the entry's samples land in the profiler's
+                // `unknown` bucket — 73% of a NUC mandelbrot run was an
+                // unregistered OSR entry.
+                ash::profile::register_jit_code(
+                    findex as u32,
+                    ash::profile::Tier::Cranelift,
+                    addr,
+                );
+                entries.push(OsrEntry {
+                    site: pc as u64,
+                    code: addr as *mut (),
+                })
+            }
             Err(e) => {
                 if osr_logging() {
                     eprintln!(
@@ -3217,7 +3227,14 @@ impl HLInterpreter {
                 &opt,
                 header_pc,
             ) {
-                Ok(a) => a as u64,
+                Ok(a) => {
+                    ash::profile::register_jit_code(
+                        findex as u32,
+                        ash::profile::Tier::Cranelift,
+                        a,
+                    );
+                    a as u64
+                }
                 Err(e) => {
                     if osr_logging() {
                         eprintln!(

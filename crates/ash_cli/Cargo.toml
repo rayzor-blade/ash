@@ -13,3 +13,9 @@ anyhow = { workspace = true }
 inkwell = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
+
+# glibc's allocator returns freed memory to the process lazily, which wren_lift
+# measured as a large loss on Linux; jemalloc frees on time. Linux-only — macOS
+# libmalloc does not have the problem.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"

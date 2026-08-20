@@ -66,6 +66,12 @@ enum Mode {
 /// capture itself (see [`crash_handler_siginfo`]).
 static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
 
+
+// See Cargo.toml: glibc frees lazily; jemalloc is the wren_lift-proven fix.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 fn main() {
     // Resolve the crash-time options before installing the handler, so the
     // handler itself never touches the environment (getenv is not

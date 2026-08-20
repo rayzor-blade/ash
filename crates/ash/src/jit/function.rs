@@ -157,8 +157,47 @@ impl<'ctx> JITModule<'ctx> {
         name: &str,
         func_type: FunctionType<'ctx>,
     ) -> FunctionValue<'ctx> {
-        self.module
-            .add_function(name, func_type, Some(inkwell::module::Linkage::External))
+        let f = self
+            .module
+            .add_function(name, func_type, Some(inkwell::module::Linkage::External));
+        self.stamp_host_cpu(f);
+        f
+    }
+
+    /// Pin `f`'s codegen to the HOST CPU.
+    ///
+    /// MCJIT's engine compiles for a GENERIC target CPU — on x86-64 that is
+    /// SSE2 with no FMA3 and no AVX2, which is why the NUC produced the
+    /// unfused mandelbrot checksum and lost to an M1 on FP kernels it should
+    /// win. aarch64 never felt it because the base ISA already has fmadd.
+    /// Codegen honors per-FUNCTION `target-cpu`/`target-features` attributes
+    /// regardless of the engine's machine, so every function gets stamped at
+    /// creation — the one choke point both the whole-module and the tiered
+    /// promote paths pass through.
+    fn stamp_host_cpu(&self, f: FunctionValue<'ctx>) {
+        use std::sync::OnceLock;
+        static HOST: OnceLock<(String, String)> = OnceLock::new();
+        let (cpu, feats) = HOST.get_or_init(|| {
+            (
+                inkwell::targets::TargetMachine::get_host_cpu_name()
+                    .to_string_lossy()
+                    .into_owned(),
+                inkwell::targets::TargetMachine::get_host_cpu_features()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        });
+        let loc = inkwell::attributes::AttributeLoc::Function;
+        if !cpu.is_empty() {
+            f.add_attribute(loc, self.context.create_string_attribute("target-cpu", cpu));
+        }
+        if !feats.is_empty() {
+            f.add_attribute(
+                loc,
+                self.context
+                    .create_string_attribute("target-features", feats),
+            );
+        }
     }
 
     pub(crate) fn get_or_create_function_value(

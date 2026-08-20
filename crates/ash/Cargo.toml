@@ -43,3 +43,7 @@ path = "src/main.rs"
 
 [build-dependencies]
 bindgen = "0.70.1"
+
+# See ash_cli/Cargo.toml — glibc frees lazily on Linux; jemalloc frees on time.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"

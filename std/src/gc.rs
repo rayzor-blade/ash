@@ -119,10 +119,32 @@ static MUTATOR_THREAD: AtomicU64 = AtomicU64::new(0);
 /// region ever needs an `alloc_sizes` span entry.
 const TLAB_MAX_OBJ: usize = LINE_SIZE;
 
+/// The current thread's identity, cheap enough for a per-allocation check.
+///
+/// `libc::pthread_self` was 15.8% of an allocation-bound profile — it is a
+/// real function call. On macOS/aarch64 the pthread pointer lives in
+/// TPIDRRO_EL0, so reading the register directly is the same value for one
+/// instruction. (The low bits carry the CPU number on some OS versions;
+/// masking 3 bits matches what libpthread itself does — and both sides of
+/// every comparison go through this same function, so even a masking
+/// difference could not produce a false positive.)
+#[inline(always)]
+fn thread_self_fast() -> u64 {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    unsafe {
+        let tpidrro: u64;
+        std::arch::asm!("mrs {}, TPIDRRO_EL0", out(reg) tpidrro, options(nomem, nostack, preserves_flags));
+        tpidrro & !0x7
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    unsafe {
+        libc::pthread_self() as u64
+    }
+}
+
 #[inline]
 fn on_mutator() -> bool {
-    let me = unsafe { libc::pthread_self() } as u64;
-    MUTATOR_THREAD.load(Ordering::Relaxed) == me
+    MUTATOR_THREAD.load(Ordering::Relaxed) == thread_self_fast()
 }
 
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.
@@ -187,6 +209,18 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     ASH_TLAB_CUR.store(base as usize + aligned, Ordering::Relaxed);
     ASH_TLAB_LIMIT.store(base as usize + BLOCK_SIZE, Ordering::Relaxed);
     Some(unsafe { NonNull::new_unchecked(base) })
+}
+
+/// Trace flags, read once. `std::env::var` per allocation took the macOS
+/// process-wide getenv lock on the hottest path in the program — the exact
+/// mistake the opcode-dispatch env flags already document.
+fn trace_alloc() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_TRACE_ALLOC").is_ok())
+}
+fn trace_freed() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_TRACE_FREED").is_ok())
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -874,7 +908,7 @@ impl ImmixAllocator {
             NonNull::new_unchecked(ptr)
         };
 
-        if std::env::var("ASH_GC_TRACE_ALLOC").is_ok() {
+        if trace_alloc() {
             let base = self.heap.memory.as_ptr() as usize;
             eprintln!("[gc-alloc] {:#x} size={size}", base + point);
         }
@@ -1538,7 +1572,7 @@ impl ImmixAllocator {
 
             if is_empty && !is_tlab {
                 self.heap.used_blocks.remove(&block_addr);
-                if std::env::var("ASH_GC_TRACE_FREED").is_ok() {
+                if trace_freed() {
                     let base = self.heap.memory.as_ptr() as usize;
                     eprintln!(
                         "[gc-freed] {:#x}..{:#x}",
@@ -1562,17 +1596,24 @@ impl ImmixAllocator {
         // Safe: allocate() zeroes on reuse, and acquire_free_block REUSEs the
         // range before live data is written. Batched one madvise per
         // contiguous run to keep sweep cheap.
-        // Only pages beyond a resident working set are handed back. An
-        // allocation-churn workload frees and immediately re-acquires the
-        // same blocks every collection; handing each one back and reclaiming
-        // it again cost a REUSABLE+REUSE madvise pair per block per cycle —
-        // acquire-side madvise alone was 4.8% of mandelbrot. Blocks inside
-        // the working set skip both syscalls; long-idle processes still
-        // deflate, because a genuinely shrinking heap pushes its surplus past
-        // the threshold.
-        let resident_target = (self.heap.used_blocks.len() / 2).max(16);
-        if self.heap.free_blocks.len() > resident_target && !freed.is_empty() {
-            let surplus = self.heap.free_blocks.len() - resident_target;
+        // Pages go back to the OS only when the process has been QUIET —
+        // specifically, when no collection ran for a heartbeat interval, the
+        // signal the heartbeat trigger already computes. A churn workload
+        // frees and re-acquires the same blocks every cycle, and any
+        // per-sweep hand-back (even thresholded: keying the working set on
+        // LIVE blocks fails once a bump region keeps liveness tiny while
+        // churn is huge) turns into a REUSABLE+REUSE madvise pair per block
+        // per cycle — still 17.3% of mandelbrot after the first attempt at
+        // a threshold. Idle processes deflate on their heartbeat
+        // collections, which is what the mechanism was for.
+        let quiet = self.heap.last_collect.elapsed() >= HEARTBEAT;
+        if quiet && !freed.is_empty() {
+            let resident_target = 16;
+            let surplus = self
+                .heap
+                .free_blocks
+                .len()
+                .saturating_sub(resident_target);
             let mut hand_back: Vec<usize> = freed
                 .iter()
                 .copied()
@@ -1786,7 +1827,7 @@ pub unsafe extern "C" fn hlp_gc_init() {
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
     // The thread announcing its stack top IS the mutator — record it so the
     // TLAB fast path can tell itself apart from broker threads.
-    MUTATOR_THREAD.store(libc::pthread_self() as u64, Ordering::Relaxed);
+    MUTATOR_THREAD.store(thread_self_fast(), Ordering::Relaxed);
     let mut gc = gc_locked();
     gc.stack_top = top;
 }

@@ -412,6 +412,15 @@ impl AirCodegen<'_, '_> {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             for pi in 0..self.f.blocks[bid.idx()].phis.len() {
                 let dst = self.f.blocks[bid.idx()].phis[pi].dst;
+                // A void phi (AIR merges void call results across arms) has
+                // no machine representation and no legal use; it gets no
+                // block parameter. This was mandelbrot's whole bottleneck:
+                // declining the kernel for it closed the Cranelift OSR door,
+                // and the loop interpreted while a promote-sized LLVM
+                // compile ran.
+                if self.is_void(dst) {
+                    continue;
+                }
                 let ty = self.value_clif_ty(dst)?;
                 let v = self.b.append_block_param(blk, ty);
                 self.vals[dst.idx()] = Some(v);
@@ -472,6 +481,9 @@ impl AirCodegen<'_, '_> {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             for pi in 0..self.f.blocks[bid.idx()].phis.len() {
                 let dst = self.f.blocks[bid.idx()].phis[pi].dst;
+                if self.is_void(dst) {
+                    continue; // no machine representation — see run()
+                }
                 let ty = self.value_clif_ty(dst)?;
                 let v = self.b.append_block_param(blk, ty);
                 self.vals[dst.idx()] = Some(v);
@@ -497,43 +509,70 @@ impl AirCodegen<'_, '_> {
             self.b.ins().stack_store(v, slot, 0);
         }
 
-        // Live-ins: used by an emitted block, defined by none of them (the
-        // header's phi destinations count as defined — they are its block
-        // params). Loaded from the buffer at their de-SSA register slot.
+        // Live-ins, in EMISSION order: any use not preceded by a definition
+        // in that order loads from the transfer buffer at its de-SSA
+        // register slot. Emission order is the binding constraint (a CLIF
+        // value must exist before its use), and it is also semantically
+        // right: `buf[value_reg(v)]` is what the interpreter's register held
+        // at the transfer point, which is de-SSA truth for every value whose
+        // definition the header-entry path bypasses. A mere
+        // "defined-anywhere-in-region" rule missed exactly those — a def on
+        // a path the header does not dominate left its uses reading an
+        // unmaterialized value (mandelbrot's kernel, v83).
         let mut defined = vec![false; self.f.values.len()];
-        let mut used = vec![false; self.f.values.len()];
-        for &bid in &order {
-            let blk = &self.f.blocks[bid.idx()];
-            for phi in &blk.phis {
-                defined[phi.dst.idx()] = true;
-            }
-            for i in &blk.instrs {
-                if let Some(d) = i.dst() {
-                    defined[d.idx()] = true;
+        let mut live_in = vec![false; self.f.values.len()];
+        {
+            let mut note_use = |u: ValueId, defined: &[bool], live_in: &mut [bool]| {
+                if !defined[u.idx()] {
+                    live_in[u.idx()] = true;
                 }
-                for u in i.uses() {
-                    used[u.idx()] = true;
+            };
+            for &bid in &order {
+                let blk = &self.f.blocks[bid.idx()];
+                for phi in &blk.phis {
+                    defined[phi.dst.idx()] = true;
                 }
-            }
-            for u in blk.term.uses() {
-                used[u.idx()] = true;
-            }
-            // Phi arguments this block supplies to emitted successors.
-            for succ in blk.term.successors() {
-                if succ.idx() < self.blocks.len() && self.blocks[succ.idx()].is_some() {
-                    for phi in &self.f.blocks[succ.idx()].phis {
-                        if let Some((_, v)) = phi.incoming.iter().find(|(p, _)| *p == bid) {
-                            used[v.idx()] = true;
+                for i in &blk.instrs {
+                    for u in i.uses() {
+                        note_use(u, &defined, &mut live_in);
+                    }
+                    if let Some(d) = i.dst() {
+                        defined[d.idx()] = true;
+                    }
+                }
+                for u in blk.term.uses() {
+                    note_use(u, &defined, &mut live_in);
+                }
+                for succ in blk.term.successors() {
+                    if succ.idx() < self.blocks.len() && self.blocks[succ.idx()].is_some() {
+                        for phi in &self.f.blocks[succ.idx()].phis {
+                            if let Some((_, v)) = phi.incoming.iter().find(|(p, _)| *p == bid) {
+                                note_use(*v, &defined, &mut live_in);
+                            }
                         }
                     }
                 }
             }
         }
         for v in 0..self.f.values.len() {
-            if used[v] && !defined[v] {
+            if live_in[v] {
                 let vid = ValueId(v as u32);
                 if self.is_void(vid) {
                     continue;
+                }
+                // Used before its in-region definition in emission order:
+                // the header-entry path can bypass the def, and whether the
+                // buffer slot or the (later) definition is the right value
+                // is a dataflow question this entry does not answer. The
+                // first attempt answered it wrong and produced an entry
+                // that looped forever. Decline; the function's ordinary
+                // compiled entry still serves every future CALL, which is
+                // what a frequently-invoked function actually needs.
+                if defined[v] {
+                    bail!(
+                        "OSR entry: v{v} is used before its in-region definition; \
+                         header-relative liveness is ambiguous"
+                    );
                 }
                 let ty = self.value_clif_ty(vid)?;
                 let reg = self.f.value_reg(vid);
@@ -545,6 +584,9 @@ impl AirCodegen<'_, '_> {
         // Into the header, phi args from the buffer.
         let mut args: Vec<BlockArg> = Vec::new();
         for phi in &self.f.blocks[header].phis {
+            if self.is_void(phi.dst) {
+                continue; // void phis have no block parameter
+            }
             let ty = abi_class(self.ctx.type_kind(self.f.value_ty(phi.dst).0 as usize)?)
                 .clif_type()
                 .ok_or_else(|| anyhow!("void phi"))?;
@@ -1671,6 +1713,9 @@ impl AirCodegen<'_, '_> {
         for pi in 0..n {
             let phi = &self.f.blocks[to.idx()].phis[pi];
             let dst = phi.dst;
+            if self.is_void(dst) {
+                continue; // void phis have no block parameter
+            }
             let src = phi
                 .incoming
                 .iter()

@@ -717,6 +717,27 @@ impl<'ctx> JITModule<'ctx> {
             return Err(anyhow!("osr entry {name}: zero address"));
         }
         crate::profile::count("osr entries compiled", 1);
+        // Register EVERY function this module defines, not just the entry.
+        // The module carries its own copies of the native-caller thunks and
+        // constant plumbing; on a NUC mandelbrot profile 72% of samples sat
+        // in those unregistered ranges, filed under `unknown` while the
+        // entry itself attributed fine.
+        for f in osr_module.get_functions() {
+            if f.count_basic_blocks() == 0 {
+                continue; // declaration, defined elsewhere
+            }
+            if let Ok(sym) = f.get_name().to_str() {
+                if let Ok(a) = self.execution_engine.get_function_address(sym) {
+                    if a != 0 && a as u64 != addr as u64 {
+                        crate::profile::register_jit_code(
+                            findex as u32,
+                            crate::profile::Tier::Llvm,
+                            a as usize,
+                        );
+                    }
+                }
+            }
+        }
         // Register the entry so samples inside it are charged to the function
         // it belongs to. Without this the sampler has no symbol for the
         // address range and reports the time as `unknown` -- which on nbody was

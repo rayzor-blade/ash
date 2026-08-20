@@ -109,7 +109,6 @@ pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvir
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic {
-    let mut allocator = crate::gc::gc_locked();
     let obj = (*t).__bindgen_anon_1.obj;
     if obj.is_null() {
         return ptr::null_mut();
@@ -130,7 +129,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     // Allocate memory — `allocate` returns zeroed memory (it memsets the
     // region against stale data in reused blocks), so zeroing again here
     // was one of the two memsets the profiler charged to every allocation.
-    let ptr = allocator.allocate(size).expect("Out of memory");
+    let ptr = crate::gc::gc_alloc(size).expect("Out of memory");
 
     let o = ptr.as_ptr() as *mut hl::vobj;
     if (*t).kind != hl::hl_type_kind_HSTRUCT {
@@ -161,10 +160,8 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     // let flags = mem_kind | MEM_ZERO;
-    let mut gc = crate::gc::gc_locked();
 
-    let d = gc
-        .allocate(std::mem::size_of::<vdynamic>())
+    let d = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
         .expect("Out of memory")
         .as_ptr() as *mut vdynamic;
 
@@ -1328,7 +1325,6 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     let index: i32;
     let address_offset: isize;
 
-    let mut allocator = crate::gc::gc_locked();
 
     // expand data
     if hl_is_ptr(t) {
@@ -1336,8 +1332,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
         if index > HL_DYNOBJ_INDEX_MASK as i32 {
             hlp_error(str_to_uchar_ptr("Too many dynobj values\0"));
         }
-        let nvalues = allocator
-            .allocate(((*o).nvalues as usize + 1) * mem::size_of::<*mut c_void>())
+        let nvalues = crate::gc::gc_alloc(((*o).nvalues as usize + 1) * mem::size_of::<*mut c_void>())
             .expect("Failed to allocate memory")
             .as_ptr() as *mut *mut c_void;
         ptr::copy_nonoverlapping((*o).values, nvalues, (*o).nvalues as usize);
@@ -1365,8 +1360,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
             hlp_error(str_to_uchar_ptr("Too many dynobj values\0"));
         }
 
-        let new_data = allocator
-            .allocate(raw_size as usize + pad + size)
+        let new_data = crate::gc::gc_alloc(raw_size as usize + pad + size)
             .expect("Failed to allocate memory")
             .as_ptr() as *mut i8;
         if raw_size == (*o).raw_size {
@@ -1402,8 +1396,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     }
 
     // update field table
-    let new_lookup = allocator
-        .allocate(mem::size_of::<hl_field_lookup>() * ((*o).nfields as usize + 1))
+    let new_lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * ((*o).nfields as usize + 1))
         .expect("Failed to allocate memory")
         .as_ptr() as *mut hl_field_lookup;
     let field_pos = hlp_lookup_find_index((*o).lookup, (*o).nfields, hfield);
@@ -1505,11 +1498,9 @@ pub fn hlp_pad_size(size: i32, t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
-    let mut allocator = crate::gc::gc_locked();
 
     // Allocate memory for the vdynobj structure
-    let obj = allocator
-        .allocate(mem::size_of::<vdynobj>())
+    let obj = crate::gc::gc_alloc(mem::size_of::<vdynobj>())
         .expect("Failed to allocate memory for vdynobj")
         .as_ptr() as *mut vdynobj;
 
@@ -1530,15 +1521,13 @@ pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
 
     // Allocate initial memory for lookup table (we'll start with a small size)
     let initial_lookup_size = 4; // Starting with space for 4 fields
-    (*obj).lookup = allocator
-        .allocate(mem::size_of::<hl_field_lookup>() * initial_lookup_size)
+    (*obj).lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * initial_lookup_size)
         .expect("Failed to allocate memory for lookup table")
         .as_ptr() as *mut hl_field_lookup;
 
     // Allocate initial memory for values (we'll start with a small size)
     let initial_values_size = 4; // Starting with space for 4 values
-    (*obj).values = allocator
-        .allocate(mem::size_of::<*mut std::ffi::c_void>() * initial_values_size)
+    (*obj).values = crate::gc::gc_alloc(mem::size_of::<*mut std::ffi::c_void>() * initial_values_size)
         .expect("Failed to allocate memory for values")
         .as_ptr() as *mut *mut std::ffi::c_void;
 
@@ -1559,9 +1548,7 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
     let mut nvalues = 0;
 
     // Copy the lookup table
-    let mut allocator = crate::gc::gc_locked();
-    (*o).lookup = allocator
-        .allocate(mem::size_of::<hl_field_lookup>() * nfields as usize)
+    (*o).lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * nfields as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut hl_field_lookup;
     (*o).nfields = nfields;
@@ -1588,13 +1575,11 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
     }
 
     // Copy the data & rebind virtual addresses
-    (*o).raw_data = allocator
-        .allocate(raw_size as usize)
+    (*o).raw_data = crate::gc::gc_alloc(raw_size as usize)
         .expect("Failed to allocate memory")
         .as_ptr() as *mut i8;
     (*o).raw_size = raw_size;
-    (*o).values = allocator
-        .allocate(nvalues as usize * mem::size_of::<*mut std::ffi::c_void>())
+    (*o).values = crate::gc::gc_alloc(nvalues as usize * mem::size_of::<*mut std::ffi::c_void>())
         .expect("Failed to allocate memory")
         .as_ptr() as *mut *mut std::ffi::c_void;
     (*o).nvalues = nvalues;
@@ -1684,7 +1669,6 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
         }
     }
 
-    let mut gc = crate::gc::gc_locked();
 
     match (*obj).t.as_ref().unwrap().kind {
         hl::hl_type_kind_HOBJ => {
@@ -1717,8 +1701,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                 }
             }
 
-            v = gc
-                .allocate(
+            v = crate::gc::gc_alloc(
                     mem::size_of::<vvirtual>()
                         + mem::size_of::<*mut std::ffi::c_void>()
                             * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,
@@ -1827,8 +1810,7 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
             }
 
             let mut need_recast: i64 = 0;
-            v = gc
-                .allocate(
+            v = crate::gc::gc_alloc(
                     mem::size_of::<vvirtual>()
                         + mem::size_of::<*mut std::ffi::c_void>()
                             * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,

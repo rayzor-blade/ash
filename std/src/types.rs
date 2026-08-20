@@ -428,7 +428,6 @@ pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
-    let mut gc = crate::gc::gc_locked();
 
     let tenum = (*t).__bindgen_anon_1.tenum;
     if tenum.is_null() {
@@ -444,8 +443,7 @@ pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut ven
     let has_ptr = (*construct).hasptr;
 
     // Allocate memory
-    let ptr = gc
-        .allocate(std::mem::size_of::<hl::venum>() + size)
+    let ptr = crate::gc::gc_alloc(std::mem::size_of::<hl::venum>() + size)
         .expect("Out of memory");
 
     // Initialize the enum

@@ -271,7 +271,6 @@ pub static mut fun_var_args: unsafe extern "C" fn() = _fun_var_args;
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type) -> *mut vclosure {
-    let mut gc = crate::gc::gc_locked();
     let wrap = hlc_get_wrapper(to);
     if wrap.is_null() {
         return ptr::null_mut();
@@ -284,8 +283,7 @@ pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type
         return ptr::null_mut();
     }
 
-    let c = gc
-        .allocate(std::mem::size_of::<vclosure_wrapper>())
+    let c = crate::gc::gc_alloc(std::mem::size_of::<vclosure_wrapper>())
         .unwrap()
         .as_ptr() as *mut vclosure_wrapper;
     (*c).cl.t = to;
@@ -510,10 +508,8 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
     fvalue: *mut libc::c_void,
 ) -> *mut vclosure {
     let size = mem::size_of::<vclosure>();
-    let mut gc = crate::gc::gc_locked();
 
-    let c_ptr = gc
-        .allocate(size)
+    let c_ptr = crate::gc::gc_alloc(size)
         .expect("Failed to allocate memory for closure")
         .as_ptr() as *mut vclosure;
 

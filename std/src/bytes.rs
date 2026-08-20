@@ -26,8 +26,7 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
         panic!("invalid size for bytes allocation")
     }
     let _size: usize = size as usize;
-    let mut allocator = crate::gc::gc_locked();
-    let bytes_ptr = allocator.allocate(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte;
+    let bytes_ptr = crate::gc::gc_alloc(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte;
 
     bytes_ptr
 }

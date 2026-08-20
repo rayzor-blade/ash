@@ -144,6 +144,32 @@ impl<'b> ModuleInfo for AshModule<'b> {
             .is_some_and(|t| t.kind == hl_type_kind_HF32 || t.kind == hl_type_kind_HF64)
     }
 
+    fn intrinsic_of(&self, findex: usize) -> Option<air::v2::ir::IntrinsicKind> {
+        use air::v2::ir::IntrinsicKind as K;
+        use crate::intrinsics::NativeIntrinsic as NI;
+        let n = &self.bc.natives[*self.native_at.get(&findex)?];
+        if n.lib != "std" && n.lib != "?std" {
+            return None;
+        }
+        // ptr_compare is not in the backend emitter table (it is two-arg);
+        // its body is `(a as usize).cmp(&b)` in std/src/cast.rs.
+        if n.name == "ptr_compare" {
+            return Some(K::PtrCompare);
+        }
+        Some(match crate::intrinsics::lookup("std", n.name.as_str())? {
+            NI::Sqrt => K::Sqrt,
+            NI::Abs => K::Abs,
+            NI::Floor => K::Floor,
+            NI::Ceil => K::Ceil,
+            NI::RoundHalfUp => K::RoundHalfUp,
+            NI::FloorToI32 => K::FloorToI32,
+            NI::CeilToI32 => K::CeilToI32,
+            NI::RoundHalfUpToI32 => K::RoundHalfUpToI32,
+            NI::IsNaN => K::IsNaN,
+            NI::IsFinite => K::IsFinite,
+        })
+    }
+
     fn callee(&self, findex: usize) -> Option<CalleeBody> {
         if !self.offer_callees {
             return None;

@@ -190,6 +190,49 @@ pub enum Effect {
     ClobberAll,
 }
 
+/// A stdlib operation the IR expresses directly instead of as an FFI call.
+///
+/// HashLink is statically typed: the bytecode already names `std@math_sqrt`
+/// as a direct call to a known symbol with a known signature. Leaving it a
+/// [`Instr::Call`] threw that knowledge away twice over — every call is
+/// [`Effect::ClobberAll`], so a single `sqrt` in a loop pinned every
+/// loop-invariant load beside it, and every engine paid an FFI boundary for
+/// an operation that is one machine instruction. rayzor builds these into
+/// its MIR for the same reason.
+///
+/// Each kind's semantics are pinned by `ash_std`'s implementations —
+/// `RoundHalfUp` is `floor(x + 0.5)` (HashLink's rounding, not IEEE's), and
+/// the `..ToI32` conversions saturate with NaN → 0 (Rust `as`), which is
+/// why backends emit saturating conversions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntrinsicKind {
+    /// `sqrt(x)` — f64 → f64.
+    Sqrt,
+    /// `|x|` — f64 → f64.
+    Abs,
+    /// `floor(x)` — f64 → f64.
+    Floor,
+    /// `ceil(x)` — f64 → f64.
+    Ceil,
+    /// `floor(x + 0.5)` — f64 → f64.
+    RoundHalfUp,
+    /// `floor(x)` saturating to i32.
+    FloorToI32,
+    /// `ceil(x)` saturating to i32.
+    CeilToI32,
+    /// `floor(x + 0.5)` saturating to i32.
+    RoundHalfUpToI32,
+    /// `x != x` — f64 → bool.
+    IsNaN,
+    /// `|x| < inf` — f64 → bool.
+    IsFinite,
+    /// Three-way POINTER IDENTITY comparison: `(a as usize).cmp(b)` mapped
+    /// to {-1, 0, 1}. `ash_std`'s `hlp_ptr_compare` verbatim — it never
+    /// dereferences, which is what makes it pure. (The content-aware
+    /// `hlp_dyn_compare` is a different function and stays a call.)
+    PtrCompare,
+}
+
 /// A phi instruction at a block head: `dst = phi[(pred, value), ...]`.
 /// `incoming` has exactly one entry per predecessor block (set semantics;
 /// order is not significant).
@@ -270,6 +313,16 @@ pub enum Instr {
         op: UnOp,
         dst: ValueId,
         src: ValueId,
+    },
+    /// A recognized stdlib operation — see [`IntrinsicKind`]. `fun` keeps the
+    /// original native findex so [`serialize`](super::serialize) can lower it
+    /// back to the `Call` the flat form requires, the same round-trip
+    /// contract [`Instr::Fma`] follows.
+    Intrinsic {
+        kind: IntrinsicKind,
+        fun: usize,
+        dst: ValueId,
+        args: Vec<ValueId>,
     },
     /// Direct call by findex (arity re-derived at serialization).
     Call {
@@ -492,6 +545,8 @@ impl Instr {
             | Instr::BinOp { dst, .. }
             | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
+            | Instr::Intrinsic { dst, .. }
+            | Instr::Intrinsic { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }
@@ -567,7 +622,9 @@ impl Instr {
             | Instr::CellSet { src, .. } => vec![*src],
             Instr::BinOp { a, b, .. } => vec![*a, *b],
             Instr::Fma { a, b, c, .. } => vec![*a, *b, *c],
-            Instr::Call { args, .. } | Instr::CallMethod { args, .. } => args.clone(),
+            Instr::Call { args, .. }
+            | Instr::CallMethod { args, .. }
+            | Instr::Intrinsic { args, .. } => args.clone(),
             Instr::CallClosure { fun, args, .. } => {
                 let mut v = vec![*fun];
                 v.extend(args.iter().copied());
@@ -607,6 +664,11 @@ impl Instr {
             | Instr::Null { .. }
             | Instr::UnOp { .. }
             | Instr::Fma { .. }
+            // Pure BY CONSTRUCTION: only operations whose ash_std bodies read
+            // nothing but their argument are admitted to IntrinsicKind. This
+            // is the fact the FFI form discarded — one sqrt in a loop was a
+            // ClobberAll that pinned every loop-invariant load around it.
+            | Instr::Intrinsic { .. }
             | Instr::TypeConst { .. }
             | Instr::CellRef { .. }
             | Instr::RefOffset { .. }
@@ -724,7 +786,9 @@ impl Instr {
                 one(b);
                 one(c);
             }
-            Instr::Call { args, .. } | Instr::CallMethod { args, .. } => {
+            Instr::Call { args, .. }
+            | Instr::CallMethod { args, .. }
+            | Instr::Intrinsic { args, .. } => {
                 args.iter_mut().for_each(one)
             }
             Instr::CallClosure { fun, args, .. } => {
@@ -782,6 +846,7 @@ impl Instr {
             | Instr::BinOp { dst, .. }
             | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
+            | Instr::Intrinsic { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }

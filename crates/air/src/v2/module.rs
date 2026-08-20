@@ -209,6 +209,17 @@ pub trait ModuleInfo {
         None
     }
 
+    /// The [`IntrinsicKind`](super::ir::IntrinsicKind) for `findex`, when the
+    /// embedder knows the native's body is one of the operations the IR
+    /// expresses directly. `None` — the default — leaves the call an FFI
+    /// call. The embedder is VOUCHING for semantics here: a kind must only
+    /// be answered when the runtime body matches the kind's documented
+    /// contract exactly.
+    fn intrinsic_of(&self, findex: usize) -> Option<super::ir::IntrinsicKind> {
+        let _ = findex;
+        None
+    }
+
     /// True when values of `ty` are HL floats (`f32`/`f64`). Float-only
     /// rewrites — notably [`Fma`](super::ir::Instr::Fma) formation — consult
     /// this and refuse when it is false.

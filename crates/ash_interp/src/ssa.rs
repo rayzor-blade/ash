@@ -298,6 +298,7 @@ fn unsupported_instr(i: &Instr) -> Option<&'static str> {
         | Instr::Null { .. }
         | Instr::BinOp { .. }
         | Instr::Fma { .. }
+        | Instr::Intrinsic { .. }
         | Instr::UnOp { .. }
         | Instr::Call { .. }
         | Instr::CallMethod { .. }

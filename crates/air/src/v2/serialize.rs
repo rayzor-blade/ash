@@ -47,6 +47,13 @@ pub struct Serialized {
     pub ops: Vec<Opcode>,
     pub reg_types: Vec<TypeRef>,
     pub num_regs: usize,
+    /// Opcode index where each block's emission begins, indexed by
+    /// [`BlockId`]. For a loop header this is the pc its back-edges target
+    /// (the `Label`, when one was required) — i.e. exactly the pc an
+    /// interpreter running `ops` observes as the jump destination. This is
+    /// what lets an OSR producer turn [`crate::v2::analysis`] block ids into
+    /// entry sites without re-discovering headers by probe timing.
+    pub block_pcs: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -447,10 +454,12 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     }
 
     let num_regs = reg_types.len();
+    let block_pcs = entry_of_block.iter().map(|&e| starts[e]).collect();
     Ok(Serialized {
         ops,
         reg_types,
         num_regs,
+        block_pcs,
     })
 }
 
@@ -556,6 +565,25 @@ fn emit_instr(
 ) -> Result<()> {
     match ins {
         Instr::Param { .. } => {}
+        // Back to the direct native call the bytecode had — the flat form
+        // has no intrinsic opcode, the same round-trip Fma takes.
+        Instr::Intrinsic { fun, dst, args, .. } => {
+            let d = rg(*dst);
+            match args.len() {
+                1 => ops.push(Opcode::Call1 {
+                    dst: d,
+                    fun: crate::opcodes::RefFun(*fun),
+                    arg0: rg(args[0]),
+                }),
+                2 => ops.push(Opcode::Call2 {
+                    dst: d,
+                    fun: crate::opcodes::RefFun(*fun),
+                    arg0: rg(args[0]),
+                    arg1: rg(args[1]),
+                }),
+                n => bail!("intrinsic with {n} args has no serialization"),
+            }
+        }
         Instr::Copy { dst, src } => {
             let (d, s) = (rg(*dst), rg(*src));
             if d != s {

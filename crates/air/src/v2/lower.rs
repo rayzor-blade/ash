@@ -524,7 +524,46 @@ pub fn lower_with(
             handler: handlers[b],
         });
     }
+    recognize_intrinsics(&mut func, info);
     Ok(func)
+}
+
+/// Rewrite direct calls to natives the embedder names as intrinsics into
+/// [`Instr::Intrinsic`].
+///
+/// This is where "we should not be calling math ops through FFI" is
+/// enforced: HashLink's bytecode names `std@math_sqrt` statically, so the
+/// call becomes an IR operation with a declared effect — [`Effect::Pure`]
+/// for every admitted kind — instead of a [`Effect::ClobberAll`] boundary.
+/// One `sqrt` in nbody's loop pinned every loop-invariant load beside it.
+///
+/// Runs on every lowering (all opt levels), and again implicitly for calls
+/// the inliner exposes, because inlined bodies were themselves lowered
+/// through here.
+fn recognize_intrinsics(f: &mut Function, info: &dyn ModuleInfo) {
+    use std::collections::HashMap as Map;
+    let mut cache: Map<usize, Option<IntrinsicKind>> = Map::new();
+    for b in &mut f.blocks {
+        for ins in &mut b.instrs {
+            let Instr::Call { dst, fun, args } = ins else {
+                continue;
+            };
+            let kind = *cache
+                .entry(*fun)
+                .or_insert_with(|| info.intrinsic_of(*fun));
+            let Some(kind) = kind else { continue };
+            let want = if kind == IntrinsicKind::PtrCompare { 2 } else { 1 };
+            if args.len() != want {
+                continue;
+            }
+            *ins = Instr::Intrinsic {
+                kind,
+                fun: *fun,
+                dst: *dst,
+                args: std::mem::take(args),
+            };
+        }
+    }
 }
 
 /// Lowers a whole module's functions against one [`ModuleInfo`], accumulating

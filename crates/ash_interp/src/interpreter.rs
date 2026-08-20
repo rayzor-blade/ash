@@ -9434,10 +9434,16 @@ impl HLInterpreter {
         use ValueTypeKind::*;
         match ValueTypeKind::try_from(ret_kind).unwrap_or(HNULL) {
             HVOID => NanBoxedValue::void(),
-            HI32 | HUI8 | HUI16 => NanBoxedValue::from_i32(raw as i32),
+            HI32 => NanBoxedValue::from_i32(raw as i32),
+            // A callee returning bool/u8/u16 only defines the low bits of the
+            // return register — SysV x86-64 leaves the rest undefined, and the
+            // dispatch reads the full register. Truncate to the ABI width or
+            // Linux garbage bits turn a returned `false` into `true`.
+            HUI8 => NanBoxedValue::from_i32(raw as u8 as i32),
+            HUI16 => NanBoxedValue::from_i32(raw as u16 as i32),
             HI64 => NanBoxedValue::from_i64(raw),
             HF32 | HF64 => NanBoxedValue::from_f64(f64::from_bits(raw as u64)),
-            HBOOL => NanBoxedValue::from_bool(raw != 0),
+            HBOOL => NanBoxedValue::from_bool((raw as u8) != 0),
             HBYTES => NanBoxedValue::from_bytes_ptr(raw as usize),
             _ => {
                 // All other types are pointer-like (HOBJ, HDYN, HFUN, HARRAY, etc.)

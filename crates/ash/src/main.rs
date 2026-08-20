@@ -11,6 +11,11 @@ struct Cli {
     file: Option<PathBuf>,
 }
 
+// glibc frees lazily on Linux; jemalloc frees on time (wren_lift-proven).
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 pub fn main() {
     let cli = Cli::parse();
     ash::profile::init();

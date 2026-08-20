@@ -33,6 +33,55 @@ const PRESSURE_RELIEF_MIN_INTERVAL: Duration = Duration::from_millis(500);
 // ── Env-gated config (OnceLock-cached — uncached getenv on the alloc hot
 // path cost wren_lift 30x throughput; gc.rs:38-46) ──────────────────────────
 
+/// How many words [`spill_callee_saved`] writes.
+const CALLEE_SAVED_WORDS: usize = 10;
+
+/// Write the callee-saved general-purpose registers into `buf`.
+///
+/// A conservative collector that scans only the machine stack misses anything
+/// the compiler chose to keep in a register across a call. On aarch64 that is
+/// x19–x28; the float registers (d8–d15) are excluded deliberately, because a
+/// GC pointer is never held in one.
+///
+/// `#[inline(never)]` so the store cannot be sunk past the scan that reads it.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+fn spill_callee_saved(buf: &mut [usize; CALLEE_SAVED_WORDS]) {
+    unsafe {
+        std::arch::asm!(
+            "stp x19, x20, [{p}, #0]",
+            "stp x21, x22, [{p}, #16]",
+            "stp x23, x24, [{p}, #32]",
+            "stp x25, x26, [{p}, #48]",
+            "stp x27, x28, [{p}, #64]",
+            p = in(reg) buf.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// x86-64: rbx, rbp, r12–r15.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+fn spill_callee_saved(buf: &mut [usize; CALLEE_SAVED_WORDS]) {
+    unsafe {
+        std::arch::asm!(
+            "mov [{p} + 0], rbx",
+            "mov [{p} + 8], rbp",
+            "mov [{p} + 16], r12",
+            "mov [{p} + 24], r13",
+            "mov [{p} + 32], r14",
+            "mov [{p} + 40], r15",
+            p = in(reg) buf.as_mut_ptr(),
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline(never)]
+fn spill_callee_saved(_buf: &mut [usize; CALLEE_SAVED_WORDS]) {}
+
 fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
 }
@@ -230,6 +279,10 @@ pub static HL_GLOBAL_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
 struct ReentrantGcLock {
     owner: std::sync::atomic::AtomicU64,
     depth: std::sync::atomic::AtomicUsize,
+    /// Threads inside the slow acquire path. The uncontended release reads
+    /// this to skip the mutex + broadcast entirely — the broadcast alone was
+    /// 4.6% of an allocation-bound profile, fired with nobody listening.
+    waiters: std::sync::atomic::AtomicUsize,
     inner: std::sync::Mutex<()>,
     cond: std::sync::Condvar,
 }
@@ -237,18 +290,18 @@ struct ReentrantGcLock {
 static GC_LOCK: ReentrantGcLock = ReentrantGcLock {
     owner: std::sync::atomic::AtomicU64::new(0),
     depth: std::sync::atomic::AtomicUsize::new(0),
+    waiters: std::sync::atomic::AtomicUsize::new(0),
     inner: std::sync::Mutex::new(()),
     cond: std::sync::Condvar::new(),
 };
 
-/// Unique, never-zero, never-reused token for the current thread.
+/// Unique, never-zero token for the current thread: its pthread handle.
+/// The previous `thread_local!` token cost a `_tlv_get_addr` call (with its
+/// lazy-init branch) on EVERY lock operation — 11.6% of an allocation-bound
+/// profile; `pthread_self` is a register read.
+#[inline]
 fn gc_thread_token() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
-    thread_local! {
-        static TOKEN: u64 = NEXT_TOKEN.fetch_add(1, Ordering::Relaxed);
-    }
-    TOKEN.with(|t| *t)
+    unsafe { libc::pthread_self() as u64 }
 }
 
 impl ReentrantGcLock {
@@ -261,11 +314,27 @@ impl ReentrantGcLock {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        // Uncontended path: one CAS, no mutex.
+        if self
+            .owner
+            .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.depth.store(1, Ordering::Relaxed);
+            return;
+        }
+        // Contended: register as a waiter (SeqCst pairs with release's
+        // owner-store/waiters-load — see the comment there), then sleep.
+        self.waiters.fetch_add(1, Ordering::SeqCst);
         let mut g = self.inner.lock().unwrap();
-        while self.owner.load(Ordering::Relaxed) != 0 {
+        while self
+            .owner
+            .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
             g = self.cond.wait(g).unwrap();
         }
-        self.owner.store(me, Ordering::Relaxed);
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
         self.depth.store(1, Ordering::Relaxed);
         drop(g);
     }
@@ -282,11 +351,17 @@ impl ReentrantGcLock {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             return;
         }
-        let g = self.inner.lock().unwrap();
         self.depth.store(0, Ordering::Relaxed);
-        self.owner.store(0, Ordering::Relaxed);
-        drop(g);
-        self.cond.notify_all();
+        // SeqCst store then SeqCst load: either the releasing thread sees the
+        // waiter's `waiters` increment and notifies under the mutex, or the
+        // waiter's CAS loop (entered after its increment) sees owner == 0 and
+        // takes the lock without needing the wakeup. Both orders are covered,
+        // so the wakeup cannot be lost.
+        self.owner.store(0, Ordering::SeqCst);
+        if self.waiters.load(Ordering::SeqCst) != 0 {
+            let _g = self.inner.lock().unwrap();
+            self.cond.notify_all();
+        }
     }
 
     /// Depth held by the CURRENT thread (0 if it is not the owner).
@@ -632,9 +707,22 @@ impl ImmixAllocator {
 
     pub fn allocate(&mut self, size: usize) -> Option<NonNull<u8>> {
         let size = size.max(8);
-        // Round up to LINE_SIZE (128 bytes) — Immix line-granularity allocation.
-        // Each object gets its own line(s), preventing cross-object corruption.
-        let aligned_size = (size + LINE_SIZE - 1) & !(LINE_SIZE - 1);
+        // 16-byte bump allocation. This used to round EVERY object up to a
+        // full 128-byte line ("each object gets its own line"), which
+        // amplified an alloc-heavy workload five-fold: 5x the footprint, 5x
+        // the memset, 5x the block churn and collections — mandelbrot spent
+        // 72.6% of its run in here. Lines are the MARK granularity, not the
+        // allocation granularity: reclaim is whole-block, so a marked line
+        // retaining a few neighbours costs nothing an entire retained block
+        // was not already costing.
+        //
+        // Two placement rules keep the conservative marker sound:
+        // * a small object never straddles a line, so a hit on its line
+        //   covers all of it;
+        // * a multi-line object starts on a line boundary and its span is
+        //   recorded in `alloc_sizes`, exactly as before, so
+        //   `mark_allocation_at_line`'s walk-back still finds real starts.
+        let aligned_size = (size + 15) & !15;
 
         self.maybe_collect();
 
@@ -642,10 +730,17 @@ impl ImmixAllocator {
             return self.allocate_large(size);
         }
 
-        let needs_new_block =
-            self.heap.allocation_point + aligned_size > self.heap.current_block_end;
+        let multi_line = aligned_size > LINE_SIZE - (self.heap.allocation_point & (LINE_SIZE - 1));
+        let mut point = self.heap.allocation_point;
+        if aligned_size >= LINE_SIZE {
+            // Line-aligned start; span recorded below.
+            point = (point + LINE_SIZE - 1) & !(LINE_SIZE - 1);
+        } else if multi_line {
+            // Would straddle a line: skip to the next boundary.
+            point = (point + LINE_SIZE - 1) & !(LINE_SIZE - 1);
+        }
 
-        if needs_new_block {
+        if point + aligned_size > self.heap.current_block_end {
             let new_block = match self.acquire_free_block() {
                 Some(b) => b,
                 None => {
@@ -654,16 +749,12 @@ impl ImmixAllocator {
                     self.acquire_free_block()? // None = out of memory
                 }
             };
-            self.heap.allocation_point = new_block;
+            point = new_block;
             self.heap.current_block_end = new_block + BLOCK_SIZE;
         }
 
         let result = unsafe {
-            let ptr = self
-                .heap
-                .memory
-                .as_mut_ptr()
-                .add(self.heap.allocation_point);
+            let ptr = self.heap.memory.as_mut_ptr().add(point);
             // Zero the allocation — HashLink semantics require zeroed memory.
             // Reused GC blocks contain stale data that would be misinterpreted
             // as valid pointers by the conservative scanner and HDLL code.
@@ -671,15 +762,20 @@ impl ImmixAllocator {
             NonNull::new_unchecked(ptr)
         };
 
-        // Record allocation size in line table for GC multi-line marking
-        let start_line = self.heap.allocation_point / LINE_SIZE;
-        let num_lines = aligned_size / LINE_SIZE;
-        self.heap.alloc_sizes[start_line] = num_lines as u32;
-        for i in 1..num_lines {
-            self.heap.alloc_sizes[start_line + i] = 0;
+        if aligned_size >= LINE_SIZE {
+            // Multi-line span for the marker's walk-back. The span is rounded
+            // up so its tail line is not shared: a small object packed after
+            // it would make the walk-back ambiguous.
+            let start_line = point / LINE_SIZE;
+            let num_lines = (aligned_size + LINE_SIZE - 1) / LINE_SIZE;
+            self.heap.alloc_sizes[start_line] = num_lines as u32;
+            for i in 1..num_lines {
+                self.heap.alloc_sizes[start_line + i] = 0;
+            }
+            self.heap.allocation_point = point + num_lines * LINE_SIZE;
+        } else {
+            self.heap.allocation_point = point + aligned_size;
         }
-
-        self.heap.allocation_point += aligned_size;
         self.heap.alloc_count += 1;
         self.heap.bytes_since_gc += aligned_size;
         GC_STATS
@@ -850,6 +946,19 @@ impl ImmixAllocator {
         let num_lines = if num_lines == 0 { 1 } else { num_lines };
 
         let mut newly_marked = Vec::new();
+        // Small objects pack into lines with no `alloc_sizes` entry, so the
+        // walk-back can land on an EARLIER multi-line span that does not
+        // cover `line`. Reclaim is whole-block, so the only thing that must
+        // hold is that the hit line itself is marked — do that first,
+        // unconditionally.
+        {
+            let block_idx = line / LINES_PER_BLOCK;
+            let line_idx = line % LINES_PER_BLOCK;
+            if block_idx < self.blocks.len() && !self.blocks[block_idx].mark_bits[line_idx] {
+                self.blocks[block_idx].mark_bits[line_idx] = true;
+                newly_marked.push((block_idx, line_idx));
+            }
+        }
         for l in start..start + num_lines {
             let block_idx = l / LINES_PER_BLOCK;
             let line_idx = l % LINES_PER_BLOCK;
@@ -1044,8 +1153,23 @@ impl ImmixAllocator {
         // Conservative scan of execution stacks. Collection always runs on
         // the allocating context's stack, which may be the main thread OR a
         // fiber stack — resolve the live probe SP against the registry.
+        // Spill the callee-saved registers into this frame before probing.
+        //
+        // The scan below covers `[sp, stack_top)` — the machine stack, and
+        // nothing else. A value held only in a callee-saved register at the
+        // allocation point is therefore invisible, and the object it points
+        // at is swept while still live. The interpreter never showed this
+        // because its HL registers live in a scanned array; compiled frames
+        // are exactly where a GC pointer sits in x19..x28 across a call into
+        // an allocating native.
+        //
+        // `buf` is a local of this frame, so clamping the probe to its
+        // address puts the spilled words inside the scanned range.
+        let mut buf = [0usize; CALLEE_SAVED_WORDS];
+        spill_callee_saved(&mut buf);
+        let probe = Self::current_stack_addr().min(buf.as_ptr() as usize);
         // (8-align the probe: conservative_scan_range walks 8-byte words.)
-        let sp = (Self::current_stack_addr() + 7) & !7;
+        let sp = (probe + 7) & !7;
         let fiber_stacks = self.fiber_stacks.clone();
         let running_fiber = fiber_stacks
             .iter()
@@ -1310,30 +1434,48 @@ impl ImmixAllocator {
         // Safe: allocate() zeroes on reuse, and acquire_free_block REUSEs the
         // range before live data is written. Batched one madvise per
         // contiguous run to keep sweep cheap.
-        if !freed.is_empty() {
-            freed.sort_unstable();
-            let base = self.heap.memory.as_mut_ptr();
-            let mut run_start = freed[0];
-            let mut run_len = BLOCK_SIZE;
-            let mut advise = |start: usize, len: usize| unsafe {
-                #[cfg(target_os = "macos")]
-                let advice = libc::MADV_FREE_REUSABLE;
-                #[cfg(not(target_os = "macos"))]
-                let advice = libc::MADV_DONTNEED;
-                libc::madvise(base.add(start) as *mut c_void, len, advice);
-            };
-            for &addr in &freed[1..] {
-                if addr == run_start + run_len {
-                    run_len += BLOCK_SIZE;
-                } else {
-                    advise(run_start, run_len);
-                    run_start = addr;
-                    run_len = BLOCK_SIZE;
+        // Only pages beyond a resident working set are handed back. An
+        // allocation-churn workload frees and immediately re-acquires the
+        // same blocks every collection; handing each one back and reclaiming
+        // it again cost a REUSABLE+REUSE madvise pair per block per cycle —
+        // acquire-side madvise alone was 4.8% of mandelbrot. Blocks inside
+        // the working set skip both syscalls; long-idle processes still
+        // deflate, because a genuinely shrinking heap pushes its surplus past
+        // the threshold.
+        let resident_target = (self.heap.used_blocks.len() / 2).max(16);
+        if self.heap.free_blocks.len() > resident_target && !freed.is_empty() {
+            let surplus = self.heap.free_blocks.len() - resident_target;
+            let mut hand_back: Vec<usize> = freed
+                .iter()
+                .copied()
+                .take(surplus)
+                .filter(|a| !self.heap.reusable_blocks.contains(a))
+                .collect();
+            if !hand_back.is_empty() {
+                hand_back.sort_unstable();
+                let base = self.heap.memory.as_mut_ptr();
+                let mut run_start = hand_back[0];
+                let mut run_len = BLOCK_SIZE;
+                let mut advise = |start: usize, len: usize| unsafe {
+                    #[cfg(target_os = "macos")]
+                    let advice = libc::MADV_FREE_REUSABLE;
+                    #[cfg(not(target_os = "macos"))]
+                    let advice = libc::MADV_DONTNEED;
+                    libc::madvise(base.add(start) as *mut c_void, len, advice);
+                };
+                for &addr in &hand_back[1..] {
+                    if addr == run_start + run_len {
+                        run_len += BLOCK_SIZE;
+                    } else {
+                        advise(run_start, run_len);
+                        run_start = addr;
+                        run_len = BLOCK_SIZE;
+                    }
                 }
-            }
-            advise(run_start, run_len);
-            for &addr in &freed {
-                self.heap.reusable_blocks.insert(addr);
+                advise(run_start, run_len);
+                for &addr in &hand_back {
+                    self.heap.reusable_blocks.insert(addr);
+                }
             }
         }
 

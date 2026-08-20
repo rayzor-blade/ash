@@ -127,12 +127,12 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     let size = (*rt).size as usize;
     // let has_ptr = (*rt).hasPtr;
 
-    // Allocate memory
+    // Allocate memory — `allocate` returns zeroed memory (it memsets the
+    // region against stale data in reused blocks), so zeroing again here
+    // was one of the two memsets the profiler charged to every allocation.
     let ptr = allocator.allocate(size).expect("Out of memory");
 
-    // Zero-initialize memory first, THEN set type header
     let o = ptr.as_ptr() as *mut hl::vobj;
-    std::ptr::write_bytes(o as *mut u8, 0, size);
     if (*t).kind != hl::hl_type_kind_HSTRUCT {
         (*o).t = t;
     }

@@ -784,7 +784,60 @@ fn classify(pc: u64, jit: &[CodeRange]) -> (Bucket, String) {
         let name = resolve_name(r.findex).unwrap_or_else(|| format!("findex={}", r.findex));
         return (bucket, format!("{} [{}]", name, r.tier.label()));
     }
+    // Linux last resort: name the mapping. `dladdr` on a shared object
+    // resolves only exported symbols, so a cdylib's internal Rust functions
+    // (all of ash_std's allocator internals) and glibc's hidden ifunc
+    // memset/memcpy bodies land here — 70% of a NUC mandelbrot profile was
+    // hex that was really libash_std.so and libc. A library name is not a
+    // symbol, but it puts samples in the right bucket and tells the reader
+    // which object to open.
+    #[cfg(target_os = "linux")]
+    if let Some(obj) = mapping_name(pc) {
+        let bucket = if obj.contains("ash_std") {
+            Bucket::Gc // its unexported hot paths are the allocator's
+        } else {
+            Bucket::Native
+        };
+        return (bucket, format!("[{obj} +unexported]"));
+    }
     (Bucket::Unknown, format!("{:#x}", pc))
+}
+
+/// Basename of the mapping containing `pc`, from /proc/self/maps (cached).
+#[cfg(target_os = "linux")]
+fn mapping_name(pc: usize) -> Option<String> {
+    use std::sync::OnceLock;
+    static MAPS: OnceLock<Vec<(usize, usize, String)>> = OnceLock::new();
+    let maps = MAPS.get_or_init(|| {
+        let mut v = Vec::new();
+        if let Ok(text) = std::fs::read_to_string("/proc/self/maps") {
+            for l in text.lines() {
+                let mut it = l.split_whitespace();
+                let (Some(range), Some(perms)) = (it.next(), it.next()) else {
+                    continue;
+                };
+                if !perms.contains('x') {
+                    continue;
+                }
+                let path = it.last().unwrap_or("");
+                if path.is_empty() || path.starts_with('[') {
+                    continue;
+                }
+                if let Some((lo, hi)) = range.split_once('-') {
+                    if let (Ok(lo), Ok(hi)) =
+                        (usize::from_str_radix(lo, 16), usize::from_str_radix(hi, 16))
+                    {
+                        let base = path.rsplit('/').next().unwrap_or(path).to_string();
+                        v.push((lo, hi, base));
+                    }
+                }
+            }
+        }
+        v
+    });
+    maps.iter()
+        .find(|(lo, hi, _)| (*lo..*hi).contains(&pc))
+        .map(|(_, _, n)| n.clone())
 }
 
 /// Resolve `pc` to `(symbol, image path)` via `dladdr`.

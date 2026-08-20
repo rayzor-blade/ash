@@ -122,6 +122,11 @@ checksums = [
   # block, so ash's `contract` flag fuses more of them. A third fusion pattern,
   # not a wrong answer.
   { value = "112798288", label = "fused-llvm-opt" },
+  # Hybrid with OSR: an unfused interpreted prefix, then a Cranelift OSR
+  # entry whose AIR `Fma` lowers to a hardware fma, then LLVM after tier-up.
+  # Stable across runs (the transfer point is tick-deterministic). The
+  # cross-tier FMA policy note in BACKLOG.md covers why these coexist.
+  { value = "112798265", label = "fused-osr-mixed" },
 ]
 
 # Object field access with no allocation in the hot loop, which makes it the

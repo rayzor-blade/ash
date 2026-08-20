@@ -4346,6 +4346,121 @@ fn inline_replaces_a_direct_call_with_the_callee_body() {
     );
 }
 
+/// The fib shape: `fib(n) = n < 2 ? n : fib(n-1) + fib(n-2)`, as a direct
+/// self-recursive body. Registers: r0 = n (arg), r1 = temp, r2 = temp.
+fn fix_fib(findex: usize) -> (Vec<Opcode>, Vec<TypeRef>) {
+    (
+        vec![
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::JSLt {
+                a: Reg(0),
+                b: Reg(1),
+                offset: 6,
+            },
+            Opcode::Int {
+                dst: Reg(1),
+                ptr: RefInt(0),
+            },
+            Opcode::Sub {
+                dst: Reg(1),
+                a: Reg(0),
+                b: Reg(1),
+            },
+            Opcode::Call1 {
+                dst: Reg(2),
+                fun: RefFun(findex),
+                arg0: Reg(1),
+            },
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(findex),
+                arg0: Reg(1),
+            },
+            Opcode::Add {
+                dst: Reg(2),
+                a: Reg(2),
+                b: Reg(1),
+            },
+            Opcode::Ret { ret: Reg(2) },
+            Opcode::Ret { ret: Reg(0) }, // base case: n < 2 returns n
+        ],
+        vec![t(0), t(0), t(0)],
+    )
+}
+
+/// A DIRECT self-call is expanded — that is deliberate (it lowers the
+/// recurrence base; rayzor and GCC -O2 do the same) — but ONLY under its own
+/// budget, held across manager rounds. Before the budget existed, the depth
+/// vector reset every round and fib's 11-instruction body compounded to 319:
+/// an optimizer whose output was 29x its input. The invariant pinned here is
+/// the user-facing one: optimized output stays within [`growth_cap`] of its
+/// input, no matter how many rounds run.
+#[test]
+fn inline_bounds_direct_self_recursion_across_rounds() {
+    let (ops, tys) = fix_fib(9);
+    let info = bodies(&[(9, fix_fib(9))]);
+    let mut f = lower(&ops, &tys).expect("lower").with_findex(9);
+    let original: usize = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| !matches!(i, Instr::Param { .. }))
+        .count();
+
+    let inliner = Inlining::new(&info);
+    // Many more rounds than the manager would ever run: the budget must hold
+    // regardless, because it is the only bound that survives the reset of the
+    // per-run depth vector.
+    let mut total_inlined = 0;
+    for _ in 0..12 {
+        total_inlined += run_pass(&mut f, &inliner, PassOptions::default()).inlined;
+    }
+
+    let size: usize = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| !matches!(i, Instr::Param { .. }))
+        .count();
+    assert!(
+        total_inlined >= 1,
+        "a direct self-call within budget is worth one expansion\n{}",
+        f.dump()
+    );
+    assert!(
+        total_inlined <= 4,
+        "self expansions must stop at the per-pipeline budget, got {total_inlined}\n{}",
+        f.dump()
+    );
+    assert!(
+        size <= original * 3 + 80,
+        "output must stay within the growth cap of its input: {original} -> {size}\n{}",
+        f.dump()
+    );
+}
+
+/// Direct mutual recursion (A calls B, B calls A) is never expanded: each
+/// round would re-open the other function's call site, and no per-site
+/// budget bounds that. rayzor's policy, via its `can_reach` check.
+#[test]
+fn inline_refuses_direct_mutual_recursion() {
+    // Function 9 calls 10; the body offered for 10 calls 9.
+    let caller = fix_fib(10);
+    let callee = fix_fib(9);
+    let info = bodies(&[(10, callee)]);
+    let mut f = lower(&caller.0, &caller.1).expect("lower").with_findex(9);
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(
+        stats.inlined,
+        0,
+        "a callee that calls back into the caller must be refused\n{}",
+        f.dump()
+    );
+}
+
 #[test]
 fn inline_is_inert_without_module_info() {
     let (ops, tys) = fix_caller_call2();

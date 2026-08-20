@@ -5,7 +5,7 @@ use crate::v2::ir::*;
 use crate::v2::module::ModuleInfo;
 use crate::v2::verify::verify;
 use anyhow::Result;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 /// Replaces a direct `Call` with the callee's body.
@@ -43,18 +43,38 @@ use std::collections::HashMap;
 ///   continuation unreachable;
 /// * **types must line up** — every returned value and every argument must
 ///   have the type the caller's call expects;
+/// * **recursion is a policy, not an accident.** A DIRECT self-call may be
+///   expanded — it replaces two calls with the work of three smaller ones, so
+///   the recurrence base drops (naive fib: 1.618 → 1.380; GCC's recursive
+///   inliner does the same at -O2) — but only under its own budget:
+///   [`SELF_INLINE_MAX_BODY`], [`SELF_INLINE_MAX_SITES`] expansions per
+///   function *per pipeline*, held in [`Inlining::self_expanded`] so manager
+///   rounds cannot compound it. A callee that calls back into this function
+///   (direct mutual recursion) is never inlined: no per-site budget bounds
+///   what re-running the rounds would re-open. This is rayzor's
+///   `InliningCostModel::should_inline` policy and zyntax's
+///   `MAX_RECURSIVE_INLINE_*` caps; before it existed, fib's 11-instruction
+///   body reached `inline_max_function` at 319 instructions — an optimizer
+///   whose output was 29x its input;
 /// * **budgeted** — [`PassOptions::inline_max_callee`] bounds the callee,
-///   [`PassOptions::inline_max_depth`] bounds how deep one run nests inlines
-///   (which is what caps recursive inlining), and
-///   [`PassOptions::inline_max_function`] bounds the caller. The last is a
-///   ceiling on the function rather than on one step, so repeated manager
-///   rounds cannot grow a function without bound even though each round starts
-///   its depth count over.
+///   [`PassOptions::inline_max_depth`] bounds how deep one run nests inlines,
+///   [`PassOptions::inline_max_function`] bounds the caller absolutely, and
+///   [`GROWTH_LIMIT`] bounds it *relative to its own original size* — the
+///   invariant that optimized output does not dwarf its input, enforced
+///   rather than hoped for. The relative bound is the one that holds across
+///   manager rounds; the depth vector starts over each round.
 pub struct Inlining<'m> {
     info: &'m dyn ModuleInfo,
     /// Lowered callee bodies, so a callee inlined at several sites is lowered
     /// once. `None` records "asked, not inlinable".
     cache: RefCell<HashMap<usize, Option<Function>>>,
+    /// The function's instruction count before the first inline, recorded on
+    /// the first `run`. One `Inlining` serves one function's pipeline, so this
+    /// is the baseline [`GROWTH_LIMIT`] measures against — unlike the per-run
+    /// depth vector, it survives manager rounds.
+    original_size: Cell<Option<usize>>,
+    /// Direct self-call expansions performed so far, across every round.
+    self_expanded: Cell<usize>,
 }
 
 impl<'m> Inlining<'m> {
@@ -62,6 +82,8 @@ impl<'m> Inlining<'m> {
         Inlining {
             info,
             cache: RefCell::new(HashMap::new()),
+            original_size: Cell::new(None),
+            self_expanded: Cell::new(0),
         }
     }
 
@@ -84,6 +106,27 @@ impl<'m> Inlining<'m> {
 /// Bound on inlines performed by one run, independent of the budgets.
 const MAX_SITES: usize = 64;
 
+/// A self-recursive body larger than this is not worth duplicating: every
+/// copy is a full body behind a live argument, so later passes cannot shrink
+/// it back. Naive fib is ~11 instructions; zyntax draws the same line at 96.
+const SELF_INLINE_MAX_BODY: usize = 96;
+
+/// Direct self-call sites expanded per function per PIPELINE — not per round.
+/// Naive fib has 2. Expanding an already-expanded body compounds the size
+/// exponentially for a recurrence-base gain that only the first expansion
+/// buys, which is why this lives in a [`Cell`] on the pass rather than in the
+/// per-run depth vector.
+const SELF_INLINE_MAX_SITES: usize = 4;
+
+/// Ceiling on the function's size as a multiple of what it started the
+/// pipeline at. `inline_max_function` (400) alone let an 11-instruction
+/// function grow 29x; rayzor bounds the same way (`max_growth_percent`).
+/// The additive floor keeps tiny functions — constructors are ~5
+/// instructions — able to absorb a helper at all.
+fn growth_cap(original: usize, opts: &PassOptions) -> usize {
+    (original * 3).max(original + 2 * opts.inline_max_callee)
+}
+
 impl Pass for Inlining<'_> {
     fn name(&self) -> &'static str {
         "inline"
@@ -91,6 +134,9 @@ impl Pass for Inlining<'_> {
 
     fn run(&self, f: &mut Function, opts: &PassOptions) -> Result<PassStats> {
         let mut stats = PassStats::default();
+        if self.original_size.get().is_none() {
+            self.original_size.set(Some(instr_count(f)));
+        }
         // How many inlines deep each block already is, within this run.
         let mut depth: Vec<usize> = vec![0; f.blocks.len()];
         for _ in 0..MAX_SITES {
@@ -146,15 +192,46 @@ impl Inlining<'_> {
                 let Instr::Call { dst, fun, args } = ins else {
                     continue;
                 };
-                let Some(g) = self.body(*fun) else { continue };
-                if !fits(f, &g, *dst, args, opts, caller_size) {
+                let self_call = f.findex == Some(*fun);
+                if self_call
+                    && (self.self_expanded.get() >= SELF_INLINE_MAX_SITES
+                        || caller_size > SELF_INLINE_MAX_BODY)
+                {
                     continue;
+                }
+                let Some(g) = self.body(*fun) else { continue };
+                // Direct mutual recursion: a callee that calls back into this
+                // function re-opens on every round, and no per-site budget
+                // bounds that. Never inlined.
+                if !self_call && calls_into(&g, f.findex) {
+                    continue;
+                }
+                let cap = self
+                    .original_size
+                    .get()
+                    .map(|o| growth_cap(o, opts))
+                    .unwrap_or(opts.inline_max_function)
+                    .min(opts.inline_max_function);
+                if !fits(f, &g, *dst, args, opts, caller_size, cap) {
+                    continue;
+                }
+                if self_call {
+                    self.self_expanded.set(self.self_expanded.get() + 1);
                 }
                 return Some((BlockId(b as u32), k, g));
             }
         }
         None
     }
+}
+
+/// True when `g` contains a direct call to `findex`.
+fn calls_into(g: &Function, findex: Option<usize>) -> bool {
+    let Some(target) = findex else { return false };
+    g.blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .any(|i| matches!(i, Instr::Call { fun, .. } if *fun == target))
 }
 
 /// True when every use of `v` is a `Ret` returning it.
@@ -201,9 +278,10 @@ fn fits(
     args: &[ValueId],
     opts: &PassOptions,
     caller_size: usize,
+    size_cap: usize,
 ) -> bool {
     let size = instr_count(g);
-    if size > opts.inline_max_callee || caller_size + size > opts.inline_max_function {
+    if size > opts.inline_max_callee || caller_size + size > size_cap {
         return false;
     }
     // Cells are frame slots; see the pass documentation.

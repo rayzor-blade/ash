@@ -127,6 +127,14 @@ checksums = [
   # Stable across runs (the transfer point is tick-deterministic). The
   # cross-tier FMA policy note in BACKLOG.md covers why these coexist.
   { value = "112798265", label = "fused-osr-mixed" },
+  # SROA scalarized the Complex loop, so the AIR-level `Fma` peephole now
+  # forms the fused ops on scalars and every engine executing that AIR agrees
+  # with itself. Cranelift executes exactly the AIR Fmas:
+  { value = "112798500", label = "fused-air-cranelift" },
+  # ...while the LLVM tier additionally contracts the mul/add pairs the AIR
+  # peephole left behind. A fifth pattern, not a wrong answer; unifying the
+  # policy so both compiled tiers agree by construction stays in BACKLOG.md.
+  { value = "112798779", label = "fused-air-llvm" },
 ]
 
 # Object field access with no allocation in the hot loop, which makes it the

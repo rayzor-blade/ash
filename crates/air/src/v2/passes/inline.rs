@@ -212,7 +212,13 @@ impl Inlining<'_> {
                     .map(|o| growth_cap(o, opts))
                     .unwrap_or(opts.inline_max_function)
                     .min(opts.inline_max_function);
-                if !fits(f, &g, *dst, args, opts, caller_size, cap) {
+                if let Some(why) = fits_reason(f, &g, *dst, args, opts, caller_size, cap) {
+                    if std::env::var("ASH_INLINE_WHY").is_ok() {
+                        eprintln!(
+                            "[inline-why] caller={:?} callee={fun} refused: {why}",
+                            f.findex
+                        );
+                    }
                     continue;
                 }
                 if self_call {
@@ -271,7 +277,11 @@ fn is_nullable(g: &Function, v: ValueId) -> bool {
 }
 
 /// Every check that does not depend on the rewrite itself.
-fn fits(
+/// Why the inline is refused, or `None` when it fits. `ASH_INLINE_WHY=1`
+/// prints these from `pick` — refusals were silent, and a 6-instruction
+/// constructor quietly surviving O3 is what keeps SROA from erasing an
+/// allocation-bound benchmark's allocations.
+fn fits_reason(
     f: &Function,
     g: &Function,
     dst: ValueId,
@@ -279,17 +289,23 @@ fn fits(
     opts: &PassOptions,
     caller_size: usize,
     size_cap: usize,
-) -> bool {
+) -> Option<&'static str> {
     let size = instr_count(g);
-    if size > opts.inline_max_callee || caller_size + size > size_cap {
-        return false;
+    if size > opts.inline_max_callee {
+        return Some("callee over budget");
+    }
+    if caller_size + size > size_cap {
+        return Some("caller would exceed growth cap");
     }
     // Cells are frame slots; see the pass documentation.
-    if !g.cells.is_empty() || g.blocks.iter().any(|b| b.handler.is_some()) {
-        return false;
+    if !g.cells.is_empty() {
+        return Some("callee has cells");
+    }
+    if g.blocks.iter().any(|b| b.handler.is_some()) {
+        return Some("callee has trap regions");
     }
     if args.len() > g.reg_types.len() {
-        return false;
+        return Some("arg count exceeds callee registers");
     }
     // The continuation needs at least one returning path, and every returned
     // value must have the type the caller's destination has.
@@ -298,17 +314,17 @@ fn fits(
         if let Terminator::Ret { value } = blk.term {
             returns += 1;
             if g.value_ty(value) != f.value_ty(dst) {
-                return false;
+                return Some("return type mismatch");
             }
         }
     }
     if returns == 0 {
-        return false;
+        return Some("callee never returns");
     }
     // Entry binding: arguments must match their parameters, and parameters of
     // the callee's other registers must be dead — or dead enough, see below.
     let counts = g.use_counts();
-    let dst_dead = f.use_counts()[dst.idx()] == 0;
+
     for ins in &g.blocks[0].instrs {
         let Instr::Param { dst: pv, reg } = ins else {
             continue;
@@ -316,25 +332,29 @@ fn fits(
         match args.get(*reg as usize) {
             Some(&a) => {
                 if f.value_ty(a) != g.value_ty(*pv) {
-                    return false;
+                    return Some("argument type mismatch");
                 }
             }
             None => {
                 if counts[pv.idx()] > 0 && !only_returned(g, *pv) {
-                    return false;
+                    return Some("unbound parameter is read");
                 }
                 // Read only by `Ret`: the callee hands back its frame's
                 // initial value for that register, which is the HL default.
                 // Inlining it is sound as long as the caller cannot observe
                 // the difference, so the result must be dead and the type must
                 // be one whose default is null.
-                if counts[pv.idx()] > 0 && (!dst_dead || !is_nullable(g, *pv)) {
-                    return false;
+                // An unbound register's frame default is null, and
+                // `inline_at` materializes exactly that — so a live caller
+                // dst is fine. Only a numeric default would need a constant
+                // the pass cannot mint.
+                if counts[pv.idx()] > 0 && !is_nullable(g, *pv) {
+                    return Some("unbound parameter returned but not nullable");
                 }
             }
         }
     }
-    true
+    None
 }
 
 /// Splice `g` into `f` at instruction `k` of block `b`.

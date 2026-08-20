@@ -368,6 +368,9 @@ pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
     if !sampling_enabled() || addr == 0 {
         return;
     }
+    if std::env::var("ASH_PROFILE_DEBUG").is_ok() {
+        eprintln!("[prof-reg] findex={findex} tier={} addr={addr:#x}", tier.label());
+    }
     jit_code()
         .lock()
         .unwrap()

@@ -70,6 +70,26 @@ pub fn reject_reason_for_ops(
     func: &HLFunction,
     ops: &[Opcode],
 ) -> Option<String> {
+    if let Some(reason) = signature_reject_reason(bytecode, func) {
+        return Some(reason);
+    }
+    if let Some(op) = first_unsupported_opcode(ops) {
+        return Some(format!("unsupported_opcode {}", opcode_name(op)));
+    }
+    None
+}
+
+/// The half of [`reject_reason_for_ops`] that looks only at the function's
+/// signature — what the interpreter can marshal across the boundary.
+///
+/// Split out because the AIR codegen path ([`super::codegen`]) needs exactly
+/// these checks and none of the opcode ones: it screens the IR instead, and
+/// running an opcode gate over a serialization it never compiles would refuse
+/// functions for instructions that are not in the code being generated.
+pub fn signature_reject_reason(
+    bytecode: &crate::bytecode::DecodedBytecode,
+    func: &HLFunction,
+) -> Option<String> {
     let tf = match bytecode
         .types
         .get(func.type_.0)
@@ -95,9 +115,6 @@ pub fn reject_reason_for_ops(
     }
     if bytecode.types[tf.ret.0].kind == hl::hl_type_kind_HF32 {
         return Some("f32_in_signature".to_string());
-    }
-    if let Some(op) = first_unsupported_opcode(ops) {
-        return Some(format!("unsupported_opcode {}", opcode_name(op)));
     }
     None
 }
@@ -297,7 +314,7 @@ pub fn lower_function(
 ///
 /// The spec is parsed once: this is asked per lowered function, and macOS
 /// `getenv` takes a process-wide lock.
-fn clif_dump_wanted(findex: usize) -> bool {
+pub(super) fn clif_dump_wanted(findex: usize) -> bool {
     static SPEC: std::sync::OnceLock<Option<(bool, Vec<String>)>> = std::sync::OnceLock::new();
     let spec = SPEC.get_or_init(|| {
         std::env::var("ASH_CL_DUMP").ok().map(|want| {

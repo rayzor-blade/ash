@@ -117,6 +117,24 @@ impl AshCraneliftBackend {
         format!("ash_cl_{findex}_{sanitized}_{n}")
     }
 
+    /// Compile an already-lowered definition and return its code pointer.
+    /// The OSR-entry path uses this: it builds its own `def` (different
+    /// signature, different prologue) and needs only the address back.
+    pub fn compile_def(
+        &self,
+        bead: &Arc<Bead>,
+        def: CraneliftFunctionDef,
+    ) -> Result<*mut ()> {
+        let code = self
+            .inner
+            .compile(bead, def)
+            .map_err(|e| anyhow!("cranelift compile failed: {e}"))?;
+        if code.is_null() {
+            bail!("cranelift returned a null entry pointer");
+        }
+        Ok(code)
+    }
+
     /// Lower and compile one bytecode function. Returns the entry address and
     /// the marshaling metadata the interpreter needs.
     ///
@@ -137,13 +155,28 @@ impl AshCraneliftBackend {
             num_ops,
         } = {
             let _phase = crate::profile::scope("clif lower");
-            lower_function(self, ctx, findex)?
+            // AIR codegen first, opcode lowering behind it. See
+            // `super::air::lower_best`.
+            super::air::lower_best(self, ctx, findex)?
         };
         let code = {
             let _phase = crate::profile::scope("clif codegen");
-            self.inner
-                .compile(bead, def)
-                .map_err(|e| anyhow!("cranelift compile failed: {e}"))?
+            self.inner.compile(bead, def).map_err(|e| {
+                let msg = e.to_string();
+                // A verifier or regalloc-checker error is not a decline — it
+                // means the lowering emitted invalid CLIF, and the LLVM
+                // fallback would otherwise mask the bug entirely. Report it
+                // unconditionally; the caller may still fall back, but never
+                // silently. (`CodegenError::Verifier` displays as "Verifier
+                // errors"; the detail rides in the source chain.)
+                if msg.contains("Verifier") || msg.contains("Regalloc") {
+                    eprintln!(
+                        "[cranelift] INVALID CLIF for findex={findex}: {msg} — \
+                         this is an ash lowering bug, not an unsupported function"
+                    );
+                }
+                anyhow!("cranelift compile failed: {msg}")
+            })?
         };
         if code.is_null() {
             bail!("cranelift returned a null entry pointer");
@@ -195,6 +228,16 @@ pub struct CraneliftTierContext {
     messages: Mutex<HashMap<String, usize>>,
     dyn_compare: usize,
     hl_error: usize,
+    /// Runtime `hl_type*` per bytecode type index, copied from the
+    /// interpreter's `CTypeFactory`. These are the identities compiled code
+    /// must hand to the allocators and store in object headers — the decoded
+    /// `DecodedBytecode::types` is a description, not a runtime object.
+    c_types: Vec<usize>,
+    /// Allocation helpers, resolved once. Zero means unavailable, which
+    /// declines the instruction that needs it rather than the tier.
+    alloc_obj: usize,
+    alloc_dynobj: usize,
+    alloc_virtual: usize,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -224,6 +267,7 @@ impl CraneliftTierContext {
         nglobals: usize,
         functions_ptrs: *mut *mut c_void,
         max_findex: usize,
+        c_types: &[usize],
     ) -> Result<Self> {
         let mut findex_to_func = HashMap::new();
         for (i, f) in bytecode.functions.iter().enumerate() {
@@ -253,6 +297,15 @@ impl CraneliftTierContext {
             .resolve_function("std", "hlp_error")
             .map(|p| p as usize)
             .unwrap_or(0);
+        let helper = |name: &str| {
+            resolver
+                .resolve_function("std", name)
+                .map(|p| p as usize)
+                .unwrap_or(0)
+        };
+        let alloc_obj = helper("hlp_alloc_obj");
+        let alloc_dynobj = helper("hlp_alloc_dynobj");
+        let alloc_virtual = helper("hlp_alloc_virtual");
 
         Ok(Self {
             bytecode: bytecode as *const _,
@@ -267,6 +320,10 @@ impl CraneliftTierContext {
             messages: Mutex::new(HashMap::new()),
             dyn_compare,
             hl_error,
+            c_types: c_types.to_vec(),
+            alloc_obj,
+            alloc_dynobj,
+            alloc_virtual,
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
@@ -391,5 +448,30 @@ impl CraneliftTierContext {
             bail!("hlp_error unavailable");
         }
         Ok(self.hl_error)
+    }
+
+    /// The runtime `hl_type*` for a bytecode type index.
+    pub fn type_ptr(&self, type_idx: usize) -> Result<usize> {
+        match self.c_types.get(type_idx) {
+            Some(&p) if p != 0 => Ok(p),
+            Some(_) => bail!("type {type_idx} has no runtime hl_type"),
+            None => bail!("type index {type_idx} out of range"),
+        }
+    }
+
+    /// `hlp_alloc_obj`, `hlp_alloc_dynobj` and `hlp_alloc_virtual` — the three
+    /// allocators `New` dispatches to on the destination's type kind, the same
+    /// split the LLVM tier makes.
+    pub fn alloc_helper(&self, kind: hl::hl_type_kind) -> Result<(usize, bool)> {
+        let (addr, takes_type) = match kind {
+            hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => (self.alloc_obj, true),
+            hl::hl_type_kind_HDYNOBJ => (self.alloc_dynobj, false),
+            hl::hl_type_kind_HVIRTUAL => (self.alloc_virtual, true),
+            _ => bail!("New on type kind {kind}"),
+        };
+        if addr == 0 {
+            bail!("allocation helper for kind {kind} unavailable");
+        }
+        Ok((addr, takes_type))
     }
 }

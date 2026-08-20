@@ -156,10 +156,14 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         Body::bytecode(func)
     };
 
-    let s = match air_pipeline::optimize_with(ctx.air_module(), func, cfg.level) {
-        Ok(s) => s,
+    // The shared cache, not a private pipeline run: one function lowers to
+    // AIR once and every consumer reads that result. `optimize_with` here was
+    // the tier's own third copy.
+    let opt = match air_pipeline::optimized(ctx.air_module(), func) {
+        Ok(o) => o,
         Err(e) => return decline(format!("{} failed: {}", e.stage, e.brief())),
     };
+    let s = &opt.ser;
 
     // Re-gate. The passes only ever remove opcodes, but the serializer
     // *normalizes* some (`GetThis` -> `Field`, `CallThis` -> `CallMethod`) and
@@ -194,11 +198,120 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
         );
     }
     Body {
-        ops: Cow::Owned(s.ops),
+        ops: Cow::Owned(s.ops.clone()),
         // v2 indexes the module type table with u32, ash with usize; the
         // values are the same indices.
         regs: Cow::Owned(s.reg_types.iter().map(|t| TypeRef(t.0 as usize)).collect()),
         optimized: true,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Which lowering runs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether this tier composes CLIF from the AIR IR ([`super::codegen`]) rather
+/// than from a flat opcode array ([`super::lower`]).
+///
+/// On by default when AIR itself is on. `ASH_CL_CODEGEN=0` pins the tier to
+/// the opcode lowerer, which is what makes "is this a codegen bug" answerable
+/// by one environment variable instead of a rebuild.
+pub fn codegen_from_air() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        if !air_pipeline::air_enabled() {
+            return false;
+        }
+        match std::env::var("ASH_CL_CODEGEN").as_deref() {
+            Ok("0") | Ok("off") => false,
+            _ => true,
+        }
+    })
+}
+
+/// Why `ASH_CL_SKIP` / `ASH_CL_ONLY` refuses this findex, if they do.
+fn pinned_out(findex: usize) -> Option<&'static str> {
+    fn list(var: &str) -> Vec<usize> {
+        std::env::var(var)
+            .ok()
+            .map(|v| v.split(',').filter_map(|t| t.trim().parse().ok()).collect())
+            .unwrap_or_default()
+    }
+    static SKIP: OnceLock<Vec<usize>> = OnceLock::new();
+    static ONLY: OnceLock<Vec<usize>> = OnceLock::new();
+    if SKIP.get_or_init(|| list("ASH_CL_SKIP")).contains(&findex) {
+        return Some("ASH_CL_SKIP");
+    }
+    let only = ONLY.get_or_init(|| list("ASH_CL_ONLY"));
+    if !only.is_empty() && !only.contains(&findex) {
+        return Some("ASH_CL_ONLY");
+    }
+    None
+}
+
+/// Lower `findex` by whichever path can take it.
+///
+/// The AIR codegen is tried first and the opcode lowerer is the fallback, per
+/// function. Both produce the same `LoweredFunction`, so a function either
+/// path declines still reaches the LLVM tier exactly as before — the set of
+/// functions this tier compiles can only grow.
+pub fn lower_best(
+    backend: &super::backend::AshCraneliftBackend,
+    ctx: &CraneliftTierContext,
+    findex: usize,
+) -> anyhow::Result<super::lower::LoweredFunction> {
+    // `ASH_CL_SKIP=<findex,...>` declines the tier for those functions, and
+    // `ASH_CL_ONLY=<findex,...>` declines it for every other. Bisecting a
+    // miscompile to one function is otherwise a rebuild per guess.
+    if let Some(reason) = pinned_out(findex) {
+        anyhow::bail!("{reason}");
+    }
+    if codegen_from_air() {
+        if let Some(l) = try_air_codegen(backend, ctx, findex) {
+            crate::profile::count("cranelift air-codegen", 1);
+            return Ok(l);
+        }
+    }
+    crate::profile::count("cranelift opcode-lower", 1);
+    super::lower::lower_function(backend, ctx, findex)
+}
+
+/// The AIR codegen attempt, or `None` with the reason logged.
+///
+/// Every failure here is a decline, never an error the caller sees: the
+/// opcode lowerer is behind it, and behind that the LLVM tier.
+fn try_air_codegen(
+    backend: &super::backend::AshCraneliftBackend,
+    ctx: &CraneliftTierContext,
+    findex: usize,
+) -> Option<super::lower::LoweredFunction> {
+    let cfg = config();
+    let bytecode = ctx.bytecode();
+    let func = ctx.func_index(findex).map(|i| &bytecode.functions[i])?;
+
+    let decline = |reason: String| -> Option<super::lower::LoweredFunction> {
+        if cfg.log {
+            eprintln!("[air] findex={findex} codegen declined: {reason}");
+        }
+        None
+    };
+
+    // Signature checks only. The opcode gate is not the right screen here:
+    // this path never compiles the serialized array, so refusing a function
+    // for an opcode that only exists in a serialization it does not read
+    // would decline work it can actually do.
+    if let Some(r) = super::lower::signature_reject_reason(bytecode, func) {
+        return decline(r);
+    }
+
+    let opt = match air_pipeline::optimized(ctx.air_module(), func) {
+        Ok(o) => o,
+        Err(e) => return decline(format!("{} failed: {}", e.stage, e.brief())),
+    };
+
+    match super::codegen::lower_air_function(backend, ctx, findex, &opt.ir) {
+        Ok(l) => Some(l),
+        Err(e) => decline(format!("{e:#}")),
     }
 }
 

@@ -16,14 +16,17 @@
 //! - [`air`]: the `ASH_AIR` gate deciding whether a compile lowers the
 //!   bytecode as decoded or AIR v2's optimized serialization of it.
 //! - [`lower`]: HL bytecode → CLIF lowering for the v1 opcode subset.
+//! - [`codegen`]: AIR v2 IR → CLIF codegen, composed from the typed
+//!   block-structured form instead of a flat opcode array.
 
 pub mod air;
 pub mod backend;
+pub mod codegen;
 pub mod lower;
 
 pub use air::{AirMode, Body};
 pub use backend::{AshCraneliftBackend, CraneliftTierContext};
-pub use lower::{lowering_reject_reason, LoweredFunction};
+pub use lower::{lowering_reject_reason, signature_reject_reason, LoweredFunction};
 
 use crate::hl_bindings as hl;
 use crate::opcodes::Opcode;

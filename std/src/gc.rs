@@ -874,6 +874,10 @@ impl ImmixAllocator {
             NonNull::new_unchecked(ptr)
         };
 
+        if std::env::var("ASH_GC_TRACE_ALLOC").is_ok() {
+            let base = self.heap.memory.as_ptr() as usize;
+            eprintln!("[gc-alloc] {:#x} size={size}", base + point);
+        }
         if aligned_size >= LINE_SIZE {
             // Multi-line span for the marker's walk-back. The span is rounded
             // up so its tail line is not shared: a small object packed after
@@ -1534,6 +1538,14 @@ impl ImmixAllocator {
 
             if is_empty && !is_tlab {
                 self.heap.used_blocks.remove(&block_addr);
+                if std::env::var("ASH_GC_TRACE_FREED").is_ok() {
+                    let base = self.heap.memory.as_ptr() as usize;
+                    eprintln!(
+                        "[gc-freed] {:#x}..{:#x}",
+                        base + block_addr,
+                        base + block_addr + BLOCK_SIZE
+                    );
+                }
                 self.heap.free_blocks.push(block_addr);
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;

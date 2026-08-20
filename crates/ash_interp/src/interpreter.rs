@@ -2820,8 +2820,26 @@ impl HLInterpreter {
                     continue;
                 }
 
-                // Store in globals
+                // Store in globals — BOTH stores, like the SetGlobal opcode.
+                //
+                // `self.globals` is a Rust Vec: malloc memory the conservative
+                // scanner never sees. `globals_data` is the C array registered
+                // as a GC root. A constant written only to the Vec — which is
+                // what this did, with a comment warning about descriptor
+                // slots that actually concerns `(*obj).global_value`, a
+                // DIFFERENT pointer — has no root at all: it survives only
+                // while some scanned register happens to reference it, and
+                // any collection in a gap reclaims it. That was this
+                // codebase's oldest intermittent corruption: string constants
+                // (every string literal is one) dying under ASH_GC_STRESS,
+                // and the map tests' nondeterminism reading freed keys.
                 self.globals[global_idx] = NanBoxedValue::from_ptr(obj_ptr as usize);
+                {
+                    let (gd, nglobals) = self.c_type_factory.globals_data();
+                    if !gd.is_null() && global_idx < nglobals {
+                        unsafe { *gd.add(global_idx) = obj_ptr as *mut c_void };
+                    }
+                }
 
                 // Update the global_value slot ONLY when this constant IS the class descriptor
                 // for its type (i.e., global_idx == type.obj.global_value - 1).
@@ -9408,6 +9426,25 @@ impl HLInterpreter {
             return NanBoxedValue::null();
         }
 
+        // Corruption tripwire: a type pointer must be 8-aligned; a NaN-boxed
+        // double here means the object's memory was reclaimed and reused.
+        // Print the evidence (cross-reference with ASH_GC_TRACE_FREED) before
+        // the misaligned deref aborts without it.
+        {
+            let bad_align = (type_ptr as usize) & 7 != 0;
+            // An aligned-but-garbage header (a reused line of doubles) passes
+            // the alignment check; the type's kind field gives it away.
+            let bad_kind = !bad_align && {
+                let k = *(type_ptr as *const i32);
+                !(0..=22).contains(&k)
+            };
+            if bad_align || bad_kind {
+                eprintln!(
+                    "[gc-corrupt] FieldGet obj={:#x} header={:#x} field={field_idx}",
+                    obj_ptr as usize, type_ptr as usize
+                );
+            }
+        }
         let get_rt: FnGetObjRt = std::mem::transmute(fn_get_obj_rt);
         let rt = get_rt(type_ptr) as *const hl_runtime_obj;
         if rt.is_null() || (*rt).fields_indexes.is_null() {

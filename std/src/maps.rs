@@ -354,6 +354,14 @@ pub unsafe extern "C" fn hlp_hbset(
     value: *mut hl::vdynamic,
 ) {
     use hl_hb::HbMap;
+    if std::env::var("ASH_MAP_TRACE").is_ok() {
+        let k = if key.is_null() { String::new() } else {
+            let mut out = String::new(); let mut p = key;
+            while *p != 0 { out.push(char::from_u32(*p as u32).unwrap_or('?')); p = p.add(1); }
+            out
+        };
+        eprintln!("[hbset] map={:#x} key={k:?} val={:#x}", m as usize, value as usize);
+    }
 
     let mut c;
     let hash = hl_hb::hb_hash(key);

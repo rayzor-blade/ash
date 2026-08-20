@@ -1676,16 +1676,29 @@ impl HLInterpreter {
         }
         #[cfg(target_os = "linux")]
         {
+            // pthread_getattr_np, NOT pthread_attr_init: init creates a
+            // FRESH default attr whose stack fields are null, so the old
+            // code returned 0 — which zeroed stack_top, which disabled
+            // every triggered collection (only the exhaustion backstop ever
+            // ran: mandelbrot parked at 590MB RSS) AND skipped the
+            // conservative machine-stack scan entirely on Linux, a
+            // soundness hole the short corpus only survived because interp
+            // snapshots and globals happened to cover it.
             unsafe {
                 let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-                if libc::pthread_attr_init(&mut attr) == 0 {
+                if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
                     let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
                     let mut stack_size: libc::size_t = 0;
-                    if libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0 {
-                        libc::pthread_attr_destroy(&mut attr);
+                    let ok =
+                        libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0
+                            && !stack_addr.is_null()
+                            && stack_size != 0;
+                    libc::pthread_attr_destroy(&mut attr);
+                    if ok {
+                        // getstack returns the LOWEST address; the top is
+                        // base + size (stacks grow down).
                         return stack_addr as usize + stack_size;
                     }
-                    libc::pthread_attr_destroy(&mut attr);
                 }
             }
         }

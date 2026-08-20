@@ -754,6 +754,7 @@ impl<'ctx> JITModule<'ctx> {
             _ => ptr_ty.fn_type(&[ptr_ty.into()], false),
         };
         let function = self.module.add_function(name, fn_ty, None);
+        self.stamp_host_cpu(function);
 
         let entry = self.context.append_basic_block(function, "osr_entry");
         self.builder.position_at_end(entry);
@@ -863,7 +864,9 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expect to get function type");
         let func_type = self.create_function_type(&type_fun)?;
 
-        Ok(self.module.add_function(&f.name(), func_type, None))
+        let f_v = self.module.add_function(&f.name(), func_type, None);
+        self.stamp_host_cpu(f_v);
+        Ok(f_v)
     }
 
     fn load_function_arguments(
@@ -4900,7 +4903,9 @@ impl<'ctx> JITModule<'ctx> {
             .clone()
             .expect("expected to get function type");
         let func_type = self.create_function_type(&type_fun)?;
-        Ok(self.module.add_function(name, func_type, None))
+        let f_v = self.module.add_function(name, func_type, None);
+        self.stamp_host_cpu(f_v);
+        Ok(f_v)
     }
 
     /// Generate a caller function that embeds the native function's address directly
@@ -4914,6 +4919,7 @@ impl<'ctx> JITModule<'ctx> {
         let saved_block = self.builder.get_insert_block();
 
         let function = self.module.add_function(name, fn_type, None);
+        self.stamp_host_cpu(function);
         let basic_block = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(basic_block);
 

@@ -2265,6 +2265,15 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let addr = hlp_obj_lookup_set(d, hfield, t, &mut ft);
+    if std::env::var("ASH_DYN_TRACE").is_ok() {
+        eprintln!(
+            "[dyn-seti] d={:#x} dkind={} hfield={hfield} value={value} addr={:#x} ftkind={}",
+            d as usize,
+            if d.is_null() { 999 } else { (*(*d).t).kind },
+            addr as usize,
+            if ft.is_null() { 999 } else { (*ft).kind }
+        );
+    }
 
     match std::mem::transmute::<u32, hl_type_kind>((*ft).kind) {
         hl_type_kind_HUI8 => *(addr as *mut u8) = value as u8,
@@ -2358,6 +2367,15 @@ pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     let mut ft: *mut hl_type = std::ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let addr = hlp_obj_lookup(d, hfield, &mut ft);
+    if std::env::var("ASH_DYN_TRACE").is_ok() {
+        eprintln!(
+            "[dyn-geti] d={:#x} dkind={} hfield={hfield} addr={:#x} ftkind={}",
+            d as usize,
+            if d.is_null() { 999 } else { (*(*d).t).kind },
+            addr as usize,
+            if ft.is_null() { 999 } else { (*ft).kind }
+        );
+    }
     if addr.is_null() {
         let d = hlp_obj_lookup_extra(d, hfield);
         return if d.is_null() {
@@ -2447,6 +2465,12 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
     if obj.is_null() {
         return ptr::null_mut();
     }
+    if std::env::var("ASH_DYN_TRACE").is_ok() {
+        eprintln!(
+            "[obj-get] obj={:#x} kind={} hfield={hfield}",
+            obj as usize, (*(*obj).t).kind
+        );
+    }
 
     let _hlt_dyn: *mut hl_type = &mut hl_type {
         kind: hl_type_kind_HDYN,
@@ -2472,6 +2496,12 @@ pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *
     if obj.is_null() {
         hlp_error(str_to_uchar_ptr("Null access"));
         return;
+    }
+    if std::env::var("ASH_DYN_TRACE").is_ok() {
+        eprintln!(
+            "[obj-set] obj={:#x} kind={} hfield={hfield} v={:#x}",
+            obj as usize, (*(*obj).t).kind, v as usize
+        );
     }
 
     let _hlt_dyn: *mut hl_type = &mut hl_type {

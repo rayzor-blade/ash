@@ -2003,6 +2003,15 @@ impl HLInterpreter {
             .get(&(obj_ptr, meta.map_or(usize::MAX, |(idx, _)| idx)))
             .copied()
             .or_else(|| self.virtual_hash_fields.get(&(obj_ptr, hfield)).copied());
+        if env_flag!("ASH_DBG_DYN") {
+            eprintln!(
+                "[VGET] self={:p} obj={obj_ptr:#x} hfield={hfield} meta={:?} found={found:?} maps={}/{}",
+                self as *const _,
+                meta.map(|(i, _)| i),
+                self.virtual_fields.len(),
+                self.virtual_hash_fields.len()
+            );
+        }
         match found {
             Some(val) if !val.is_null() && !val.is_void() => {
                 if val.is_ptr() {
@@ -2068,6 +2077,15 @@ impl HLInterpreter {
             None => {
                 self.virtual_hash_fields.insert((obj_ptr, hfield), src_val);
             }
+        }
+        if env_flag!("ASH_DBG_DYN") {
+            eprintln!(
+                "[VSET] self={:p} obj={obj_ptr:#x} hfield={hfield} meta={:?} maps={}/{}",
+                self as *const _,
+                meta.map(|(i, _)| i),
+                self.virtual_fields.len(),
+                self.virtual_hash_fields.len()
+            );
         }
         Some(NanBoxedValue::void())
     }
@@ -8239,28 +8257,19 @@ impl HLInterpreter {
                     return Ok(v);
                 }
             }
-            // Virtual object field operations are intercepted so interpreter-side
-            // HVIRTUAL fallback storage stays consistent with Reflect/hl.Api calls.
-            "obj_get_field" => {
-                if let Some(v) = self.try_handle_virtual_obj_get_field(args) {
-                    return Ok(v);
-                }
-            }
-            "obj_set_field" => {
-                if let Some(v) = self.try_handle_virtual_obj_set_field(args) {
-                    return Ok(v);
-                }
-            }
-            "obj_has_field" => {
-                if let Some(v) = self.try_handle_virtual_obj_has_field(args) {
-                    return Ok(v);
-                }
-            }
-            "obj_delete_field" => {
-                if let Some(v) = self.try_handle_virtual_obj_delete_field(args) {
-                    return Ok(v);
-                }
-            }
+            // Reflect/hl.Api field operations go to the ash_std natives like
+            // every other caller. They used to be intercepted into
+            // interpreter-PRIVATE shadow HashMaps ("HVIRTUAL fallback
+            // storage") that the real object never learned about — state in
+            // one world again, and the reason a Reflect.setField was lost
+            // the moment any tier compiled a Reflect wrapper: the compiled
+            // wrapper calls hlp_obj_get_field directly and reads the actual
+            // object, while the interpreted setField had only fed the shadow.
+            // (Traced end-to-end on test_feature_typedef_anon at
+            // --jit-threshold 1: [VSET] stored shadow maps 1/1, the read
+            // never re-entered the interpreter, hlp_obj_get_field returned
+            // the stale field.) The natives handle virtuals correctly since
+            // the Phase-11/12 fixes; the crutch now only creates divergence.
             // macOS OpenGL core profile jumps from GLSL 1.20 → 1.50 (no 1.30/1.40).
             // Heaps probes #version 130, fails, and treats it as fatal.
             // Patch the source bytes in-place so the probe succeeds.

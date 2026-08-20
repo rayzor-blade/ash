@@ -188,7 +188,18 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
 #[cold]
 fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     let mut gc = gc_locked();
-    gc.maybe_collect();
+    // A refill is a true safepoint, so a due trigger COLLECTS here instead
+    // of deferring to the interpreter's next snapshot. During an
+    // OSR-compiled phase there are no snapshots, and the deferral let the
+    // heap run to full reservation before the exhaustion backstop fired:
+    // mandelbrot parked at 590MB RSS with a 3.5MB live set, collections
+    // arrived 508MB apart, and every allocation marched through cold
+    // never-recycled pages — a large share of its memset cost. Collecting
+    // on the trigger is exactly as safe as the backstop already was: same
+    // thread, conservative stack scan covering the compiled frames, and
+    // the registered interpreter ranges are complete as of their last
+    // sync (a superset is over-retention, never under-rooting).
+    gc.maybe_collect_at_safepoint();
     let block = match gc.acquire_free_block() {
         Some(b) => b,
         None => {
@@ -771,6 +782,27 @@ impl ImmixAllocator {
     /// next root-snapshot publication instead of collecting immediately —
     /// unless pressure is extreme (hard trigger), where collecting with a
     /// possibly-stale snapshot matches the old exhaustion-path behavior.
+    /// [`Self::maybe_collect`] at a point known to be a safepoint: a due
+    /// trigger collects immediately instead of deferring to the next
+    /// interpreter snapshot.
+    pub(crate) fn maybe_collect_at_safepoint(&mut self) {
+        if self.stack_top == 0 {
+            return;
+        }
+        let stress = gc_stress_every();
+        let pressure = self.heap.bytes_since_gc + self.heap.external_since_gc;
+        let due = if stress > 0 {
+            self.heap.alloc_count + 1 >= stress
+        } else {
+            pressure >= self.heap.trigger_threshold
+                || (self.heap.alloc_count & 1023 == 0
+                    && self.heap.last_collect.elapsed() >= HEARTBEAT)
+        };
+        if due || self.heap.collect_pending {
+            self.collect_garbage();
+        }
+    }
+
     fn maybe_collect(&mut self) {
         // No automatic collections before the host runtime has entered user
         // code (hlp_gc_set_stack_top): during bootstrap (constants/class

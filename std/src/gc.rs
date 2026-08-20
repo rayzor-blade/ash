@@ -1321,7 +1321,7 @@ impl ImmixAllocator {
         }
 
         // Conservative scan of interpreter-provided ranges
-        for (start, size) in scan_ranges {
+        for &(start, size) in &scan_ranges {
             if size == 0 {
                 continue;
             }
@@ -1357,6 +1357,15 @@ impl ImmixAllocator {
             .iter()
             .find(|f| f.size > 0 && sp >= f.base && sp < f.base + f.size)
             .map(|f| (f.id, f.base + f.size));
+        if std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
+            eprintln!(
+                "[gc-roots] sp={sp:#x} stack_top={:#x} span={}KB ranges={} globals={:?}",
+                self.stack_top,
+                (self.stack_top.saturating_sub(sp)) / 1024,
+                scan_ranges.len(),
+                self.globals_range.map(|(_, c)| c)
+            );
+        }
         match running_fiber {
             Some((_, top)) => {
                 all_newly_marked.extend(self.conservative_scan_range(sp, top));

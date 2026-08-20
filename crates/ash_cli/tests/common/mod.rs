@@ -163,8 +163,28 @@ pub fn render_output(output: &Output) -> String {
     s
 }
 
+/// Whether a `haxe` compiler is on PATH. A box without the toolchain (CI, the
+/// NUC) still validates everything that matters — the committed `.hl` corpus
+/// and parity *between* ash's own engines — so the harness degrades to that
+/// instead of failing to spawn.
+pub fn haxe_available() -> bool {
+    static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAIL.get_or_init(|| {
+        let ok = Command::new("haxe")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok();
+        if !ok {
+            eprintln!("[matrix] haxe not found: using committed .hl files, skipping the haxe --interp oracle");
+        }
+        ok
+    })
+}
+
 pub fn compile_haxe_case(tests_dir: &Path, case: &ParityCase) -> Output {
-    if !case.compile {
+    if !case.compile || !haxe_available() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("true");
         return run(cmd);
@@ -180,7 +200,7 @@ pub fn compile_haxe_case(tests_dir: &Path, case: &ParityCase) -> Output {
 }
 
 pub fn run_haxe_interp(tests_dir: &Path, case: &ParityCase) -> Option<Output> {
-    if !case.sanity_interp {
+    if !case.sanity_interp || !haxe_available() {
         return None;
     }
     let mut cmd = Command::new("haxe");

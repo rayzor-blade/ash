@@ -670,6 +670,12 @@ struct ImmixHeap {
 struct Block {
     mark_bits: [bool; LINES_PER_BLOCK],
     evacuation_candidate: bool,
+    /// True while any multi-line allocation span is recorded in this block.
+    /// The marker's walk-back only exists to find span starts; a block that
+    /// never held one (every TLAB churn block) marks in O(1) instead of
+    /// walking a sea of zero `alloc_sizes` entries — that walk was 76% of
+    /// mandelbrot once NaN-box decoding multiplied candidate hits.
+    has_span: bool,
 }
 
 struct RootSet {
@@ -742,6 +748,7 @@ impl ImmixAllocator {
         let blocks = vec![
             Block {
                 mark_bits: [false; LINES_PER_BLOCK],
+                has_span: false,
                 evacuation_candidate: false,
             };
             heap_size / BLOCK_SIZE
@@ -950,6 +957,11 @@ impl ImmixAllocator {
             // it would make the walk-back ambiguous.
             let start_line = point / LINE_SIZE;
             let num_lines = (aligned_size + LINE_SIZE - 1) / LINE_SIZE;
+            for b in start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK {
+                if let Some(blk) = self.blocks.get_mut(b) {
+                    blk.has_span = true;
+                }
+            }
             self.heap.alloc_sizes[start_line] = num_lines as u32;
             for i in 1..num_lines {
                 self.heap.alloc_sizes[start_line + i] = 0;
@@ -1009,6 +1021,12 @@ impl ImmixAllocator {
                 // Record allocation size for GC multi-line marking
                 let num_lines = (size + LINE_SIZE - 1) / LINE_SIZE;
                 let start_line = start_addr / LINE_SIZE;
+                for b in start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK
+                {
+                    if let Some(blk) = self.blocks.get_mut(b) {
+                        blk.has_span = true;
+                    }
+                }
                 self.heap.alloc_sizes[start_line] = num_lines as u32;
                 for j in 1..num_lines {
                     self.heap.alloc_sizes[start_line + j] = 0;
@@ -1119,10 +1137,30 @@ impl ImmixAllocator {
     /// then marks all lines from start to start+size.
     /// Returns newly-marked (block_idx, line_idx) pairs.
     fn mark_allocation_at_line(&mut self, line: usize) -> Vec<(usize, usize)> {
-        // Find allocation start by walking backwards
+        // Find the allocation start. Only multi-line spans record a start
+        // (`alloc_sizes > 0`); packed small objects never need one, so a
+        // block whose has_span flag is clear marks in O(1). The walk, when
+        // it runs, is bounded to span-bearing blocks: spans cannot begin in
+        // a block that never recorded one, so crossing into a span-free
+        // predecessor is proof there is no start to find.
         let mut start = line;
-        while start > 0 && self.heap.alloc_sizes[start] == 0 {
-            start -= 1;
+        loop {
+            let b = start / LINES_PER_BLOCK;
+            if self.blocks.get(b).map_or(true, |blk| !blk.has_span) {
+                start = line; // no span can cover `line`
+                break;
+            }
+            let floor = b * LINES_PER_BLOCK;
+            while start > floor && self.heap.alloc_sizes[start] == 0 {
+                start -= 1;
+            }
+            if self.heap.alloc_sizes[start] != 0 {
+                break;
+            }
+            if start == 0 {
+                break;
+            }
+            start -= 1; // cross into the previous block (large allocations)
         }
         let num_lines = self.heap.alloc_sizes[start] as usize;
         let num_lines = if num_lines == 0 { 1 } else { num_lines };
@@ -1162,17 +1200,42 @@ impl ImmixAllocator {
 
         let mut addr = start;
         while addr + 8 <= end {
-            let val = unsafe { *(addr as *const usize) };
-            if val >= heap_start && val < heap_end {
-                let offset = val - heap_start;
-                let line = offset / LINE_SIZE;
-                let block_idx = line / LINES_PER_BLOCK;
-                let line_idx = line % LINES_PER_BLOCK;
-                // Only process if the pointed-to line isn't already marked
-                if block_idx < self.blocks.len() && !self.blocks[block_idx].mark_bits[line_idx] {
-                    let alloc_marks = self.mark_allocation_at_line(line);
-                    newly_marked.extend(alloc_marks);
+            let raw = unsafe { *(addr as *const usize) };
+            // Two candidate interpretations per word: the raw value, and —
+            // when the word carries the interpreter's NaN-box pattern — the
+            // boxed 48-bit payload. The interpreter's LIVE register buffers
+            // hold NaN-boxed words (0x7FF8... | tag | payload), which the
+            // raw comparison can never match, and rooting registers through
+            // an extracted point-in-time COPY instead left a staleness
+            // window: any value written after the last snapshot was
+            // invisible, and a collection in that window freed it. The
+            // constants bug, the Reflect shadow maps, and this were all the
+            // same disease — state the collector could not see where it
+            // actually lives. Decoding here lets the buffers be scanned
+            // directly. A junk word that happens to decode in-bounds only
+            // over-retains, which is the conservative contract already.
+            let mut consider = |val: usize, this: &mut Self, out: &mut Vec<(usize, usize)>| {
+                if val >= heap_start && val < heap_end {
+                    let offset = val - heap_start;
+                    let line = offset / LINE_SIZE;
+                    let block_idx = line / LINES_PER_BLOCK;
+                    let line_idx = line % LINES_PER_BLOCK;
+                    if block_idx < this.blocks.len()
+                        && !this.blocks[block_idx].mark_bits[line_idx]
+                    {
+                        let alloc_marks = this.mark_allocation_at_line(line);
+                        out.extend(alloc_marks);
+                    }
                 }
+            };
+            consider(raw, self, &mut newly_marked);
+            // Mirrors ash_interp::values: NAN_TAG 0x7FF8...<<48, 3-bit tag in
+            // bits 48-50, payload in bits 0-47.
+            const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
+            const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
+            const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+            if raw & NAN_MASK == NAN_TAG {
+                consider(raw & PAYLOAD_MASK, self, &mut newly_marked);
             }
             addr += 8;
         }
@@ -1313,10 +1376,14 @@ impl ImmixAllocator {
         drop(root_set);
 
         // Conservative scan of globals_data
+        let dbg = std::env::var("ASH_GC_DEBUG_ROOTS").is_ok();
         if let Some((globals_ptr, count)) = self.globals_range {
             let start = globals_ptr as usize;
             let end = start + count * 8;
             let newly_marked = self.conservative_scan_range(start, end);
+            if dbg {
+                eprintln!("[gc-roots]   globals marked {} lines", newly_marked.len());
+            }
             all_newly_marked.extend(newly_marked);
         }
 
@@ -1328,6 +1395,12 @@ impl ImmixAllocator {
             let end = start.saturating_add(size);
             if end > start {
                 let newly_marked = self.conservative_scan_range(start, end);
+                if dbg {
+                    eprintln!(
+                        "[gc-roots]   range {start:#x}+{size} marked {} lines",
+                        newly_marked.len()
+                    );
+                }
                 all_newly_marked.extend(newly_marked);
             }
         }
@@ -1621,12 +1694,47 @@ impl ImmixAllocator {
                         base + block_addr + BLOCK_SIZE
                     );
                 }
+                // Use-after-free detector: a block about to be freed while a
+                // ROOT still points into it means the tracer failed; no such
+                // root means the snapshot never contained the pointer. This
+                // is the question that splits every premature-free bug.
+                if std::env::var("ASH_GC_SWEEP_AUDIT").is_ok() {
+                    let base = self.heap.memory.as_ptr() as usize;
+                    let lo = base + block_addr;
+                    let hi = lo + BLOCK_SIZE;
+                    let mut audit = |src: &str, start: usize, end: usize| {
+                        let mut p = start & !7;
+                        while p + 8 <= end {
+                            let w = unsafe { *(p as *const usize) };
+                            if (lo..hi).contains(&w) {
+                                eprintln!(
+                                    "[gc-audit] FREED {lo:#x}..{hi:#x} but {src} @{p:#x} holds {w:#x}"
+                                );
+                            }
+                            p += 8;
+                        }
+                    };
+                    if let Some((gp, count)) = self.globals_range {
+                        audit("globals", gp as usize, gp as usize + count * 8);
+                    }
+                    let ranges = self.roots.borrow().scan_ranges.clone();
+                    for (rs, sz) in ranges {
+                        audit("range", rs, rs + sz);
+                    }
+                    // The machine stack too — the mark phase scanned it, so
+                    // a hit here while the block frees means marking lost it.
+                    let sp = (Self::current_stack_addr() + 7) & !7;
+                    if self.stack_top > sp {
+                        audit("stack", sp, self.stack_top);
+                    }
+                }
                 self.heap.free_blocks.push(block_addr);
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;
                 for l in base_line..base_line + LINES_PER_BLOCK {
                     self.heap.alloc_sizes[l] = 0;
                 }
+                self.blocks[block_index].has_span = false;
                 freed.push(block_addr);
             }
         }
@@ -1728,6 +1836,15 @@ impl ImmixAllocator {
                 .scan_ranges
                 .push((ptr as usize, size));
         }
+        // Deliberately no pending-collection consumption here: a snapshot
+        // now spans SEVERAL add calls (one per interpreter frame), and a
+        // collection between them would run against a half-built root set —
+        // wiped by clear, only partially repopulated. The interpreter calls
+        // `hlp_gc_scan_roots_done` when the set is complete.
+    }
+
+    /// The snapshot is complete: a deferred collection is honored now.
+    pub fn scan_roots_done(&mut self) {
         if self.heap.collect_pending {
             self.collect_garbage();
         }
@@ -1882,6 +1999,12 @@ pub unsafe extern "C" fn hlp_gc_set_globals(ptr: *const *mut c_void, count: usiz
 }
 
 /// Clear interpreter-provided conservative scan ranges.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_scan_roots_done() {
+    let mut gc = gc_locked();
+    gc.scan_roots_done();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_clear_scan_roots() {
     let mut gc = gc_locked();

@@ -1170,6 +1170,8 @@ pub struct HLInterpreter {
     fn_gc_clear_scan_roots: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_add_scan_root
     fn_gc_add_scan_root: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_gc_scan_roots_done
+    fn_gc_scan_roots_done: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_stack_top
     fn_gc_set_stack_top: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_globals
@@ -1177,7 +1179,6 @@ pub struct HLInterpreter {
     /// Whether GC globals/stack top were initialized for this interpreter.
     gc_runtime_initialized: bool,
     /// Scratch space for decoded raw pointer roots (from NaN-boxed registers).
-    gc_root_ptrs: Vec<usize>,
     /// Cache of UTF-16 null-terminated strings (string index → owned buffer).
     /// HashLink uses UTF-16 internally; bytecode strings are stored as UTF-8 in Rust.
     utf16_strings: HashMap<usize, Vec<u16>>,
@@ -1323,6 +1324,9 @@ impl HLInterpreter {
         let fn_gc_clear_scan_roots = native_resolver
             .resolve_function("std", "hlp_gc_clear_scan_roots")
             .unwrap_or(std::ptr::null_mut());
+        let fn_gc_scan_roots_done = native_resolver
+            .resolve_function("std", "hlp_gc_scan_roots_done")
+            .unwrap_or(std::ptr::null_mut());
         let fn_gc_add_scan_root = native_resolver
             .resolve_function("std", "hlp_gc_add_scan_root")
             .unwrap_or(std::ptr::null_mut());
@@ -1375,10 +1379,10 @@ impl HLInterpreter {
             fn_type_name,
             fn_gc_clear_scan_roots,
             fn_gc_add_scan_root,
+            fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
             gc_runtime_initialized: false,
-            gc_root_ptrs: Vec::new(),
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
@@ -1743,18 +1747,30 @@ impl HLInterpreter {
         let clear: FnClear = unsafe { std::mem::transmute(self.fn_gc_clear_scan_roots) };
         let add: FnAdd = unsafe { std::mem::transmute(self.fn_gc_add_scan_root) };
         unsafe { clear() };
-        self.gc_root_ptrs.clear();
+        // Register each frame's LIVE register buffer, not a filtered copy.
+        // The copy was a point-in-time snapshot: any value written to a
+        // register after the last sync existed nowhere the collector could
+        // see, and a collection landing in that window freed it — the same
+        // one-world disease as the constants bug and the Reflect shadow
+        // maps, this time in the root set itself. The buffers hold
+        // NaN-boxed words; the conservative scanner decodes the box pattern
+        // (see conservative_scan_range), so scanning them directly is
+        // sound, always-current, and cheaper than rebuilding a Vec per
+        // sync.
         for frame in &self.stack {
-            for v in frame.registers.as_slice() {
-                if v.is_ptr() && !v.is_null() {
-                    self.gc_root_ptrs.push(v.as_ptr());
-                }
+            let regs = frame.registers.as_slice();
+            if !regs.is_empty() {
+                let ptr = regs.as_ptr() as *const c_void;
+                let size = std::mem::size_of_val(regs);
+                unsafe { add(ptr, size) };
             }
         }
-        if !self.gc_root_ptrs.is_empty() {
-            let ptr = self.gc_root_ptrs.as_ptr() as *const c_void;
-            let size = self.gc_root_ptrs.len() * std::mem::size_of::<usize>();
-            unsafe { add(ptr, size) };
+        // The set is complete — a deferred collection is honored HERE, never
+        // mid-registration against a half-built set.
+        if !self.fn_gc_scan_roots_done.is_null() {
+            type FnDone = unsafe extern "C" fn();
+            let done: FnDone = unsafe { std::mem::transmute(self.fn_gc_scan_roots_done) };
+            unsafe { done() };
         }
     }
 

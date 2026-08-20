@@ -165,6 +165,11 @@ impl NanBoxedValue {
     }
 
     #[inline(always)]
+    pub fn is_bytes(&self) -> bool {
+        !self.is_f64() && self.tag() == Self::TAG_BYTES
+    }
+
+    #[inline(always)]
     pub fn is_func(&self) -> bool {
         !self.is_f64() && self.tag() == Self::TAG_FUNC
     }

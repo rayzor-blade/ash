@@ -284,9 +284,12 @@ impl<'ctx> JITModule<'ctx> {
                     index
                 )
             })?;
-            if !f.verify(false) {
+            // `verify(true)`: on failure LLVM prints WHY to stderr
+            // (LLVMPrintMessageAction); `false` reduced every verifier error
+            // to an undiagnosed boolean.
+            if !f.verify(true) {
                 return Err(anyhow!(
-                    "Strict promotion failed: function {} did not verify",
+                    "Strict promotion failed: function {} did not verify (diagnostic above)",
                     index
                 ));
             }
@@ -410,11 +413,23 @@ impl<'ctx> JITModule<'ctx> {
                 findex
             )
         })?;
-        if !function.verify(false) {
+        // As above: print the diagnostic, do not swallow it into a bool.
+        if !function.verify(true) {
             return Err(anyhow!(
-                "Strict promotion failed: function {} did not verify",
+                "Strict promotion failed: function {} did not verify (diagnostic above)",
                 findex
             ));
+        }
+
+        // `ASH_DUMP_FN_IR=<findex,...|all>`: print this function's LLVM IR as
+        // it will execute — post middle-end, the exact input to codegen. The
+        // third panel of the AIR / CLIF / LLVM side-by-side that latency
+        // investigations read (AIR: `Function::dump`, CLIF: `ASH_CL_DUMP`).
+        if Self::fn_ir_dump_wanted_impl(findex) {
+            eprintln!(
+                "=== LLVM IR (promote) findex={findex} ===\n{}",
+                function.print_to_string().to_string()
+            );
         }
 
         let name = function.get_name().to_str().map_err(|_| {
@@ -4938,6 +4953,12 @@ impl<'ctx> JITModule<'ctx> {
         let stub_bb = self
             .context
             .append_basic_block(function, &format!("{}_stub", name));
+        let heal_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_heal", name));
+        let bridge_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_bridge", name));
         let merge_bb = self
             .context
             .append_basic_block(function, &format!("{}_merge", name));
@@ -4952,8 +4973,102 @@ impl<'ctx> JITModule<'ctx> {
         let direct_val = direct.try_as_basic_value().basic();
         self.builder.build_unconditional_branch(merge_bb)?;
 
-        // --- Stub path: spill args as raw i64 words, re-enter interpreter ---
+        // --- Stub probe: has the sentinel's findex been promoted since this
+        // pointer was captured? ---
+        //
+        // A sentinel encodes `findex + 1`, captured by value — into a
+        // closure's `fun` field, a vtable row, a stored function pointer —
+        // at a time when the findex was interpreted. Promotion updates
+        // `functions_ptrs[findex]`, not the captures, so a hot loop calling
+        // through an old capture paid the full bridge (a malloc, an
+        // interpreter re-entry and a marshal) for every call: 100M closure
+        // calls spent 63.9% of the run in `call_function` and 8% in the
+        // bridge's malloc/free. One load from the (hot, cached) slot turns
+        // all of those into direct calls.
         self.builder.position_at_end(stub_bb);
+        let ptrs_base = self
+            .shared_runtime
+            .as_ref()
+            .filter(|sh| !sh.module_ctx.is_null())
+            .map(|sh| unsafe { (*sh.module_ctx).functions_ptrs })
+            .filter(|p| !p.is_null());
+        let healed: Option<inkwell::values::BasicValueEnum> = match ptrs_base {
+            Some(base) => {
+                let zero = i64_type.const_zero();
+                let is_null = self.builder.build_int_compare(
+                    IntPredicate::EQ,
+                    addr,
+                    zero,
+                    &format!("{}_is_null", name),
+                )?;
+                // Null probes slot 0 harmlessly instead of slot -1.
+                let fx_raw = self.builder.build_int_sub(
+                    addr,
+                    i64_type.const_int(1, false),
+                    &format!("{}_fx_raw", name),
+                )?;
+                let fx = self
+                    .builder
+                    .build_select(is_null, zero, fx_raw, &format!("{}_fx", name))?
+                    .into_int_value();
+                let base_ptr = i64_type
+                    .const_int(base as usize as u64, false)
+                    .const_to_pointer(ptr_type);
+                let slot_gep = unsafe {
+                    self.builder.build_gep(
+                        ptr_type,
+                        base_ptr,
+                        &[fx],
+                        &format!("{}_slot_gep", name),
+                    )?
+                };
+                let slot = self
+                    .builder
+                    .build_load(ptr_type, slot_gep, &format!("{}_slot", name))?
+                    .into_pointer_value();
+                let slot_addr = self.builder.build_ptr_to_int(
+                    slot,
+                    i64_type,
+                    &format!("{}_slot_addr", name),
+                )?;
+                let slot_real = self.builder.build_int_compare(
+                    IntPredicate::UGE,
+                    slot_addr,
+                    i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+                    &format!("{}_slot_real", name),
+                )?;
+                let not_null = self.builder.build_not(is_null, &format!("{}_nn", name))?;
+                let can_heal =
+                    self.builder
+                        .build_and(slot_real, not_null, &format!("{}_can_heal", name))?;
+                self.builder
+                    .build_conditional_branch(can_heal, heal_bb, bridge_bb)?;
+
+                self.builder.position_at_end(heal_bb);
+                let call = self.builder.build_indirect_call(
+                    fn_type,
+                    slot,
+                    args,
+                    &format!("{}_healed", name),
+                )?;
+                let v = call.try_as_basic_value().basic();
+                self.builder.build_unconditional_branch(merge_bb)?;
+                v
+            }
+            None => {
+                // No runtime handles (whole-module JIT: nothing is ever a
+                // sentinel there anyway). Keep the single-path shape. The
+                // heal block still needs a terminator to satisfy the
+                // verifier, even with zero predecessors.
+                self.builder.build_unconditional_branch(bridge_bb)?;
+                self.builder.position_at_end(heal_bb);
+                self.builder.build_unreachable()?;
+                None
+            }
+        };
+
+        // --- Bridge path: spill args as raw i64 words, re-enter interpreter ---
+        self.builder.position_at_end(bridge_bb);
         let nargs = args.len() as u32;
         // Hoist the spill buffer to the entry block so a guarded call inside
         // a hot loop does not grow the stack per iteration.
@@ -5086,7 +5201,10 @@ impl<'ctx> JITModule<'ctx> {
                 let phi = self
                     .builder
                     .build_phi(d.get_type(), &format!("{}_result", name))?;
-                phi.add_incoming(&[(&d, direct_bb), (&s, stub_bb)]);
+                phi.add_incoming(&[(&d, direct_bb), (&s, bridge_bb)]);
+                if let Some(h) = healed {
+                    phi.add_incoming(&[(&h, heal_bb)]);
+                }
                 Ok(Some(phi.as_basic_value()))
             }
             _ => Ok(None),
@@ -5544,6 +5662,20 @@ impl<'ctx> JITModule<'ctx> {
         n
     }
 
+    fn fn_ir_dump_wanted_impl(findex: usize) -> bool {
+        static SPEC: std::sync::OnceLock<Option<(bool, Vec<String>)>> = std::sync::OnceLock::new();
+        let spec = SPEC.get_or_init(|| {
+            std::env::var("ASH_DUMP_FN_IR").ok().map(|want| {
+                let all = want == "all";
+                (all, want.split(',').map(|w| w.trim().to_string()).collect())
+            })
+        });
+        match spec {
+            Some((all, wanted)) => *all || wanted.iter().any(|w| *w == findex.to_string()),
+            None => false,
+        }
+    }
+
     pub fn execute_main(&mut self) -> Result<()> {
         // Everything up to `execute` is compilation, grouped so the report
         // gives one number for it rather than four the reader has to add up --
@@ -5590,6 +5722,30 @@ impl<'ctx> JITModule<'ctx> {
                     Ok(()) => eprintln!("[ash] LLVM IR written to {path}"),
                     Err(e) => eprintln!("[ash] could not write {path}: {e}"),
                 }
+            }
+        }
+
+        // The whole-module verifier, before MCJIT consumes the IR. This was
+        // the one LLVM path with no verification at all: the tiered promote
+        // path verifies per function, the OSR module verifies on build, and
+        // this — the largest module of the three — handed MCJIT whatever the
+        // builder produced. Invalid IR here is undefined behaviour that tends
+        // to surface as an unrelated crash long after the cause.
+        //
+        // An error reports and aborts the run rather than continuing:
+        // executing IR the verifier rejected is not a degraded mode, it is
+        // UB. `ASH_LLVM_VERIFY=0` skips the check (and its one linear pass
+        // over the module) once a measurement needs the old behaviour.
+        if !matches!(
+            std::env::var("ASH_LLVM_VERIFY").as_deref(),
+            Ok("0") | Ok("off")
+        ) {
+            let _phase = crate::profile::scope("llvm verify");
+            if let Err(msg) = self.module.verify() {
+                return Err(anyhow!(
+                    "LLVM module failed verification — an ash codegen bug:\n{}",
+                    msg.to_string()
+                ));
             }
         }
 

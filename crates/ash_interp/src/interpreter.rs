@@ -6,7 +6,7 @@ use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use beadie::{Bead, HotnessPolicy, ThresholdPolicy, TieredAdapter, TieredBound};
+use beadie::{Bead, HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter, TieredBound};
 
 use ash::bytecode::DecodedBytecode;
 use ash::c_types::CTypeFactory;
@@ -319,11 +319,16 @@ struct CraneliftTier {
 
 /// Raw handles the Cranelift lowering needs; all process-lifetime shared
 /// arrays, captured once in `enable_tiered`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SharedArrayHandles {
     globals_data: usize,
     nglobals: usize,
     functions_ptrs: usize,
+    /// Runtime `hl_type*` per bytecode type index, copied out of
+    /// `SharedRuntimeHandles::c_types` so the Cranelift tier can hand a type
+    /// identity to an allocator without borrowing the interpreter's tables
+    /// across threads.
+    c_types: Vec<usize>,
 }
 
 /// State shared between the interpreter thread and beadie's tier brokers.
@@ -351,6 +356,36 @@ struct TieredSharedCtx {
     /// Findexes whose installed code already came from LLVM — a tier-1
     /// upgrade for those would recompile identical code.
     llvm_done: Mutex<HashSet<usize>>,
+    /// Loop headers the interpreter has probed hot, `findex -> header pcs`,
+    /// written by `note_hot_loop` on the main thread and read by the broker
+    /// when an LLVM promote finishes. The pcs index the SAME opcode array the
+    /// interpreter executes (`air::Cache::body`), which the broker mirrors
+    /// through the shared `air_pipeline::optimized` cache — an entry compiled
+    /// against a separately optimized copy would name a different
+    /// instruction.
+    hot_loop_pcs: Mutex<HashMap<usize, Vec<usize>>>,
+    /// `findex -> [(type index, vtable slot)]`, over every HOBJ/HSTRUCT
+    /// type whose vtable names the findex (own protos and inherited ones —
+    /// `pindex` is absolute across the super chain, and every subclass's
+    /// `vobj_proto` holds its own COPY of the ancestor's row). Built once,
+    /// on the first install that needs it.
+    ///
+    /// This exists because `hl_get_obj_proto` fills `vobj_proto` by value
+    /// from `functions_ptrs` at type-init time: promotion updates the slot
+    /// it copied FROM, and without this map the copies keep the interpreter
+    /// stub sentinels forever — which made every virtual dispatch from
+    /// compiled code take a malloc-per-call bridge through the interpreter.
+    /// Measured: 100M dispatches in 26.6s, 77% of it interpreter samples.
+    vtable_slots: OnceLock<HashMap<usize, Vec<(usize, usize)>>>,
+    /// OSR entries an LLVM promote has compiled but not yet attached,
+    /// `findex -> entries`. The broker cannot attach them itself: beadie's
+    /// adapter installs the main code pointer only after the compile closure
+    /// returns, and `swap_compiled_with_osr` before that install would have
+    /// its table orphaned by the install's generation bump. The main thread
+    /// attaches on next observing the fresh pointer in `tiered_on_invoke` —
+    /// for a single-invocation hot loop that observation comes from the
+    /// back-edge ticks, at most 64 iterations later.
+    pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
     attempted: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     cranelift_promotions: std::sync::atomic::AtomicU64,
@@ -481,7 +516,15 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
     else {
         return std::ptr::null_mut();
     };
-    if let Some(reason) = ash::cranelift::lowering_reject_reason(bytecode, func) {
+    // Signature checks only. The opcode gate cannot be the screen here any
+    // more: this tier has two lowering paths, and the AIR one accepts
+    // instructions the opcode subset refuses (address-taken registers, for
+    // one). Screening on the opcode subset would refuse those before either
+    // path was asked. What each path can take is decided by that path, in
+    // `cranelift::air::lower_best`; a function both decline still reaches the
+    // LLVM tier, because a declining Cranelift compile returns an error and
+    // this returns null on it.
+    if let Some(reason) = ash::cranelift::signature_reject_reason(bytecode, func) {
         if ctx.tier_log {
             eprintln!("[tier] decline findex={findex} tier=cranelift reason={reason}");
         }
@@ -505,6 +548,7 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
                         ctx.arrays.nglobals,
                         ctx.arrays.functions_ptrs as *mut c_void as *mut *mut c_void,
                         ctx.max_findex.load(Ordering::Acquire),
+                        &ctx.arrays.c_types,
                     )?
                 };
                 if ctx.log_promotions {
@@ -548,11 +592,30 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
                     t0.elapsed().as_secs_f64() * 1e3
                 );
             }
+            // Publish through `functions_ptrs` too. The LLVM tier always did
+            // (inside `install_function_address`); Cranelift installs never
+            // wrote the slot, so even a DIRECT call from compiled code to a
+            // Cranelift-compiled callee took the stub bridge through the
+            // interpreter. The entry ABI mirrors `create_function_type`, so
+            // the slot is callable by the same transmuted pointer either
+            // tier would install.
+            if ctx.arrays.functions_ptrs != 0 && findex < ctx.max_findex.load(Ordering::Acquire) {
+                unsafe {
+                    let ptrs = ctx.arrays.functions_ptrs as *mut *mut c_void;
+                    *ptrs.add(findex) = addr as *mut c_void;
+                }
+            }
+            patch_vtable_slots(ctx, findex, addr as *mut c_void);
+            produce_cranelift_osr_entries(ctx, &tier, bead, findex);
             addr as *mut ()
         }
         Ok(Err(e)) => {
-            if ctx.tier_log {
-                eprintln!("[tier] decline findex={findex} tier=cranelift reason={e:#}");
+            // Declines are routine and stay quiet; invalid IR is a compiler
+            // bug and never is. (backend.rs already printed the detail; this
+            // is the findex-level trail in case that print is ever gated.)
+            let msg = format!("{e:#}");
+            if ctx.tier_log || msg.contains("Verifier") || msg.contains("Regalloc") {
+                eprintln!("[tier] decline findex={findex} tier=cranelift reason={msg}");
             }
             std::ptr::null_mut()
         }
@@ -561,6 +624,298 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
             std::ptr::null_mut()
         }
     }
+}
+
+/// Write a freshly installed code address into every materialized vtable
+/// row that names `findex`.
+///
+/// Rows materialized LATER need no patching: `hl_get_obj_proto` copies from
+/// `functions_ptrs`, which already holds the real address by then. Only the
+/// copies made before promotion are stale, and this walks exactly those.
+/// The store is a word write racing readers the same way `functions_ptrs`
+/// updates already do.
+fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mut c_void) {
+    let map = ctx.vtable_slots.get_or_init(|| {
+        let mut m: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+        let Some(bytecode) = ctx.bytecode_ptr() else {
+            return m;
+        };
+        for (tidx, t) in bytecode.types.iter().enumerate() {
+            if t.kind != hl::hl_type_kind_HOBJ && t.kind != hl::hl_type_kind_HSTRUCT {
+                continue;
+            }
+            // The full vtable: own protos plus everything inherited.
+            // `pindex` is the absolute slot, so no offsetting is needed.
+            let mut cur = t.obj.as_ref();
+            while let Some(o) = cur {
+                for p in &o.proto {
+                    if p.pindex >= 0 {
+                        m.entry(p.findex as usize)
+                            .or_default()
+                            .push((tidx, p.pindex as usize));
+                    }
+                }
+                cur = o
+                    .super_
+                    .as_ref()
+                    .and_then(|s| bytecode.types.get(s.0))
+                    .and_then(|st| st.obj.as_ref());
+            }
+        }
+        m
+    });
+    let Some(sites) = map.get(&findex) else {
+        return;
+    };
+    for &(tidx, slot) in sites {
+        let Some(&tp) = ctx.arrays.c_types.get(tidx) else {
+            continue;
+        };
+        if tp == 0 {
+            continue;
+        }
+        unsafe {
+            let ot = tp as *mut hl_type;
+            let vp = (*ot).vobj_proto;
+            // Null: never materialized. 1: the no-proto sentinel.
+            if vp as usize > 1 {
+                *vp.add(slot) = addr;
+            }
+        }
+    }
+}
+
+/// Compile CRANELIFT OSR entries for the hot loop headers probed in
+/// `findex`, and stage them for the main thread to attach.
+///
+/// This is the ladder's fast door: a tier-0 compile is ~1ms, so a frame
+/// stuck in a hot loop picks up native code milliseconds after the probe
+/// notices it, instead of waiting ~170ms for an LLVM promote plus an
+/// LLVM entry build. The tier-up to LLVM later replaces the whole table
+/// through the ordinary swap, upgrading the loop's tail on the next
+/// transfer opportunity of a future frame — the code the running frame
+/// already entered stays valid regardless.
+fn produce_cranelift_osr_entries(
+    ctx: &TieredSharedCtx,
+    tier: &CraneliftTier,
+    bead: &Arc<Bead>,
+    findex: usize,
+) {
+    if !osr_transfer_enabled() || !ash::air_pipeline::air_enabled() {
+        return;
+    }
+    let pcs: Vec<usize> = match ctx
+        .hot_loop_pcs
+        .lock()
+        .expect("hot_loop_pcs mutex poisoned")
+        .get(&findex)
+    {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return,
+    };
+    let Some(bytecode) = ctx.bytecode_ptr() else {
+        return;
+    };
+    let Some(raw) = bytecode
+        .functions
+        .iter()
+        .find(|f| f.findex as usize == findex)
+    else {
+        return;
+    };
+    let Ok(opt) = ash::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
+        return;
+    };
+    let plan = ash::osr::analyze(&opt.ir);
+    if !plan.eligible() {
+        return;
+    }
+    let eligible: std::collections::HashSet<usize> = plan
+        .entry_headers
+        .iter()
+        .filter_map(|&h| opt.ser.block_pcs.get(h as usize).copied())
+        .collect();
+
+    let mut entries: Vec<OsrEntry> = Vec::new();
+    for pc in pcs {
+        if !eligible.contains(&pc) {
+            continue;
+        }
+        match ash::cranelift::codegen::compile_osr_entry(
+            &tier.backend,
+            &tier.ctx,
+            bead,
+            findex,
+            &opt,
+            pc,
+        ) {
+            Ok(addr) => entries.push(OsrEntry {
+                site: pc as u64,
+                code: addr as *mut (),
+            }),
+            Err(e) => {
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] cranelift entry declined findex={findex} pc={pc}: {e:#}"
+                    );
+                }
+            }
+        }
+    }
+    if entries.is_empty() {
+        return;
+    }
+    if osr_logging() {
+        eprintln!(
+            "[osr] staged {} cranelift entr{} for findex={findex}",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        );
+    }
+    // Same staging map the LLVM producer uses; the fresh-install branch
+    // attaches whatever is pending when it observes the new pointer.
+    ctx.pending_osr
+        .lock()
+        .expect("pending_osr mutex poisoned")
+        .insert(findex, entries);
+}
+
+/// Compile an OSR entry for every hot loop header the interpreter has
+/// probed in `findex`, and stage them for the main thread to attach.
+///
+/// Runs on the broker, right after this findex's LLVM promote — the point
+/// the user-facing design names: the ladder runs interpreter → Cranelift →
+/// LLVM on invocation counts (back-edge ticks included), and OSR is how a
+/// frame already inside a loop picks the LLVM code up. Nothing here compiles
+/// on the main thread and nothing bypasses a tier.
+///
+/// Silent when there is nothing to do: no probed headers, the plan refuses
+/// the function, or the pipeline declined it. `ASH_OSR=0` disables the
+/// production as well as the transfer.
+fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
+    if !osr_transfer_enabled() {
+        return;
+    }
+    // The gate: only functions something actually probed hot get entries.
+    // (Also the sites themselves in the raw-opcode arm below.)
+    let pcs: Vec<usize> = match ctx
+        .hot_loop_pcs
+        .lock()
+        .expect("hot_loop_pcs mutex poisoned")
+        .get(&findex)
+    {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return,
+    };
+    let Some(bytecode) = ctx.bytecode_ptr() else {
+        return;
+    };
+    let Some(raw) = bytecode
+        .functions
+        .iter()
+        .find(|f| f.findex as usize == findex)
+    else {
+        return;
+    };
+
+    // Eligibility and body must come from the same place the interpreter
+    // reads: the shared `optimized` cache when AIR is on, the raw opcodes
+    // when it is off. The serializer's `block_pcs` maps the plan's headers
+    // to pcs, which is what lets a probed pc be validated as an eligible
+    // header rather than gating on the whole function.
+    let m = ash::air_pipeline::AshModule::new(bytecode);
+    let (plan, body, sites): (_, std::borrow::Cow<HLFunction>, Vec<usize>) =
+        if ash::air_pipeline::air_enabled() {
+            match ash::air_pipeline::optimized(&m, raw) {
+                Ok(opt) => {
+                    let mut b = raw.clone();
+                    b.ops = opt.ser.ops.clone();
+                    b.regs = opt
+                        .ser
+                        .reg_types
+                        .iter()
+                        .map(|t| ash::types::TypeRef(t.0 as usize))
+                        .collect();
+                    // The pipeline renumbers opcodes; `debug` indices no
+                    // longer line up (mirrors `air::Cache::prepare`).
+                    b.debug = Vec::new();
+                    let plan = ash::osr::analyze(&opt.ir);
+                    // Only headers that have actually been probed hot. An
+                    // entry duplicates the rest of the function, so building
+                    // one per statically eligible header compiled ~20 bodies
+                    // for nbody and the interpreter ran most of the loop
+                    // before the attach landed. Headers that turn hot later
+                    // get single entries on demand (`late_osr_entry`).
+                    let eligible: std::collections::HashSet<usize> = plan
+                        .entry_headers
+                        .iter()
+                        .filter_map(|&h| opt.ser.block_pcs.get(h as usize).copied())
+                        .collect();
+                    let sites = pcs
+                        .iter()
+                        .copied()
+                        .filter(|pc| eligible.contains(pc))
+                        .collect();
+                    (plan, std::borrow::Cow::Owned(b), sites)
+                }
+                Err(_) => return,
+            }
+        } else {
+            // Raw opcodes: the probe's pcs are already in the right
+            // namespace, so use those. Headers probed after the promote are
+            // missed in this mode; it is the diagnostic configuration, not
+            // the shipping one.
+            let opts = ash::air_pipeline::AirPassOptions::default();
+            match ash::air_pipeline::prepare_ir(&m, raw, ash::air_pipeline::AirOptLevel::O0, &opts)
+            {
+                Ok((f, _)) => (ash::osr::analyze(&f), std::borrow::Cow::Borrowed(raw), pcs),
+                Err(_) => return,
+            }
+        };
+    if !plan.eligible() {
+        if osr_logging() {
+            eprintln!(
+                "[osr] findex={findex} not entered: {:?}",
+                plan.refusals
+            );
+        }
+        return;
+    }
+
+    let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
+    let LlvmState::Ready(module) = &mut *guard else {
+        return;
+    };
+    let mut entries: Vec<OsrEntry> = Vec::with_capacity(sites.len());
+    for pc in sites {
+        match module.0.compile_osr_entry(findex, pc, &body) {
+            Ok(addr) if addr != 0 => entries.push(OsrEntry {
+                site: pc as u64,
+                code: addr as *mut (),
+            }),
+            Ok(_) => {}
+            Err(e) => {
+                if osr_logging() {
+                    eprintln!("[osr] entry compile failed findex={findex} pc={pc}: {e:#}");
+                }
+            }
+        }
+    }
+    drop(guard);
+    if entries.is_empty() {
+        return;
+    }
+    if osr_logging() {
+        eprintln!(
+            "[osr] staged {} entr{} for findex={findex}",
+            entries.len(),
+            if entries.len() == 1 { "y" } else { "ies" }
+        );
+    }
+    ctx.pending_osr
+        .lock()
+        .expect("pending_osr mutex poisoned")
+        .insert(findex, entries);
 }
 
 /// LLVM top tier — the pre-existing `promote_function_strict` path.
@@ -633,6 +988,8 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 .expect("llvm_done mutex poisoned")
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
+            patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
+            produce_osr_entries(ctx, findex);
             // (LLVM code registers itself with the profiler in
             // install_function_address, which every promotion passes through.)
             if ctx.tier_log {
@@ -645,7 +1002,9 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
             meta.fn_addr as *mut ()
         }
         Err(reason) => {
-            if ctx.log_promotions {
+            // Same policy as the Cranelift sink: a verifier failure is an ash
+            // codegen bug and must be visible without any logging flag.
+            if ctx.log_promotions || reason.contains("did not verify") {
                 eprintln!("[tiered] {on_fail} findex={findex} reason={reason}");
             }
             std::ptr::null_mut()
@@ -695,6 +1054,11 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
+    /// OSR entries currently attached per findex — the main thread's mirror
+    /// of each bead's table. `swap_compiled_with_osr` REPLACES the table, so
+    /// an incremental attach must resend the entries already installed; this
+    /// is where they are remembered.
+    osr_attached: std::collections::HashMap<usize, Vec<OsrEntry>>,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
 
@@ -965,6 +1329,7 @@ impl HLInterpreter {
             targets,
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
+            osr_attached: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
@@ -1198,6 +1563,7 @@ impl HLInterpreter {
             arrays: SharedArrayHandles {
                 globals_data: globals_data_ptr as usize,
                 nglobals,
+                c_types: shared.c_types.iter().map(|p| *p as usize).collect(),
                 functions_ptrs: unsafe {
                     if shared.module_ctx.is_null() {
                         0
@@ -1209,6 +1575,9 @@ impl HLInterpreter {
             bytecode: std::sync::atomic::AtomicUsize::new(0),
             max_findex: std::sync::atomic::AtomicUsize::new(0),
             llvm_done: Mutex::new(HashSet::new()),
+            hot_loop_pcs: Mutex::new(HashMap::new()),
+            vtable_slots: OnceLock::new(),
+            pending_osr: Mutex::new(HashMap::new()),
             attempted: std::sync::atomic::AtomicU64::new(0),
             failed: std::sync::atomic::AtomicU64::new(0),
             cranelift_promotions: std::sync::atomic::AtomicU64::new(0),
@@ -2697,16 +3066,193 @@ impl HLInterpreter {
     fn note_hot_loop(&mut self, bytecode: &DecodedBytecode, func_idx: usize, header_pc: usize) {
         let findex = self.bytecode_findex(func_idx);
 
+        // Publish the header before ticking: a tick can be the one that
+        // submits the LLVM compile, and the broker reads this map when that
+        // compile finishes to know which entries to build.
+        if self.hot_loops.insert((findex, header_pc)) {
+            if let Some(t) = self.tiered_runtime.as_ref() {
+                t.shared_ctx
+                    .hot_loop_pcs
+                    .lock()
+                    .expect("hot_loop_pcs mutex poisoned")
+                    .entry(findex)
+                    .or_default()
+                    .push(header_pc);
+            }
+            self.report_hot_loop(bytecode, func_idx, findex, header_pc);
+            self.late_osr_entry(bytecode, func_idx, findex, header_pc);
+        }
+
         // Tick the bead. The returned entry is the function's *normal* entry
         // point and is deliberately dropped: calling it would restart the
         // function from the top, which is the one thing a mid-loop transfer
         // must not do. Only the tick matters here.
         let _ = self.tiered_on_invoke(bytecode, findex, func_idx);
+    }
 
-        if !self.hot_loops.insert((findex, header_pc)) {
+    /// Build and attach ONE OSR entry for a header that turned hot after its
+    /// function was already LLVM-promoted.
+    ///
+    /// The promote-time batch covers headers probed before the code landed;
+    /// this covers the other order, which is the common one for the loop
+    /// that matters — nbody's probes that drove promotion came from short
+    /// init loops, and the 10M-iteration loop was reached only afterwards.
+    ///
+    /// This is a synchronous LLVM compile on the main thread — the thing the
+    /// tiering otherwise never does — accepted here because it is one entry,
+    /// once per truly-hot header, for a loop that is by definition still
+    /// running: ~80ms of compile against seconds of remaining
+    /// interpretation. It does not compile the FUNCTION (the ladder already
+    /// did, on the broker); it builds the door into code that already
+    /// exists.
+    fn late_osr_entry(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        findex: usize,
+        header_pc: usize,
+    ) {
+        if !osr_transfer_enabled() {
             return;
         }
-        // Report eligibility once, the first time this header is seen hot.
+        let Some(tiered) = self.tiered_runtime.as_ref() else {
+            return;
+        };
+        let ctx = Arc::clone(&tiered.shared_ctx);
+        // Some tier must have installed code for this findex — an entry is a
+        // door into code that already exists.
+        let Some(addr) = self
+            .tiered_runtime
+            .as_ref()
+            .and_then(|t| t.entries.get(findex))
+            .and_then(|e| e.as_ref())
+            .map(|e| e.fn_addr)
+        else {
+            return;
+        };
+        let llvm_installed = ctx
+            .llvm_done
+            .lock()
+            .expect("llvm_done mutex poisoned")
+            .contains(&findex);
+        if !ash::air_pipeline::air_enabled() {
+            return; // raw-opcode mode has no block_pcs to validate against
+        }
+
+        let raw = &bytecode.functions[func_idx];
+        let m = ash::air_pipeline::AshModule::new(bytecode);
+        let Ok(opt) = ash::air_pipeline::optimized(&m, raw) else {
+            return;
+        };
+        let plan = ash::osr::analyze(&opt.ir);
+        let eligible = plan
+            .entry_headers
+            .iter()
+            .any(|&h| opt.ser.block_pcs.get(h as usize) == Some(&header_pc));
+        if !eligible {
+            return;
+        }
+
+        // Prefer the fast door. A Cranelift entry costs ~1ms — cheap enough
+        // to build synchronously right here, which matters because this runs
+        // on the MAIN thread mid-loop. The LLVM entry is a promote-sized
+        // compile and is only worth that stall when LLVM code is what is
+        // installed; and even then, never while a broker holds the module
+        // lock — `try_lock`, and a miss just retries on a later probe.
+        let entry_addr: u64 = if !llvm_installed {
+            let cl = ctx.cranelift.lock().expect("cranelift mutex poisoned");
+            let Some(tier) = cl.as_ref().and_then(|o| o.as_ref()).cloned() else {
+                return;
+            };
+            drop(cl);
+            let Some(bound) = self
+                .tiered_runtime
+                .as_ref()
+                .and_then(|t| t.beads.get(findex))
+                .and_then(|b| b.as_ref())
+            else {
+                return;
+            };
+            match ash::cranelift::codegen::compile_osr_entry(
+                &tier.backend,
+                &tier.ctx,
+                bound.bead(),
+                findex,
+                &opt,
+                header_pc,
+            ) {
+                Ok(a) => a as u64,
+                Err(e) => {
+                    if osr_logging() {
+                        eprintln!(
+                            "[osr] late cranelift entry declined findex={findex} pc={header_pc}: {e:#}"
+                        );
+                    }
+                    return;
+                }
+            }
+        } else {
+            let body = self.air.body(bytecode, func_idx);
+            let Ok(mut guard) = ctx.llvm.try_lock() else {
+                // A broker is compiling; blocking the interpreter behind it
+                // was 11.5% of nbody's execute. The header stays in
+                // `hot_loops`... which would stop this from retrying, so put
+                // it back on the retry path by forgetting it was seen.
+                self.hot_loops.remove(&(findex, header_pc));
+                return;
+            };
+            let LlvmState::Ready(module) = &mut *guard else {
+                return;
+            };
+            match module.0.compile_osr_entry(findex, header_pc, body) {
+                Ok(a) if a != 0 => a,
+                Ok(_) => return,
+                Err(e) => {
+                    if osr_logging() {
+                        eprintln!(
+                            "[osr] late entry compile failed findex={findex} pc={header_pc}: {e:#}"
+                        );
+                    }
+                    return;
+                }
+            }
+        };
+
+        // Incremental attach: the swap replaces the whole table, so resend
+        // what is already installed plus the new entry.
+        let mut entries = self.osr_attached.get(&findex).cloned().unwrap_or_default();
+        entries.push(OsrEntry {
+            site: header_pc as u64,
+            code: entry_addr as *mut (),
+        });
+        let Some(bound) = self
+            .tiered_runtime
+            .as_ref()
+            .and_then(|t| t.beads.get(findex))
+            .and_then(|b| b.as_ref())
+        else {
+            return;
+        };
+        if bound
+            .bead()
+            .swap_compiled_with_osr(addr as *mut (), entries.clone())
+            .is_some()
+        {
+            self.osr_attached.insert(findex, entries);
+            if osr_logging() {
+                eprintln!("[osr] late-attached entry findex={findex} pc={header_pc}");
+            }
+        }
+    }
+
+    /// The once-per-header eligibility log, split out of the probe path.
+    fn report_hot_loop(
+        &self,
+        bytecode: &DecodedBytecode,
+        func_idx: usize,
+        findex: usize,
+        header_pc: usize,
+    ) {
         // `osr::analyze` answers from the IR whether a transfer may enter at
         // all: a live trap region or a register whose address escaped means no.
         if osr_logging() {
@@ -2981,6 +3527,37 @@ impl HLInterpreter {
             }
         }
         // Freshly installed (or newly swapped-in) code.
+        //
+        // Attach any OSR entries the promote staged. The re-swap with the
+        // SAME code pointer is beadie's install path for a table: it bumps
+        // the generation, which is what activates the entries — a table
+        // installed before the adapter's own install would be orphaned by
+        // that install's bump. For a single-invocation hot loop this branch
+        // is reached by the loop's own back-edge ticks, so the entries are
+        // live within 64 iterations of the code landing.
+        if let Some(entries) = tiered
+            .shared_ctx
+            .pending_osr
+            .lock()
+            .expect("pending_osr mutex poisoned")
+            .remove(&findex)
+        {
+            if let Some(bound) = tiered.beads[findex].as_ref() {
+                let n = entries.len();
+                if bound
+                    .bead()
+                    .swap_compiled_with_osr(addr as *mut (), entries.clone())
+                    .is_some()
+                {
+                    self.osr_attached.insert(findex, entries);
+                    if osr_logging() {
+                        eprintln!("[osr] attached {n} entries findex={findex}");
+                    }
+                } else if osr_logging() {
+                    eprintln!("[osr] attach refused findex={findex} (bead not compiled)");
+                }
+            }
+        }
         let (arg_kinds, nargs, ret_kind) = tiered.sigs[findex]?;
         let entry = CompiledFunctionEntry {
             fn_addr: addr,
@@ -5930,8 +6507,22 @@ impl HLInterpreter {
                 let vobj_proto = (*type_ptr).vobj_proto;
                 if !vobj_proto.is_null() && vobj_proto as usize > 1 {
                     let method_ptr = *vobj_proto.add(field);
-                    // Extract findex from stub pointer (findex+1)
-                    (method_ptr as usize).wrapping_sub(1)
+                    if (method_ptr as u64) < ash::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                        // Interpreter stub: the slot encodes findex+1.
+                        (method_ptr as usize).wrapping_sub(1)
+                    } else {
+                        // A real code pointer — `patch_vtable_slots` wrote the
+                        // compiled address into this row on promotion. The
+                        // interpreter dispatches by findex (its call path then
+                        // finds the compiled entry through the bead), so
+                        // resolve the findex from the bytecode instead of
+                        // decoding the pointer as one — which produced
+                        // "findex 47297429503 not found".
+                        self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                            .ok_or_else(|| {
+                                anyhow!("Cannot resolve method field={} on type", field)
+                            })?
+                    }
                 } else {
                     // Fallback: resolve from bytecode type proto
                     self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
@@ -6344,6 +6935,45 @@ impl HLInterpreter {
             }
 
             // ---- calls -------------------------------------------------
+            I::Intrinsic {
+                kind,
+                dst,
+                args: a,
+                ..
+            } => {
+                // Inline Rust, no FFI dispatch, no marshal. Semantics are
+                // pinned to the ash_std bodies these replaced — RoundHalfUp
+                // is floor(x + 0.5) and the i32 conversions are Rust `as`
+                // (saturating, NaN -> 0).
+                use air::v2::ir::IntrinsicKind as K;
+                let r = match kind {
+                    K::PtrCompare => {
+                        let (pa, pb) = (get!(&a[0]).as_ptr() as usize, get!(&a[1]).as_ptr() as usize);
+                        NanBoxedValue::from_i32(match pa.cmp(&pb) {
+                            std::cmp::Ordering::Equal => 0,
+                            std::cmp::Ordering::Greater => 1,
+                            std::cmp::Ordering::Less => -1,
+                        })
+                    }
+                    _ => {
+                        let x = get!(&a[0]).as_f64();
+                        match kind {
+                            K::Sqrt => NanBoxedValue::from_f64(x.sqrt()),
+                            K::Abs => NanBoxedValue::from_f64(x.abs()),
+                            K::Floor => NanBoxedValue::from_f64(x.floor()),
+                            K::Ceil => NanBoxedValue::from_f64(x.ceil()),
+                            K::RoundHalfUp => NanBoxedValue::from_f64((x + 0.5).floor()),
+                            K::FloorToI32 => NanBoxedValue::from_i32(x.floor() as i32),
+                            K::CeilToI32 => NanBoxedValue::from_i32(x.ceil() as i32),
+                            K::RoundHalfUpToI32 => NanBoxedValue::from_i32((x + 0.5).floor() as i32),
+                            K::IsNaN => NanBoxedValue::from_bool(x.is_nan()),
+                            K::IsFinite => NanBoxedValue::from_bool(x.is_finite()),
+                            K::PtrCompare => unreachable!("handled above"),
+                        }
+                    }
+                };
+                set!(dst, r);
+            }
             I::Call { dst, fun, args: a } => {
                 let argv: Vec<NanBoxedValue> = a.iter().map(|v| get!(v)).collect();
                 return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);

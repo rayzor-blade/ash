@@ -1310,11 +1310,96 @@ impl AirCodegen<'_, '_> {
                 BinOp::SShr => self.b.ins().sshr(va, vb),
                 BinOp::UShr => self.b.ins().ushr(va, vb),
                 BinOp::SDiv | BinOp::UDiv | BinOp::SMod | BinOp::UMod => {
-                    self.guarded_div(va, vb, ta, op)
+                    match self.int_const_of(b) {
+                        Some(c) => self.const_div(va, ta, op, c),
+                        None => self.guarded_div(va, vb, ta, op),
+                    }
                 }
             }
         };
         self.def(dst, r)
+    }
+
+    /// The literal behind `v` when its definition is `Instr::Int`. Divisions
+    /// are rare enough that a scan beats carrying a map.
+    fn int_const_of(&self, v: ValueId) -> Option<i64> {
+        for blk in &self.f.blocks {
+            for ins in &blk.instrs {
+                if let Instr::Int { dst, idx } = ins {
+                    if *dst == v {
+                        return self.ctx.bytecode().ints.get(*idx).map(|&i| i as i64);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Division/remainder by a compile-time constant. The zero and INT_MIN/-1
+    /// guards of [`guarded_div`] fold away, and a power-of-two divisor
+    /// strength-reduces to shifts and masks — Cranelift's mid-end does not do
+    /// this for `srem`/`sdiv`, and on x86-64 the difference is a ~25-cycle
+    /// `idiv` per iteration in a `% 8` reduction loop. Semantics are HL's:
+    /// truncated division, remainder takes the dividend's sign, and the
+    /// INT_MIN edge cases wrap exactly as the guarded path's answers do.
+    fn const_div(&mut self, va: Value, ty: Type, op: BinOp, c: i64) -> Value {
+        let bits = i64::from(ty.bits());
+        let abs = c.unsigned_abs() as i64;
+        if c == 0 {
+            // HL yields 0 for a zero divisor (division) and 0 for modulo.
+            return self.b.ins().iconst(ty, 0);
+        }
+        if abs == 1 {
+            return match op {
+                // x / -1 = -x; `ineg` wraps, which is exactly the
+                // INT_MIN / -1 answer the guarded path selects.
+                BinOp::SDiv if c < 0 => self.b.ins().ineg(va),
+                BinOp::SDiv | BinOp::UDiv => va,
+                _ => self.b.ins().iconst(ty, 0),
+            };
+        }
+        let pow2 = abs & (abs - 1) == 0;
+        if pow2 && matches!(op, BinOp::SDiv | BinOp::SMod) {
+            let k = i64::from(abs.trailing_zeros());
+            // Truncated division needs the bias 2^k - 1 added for negative
+            // dividends; the arithmetic shift of the sign produces it.
+            let sign = self.b.ins().sshr_imm(va, bits - 1);
+            let bias = self.b.ins().ushr_imm(sign, bits - k);
+            let sum = self.b.ins().iadd(va, bias);
+            return match op {
+                BinOp::SDiv => {
+                    let q = self.b.ins().sshr_imm(sum, k);
+                    if c < 0 {
+                        self.b.ins().ineg(q)
+                    } else {
+                        q
+                    }
+                }
+                _ => {
+                    // Remainder keeps the dividend's sign: mask the biased
+                    // value, un-bias. |x % c| depends only on |c|.
+                    let m = self.b.ins().band_imm(sum, abs - 1);
+                    self.b.ins().isub(m, bias)
+                }
+            };
+        }
+        if pow2 && c > 0 {
+            match op {
+                BinOp::UDiv => return self.b.ins().ushr_imm(va, abs.trailing_zeros() as i64),
+                BinOp::UMod => return self.b.ins().band_imm(va, abs - 1),
+                _ => {}
+            }
+        }
+        // Any other non-zero, non-(-1) constant: the guards can never fire,
+        // so emit the raw operation. (-1 is handled above for signed; for
+        // unsigned it is just a huge divisor and this is still exact.)
+        let vb = self.b.ins().iconst(ty, c);
+        match op {
+            BinOp::SDiv => self.b.ins().sdiv(va, vb),
+            BinOp::UDiv => self.b.ins().udiv(va, vb),
+            BinOp::SMod => self.b.ins().srem(va, vb),
+            _ => self.b.ins().urem(va, vb),
+        }
     }
 
     /// Integer division and remainder without Cranelift's trapping edge cases.

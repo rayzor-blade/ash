@@ -5,3 +5,4 @@ target
 rustc-ice-*.txt
 # Python bytecode from scripts/
 __pycache__/
+dist/

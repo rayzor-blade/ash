@@ -53,38 +53,26 @@ pub fn std_is_static() -> bool {
 
 /// Decide how ash_std will be reached, before anything touches it.
 ///
-/// A program that loads no HDLL never needs the dylib: nothing outside this
-/// binary has to see `hl_*`, so the linked-in copy serves every call and
-/// startup skips the dynamic loader entirely. A program that does load HDLLs
-/// still needs it, because an .hdll resolves its `hl_*` imports through the
-/// dynamic linker and cannot see symbols that live only inside an executable.
+/// Always the linked-in copy. An earlier version of this kept the dylib for
+/// programs that load HDLLs, on the theory that an .hdll resolves its `hl_*`
+/// imports through the dynamic linker and so needs a real library to bind to.
+/// That reasoning was wrong in a way that only shows up at runtime: once
+/// ash_std is linked into the executable, the executable exports those symbols
+/// and *precedes* any dlopened library in the global search order, so the
+/// .hdll binds the executable's copy regardless. Keeping the dylib therefore
+/// did not give HDLLs a second copy to use — it gave the process two copies of
+/// the GC, initialized the wrong one, and a Heaps game died on
+/// "GC not initialized" the moment SDL allocated.
 ///
-/// The test is "is there an .hdll beside the program", not "does the bytecode
-/// name one", because this has to be decided *before* the bytecode is decoded
-/// — the decoder itself calls `hlp_hash_gen`, and that function interns names
-/// in a cache. Deciding afterwards would mean decoding against one copy's
-/// cache and running against the other's. The heuristic errs toward the
-/// proven path: an .hdll present but unused costs the old startup, while the
-/// reverse mistake would split the GC.
+/// Linking unconditionally is both simpler and the only arrangement in which
+/// exactly one GC exists. Verified against the Heaps sample: all four HDLLs
+/// load and the program reaches Main.init().
 ///
-/// `ASH_STD_LINKAGE=static|dynamic` overrides.
-pub fn choose_std_linkage(program: &Path) -> bool {
-    let force = std::env::var("ASH_STD_LINKAGE").unwrap_or_default();
-    let static_ok = match force.as_str() {
-        "static" => true,
-        "dynamic" => false,
-        _ => {
-            let dir = program.parent().unwrap_or_else(|| Path::new("."));
-            let has_hdll = std::fs::read_dir(dir)
-                .map(|entries| {
-                    entries.filter_map(|e| e.ok()).any(|e| {
-                        e.path().extension().is_some_and(|x| x == "hdll")
-                    })
-                })
-                .unwrap_or(false);
-            !has_hdll
-        }
-    };
+/// `ASH_STD_LINKAGE=dynamic` restores the dlopen for A/B diagnosis. It is not
+/// a supported configuration — with any HDLL loaded it reproduces the split
+/// described above.
+pub fn choose_std_linkage(_program: &Path) -> bool {
+    let static_ok = std::env::var("ASH_STD_LINKAGE").as_deref() != Ok("dynamic");
     STATIC_STD.store(static_ok, std::sync::atomic::Ordering::Relaxed);
     static_ok
 }

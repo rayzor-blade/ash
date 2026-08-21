@@ -412,17 +412,21 @@ def time_wrapper() -> list[str] | None:
 class Mode:
     def __init__(self, raw: dict):
         self.name: str = raw["name"]
-        self.binary: str = raw.get("binary", "ash_cli")
+        self.binary: str = raw.get("binary", "ash")
         self.args: list[str] = list(raw.get("args", []))
         self.default: bool = bool(raw.get("default", True))
         self.description: str = raw.get("description", "")
-        if self.binary not in ("ash_cli", "ash"):
-            raise SystemExit(f"mode {self.name}: unknown binary {self.binary!r}")
+        if self.binary != "ash":
+            raise SystemExit(
+                f"mode {self.name}: unknown binary {self.binary!r} — the CLI "
+                f"is unified; every mode is a flag set on the `ash` binary"
+            )
 
     @property
     def supports_flags(self) -> bool:
-        """The standalone `ash` binary takes a file and nothing else."""
-        return self.binary == "ash_cli"
+        """Every mode runs the unified `ash` CLI, which takes the full flag
+        set (--quiet, --jit-log, ...) in every --mode."""
+        return True
 
 
 class Bench:
@@ -1199,10 +1203,10 @@ def cargo_build(repo_root: pathlib.Path, needed: set[str]) -> None:
     an interpreter-only sweep has no use for it.
     """
     pkgs = ["ash_std"]
-    if "ash_cli" in needed:
+    if needed:
+        # The unified `ash` binary is built by the ash_cli package; the ash
+        # library (and its LLVM link) comes in as its dependency.
         pkgs.append("ash_cli")
-    if "ash" in needed:
-        pkgs.append("ash")
 
     build_target = os.environ.get("CARGO_BUILD_TARGET")
     for pkg in pkgs:
@@ -1278,25 +1282,22 @@ def main(argv=None) -> int:
         raise SystemExit("nothing selected")
 
     if args.build:
-        cargo_build(repo_root, {m.binary for m in modes} | {"ash_cli"})
+        cargo_build(repo_root, {m.binary for m in modes} | {"ash"})
 
-    # ash_cli is resolved unconditionally: even a full-JIT-only sweep needs it
-    # to produce the interp reference output that `exact` benchmarks are
-    # judged against.
+    # One binary serves every mode, including the untimed interp reference
+    # run that `exact` benchmarks are judged against.
     binaries: dict[str, pathlib.Path] = {}
-    for candidate in ("ash_cli", "ash"):
-        found = find_binary(repo_root, candidate)
-        if found is not None:
-            binaries[candidate] = found
+    found = find_binary(repo_root, "ash")
+    if found is not None:
+        binaries["ash"] = found
 
-    needed = {m.binary for m in modes} | {"ash_cli"}
+    needed = {m.binary for m in modes} | {"ash"}
     missing = sorted(needed - set(binaries))
     if missing:
         raise SystemExit(
             f"binary/binaries {', '.join(missing)} not found under "
             f"{repo_root / 'target'}. Run with --build, or:\n"
-            f"  cargo build -p ash_std && cargo build -p ash_cli && "
-            f"cargo build -p ash"
+            f"  cargo build -p ash_std && cargo build -p ash_cli"
         )
 
     oracle = load_oracle(pathlib.Path(args.oracle).resolve() if args.oracle else None)
@@ -1317,8 +1318,7 @@ def main(argv=None) -> int:
                 f"or pass --ignore-load to proceed anyway."
             )
 
-    eprint(f"[bench] ash_cli: {binaries.get('ash_cli', '-')}")
-    eprint(f"[bench] ash:     {binaries.get('ash', '-')}")
+    eprint(f"[bench] ash: {binaries.get('ash', '-')}")
     eprint(
         f"[bench] {len(benches)} benchmark(s) x {len(modes)} mode(s), "
         f"{args.warmups} warmup + {args.iterations} timed run(s) each"

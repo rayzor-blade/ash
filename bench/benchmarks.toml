@@ -18,8 +18,8 @@ schema_version = 1
 
 # ── Execution modes ─────────────────────────────────────────────────────────
 #
-# `binary` is either "ash_cli" (interpreter + optional tiered JIT) or "ash"
-# (the standalone full-JIT binary, which takes no flags).
+# `binary` is "ash" — the unified CLI. Every mode is a flag set on it,
+# including the whole-module JIT (`--mode jit`).
 #
 # `default = false` keeps a mode out of the sweep unless it is named with
 # --modes. Use it for controls and policy variants that are interesting to
@@ -27,37 +27,37 @@ schema_version = 1
 
 [[mode]]
 name = "interp"
-binary = "ash_cli"
+binary = "ash"
 args = ["--mode", "interp"]
 description = "Pure bytecode interpreter. The parity-validated reference."
 
 [[mode]]
 name = "hybrid-auto"
-binary = "ash_cli"
+binary = "ash"
 args = ["--mode", "hybrid", "--jit-tier", "auto"]
 description = "Interpreter with the full ladder: interp -> Cranelift -> LLVM."
 
 [[mode]]
 name = "hybrid-cranelift"
-binary = "ash_cli"
+binary = "ash"
 args = ["--mode", "hybrid", "--jit-tier", "cranelift"]
 description = "Ladder pinned to the Cranelift middle tier."
 
 [[mode]]
 name = "hybrid-llvm"
-binary = "ash_cli"
+binary = "ash"
 args = ["--mode", "hybrid", "--jit-tier", "llvm"]
 description = "Ladder pinned to the LLVM top tier."
 
 [[mode]]
 name = "full-jit"
 binary = "ash"
-args = []
+args = ["--mode", "jit"]
 description = "Standalone whole-module LLVM JIT (no interpreter)."
 
 [[mode]]
 name = "hybrid-off"
-binary = "ash_cli"
+binary = "ash"
 args = ["--mode", "hybrid", "--jit-tier", "off"]
 default = false
 description = """Hybrid with promotion disabled. Control for `interp`: the \
@@ -65,7 +65,7 @@ difference is the cost of carrying the tiering machinery without using it."""
 
 [[mode]]
 name = "hybrid-eager"
-binary = "ash_cli"
+binary = "ash"
 args = [
   "--mode", "hybrid", "--jit-tier", "auto",
   "--jit-threshold", "1", "--jit-min-ops", "0", "--jit-max-args", "8",
@@ -144,6 +144,7 @@ checksums = [
 # mandelbrot's allocation-bound row roughly alone.
 [[bench]]
 name = "nbody"
+main = "NBody"
 hl = "test_nbody.hl"
 # Judged on its own reduced value rather than on stdout, so that no interpreter
 # reference run is needed — the interpreter is excluded below, and demanding a
@@ -178,6 +179,7 @@ so the number is comparable with the official Haxe targets."""
 
 [[bench]]
 name = "inlined_call"
+main = "BenchInlinedCall"
 hl = "bench_inlined_call.hl"
 expectation = "checksum"
 checksum_marker = "BenchInlinedCall"
@@ -189,6 +191,7 @@ group is read as a delta against it."""
 
 [[bench]]
 name = "free_call"
+main = "BenchFreeCall"
 hl = "bench_free_call.hl"
 expectation = "checksum"
 checksum_marker = "BenchFreeCall"
@@ -200,6 +203,7 @@ take it: a delta near zero says the call was removed, not that calls are free.""
 
 [[bench]]
 name = "method_call"
+main = "BenchMethodCall"
 hl = "bench_method_call.hl"
 expectation = "checksum"
 checksum_marker = "BenchMethodCall"
@@ -212,6 +216,7 @@ vectorize -- 100M dispatches in 6.04ms, the baseline's own time."""
 
 [[bench]]
 name = "closure_call"
+main = "BenchClosureCall"
 hl = "bench_closure_call.hl"
 expectation = "checksum"
 checksum_marker = "BenchClosureCall"
@@ -219,6 +224,22 @@ checksums = [{ value = "-1737346944", label = "reference" }]
 timeout_secs = 120
 group = "call"
 description = "Indirect call through a closure: target in a register, no vtable slot."
+
+[[bench]]
+name = "fib"
+main = "BenchFib"
+hl = "bench_fib.hl"
+# Judged on its printed value, like nbody, so no interpreter reference run is
+# needed -- interp fib(40) takes minutes for a number the call benches already
+# cover.
+expectation = "checksum"
+checksum_marker = "BenchFib"
+checksums = [{ value = "102334155", label = "reference" }]
+timeout_secs = 300
+group = "call"
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = "recursion depth 40 is minutes under the interpreter"
+description = "Recursive fib(40): raw call/return latency with no loop to vectorize."
 
 [[bench]]
 name = "array_push"

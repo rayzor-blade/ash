@@ -78,7 +78,7 @@ pub fn parity_cases_file() -> PathBuf {
 }
 
 pub fn ash_cli_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_ash_cli"))
+    PathBuf::from(env!("CARGO_BIN_EXE_ash"))
 }
 
 pub fn parse_bool_env(name: &str, default: bool) -> bool {

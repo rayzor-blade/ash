@@ -14,7 +14,7 @@ this tool. Do not add features there.
 
 ```sh
 # build first — ash_std is embedded into `ash` at build time
-cargo build -p ash_std && cargo build -p ash_cli && cargo build -p ash
+cargo build -p ash_std && cargo build -p ash_cli   # produces the unified `ash` binary
 
 # full default sweep, table on stdout + JSON on disk
 ./scripts/ash_bench.py --out-json bench/baselines/local.json

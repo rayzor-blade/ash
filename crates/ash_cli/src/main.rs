@@ -8,7 +8,7 @@ use std::process;
 use std::sync::OnceLock;
 
 #[derive(Parser)]
-#[command(name = "ash_cli", about = "ASH - HashLink VM Interpreter")]
+#[command(name = "ash", about = "ASH - HashLink bytecode runtime (interp | hybrid | jit)")]
 struct Cli {
     /// Path to a HashLink bytecode (.hl) file
     file: Option<PathBuf>,
@@ -393,6 +393,14 @@ fn run() -> Result<()> {
         anyhow::bail!("Bytecode file not found: {}", hl_path.display());
     }
 
+    // The whole-module JIT is its own world: it decodes, initializes the
+    // stdlib and compiles inside `run_whole_module`, exactly as the old
+    // standalone `ash` binary did — so it branches off before the
+    // interpreter-oriented prep below.
+    if matches!(cli.mode, Mode::Jit) {
+        return ash::jit::run_whole_module(&hl_path);
+    }
+
     {
         let _p = ash::profile::scope("init stdlib");
         init_std_library()?;
@@ -722,16 +730,7 @@ fn run() -> Result<()> {
                 eprintln!("Interpreter returned: {:?}", result);
             }
         }
-        Mode::Jit => {
-            if !cli.quiet {
-                eprintln!("JIT-only mode not yet fully implemented, falling back to interpreter");
-            }
-            let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
-            let result = interpreter.execute_entrypoint(&bytecode, &native_resolver)?;
-            if !cli.quiet {
-                eprintln!("Interpreter returned: {:?}", result);
-            }
-        }
+        Mode::Jit => unreachable!("handled before the interpreter prep"),
     }
 
     Ok(())

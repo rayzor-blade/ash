@@ -125,7 +125,6 @@ dependencies = [
  "once_cell",
  "rustc-demangle",
  "tempfile",
- "tikv-jemallocator",
 ]
 
 [[package]]

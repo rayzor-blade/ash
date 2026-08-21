@@ -67,7 +67,7 @@ jobs:
     needs: oracle-bundle
     env:
       HAXE_VERSION: "4.3.4"
-      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      LLVM_SYS_211_PREFIX: "/usr/lib/llvm-21"
       CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
       ASH_PARITY_REQUIRE_ORACLE: "1"
       ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
@@ -80,15 +80,16 @@ jobs:
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 
-      - name: Install LLVM 18 toolchain
+      - name: Install LLVM 21 toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
           wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18 all
-          llvm-config-18 --version
-          clang-18 --version
+          sudo /tmp/llvm.sh 21 all
+          llvm-config-21 --version
+          clang-21 --version
 
       - name: Download parity oracle for this run
         uses: actions/download-artifact@v4
@@ -107,7 +108,7 @@ jobs:
     needs: oracle-bundle
     env:
       HAXE_VERSION: "4.3.4"
-      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      LLVM_SYS_211_PREFIX: "/usr/lib/llvm-21"
       CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
       ASH_PARITY_REQUIRE_ORACLE: "1"
       ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
@@ -120,15 +121,16 @@ jobs:
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 
-      - name: Install LLVM 18 toolchain
+      - name: Install LLVM 21 toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
           wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18 all
-          llvm-config-18 --version
-          clang-18 --version
+          sudo /tmp/llvm.sh 21 all
+          llvm-config-21 --version
+          clang-21 --version
 
       - name: Download parity oracle for this run
         uses: actions/download-artifact@v4
@@ -151,7 +153,7 @@ jobs:
     needs: oracle-bundle
     env:
       HAXE_VERSION: "4.3.4"
-      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      LLVM_SYS_211_PREFIX: "/usr/lib/llvm-21"
       CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
       ASH_PARITY_REQUIRE_ORACLE: "1"
       ASH_PARITY_ORACLE_DIR: "target/parity-oracle"
@@ -166,15 +168,16 @@ jobs:
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 
-      - name: Install LLVM 18 toolchain
+      - name: Install LLVM 21 toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
           wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18 all
-          llvm-config-18 --version
-          clang-18 --version
+          sudo /tmp/llvm.sh 21 all
+          llvm-config-21 --version
+          clang-21 --version
 
       - name: Download parity oracle for this run
         uses: actions/download-artifact@v4

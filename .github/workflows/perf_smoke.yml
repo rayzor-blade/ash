@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       HAXE_VERSION: "4.3.4"
-      LLVM_SYS_180_PREFIX: "/usr/lib/llvm-18"
+      LLVM_SYS_211_PREFIX: "/usr/lib/llvm-21"
       CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
     steps:
       - uses: actions/checkout@v4
@@ -34,15 +34,16 @@ jobs:
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 
-      - name: Install LLVM 18 toolchain
+      - name: Install LLVM 21 toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
           wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
           chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 18 all
-          llvm-config-18 --version
-          clang-18 --version
+          sudo /tmp/llvm.sh 21 all
+          llvm-config-21 --version
+          clang-21 --version
 
       - name: Build embedded stdlib cdylib
         run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"

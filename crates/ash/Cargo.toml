@@ -30,10 +30,6 @@ cranelift-codegen = "0.130"
 cranelift-frontend = "0.130"
 cranelift-module = "0.130"
 
-[[bin]]
-name = "ash"
-path = "src/main.rs"
-
 # NOTE: profiles live in the workspace root Cargo.toml. Cargo ignores a
 # [profile.*] table in a non-root package and only warns about it, which is how
 # this crate spent a while producing "release" builds that were nothing of the
@@ -44,6 +40,3 @@ path = "src/main.rs"
 [build-dependencies]
 bindgen = "0.70.1"
 
-# See ash_cli/Cargo.toml — glibc frees lazily on Linux; jemalloc frees on time.
-[target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = "0.6"

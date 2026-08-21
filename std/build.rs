@@ -78,10 +78,22 @@ fn main() {
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
+    // Layout tests only make sense when the headers being parsed are the
+    // target's own. On a native build they are a real safety net — they catch
+    // bindgen mis-sizing an HL struct, which the whole ABI leans on. But the
+    // Windows cross-check from macOS has no Windows SDK headers, so it lends
+    // bindgen the darwin ones (BINDGEN_EXTRA_CLANG_ARGS=--target=...-apple-
+    // darwin) and every assertion then measures a darwin struct under MSVC
+    // layout rules: 15 guaranteed E0080s about pthread_t and __darwin_*
+    // types that exist on no Windows machine. Host != target is exactly the
+    // condition under which the headers are borrowed, so it is the gate.
+    let cross = env::var("HOST").unwrap_or_default() != env::var("TARGET").unwrap_or_default();
+
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
+        .layout_tests(!cross)
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))

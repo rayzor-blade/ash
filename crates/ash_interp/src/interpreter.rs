@@ -641,6 +641,7 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
             // 362ms in Cranelift against 87ms in LLVM, a rung the ladder
             // could not otherwise climb.
             if llvm_chase_enabled()
+                && chase_worthwhile(&tier, findex)
                 && matches!(ctx.mode, TierMode::Auto)
                 && !ctx
                     .llvm_done
@@ -652,6 +653,15 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                 if let Ok(h) = std::thread::Builder::new()
                     .name("ash-retier-llvm".into())
                     .spawn(move || {
+                        // Speculative work must yield to the program it is
+                        // speculating for. Unpriorit
+                        // ised, this compile competes for a core with the
+                        // mutator, and on a small machine it wins: free_call
+                        // measured 86ms against 131ms when pinned to two
+                        // cores, against 88ms against 98ms on sixteen. That
+                        // is the whole reason a 4-core CI runner did not
+                        // reproduce this box's numbers.
+                        lower_own_priority();
                         compile_with_llvm(&chase, 1, findex);
                     })
                 {
@@ -9530,6 +9540,43 @@ impl HLInterpreter {
     /// Write a NanBoxedValue to a raw memory pointer using the given type kind.
     fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: u32) {
         unsafe { Self::write_value_at(ptr, kind, val) }
+    }
+}
+
+/// Whether this findex's AIR says an LLVM promotion is worth its compile.
+/// Reads the shared optimized cache, so it costs a lookup rather than a
+/// pipeline run. A function the pipeline refused is not chased.
+fn chase_worthwhile(tier: &CraneliftTier, findex: usize) -> bool {
+    let bytecode = tier.ctx.bytecode();
+    let Some(raw) = bytecode
+        .functions
+        .iter()
+        .find(|f| f.findex as usize == findex)
+    else {
+        return true;
+    };
+    match ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) {
+        Ok(opt) => ash_core::cranelift::llvm_chase_worthwhile(&opt.ir),
+        Err(_) => true,
+    }
+}
+
+/// Drop the calling thread to background priority, so it runs on capacity
+/// the program is not using rather than taking a core from it.
+///
+/// Linux `nice` is per-thread, which is exactly the granularity wanted here.
+/// macOS sets a QoS class instead; its scheduler honours that the same way.
+/// A failure is ignored: the chase is still correct at normal priority, only
+/// less polite.
+fn lower_own_priority() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        // QOS_CLASS_BACKGROUND
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
     }
 }
 

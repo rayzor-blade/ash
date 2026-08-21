@@ -20,7 +20,7 @@
 //!   block-structured form instead of a flat opcode array.
 
 pub mod air;
-pub use air::{publish_retier_target, retier_enabled};
+pub use air::{llvm_chase_worthwhile, publish_retier_target, retier_enabled};
 pub mod backend;
 pub mod codegen;
 pub mod lower;

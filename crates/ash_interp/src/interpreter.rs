@@ -464,7 +464,7 @@ struct TieredRuntime {
 /// beadie's primary broker treats a null tier-0 result as a permanent
 /// invalidation and the function would then never reach the LLVM tier either.
 fn tiered_compile_tier(
-    ctx: &TieredSharedCtx,
+    ctx: &Arc<TieredSharedCtx>,
     tier: usize,
     findex: usize,
     bead: &Arc<Bead>,
@@ -505,7 +505,7 @@ fn tiered_compile_tier(
 
 /// Cranelift middle tier. Returns null when the function is outside the
 /// lowerable subset or lowering declines — the caller falls back to LLVM.
-fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>) -> *mut () {
+fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<Bead>) -> *mut () {
     use std::sync::atomic::Ordering;
     let Some(bytecode) = ctx.bytecode_ptr() else {
         return std::ptr::null_mut();
@@ -609,7 +609,35 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
                 }
             }
             patch_vtable_slots(ctx, findex, addr as *mut c_void);
-            produce_cranelift_osr_entries(ctx, &tier, bead, findex);
+            let staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
+            // A hot loop is the strongest promotion signal there is, and a
+            // function compiled here stops accruing call counts — the
+            // (Auto, 1) rung would starve. Chase the LLVM tier immediately;
+            // when its OSR entries land, `produce_osr_entries` publishes
+            // them into the re-tier slots this compile just baked, and the
+            // running frame climbs out on its next iteration.
+            if staged > 0
+                && matches!(ctx.mode, TierMode::Auto)
+                && !ctx
+                    .llvm_done
+                    .lock()
+                    .expect("llvm_done mutex poisoned")
+                    .contains(&findex)
+            {
+                // Off this thread: the fast door's address publishes when
+                // this function returns, and a promote-sized LLVM compile
+                // in between would hold the loop in the interpreter for
+                // exactly the latency the fast door exists to remove.
+                // `compile_with_llvm` serializes on the llvm mutex, so a
+                // concurrent chase is safe by the same rule that lets two
+                // broker threads promote.
+                let chase = Arc::clone(ctx);
+                let _ = std::thread::Builder::new()
+                    .name("ash-retier-llvm".into())
+                    .spawn(move || {
+                        compile_with_llvm(&chase, 1, findex);
+                    });
+            }
             addr as *mut ()
         }
         Ok(Err(e)) => {
@@ -703,9 +731,9 @@ fn produce_cranelift_osr_entries(
     tier: &CraneliftTier,
     bead: &Arc<Bead>,
     findex: usize,
-) {
+) -> usize {
     if !osr_transfer_enabled() || !ash_core::air_pipeline::air_enabled() {
-        return;
+        return 0;
     }
     let pcs: Vec<usize> = match ctx
         .hot_loop_pcs
@@ -714,24 +742,24 @@ fn produce_cranelift_osr_entries(
         .get(&findex)
     {
         Some(v) if !v.is_empty() => v.clone(),
-        _ => return,
+        _ => return 0,
     };
     let Some(bytecode) = ctx.bytecode_ptr() else {
-        return;
+        return 0;
     };
     let Some(raw) = bytecode
         .functions
         .iter()
         .find(|f| f.findex as usize == findex)
     else {
-        return;
+        return 0;
     };
     let Ok(opt) = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
-        return;
+        return 0;
     };
     let plan = ash_core::osr::analyze(&opt.ir);
     if !plan.eligible() {
-        return;
+        return 0;
     }
     let eligible: std::collections::HashSet<usize> = plan
         .entry_headers
@@ -776,7 +804,7 @@ fn produce_cranelift_osr_entries(
         }
     }
     if entries.is_empty() {
-        return;
+        return 0;
     }
     if osr_logging() {
         eprintln!(
@@ -787,10 +815,12 @@ fn produce_cranelift_osr_entries(
     }
     // Same staging map the LLVM producer uses; the fresh-install branch
     // attaches whatever is pending when it observes the new pointer.
+    let staged = entries.len();
     ctx.pending_osr
         .lock()
         .expect("pending_osr mutex poisoned")
         .insert(findex, entries);
+    staged
 }
 
 /// Compile an OSR entry for every hot loop header the interpreter has
@@ -917,6 +947,19 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     drop(guard);
     if entries.is_empty() {
         return;
+    }
+    // Publish into the Cranelift re-tier slots: any frame still looping in
+    // tier-1 code takes the exit on its next iteration. The staging map
+    // below serves interpreter frames the same way.
+    for e in &entries {
+        if ash_core::cranelift::publish_retier_target(findex, e.site as usize, e.code as u64)
+            && osr_logging()
+        {
+            eprintln!(
+                "[osr] re-tier slot filled findex={findex} pc={}",
+                e.site
+            );
+        }
     }
     if osr_logging() {
         eprintln!(

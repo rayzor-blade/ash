@@ -176,6 +176,13 @@ pub fn lower_air_function(
     ctx: &CraneliftTierContext,
     findex: usize,
     air: &AirFunction,
+    // Re-tier exits: AIR block id of an OSR-eligible loop header -> address
+    // of a leaked AtomicU64 slot. The header polls the slot; when the broker
+    // publishes an LLVM OSR entry address there, the frame spills its
+    // register image into `osr_buf` and tail-calls the entry. Empty map (and
+    // buf 0) compiles the function with no exits.
+    osr_exits: &HashMap<u32, u64>,
+    osr_buf: u64,
 ) -> Result<LoweredFunction> {
     let bytecode = ctx.bytecode();
     let func_idx = ctx
@@ -228,6 +235,8 @@ pub fn lower_air_function(
             native_refs,
             nargs: tf.args.len(),
             ret_class: entry_return_class(ret_kind),
+            osr_exits,
+            osr_buf,
         };
         cg.run()?;
         cg.finish();
@@ -308,6 +317,10 @@ pub fn compile_osr_entry(
         .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
     let native_refs = import_natives(backend, ctx, air, &mut def)?;
 
+    // The frame that enters here is exactly the one a later LLVM promote
+    // wants to lift out, so the entry polls the same re-tier slots the
+    // function's ordinary compile allocated.
+    let (osr_exits, osr_buf) = super::air::retier_state_for(findex, &opt.ser.block_pcs);
     {
         let mut cg = AirCodegen {
             ctx,
@@ -319,6 +332,8 @@ pub fn compile_osr_entry(
             native_refs,
             nargs: 0, // parameters are dead in an OSR body; values come from buf
             ret_class: entry_return_class(ret_kind),
+            osr_exits: &osr_exits,
+            osr_buf,
         };
         cg.run_osr(header)?;
         cg.finish();
@@ -395,6 +410,9 @@ struct AirCodegen<'a, 'b> {
     native_refs: HashMap<usize, FuncRef>,
     nargs: usize,
     ret_class: AbiClass,
+    /// See [`lower_air_function`]: loop-header re-tier exits.
+    osr_exits: &'a HashMap<u32, u64>,
+    osr_buf: u64,
 }
 
 impl AirCodegen<'_, '_> {
@@ -433,10 +451,25 @@ impl AirCodegen<'_, '_> {
 
         self.bind_entry()?;
 
+        // Re-tier exits: each participating loop header gets a body block the
+        // poll falls through to, and a cold exit block that hands the frame
+        // to the LLVM OSR entry. The register image a header must spill is
+        // decided by dominance, so the tree is built once, lazily.
+        let dom_cfg = if self.osr_exits.is_empty() {
+            None
+        } else {
+            Some(air::v2::CfgInfo::build(self.f))
+        };
+
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             if bid.0 != 0 {
                 self.b.switch_to_block(blk);
+            }
+            if let (Some(&slot), Some(cfg)) =
+                (self.osr_exits.get(&bid.0), dom_cfg.as_ref())
+            {
+                self.emit_retier_poll(bid, slot, cfg)?;
             }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
@@ -446,6 +479,99 @@ impl AirCodegen<'_, '_> {
             self.emit_term(bid, &term)?;
         }
         self.b.seal_all_blocks();
+        Ok(())
+    }
+
+    /// Poll the re-tier slot at a loop header; on a published LLVM OSR entry,
+    /// spill the register image and tail into it.
+    ///
+    /// The image is the value each serialized register holds at the header:
+    /// the header's own phis first (they are the live-in joins), then the
+    /// nearest dominating definition of every other register. Registers with
+    /// no dominating definition are left as whatever the per-function buffer
+    /// already holds — the entry restores every register, but the compiled
+    /// region only reads the live ones, and a live register always has a
+    /// dominating definition or a header phi.
+    ///
+    /// Single-threaded by design, like the interpreter that feeds this tier:
+    /// the spill buffer is one leaked allocation per compiled function.
+    fn emit_retier_poll(
+        &mut self,
+        header: BlockId,
+        slot: u64,
+        cfg: &air::v2::CfgInfo,
+    ) -> Result<()> {
+        let body = self.b.create_block();
+        let exit = self.b.create_block();
+        self.b.set_cold_block(exit);
+
+        let slot_addr = self.b.ins().iconst(types::I64, slot as i64);
+        let target = self
+            .b
+            .ins()
+            .atomic_load(types::I64, MemFlags::trusted(), slot_addr);
+        self.b.ins().brif(target, exit, &[], body, &[]);
+
+        // ---- cold exit: spill the image, call the entry, return ----------
+        self.b.switch_to_block(exit);
+
+        let mut image: HashMap<u32, ValueId> = HashMap::new();
+        for phi in &self.f.blocks[header.idx()].phis {
+            if !self.is_void(phi.dst) {
+                image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
+            }
+        }
+        let mut b = header.idx();
+        while cfg.dom.idom[b] != b {
+            b = cfg.dom.idom[b];
+            for ins in self.f.blocks[b].instrs.iter().rev() {
+                if let Some(d) = ins.dst() {
+                    if !self.is_void(d) && self.vals[d.idx()].is_some() {
+                        image.entry(self.f.value_reg(d)).or_insert(d);
+                    }
+                }
+            }
+            for phi in &self.f.blocks[b].phis {
+                if !self.is_void(phi.dst) {
+                    image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
+                }
+            }
+        }
+
+        // Deterministic emission order.
+        let mut spill: Vec<(u32, ValueId)> = image.into_iter().collect();
+        spill.sort_unstable_by_key(|&(r, _)| r);
+        for (reg, vid) in spill {
+            let v = self.get(vid)?;
+            let addr = self
+                .b
+                .ins()
+                .iconst(types::I64, (self.osr_buf + u64::from(reg) * 8) as i64);
+            // Narrow stores leave the slot's high bytes stale; the entry
+            // truncates every load to the register's width, so that is fine.
+            self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+        }
+
+        let mut call_sig = Signature::new(self.ctx.call_conv());
+        call_sig.params.push(AbiParam::new(types::I64));
+        if let Some(ty) = self.ret_class.clif_type() {
+            call_sig.returns.push(AbiParam::new(ty));
+        }
+        let sig_ref = self.b.import_signature(call_sig);
+        let buf_addr = self.b.ins().iconst(types::I64, self.osr_buf as i64);
+        let call = self.b.ins().call_indirect(sig_ref, target, &[buf_addr]);
+        let results: Vec<Value> = self.b.inst_results(call).to_vec();
+        match results.first() {
+            Some(&r) => {
+                self.b.ins().return_(&[r]);
+            }
+            None => {
+                self.b.ins().return_(&[]);
+            }
+        }
+
+        // ---- warm fall-through -------------------------------------------
+        self.b.switch_to_block(body);
         Ok(())
     }
 
@@ -597,9 +723,19 @@ impl AirCodegen<'_, '_> {
         let hblk = self.blocks[header].expect("header emitted");
         self.b.ins().jump(hblk, &args);
 
+        let dom_cfg = if self.osr_exits.is_empty() {
+            None
+        } else {
+            Some(air::v2::CfgInfo::build(self.f))
+        };
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             self.b.switch_to_block(blk);
+            if let (Some(&slot), Some(cfg)) =
+                (self.osr_exits.get(&bid.0), dom_cfg.as_ref())
+            {
+                self.emit_retier_poll(bid, slot, cfg)?;
+            }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
                 self.emit(&instr)?;

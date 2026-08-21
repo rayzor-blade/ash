@@ -144,8 +144,18 @@ jobs:
           rm -rf ~/hashlink-hl2
           git clone --depth 1 --branch "${HASHLINK_HL2_REF}" \
             https://github.com/HaxeFoundation/hashlink.git ~/hashlink-hl2
-          make -C ~/hashlink-hl2 libhl hl -j"$(nproc)" && test -x ~/hashlink-hl2/hl \
-            || { echo "::warning::hl2_ir_rebase build failed"; rm -rf ~/hashlink-hl2; }
+          # This branch has no phony `libhl`/`hl` targets — they are file
+          # variables ($(LIBHL), $(HL)) reached through `all`. `LIBS=` drops
+          # the optional hdlls, whose SDL3/openal headers the runner lacks.
+          # (The branch also declares the VM x86_64-only, which this runner is.)
+          if make -C ~/hashlink-hl2 LIBS= -j"$(nproc)" > /tmp/hl2build.log 2>&1 \
+             && test -x ~/hashlink-hl2/hl; then
+            ~/hashlink-hl2/hl --version
+          else
+            echo "::warning title=hl2-ir lane unavailable::build of ${HASHLINK_HL2_REF} failed; the benchmark table loses that row"
+            tail -25 /tmp/hl2build.log
+            rm -rf ~/hashlink-hl2
+          fi
 
       - name: Put HashLink on PATH
         continue-on-error: true
@@ -193,6 +203,19 @@ jobs:
             --warmups 1 \
             --timeout-scale 3 \
             --out "parts/hl-${{ matrix.bench }}.json"
+
+      - name: Report which comparison lanes this leg produced
+        run: |
+          python3 - <<'PY'
+          import json, glob, sys
+          for f in sorted(glob.glob("parts/hl-*.json")):
+              d = json.load(open(f))
+              for r in d["results"]:
+                  status = r["status"]
+                  mark = "ok " if status == "OK" else "MISSING"
+                  print(f"{mark} {r['engine']:<14} {r['benchmark']:<14} {status}"
+                        f"{'' if status == 'OK' else '  — ' + r.get('detail','')[:80]}")
+          PY
 
       - name: Upload partial result
         uses: actions/upload-artifact@v4

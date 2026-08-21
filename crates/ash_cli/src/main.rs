@@ -712,6 +712,9 @@ fn run() -> Result<()> {
                 let _p = ash_core::profile::scope("run");
                 interpreter.execute_entrypoint(&bytecode, &native_resolver)?
             };
+            // Any tier-chase thread still compiling touches the shared JIT
+            // module; letting one outlive this scope is a use-after-free.
+            ash_interp::interpreter::retier_chase_join();
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(

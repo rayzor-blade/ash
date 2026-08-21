@@ -247,7 +247,7 @@ static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierSt
 /// The call benches gain (inlined 163 -> 147, method 210 -> 196), so this
 /// flips on the day the LLVM-tier deficit is fixed. `ASH_CL_RETIER=1` opts
 /// in meanwhile.
-fn retier_enabled() -> bool {
+pub fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v != "0"))
 }

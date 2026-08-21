@@ -616,7 +616,21 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
             // when its OSR entries land, `produce_osr_entries` publishes
             // them into the re-tier slots this compile just baked, and the
             // running frame climbs out on its next iteration.
+            // Chase the LLVM tier only when the re-tier exits exist to
+            // receive it: a function compiled here stops accruing call
+            // counts, so the (Auto, 1) rung would otherwise starve — but
+            // with no exits compiled in, the promotion has nothing to reach
+            // and only costs compile time.
+            //
+            // The chase runs on a thread of its own so the Cranelift address
+            // publishes the moment this returns, instead of after a
+            // promote-sized LLVM compile. That thread must not outlive the
+            // program: it touches the shared JIT module, and a detached one
+            // still compiling while the main thread tears the interpreter
+            // down segfaults (observed under --jit-log, roughly one run in
+            // ten). `retier_chase_join` collects it before shutdown.
             if staged > 0
+                && ash_core::cranelift::retier_enabled()
                 && matches!(ctx.mode, TierMode::Auto)
                 && !ctx
                     .llvm_done
@@ -624,19 +638,18 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                     .expect("llvm_done mutex poisoned")
                     .contains(&findex)
             {
-                // Off this thread: the fast door's address publishes when
-                // this function returns, and a promote-sized LLVM compile
-                // in between would hold the loop in the interpreter for
-                // exactly the latency the fast door exists to remove.
-                // `compile_with_llvm` serializes on the llvm mutex, so a
-                // concurrent chase is safe by the same rule that lets two
-                // broker threads promote.
                 let chase = Arc::clone(ctx);
-                let _ = std::thread::Builder::new()
+                if let Ok(h) = std::thread::Builder::new()
                     .name("ash-retier-llvm".into())
                     .spawn(move || {
                         compile_with_llvm(&chase, 1, findex);
-                    });
+                    })
+                {
+                    RETIER_CHASE
+                        .lock()
+                        .expect("retier chase mutex poisoned")
+                        .push(h);
+                }
             }
             addr as *mut ()
         }
@@ -9507,6 +9520,26 @@ impl HLInterpreter {
     /// Write a NanBoxedValue to a raw memory pointer using the given type kind.
     fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: u32) {
         unsafe { Self::write_value_at(ptr, kind, val) }
+    }
+}
+
+/// Threads spawned to chase the LLVM tier after a Cranelift install.
+///
+/// They touch the shared JIT module, so they must be finished before the
+/// interpreter is torn down; a detached one still compiling at exit is a
+/// use-after-free.
+static RETIER_CHASE: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Wait for every outstanding re-tier chase. Called once the program's
+/// entrypoint has returned, before anything the chase can touch is dropped.
+pub fn retier_chase_join() {
+    let handles: Vec<_> = {
+        let mut g = RETIER_CHASE.lock().expect("retier chase mutex poisoned");
+        std::mem::take(&mut *g)
+    };
+    for h in handles {
+        let _ = h.join();
     }
 }
 

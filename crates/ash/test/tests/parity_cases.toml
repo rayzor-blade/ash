@@ -488,3 +488,18 @@ normalize = "default"
 # exists to defend is the one its own header states -- every engine agrees
 # with the interpreter -- and that is what this now checks.
 oracle_is_interp = true
+
+# Address-taken locals (hl.Ref) exercising AIR v2's cell machinery — the
+# marblegame (MBHaxe) refusal shapes; see TestRefCells.hx for the two
+# CellForwarding defects these pin down. Judged against ash's interpreter
+# because eval cannot run the hl package (no --interp sanity either).
+[[case]]
+name = "TestRefCells"
+main = "TestRefCells"
+hl = "test_ref_cells.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true

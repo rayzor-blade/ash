@@ -36,7 +36,7 @@
 //! something else; a cross-block version is mem2reg, and that is a larger
 //! change than this earns.
 
-use super::{replace_all_uses, Pass, PassOptions, PassStats};
+use super::{compact_values, replace_all_uses, Pass, PassOptions, PassStats};
 use crate::v2::ir::*;
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -108,17 +108,49 @@ impl Pass for CellForwarding {
             return Ok(stats);
         }
 
+        // A forward's target can itself be a forwarded load: a `CellSet`
+        // whose `src` is a `CellGet` result (a `Copy` between two pinned
+        // registers collapses to exactly that once GVN has run). Applying
+        // (v2 -> v1) after (v1 -> vA) deleted v1's load would leave v2's
+        // uses pointing at a value with no definition, so every forward is
+        // resolved through the chain to a value whose definition survives
+        // before anything is rewritten. Chains are acyclic: a load can only
+        // be forwarded to a value defined before it in program order.
+        let chain: HashMap<ValueId, ValueId> = forwards.iter().copied().collect();
+
         // A forwarded value's live range now reaches every use of the load,
         // so it needs a register of its own for de-SSA to stay correct —
         // the same rule SROA follows when it replaces a field read.
         let is_param = super::param_values(f);
         let mut claims = super::RegClaims::build(f);
+        // Loads whose forward was applied (their `CellGet` dies), and loads
+        // whose forward was refused by `privatize` (their `CellGet` stays and
+        // remains a valid chain target).
+        let mut applied_to: HashMap<ValueId, ValueId> = HashMap::new();
+        let mut refused: HashSet<ValueId> = HashSet::new();
         let mut applied: Vec<(usize, usize)> = Vec::new();
-        for (from, to) in forwards {
-            if !super::privatize(f, to, &mut claims, is_param[to.idx()]) {
-                continue; // leave this one alone; the load stays
+        for (from, to) in forwards.iter().copied() {
+            // Resolve `to` through the chain until a value whose definition
+            // is certain to survive. Following a link that has not been
+            // decided yet is sound: every link records a value equality, and
+            // a link that later gets refused keeps its load — and with it
+            // the definition — so stopping there would also have been fine.
+            let mut target = to;
+            loop {
+                if refused.contains(&target) {
+                    break; // load stays; target is defined
+                }
+                match applied_to.get(&target).or_else(|| chain.get(&target)) {
+                    Some(&next) => target = next,
+                    None => break, // not a forwarded load; definition survives
+                }
             }
-            stats.replaced += replace_all_uses(f, from, to);
+            if !super::privatize(f, target, &mut claims, is_param[target.idx()]) {
+                refused.insert(from); // leave this one alone; the load stays
+                continue;
+            }
+            stats.replaced += replace_all_uses(f, from, target);
+            applied_to.insert(from, target);
             if let Some(pos) = dead
                 .iter()
                 .position(|&(b, k)| matches!(&f.blocks[b].instrs[k], Instr::CellGet { dst, .. } if *dst == from))
@@ -133,6 +165,12 @@ impl Pass for CellForwarding {
         for &(b, k) in applied.iter().rev() {
             f.blocks[b].instrs.remove(k);
             stats.eliminated += 1;
+        }
+        // The deleted loads' values must leave the table, or the verifier's
+        // "every value is defined" totality check refuses the function even
+        // though nothing uses them anymore.
+        if stats.eliminated > 0 {
+            compact_values(f)?;
         }
         Ok(stats)
     }

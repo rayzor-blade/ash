@@ -3599,7 +3599,7 @@ fn pass_manager_reports_per_pass_statistics() {
     verify(&f).unwrap();
     assert_eq!(
         pm.pass_names(),
-        vec!["null-check-elim", "gvn", "licm", "fma", "dce"]
+        vec!["cellfwd", "null-check-elim", "gvn", "licm", "fma", "dce"]
     );
     assert_eq!(report.stats_for("null-check-elim").eliminated, 1);
     assert_eq!(report.stats_for("gvn").eliminated, 1);
@@ -5559,5 +5559,125 @@ fn escape_separates_iteration_local_allocations_from_carried_ones() {
         !infos[0].escapes,
         "an object built and dropped in one iteration must be hoistable: {:?}",
         infos[0].reason
+    );
+}
+
+// ---------------------------------------------------------------------------
+// cellfwd regressions (MBHaxe marblegame refusals)
+// ---------------------------------------------------------------------------
+
+/// marblegame f310 `init`, minimized: an in-place redefine of a pinned
+/// register (`Not r, r`) whose `CellGet` cellfwd forwards and deletes. The
+/// pass used to skip `compact_values`, leaving the deleted load's dst as an
+/// undefined value-table entry that nothing else cleaned up when no later
+/// pass removed anything — verify then refused the whole function.
+#[test]
+fn cellfwd_compacts_after_deleting_forwarded_loads() {
+    let ops = vec![
+        Opcode::Bool {
+            dst: Reg(0),
+            value: false,
+        },
+        Opcode::Not {
+            dst: Reg(0),
+            src: Reg(0),
+        },
+        Opcode::Ref {
+            dst: Reg(1),
+            src: Reg(0),
+        },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let mut f = lower(&ops, &[t(0), t(1)]).unwrap();
+    verify(&f).unwrap();
+    let pm = PassManager::new(OptLevel::O2).with_options(PassOptions {
+        verify_each: true,
+        ..PassOptions::default()
+    });
+    pm.run(&mut f)
+        .unwrap_or_else(|e| panic!("pipeline: {e}\n{}", f.dump()));
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+}
+
+/// marblegame f6227 `initFromScene`, minimized: a `CellSet` whose stored
+/// value is itself the dst of a forwarded (hence deleted) `CellGet`. The
+/// forward tuples are collected before any rewriting, so applying
+/// `(v2 -> v1)` after `(v1 -> v0)` must chase the chain to `v0`; pointing
+/// uses at `v1` leaves them dangling once both loads are removed.
+#[test]
+fn cellfwd_resolves_forwarding_chains() {
+    use super::passes::CellForwarding;
+    let mut f = empty_func(vec![t(0), t(0), t(1)]);
+    let c0 = CellId(0);
+    let c1 = CellId(1);
+    f.cells = vec![
+        CellData {
+            reg: 0,
+            ty: t(0),
+            reason: PinReason::RefTaken,
+        },
+        CellData {
+            reg: 1,
+            ty: t(0),
+            reason: PinReason::RefTaken,
+        },
+    ];
+    let v0 = f.new_value(t(0), 0);
+    let v1 = f.new_value(t(0), 0);
+    let v2 = f.new_value(t(0), 1);
+    let v3 = f.new_value(t(0), 1);
+    let v4 = f.new_value(t(1), 2);
+    let v5 = f.new_value(t(1), 2);
+    f.blocks.push(Block {
+        phis: vec![],
+        instrs: vec![
+            Instr::Int { dst: v0, idx: 0 },
+            Instr::CellSet { cell: c0, src: v0 },
+            Instr::CellGet { dst: v1, cell: c0 },
+            Instr::CellSet { cell: c1, src: v1 },
+            Instr::CellGet { dst: v2, cell: c1 },
+            Instr::UnOp {
+                op: UnOp::Not,
+                dst: v3,
+                src: v2,
+            },
+            Instr::CellSet { cell: c0, src: v3 },
+            Instr::CellRef { dst: v4, cell: c0 },
+            Instr::CellRef { dst: v5, cell: c1 },
+        ],
+        term: Terminator::Ret { value: v4 },
+        handler: None,
+    });
+    verify(&f).unwrap_or_else(|e| panic!("fixture must verify: {e}\n{}", f.dump()));
+
+    let stats = CellForwarding
+        .run(&mut f, &PassOptions::default())
+        .unwrap_or_else(|e| panic!("cellfwd: {e}\n{}", f.dump()));
+    assert_eq!(stats.eliminated, 2, "both loads forwarded:\n{}", f.dump());
+    verify(&f).unwrap_or_else(|e| panic!("verify after cellfwd: {e}\n{}", f.dump()));
+
+    // The Not must now read the originally stored value, not the deleted
+    // intermediate load.
+    let not_src = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::UnOp {
+                op: UnOp::Not, src, ..
+            } => Some(*src),
+            _ => None,
+        })
+        .expect("Not survives");
+    let src_def = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find(|i| i.dst() == Some(not_src))
+        .expect("Not's operand is defined");
+    assert!(
+        matches!(src_def, Instr::Int { .. }),
+        "chain must resolve to the stored Int, got {src_def:?}\n{}",
+        f.dump()
     );
 }

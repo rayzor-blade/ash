@@ -403,6 +403,8 @@ fn run() -> Result<()> {
 
     {
         let _p = ash_core::profile::scope("init stdlib");
+        // Before decode: the decoder calls into ash_std itself.
+        ash_core::native_lib::choose_std_linkage(&hl_path);
         init_std_library()?;
     }
 

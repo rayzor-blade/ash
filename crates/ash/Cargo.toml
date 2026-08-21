@@ -14,6 +14,11 @@ flexstr = {workspace=true}
 num_enum = {workspace=true}
 hlbc = {git="https://github.com/Gui-Yom/hlbc", version = "0.8.0"}
 libloading = "0.8.5"
+# Linked in, not dlopened: build.rs generates a name -> address table over its
+# #[no_mangle] exports so `std@` natives resolve with no dynamic loader at all.
+# The archive still needs a reference per symbol to be pulled in, which is what
+# that table provides.
+ash_std = { path = "../../std" }
 once_cell = {workspace=true}
 tempfile = "3.2"
 memchr = "2.7.4"

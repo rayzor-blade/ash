@@ -48,15 +48,20 @@ pub fn load_symbol(_attr: TokenStream, item: TokenStream) -> TokenStream {
             expanded = quote! {
                 #expanded
 
+                // A raw address, not a libloading::Symbol: ash_std may be the
+                // copy linked into this binary rather than a dlopened one, and
+                // native_lib::std_symbol_addr is the single point that knows
+                // which. Binding here directly would tie this call site to the
+                // dylib even when nothing dlopened it.
                 #[allow(non_upper_case_globals)]
-                static #wrapper_name: std::sync::OnceLock<libloading::Symbol<unsafe extern "C" fn(#(#arg_types),*) -> #return_type>> = std::sync::OnceLock::new();
+                static #wrapper_name: std::sync::OnceLock<unsafe extern "C" fn(#(#arg_types),*) -> #return_type> = std::sync::OnceLock::new();
 
                 #[allow(non_snake_case)]
                 pub unsafe fn #f_name(#inputs) #output {
-                    let symbol = #wrapper_name.get_or_init(|| {
-                        let lib = crate::native_lib::STD_LIBRARY
-                        .as_ref().expect("Standard library not initialized");
-                        lib.get(#symbol_name.as_bytes()).expect("Failed to load symbol")
+                    let symbol = *#wrapper_name.get_or_init(|| {
+                        let addr = crate::native_lib::std_symbol_addr(#symbol_name)
+                            .expect(concat!("std symbol '", #symbol_name, "' unavailable"));
+                        std::mem::transmute::<usize, unsafe extern "C" fn(#(#arg_types),*) -> #return_type>(addr)
                     });
                     symbol(#(#arg_names),*)
                 }

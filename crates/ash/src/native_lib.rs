@@ -26,10 +26,98 @@ fn quiet() -> bool {
 }
 
 
+/// ash_std's exports, addressed directly rather than through a dynamic loader.
+///
+/// build.rs writes this from `std/src/*.rs`: an `extern "C"` declaration per
+/// `#[no_mangle]` native plus a name -> address map. The declarations are what
+/// make the linker pull each one out of the rlib archive — without a reference
+/// nothing would be linked, since an archive contributes only the members that
+/// satisfy an undefined symbol.
+mod std_symbols {
+    include!(concat!(env!("OUT_DIR"), "/std_symbols.rs"));
+}
+
+/// Whether `std@` natives resolve against the linked-in copy of ash_std.
+///
+/// The two copies must never both be live. ash_std owns the GC, so a program
+/// running half its natives from the binary and half from a dlopened dylib has
+/// two heaps, and an object allocated in one is invisible to the other's
+/// collector. The choice is therefore made once, before anything allocates,
+/// and never revisited.
+static STATIC_STD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when `std@` resolution is going through the linked-in runtime.
+pub fn std_is_static() -> bool {
+    STATIC_STD.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Decide how ash_std will be reached, before anything touches it.
+///
+/// A program that loads no HDLL never needs the dylib: nothing outside this
+/// binary has to see `hl_*`, so the linked-in copy serves every call and
+/// startup skips the dynamic loader entirely. A program that does load HDLLs
+/// still needs it, because an .hdll resolves its `hl_*` imports through the
+/// dynamic linker and cannot see symbols that live only inside an executable.
+///
+/// The test is "is there an .hdll beside the program", not "does the bytecode
+/// name one", because this has to be decided *before* the bytecode is decoded
+/// — the decoder itself calls `hlp_hash_gen`, and that function interns names
+/// in a cache. Deciding afterwards would mean decoding against one copy's
+/// cache and running against the other's. The heuristic errs toward the
+/// proven path: an .hdll present but unused costs the old startup, while the
+/// reverse mistake would split the GC.
+///
+/// `ASH_STD_LINKAGE=static|dynamic` overrides.
+pub fn choose_std_linkage(program: &Path) -> bool {
+    let force = std::env::var("ASH_STD_LINKAGE").unwrap_or_default();
+    let static_ok = match force.as_str() {
+        "static" => true,
+        "dynamic" => false,
+        _ => {
+            let dir = program.parent().unwrap_or_else(|| Path::new("."));
+            let has_hdll = std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries.filter_map(|e| e.ok()).any(|e| {
+                        e.path().extension().is_some_and(|x| x == "hdll")
+                    })
+                })
+                .unwrap_or(false);
+            !has_hdll
+        }
+    };
+    STATIC_STD.store(static_ok, std::sync::atomic::Ordering::Relaxed);
+    static_ok
+}
+
+/// A `std@` native's address, from whichever copy of ash_std is in use.
+///
+/// This is the single resolution point: the `#[load_symbol]` macro, the
+/// bytecode decoder's `hlp_hash_gen`, and the native resolver all come
+/// through here, so they cannot end up bound to different copies.
+pub fn std_symbol_addr(name: &str) -> Option<usize> {
+    if std_is_static() {
+        return std_symbols::std_symbol_table().get(name).copied();
+    }
+    unsafe {
+        let lib = STD_LIBRARY.as_ref()?;
+        let sym: Symbol<*mut c_void> = lib.get(name.as_bytes()).ok()?;
+        Some(*sym as usize)
+    }
+}
+
 static STD_INIT: Once = Once::new();
 pub static mut STD_LIBRARY: Option<Library> = None;
 
 pub fn init_std_library() -> Result<()> {
+    if std_is_static() {
+        // No loader, no temp file, no codesign, no signature registration —
+        // the runtime is already in this address space. Just start its GC,
+        // once, the same way the dlopened path does.
+        STD_INIT.call_once(|| unsafe {
+            ash_std::gc::hlp_gc_init();
+        });
+        return Ok(());
+    }
     STD_INIT.call_once(|| {
         unsafe {
             let ext = if cfg!(target_os = "windows") {
@@ -448,11 +536,11 @@ impl NativeFunctionResolver {
         let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
 
         if clean_lib == "std" {
-            // ash_std uses direct exports (Rust #[no_mangle])
-            let library = unsafe { STD_LIBRARY.as_ref() }
-                .ok_or_else(|| anyhow!("std library not initialized"))?;
-            let symbol: Symbol<*mut c_void> = unsafe { library.get(function_name.as_bytes()) }?;
-            return Ok(*symbol);
+            // ash_std uses direct exports (Rust #[no_mangle]), reached either
+            // through the linked-in copy or the dylib — see std_symbol_addr.
+            return std_symbol_addr(function_name)
+                .map(|a| a as *mut c_void)
+                .ok_or_else(|| anyhow!("std native '{}' not found", function_name));
         }
 
         let library = NativeLibraryManager::get_registered(clean_lib)

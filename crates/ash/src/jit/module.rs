@@ -186,6 +186,7 @@ impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
+        crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
         let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
@@ -417,6 +418,7 @@ impl<'ctx> JITModule<'ctx> {
     fn new_for_tiered(context: &'ctx Context, path: &Path, shared: SharedRuntimeHandles) -> Self {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
+        crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
         let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");

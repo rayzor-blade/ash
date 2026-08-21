@@ -121,6 +121,7 @@ dependencies = [
  "air",
  "anyhow",
  "ash_macro",
+ "ash_std",
  "beadie",
  "bindgen",
  "byteorder",

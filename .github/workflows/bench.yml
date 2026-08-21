@@ -1,12 +1,14 @@
 name: benchmarks
 
-# Benchmark CI in the zyntax shape: one fresh runner per benchmark (so a heavy
-# kernel's thermal/cache history never bleeds into a light one), partial JSON
-# artifacts, an aggregate job that merges them into the site's results.json,
-# and a GitHub Pages deploy of website/ with that data. The published page
-# normalizes to the HashLink JIT, so each leg also times official `hl` on the
-# same runner — best-effort: a runner where HashLink won't build still
-# publishes ash rows, in absolute milliseconds.
+# Benchmark CI in two phases, deliberately.
+#
+# BUILD happens once, in its own job: the LLVM toolchain, ash itself, and both
+# HashLink VMs. MEASUREMENT happens on fresh runners that download those
+# artifacts and do nothing but run programs. Previously every one of the seven
+# matrix legs compiled all of that itself and then measured on the same
+# machine — roughly ten minutes of heavy compilation immediately before the
+# numbers were taken, on a 4-core shared-tenant runner, seven times over. A
+# benchmark that shares a runner with a build is measuring the build.
 #
 # Correctness is the gate, not speed: ash_bench.py and hl_bench.py both exit
 # non-zero when a run prints a value outside the accepted checksum set, which
@@ -36,7 +38,7 @@ concurrency:
   group: pages
   # A new push queues behind an in-flight sweep rather than cancelling it —
   # cancellation between upload-pages-artifact and deploy-pages would throw
-  # away a completed 30-minute run.
+  # away a completed run.
   cancel-in-progress: false
 
 env:
@@ -46,22 +48,10 @@ env:
   HASHLINK_HL2_REF: "hl2_ir_rebase"
 
 jobs:
-  benchmark:
-    name: bench (${{ matrix.bench }})
+  build:
+    name: Build ash and the comparison VMs
     runs-on: ubuntu-24.04
-    strategy:
-      # One crashing benchmark must not cancel the rest of the sweep; the
-      # aggregate below runs on whatever legs survive.
-      fail-fast: false
-      matrix:
-        bench:
-          - fib
-          - mandelbrot
-          - nbody
-          - inlined_call
-          - method_call
-          - free_call
-          - closure_call
+    timeout-minutes: 60
     env:
       LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
       # ash_std's build.rs runs bindgen; the runner's system libclang is too
@@ -70,30 +60,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt # bindgen pretty-prints through it
 
-      # Haxe recompiles each bench to C for the HashLink/C (AOT) lane.
-      - uses: krdlab/setup-haxe@v1
-        continue-on-error: true
-        with:
-          haxe-version: "4.3.4"
-
-      # The Haxe compiler refuses the HL/C target without the hashlink
-      # haxelib, even though the generated code only needs HashLink's C
-      # headers (rayzor's CI learned this the same way).
-      - name: Install hashlink haxelib
-        continue-on-error: true
-        run: haxelib install hashlink --always
-
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: bench-runner
+          shared-key: bench-build
 
       - name: Install LLVM 21 toolchain
         run: |
@@ -105,16 +78,24 @@ jobs:
           sudo /tmp/llvm.sh 21 all
           llvm-config-21 --version
 
+      # Two invocations, not one: ash_std is a cdylib that ash's build.rs
+      # embeds via include_bytes!, and cargo has no ordering edge between the
+      # two — a single invocation can race and embed a stale or missing stdlib.
+      - name: Build ash (release)
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash
+
       # HashLink is the page's 1.00 baseline. The VM needs only libhl + hl
       # (pcre is vendored); the hdll libraries with image/audio deps are not
-      # built. Best-effort by design: on failure the leg still publishes ash
-      # rows and hl_bench.py records the baseline as UNAVAILABLE.
-      - name: Cache HashLink build
+      # built. Best-effort: a failure here costs that comparison row, never
+      # the run, and hl_bench.py records the lane as UNAVAILABLE.
+      - name: Cache HashLink ${{ env.HASHLINK_VERSION }}
         id: hl-cache
         uses: actions/cache@v4
         with:
           path: ~/hashlink
-          key: hashlink-${{ env.HASHLINK_VERSION }}-${{ runner.os }}-ubuntu-24.04
+          key: hashlink-${{ env.HASHLINK_VERSION }}-ubuntu-24.04
 
       - name: Build HashLink ${{ env.HASHLINK_VERSION }}
         if: steps.hl-cache.outputs.cache-hit != 'true'
@@ -127,18 +108,30 @@ jobs:
           make -C ~/hashlink libhl hl -j"$(nproc)" && test -x ~/hashlink/hl \
             || { echo "::warning::HashLink build failed"; rm -rf ~/hashlink; }
 
-      - name: Cache HashLink hl2-ir build
+      # The branch moves, so the cache is keyed on the commit it currently
+      # points at: unchanged branch means a hit and no rebuild, a moved
+      # branch means a miss and a fresh build. Keying on anything
+      # run-varying (a run number, a timestamp) misses every single time and
+      # quietly rebuilds a HashLink on every leg, which is the cost this
+      # split exists to remove.
+      - name: Resolve ${{ env.HASHLINK_HL2_REF }} head
+        id: hl2-rev
+        run: |
+          REV=$(git ls-remote https://github.com/HaxeFoundation/hashlink.git \
+                  "refs/heads/${HASHLINK_HL2_REF}" | cut -f1)
+          test -n "$REV" || REV=unresolved
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "$HASHLINK_HL2_REF is at $REV"
+
+      - name: Cache HashLink ${{ env.HASHLINK_HL2_REF }}
         id: hl2-cache
         uses: actions/cache@v4
         with:
           path: ~/hashlink-hl2
-          key: hashlink-${{ env.HASHLINK_HL2_REF }}-${{ runner.os }}-${{ github.run_id }}
-          restore-keys: hashlink-${{ env.HASHLINK_HL2_REF }}-${{ runner.os }}-
+          key: hashlink-hl2-ubuntu-24.04-${{ steps.hl2-rev.outputs.rev }}
 
-      # A branch under active development, so the cache key carries the run id
-      # and only restores as a warm start; a build failure here costs the
-      # comparison row, never the run.
       - name: Build HashLink ${{ env.HASHLINK_HL2_REF }}
+        if: steps.hl2-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
           rm -rf ~/hashlink-hl2
@@ -154,29 +147,94 @@ jobs:
           else
             echo "::warning title=hl2-ir lane unavailable::build of ${HASHLINK_HL2_REF} failed; the benchmark table loses that row"
             tail -25 /tmp/hl2build.log
+            # Leave nothing behind, or the cache post-step saves a broken
+            # tree under this commit's key and every later run reuses it.
             rm -rf ~/hashlink-hl2
           fi
 
-      - name: Put HashLink on PATH
-        continue-on-error: true
+      # One archive, so a measuring runner unpacks rather than builds. tar
+      # preserves the execute bits that the artifact format does not.
+      - name: Package the toolchain
         run: |
-          if [ -x ~/hashlink/hl ]; then
-            echo "$HOME/hashlink" >> "$GITHUB_PATH"
+          mkdir -p dist
+          cp target/release/ash dist/
+          cp target/release/libash_std.so dist/ 2>/dev/null || true
+          tar czf dist/hashlink.tar.gz -C "$HOME" hashlink 2>/dev/null || echo "no hashlink"
+          tar czf dist/hashlink-hl2.tar.gz -C "$HOME" hashlink-hl2 2>/dev/null || echo "no hl2"
+          ls -la dist/
+          # Prove the thing we are about to ship actually runs, here rather
+          # than in seven downstream legs.
+          ./target/release/ash --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-toolchain
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  benchmark:
+    name: bench (${{ matrix.bench }})
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      # One crashing benchmark must not cancel the rest of the sweep; the
+      # aggregate below runs on whatever legs survive.
+      fail-fast: false
+      matrix:
+        bench:
+          - fib
+          - mandelbrot
+          - nbody
+          - inlined_call
+          - method_call
+          - free_call
+          - closure_call
+    steps:
+      # Only what measurement needs: the .hl corpus, the bench scripts, and
+      # the prebuilt binaries. No toolchain, no compiler, no cargo.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bench-toolchain
+          path: dist
+
+      - name: Unpack the toolchain
+        run: |
+          mkdir -p target/release
+          cp dist/ash target/release/ && chmod +x target/release/ash
+          cp dist/libash_std.so target/release/ 2>/dev/null || true
+          tar xzf dist/hashlink.tar.gz -C "$HOME" 2>/dev/null || true
+          tar xzf dist/hashlink-hl2.tar.gz -C "$HOME" 2>/dev/null || true
+          # The VM links libhl from beside itself.
+          if [ -x "$HOME/hashlink/hl" ]; then
             echo "LD_LIBRARY_PATH=$HOME/hashlink${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-            ~/hashlink/hl --version
+            "$HOME/hashlink/hl" --version
           else
             echo "::warning::hl binary not available; publishing without the HashLink baseline"
           fi
+          ./target/release/ash --help > /dev/null
 
-      # ash_bench discovers the newest binary under target/, so building only
-      # release keeps it honest. Two invocations, not one: ash_std is a cdylib
-      # that ash's build.rs embeds via include_bytes!, and cargo has no
-      # ordering edge between the two — a single invocation can race and
-      # embed a stale or missing stdlib.
-      - name: Build ash (release)
-        run: |
-          cargo build --release -p ash_std
-          cargo build --release -p ash
+      # Haxe is needed only by the HL/C lane, which compiles each benchmark
+      # from source. That lane runs after ash's numbers are taken, so its
+      # compilation cannot disturb them.
+      - uses: krdlab/setup-haxe@v1
+        continue-on-error: true
+        with:
+          haxe-version: "4.3.4"
+
+      # The Haxe compiler refuses the HL/C target without the hashlink
+      # haxelib, even though the generated code only needs HashLink's C
+      # headers (rayzor's CI learned this the same way).
+      - name: Install hashlink haxelib
+        continue-on-error: true
+        run: haxelib install hashlink --always
 
       - name: Bench ash (${{ matrix.bench }})
         run: |
@@ -193,8 +251,12 @@ jobs:
 
       - name: Bench HashLink (release JIT, hl2-ir, HL/C) (${{ matrix.bench }})
         run: |
+          # An explicit `if`, not `test && assign`: under `bash -e` the
+          # latter fails the whole step on the very case it is testing for.
           HL2=()
-          [ -x ~/hashlink-hl2/hl ] && HL2=(--hl2 "$HOME/hashlink-hl2/hl")
+          if [ -x "$HOME/hashlink-hl2/hl" ]; then
+            HL2=(--hl2 "$HOME/hashlink-hl2/hl")
+          fi
           ./scripts/hl_bench.py \
             --benchmarks "${{ matrix.bench }}" \
             --hashlink-dir ~/hashlink \
@@ -204,10 +266,44 @@ jobs:
             --timeout-scale 3 \
             --out "parts/hl-${{ matrix.bench }}.json"
 
+      # Which rungs the ladder actually climbed, read out of the timed runs
+      # themselves — ash_bench already records every install. A leg that
+      # silently never leaves the interpreter looks like a slow runner rather
+      # than an unclimbed ladder, and fib's 342ms -> 74ms came entirely from
+      # the top rung, so this is the first question to ask of a disappointing
+      # number. Re-running the program under ASH_TIER_LOG would answer it too,
+      # but from a run nobody timed.
+      - name: Which tiers did the ladder reach? (${{ matrix.bench }})
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json
+          d = json.load(open("parts/ash-${{ matrix.bench }}.json"))
+          for r in d["results"]:
+              t = r.get("tiered") or {}
+              installs = r.get("tier_installs") or []
+              print(f"{r['benchmark']} / {r['mode']}: "
+                    f"cranelift={t.get('cranelift', 0)} llvm={t.get('llvm', 0)} "
+                    f"attempted={t.get('attempted', 0)} failed={t.get('failed', 0)} "
+                    f"fallbacks={t.get('fallbacks', 0)}")
+              for i in installs:
+                  print(f"    findex={i['findex']:<6} {i['tier']:<10} "
+                        f"compile={i.get('compile_ms', 0):.2f}ms")
+              # Reaching only Cranelift is not a fault in itself: the LLVM
+              # chase is call-gated, and free_call's Cranelift code already
+              # matches hand-written C, so it correctly stops there. Reaching
+              # no tier at all means this leg timed the interpreter.
+              if not installs:
+                  print(f"::warning title=No tier installed ({r['benchmark']})::"
+                        "the ladder never promoted anything; this leg measured "
+                        "the interpreter, and its number should not be read as "
+                        "a JIT result")
+          PY
+
       - name: Report which comparison lanes this leg produced
         run: |
           python3 - <<'PY'
-          import json, glob, sys
+          import json, glob
           for f in sorted(glob.glob("parts/hl-*.json")):
               d = json.load(open(f))
               for r in d["results"]:
@@ -233,6 +329,7 @@ jobs:
     # the whole published page down rather than just its own rows.
     if: ${{ always() && needs.benchmark.result != 'cancelled' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -266,6 +363,7 @@ jobs:
     needs: aggregate
     if: ${{ always() && needs.aggregate.result == 'success' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -286,8 +384,6 @@ jobs:
           cp site-data/results.json website/bench/results.json
 
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -188,6 +188,7 @@ jobs:
       matrix:
         bench:
           - fib
+          - binary_trees
           - mandelbrot
           - nbody
           - inlined_call

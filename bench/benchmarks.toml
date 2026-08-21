@@ -231,6 +231,22 @@ group = "call"
 description = "Indirect call through a closure: target in a register, no vtable slot."
 
 [[bench]]
+name = "binary_trees"
+main = "BenchBinaryTrees"
+hl = "bench_binary_trees.hl"
+expectation = "checksum"
+checksums = [{ value = "-104864", label = "reference" }]
+timeout_secs = 300
+group = "gc"
+# The interpreter is included deliberately: at ~12s it is slow but the point
+# of this row is the allocator, and the interpreter exercises the same GC.
+description = """Binary trees, depth 16 — HashLink's own allocation benchmark \
+(other/benchs/BinaryTrees.hx). Millions of short-lived trees reclaimed around \
+one long-lived survivor: the GC-pressure row of the set. The n=14 variant \
+reproduces upstream's @:result(26208); the n=16 checksum is cross-validated \
+between ash's interpreter (arm64) and stock HashLink 1.15 (x86_64)."""
+
+[[bench]]
 name = "fib"
 main = "BenchFib"
 hl = "bench_fib.hl"

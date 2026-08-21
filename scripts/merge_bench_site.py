@@ -35,6 +35,7 @@ from pathlib import Path
 # partials is appended alphabetically — the page renders whatever is present.
 KNOWN = [
     ("fib", "fib(40)"),
+    ("binary_trees", "binary trees"),
     ("mandelbrot", "mandelbrot"),
     ("nbody", "n-body"),
     ("inlined_call", "inlined function"),

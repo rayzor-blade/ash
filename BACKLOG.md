@@ -25,6 +25,28 @@ at 0.04s here, so "hybrid is slow to start" is the crash, not the warm-up.
 
 ---
 
+## ASH_GC_STRESS runs out of memory on binary trees
+
+Found the day the benchmark was added, by the benchmark. `bench_binary_trees`
+(and even its lighter n=14 variant) aborts under `ASH_GC_STRESS=1` with
+"Out of memory" from `hlp_alloc_obj` (std/src/obj.rs:134), while completing
+fine — checksum-correct in every engine — without stress mode.
+
+The corpus being "bit-identical at ASH_GC_STRESS=1" predates any test that
+allocates like this: millions of short-lived 3-field objects around one
+long-lived tree. That is the worst case for block-level reclamation with
+conservative scanning — a block survives if ANY stale stack word points into
+it, and this workload maximizes both the number of blocks and the number of
+plausible-pointer integers (tree items) on the stack. Suspect list, in order:
+false retention pinning nearly every block until the 512MB heap fills;
+stress-mode collecting so often that the proactive trigger never sees a
+genuinely empty block; or a leak in the stress path itself.
+
+Not blocking the bench (normal-mode runs are what CI measures), but it means
+the GC stress gate currently proves less than it claims.
+
+---
+
 ## `--mode jit` is not checked against anything
 
 `AshMode` in the parity matrix is `Interp | Hybrid`. The standalone

@@ -100,6 +100,7 @@ def ensure_checkout(root: pathlib.Path, tag: str) -> pathlib.Path:
         return src
     src.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(src, ignore_errors=True)
+    print(f"fetching the Haxe {tag} suite into {src} ...", flush=True)
     r = run([
         "git", "clone", "--depth", "1", "--branch", tag,
         "--filter=blob:none", "--sparse",
@@ -107,7 +108,18 @@ def ensure_checkout(root: pathlib.Path, tag: str) -> pathlib.Path:
     ], timeout=900)
     if r.returncode != 0:
         sys.exit(f"could not fetch the Haxe suite at tag {tag}:\n{r.stderr[:800]}")
-    run(["git", "sparse-checkout", "set", "tests"], cwd=str(src), timeout=300)
+    # A --sparse clone checks out only the root, so tests/ arrives here. This
+    # is checked rather than assumed: when it silently did not happen, every
+    # suite reported "not present at tag X" and the run published 0/0, which
+    # reads like a result and is really a missing checkout.
+    sc = run(["git", "sparse-checkout", "set", "tests"], cwd=str(src), timeout=300)
+    if not (src / "tests").is_dir():
+        sys.exit(
+            f"the suite checkout at {src} has no tests/ directory after "
+            f"`git sparse-checkout set tests`"
+            + (f" (exit {sc.returncode}: {sc.stderr.strip()[:400]})"
+               if sc.returncode else "")
+        )
     return src
 
 
@@ -217,7 +229,8 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo-root", type=pathlib.Path, default=repo_root)
     ap.add_argument("--work", type=pathlib.Path, default=None,
-                    help="where to keep the Haxe checkout (default: target/haxe-conformance)")
+                    help="where to keep the Haxe checkout "
+                         "(default: ~/.cache/ash-haxe-conformance)")
     ap.add_argument("--ash", default=None, help="ash binary (default: newest under target/)")
     ap.add_argument("--haxe", default=shutil.which("haxe") or "haxe")
     ap.add_argument("--haxelib", default=shutil.which("haxelib") or "haxelib")
@@ -241,7 +254,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     root = args.repo_root.resolve()
-    work = (args.work or root / "target" / "haxe-conformance").resolve()
+    # Deliberately not under target/: rust-cache owns that tree in CI and
+    # prunes what it does not recognise, which silently emptied the checkout
+    # between runs.
+    work = (args.work
+            or pathlib.Path.home() / ".cache" / "ash-haxe-conformance").resolve()
 
     ash = args.ash
     if ash is None:

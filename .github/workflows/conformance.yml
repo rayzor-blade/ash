@@ -124,6 +124,15 @@ jobs:
           # run restores nothing and skips the build that would have fixed it.
           if ! ls ~/hl-hdll/*.hdll >/dev/null 2>&1; then rm -rf ~/hl-hdll; fi
 
+      # The suite checkout is a blobless sparse clone of one tag — it never
+      # changes for that tag, so caching it removes a git fetch from every
+      # run. Deliberately not under target/, which rust-cache owns.
+      - name: Cache the Haxe suite checkout
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ash-haxe-conformance
+          key: haxe-suite-${{ env.HAXE_VERSION }}
+
       - name: Run the suite
         run: |
           HD=()

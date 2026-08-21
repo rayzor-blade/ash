@@ -25,6 +25,54 @@ at 0.04s here, so "hybrid is slow to start" is the crash, not the warm-up.
 
 ---
 
+## `--mode jit` is not checked against anything
+
+`AshMode` in the parity matrix is `Interp | Hybrid`. The standalone
+whole-module JIT is never compared to an oracle, which is how an
+always-false `String ==` survived in it (fixed in e7f7fec — all three
+compiled tiers gated `hlp_dyn_compare` on HDYN/HNULL and let HOBJ fall
+through to pointer identity).
+
+Measured across the 45-case corpus, `--mode jit` vs the interpreter:
+
+    agrees                        38
+    differs, expected (FP fusion)  2   Mandelbrot, MandelbrotSmall
+    differs, unexplained           5
+    crashes                        0
+
+The two FP cases are intended: compiled code fuses multiply-add, the
+interpreter rounds every opcode. The remaining five are worth a lane in the
+parity matrix once they are down.
+
+### Map value iteration disagrees between interp and jit
+
+`for (v in someStringIntMap)` yields boxed pointers under `--mode jit` and
+the right integers under the interpreter. Four corpus cases hit it
+(TestMapSimple, TestMapIter, TestMapDebug2, TestMapDebug3).
+
+Isolated to exactly this shape — all of these are correct under both modes:
+iterating `Array<Int>`, iterating `Array<Dynamic>`, `var i:Int = someDynamic`,
+`var i:Int = callReturningDynamic()`, and `var i:Int = nativeArrayOfDynamic[0]`.
+Map *keys* are correct too. Only map values are wrong.
+
+`hlp_hbvalues` looks right: it allocates a `varray` of `hlt_dyn()` and fills
+it with the stored `vdynamic*`, and the printed addresses are 16 bytes
+apart, i.e. genuinely boxed. `BytesMap.iterator()` is
+`NativeArrayIterator<Dynamic>(valuesArray())`, and the Map abstract types it
+as `Iterator<Int>`, so a Dynamic→Int conversion has to happen somewhere. The
+interpreter gets the right answer because its registers are NaN-boxed and
+carry their own type; the JIT is statically typed and prints the pointer.
+
+That difference means the opcode is probably an `UnsafeCast`, which by
+definition does not convert — in which case ash's interpreter is being
+permissive rather than the JIT being wrong, and the question is what stock
+HashLink does. **Settling this needs a reference run**, which is exactly
+what `scripts/haxe_conformance.py --reference <hl>` provides; `hl` does not
+run on Apple Silicon, but the Linux conformance CI can. Do that before
+changing either side.
+
+---
+
 ## Where the time actually goes
 
 Measured with the built-in profiler (`ASH_PROFILE=sample`, see the README), so

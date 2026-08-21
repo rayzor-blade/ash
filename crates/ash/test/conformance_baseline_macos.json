@@ -1,61 +1,55 @@
 {
-  "generated_iso": "2026-08-21T13:45:10Z",
+  "generated_iso": "2026-08-21T14:41:07Z",
   "haxe_version": "4.3.6",
   "suite_tag": "4.3.6",
-  "ash": "/Users/amaterasu/Vibranium/ash/target/release/ash",
+  "ash": "/Users/amaterasu/Vibranium/ash/target/debug/ash",
   "results": [
     {
       "suite": "unit",
       "program": "bin/unit.hl",
       "engine": "ash:interp",
       "status": "CRASH",
-      "detail": "=== CRASH: SIGSEGV (signal 11) fault_addr=0x42d pc=0x104676768 lr=0x104672804 fp=0x16b8cf640 sp=0x16b8cf5d0 ===",
-      "ms": 2362.9,
-      "missing_natives": [
-        "std@hlp_obj_copy",
-        "std@hlp_dyn_op",
-        "std@hlp_sys_has_debugger"
-      ]
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16cefc0f0 sp=0x16cefc0d0 ===",
+      "ms": 1489.6,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     },
     {
       "suite": "sys",
       "program": "bin/hl/sys.hl",
       "engine": "ash:interp",
       "status": "CRASH",
-      "detail": "=== CRASH: SIGSEGV (signal 11) fault_addr=0x9 pc=0x102822768 lr=0x10281e804 fp=0x16d723cc0 sp=0x16d723c50 ===",
-      "ms": 159.3,
-      "missing_natives": [
-        "std@hlp_process_stdin_write",
-        "std@hlp_process_stdin_close",
-        "std@hlp_process_stdout_read",
-        "std@hlp_process_stderr_read",
-        "std@hlp_process_run",
-        "std@hlp_process_exit",
-        "std@hlp_process_close"
-      ]
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16b8a06d0 sp=0x16b8a06b0 ===",
+      "ms": 478.0,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     },
     {
       "suite": "threads",
       "program": "bin/threads.hl",
       "engine": "ash:interp",
       "status": "CRASH",
-      "detail": "=== CRASH: SIGSEGV (signal 11) fault_addr=0x9 pc=0x10263a768 lr=0x102636804 fp=0x16d90bcb0 sp=0x16d90bc40 ===",
-      "ms": 124.0,
-      "missing_natives": [
-        "std@hlp_sys_has_debugger"
-      ]
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16d4886d0 sp=0x16d4886b0 ===",
+      "ms": 122.2,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     }
   ],
-  "missing_natives": [
-    "std@hlp_dyn_op",
-    "std@hlp_obj_copy",
-    "std@hlp_process_close",
-    "std@hlp_process_exit",
-    "std@hlp_process_run",
-    "std@hlp_process_stderr_read",
-    "std@hlp_process_stdin_close",
-    "std@hlp_process_stdin_write",
-    "std@hlp_process_stdout_read",
-    "std@hlp_sys_has_debugger"
-  ]
+  "summary": {
+    "suites_total": 3,
+    "suites_passed": 0,
+    "tests_reached": 0,
+    "tests_total": null,
+    "test_pct": null,
+    "assertions_total": 0,
+    "assertions_passed": 0,
+    "assertion_pct": null,
+    "suite_pct": 0.0
+  }
 }

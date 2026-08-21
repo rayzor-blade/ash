@@ -39,6 +39,12 @@ SUITES = {
     "unit": {
         "dir": "tests/unit",
         "hxml": "compile-hl.hxml",
+        # -D UTEST_PRINT_TESTS makes utest name each case and test as it
+        # starts, via an unbuffered Sys.print. Without it a crashed run
+        # yields nothing at all to count: utest's own tally is printed once,
+        # at the end, so a VM that dies partway reports exactly as much as a
+        # VM that dies immediately.
+        "args": ["-D", "UTEST_PRINT_TESTS"],
         "programs": ["bin/unit.hl"],
         "needs": ["utest"],
         "about": "The main language suite: every type, operator, generic, "
@@ -47,6 +53,7 @@ SUITES = {
     "sys": {
         "dir": "tests/sys",
         "hxml": "compile-hl.hxml",
+        "args": ["-D", "UTEST_PRINT_TESTS"],
         # Only the main driver is run directly; the other three are helpers it
         # spawns, and running them standalone tests nothing.
         "programs": ["bin/hl/sys.hl"],
@@ -59,7 +66,7 @@ SUITES = {
         # This one carries no target in its hxml -- upstream CI supplies it on
         # the command line -- so the target is passed here instead.
         "hxml": "build.hxml",
-        "args": ["-hl", "bin/threads.hl"],
+        "args": ["-hl", "bin/threads.hl", "-D", "UTEST_PRINT_TESTS"],
         "programs": ["bin/threads.hl"],
         "needs": ["utest"],
         "about": "Threads, locks, mutexes, deques.",
@@ -215,6 +222,26 @@ def parse_utest(out: str) -> dict | None:
     }
 
 
+# utest/utils/Print.hx under -D UTEST_PRINT_TESTS: "Running <Case>..." per
+# case and a four-space-indented name per test, each printed as it starts.
+RE_CASE = re.compile(r"^Running\s+(\S+?)\.\.\.\s*$", re.M)
+RE_TEST = re.compile(r"^    ([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M)
+
+
+def parse_progress(out: str) -> dict:
+    """How far the run got before it stopped, however it stopped.
+
+    This is the only measure that survives a crash. It is deliberately a count
+    of tests *entered*, not passed: a test that started and then took the VM
+    down with it is progress in the sense that matters here — the VM reached
+    it — and calling it a pass would be a lie the next fix would expose.
+    """
+    return {
+        "cases_reached": len(RE_CASE.findall(out)),
+        "tests_reached": len(RE_TEST.findall(out)),
+    }
+
+
 def missing_natives(out: str) -> list[str]:
     """ash narrates unresolved natives at startup; that line is a finding."""
     for line in out.splitlines():
@@ -353,9 +380,11 @@ def main(argv=None) -> int:
                 natives = missing_natives((res.stdout or "") + (res.stderr or ""))
                 rec = {"suite": name, "program": prog, "engine": label,
                        "status": status, "detail": detail, "ms": round(ms, 1)}
-                tally = parse_utest((res.stdout or "") + (res.stderr or ""))
+                whole = (res.stdout or "") + (res.stderr or "")
+                tally = parse_utest(whole)
                 if tally:
                     rec["utest"] = tally
+                rec["progress"] = parse_progress(whole)
                 if natives:
                     rec["missing_natives"] = natives
                 report["results"].append(rec)
@@ -371,24 +400,42 @@ def main(argv=None) -> int:
     total = len(ash_rows)
     a_pass = sum(r["utest"]["passed"] for r in ash_rows if r.get("utest"))
     a_total = sum(r["utest"]["assertions"] for r in ash_rows if r.get("utest"))
+    # How far ash got, and how far the reference VM gets on the same
+    # bytecode. The reference is the only honest denominator available: the
+    # suite does not publish its own test count, and a total taken from a run
+    # that crashed would shrink as ash got worse.
+    t_reached = sum((r.get("progress") or {}).get("tests_reached", 0) for r in ash_rows)
+    ref_rows = [r for r in report["results"] if r["engine"] == "hashlink"]
+    t_total = sum((r.get("progress") or {}).get("tests_reached", 0) for r in ref_rows)
     report["summary"] = {
         "suites_total": total,
         "suites_passed": passes,
+        "tests_reached": t_reached,
+        "tests_total": t_total or None,
+        # The headline. Unlike the assertion tally, this moves the moment ash
+        # gets one test further, because utest prints each test as it starts
+        # and that output survives a crash.
+        "test_pct": round(100.0 * t_reached / t_total, 1) if t_total else None,
         "assertions_total": a_total,
         "assertions_passed": a_pass,
-        # None rather than 0 when nothing reported a tally: "we do not know
-        # yet" and "we got everything wrong" are different claims, and a site
-        # that renders the second when it means the first is lying.
+        # None rather than 0 throughout: "we do not know yet" and "we got
+        # everything wrong" are different claims, and a site that renders the
+        # second when it means the first is lying.
         "assertion_pct": round(100.0 * a_pass / a_total, 1) if a_total else None,
         "suite_pct": round(100.0 * passes / total, 1) if total else None,
     }
     print(f"\n{passes}/{total} suites passed")
+    if t_total:
+        print(f"{t_reached}/{t_total} tests reached "
+              f"({report['summary']['test_pct']}%, denominator from the reference VM)")
+    else:
+        print(f"{t_reached} tests reached "
+              "(no reference VM, so there is no total to divide by)")
     if a_total:
         print(f"{a_pass}/{a_total} assertions passed "
               f"({report['summary']['assertion_pct']}%)")
     else:
-        print("no suite reached utest's tally, so there is no assertion "
-              "percentage to report")
+        print("no suite ran to completion, so utest printed no assertion tally")
 
     # Every distinct unresolved native across the whole run, which is the most
     # directly actionable output this harness produces.

@@ -1,5 +1,5 @@
 {
-  "generated_iso": "2026-08-21T14:21:16Z",
+  "generated_iso": "2026-08-21T14:41:07Z",
   "haxe_version": "4.3.6",
   "suite_tag": "4.3.6",
   "ash": "/Users/amaterasu/Vibranium/ash/target/debug/ash",
@@ -8,30 +8,45 @@
       "suite": "unit",
       "program": "bin/unit.hl",
       "engine": "ash:interp",
-      "status": "FAIL",
-      "detail": "exit 1: Error: Assert hit at pc 3",
-      "ms": 1536.3
+      "status": "CRASH",
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16cefc0f0 sp=0x16cefc0d0 ===",
+      "ms": 1489.6,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     },
     {
       "suite": "sys",
       "program": "bin/hl/sys.hl",
       "engine": "ash:interp",
       "status": "CRASH",
-      "detail": "=== CRASH: SIGSEGV (signal 11) fault_addr=0x30 pc=0x1021b0b68 lr=0x1021ac224 fp=0x16dcccc70 sp=0x16dcccc70 ===",
-      "ms": 394.3
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16b8a06d0 sp=0x16b8a06b0 ===",
+      "ms": 478.0,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     },
     {
       "suite": "threads",
       "program": "bin/threads.hl",
       "engine": "ash:interp",
       "status": "CRASH",
-      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16d07d770 sp=0x16d07d750 ===",
-      "ms": 1225.1
+      "detail": "=== CRASH: SIGABRT (signal 6) fault_addr=0x184bfc5e8 pc=0x184bfc5e8 lr=0x184c378d8 fp=0x16d4886d0 sp=0x16d4886b0 ===",
+      "ms": 122.2,
+      "progress": {
+        "cases_reached": 0,
+        "tests_reached": 0
+      }
     }
   ],
   "summary": {
     "suites_total": 3,
     "suites_passed": 0,
+    "tests_reached": 0,
+    "tests_total": null,
+    "test_pct": null,
     "assertions_total": 0,
     "assertions_passed": 0,
     "assertion_pct": null,

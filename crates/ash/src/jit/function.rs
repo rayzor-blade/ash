@@ -4134,6 +4134,21 @@ impl<'ctx> JITModule<'ctx> {
                         let type_ptr = self
                             .get_initialized_type(src_type_idx)?
                             .into_pointer_value();
+                        // All four kinds share one setter, whose value
+                        // parameter is i32 — but their registers are not: HBOOL
+                        // loads as i1, HUI8 as i8, HUI16 as i16. Passing those
+                        // straight through builds a call the LLVM verifier
+                        // rejects ("Call parameter type does not match function
+                        // signature"), which fails the whole module and drops
+                        // the program back to the interpreter. Widen first;
+                        // all three narrow kinds are unsigned, so zero-extend.
+                        let src_int = src_val.into_int_value();
+                        let src_i32 = if src_int.get_type().get_bit_width() < 32 {
+                            self.builder
+                                .build_int_z_extend(src_int, i32_type, "dynset_src_i32")?
+                        } else {
+                            src_int
+                        };
                         let setter = self.declare_native(
                             "hlp_dyn_seti",
                             &[
@@ -4150,7 +4165,7 @@ impl<'ctx> JITModule<'ctx> {
                                 obj_val.into(),
                                 hfield_val.into(),
                                 type_ptr.into(),
-                                src_val.into(),
+                                src_i32.into(),
                             ],
                             "dynset_i",
                         )?;

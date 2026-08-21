@@ -25,6 +25,9 @@ jobs:
   build:
     name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # A retired or saturated runner image must fail this leg, not stall the
+    # release behind it.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -33,7 +36,10 @@ jobs:
             target: linux-x86_64
           - os: macos-14
             target: macos-aarch64
-          - os: macos-13
+          # macos-13 is retired: its jobs queue forever rather than failing,
+          # which used to hold the whole release. macos-15-intel is the
+          # current Intel image.
+          - os: macos-15-intel
             target: macos-x86_64
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +119,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.try_windows }}
     runs-on: windows-2022
     continue-on-error: true
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -127,7 +134,13 @@ jobs:
   publish:
     name: Publish release
     needs: build
+    # `needs` alone withholds the release when any leg fails or is skipped,
+    # so one dead runner image took every platform's binary down with it.
+    # Publish what built; the missing platform simply has no asset until its
+    # leg is fixed, and install.sh already reports that per platform.
+    if: ${{ always() && needs.build.result != 'cancelled' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -135,6 +148,17 @@ jobs:
           pattern: ash-*
           path: dist
           merge-multiple: true
+
+      - name: Require at least one tarball
+        run: |
+          ls -la dist/ || true
+          count=$(find dist -name '*.tar.gz' | wc -l | tr -d ' ')
+          if [ "$count" = "0" ]; then
+            echo "::error::no platform produced a tarball; nothing to publish"
+            exit 1
+          fi
+          echo "publishing $count tarball(s):"
+          find dist -name '*.tar.gz' -exec basename {} \;
 
       - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/v')

@@ -362,6 +362,99 @@ unsafe extern "C" fn crash_handler_siginfo(
     push_bytes(&mut buf, &mut len, b" ===\n");
     write_stderr(&buf[..len]);
 
+    // Frame-pointer walk, default-on. Bounded stack reads plus a try_lock
+    // registry lookup — nothing here allocates or takes a lock it could
+    // deadlock on, unlike the opt-in Rust backtrace below. Both arm64 and
+    // x86_64 store [saved_fp, return_addr] at fp, so one walk serves both.
+    // JIT frames are named from the promotion registry (findex + tier);
+    // everything else goes through dladdr on unix.
+    if let Some((pc0, lr, mut fp, _sp)) = signal_registers(ctx) {
+        write_stderr(b"[ash] frames (innermost first):\n");
+        let mut frame = 0usize;
+        let mut emit = |pc: u64, frame: usize| {
+            let mut b = [0u8; 192];
+            let mut l = 0usize;
+            push_bytes(&mut b, &mut l, b"  #");
+            push_dec(&mut b, &mut l, frame as u64);
+            push_bytes(&mut b, &mut l, b" 0x");
+            push_hex(&mut b, &mut l, pc);
+            if let Some((findex, tier, off)) =
+                ash_core::profile::describe_jit_pc(pc as usize)
+            {
+                push_bytes(&mut b, &mut l, b" jit findex=");
+                push_dec(&mut b, &mut l, findex as u64);
+                push_bytes(&mut b, &mut l, b" (");
+                push_bytes(&mut b, &mut l, tier.as_bytes());
+                push_bytes(&mut b, &mut l, b"+0x");
+                push_hex(&mut b, &mut l, off as u64);
+                push_bytes(&mut b, &mut l, b")");
+            } else {
+                #[cfg(unix)]
+                unsafe {
+                    let mut info: libc::Dl_info = std::mem::zeroed();
+                    if libc::dladdr(pc as *const std::ffi::c_void, &mut info) != 0
+                        && !info.dli_sname.is_null()
+                    {
+                        let name = std::ffi::CStr::from_ptr(info.dli_sname);
+                        push_bytes(&mut b, &mut l, b" ");
+                        // Demangle into the fixed buffer — rustc_demangle
+                        // formats lazily, so a stack fmt::Write sink keeps
+                        // this allocation-free, which the signal context
+                        // requires.
+                        struct Sink<'a> {
+                            buf: &'a mut [u8; 192],
+                            len: &'a mut usize,
+                        }
+                        impl std::fmt::Write for Sink<'_> {
+                            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                                push_bytes(self.buf, self.len, s.as_bytes());
+                                Ok(())
+                            }
+                        }
+                        if let Ok(sym) = name.to_str() {
+                            let _ = std::fmt::write(
+                                &mut Sink { buf: &mut b, len: &mut l },
+                                format_args!("{:#}", rustc_demangle::demangle(sym)),
+                            );
+                        } else {
+                            let bytes = name.to_bytes();
+                            let take = bytes.len().min(120);
+                            push_bytes(&mut b, &mut l, &bytes[..take]);
+                        }
+                    }
+                }
+            }
+            push_bytes(&mut b, &mut l, b"\n");
+            write_stderr(&b[..l]);
+        };
+        emit(pc0, frame);
+        frame += 1;
+        if lr != 0 && lr != pc0 {
+            emit(lr, frame);
+            frame += 1;
+        }
+        // The chain itself: each fp points at [saved_fp, return_addr].
+        // Sanity bounds keep a corrupted fp from turning the report into a
+        // second fault: alignment, monotonic growth, and a page of slack
+        // below 48 bits of address space.
+        while frame < 32 {
+            if fp == 0 || fp & 0xF != 0 || fp > 0x7FFF_FFFF_F000 {
+                break;
+            }
+            let saved_fp = unsafe { *(fp as *const u64) };
+            let ra = unsafe { *((fp + 8) as *const u64) };
+            if ra < 0x1000 {
+                break;
+            }
+            emit(ra, frame);
+            frame += 1;
+            if saved_fp <= fp {
+                break;
+            }
+            fp = saved_fp;
+        }
+    }
+
     // Opt-in, best-effort, and NOT async-signal-safe — see the doc comment.
     if *CRASH_BACKTRACE.get().unwrap_or(&false) {
         write_stderr(b"[ash] ASH_CRASH_BACKTRACE=1: capturing (unsafe in a signal handler)\n");

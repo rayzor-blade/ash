@@ -111,6 +111,7 @@ dependencies = [
  "clap",
  "inkwell",
  "libc",
+ "rustc-demangle",
  "tikv-jemallocator",
 ]
 

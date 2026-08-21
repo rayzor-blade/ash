@@ -377,7 +377,11 @@ fn jit_code() -> &'static Mutex<Vec<CodeRange>> {
 /// Ranges are matched nearest-entry-below, since neither backend reports a code
 /// length; see [`classify`] for the bound that keeps that from over-claiming.
 pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
-    if !sampling_enabled() || addr == 0 {
+    // Unconditional, not sampling-gated: the crash handler symbolizes fault
+    // frames against this registry, and a crash does not schedule itself for
+    // runs where the profiler happened to be on. The cost is one Vec push per
+    // PROMOTION, which is measured in dozens per process.
+    if addr == 0 {
         return;
     }
     if std::env::var("ASH_PROFILE_DEBUG").is_ok() {
@@ -387,6 +391,29 @@ pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
         .lock()
         .unwrap()
         .push(CodeRange { addr, findex, tier });
+}
+
+/// Which compiled function a PC falls in, for the crash handler.
+///
+/// Nearest-entry-below, same rule the sampler uses, since neither backend
+/// reports a code size; a PC more than 2MB past the nearest entry is treated
+/// as not JIT code rather than attributed to a function it cannot belong to.
+/// try_lock, never lock: this is called from a signal handler, and a handler
+/// that deadlocks on the mutex its own thread holds turns a crash report
+/// into a hang.
+pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
+    let guard = jit_code().try_lock().ok()?;
+    let mut best: Option<&CodeRange> = None;
+    for r in guard.iter() {
+        if r.addr <= pc && best.map_or(true, |b| r.addr > b.addr) {
+            best = Some(r);
+        }
+    }
+    let r = best?;
+    if pc - r.addr > 2 << 20 {
+        return None;
+    }
+    Some((r.findex, r.tier.label(), pc - r.addr))
 }
 
 /// Resolves a findex to a human-readable function name for the report.

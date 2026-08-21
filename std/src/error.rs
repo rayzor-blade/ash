@@ -75,13 +75,60 @@ impl std::fmt::Debug for VDynamicException {
 
 unsafe impl Send for VDynamicException {}
 
+/// Best-effort rendering of a thrown value for the uncaught-exception path.
+///
+/// Deliberately defensive rather than complete: this runs on the way to
+/// abort, possibly with a heap in a bad state, so every dereference is
+/// guarded and anything unrecognized falls back to kind+pointer — the old
+/// output, as a floor rather than a ceiling.
+unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
+    if v.is_null() {
+        return "null".into();
+    }
+    let t = (*v).t;
+    if t.is_null() || (t as usize) < 0x10000 {
+        return format!("<corrupt type> ptr={v:p}");
+    }
+    let kind = (*t).kind;
+    let utf16z = |p: *const hl::uchar| -> String {
+        if p.is_null() {
+            return "null".into();
+        }
+        let mut n = 0usize;
+        while n < 4096 && *p.add(n) != 0 {
+            n += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+    };
+    if kind == hl::hl_type_kind_HBYTES {
+        // A thrown bytes value is a message string in every case the stdlib
+        // produces (hl_error goes through here).
+        return format!("\"{}\"", utf16z((*v).v.bytes as *const hl::uchar));
+    }
+    if kind == hl::hl_type_kind_HOBJ {
+        let obj = (*t).__bindgen_anon_1.obj;
+        if !obj.is_null() && (obj as usize) >= 0x10000 {
+            let name = utf16z((*obj).name);
+            // A String object's payload is worth printing whole; for any
+            // other class the name alone locates the throw site.
+            if name == "String" || name == "S" {
+                let bytes = *((v as *const u8).add(8) as *const *const hl::uchar);
+                return format!("String \"{}\"", utf16z(bytes));
+            }
+            return format!("instance of {name} ({v:p})");
+        }
+    }
+    format!("kind={kind} ptr={v:p}")
+}
+
 pub struct TrapContext {
     pub buf: hl::jmp_buf,
     pub has_jmpbuf: bool,
     pub prev: *mut TrapContext,
     pub exception_value: Option<VDynamicException>,
     pub caught: bool,
-    /// GC-lock depth held by this thread at the setjmp site. hlp_throw
+    
+/// GC-lock depth held by this thread at the setjmp site. hlp_throw
     /// restores the lock to this depth before longjmp, releasing guards
     /// held by the frames being jumped over (their Drop never runs).
     pub saved_lock_depth: usize,
@@ -266,8 +313,12 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
             retire_trap(st, current);
             depth
         } else {
-            // No active setjmp trap: this is an uncaught native exception.
+            // No active setjmp trap: this is an uncaught exception. Say WHAT
+            // was thrown before dying — the value is right here, and "kind=8
+            // ptr=0x..." sent a real bug report back for another round trip
+            // when the message string it pointed at would have named the bug.
             st.exc_value = v;
+            eprintln!("[ash] uncaught exception: {}", describe_exception(v));
             eprintln!("hlp_throw called without active trap; aborting");
             std::process::abort();
         }

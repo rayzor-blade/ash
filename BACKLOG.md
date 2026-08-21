@@ -42,6 +42,12 @@ hybrid does not SIGSEGV at all: it dies on an uncaught "Null access",
 consistent with compiled code loading from a page the GC reclaimed and
 faulting the *pointer it read* rather than the page itself.
 
+The crash-handler frame walk (landed the same day) names the fault site
+directly: `utf16_len_eq <- compare_regs_in <- execute_opcode` — the
+interpreter comparing a String whose UTF-16 payload page is gone. So the
+reclaimed object is one held live by an interp register at the moment of a
+string comparison, which is precisely the scan-root-liveness shape.
+
 A page-aligned fault address in a workload of small object graphs points at
 page handback — the macOS MADV_FREE_REUSABLE path and the
 reclaim_block_pages bookkeeping — or block reclamation freeing a block that

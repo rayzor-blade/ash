@@ -13,6 +13,9 @@ anyhow = { workspace = true }
 inkwell = { workspace = true }
 clap = { workspace = true }
 libc = "0.2"
+# Crash-handler frame names: dladdr returns v0-mangled Rust symbols, and a
+# crash report you cannot read is half a crash report.
+rustc-demangle = "0.1"
 
 # glibc's allocator returns freed memory to the process lazily, which wren_lift
 # measured as a large loss on Linux; jemalloc frees on time. Linux-only — macOS

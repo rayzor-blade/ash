@@ -203,8 +203,42 @@ fn run_v2(bc: &DecodedBytecode, f: &mut HLFunction, hot_reload: bool) -> bool {
         }
         Err(e) => {
             report_refusal(&e);
+            dump_refused(f, &e);
             false
         }
+    }
+}
+
+/// `ASH_AIR_DUMP_REFUSED=<dir>`: write the refused function's opcodes so a
+/// refusal seen in the field arrives as a reproducer instead of a screenshot.
+/// The corpus refuses nothing, so every real-world refusal is a lowering or
+/// pass defect we cannot fix without exactly this artifact.
+fn dump_refused(f: &HLFunction, e: &PipelineError) {
+    let Some(dir) = std::env::var_os("ASH_AIR_DUMP_REFUSED") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(format!("refused_f{}_{}.txt", e.findex, e.stage));
+    let mut body = format!(
+        "findex: {}\nname: {}\nstage: {}\nerror: {}\nnregs: {}\nops: {}\n\n",
+        e.findex,
+        e.name,
+        e.stage,
+        e.brief(),
+        f.regs.len(),
+        f.ops.len()
+    );
+    for (i, (reg, _)) in f.regs.iter().zip(0..).enumerate() {
+        body.push_str(&format!("reg r{i}: type#{}\n", reg.0));
+    }
+    body.push('\n');
+    for (pc, op) in f.ops.iter().enumerate() {
+        body.push_str(&format!("{pc:5}: {op:?}\n"));
+    }
+    match std::fs::write(&path, body) {
+        Ok(()) => eprintln!("[air] refused function written to {}", path.display()),
+        Err(err) => eprintln!("[air] could not write refusal dump: {err}"),
     }
 }
 
@@ -216,13 +250,25 @@ fn report_refusal(e: &PipelineError) {
     const SHOWN: usize = 20;
     let n = REFUSED.fetch_add(1, Ordering::Relaxed);
     if n < SHOWN {
+        // "left unoptimized", and say so — an earlier version of this line
+        // claimed "using v1 for it" long after v1 was deleted, which sent at
+        // least one reader hunting for a second pipeline that does not exist.
         eprintln!(
-            "[air] v2 refused findex={} {} at {}: {} — using v1 for it",
+            "[air] v2 refused findex={} {} at {}: {} — function left unoptimized",
             e.findex,
             e.name,
             e.stage,
             e.brief()
         );
+        if std::env::var_os("ASH_AIR_DUMP_REFUSED").is_none() {
+            static HINTED: AtomicUsize = AtomicUsize::new(0);
+            if HINTED.swap(1, Ordering::Relaxed) == 0 {
+                eprintln!(
+                    "[air] set ASH_AIR_DUMP_REFUSED=<dir> to write each refused \
+function's bytecode for a bug report"
+                );
+            }
+        }
     } else if n == SHOWN {
         eprintln!("[air] v2 refusals past {SHOWN} silenced");
     }

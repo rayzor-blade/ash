@@ -1,0 +1,236 @@
+name: benchmarks
+
+# Benchmark CI in the zyntax shape: one fresh runner per benchmark (so a heavy
+# kernel's thermal/cache history never bleeds into a light one), partial JSON
+# artifacts, an aggregate job that merges them into the site's results.json,
+# and a GitHub Pages deploy of website/ with that data. The published page
+# normalizes to the HashLink JIT, so each leg also times official `hl` on the
+# same runner — best-effort: a runner where HashLink won't build still
+# publishes ash rows, in absolute milliseconds.
+#
+# Correctness is the gate, not speed: ash_bench.py and hl_bench.py both exit
+# non-zero when a run prints a value outside the accepted checksum set, which
+# fails that benchmark's leg. The aggregate publishes whatever legs survived.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "crates/**"
+      - "std/**"
+      - "bench/**"
+      - "scripts/**"
+      - "website/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  # A new push queues behind an in-flight sweep rather than cancelling it —
+  # cancellation between upload-pages-artifact and deploy-pages would throw
+  # away a completed 30-minute run.
+  cancel-in-progress: false
+
+env:
+  HASHLINK_VERSION: "1.15"
+
+jobs:
+  benchmark:
+    name: bench (${{ matrix.bench }})
+    runs-on: ubuntu-24.04
+    strategy:
+      # One crashing benchmark must not cancel the rest of the sweep; the
+      # aggregate below runs on whatever legs survive.
+      fail-fast: false
+      matrix:
+        bench:
+          - fib
+          - mandelbrot
+          - nbody
+          - inlined_call
+          - method_call
+          - free_call
+          - closure_call
+    env:
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      # Haxe recompiles each bench to C for the HashLink/C (AOT) lane.
+      - uses: krdlab/setup-haxe@v1
+        continue-on-error: true
+        with:
+          haxe-version: "4.3.4"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: bench-runner
+
+      - name: Install LLVM 21 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+          llvm-config-21 --version
+
+      # HashLink is the page's 1.00 baseline. The VM needs only libhl + hl
+      # (pcre is vendored); the hdll libraries with image/audio deps are not
+      # built. Best-effort by design: on failure the leg still publishes ash
+      # rows and hl_bench.py records the baseline as UNAVAILABLE.
+      - name: Cache HashLink build
+        id: hl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/hashlink
+          key: hashlink-${{ env.HASHLINK_VERSION }}-${{ runner.os }}-ubuntu-24.04
+
+      - name: Build HashLink ${{ env.HASHLINK_VERSION }}
+        if: steps.hl-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --branch "${HASHLINK_VERSION}" \
+            https://github.com/HaxeFoundation/hashlink.git ~/hashlink
+          # A failed build must not be cached under the version key forever:
+          # remove the tree so the cache post-step has nothing to save.
+          make -C ~/hashlink libhl hl -j"$(nproc)" && test -x ~/hashlink/hl \
+            || { echo "::warning::HashLink build failed"; rm -rf ~/hashlink; }
+
+      - name: Put HashLink on PATH
+        continue-on-error: true
+        run: |
+          if [ -x ~/hashlink/hl ]; then
+            echo "$HOME/hashlink" >> "$GITHUB_PATH"
+            echo "LD_LIBRARY_PATH=$HOME/hashlink${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+            ~/hashlink/hl --version
+          else
+            echo "::warning::hl binary not available; publishing without the HashLink baseline"
+          fi
+
+      # ash_bench discovers the newest binary under target/, so building only
+      # release keeps it honest. Two invocations, not one: ash_std is a cdylib
+      # that ash's build.rs embeds via include_bytes!, and cargo has no
+      # ordering edge between the two — a single invocation can race and
+      # embed a stale or missing stdlib.
+      - name: Build ash (release)
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash_cli
+
+      - name: Bench ash (${{ matrix.bench }})
+        run: |
+          mkdir -p parts
+          ./scripts/ash_bench.py \
+            --benchmarks "${{ matrix.bench }}" \
+            --modes hybrid-auto \
+            --iterations 7 \
+            --warmups 1 \
+            --include-slow \
+            --timeout-scale 3 \
+            --ignore-load \
+            --out-json "parts/ash-${{ matrix.bench }}.json"
+
+      - name: Bench HashLink JIT and HL/C (${{ matrix.bench }})
+        run: |
+          ./scripts/hl_bench.py \
+            --benchmarks "${{ matrix.bench }}" \
+            --hashlink-dir ~/hashlink \
+            --iterations 7 \
+            --warmups 1 \
+            --timeout-scale 3 \
+            --out "parts/hl-${{ matrix.bench }}.json"
+
+      - name: Upload partial result
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-part-${{ matrix.bench }}
+          path: parts/
+          if-no-files-found: error
+          retention-days: 90
+
+  aggregate:
+    name: Aggregate benchmark results
+    needs: benchmark
+    # `needs` alone would skip this whenever any matrix leg failed, and a
+    # skipped aggregate skips the deploy — one crashing benchmark would take
+    # the whole published page down rather than just its own rows.
+    if: ${{ always() && needs.benchmark.result != 'cancelled' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download partials
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Merge into site results.json
+        run: |
+          ls -la parts/ || true
+          ./scripts/merge_bench_site.py --parts parts --out site-data/results.json --source ci
+          python3 -m json.tool site-data/results.json > /dev/null
+
+      - name: Upload merged results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: site-data/results.json
+          if-no-files-found: error
+          retention-days: 90
+
+  deploy-site:
+    name: Deploy website to GitHub Pages
+    needs: aggregate
+    if: ${{ always() && needs.aggregate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download merged results
+        uses: actions/download-artifact@v4
+        with:
+          name: benchmark-results
+          path: site-data
+
+      # The committed website/bench/results.json is a local-run fallback for
+      # previews; the deploy always ships the fresh CI numbers over it.
+      - name: Assemble site
+        run: |
+          mkdir -p website/bench
+          cp site-data/results.json website/bench/results.json
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

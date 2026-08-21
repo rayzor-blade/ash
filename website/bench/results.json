@@ -1,0 +1,184 @@
+{
+  "schema_version": 1,
+  "generated_iso": "2026-08-21T06:40:38Z",
+  "source": "local",
+  "commit": "f53bb5c87011",
+  "branch": "main",
+  "hl_version": null,
+  "system": {
+    "os": "darwin",
+    "arch": "arm64",
+    "cpu_model": "Apple M1 Pro",
+    "cpu_count": 10
+  },
+  "benchmarks": [
+    {
+      "name": "fib",
+      "title": "fib(40)",
+      "group": "call",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum 102334155 (reference)",
+          "compile_ms": 0.64,
+          "tiers": {
+            "cranelift": 1,
+            "llvm": 0
+          },
+          "checksum": "102334155",
+          "median_ms": 384.71,
+          "min_ms": 384.16,
+          "max_ms": 385.9,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "mandelbrot",
+      "title": "mandelbrot",
+      "group": "fp",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum 112798500 (fused-air-cranelift)",
+          "compile_ms": 1.19,
+          "tiers": {
+            "cranelift": 2,
+            "llvm": 0
+          },
+          "checksum": "112798500",
+          "median_ms": 366.52,
+          "min_ms": 364.19,
+          "max_ms": 366.77,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "nbody",
+      "title": "n-body",
+      "group": "fp",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum -169077 (reference)",
+          "compile_ms": 156.96,
+          "tiers": {
+            "cranelift": 2,
+            "llvm": 1
+          },
+          "checksum": "-169077",
+          "median_ms": 555.98,
+          "min_ms": 549.54,
+          "max_ms": 586.18,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "inlined_call",
+      "title": "inlined function",
+      "group": "call",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum -1737346944 (reference)",
+          "compile_ms": 0.47,
+          "tiers": {
+            "cranelift": 1,
+            "llvm": 0
+          },
+          "checksum": "-1737346944",
+          "median_ms": 136.16,
+          "min_ms": 135.81,
+          "max_ms": 137.98,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "method_call",
+      "title": "method call",
+      "group": "call",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum -1737346944 (reference)",
+          "compile_ms": 92.17,
+          "tiers": {
+            "cranelift": 2,
+            "llvm": 1
+          },
+          "checksum": "-1737346944",
+          "median_ms": 186.93,
+          "min_ms": 184.54,
+          "max_ms": 187.65,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "free_call",
+      "title": "free function",
+      "group": "call",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum -1737346944 (reference)",
+          "compile_ms": 0.44,
+          "tiers": {
+            "cranelift": 1,
+            "llvm": 0
+          },
+          "checksum": "-1737346944",
+          "median_ms": 136.57,
+          "min_ms": 135.84,
+          "max_ms": 137.65,
+          "runs": 3
+        }
+      ]
+    },
+    {
+      "name": "closure_call",
+      "title": "closure call",
+      "group": "call",
+      "rows": [
+        {
+          "engine": "ash",
+          "label": "Ash",
+          "mode": "hybrid-auto",
+          "status": "OK",
+          "detail": "checksum -1737346944 (reference)",
+          "compile_ms": 245.34,
+          "tiers": {
+            "cranelift": 1,
+            "llvm": 2
+          },
+          "checksum": "-1737346944",
+          "median_ms": 279.86,
+          "min_ms": 273.24,
+          "max_ms": 284.4,
+          "runs": 3
+        }
+      ]
+    }
+  ]
+}

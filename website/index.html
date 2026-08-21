@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ash — HashLink Bytecode Runtime</title>
+<meta name="description" content="Ash runs HashLink (.hl) bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM. Continuously benchmarked against HashLink's JIT and HL/C.">
+<meta name="author" content="Damilare Akinlaja">
+<meta name="keywords" content="HashLink, Haxe, bytecode, runtime, JIT, Cranelift, LLVM, Rust, virtual machine">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#f5f1ea">
+<link rel="canonical" href="https://rayzor-blade.github.io/ash/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Ash">
+<meta property="og:title" content="Ash — HashLink Bytecode Runtime">
+<meta property="og:description" content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM — benchmarked against HashLink's JIT and HL/C on every push.">
+<meta property="og:url" content="https://rayzor-blade.github.io/ash/">
+<meta property="og:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
+<meta name="twitter:description" content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM.">
+<meta name="twitter:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Ash",
+  "operatingSystem": "macOS, Linux",
+  "applicationCategory": "DeveloperApplication",
+  "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
+  "url": "https://rayzor-blade.github.io/ash/",
+  "image": "https://rayzor-blade.github.io/ash/ash-mark-tight.png",
+  "license": "https://opensource.org/license/isc-license-txt",
+  "author": { "@type": "Person", "name": "Damilare Akinlaja" },
+  "codeRepository": "https://github.com/rayzor-blade/ash"
+}
+</script>
+<link rel="icon" type="image/png" href="ash-mark-tight.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:#f5f1ea;color:#221d1a;-webkit-font-smoothing:antialiased;font-family:'IBM Plex Sans',sans-serif}
+a{color:#a8703c;text-decoration:none}
+a:hover{color:#7f5228}
+::selection{background:#a8703c;color:#f5f1ea}
+code{font-family:'IBM Plex Mono',monospace}
+@keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
+@media (prefers-reduced-motion: reduce){
+  html{scroll-behavior:auto}
+  .cursor{animation:none !important}
+}
+/* Benchmark rows are rendered from bench/results.json; classes keep the
+   generated markup identical to the design's static rows. */
+.bench-row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.08)}
+.bench-name{width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13px;color:#221d1a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bench-bars{flex:1 1 200px;min-width:0;display:flex;flex-direction:column;gap:6px}
+.bench-line{display:flex;align-items:center;gap:10px}
+.bench-label{width:clamp(72px,18vw,104px);flex:none;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8a807a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bench-track{flex:1;min-width:0;height:15px;background:rgba(34,29,26,0.05);border-radius:3px;overflow:hidden;display:flex}
+.bench-num{font-family:'IBM Plex Mono',monospace;font-size:12px;width:58px;flex:none;text-align:right;white-space:nowrap}
+.seg-hl{height:100%;background:#c7bdb2}
+.seg-compile{height:100%;background:#dcbf9d}
+.seg-exec{height:100%;background:#a8703c}
+.seg-hlc{height:100%;background:#221d1a}
+.copy-btn{flex:none;background:none;border:1px solid rgba(234,230,225,0.2);border-radius:5px;color:#a89d91;font-family:'IBM Plex Mono',monospace;font-size:11.5px;padding:5px 10px;cursor:pointer;margin-top:2px;white-space:nowrap}
+.copy-btn:hover{border-color:rgba(234,230,225,0.45);color:#d8d2c9}
+</style>
+</head>
+<body>
+
+<div style="min-height:100vh;background:#f5f1ea;">
+
+<header style="position:sticky;top:0;z-index:50;background:rgba(245,241,234,0.88);backdrop-filter:blur(10px);border-bottom:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;justify-content:space-between;gap:24px;flex-wrap:wrap;padding:14px clamp(24px,6vw,64px);max-width:1180px;margin:0 auto">
+<a href="#top" style="display:flex;align-items:center;gap:10px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(24px,6.5vw,32px);letter-spacing:-0.03em;line-height:1">
+<img src="ash-mark-tight.png" alt="Ash" style="height:clamp(34px,9vw,46px);width:auto;display:block">
+<span style="padding-top:clamp(10px,2.6vw,15px)">ash</span>
+</a>
+<nav style="display:flex;align-items:center;gap:clamp(16px,3vw,32px);flex-wrap:wrap">
+<a href="#features" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Features</a>
+<a href="#tiers" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Tiers</a>
+<a href="#setup" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
+<a href="#benchmarks" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Benchmarks</a>
+<a href="#platforms" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Platforms</a>
+<a href="https://github.com/rayzor-blade/ash" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A7.995 7.995 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>GitHub</a>
+</nav>
+</div>
+</header>
+
+<section id="top" style="padding:clamp(56px,8vw,104px) clamp(24px,6vw,64px) clamp(48px,6vw,80px);max-width:1180px;margin:0 auto">
+<div style="display:flex;gap:clamp(32px,6vw,64px);align-items:center;flex-wrap:wrap">
+<div style="flex:1 1 420px;min-width:0;max-width:600px">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 24px">
+<span style="width:7px;height:7px;border-radius:50%;background:#a8703c;display:inline-block"></span>
+HashLink Bytecode Runtime
+</div>
+<h1 style="font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:clamp(38px,6vw,68px);line-height:1.08;letter-spacing:-0.01em;color:#221d1a;margin:0">A <span style="font-weight:700;color:#6D4C41">faster</span> Runner for<br>HashLink bytecode.</h1>
+<p style="font-size:clamp(15px,1.8vw,17.5px);line-height:1.65;color:#5c5450;max-width:520px;margin:24px 0 0">Ash runs HashLink (<code>.hl</code>) bytecode compiled from Haxe. Execution is tiered: an interpreter runs everything, hot functions are promoted to Cranelift, and the hottest are recompiled by LLVM.</p>
+<div style="display:flex;gap:14px;flex-wrap:wrap;margin:36px 0 0">
+<a href="#setup" style="background:#221d1a;color:#f5f1ea;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14.5px;white-space:nowrap">Get Started →</a>
+<a href="https://github.com/rayzor-blade/ash" target="_blank" rel="noopener" style="border:1px solid rgba(34,29,26,0.22);color:#221d1a;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:14.5px;white-space:nowrap">View on GitHub</a>
+</div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin:28px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a">
+<span>Cranelift + LLVM 21</span><span>·</span><span>aarch64 &amp; x86_64</span><span>·</span><span>ISC licensed</span>
+</div>
+</div>
+<div style="flex:1 1 340px;min-width:0;max-width:500px;width:100%;background:#221d1a;border:1px solid rgba(34,29,26,0.14);border-radius:10px;overflow:hidden;box-shadow:0 24px 50px -22px rgba(34,29,26,0.4)">
+<div style="display:flex;align-items:center;gap:6px;padding:14px 18px;border-bottom:1px solid rgba(234,230,225,0.1)">
+<span style="width:8px;height:8px;border-radius:50%;background:#4a3f3d;display:inline-block"></span>
+<span style="width:8px;height:8px;border-radius:50%;background:#4a3f3d;display:inline-block"></span>
+<span style="width:8px;height:8px;border-radius:50%;background:#4a3f3d;display:inline-block"></span>
+<span style="margin-left:8px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;white-space:nowrap">ash — shell</span>
+</div>
+<div style="padding:24px 22px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.95;overflow-x:auto">
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode hybrid mandelbrot.hl</span></div>
+<div style="color:#8a8078;white-space:nowrap">tier1 cranelift&nbsp;&nbsp;12 functions promoted</div>
+<div style="color:#8a8078;white-space:nowrap">tier2 llvm&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3 functions promoted</div>
+<div style="color:#d8d2c9;white-space:nowrap">checksum: 112798515</div>
+<div><span style="color:#caa06f">$</span> <span class="cursor" style="display:inline-block;width:8px;height:15px;background:#caa06f;vertical-align:text-bottom;animation:blink 1s steps(1) infinite;margin-left:6px"></span></div>
+</div>
+</div>
+</div>
+</section>
+
+<section id="features" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Features</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">The <span style="font-weight:700;font-style:italic;color:#6D4C41">ash</span> approach to running HashLink</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">Two compiler backends over a typed SSA IR, an Immix collector, cooperative fibers for <code>sys.thread</code>, and the HashLink standard library rewritten in Rust.</p>
+<div style="margin-top:36px;display:flex;flex-wrap:wrap;gap:1px;background:rgba(34,29,26,0.12);border:1px solid rgba(34,29,26,0.12);border-radius:14px;overflow:hidden">
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">01</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Tiered execution</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Interpreter → Cranelift → LLVM. Functions climb the ladder as they get hot, and compilation happens off the main thread.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">02</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">AIR</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">A typed phi-SSA IR over HashLink bytecode, with first-class trap regions, an effect lattice, and an alias model.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">03</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Optimization passes</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Null-check elimination, GVN/CSE, LICM, FMA fusion, DCE, tail-recursion elimination, inlining, and scalar replacement of aggregates.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">04</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Immix collector</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Conservative stack-scanning Immix with a demand-committed heap, adaptive triggers, and external-pressure accounting.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">05</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Fibers</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0"><code>sys.thread</code> threads run as cooperative stackful fibers, so code blocking on locks, deques or <code>Sys.sleep</code> still makes progress on one OS thread.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">06</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Shared symbol table</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">One canonical <code>lib@symbol</code> → address map, built at startup and consumed by the interpreter and both compiled tiers.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">07</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">HDLL support</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">External HashLink dynamic libraries via the standard <code>DEFINE_PRIM</code> resolver protocol.</p></div>
+
+<div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)"><div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">08</div><h3 style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">Embedded standard library</h3><p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The HashLink standard library implemented in Rust, built as a cdylib and embedded in the binary.</p></div>
+
+</div>
+</section>
+
+<section id="tiers" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Execution tiers</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Three rungs, one ladder</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Promotion is brokered by <a href="https://github.com/darmie/beadie" target="_blank" rel="noopener">beadie</a>, which counts invocations, compiles on background threads, and publishes code pointers atomically. <code>ash --jit-tier</code> pins a single rung for testing.</p>
+<div style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:10px;overflow:hidden;max-width:860px;background:#ffffff">
+
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px;border-bottom:1px solid rgba(34,29,26,0.1)"><div style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#c7bdb2">0</div><div style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">Interpreter</div><div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Runs everything, on NaN-boxed values.</div></div>
+
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px;border-bottom:1px solid rgba(34,29,26,0.1)"><div style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#c7bdb2">1</div><div style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">Cranelift</div><div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Fast compilation — about 0.04 ms per function — for warm functions at <code>opt_level=speed</code>.</div></div>
+
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px"><div style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#a8703c">2</div><div style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">LLVM 21 (MCJIT)</div><div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Full codegen for the hottest functions. Whatever the Cranelift tier declines to lower falls through here rather than staying interpreted.</div></div>
+
+</div>
+</section>
+
+<section id="setup" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Quick Setup</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Install, compile, run</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">One script, no toolchain. Prebuilt binaries for macOS and Linux on aarch64 and x86_64.</p>
+
+<div style="margin-top:40px;display:flex;flex-direction:column;gap:36px;max-width:800px">
+
+<div>
+<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px"><span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">01</span><h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Install Ash</h3></div>
+<p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Drops the <code>ash</code> binary into <code>~/.ash/bin</code> and adds them to your <code>PATH</code>. Ash requires a 64-bit target.</p>
+<div style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
+<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+<div style="overflow-x:auto">
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh</span></div>
+</div>
+<button class="copy-btn" data-copy="curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh">Copy</button>
+</div>
+</div>
+</div>
+
+<div>
+<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px"><span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">02</span><h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Compile Haxe to bytecode</h3></div>
+<p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Ash runs HashLink bytecode, so build a <code>.hl</code> file with Haxe — or use one you already have.</p>
+<div style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
+<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+<div style="overflow-x:auto">
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">haxe -main Main -hl main.hl</span></div>
+</div>
+<button class="copy-btn" data-copy="haxe -main Main -hl main.hl">Copy</button>
+</div>
+</div>
+</div>
+
+<div>
+<div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px"><span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">03</span><h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Run it</h3></div>
+<p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">One binary, one flag set: <code>--mode interp|hybrid|jit</code>, <code>--jit-tier auto|cranelift|llvm|off</code>, promotion thresholds, and <code>--jit-log</code>.</p>
+<div style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
+<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+<div style="overflow-x:auto">
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode hybrid main.hl</span></div>
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode hybrid --jit-tier cranelift --jit-log main.hl</span></div>
+<div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode jit main.hl</span> <span style="color:#8a807a"># compile everything up front</span></div>
+</div>
+<button class="copy-btn" data-copy="ash --mode hybrid main.hl&#10;ash --mode jit main.hl">Copy</button>
+</div>
+</div>
+<div style="margin-top:14px;padding:14px 16px;border:1px dashed rgba(34,29,26,0.2);border-radius:8px;font-size:13px;line-height:1.65;color:#5c5450">Building from source instead? That's the contributor path — Rust nightly and LLVM 21, with the <code>std/</code> rebuild steps spelled out in the <a href="https://github.com/rayzor-blade/ash#building" target="_blank" rel="noopener">README</a>.</div>
+</div>
+
+</div>
+</section>
+
+<section id="benchmarks" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Benchmarks</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Faster than HashLink's JIT</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured against HashLink's own JIT — same bytecode, same machine, every run checksum-verified. Numbers land fresh from CI with each push to <code>main</code>.</p>
+
+<div style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
+<div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;flex-wrap:wrap;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#5c5450">
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#c7bdb2;display:inline-block"></span>HashLink JIT</span>
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#dcbf9d;display:inline-block"></span>compile</span>
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>execute</span>
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C</span>
+</div>
+<div id="bench-scale-note" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is better · 1.00× = HashLink JIT total</div>
+</div>
+<div id="bench-rows">
+<div class="bench-row" id="bench-loading" style="border-bottom:none">
+<div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">Loading benchmark results…</div>
+<noscript><div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">The benchmark table needs JavaScript; the raw numbers live in <a href="bench/results.json">bench/results.json</a>.</div></noscript>
+</div>
+</div>
+<div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">HashLink/C is compiled ahead of time, so it pays no compile cost inside the run. Ash's compile segment is broker-side tier installation — Cranelift and LLVM compile on background threads while the program runs, so the segments overlap rather than add. Every row is verified against the benchmark's accepted checksums before it is published.</div>
+</div>
+
+<p id="bench-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
+
+</section>
+
+<section id="platforms" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Platforms</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Supported platforms</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash compiles natively for aarch64 and x86_64. One binary per platform, with the full interpreter → Cranelift → LLVM ladder on each.</p>
+
+<div style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.08)"><div style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">macOS · Apple silicon</div><div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">aarch64, the primary development target</div></div>
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.08)"><div style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">macOS · Intel</div><div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">x86_64</div></div>
+<div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px"><div style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">Linux · x86_64</div><div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">validated continuously in CI</div></div>
+<div style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">Benchmark numbers are published from Linux x86_64 CI.</div>
+</div>
+</section>
+
+<footer style="padding:36px clamp(24px,6vw,64px) 48px;max-width:1180px;margin:0 auto;display:flex;flex-wrap:wrap;gap:16px;align-items:center;justify-content:space-between;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;color:#8a807a">
+<img src="ash-mark-tight.png" alt="Ash" style="height:26px;width:auto;display:block">
+<span>ash · ISC License · © 2025 Damilare Akinlaja</span>
+</div>
+<div style="display:flex;gap:20px;font-family:'IBM Plex Mono',monospace;font-size:13px">
+<a href="https://github.com/rayzor-blade/ash" target="_blank" rel="noopener" style="color:#5c5450">GitHub</a>
+<a href="https://hashlink.haxe.org/" target="_blank" rel="noopener" style="color:#5c5450">HashLink</a>
+<a href="https://haxe.org/" target="_blank" rel="noopener" style="color:#5c5450">Haxe</a>
+</div>
+</footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---- copy buttons -------------------------------------------------------
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var text = btn.getAttribute('data-copy') || '';
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).catch(function () {});
+        }
+      } catch (e) { /* clipboard unavailable; the label still confirms intent */ }
+      var prev = btn.textContent;
+      btn.textContent = 'Copied';
+      clearTimeout(btn._t);
+      btn._t = setTimeout(function () { btn.textContent = prev; }, 1500);
+    });
+  });
+
+  // ---- benchmark section --------------------------------------------------
+  // Renders bench/results.json, published by the benchmarks workflow. The
+  // HashLink JIT row is the 1.00 baseline when present; without it the bars
+  // fall back to absolute milliseconds so a degraded publish still reads.
+  var el = function (tag, cls, style) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (style) e.setAttribute('style', style);
+    return e;
+  };
+
+  function fmtRatio(x) { return x.toFixed(2) + '\u00d7'; }
+  function fmtMs(x) {
+    return x >= 10000 ? (x / 1000).toFixed(1) + 's' : Math.round(x) + 'ms';
+  }
+
+  function renderRows(data) {
+    var mount = document.getElementById('bench-rows');
+    mount.textContent = '';
+    var anyBaseline = false;
+
+    data.benchmarks.forEach(function (b, idx) {
+      var hl = b.rows.find(function (r) { return r.engine === 'hashlink-jit' && r.status === 'OK' && typeof r.median_ms === 'number' && r.median_ms > 0; });
+      var rows = b.rows.filter(function (r) { return r.status === 'OK' && typeof r.median_ms === 'number' && r.median_ms > 0; });
+      if (!rows.length) return;
+      if (hl) anyBaseline = true;
+
+      var baseline = hl ? hl.median_ms : null;
+      var maxVal = Math.max.apply(null, rows.map(function (r) { return r.median_ms; }));
+      // The longest bar fills 90% of the track, like the mock's 1.00 row.
+      var unit = 90 / maxVal;
+
+      var row = el('div', 'bench-row');
+      if (idx === data.benchmarks.length - 1) row.style.borderBottom = 'none';
+      var name = el('div', 'bench-name');
+      name.textContent = b.title || b.name;
+      row.appendChild(name);
+      var bars = el('div', 'bench-bars');
+
+      rows.forEach(function (r) {
+        var line = el('div', 'bench-line');
+        var label = el('div', 'bench-label');
+        label.textContent = r.label + (r.engine === 'ash' && r.mode && r.mode !== 'hybrid-auto' ? ' (' + r.mode + ')' : '');
+        line.appendChild(label);
+
+        var track = el('div', 'bench-track');
+        var total = r.median_ms * unit;
+        if (r.engine === 'ash') {
+          var compile = Math.min(r.compile_ms || 0, r.median_ms * 0.9) * unit;
+          if (compile > 0.4) {
+            var segC = el('div', 'seg-compile');
+            segC.style.width = compile + '%';
+            track.appendChild(segC);
+          } else {
+            compile = 0;
+          }
+          var segE = el('div', 'seg-exec');
+          segE.style.width = Math.max(total - compile, 0.6) + '%';
+          track.appendChild(segE);
+        } else {
+          var seg = el('div', r.engine === 'hashlink-c' ? 'seg-hlc' : 'seg-hl');
+          seg.style.width = Math.max(total, 0.6) + '%';
+          track.appendChild(seg);
+        }
+        line.appendChild(track);
+
+        var num = el('div', 'bench-num');
+        num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : '#8a807a';
+        num.textContent = baseline ? fmtRatio(r.median_ms / baseline) : fmtMs(r.median_ms);
+        num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
+        (r.engine === 'ash' && r.compile_ms ? ' · ' + fmtMs(r.compile_ms) + ' tier compile (background)' : '') +
+        (r.aot_build_ms ? ' · AOT build excluded' : '');
+        line.appendChild(num);
+        bars.appendChild(line);
+      });
+
+      row.appendChild(bars);
+      mount.appendChild(row);
+    });
+
+    if (!mount.children.length) {
+      var empty = el('div', 'bench-row');
+      empty.style.borderBottom = 'none';
+      var note = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0");
+      note.textContent = 'The latest run produced no publishable rows; previous numbers remain in the run artifacts.';
+      empty.appendChild(note);
+      mount.appendChild(empty);
+    }
+
+    document.getElementById('bench-scale-note').textContent = anyBaseline
+      ? 'lower is better · 1.00\u00d7 = HashLink JIT total'
+      : 'lower is better · median wall time';
+
+    var prov = document.getElementById('bench-provenance');
+    var sys = data.system || {};
+    var bits = [];
+    if (sys.cpu_model) bits.push(sys.cpu_model);
+    if (sys.os && sys.arch) bits.push(sys.os + '/' + sys.arch);
+    if (data.hl_version) bits.push('HashLink ' + data.hl_version);
+    if (data.commit) bits.push('ash@' + data.commit);
+    if (data.generated_iso) bits.push(data.generated_iso.slice(0, 10));
+    bits.push(data.source === 'ci' ? 'GitHub Actions' : 'local run');
+    prov.textContent = bits.join(' · ');
+  }
+
+  fetch('bench/results.json', { cache: 'no-cache' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      if (!data || !Array.isArray(data.benchmarks) || !data.benchmarks.length) {
+        throw new Error('empty results');
+      }
+      renderRows(data);
+    })
+    .catch(function (err) {
+      var mount = document.getElementById('bench-rows');
+      mount.textContent = '';
+      var row = el('div', 'bench-row');
+      row.style.borderBottom = 'none';
+      var msg = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0");
+      msg.textContent = 'No published benchmark run is available yet — numbers land with the first CI publish. (' + err.message + ')';
+      row.appendChild(msg);
+      mount.appendChild(row);
+    });
+})();
+</script>
+</body>
+</html>

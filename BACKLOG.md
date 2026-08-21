@@ -3,14 +3,25 @@
 Known gaps, deferred refinements, and open defects. Code docs describe what the
 code guarantees today; anything that should change lives here.
 
-**Last updated**: 2026-08-17
+**Last updated**: 2026-08-21
 
-**Status**: Heaps Base2D renders through the real init path, and hybrid mode
-(`ash_cli --mode hybrid examples/heaps_base2d/bin/game.hl`) sustains 19
-promoted functions with no crashes, backed by a beadie broker, a shared
-symbol table, thread-safe GC, and a 0.05s tiered pre-warm. The
-full-JIT-everything path (`ash <file>.hl`) still has one open crash; see
-[JIT & tiering](#jit--tiering).
+**Status**: Heaps Base2D renders through the real init path under
+`--mode interp`, reaching `Main.init()` in ~1.5s.
+
+`--mode hybrid` on the same program **crashes about four runs in five**
+(SIGSEGV, `fault_addr=0x0`, after roughly four Cranelift installs). This
+entry previously read "sustains 19 promoted functions with no crashes";
+that was measured on a single successful run, and 5-run samples of both a
+2026-08-17-era binary and today's put it at 1/5. It is intermittent, which
+points at a race between the broker thread and the mutator rather than at
+any one lowering. Not a regression — both binaries fail at the same rate.
+
+`--mode jit` does not reach `Main.init()` within 90s on this program; the
+whole-module LLVM compile of a 1.4MB module is the suspect, and it has not
+been separated from the crash above.
+
+The tiered pre-warm is not the startup cost it was assumed to be: measured
+at 0.04s here, so "hybrid is slow to start" is the crash, not the warm-up.
 
 ---
 

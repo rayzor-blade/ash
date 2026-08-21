@@ -125,6 +125,41 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+
+      # llvm-sys needs an LLVM 21 with llvm-config and the static libraries.
+      # The runner image's LLVM is the official installer, which ships
+      # neither — it is a clang toolchain, not an LLVM SDK. llvm.org's
+      # clang+llvm-*-x86_64-pc-windows-msvc.tar.xz bundle carries both, plus
+      # the libclang.dll bindgen wants, so one download serves the whole
+      # build. ~2GB unpacked, hence the cache.
+      - name: Cache LLVM 21
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm21
+          key: llvm-21.1.2-x86_64-pc-windows-msvc
+
+      - name: Install LLVM 21
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          curl -sSfL -o /tmp/llvm.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.2/clang+llvm-21.1.2-x86_64-pc-windows-msvc.tar.xz
+          mkdir -p /c/llvm21
+          tar -xf /tmp/llvm.tar.xz -C /c/llvm21 --strip-components=1
+          /c/llvm21/bin/llvm-config.exe --version
+
+      - name: Export LLVM environment
+        shell: bash
+        run: |
+          echo 'LLVM_SYS_211_PREFIX=C:\llvm21' >> "$GITHUB_ENV"
+          echo 'LIBCLANG_PATH=C:\llvm21\bin' >> "$GITHUB_ENV"
+          echo 'C:\llvm21\bin' >> "$GITHUB_PATH"
+
       - name: Build (expected to fail until the port lands)
         shell: bash
         run: |

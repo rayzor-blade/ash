@@ -25,6 +25,34 @@ at 0.04s here, so "hybrid is slow to start" is the crash, not the warm-up.
 
 ---
 
+## DeltaBlue crashes interp and hybrid — two defects, one of them GC-shaped
+
+Added 2026-08-21 from rayzor's suite; `--mode jit` is correct (checksum
+14065400, agreeing with stock HashLink 1.15 on x86_64), and the bench is
+registered full-jit-only until this closes.
+
+On the release binary, interp crashes 5/5: four of five at a PAGE-ALIGNED
+heap address (0x14ae04000, 0x13fe04000, ... ~350-420ms in), one of five at
+the small-int fault (0x6, ~27s in) that is the OSafeCast/__cast defect.
+Under a build carrying the pending SafeCast fix the small-int mode
+disappears and the page fault remains, arriving earlier — so DeltaBlue is
+two stacked defects, and the SafeCast fix peels off only the first.
+
+hybrid does not SIGSEGV at all: it dies on an uncaught "Null access",
+consistent with compiled code loading from a page the GC reclaimed and
+faulting the *pointer it read* rather than the page itself.
+
+A page-aligned fault address in a workload of small object graphs points at
+page handback — the macOS MADV_FREE_REUSABLE path and the
+reclaim_block_pages bookkeeping — or block reclamation freeing a block that
+conservative marking should have kept. Note binary_trees independently
+showed ASH_GC_STRESS running out of memory the same day: the allocator's
+story under object-graph pressure has two open holes, and this one
+reproduces in 0.4s, headless, ~100% of the time — a far better instrument
+than the 1-in-5 Heaps repro.
+
+---
+
 ## ASH_GC_STRESS runs out of memory on binary trees
 
 Found the day the benchmark was added, by the benchmark. `bench_binary_trees`

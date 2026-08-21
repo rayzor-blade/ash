@@ -189,6 +189,7 @@ jobs:
         bench:
           - fib
           - binary_trees
+          - deltablue
           - mandelbrot
           - nbody
           - inlined_call

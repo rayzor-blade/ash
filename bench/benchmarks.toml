@@ -231,6 +231,27 @@ group = "call"
 description = "Indirect call through a closure: target in a register, no vtable slot."
 
 [[bench]]
+name = "deltablue"
+main = "BenchDeltaBlue"
+hl = "bench_deltablue.hl"
+expectation = "checksum"
+checksums = [{ value = "14065400", label = "reference" }]
+timeout_secs = 300
+group = "oop"
+# full-jit only, for now, and deliberately: the bench found real defects in
+# the other modes the day it was added. interp crashes 5/5 (usually a
+# page-aligned heap fault ~0.4s in, occasionally the OSafeCast small-int
+# fault), hybrid dies on an uncaught Null access. --mode jit is correct and
+# agrees with stock HashLink 1.15 on x86_64. Widen modes when BACKLOG's
+# "DeltaBlue" entry closes.
+modes = ["full-jit"]
+modes_reason = "interp and hybrid crash on this workload; see BACKLOG"
+description = """DeltaBlue constraint solver, verbatim from rayzor's suite \
+(40 x chainTest(100) + projectionTest(100)) so the row is directly comparable \
+with rayzor's published numbers. Real polymorphic dispatch over a constraint \
+hierarchy — the OOP row of the set."""
+
+[[bench]]
 name = "binary_trees"
 main = "BenchBinaryTrees"
 hl = "bench_binary_trees.hl"

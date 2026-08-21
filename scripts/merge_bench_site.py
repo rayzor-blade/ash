@@ -36,6 +36,7 @@ from pathlib import Path
 KNOWN = [
     ("fib", "fib(40)"),
     ("binary_trees", "binary trees"),
+    ("deltablue", "deltablue"),
     ("mandelbrot", "mandelbrot"),
     ("nbody", "n-body"),
     ("inlined_call", "inlined function"),

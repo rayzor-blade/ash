@@ -219,10 +219,12 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     // thread, conservative stack scan covering the compiled frames, and
     // the registered interpreter ranges are complete as of their last
     // sync (a superset is over-retention, never under-rooting).
+    set_collect_origin(2);
     gc.maybe_collect_at_safepoint();
     let block = match gc.acquire_free_block() {
         Some(b) => b,
         None => {
+            set_collect_origin(4);
             gc.collect_garbage();
             gc.acquire_free_block()?
         }
@@ -249,9 +251,54 @@ fn trace_alloc() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var("ASH_GC_TRACE_ALLOC").is_ok())
 }
+fn trace_map() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_TRACE_MAP").is_ok())
+}
+
+/// Diagnostic: ASH_GC_NO_RECLAIM=1 makes sweep retain every block (marks
+/// still reset; nothing returns to the free list). Splits "collector
+/// reclaims a live block" from every non-reclamation corruption source.
+fn no_reclaim() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| matches!(std::env::var("ASH_GC_NO_RECLAIM").as_deref(), Ok("1")))
+}
+
 fn trace_freed() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var("ASH_GC_TRACE_FREED").is_ok())
+}
+/// ASH_GC_POISON=1: fill every swept (freed) block with 0xA5 bytes. A
+/// mutator that reads a prematurely-freed object then sees an unmistakable
+/// pattern (0xA5A5... pointers / lengths) instead of plausible reused data,
+/// which converts "mysterious corruption later" into "poison read here".
+fn poison_freed() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_POISON").is_ok())
+}
+/// ASH_GC_QUARANTINE=1: freed blocks are never returned to the free list
+/// (and are poisoned), so no reuse can ever paper over a premature free —
+/// every read of a freed object hits poison. Diagnosis only: the heap only
+/// grows, so pair it with a large ASH_GC_HEAP_MB.
+fn quarantine_freed() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_QUARANTINE").is_ok())
+}
+/// Why the current collection was started — set by every collect_garbage
+/// caller immediately before the call, printed by the per-collection trace
+/// lines. Single mutator + GC lock make a plain static sound here.
+static COLLECT_ORIGIN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const ORIGIN_NAMES: [&str; 7] = [
+    "?",
+    "snapshot-done",   // scan_roots_done honoring a deferred trigger
+    "tlab-safepoint",  // tlab_refill_then_alloc's maybe_collect_at_safepoint
+    "hard-pressure",   // maybe_collect past the 4x deferral bound
+    "exhaustion",      // allocate's no-free-block backstop
+    "large-exhaustion",// allocate_large fallback
+    "explicit",        // Gc.major / hlp_gc_major
+];
+fn set_collect_origin(o: u8) {
+    COLLECT_ORIGIN.store(o, Ordering::Relaxed);
 }
 
 fn env_usize(name: &str) -> Option<usize> {
@@ -836,6 +883,11 @@ impl ImmixAllocator {
             collect_pending: false,
         };
 
+        if std::env::var("ASH_GC_TRACE_MAP").is_ok() {
+            let base = heap.memory.base as usize;
+            eprintln!("[gc-map] heap reservation {:#x}..{:#x} ({} MB)", base, base + heap_size, heap_size >> 20);
+        }
+
         // Reverse order so pop() hands out low addresses first — touched
         // pages stay contiguous at the heap base.
         for i in (0..heap_size).step_by(BLOCK_SIZE).rev() {
@@ -911,6 +963,7 @@ impl ImmixAllocator {
     }
 
     fn maybe_collect(&mut self) {
+        set_collect_origin(3);
         // No automatic collections before the host runtime has entered user
         // code (hlp_gc_set_stack_top): during bootstrap (constants/class
         // descriptor init) both engines hold GC pointers in host-side Rust
@@ -962,6 +1015,10 @@ impl ImmixAllocator {
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
         self.blocks[addr / BLOCK_SIZE].mark_bits = [false; LINES_PER_BLOCK];
+        if trace_freed() {
+            let base = self.heap.memory.as_ptr() as usize;
+            eprintln!("[gc-reuse] {:#x}..{:#x}", base + addr, base + addr + BLOCK_SIZE);
+        }
         Some(addr)
     }
 
@@ -970,6 +1027,10 @@ impl ImmixAllocator {
     /// under memory pressure AFTER we've written live data into them.
     fn reclaim_block_pages(&mut self, addr: usize) {
         if self.heap.reusable_blocks.remove(&addr) {
+            if trace_map() {
+                let base = self.heap.memory.as_ptr() as usize;
+                eprintln!("[gc-map] REUSE {:#x}..{:#x}", base + addr, base + addr + BLOCK_SIZE);
+            }
             #[cfg(target_os = "macos")]
             unsafe {
                 libc::madvise(
@@ -1036,6 +1097,7 @@ impl ImmixAllocator {
                 Some(b) => b,
                 None => {
                     // Exhaustion backstop trigger.
+                    set_collect_origin(4);
                     self.collect_garbage();
                     self.acquire_free_block()? // None = out of memory
                 }
@@ -1146,6 +1208,7 @@ impl ImmixAllocator {
         }
 
         // No contiguous run found — trigger GC and retry
+        set_collect_origin(5);
         self.collect_garbage();
         if self.heap.free_blocks.len() >= blocks_needed {
             return self.allocate_large(size);
@@ -1386,6 +1449,18 @@ impl ImmixAllocator {
 
     pub fn collect_garbage(&mut self) {
         let t0 = Instant::now();
+        if trace_freed() || std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
+            let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
+            let origin =
+                ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
+            let base = self.heap.memory.as_ptr() as usize;
+            eprintln!(
+                "[gc-collect] #{seq} origin={origin} heap={base:#x}..{:#x} ranges={} pending={}",
+                base + self.heap.memory.len,
+                self.roots.borrow().scan_ranges.len(),
+                self.heap.collect_pending,
+            );
+        }
         self.mark_roots();
         let freed_blocks = self.sweep();
         let pause = t0.elapsed();
@@ -1774,6 +1849,22 @@ impl ImmixAllocator {
     pub fn sweep(&mut self) -> usize {
         let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
         let mut freed: Vec<usize> = Vec::new();
+        // The retained-heap half of the use-after-free audit needs this
+        // cycle's marks AFTER the loop below has reset them: only words in
+        // lines that were marked LIVE are meaningful referrers — dead lines
+        // are full of stale pointers by definition and would drown the
+        // signal.
+        let audit_marks: Option<std::collections::HashMap<usize, [bool; LINES_PER_BLOCK]>> =
+            if std::env::var("ASH_GC_SWEEP_AUDIT").is_ok() {
+                Some(
+                    used_block_addrs
+                        .iter()
+                        .map(|&a| (a, self.blocks[a / BLOCK_SIZE].mark_bits))
+                        .collect(),
+                )
+            } else {
+                None
+            };
         for block_addr in used_block_addrs {
             // The mutator's live bump region: marks still reset below for
             // the next cycle, but the block is never reclaimed under the
@@ -1789,12 +1880,13 @@ impl ImmixAllocator {
                 block.mark_bits[line_index] = false; // Reset for next GC cycle
             }
 
-            if is_empty && !is_tlab {
+            if is_empty && !is_tlab && !no_reclaim() {
                 self.heap.used_blocks.remove(&block_addr);
                 if trace_freed() {
                     let base = self.heap.memory.as_ptr() as usize;
+                    let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
                     eprintln!(
-                        "[gc-freed] {:#x}..{:#x}",
+                        "[gc-freed] #{seq} {:#x}..{:#x}",
                         base + block_addr,
                         base + block_addr + BLOCK_SIZE
                     );
@@ -1816,6 +1908,21 @@ impl ImmixAllocator {
                                     "[gc-audit] FREED {lo:#x}..{hi:#x} but {src} @{p:#x} holds {w:#x}"
                                 );
                             }
+                            // Interpreter scan ranges hold NaN-BOXED words;
+                            // the marker decodes them (conservative_scan_range),
+                            // so the auditor must too or it is blind to every
+                            // register-held root.
+                            const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
+                            const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
+                            const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+                            if w & NAN_MASK == NAN_TAG {
+                                let d = w & PAYLOAD_MASK;
+                                if (lo..hi).contains(&d) {
+                                    eprintln!(
+                                        "[gc-audit] FREED {lo:#x}..{hi:#x} but {src} @{p:#x} holds boxed {d:#x}"
+                                    );
+                                }
+                            }
                             p += 8;
                         }
                     };
@@ -1833,7 +1940,18 @@ impl ImmixAllocator {
                         audit("stack", sp, self.stack_top);
                     }
                 }
-                self.heap.free_blocks.push(block_addr);
+                if poison_freed() || quarantine_freed() {
+                    unsafe {
+                        std::ptr::write_bytes(
+                            self.heap.memory.as_mut_ptr().add(block_addr),
+                            0xA5,
+                            BLOCK_SIZE,
+                        );
+                    }
+                }
+                if !quarantine_freed() {
+                    self.heap.free_blocks.push(block_addr);
+                }
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;
                 for l in base_line..base_line + LINES_PER_BLOCK {
@@ -1841,6 +1959,48 @@ impl ImmixAllocator {
                 }
                 self.blocks[block_index].has_span = false;
                 freed.push(block_addr);
+            }
+        }
+
+        // Second half of the use-after-free detector: pointers INTO a freed
+        // block from lines of the RETAINED heap that were marked LIVE this
+        // cycle. The per-block audit above covers roots (globals /
+        // interpreter ranges / machine stack); a live object whose only
+        // referrer is a heap field shows up here instead. Dead lines are
+        // skipped — stale pointers in garbage are expected, not evidence.
+        // One O(retained heap) pass per collection, diagnosis-only.
+        if !freed.is_empty() {
+            if let Some(marks) = &audit_marks {
+                let base = self.heap.memory.as_ptr() as usize;
+                let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
+                let in_freed = |w: usize| -> bool {
+                    if w < base || w >= base + self.heap.memory.len {
+                        return false;
+                    }
+                    let off = (w - base) & !(BLOCK_SIZE - 1);
+                    freed.contains(&off)
+                };
+                for &block_addr in self.heap.used_blocks.iter() {
+                    let Some(mark_bits) = marks.get(&block_addr) else {
+                        continue;
+                    };
+                    for (line_index, &live) in mark_bits.iter().enumerate() {
+                        if !live {
+                            continue;
+                        }
+                        let lo = base + block_addr + line_index * LINE_SIZE;
+                        let mut p = lo;
+                        while p + 8 <= lo + LINE_SIZE {
+                            let w = unsafe { *(p as *const usize) };
+                            if in_freed(w) {
+                                eprintln!(
+                                    "[gc-audit] #{seq} live line word @{p:#x} points into freed block ({w:#x})"
+                                );
+                            }
+                            p += 8;
+                        }
+                    }
+                }
             }
         }
 
@@ -1912,6 +2072,16 @@ impl ImmixAllocator {
                 for &addr in &hand_back {
                     self.heap.reusable_blocks.insert(addr);
                 }
+                if trace_map() {
+                    let base = self.heap.memory.as_ptr() as usize;
+                    for &addr in &hand_back {
+                        eprintln!(
+                            "[gc-map] HANDBACK {:#x}..{:#x}",
+                            base + addr,
+                            base + addr + BLOCK_SIZE
+                        );
+                    }
+                }
             }
         }
 
@@ -1964,6 +2134,7 @@ impl ImmixAllocator {
     /// The snapshot is complete: a deferred collection is honored now.
     pub fn scan_roots_done(&mut self) {
         if self.heap.collect_pending {
+            set_collect_origin(1);
             self.collect_garbage();
         }
     }

@@ -110,8 +110,11 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
         if !obj.is_null() && (obj as usize) >= 0x10000 {
             let name = utf16z((*obj).name);
             // A String object's payload is worth printing whole; for any
-            // other class the name alone locates the throw site.
-            if name == "String" || name == "S" {
+            // other class the name alone locates the throw site. Exactly
+            // "String": the interpreter's old first-character truncation made
+            // an `"S"` alternative look necessary once, and matching it here
+            // would read an arbitrary S-named class's fields as bytes/length.
+            if name == "String" {
                 let bytes = *((v as *const u8).add(8) as *const *const hl::uchar);
                 return format!("String \"{}\"", utf16z(bytes));
             }

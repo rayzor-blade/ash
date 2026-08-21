@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::ffi::CStr;
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -2200,8 +2199,23 @@ impl HLInterpreter {
         if name_ptr.is_null() {
             return None;
         }
-        let s = unsafe { CStr::from_ptr(name_ptr as *const i8) };
-        Some(s.to_string_lossy().into_owned())
+        // hlp_type_name returns the type's UTF-16 uchar* name (obj.name /
+        // tenum.name / abs_name — HashLink convention). Reading it as a
+        // UTF-8 C string truncated every name to its first character (the
+        // second byte of UTF-16LE 'S' is NUL), so "Strength",
+        // "ScaleConstraint" and "StayConstraint" all reported "S" — which
+        // the equality paths treat as String and then content-compare
+        // arbitrary objects as if they had bytes/length fields. Decode the
+        // full UTF-16 name instead.
+        let name_u16 = name_ptr as *const u16;
+        let mut n = 0usize;
+        // 4096 chars is far beyond any real type name; bail rather than walk
+        // an unterminated buffer.
+        while n < 4096 && unsafe { *name_u16.add(n) } != 0 {
+            n += 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(name_u16, n) };
+        Some(String::from_utf16_lossy(slice))
     }
 
     /// Turn a stub-bridge failure into a real HL exception on the native trap
@@ -7638,6 +7652,12 @@ impl HLInterpreter {
                     vb.as_ptr() as *mut hl::vdynamic
                 };
                 if !pa.is_null() && !pb.is_null() {
+                    // Same object ⇒ equal, whatever the type — including
+                    // String, where identity implies content equality. Also
+                    // skips two name decodes on the hot object-compare path.
+                    if pa == pb {
+                        return op == CmpOp::Eq;
+                    }
                     let ta_name = self.dynamic_type_name(pa);
                     let tb_name = self.dynamic_type_name(pb);
                     if env_flag!("ASH_TRACE_EQ") {
@@ -7652,7 +7672,7 @@ impl HLInterpreter {
                         );
                     }
                     if ta_name == tb_name
-                        && matches!(ta_name.as_deref(), Some("String") | Some("S"))
+                        && matches!(ta_name.as_deref(), Some("String"))
                     {
                         let sa = unsafe {
                             self.try_extract_string_object_raw(va.as_ptr() as *mut c_void)
@@ -7966,7 +7986,7 @@ impl HLInterpreter {
         }
         if kind == hl::hl_type_kind_HOBJ {
             let name = self.dynamic_type_name(v.as_ptr() as *mut hl::vdynamic);
-            if !matches!(name.as_deref(), Some("String") | Some("S")) {
+            if !matches!(name.as_deref(), Some("String")) {
                 return None;
             }
             return self.try_extract_string_object_raw(v.as_ptr() as *mut c_void);
@@ -8103,7 +8123,7 @@ impl HLInterpreter {
                         let ta_name = self.dynamic_type_name(a);
                         let tb_name = self.dynamic_type_name(b);
                         if ta_name == tb_name
-                            && matches!(ta_name.as_deref(), Some("String") | Some("S"))
+                            && matches!(ta_name.as_deref(), Some("String"))
                         {
                             if let (Some(sa), Some(sb)) =
                                 (self.value_to_string(a), self.value_to_string(b))

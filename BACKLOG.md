@@ -32,37 +32,50 @@ at 0.04s here, so "hybrid is slow to start" is the crash, not the warm-up.
 
 ---
 
-## DeltaBlue crashes interp and hybrid — two defects, one of them GC-shaped
+## DeltaBlue: hybrid dies on an uncaught Null access (compiled tiers)
 
-Added 2026-08-21 from rayzor's suite; `--mode jit` is correct (checksum
-14065400, agreeing with stock HashLink 1.15 on x86_64), and the bench is
-registered full-jit-only until this closes.
+Narrowed 2026-08-21. This entry began as "two defects, one of them
+GC-shaped"; the investigation proved the two interp SIGSEGV modes were ONE
+defect, and not the GC's. The interp half is fixed; only the hybrid failure
+remains open.
 
-On the release binary, interp crashes 5/5: four of five at a PAGE-ALIGNED
-heap address (0x14ae04000, 0x13fe04000, ... ~350-420ms in), one of five at
-the small-int fault (0x6, ~27s in) that is the OSafeCast/__cast defect.
-The SafeCast fix has landed and peeled off the small-int mode; the
-page-aligned fault is what remains, and it is the GC investigation's
-quarry.
+CLOSED — interp SIGSEGV, page-aligned and 0x6 modes alike. The
+interpreter's `dynamic_type_name` decoded the UTF-16 uchar* name returned
+by `hlp_type_name` with `CStr::from_ptr`, truncating every type name to its
+first ASCII character ("String", "Strength", "StayConstraint" all read
+"S"), and the string-equality fast paths gated on `Some("String") |
+Some("S")` — the "S" arm existed precisely because real Strings truncated
+the same way. Every `==` between S-named non-String objects therefore
+content-compared them as String {bytes, length}: field 0 read as the bytes
+pointer (Strength.WEAKEST.value = 6 → the 0x6 fault), field 1 as the
+length (low 32 bits of a heap pointer → `utf16_len_eq` walked the mapped
+reservation and faulted at exactly heap_base + 512MB — the fault addresses
+were page-aligned because they were heap_end, not because a page had been
+reclaimed). Fix: decode the name as UTF-16, drop the "S" arms at the three
+gates, and short-circuit identical pointers in the HOBJ Eq/NotEq path.
+Verified on this tree: 20/20 interp runs at Checksum: 14065400, plus
+ASH_GC_STRESS=10/2000 runs with freed-block poisoning and the sweep audit —
+13k+ collections, 3000 blocks freed, 0 audit hits, checksum bit-correct.
 
-hybrid does not SIGSEGV at all: it dies on an uncaught "Null access",
-consistent with compiled code loading from a page the GC reclaimed and
-faulting the *pointer it read* rather than the page itself.
+The GC was exonerated three independent ways: the crash reproduced with
+zero collections ever having run; the heap is a single PROT_READ|WRITE
+mapping, so no in-heap address can fault regardless of MADV_FREE_REUSABLE
+state (page handback is additionally gated on the 30s quiet HEARTBEAT the
+sub-second crash never reached); and ASH_GC_NO_RECLAIM / quarantine /
+poison runs left the crash identical. The hunt's env-gated diagnosis knobs
+are kept in std/src/gc.rs: ASH_GC_TRACE_MAP (reservation/HANDBACK/REUSE
+tracing), ASH_GC_NO_RECLAIM, ASH_GC_POISON, ASH_GC_QUARANTINE,
+[gc-collect] origin+seq tracing, [gc-reuse], and a NaN-box-aware sweep
+audit with a second pass over live retained lines.
 
-The crash-handler frame walk (landed the same day) names the fault site
-directly: `utf16_len_eq <- compare_regs_in <- execute_opcode` — the
-interpreter comparing a String whose UTF-16 payload page is gone. So the
-reclaimed object is one held live by an interp register at the moment of a
-string comparison, which is precisely the scan-root-liveness shape.
-
-A page-aligned fault address in a workload of small object graphs points at
-page handback — the macOS MADV_FREE_REUSABLE path and the
-reclaim_block_pages bookkeeping — or block reclamation freeing a block that
-conservative marking should have kept. Note binary_trees independently
-showed ASH_GC_STRESS running out of memory the same day: the allocator's
-story under object-graph pressure has two open holes, and this one
-reproduces in 0.4s, headless, ~100% of the time — a far better instrument
-than the 1-in-5 Heaps repro.
+OPEN — hybrid dies deterministically (10/10) on an uncaught "HL exception:
+Null access" even with the interp fix in place. Bisect on the same build:
+`--jit-tier off` → Checksum: 14065400 (correct); `--jit-tier cranelift` →
+Null access; `--jit-tier llvm` → Null access. Not the interpreter, and not
+one backend's codegen — the shared promotion/compiled path is implicated.
+parity_matrix's hybrid modes pass, so the defect needs DeltaBlue-shaped
+polymorphic-dispatch density to show. Belongs to the tiering workstream;
+the bench stays full-jit-only until this closes.
 
 ---
 

@@ -33,7 +33,7 @@
 //! is designed, [`reject_reason`] declines any function containing `Trap`,
 //! `EndTrap`, `Throw` or `Rethrow`, exactly as the opcode gate does.
 //!
-//! The object model beyond fields and arrays — `New`, closures, enums, the
+//! The object model beyond fields and arrays — `New`, closures, the
 //! dynamic accessors — needs runtime `hl_type*` pointers and allocation
 //! helpers that [`CraneliftTierContext`] does not carry. Declined for now, and
 //! named individually by [`reject_reason`] so the report says which.
@@ -54,7 +54,7 @@ use air::v2::ir::{
     Terminator, TypeRef as AirTypeRef, UnOp, ValueId,
 };
 
-use super::backend::{AshCraneliftBackend, CraneliftTierContext};
+use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
 use super::{abi_class, entry_return_class, AbiClass};
 use crate::hl_bindings as hl;
@@ -82,8 +82,10 @@ pub fn reject_reason(f: &AirFunction) -> Option<String> {
             | Terminator::Jump { .. }
             | Terminator::CondJump { .. }
             | Terminator::Switch { .. } => None,
-            Terminator::Throw { .. } => Some("Throw"),
-            Terminator::Rethrow { .. } => Some("Rethrow"),
+            // Throw and Rethrow lower to a helper that longjmps; only the
+            // trap REGION (`Trap`/`EndTrap`) still needs machinery this tier
+            // does not have.
+            Terminator::Throw { .. } | Terminator::Rethrow { .. } => None,
             Terminator::Trap { .. } => Some("Trap"),
         };
         if let Some(why) = why {
@@ -129,38 +131,78 @@ fn instr_reject(i: &Instr) -> Option<&'static str> {
         | Instr::CellSet { .. }
         | Instr::CellIncr { .. }
         | Instr::CellDecr { .. }
-        | Instr::CellRef { .. } => None,
+        | Instr::CellRef { .. }
+        // Lowered here since the closure family landed; see
+        // `emit_static_closure` / `emit_call_closure`.
+        | Instr::StaticClosure { .. }
+        | Instr::InstanceClosure { .. }
+        | Instr::CallClosure { .. }
+        // The name is a bytecode string constant, so its hash is a compile-
+        // time constant and the accessor is picked by the value's declared
+        // kind; see `emit_dyn_get` / `emit_dyn_set`.
+        | Instr::DynGet { .. }
+        | Instr::DynSet { .. }
+        // The enum family. A venum's payload layout is the loader's, and AIR
+        // carries the construct on every instruction that needs one, so all
+        // five are `hlp_alloc_enum` plus stores and loads at known offsets;
+        // see `emit_enum_alloc` / `enum_param`.
+        | Instr::MakeEnum { .. }
+        | Instr::EnumAlloc { .. }
+        | Instr::EnumIndex { .. }
+        | Instr::EnumField { .. }
+        | Instr::SetEnumField { .. }
+        // Constant-pool loads and header reads: no allocation, no runtime
+        // lookup. `GetType` / `GetTID` still decline the source kinds the
+        // two reference tiers read differently — see their arms.
+        | Instr::Bytes { .. }
+        | Instr::GetType { .. }
+        | Instr::GetTID { .. }
+        | Instr::RefOffset { .. }
+        | Instr::Assert
+        | Instr::Prefetch { .. } => None,
 
         Instr::Cast { kind, .. } => match kind {
             CastKind::ToSFloat | CastKind::ToUFloat | CastKind::ToInt | CastKind::UnsafeCast => {
                 None
             }
-            CastKind::ToDyn => Some("Cast::ToDyn"),
-            CastKind::SafeCast => Some("Cast::SafeCast"),
-            CastKind::ToVirtual => Some("Cast::ToVirtual"),
+            // Helper-backed now; `emit_cast` still declines the one shape
+            // it will not guess at (SafeCast unboxing into a primitive).
+            CastKind::ToDyn | CastKind::SafeCast | CastKind::ToVirtual => None,
         },
 
-        Instr::Bytes { .. } => Some("Bytes"),
-        Instr::CallClosure { .. } => Some("CallClosure"),
-        Instr::StaticClosure { .. } => Some("StaticClosure"),
-        Instr::InstanceClosure { .. } => Some("InstanceClosure"),
+        // The closure family lowers here; see `emit_static_closure` and
+        // `emit_call_closure`. `VirtualClosure` still needs the runtime
+        // field lookup the object model does, so it stays out.
         Instr::VirtualClosure { .. } => Some("VirtualClosure"),
-        Instr::DynGet { .. } => Some("DynGet"),
-        Instr::DynSet { .. } => Some("DynSet"),
         Instr::EndTrap { .. } => Some("EndTrap"),
-        Instr::GetType { .. } => Some("GetType"),
-        Instr::GetTID { .. } => Some("GetTID"),
+        // Out until ash decides what `RefData` means. The LLVM tier reads a
+        // pointer out of the source at offset 8 (`jit/function.rs`), both
+        // interpreters copy the source through unchanged, and AIR itself
+        // classifies it `Effect::ReadMem` / `AliasClass::Any` — three
+        // answers, two of which have to be wrong. Emitting either one here
+        // would make this tier disagree with a tier it is checked against,
+        // and a silent pointer-shaped disagreement is the worst kind.
         Instr::RefData { .. } => Some("RefData"),
-        Instr::RefOffset { .. } => Some("RefOffset"),
-        Instr::MakeEnum { .. } => Some("MakeEnum"),
-        Instr::EnumAlloc { .. } => Some("EnumAlloc"),
-        Instr::EnumIndex { .. } => Some("EnumIndex"),
-        Instr::EnumField { .. } => Some("EnumField"),
-        Instr::SetEnumField { .. } => Some("SetEnumField"),
-        Instr::Assert => Some("Assert"),
-        Instr::Prefetch { .. } => Some("Prefetch"),
         Instr::Asm { .. } => Some("Asm"),
     }
+}
+
+/// Kinds whose allocations begin with the `hl_type*` the runtime reads back
+/// out of them. Everything else — bytes, closures, arrays, type pointers
+/// themselves — either has no such word or has one the decoded table already
+/// names, which is why `GetType` answers those from the register's declared
+/// type instead of from memory.
+fn header_typed(kind: hl::hl_type_kind) -> bool {
+    matches!(
+        kind,
+        hl::hl_type_kind_HDYN
+            | hl::hl_type_kind_HOBJ
+            | hl::hl_type_kind_HSTRUCT
+            | hl::hl_type_kind_HVIRTUAL
+            | hl::hl_type_kind_HENUM
+            | hl::hl_type_kind_HDYNOBJ
+            | hl::hl_type_kind_HNULL
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -961,6 +1003,15 @@ impl AirCodegen<'_, '_> {
                 let v = self.b.ins().iconst(types::I64, addr as i64);
                 self.def(*dst, v)?;
             }
+            // The same shape as `String`, over the raw byte blob instead of
+            // the UTF-16 one. The interpreter puts `bytes_pos[idx]` — an
+            // offset, not an address — in the register, so the LLVM tier's
+            // constant global is the reference here.
+            Instr::Bytes { dst, idx } => {
+                let addr = self.ctx.bytes_ptr(*idx)?;
+                let v = self.b.ins().iconst(types::I64, addr as i64);
+                self.def(*dst, v)?;
+            }
             Instr::Null { dst } => {
                 let ty = self.value_clif_ty(*dst)?;
                 if ty.is_float() {
@@ -1127,6 +1178,52 @@ impl AirCodegen<'_, '_> {
                 self.def(*dst, v)?;
             }
 
+            // The type a value carries at run time, which only the boxed
+            // kinds carry at all — word 0 of an `hl.Bytes` is its first
+            // eight data bytes, not a type pointer. Kinds without a header
+            // answer with the register's declared type, which is what both
+            // interpreters do; the LLVM tier instead loads word 0 from every
+            // pointer, so the kinds where the two part company decline here
+            // rather than have this tier pick one of them.
+            Instr::GetType { dst, src } => {
+                let src_ty = self.f.value_ty(*src).0 as usize;
+                let kind = self.ctx.type_kind(src_ty)?;
+                if !header_typed(kind) && abi_class(kind) == AbiClass::Ptr {
+                    bail!("GetType on type kind {kind}: reference tiers disagree");
+                }
+                let stat = self.ctx.type_ptr(src_ty)?;
+                let stat = self.b.ins().iconst(types::I64, stat as i64);
+                let v = if header_typed(kind) {
+                    let p = self.get(*src)?;
+                    self.guarded_header_load(p, types::I64, stat)?
+                } else {
+                    stat
+                };
+                self.def(*dst, v)?;
+            }
+
+            // `kind` is `hl_type`'s first field, so this is a single load
+            // from the type pointer the opcode is handed — and it is handed
+            // one: the compiler types `OGetTID`'s operand `HTYPE`. A source
+            // of any other pointer kind is declined rather than guessed,
+            // since the LLVM tier walks that value's header first and the
+            // interpreters read its word 0 straight.
+            Instr::GetTID { dst, src } => {
+                let src_ty = self.f.value_ty(*src).0 as usize;
+                let kind = self.ctx.type_kind(src_ty)?;
+                if kind != hl::hl_type_kind_HTYPE && abi_class(kind) == AbiClass::Ptr {
+                    bail!("GetTID on type kind {kind}: reference tiers disagree");
+                }
+                let stat = self.b.ins().iconst(types::I32, i64::from(kind));
+                let v = if kind == hl::hl_type_kind_HTYPE {
+                    let p = self.get(*src)?;
+                    self.guarded_header_load(p, types::I32, stat)?
+                } else {
+                    stat
+                };
+                self.def(*dst, v)?;
+            }
+
             // `new C()`. Which allocator runs is decided by the destination's
             // type kind, the same three-way split the LLVM tier makes.
             Instr::New { dst } => {
@@ -1149,6 +1246,83 @@ impl AirCodegen<'_, '_> {
 
             Instr::CallMethod { dst, field, args } => {
                 self.emit_call_method(*dst, *field, args)?
+            }
+
+            Instr::StaticClosure { dst, fun } => {
+                self.emit_static_closure(*dst, *fun, None)?
+            }
+            Instr::InstanceClosure { dst, fun, obj } => {
+                self.emit_static_closure(*dst, *fun, Some(*obj))?
+            }
+            Instr::CallClosure { dst, fun, args } => {
+                self.emit_call_closure(*dst, *fun, args)?
+            }
+
+            Instr::DynGet { dst, obj, field } => {
+                self.emit_dyn_get(*dst, *obj, *field)?
+            }
+            Instr::DynSet { obj, field, src } => {
+                self.emit_dyn_set(*obj, *field, *src)?
+            }
+
+            // venum: `t` at 0, `index` at 8, then the live construct's
+            // parameters. `MakeEnum` is the allocation plus one store per
+            // parameter; `EnumAlloc` is the allocation alone, with the stores
+            // left to the `SetEnumField`s that follow it.
+            Instr::EnumAlloc { dst, construct } => {
+                let ty = self.f.value_ty(*dst);
+                let v = self.emit_enum_alloc(ty, *construct)?;
+                self.def(*dst, v)?;
+            }
+            Instr::MakeEnum {
+                dst,
+                construct,
+                args,
+            } => {
+                let ty = self.f.value_ty(*dst);
+                let e = self.emit_enum_alloc(ty, *construct)?;
+                for (j, a) in args.iter().enumerate() {
+                    let (off, pty) = self.enum_param(ty, *construct, j)?;
+                    let raw = self.get(*a)?;
+                    // Narrowed to the parameter's own width for the reason
+                    // `FieldSet` narrows: the next parameter is laid out
+                    // immediately after this one.
+                    let v = self.coerce(raw, pty)?;
+                    self.b.ins().store(MemFlags::trusted(), v, e, off);
+                }
+                self.def(*dst, e)?;
+            }
+            Instr::EnumIndex { dst, value } => {
+                let e = self.get(*value)?;
+                let v = self.b.ins().load(types::I32, MemFlags::trusted(), e, 8);
+                self.def(*dst, v)?;
+            }
+            Instr::EnumField {
+                dst,
+                value,
+                construct,
+                field,
+            } => {
+                let (off, pty) = self.enum_param(self.f.value_ty(*value), *construct, *field)?;
+                let e = self.get(*value)?;
+                let v = self.b.ins().load(pty, MemFlags::trusted(), e, off);
+                self.def(*dst, v)?;
+            }
+            // The construct comes off the instruction, where AIR put it once
+            // at lowering time — it is the result of the same backward scan
+            // the LLVM tier re-runs per opcode, so both tiers place the store
+            // at the same offset.
+            Instr::SetEnumField {
+                value,
+                construct,
+                field,
+                src,
+            } => {
+                let (off, pty) = self.enum_param(self.f.value_ty(*value), *construct, *field)?;
+                let e = self.get(*value)?;
+                let raw = self.get(*src)?;
+                let v = self.coerce(raw, pty)?;
+                self.b.ins().store(MemFlags::trusted(), v, e, off);
             }
 
             Instr::Cast { kind, dst, src } => self.emit_cast(*kind, *dst, *src)?,
@@ -1191,6 +1365,36 @@ impl AirCodegen<'_, '_> {
                 let v = self.get(*value)?;
                 self.b.ins().store(MemFlags::trusted(), v, p, 0);
             }
+
+            // A byte displacement, not an element one: the LLVM tier indexes
+            // an `i8` GEP and the interpreter adds the raw integer. The
+            // offset is a signed 32-bit HL int, so it is sign-extended —
+            // a negative displacement walks backwards rather than to the top
+            // of the address space.
+            Instr::RefOffset { dst, base, offset } => {
+                let raw = self.get(*base)?;
+                let p = self.coerce(raw, types::I64)?;
+                let off = self.index_as_addr(*offset)?;
+                let v = self.b.ins().iadd(p, off);
+                self.def(*dst, v)?;
+            }
+
+            // HL's debug break, emitted where control is meant never to
+            // arrive. The LLVM tier states that as `unreachable`, which is a
+            // licence to miscompile if it ever IS reached; a debug break
+            // states the same thing and stops instead. Deliberately not
+            // CLIF's `trap`, which is a terminator: splitting the block here
+            // would leave the rest of it outside the dominator of every
+            // value it still uses.
+            Instr::Assert => {
+                self.b.ins().debugtrap();
+            }
+
+            // A cache hint with no CLIF spelling — Cranelift has neither a
+            // prefetch instruction nor inline assembly, and AIR classifies
+            // this `Effect::Pure`, so dropping it changes nothing an observer
+            // can see. The interpreter drops it too.
+            Instr::Prefetch { .. } => {}
 
             other => bail!("unhandled AIR instruction {:?}", instr_reject(other)),
         }
@@ -1356,6 +1560,115 @@ impl AirCodegen<'_, '_> {
         }
     }
 
+    /// `DynGet`: read a field of a dynamic value, resolved by name hash.
+    ///
+    /// The accessor is chosen by the *destination's* declared kind, not by
+    /// anything about the object: the helper reads whatever the field really
+    /// holds and casts it to the type asked for, so the choice is a static
+    /// property of the instruction. That is why this needs no runtime lookup
+    /// and `FieldGet` on an `HVIRTUAL`/`HDYNOBJ` still does.
+    ///
+    /// No null guard on the object, matching the LLVM tier and HashLink's own
+    /// JIT: both call the accessor unconditionally, and the accessor reads
+    /// `obj->t->kind` before anything else. `ash_interp` is the odd one out —
+    /// it answers null (and no-ops on a set) rather than faulting — so a
+    /// program that reaches here with null is a crash under either compiled
+    /// tier and a silent null under the interpreter. Adding the branch here
+    /// alone would just move the divergence.
+    fn emit_dyn_get(&mut self, dst: ValueId, obj: ValueId, field: usize) -> Result<()> {
+        let obj_val = self.dyn_obj(obj)?;
+        let hash = self.field_hash(field)?;
+
+        let ty = self.f.value_ty(dst);
+        let kind = self.ctx.type_kind(ty.0 as usize)?;
+        let (addr, shape) = self.ctx.dyn_get_helper(kind)?;
+
+        let mut args = vec![obj_val, hash];
+        let mut params = vec![types::I64, types::I32];
+        if shape.takes_type() {
+            let p = self.ctx.type_ptr(ty.0 as usize)?;
+            args.push(self.b.ins().iconst(types::I64, p as i64));
+            params.push(types::I64);
+        }
+
+        let sig = self.helper_sigref(&params, Some(dyn_value_ty(shape)));
+        let callee = self.b.ins().iconst(types::I64, addr as i64);
+        let call = self.b.ins().call_indirect(sig, callee, &args);
+        let v = self.b.inst_results(call)[0];
+        // A void destination still runs the call: the lookup can fall through
+        // to a user `__get_field`, which is a side effect.
+        self.def(dst, v)
+    }
+
+    /// `DynSet`: write a field of a dynamic value, resolved by name hash.
+    /// The accessor is chosen by the source's declared kind, the mirror of
+    /// [`Self::emit_dyn_get`].
+    fn emit_dyn_set(&mut self, obj: ValueId, field: usize, src: ValueId) -> Result<()> {
+        let obj_val = self.dyn_obj(obj)?;
+        let hash = self.field_hash(field)?;
+
+        let ty = self.f.value_ty(src);
+        let kind = self.ctx.type_kind(ty.0 as usize)?;
+        let (addr, shape) = self.ctx.dyn_set_helper(kind)?;
+
+        let want = dyn_value_ty(shape);
+        let raw = self.get(src)?;
+        let have = self.b.func.dfg.value_type(raw);
+        // Every narrow kind reaching the `int` accessor — HBOOL, HUI8, HUI16
+        // — is unsigned in HashLink, so widening to its `int` parameter is a
+        // zero-extension. `coerce` sign-extends, which would turn a byte of
+        // 0x80..0xFF into a negative field value.
+        let src_val = if have.is_int() && want.is_int() && have.bits() < want.bits() {
+            self.b.ins().uextend(want, raw)
+        } else {
+            self.coerce(raw, want)?
+        };
+
+        let mut args = vec![obj_val, hash];
+        let mut params = vec![types::I64, types::I32];
+        if shape.takes_type() {
+            let p = self.ctx.type_ptr(ty.0 as usize)?;
+            args.push(self.b.ins().iconst(types::I64, p as i64));
+            params.push(types::I64);
+        }
+        args.push(src_val);
+        params.push(want);
+
+        let sig = self.helper_sigref(&params, None);
+        let callee = self.b.ins().iconst(types::I64, addr as i64);
+        self.b.ins().call_indirect(sig, callee, &args);
+        Ok(())
+    }
+
+    /// The object operand of a dynamic accessor.
+    ///
+    /// Declines a non-pointer class outright instead of widening it: the
+    /// accessors dereference this before looking at anything else, so a
+    /// sign-extended scalar would be a wild pointer rather than a wrong
+    /// answer.
+    fn dyn_obj(&mut self, obj: ValueId) -> Result<Value> {
+        if self.class_of(obj)? != AbiClass::Ptr {
+            bail!("dynamic field access on a non-pointer object");
+        }
+        self.get(obj)
+    }
+
+    /// The field-name hash as an immediate. It is a bytecode string constant,
+    /// so this is the same number the interpreter asks `hlp_hash_gen` for and
+    /// the same one the LLVM tier bakes in.
+    fn field_hash(&mut self, field: usize) -> Result<Value> {
+        let h = {
+            let name = self
+                .ctx
+                .bytecode()
+                .strings
+                .get(field)
+                .ok_or_else(|| anyhow!("dynamic field name {field} out of range"))?;
+            crate::layout::field_name_hash(name)
+        };
+        Ok(self.b.ins().iconst(types::I32, h as i64))
+    }
+
     fn emit_cast(&mut self, kind: CastKind, dst: ValueId, src: ValueId) -> Result<()> {
         let v = self.get(src)?;
         let t = self.b.func.dfg.value_type(v);
@@ -1385,11 +1698,102 @@ impl AirCodegen<'_, '_> {
                     self.b.ins().fcvt_from_uint(types::F64, v)
                 }
             }
-            CastKind::ToDyn | CastKind::SafeCast | CastKind::ToVirtual => {
-                bail!("cast {kind:?} needs a runtime helper")
+            // The three helper-backed casts. Each mirrors the LLVM tier's
+            // choice of helper; the argument each one wants is the reason
+            // they are not one shared shape.
+            CastKind::ToDyn => {
+                // `hlp_make_dyn(data, t)` reads the value THROUGH a pointer,
+                // so a primitive has to be given an address first. A frame
+                // slot is that address; it dies with the call.
+                let src_ty = self.f.value_ty(src);
+                let kindv = self.ctx.type_kind(src_ty.0 as usize)?;
+                let tp = self.ctx.type_ptr(src_ty.0 as usize)?;
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                self.b.ins().stack_store(v, slot, 0);
+                let data = self.b.ins().stack_addr(types::I64, slot, 0);
+                let tyv = self.b.ins().iconst(types::I64, tp as i64);
+                let callee = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.make_dyn_helper()? as i64);
+                let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I64));
+                let call = self.b.ins().call_indirect(sig, callee, &[data, tyv]);
+                let _ = kindv;
+                self.b.inst_results(call)[0]
+            }
+            CastKind::SafeCast => {
+                // Reference-to-reference only. The unboxing form — HNULL or
+                // HDYN into a primitive — needs the null-test-and-load shape
+                // the LLVM tier builds, and getting that subtly wrong reads
+                // eight bytes into a four-byte register; it stays declined
+                // until it is written deliberately.
+                let dst_kind = self.ctx.type_kind(self.f.value_ty(dst).0 as usize)?;
+                if abi_class(dst_kind) != AbiClass::Ptr {
+                    bail!("SafeCast unboxing into a primitive");
+                }
+                let src_ty = self.f.value_ty(src);
+                let sp = self.ctx.type_ptr(src_ty.0 as usize)?;
+                let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
+                let srcv = self.coerce(v, types::I64)?;
+                let stv = self.b.ins().iconst(types::I64, sp as i64);
+                let dtv = self.b.ins().iconst(types::I64, dp as i64);
+                let callee = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.dyn_castp_helper()? as i64);
+                let sig = self.helper_sigref(
+                    &[types::I64, types::I64, types::I64],
+                    Some(types::I64),
+                );
+                let call = self
+                    .b
+                    .ins()
+                    .call_indirect(sig, callee, &[srcv, stv, dtv]);
+                self.b.inst_results(call)[0]
+            }
+            CastKind::ToVirtual => {
+                let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
+                let vt = self.b.ins().iconst(types::I64, dp as i64);
+                let obj = self.coerce(v, types::I64)?;
+                let callee = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.to_virtual_helper()? as i64);
+                let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I64));
+                let call = self.b.ins().call_indirect(sig, callee, &[vt, obj]);
+                self.b.inst_results(call)[0]
             }
         };
         self.def(dst, r)
+    }
+
+    /// Read word 0 of `p`, answering `fallback` when `p` is null.
+    ///
+    /// The branch is the interpreters' behaviour, not decoration: a null
+    /// receiver reaching `GetType` / `GetTID` gets the register's declared
+    /// type there, and this tier is checked against them. The LLVM tier
+    /// faults on that input instead.
+    fn guarded_header_load(&mut self, p: Value, ty: Type, fallback: Value) -> Result<Value> {
+        let load_bb = self.b.create_block();
+        let null_bb = self.b.create_block();
+        let join_bb = self.b.create_block();
+        let out = self.b.append_block_param(join_bb, ty);
+
+        self.b.ins().brif(p, load_bb, &[], null_bb, &[]);
+
+        self.b.switch_to_block(load_bb);
+        let loaded = self.b.ins().load(ty, MemFlags::trusted(), p, 0);
+        self.b.ins().jump(join_bb, &[BlockArg::Value(loaded)]);
+
+        self.b.switch_to_block(null_bb);
+        self.b.ins().jump(join_bb, &[BlockArg::Value(fallback)]);
+
+        self.b.switch_to_block(join_bb);
+        Ok(out)
     }
 
     /// `if value == null throw`.
@@ -1587,6 +1991,88 @@ impl AirCodegen<'_, '_> {
         self.b.ins().select(bad, fallback, quot)
     }
 
+    // ── Enums ───────────────────────────────────────────────────────────────
+
+    /// The decoded description of one enum construct.
+    ///
+    /// Looking it up also proves the construct index is in range, which
+    /// `hlp_alloc_enum` does not check for itself — it indexes the construct
+    /// array to size the allocation, so a bad index there is a wild read.
+    fn enum_construct(
+        &self,
+        enum_ty: AirTypeRef,
+        construct: usize,
+    ) -> Result<&crate::types::HLEnumConstruct> {
+        let idx = enum_ty.0 as usize;
+        let tenum = self
+            .ctx
+            .bytecode()
+            .types
+            .get(idx)
+            .and_then(|t| t.tenum.as_ref())
+            .ok_or_else(|| anyhow!("enum access on type {idx}, which is not an enum"))?;
+        tenum
+            .constructs
+            .get(construct)
+            .ok_or_else(|| anyhow!("enum type {idx} has no construct {construct}"))
+    }
+
+    /// Byte offset and machine type of one parameter of an enum construct.
+    ///
+    /// The offsets are the loader's: HL bytecode names a construct's
+    /// parameter types and nothing else, so `DecodedBytecode` computes the
+    /// venum layout at load time and every tier reads it from there rather
+    /// than laying the payload out again.
+    fn enum_param(
+        &self,
+        enum_ty: AirTypeRef,
+        construct: usize,
+        field: usize,
+    ) -> Result<(i32, Type)> {
+        let c = self.enum_construct(enum_ty, construct)?;
+        let (off, param) = c
+            .offsets
+            .get(field)
+            .zip(c.params.get(field))
+            .map(|(off, param)| (*off, param.0))
+            .ok_or_else(|| {
+                anyhow!(
+                    "construct {construct} of enum {} has no parameter {field}",
+                    enum_ty.0
+                )
+            })?;
+        let kind = self.ctx.type_kind(param)?;
+        let ty = abi_class(kind)
+            .clif_type()
+            .ok_or_else(|| anyhow!("enum parameter of kind {kind} has no machine type"))?;
+        Ok((off, ty))
+    }
+
+    /// The allocation `EnumAlloc` and `MakeEnum` share:
+    /// `hlp_alloc_enum(t, construct)`, which sizes the venum from the
+    /// construct and zeroes the payload when it holds pointers.
+    ///
+    /// `t` is the runtime `hl_type*`, not a description of one — the
+    /// allocator reads `tenum` off it, and the header keeps it for
+    /// `EnumIndex` and the dynamic side to read back.
+    fn emit_enum_alloc(&mut self, enum_ty: AirTypeRef, construct: usize) -> Result<Value> {
+        let idx = enum_ty.0 as usize;
+        let kind = self.ctx.type_kind(idx)?;
+        if kind != hl::hl_type_kind_HENUM {
+            bail!("enum allocation on type kind {kind}");
+        }
+        self.enum_construct(enum_ty, construct)?;
+        let helper = self.ctx.alloc_enum_helper()?;
+        let type_ptr = self.ctx.type_ptr(idx)?;
+
+        let callee = self.b.ins().iconst(types::I64, helper as i64);
+        let t = self.b.ins().iconst(types::I64, type_ptr as i64);
+        let ci = self.b.ins().iconst(types::I32, construct as i64);
+        let sig = self.helper_sigref(&[types::I64, types::I32], Some(types::I64));
+        let call = self.b.ins().call_indirect(sig, callee, &[t, ci]);
+        Ok(self.b.inst_results(call)[0])
+    }
+
     // ── Calls ───────────────────────────────────────────────────────────────
 
     fn helper_sigref(&mut self, params: &[Type], ret: Option<Type>) -> SigRef {
@@ -1598,6 +2084,125 @@ impl AirCodegen<'_, '_> {
             sig.returns.push(AbiParam::new(r));
         }
         self.b.import_signature(sig)
+    }
+
+    /// `StaticClosure` / `InstanceClosure`: allocate a `vclosure` over a
+    /// bytecode function, optionally binding a receiver.
+    ///
+    /// The function address is LOADED from `functions_ptrs[findex]` rather
+    /// than baked in, for the same reason the LLVM tier loads it: the slot
+    /// holds a stub sentinel until that function is promoted, and a closure
+    /// built from a baked-in stale address would keep calling the stub after
+    /// the real code exists. Loading at construction time also means a
+    /// closure made after promotion carries the compiled address directly.
+    fn emit_static_closure(
+        &mut self,
+        dst: ValueId,
+        fun: usize,
+        value: Option<ValueId>,
+    ) -> Result<()> {
+        let slot_addr = self.ctx.function_slot_addr(fun)?;
+        let slot = self.b.ins().iconst(types::I64, slot_addr as i64);
+        let fn_addr = self.b.ins().load(types::I64, MemFlags::trusted(), slot, 0);
+
+        let type_ptr = self.ctx.func_type_ptr(fun)?;
+        let ty = self.b.ins().iconst(types::I64, type_ptr as i64);
+
+        let helper = self.ctx.closure_helper(value.is_some())?;
+        let callee = self.b.ins().iconst(types::I64, helper as i64);
+
+        let mut args = vec![ty, fn_addr];
+        let mut params = vec![types::I64, types::I64];
+        if let Some(v) = value {
+            let raw = self.get(v)?;
+            args.push(self.coerce(raw, types::I64)?);
+            params.push(types::I64);
+        }
+        let sig = self.helper_sigref(&params, Some(types::I64));
+        let call = self.b.ins().call_indirect(sig, callee, &args);
+        let out = self.b.inst_results(call)[0];
+        self.def(dst, out)
+    }
+
+    /// `CallClosure`: call through a `vclosure`, prepending its bound value
+    /// when it has one.
+    ///
+    /// vclosure layout, which this reads directly rather than through a
+    /// helper: `t` at 0, `fun` at 8, `hasValue` (i32) at 16, `value` at 24.
+    /// `hasValue` is a runtime property of the closure, not of the call
+    /// site, so both shapes are emitted and selected at run time — a bound
+    /// closure takes the receiver as its first argument.
+    fn emit_call_closure(
+        &mut self,
+        dst: ValueId,
+        fun: ValueId,
+        args: &[ValueId],
+    ) -> Result<()> {
+        let closure = self.get(fun)?;
+        let closure = self.coerce(closure, types::I64)?;
+
+        let fn_addr = self
+            .b
+            .ins()
+            .load(types::I64, MemFlags::trusted(), closure, 8);
+        let has_value = self
+            .b
+            .ins()
+            .load(types::I32, MemFlags::trusted(), closure, 16);
+        let bound_value = self
+            .b
+            .ins()
+            .load(types::I64, MemFlags::trusted(), closure, 24);
+
+        // Argument classes come from the closure's own signature in AIR: the
+        // destination's type gives the return, the argument values give the
+        // parameters.
+        let mut arg_vals = Vec::with_capacity(args.len() + 1);
+        let mut classes = Vec::with_capacity(args.len() + 1);
+        for a in args {
+            let c = self.class_of(*a)?;
+            let want = c
+                .clif_type()
+                .ok_or_else(|| anyhow!("void argument to closure call"))?;
+            let raw = self.get(*a)?;
+            arg_vals.push(self.coerce(raw, want)?);
+            classes.push(c);
+        }
+        let ret_class = if self.is_void(dst) {
+            AbiClass::Void
+        } else {
+            self.class_of(dst)?
+        };
+
+        let bound_bb = self.b.create_block();
+        let plain_bb = self.b.create_block();
+        let merge_bb = self.b.create_block();
+        if let Some(t) = ret_class.clif_type() {
+            self.b.append_block_param(merge_bb, t);
+        }
+        self.b.ins().brif(has_value, bound_bb, &[], plain_bb, &[]);
+
+        // Bound: the receiver is argument zero.
+        self.b.switch_to_block(bound_bb);
+        let mut bound_args = vec![bound_value];
+        bound_args.extend_from_slice(&arg_vals);
+        let mut bound_classes = vec![AbiClass::Ptr];
+        bound_classes.extend_from_slice(&classes);
+        let r = self.stub_guarded_indirect(fn_addr, &bound_args, &bound_classes, ret_class)?;
+        let bound_out: Vec<BlockArg> = r.into_iter().map(BlockArg::Value).collect();
+        self.b.ins().jump(merge_bb, &bound_out);
+
+        self.b.switch_to_block(plain_bb);
+        let r = self.stub_guarded_indirect(fn_addr, &arg_vals, &classes, ret_class)?;
+        let plain_out: Vec<BlockArg> = r.into_iter().map(BlockArg::Value).collect();
+        self.b.ins().jump(merge_bb, &plain_out);
+
+        self.b.switch_to_block(merge_bb);
+        if ret_class.clif_type().is_some() {
+            let v = self.b.block_params(merge_bb)[0];
+            self.def(dst, v)?;
+        }
+        Ok(())
     }
 
     fn emit_call(&mut self, dst: ValueId, target: usize, args: &[ValueId]) -> Result<()> {
@@ -1780,7 +2385,54 @@ impl AirCodegen<'_, '_> {
         };
         self.b.ins().jump(merge_bb, &direct_vals);
 
+        // The stub path, with the LLVM tier's self-heal in front of it.
+        //
+        // A sentinel means "this findex was not compiled when the caller
+        // captured its address" — which for a closure is decided once, at
+        // construction, and then never revisited. Without this, a closure
+        // built before its target promoted sends every later call through the
+        // interpreter bridge for the life of the program: measured at 8.2s
+        // against 0.39s on bench_closure_call. Re-read the slot instead; the
+        // sentinel encodes `findex + 1`, so the real address is one load
+        // away, and calls made after promotion go direct.
         self.b.switch_to_block(stub_bb);
+        let ptrs_base = self.ctx.functions_ptrs_base();
+        if ptrs_base != 0 {
+            let heal_bb = self.b.create_block();
+            let bridge_bb = self.b.create_block();
+            let findex = self.b.ins().iadd_imm(fn_addr, -1);
+            let off = self.b.ins().imul_imm(findex, 8);
+            let base = self.b.ins().iconst(types::I64, ptrs_base as i64);
+            let slot = self.b.ins().iadd(base, off);
+            let real = self.b.ins().load(types::I64, MemFlags::trusted(), slot, 0);
+            let healed = self.b.ins().icmp_imm(
+                IntCC::UnsignedGreaterThanOrEqual,
+                real,
+                STUB_SENTINEL_LIMIT as i64,
+            );
+            self.b.ins().brif(healed, heal_bb, &[], bridge_bb, &[]);
+
+            self.b.switch_to_block(heal_bb);
+            let mut hsig = Signature::new(self.ctx.call_conv());
+            for c in param_classes {
+                hsig.params.push(AbiParam::new(
+                    c.clif_type().ok_or_else(|| anyhow!("void parameter"))?,
+                ));
+            }
+            if let Some(t) = ret_ty {
+                hsig.returns.push(AbiParam::new(t));
+            }
+            let hsigref = self.b.import_signature(hsig);
+            let hcall = self.b.ins().call_indirect(hsigref, real, args);
+            let hvals: Vec<BlockArg> = if ret_ty.is_some() {
+                vec![BlockArg::Value(self.b.inst_results(hcall)[0])]
+            } else {
+                vec![]
+            };
+            self.b.ins().jump(merge_bb, &hvals);
+
+            self.b.switch_to_block(bridge_bb);
+        }
         let nargs = args.len();
         let slot = self.b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -1976,6 +2628,26 @@ impl AirCodegen<'_, '_> {
     fn emit_term(&mut self, bid: BlockId, term: &Terminator) -> Result<()> {
         match term {
             Terminator::Ret { value } => self.emit_ret(*value),
+
+            // `hlp_throw` does not return: it longjmps to the nearest armed
+            // trap, or exits. The block still needs a terminator for the
+            // verifier, and `trap` is the honest one — reaching it would mean
+            // the helper returned, which it cannot.
+            Terminator::Throw { exc } | Terminator::Rethrow { exc } => {
+                let is_rethrow = matches!(term, Terminator::Rethrow { .. });
+                let v = self.get(*exc)?;
+                let v = self.coerce(v, types::I64)?;
+                let callee = self.b.ins().iconst(
+                    types::I64,
+                    self.ctx.throw_helper(is_rethrow)? as i64,
+                );
+                let sig = self.helper_sigref(&[types::I64], None);
+                self.b.ins().call_indirect(sig, callee, &[v]);
+                self.b
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
+                Ok(())
+            }
 
             Terminator::Jump { target } => {
                 let args = self.phi_args(bid, *target)?;
@@ -2196,6 +2868,16 @@ impl AirCodegen<'_, '_> {
 
 /// [`air::v2::ir::IntrinsicKind`] → the backend emitter's own enum. A match
 /// so a new kind fails the build here instead of silently declining.
+/// Machine type of the value a `DynShape`'s accessor returns or takes.
+fn dyn_value_ty(shape: DynShape) -> Type {
+    match shape {
+        DynShape::F64 => types::F64,
+        DynShape::F32 => types::F32,
+        DynShape::I64 | DynShape::Ptr => types::I64,
+        DynShape::Int => types::I32,
+    }
+}
+
 fn intrinsic_to_native(k: air::v2::ir::IntrinsicKind) -> crate::intrinsics::NativeIntrinsic {
     use air::v2::ir::IntrinsicKind as K;
     use crate::intrinsics::NativeIntrinsic as NI;

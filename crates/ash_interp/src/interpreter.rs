@@ -609,7 +609,9 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                 }
             }
             patch_vtable_slots(ctx, findex, addr as *mut c_void);
-            let staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
+            // The entries matter to the re-tier exits, not to the chase
+            // below, which now runs whether or not any were staged.
+            let _staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
             // A hot loop is the strongest promotion signal there is, and a
             // function compiled here stops accruing call counts — the
             // (Auto, 1) rung would starve. Chase the LLVM tier immediately;
@@ -629,8 +631,16 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
             // still compiling while the main thread tears the interpreter
             // down segfaults (observed under --jit-log, roughly one run in
             // ten). `retier_chase_join` collects it before shutdown.
-            if staged > 0
-                && ash_core::cranelift::retier_enabled()
+            // Not gated on the re-tier exits, and not on having staged any:
+            // a function this tier compiles stops accruing call counts, so
+            // the (Auto, 1) rung starves and the top tier is never reached
+            // at all. For a loop, the exits carry a running frame across;
+            // for a RECURSIVE function there is no loop header to carry,
+            // but every later call reads `functions_ptrs`, so simply
+            // installing the better code upgrades it. Measured on fib(40):
+            // 362ms in Cranelift against 87ms in LLVM, a rung the ladder
+            // could not otherwise climb.
+            if llvm_chase_enabled()
                 && matches!(ctx.mode, TierMode::Auto)
                 && !ctx
                     .llvm_done
@@ -9521,6 +9531,16 @@ impl HLInterpreter {
     fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: u32) {
         unsafe { Self::write_value_at(ptr, kind, val) }
     }
+}
+
+/// Whether a Cranelift install chases the LLVM tier. On by default: the
+/// rung is otherwise unreachable for a function this tier compiles, and
+/// fib(40) measures 342ms against 76ms across it. `ASH_LLVM_CHASE=0` turns
+/// it off for the cases where the middle tier's code is the better of the
+/// two, which is not knowable statically today.
+fn llvm_chase_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_LLVM_CHASE").is_ok_and(|v| v != "0") || std::env::var("ASH_LLVM_CHASE").is_err())
 }
 
 /// Threads spawned to chase the LLVM tier after a Cranelift install.

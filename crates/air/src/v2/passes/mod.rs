@@ -38,6 +38,7 @@ use super::ir::*;
 use super::module::{ModuleInfo, NO_MODULE_INFO};
 use anyhow::{bail, Result};
 
+pub mod cellfwd;
 pub mod dce;
 pub mod escape;
 pub mod fma;
@@ -48,6 +49,7 @@ pub mod nullcheck;
 pub mod sroa;
 pub mod tre;
 
+pub use cellfwd::CellForwarding;
 pub use dce::DeadCodeElim;
 pub use fma::FmaPeephole;
 pub use gvn::GlobalValueNumbering;
@@ -247,6 +249,7 @@ impl<'m> PassManager<'m> {
             OptLevel::O0 => vec![],
             OptLevel::O1 => vec![Box::new(NullCheckElim), Box::new(DeadCodeElim)],
             OptLevel::O2 => vec![
+                Box::new(CellForwarding),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),
                 Box::new(LoopInvariantCodeMotion),
@@ -262,6 +265,7 @@ impl<'m> PassManager<'m> {
                 // "phi merge", and those phis are real loop-carried merges
                 // rather than inliner artifacts the cleanup could remove.
                 Box::new(ScalarReplacement),
+                Box::new(CellForwarding),
                 Box::new(NullCheckElim),
                 Box::new(GlobalValueNumbering),
                 Box::new(LoopInvariantCodeMotion),

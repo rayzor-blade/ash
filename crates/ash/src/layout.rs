@@ -102,6 +102,31 @@ pub const VARRAY_DATA_OFFSET: i32 = 24;
 /// Byte offset of a `varray`'s element count.
 pub const VARRAY_SIZE_OFFSET: i32 = 16;
 
+/// The hash `hlp_hash_gen` computes for a field name, computed here instead.
+///
+/// Field names reaching this are bytecode string constants, so the hash is a
+/// compile-time constant and the accessor helpers (`hlp_dyn_get*` /
+/// `hlp_dyn_set*`, which take the hash and never the name) can be called with
+/// an immediate. It must reproduce `hlp_hash_gen` exactly — the runtime keys
+/// its field lookup tables on this number, so an off-by-anything resolves to
+/// the wrong field or to none at all.
+///
+/// Shared for the same reason [`array_elem_size`] is: both compiled tiers
+/// bake the result into code, and a disagreement between them would be a
+/// wrong field rather than a compile failure.
+///
+/// Note this only *computes* the hash; it does not intern the name in the
+/// runtime's hash-to-name table the way calling `hlp_hash_gen` would. A field
+/// that only ever exists because compiled code created it is therefore
+/// reachable by hash but not recoverable by name through reflection.
+pub fn field_name_hash(name: &str) -> i32 {
+    let mut h: i32 = 0;
+    for c in name.encode_utf16() {
+        h = h.wrapping_mul(223).wrapping_add(c as i32);
+    }
+    h.wrapping_rem(0x1FFF_FF7B)
+}
+
 /// Padding to insert before a field of `kind` at byte `size`, mirroring
 /// `hlp_pad_struct`.
 fn pad_struct(size: i32, kind: u32) -> i32 {

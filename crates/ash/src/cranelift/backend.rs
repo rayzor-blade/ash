@@ -224,6 +224,12 @@ pub struct CraneliftTierContext {
     /// Interned NUL-terminated UTF-16 buffers for `Opcode::String`, leaked
     /// (compiled code embeds their addresses), keyed by string index.
     strings: Mutex<HashMap<usize, usize>>,
+    /// Interned byte-array constants for `Opcode::Bytes`, keyed by constant
+    /// index. Leaked for the same reason `strings` is, and copied out of the
+    /// decoded table rather than pointed into it so a Cranelift frame holds
+    /// the same kind of private, immutable buffer the LLVM tier's
+    /// `Bytes_<n>` global gives it.
+    bytes: Mutex<HashMap<usize, usize>>,
     /// Interned UTF-16 messages for runtime error calls.
     messages: Mutex<HashMap<String, usize>>,
     dyn_compare: usize,
@@ -238,6 +244,38 @@ pub struct CraneliftTierContext {
     alloc_obj: usize,
     alloc_dynobj: usize,
     alloc_virtual: usize,
+    /// `hlp_alloc_closure_void(type, fun) -> vclosure` and
+    /// `hlp_alloc_closure_ptr(type, fun, value) -> vclosure`: the two
+    /// closure constructors, split on whether a receiver is bound.
+    alloc_closure_void: usize,
+    alloc_closure_ptr: usize,
+    /// The cast helpers: `hlp_make_dyn(data, t)` boxes, `hlp_dyn_castp(data,
+    /// src_t, dst_t)` is the checked reference cast, `hl_to_virtual(vt, obj)`
+    /// wraps an object in a virtual.
+    throw: usize,
+    rethrow: usize,
+    make_dyn: usize,
+    dyn_castp: usize,
+    to_virtual: usize,
+    /// `hlp_alloc_enum(type, construct) -> venum`. It sizes the allocation
+    /// from the construct it is handed, so the type has to be the initialized
+    /// runtime `hl_type`: a bare one carries no `tenum` to read the construct
+    /// out of.
+    alloc_enum: usize,
+    /// The `hlp_dyn_get*` / `hlp_dyn_set*` family: the accessors a field
+    /// resolved by name hash goes through. ash_std picks between them by kind
+    /// at run time in `hlp_get_dynget` / `hlp_get_dynset`; [`dyn_shape`] is
+    /// that same split made at compile time, once per [`DynShape`].
+    dyn_getd: usize,
+    dyn_getf: usize,
+    dyn_geti64: usize,
+    dyn_geti: usize,
+    dyn_getp: usize,
+    dyn_setd: usize,
+    dyn_setf: usize,
+    dyn_seti64: usize,
+    dyn_seti: usize,
+    dyn_setp: usize,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -306,6 +344,24 @@ impl CraneliftTierContext {
         let alloc_obj = helper("hlp_alloc_obj");
         let alloc_dynobj = helper("hlp_alloc_dynobj");
         let alloc_virtual = helper("hlp_alloc_virtual");
+        let alloc_closure_void = helper("hlp_alloc_closure_void");
+        let alloc_closure_ptr = helper("hlp_alloc_closure_ptr");
+        let throw = helper("hlp_throw");
+        let rethrow = helper("hlp_rethrow");
+        let make_dyn = helper("hlp_make_dyn");
+        let dyn_castp = helper("hlp_dyn_castp");
+        let to_virtual = helper("hl_to_virtual");
+        let alloc_enum = helper("hlp_alloc_enum");
+        let dyn_getd = helper("hlp_dyn_getd");
+        let dyn_getf = helper("hlp_dyn_getf");
+        let dyn_geti64 = helper("hlp_dyn_geti64");
+        let dyn_geti = helper("hlp_dyn_geti");
+        let dyn_getp = helper("hlp_dyn_getp");
+        let dyn_setd = helper("hlp_dyn_setd");
+        let dyn_setf = helper("hlp_dyn_setf");
+        let dyn_seti64 = helper("hlp_dyn_seti64");
+        let dyn_seti = helper("hlp_dyn_seti");
+        let dyn_setp = helper("hlp_dyn_setp");
 
         Ok(Self {
             bytecode: bytecode as *const _,
@@ -317,6 +373,7 @@ impl CraneliftTierContext {
             findex_to_native,
             native_keys,
             strings: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
             dyn_compare,
             hl_error,
@@ -324,6 +381,24 @@ impl CraneliftTierContext {
             alloc_obj,
             alloc_dynobj,
             alloc_virtual,
+            alloc_closure_void,
+            alloc_closure_ptr,
+            throw,
+            rethrow,
+            make_dyn,
+            dyn_castp,
+            to_virtual,
+            alloc_enum,
+            dyn_getd,
+            dyn_getf,
+            dyn_geti64,
+            dyn_geti,
+            dyn_getp,
+            dyn_setd,
+            dyn_setf,
+            dyn_seti64,
+            dyn_seti,
+            dyn_setp,
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
@@ -389,6 +464,12 @@ impl CraneliftTierContext {
     }
 
     /// Address of `functions_ptrs[findex]`.
+    /// Base of the shared `functions_ptrs` array, for code that computes a
+    /// slot address at run time (the stub self-heal).
+    pub fn functions_ptrs_base(&self) -> usize {
+        self.functions_ptrs
+    }
+
     pub fn function_slot_addr(&self, findex: usize) -> Result<usize> {
         if self.functions_ptrs == 0 || findex >= self.max_findex {
             bail!("findex {findex} out of functions_ptrs range");
@@ -417,6 +498,43 @@ impl CraneliftTierContext {
         self.strings
             .lock()
             .expect("cranelift string cache poisoned")
+            .insert(index, addr);
+        Ok(addr)
+    }
+
+    /// Interned byte-array constant, mirroring the LLVM tier's `Bytes_<n>`
+    /// globals: `bytes_pos[index]` up to the next entry, or the end of the
+    /// blob for the last one — the constant pool stores offsets, not lengths.
+    ///
+    /// No NUL is appended, matching the LLVM tier's `const_string(.., false)`;
+    /// the blob already carries whatever terminator the constant needs.
+    pub fn bytes_ptr(&self, index: usize) -> Result<usize> {
+        if let Some(&p) = self
+            .bytes
+            .lock()
+            .expect("cranelift bytes cache poisoned")
+            .get(&index)
+        {
+            return Ok(p);
+        }
+        let bc = self.bytecode();
+        let start = *bc
+            .bytes_pos
+            .get(index)
+            .ok_or_else(|| anyhow!("bytes constant {index} out of range"))?;
+        let end = bc
+            .bytes_pos
+            .get(index + 1)
+            .copied()
+            .unwrap_or(bc.bytes_data.len());
+        let slice = bc
+            .bytes_data
+            .get(start..end)
+            .ok_or_else(|| anyhow!("bytes constant {index} spans past the blob"))?;
+        let addr = Box::leak(slice.to_vec().into_boxed_slice()).as_ptr() as usize;
+        self.bytes
+            .lock()
+            .expect("cranelift bytes cache poisoned")
             .insert(index, addr);
         Ok(addr)
     }
@@ -459,6 +577,111 @@ impl CraneliftTierContext {
         }
     }
 
+    /// `hlp_throw` / `hlp_rethrow`. Neither returns — both longjmp to the
+    /// nearest armed trap — so a call to either is followed by unreachable
+    /// code rather than a jump.
+    pub fn throw_helper(&self, rethrow: bool) -> Result<usize> {
+        let a = if rethrow { self.rethrow } else { self.throw };
+        if a == 0 {
+            bail!("throw helper unavailable");
+        }
+        Ok(a)
+    }
+
+    /// `hlp_make_dyn`, for `Cast::ToDyn`.
+    pub fn make_dyn_helper(&self) -> Result<usize> {
+        if self.make_dyn == 0 {
+            bail!("hlp_make_dyn unavailable");
+        }
+        Ok(self.make_dyn)
+    }
+
+    /// `hlp_dyn_castp`, for `Cast::SafeCast` between reference types. It
+    /// raises on a bad cast, which is why the caller must treat the call as
+    /// able to throw.
+    pub fn dyn_castp_helper(&self) -> Result<usize> {
+        if self.dyn_castp == 0 {
+            bail!("hlp_dyn_castp unavailable");
+        }
+        Ok(self.dyn_castp)
+    }
+
+    /// `hl_to_virtual`, for `Cast::ToVirtual`.
+    pub fn to_virtual_helper(&self) -> Result<usize> {
+        if self.to_virtual == 0 {
+            bail!("hl_to_virtual unavailable");
+        }
+        Ok(self.to_virtual)
+    }
+
+    /// The closure constructors. `bound` selects the one that carries a
+    /// receiver (`hlp_alloc_closure_ptr`) over the plain one.
+    pub fn closure_helper(&self, bound: bool) -> Result<usize> {
+        let addr = if bound {
+            self.alloc_closure_ptr
+        } else {
+            self.alloc_closure_void
+        };
+        if addr == 0 {
+            bail!("closure allocation helper unavailable");
+        }
+        Ok(addr)
+    }
+
+    /// The enum allocator, which `EnumAlloc` and the allocating half of
+    /// `MakeEnum` both go through.
+    pub fn alloc_enum_helper(&self) -> Result<usize> {
+        if self.alloc_enum == 0 {
+            bail!("hlp_alloc_enum unavailable");
+        }
+        Ok(self.alloc_enum)
+    }
+
+    /// The runtime type pointer for a bytecode function, which a closure
+    /// carries so `hl_dyn_call` and friends can read its signature.
+    pub fn func_type_ptr(&self, findex: usize) -> Result<usize> {
+        let bc = self.bytecode();
+        let f = self
+            .func_index(findex)
+            .map(|i| &bc.functions[i])
+            .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
+        self.type_ptr(f.type_.0)
+    }
+
+    /// The `hlp_dyn_get*` accessor a value of `kind` is read through, and the
+    /// shape of the call.
+    pub fn dyn_get_helper(&self, kind: hl::hl_type_kind) -> Result<(usize, DynShape)> {
+        let shape = dyn_shape(kind);
+        let addr = match shape {
+            DynShape::F64 => self.dyn_getd,
+            DynShape::F32 => self.dyn_getf,
+            DynShape::I64 => self.dyn_geti64,
+            DynShape::Int => self.dyn_geti,
+            DynShape::Ptr => self.dyn_getp,
+        };
+        if addr == 0 {
+            bail!("dynamic field getter for kind {kind} unavailable");
+        }
+        Ok((addr, shape))
+    }
+
+    /// The `hlp_dyn_set*` accessor a value of `kind` is written through, and
+    /// the shape of the call.
+    pub fn dyn_set_helper(&self, kind: hl::hl_type_kind) -> Result<(usize, DynShape)> {
+        let shape = dyn_shape(kind);
+        let addr = match shape {
+            DynShape::F64 => self.dyn_setd,
+            DynShape::F32 => self.dyn_setf,
+            DynShape::I64 => self.dyn_seti64,
+            DynShape::Int => self.dyn_seti,
+            DynShape::Ptr => self.dyn_setp,
+        };
+        if addr == 0 {
+            bail!("dynamic field setter for kind {kind} unavailable");
+        }
+        Ok((addr, shape))
+    }
+
     /// `hlp_alloc_obj`, `hlp_alloc_dynobj` and `hlp_alloc_virtual` — the three
     /// allocators `New` dispatches to on the destination's type kind, the same
     /// split the LLVM tier makes.
@@ -473,5 +696,50 @@ impl CraneliftTierContext {
             bail!("allocation helper for kind {kind} unavailable");
         }
         Ok((addr, takes_type))
+    }
+}
+
+/// Which member of the `hlp_dyn_get*` / `hlp_dyn_set*` family a value is
+/// accessed through.
+///
+/// The family is split by machine shape, not by HL kind: the four integer
+/// kinds up to 32 bits share one accessor and every reference kind shares
+/// another, so five members cover the whole kind space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynShape {
+    F64,
+    F32,
+    I64,
+    /// `HI32`, `HBOOL`, `HUI8`, `HUI16` — all carried as a C `int`.
+    Int,
+    /// Every reference kind, plus anything with no accessor of its own.
+    Ptr,
+}
+
+impl DynShape {
+    /// Whether the accessor takes the value's `hl_type*`.
+    ///
+    /// The int and pointer accessors need it because they serve several kinds
+    /// each and cast the stored field to (or from) the one asked for. The
+    /// float and 64-bit ones serve exactly one kind, which their name already
+    /// says.
+    pub fn takes_type(self) -> bool {
+        matches!(self, DynShape::Int | DynShape::Ptr)
+    }
+}
+
+/// The kind → accessor split, mirroring `hlp_get_dynget` / `hlp_get_dynset`
+/// in `std/src/obj.rs`. Held in one place so a read and a write of the same
+/// field can never pick differently shaped halves of the pair.
+fn dyn_shape(kind: hl::hl_type_kind) -> DynShape {
+    match kind {
+        hl::hl_type_kind_HF64 => DynShape::F64,
+        hl::hl_type_kind_HF32 => DynShape::F32,
+        hl::hl_type_kind_HI64 => DynShape::I64,
+        hl::hl_type_kind_HI32
+        | hl::hl_type_kind_HBOOL
+        | hl::hl_type_kind_HUI8
+        | hl::hl_type_kind_HUI16 => DynShape::Int,
+        _ => DynShape::Ptr,
     }
 }

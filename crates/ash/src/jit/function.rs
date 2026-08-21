@@ -45,13 +45,13 @@ fn native_traps_enabled() -> bool {
     })
 }
 
-/// Compute HashLink field hash at compile time (same algorithm as hlp_hash_gen)
+/// Compute HashLink field hash at compile time (same algorithm as hlp_hash_gen).
+///
+/// Lives in [`crate::layout`] now that the Cranelift tier bakes the same
+/// number into its own code: two copies of a hash both tiers embed is the
+/// shape of bug that only surfaces when they disagree about one field.
 fn hl_hash_utf8(s: &str) -> i32 {
-    let mut h: i32 = 0;
-    for c in s.encode_utf16() {
-        h = h.wrapping_mul(223).wrapping_add(c as i32);
-    }
-    h.wrapping_rem(0x1FFFFF7B)
+    crate::layout::field_name_hash(s)
 }
 
 #[to_llvm]

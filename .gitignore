@@ -6,3 +6,6 @@ rustc-ice-*.txt
 # Python bytecode from scripts/
 __pycache__/
 dist/
+
+# Agent/session scratch, not project source
+.claude/

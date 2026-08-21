@@ -15,6 +15,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, mem};
+#[cfg(windows)]
+use windows_sys::Win32::System::Memory::{
+    DiscardVirtualMemory, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
+    PAGE_READWRITE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
@@ -142,7 +149,14 @@ fn thread_self_fast() -> u64 {
         std::arch::asm!("mrs {}, TPIDRRO_EL0", out(reg) tpidrro, options(nomem, nostack, preserves_flags));
         tpidrro & !0x7
     }
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    // Windows has no pthreads, and its cheapest identity is the thread id:
+    // GetCurrentThreadId is a TEB field read behind a stub, so the same
+    // "not a real function call" property holds.
+    #[cfg(windows)]
+    unsafe {
+        GetCurrentThreadId() as u64
+    }
+    #[cfg(all(unix, not(all(target_os = "macos", target_arch = "aarch64"))))]
     unsafe {
         libc::pthread_self() as u64
     }
@@ -365,9 +379,10 @@ extern "C" {
     fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
 }
 
-/// Demand-committed heap reservation: anonymous private mmap. Pages become
-/// resident only on first touch, and fully-free blocks are returned via
-/// madvise — RSS tracks live data, not configured capacity (wren_lift's
+/// Demand-committed heap reservation: anonymous private mmap (Windows: one
+/// VirtualAlloc reservation, which is demand-zeroed the same way). Pages
+/// become resident only on first touch, and fully-free blocks are returned
+/// via madvise — RSS tracks live data, not configured capacity (wren_lift's
 /// nursery idiom, gc.rs:386-391, plus wlift_alloc::pressure_release).
 struct HeapMemory {
     base: *mut u8,
@@ -375,6 +390,7 @@ struct HeapMemory {
 }
 
 impl HeapMemory {
+    #[cfg(unix)]
     fn new(len: usize) -> Self {
         let ptr = unsafe {
             libc::mmap(
@@ -397,6 +413,32 @@ impl HeapMemory {
         }
     }
 
+    /// MEM_RESERVE|MEM_COMMIT is the demand-committed analogue: committed
+    /// pages are demand-zeroed, so none is resident until the allocator
+    /// touches it. The one behavioural difference from mmap is accounting —
+    /// Windows charges the whole reservation against the system commit limit
+    /// up front, so the 512 MB default heap needs 512 MB of RAM+pagefile
+    /// headroom (not of RAM) to start. Reserving without committing would
+    /// avoid that, but every block hand-out would then need its own
+    /// MEM_COMMIT call, and the demand-paging this design relies on gives
+    /// the same RSS curve without one.
+    #[cfg(windows)]
+    fn new(len: usize) -> Self {
+        let ptr = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                len,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            )
+        };
+        assert!(!ptr.is_null(), "GC heap reservation failed ({} bytes)", len);
+        HeapMemory {
+            base: ptr as *mut u8,
+            len,
+        }
+    }
+
     #[inline(always)]
     fn as_ptr(&self) -> *const u8 {
         self.base
@@ -410,8 +452,17 @@ impl HeapMemory {
 
 impl Drop for HeapMemory {
     fn drop(&mut self) {
+        #[cfg(unix)]
         unsafe {
             libc::munmap(self.base as *mut c_void, self.len);
+        }
+        // MEM_RELEASE releases the entire original reservation and therefore
+        // demands a zero size and the exact base VirtualAlloc returned;
+        // passing self.len fails with ERROR_INVALID_PARAMETER and leaks the
+        // whole heap.
+        #[cfg(windows)]
+        unsafe {
+            VirtualFree(self.base as *mut c_void, 0, MEM_RELEASE);
         }
     }
 }
@@ -453,13 +504,22 @@ static GC_LOCK: ReentrantGcLock = ReentrantGcLock {
     cond: std::sync::Condvar::new(),
 };
 
-/// Unique, never-zero token for the current thread: its pthread handle.
+/// Unique, never-zero token for the current thread: its pthread handle, or
+/// on Windows its thread id — which the kernel never hands out as 0 either,
+/// so the "0 means free" encoding in `owner` survives the port.
 /// The previous `thread_local!` token cost a `_tlv_get_addr` call (with its
 /// lazy-init branch) on EVERY lock operation — 11.6% of an allocation-bound
 /// profile; `pthread_self` is a register read.
 #[inline]
 fn gc_thread_token() -> u64 {
-    unsafe { libc::pthread_self() as u64 }
+    #[cfg(unix)]
+    unsafe {
+        libc::pthread_self() as u64
+    }
+    #[cfg(windows)]
+    unsafe {
+        GetCurrentThreadId() as u64
+    }
 }
 
 impl ReentrantGcLock {
@@ -1785,11 +1845,24 @@ impl ImmixAllocator {
                 let mut run_start = hand_back[0];
                 let mut run_len = BLOCK_SIZE;
                 let advise = |start: usize, len: usize| unsafe {
-                    #[cfg(target_os = "macos")]
-                    let advice = libc::MADV_FREE_REUSABLE;
-                    #[cfg(not(target_os = "macos"))]
-                    let advice = libc::MADV_DONTNEED;
-                    libc::madvise(base.add(start) as *mut c_void, len, advice);
+                    #[cfg(unix)]
+                    {
+                        #[cfg(target_os = "macos")]
+                        let advice = libc::MADV_FREE_REUSABLE;
+                        #[cfg(not(target_os = "macos"))]
+                        let advice = libc::MADV_DONTNEED;
+                        libc::madvise(base.add(start) as *mut c_void, len, advice);
+                    }
+                    // Windows' MADV_DONTNEED: the pages leave the working set
+                    // (so RSS falls, which is the whole point here) but stay
+                    // committed, so the range stays mapped and only its
+                    // contents go undefined — sound for exactly the reason
+                    // the unix paths are, since a reacquired block is zeroed
+                    // before anything reads it.
+                    #[cfg(windows)]
+                    {
+                        DiscardVirtualMemory(base.add(start) as *mut c_void, len);
+                    }
                 };
                 for &addr in &hand_back[1..] {
                     if addr == run_start + run_len {

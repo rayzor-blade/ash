@@ -198,10 +198,10 @@ pub(crate) unsafe fn block_yield() {
         // blocked fiber at 100% CPU ping-pong. 1ms keeps the old cadence
         // and keeps the SDL window responsive.
         crate::thread::pump_sdl_events();
-        let ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 1_000_000,
-        };
-        libc::nanosleep(&ts, std::ptr::null_mut());
+        // std's sleep rather than nanosleep: same syscall on unix, plus the
+        // EINTR retry a pacing nap wants anyway, and no Win32 fork. Windows
+        // may round the wait up to the OS timer resolution — acceptable,
+        // because this is pacing and not a deadline.
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

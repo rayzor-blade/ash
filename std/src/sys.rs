@@ -225,13 +225,56 @@ pub unsafe extern "C" fn hlp_resolve_symbol(
     _p: *mut std::ffi::c_void,
 ) -> *mut std::ffi::c_void {
     // Runtime symbol resolution — used by JIT for dynamic linking.
-    // Resolve via dlsym since all libs are loaded with RTLD_GLOBAL.
-    if !_name.is_null() {
+    if _name.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    #[cfg(unix)]
+    {
+        // Resolve via dlsym since all libs are loaded with RTLD_GLOBAL.
         let sym = libc::dlsym(libc::RTLD_DEFAULT, _name as *const libc::c_char);
         if !sym.is_null() {
             return sym;
         }
     }
+
+    #[cfg(windows)]
+    {
+        // Win32 has no RTLD_DEFAULT: GetProcAddress only ever searches the one
+        // module it is handed, so reaching dlsym's "anything already mapped"
+        // reach means walking the process module list ourselves. Enumeration
+        // order is load order, which is the order dlsym would have searched.
+        use windows_sys::Win32::Foundation::HMODULE;
+        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+        use windows_sys::Win32::System::ProcessStatus::EnumProcessModules;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let process = GetCurrentProcess();
+        let mut modules: Vec<HMODULE> = vec![std::ptr::null_mut(); 256];
+        loop {
+            let capacity = (modules.len() * std::mem::size_of::<HMODULE>()) as u32;
+            let mut needed: u32 = 0;
+            if EnumProcessModules(process, modules.as_mut_ptr(), capacity, &mut needed) == 0 {
+                return std::ptr::null_mut();
+            }
+            let count = needed as usize / std::mem::size_of::<HMODULE>();
+            // EnumProcessModules silently truncates rather than failing, and a
+            // library loaded between two calls can grow the list, so keep
+            // re-asking until the answer fits in the buffer we passed.
+            if needed <= capacity {
+                modules.truncate(count);
+                break;
+            }
+            modules.resize(count, std::ptr::null_mut());
+        }
+
+        for module in modules {
+            if let Some(sym) = GetProcAddress(module, _name) {
+                return sym as *mut std::ffi::c_void;
+            }
+        }
+    }
+
     std::ptr::null_mut()
 }
 

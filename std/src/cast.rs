@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    ffi::{c_long, c_void, CStr},
+    ffi::{c_void, CStr},
     ptr,
 };
 
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
-            (*v).v.i64_ = *(data as *mut c_long);
+            (*v).v.i64_ = *(data as *mut hl::int64);
             v
         }
         hl_type_kind_HF32 => {

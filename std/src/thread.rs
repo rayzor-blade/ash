@@ -18,19 +18,41 @@ use crate::hl::vdynamic;
 static mut SDL_POLL_EVENT_FN: Option<unsafe extern "C" fn(*mut u8) -> i32> = None;
 static SDL_POLL_INIT: std::sync::Once = std::sync::Once::new();
 
+#[cfg(unix)]
+unsafe fn resolve_sdl_poll_event() -> *mut c_void {
+    // SDL2 is already loaded via sdl.hdll with RTLD_GLOBAL,
+    // so SDL_PollEvent should be resolvable via RTLD_DEFAULT.
+    libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr())
+}
+
+#[cfg(windows)]
+unsafe fn resolve_sdl_poll_event() -> *mut c_void {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
+    // Win32 has no RTLD_DEFAULT — a symbol is only reachable through the module
+    // that exports it — so the SDL runtime sdl.hdll pulled in is probed by name.
+    for dll in [c"SDL2.dll", c"SDL3.dll"] {
+        let module = GetModuleHandleA(dll.as_ptr() as *const u8);
+        if module.is_null() {
+            continue;
+        }
+        if let Some(sym) = GetProcAddress(module, c"SDL_PollEvent".as_ptr() as *const u8) {
+            return sym as usize as *mut c_void;
+        }
+    }
+    ptr::null_mut()
+}
+
 unsafe fn get_sdl_poll_event() -> Option<unsafe extern "C" fn(*mut u8) -> i32> {
     SDL_POLL_INIT.call_once(|| {
-        // SDL2 is already loaded via sdl.hdll with RTLD_GLOBAL,
-        // so SDL_PollEvent should be resolvable via RTLD_DEFAULT.
-        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr());
+        let sym = resolve_sdl_poll_event();
         if !sym.is_null() {
             eprintln!("[ash] SDL_PollEvent resolved at {:p}", sym);
             SDL_POLL_EVENT_FN = Some(std::mem::transmute::<
-                *mut libc::c_void,
+                *mut c_void,
                 unsafe extern "C" fn(*mut u8) -> i32,
             >(sym));
         } else {
-            eprintln!("[ash] WARNING: SDL_PollEvent not found via dlsym");
+            eprintln!("[ash] WARNING: SDL_PollEvent not found");
         }
     });
     SDL_POLL_EVENT_FN
@@ -53,12 +75,120 @@ pub(crate) unsafe fn pump_sdl_events() {
 }
 
 // ============================================================================
+// Raw OS synchronisation primitives
+// ============================================================================
+// hl hands mutexes/conditions to Haxe as opaque pointers and splits every
+// acquire/release across two separate C calls, so std's guard-based Mutex
+// cannot express them — the OS primitives are driven directly instead.
+
+#[cfg(unix)]
+mod sys {
+    pub type RawMutex = libc::pthread_mutex_t;
+    pub type RawCond = libc::pthread_cond_t;
+
+    pub unsafe fn mutex_init(m: *mut RawMutex, recursive: bool) {
+        if !recursive {
+            libc::pthread_mutex_init(m, std::ptr::null());
+            return;
+        }
+        let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+        libc::pthread_mutexattr_init(&mut attr);
+        libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+        libc::pthread_mutex_init(m, &attr);
+        libc::pthread_mutexattr_destroy(&mut attr);
+    }
+
+    pub unsafe fn mutex_lock(m: *mut RawMutex) {
+        libc::pthread_mutex_lock(m);
+    }
+
+    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> bool {
+        libc::pthread_mutex_trylock(m) == 0
+    }
+
+    pub unsafe fn mutex_unlock(m: *mut RawMutex) {
+        libc::pthread_mutex_unlock(m);
+    }
+
+    pub unsafe fn mutex_destroy(m: *mut RawMutex) {
+        libc::pthread_mutex_destroy(m);
+    }
+
+    pub unsafe fn cond_init(c: *mut RawCond) {
+        libc::pthread_cond_init(c, std::ptr::null());
+    }
+
+    pub unsafe fn cond_signal(c: *mut RawCond) {
+        libc::pthread_cond_signal(c);
+    }
+
+    pub unsafe fn cond_broadcast(c: *mut RawCond) {
+        libc::pthread_cond_broadcast(c);
+    }
+
+    pub unsafe fn cond_destroy(c: *mut RawCond) {
+        libc::pthread_cond_destroy(c);
+    }
+}
+
+#[cfg(windows)]
+mod sys {
+    use windows_sys::Win32::System::Threading::{
+        DeleteCriticalSection, EnterCriticalSection, InitializeConditionVariable,
+        InitializeCriticalSection, LeaveCriticalSection, TryEnterCriticalSection,
+        WakeAllConditionVariable, WakeConditionVariable, CONDITION_VARIABLE, CRITICAL_SECTION,
+    };
+
+    pub type RawMutex = CRITICAL_SECTION;
+    pub type RawCond = CONDITION_VARIABLE;
+
+    // A CRITICAL_SECTION is re-entrant for its owning thread and offers no way
+    // to opt out, so `recursive` is unenforceable here. The one caller that
+    // asks for a plain lock (the semaphore) only ever takes it in balanced
+    // pairs, so the extra re-entrancy is unobservable.
+    pub unsafe fn mutex_init(m: *mut RawMutex, _recursive: bool) {
+        InitializeCriticalSection(m);
+    }
+
+    pub unsafe fn mutex_lock(m: *mut RawMutex) {
+        EnterCriticalSection(m);
+    }
+
+    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> bool {
+        TryEnterCriticalSection(m) != 0
+    }
+
+    pub unsafe fn mutex_unlock(m: *mut RawMutex) {
+        LeaveCriticalSection(m);
+    }
+
+    pub unsafe fn mutex_destroy(m: *mut RawMutex) {
+        DeleteCriticalSection(m);
+    }
+
+    pub unsafe fn cond_init(c: *mut RawCond) {
+        InitializeConditionVariable(c);
+    }
+
+    pub unsafe fn cond_signal(c: *mut RawCond) {
+        WakeConditionVariable(c);
+    }
+
+    pub unsafe fn cond_broadcast(c: *mut RawCond) {
+        WakeAllConditionVariable(c);
+    }
+
+    // Win32 condition variables own no resources and have no destructor.
+    pub unsafe fn cond_destroy(_c: *mut RawCond) {}
+}
+
+// ============================================================================
 // Mutex
 // ============================================================================
 
 #[repr(C)]
 struct HlMutex {
-    inner: libc::pthread_mutex_t,
+    inner: sys::RawMutex,
 }
 
 #[no_mangle]
@@ -71,18 +201,14 @@ pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
     // HashLink mutexes are RECURSIVE (thread.c uses PTHREAD_MUTEX_RECURSIVE);
     // sys.thread.EventLoop re-acquires from the same thread — a default
     // (non-recursive) mutex deadlocks progress().
-    let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
-    libc::pthread_mutexattr_init(&mut attr);
-    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
-    libc::pthread_mutex_init(&mut (*ptr).inner, &attr);
-    libc::pthread_mutexattr_destroy(&mut attr);
+    sys::mutex_init(&mut (*ptr).inner, true);
     ptr as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_acquire(m: *mut c_void) {
     if !m.is_null() {
-        libc::pthread_mutex_lock(&mut (*(m as *mut HlMutex)).inner);
+        sys::mutex_lock(&mut (*(m as *mut HlMutex)).inner);
     }
 }
 
@@ -91,20 +217,20 @@ pub unsafe extern "C" fn hlp_mutex_try_acquire(m: *mut c_void) -> bool {
     if m.is_null() {
         return false;
     }
-    libc::pthread_mutex_trylock(&mut (*(m as *mut HlMutex)).inner) == 0
+    sys::mutex_try_lock(&mut (*(m as *mut HlMutex)).inner)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_release(m: *mut c_void) {
     if !m.is_null() {
-        libc::pthread_mutex_unlock(&mut (*(m as *mut HlMutex)).inner);
+        sys::mutex_unlock(&mut (*(m as *mut HlMutex)).inner);
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
     if !m.is_null() {
-        libc::pthread_mutex_destroy(&mut (*(m as *mut HlMutex)).inner);
+        sys::mutex_destroy(&mut (*(m as *mut HlMutex)).inner);
         std::alloc::dealloc(m as *mut u8, std::alloc::Layout::new::<HlMutex>());
     }
 }
@@ -115,8 +241,8 @@ pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
 
 #[repr(C)]
 struct HlSemaphore {
-    mutex: libc::pthread_mutex_t,
-    cond: libc::pthread_cond_t,
+    mutex: sys::RawMutex,
+    cond: sys::RawCond,
     value: i32,
 }
 
@@ -127,8 +253,8 @@ pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
     if ptr.is_null() {
         return ptr::null_mut();
     }
-    libc::pthread_mutex_init(&mut (*ptr).mutex, ptr::null());
-    libc::pthread_cond_init(&mut (*ptr).cond, ptr::null());
+    sys::mutex_init(&mut (*ptr).mutex, false);
+    sys::cond_init(&mut (*ptr).cond);
     (*ptr).value = value;
     ptr as *mut c_void
 }
@@ -141,11 +267,11 @@ pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
     // HashLink !HL_THREADS: semaphore_acquire is a NO-OP (thread.c:219-220).
     // Blocking here is fatal in a single-threaded VM — nothing can release.
     let s = sem as *mut HlSemaphore;
-    libc::pthread_mutex_lock(&mut (*s).mutex);
+    sys::mutex_lock(&mut (*s).mutex);
     if (*s).value > 0 {
         (*s).value -= 1;
     }
-    libc::pthread_mutex_unlock(&mut (*s).mutex);
+    sys::mutex_unlock(&mut (*s).mutex);
 }
 
 #[no_mangle]
@@ -158,11 +284,11 @@ pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     }
     // HashLink !HL_THREADS: try_acquire ALWAYS returns true (thread.c:238-240).
     let s = sem as *mut HlSemaphore;
-    libc::pthread_mutex_lock(&mut (*s).mutex);
+    sys::mutex_lock(&mut (*s).mutex);
     if (*s).value > 0 {
         (*s).value -= 1;
     }
-    libc::pthread_mutex_unlock(&mut (*s).mutex);
+    sys::mutex_unlock(&mut (*s).mutex);
     true
 }
 
@@ -172,18 +298,18 @@ pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
         return;
     }
     let s = sem as *mut HlSemaphore;
-    libc::pthread_mutex_lock(&mut (*s).mutex);
+    sys::mutex_lock(&mut (*s).mutex);
     (*s).value += 1;
-    libc::pthread_cond_signal(&mut (*s).cond);
-    libc::pthread_mutex_unlock(&mut (*s).mutex);
+    sys::cond_signal(&mut (*s).cond);
+    sys::mutex_unlock(&mut (*s).mutex);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
     if !sem.is_null() {
         let s = sem as *mut HlSemaphore;
-        libc::pthread_mutex_destroy(&mut (*s).mutex);
-        libc::pthread_cond_destroy(&mut (*s).cond);
+        sys::mutex_destroy(&mut (*s).mutex);
+        sys::cond_destroy(&mut (*s).cond);
         std::alloc::dealloc(sem as *mut u8, std::alloc::Layout::new::<HlSemaphore>());
     }
 }
@@ -194,8 +320,8 @@ pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
 
 #[repr(C)]
 struct HlCondition {
-    mutex: libc::pthread_mutex_t,
-    cond: libc::pthread_cond_t,
+    mutex: sys::RawMutex,
+    cond: sys::RawCond,
 }
 
 #[no_mangle]
@@ -206,19 +332,15 @@ pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
         return ptr::null_mut();
     }
     // Recursive, matching HashLink's condition mutex (thread.c:340-344).
-    let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
-    libc::pthread_mutexattr_init(&mut attr);
-    libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
-    libc::pthread_mutex_init(&mut (*ptr).mutex, &attr);
-    libc::pthread_mutexattr_destroy(&mut attr);
-    libc::pthread_cond_init(&mut (*ptr).cond, ptr::null());
+    sys::mutex_init(&mut (*ptr).mutex, true);
+    sys::cond_init(&mut (*ptr).cond);
     ptr as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_acquire(c: *mut c_void) {
     if !c.is_null() {
-        libc::pthread_mutex_lock(&mut (*(c as *mut HlCondition)).mutex);
+        sys::mutex_lock(&mut (*(c as *mut HlCondition)).mutex);
     }
 }
 
@@ -227,13 +349,13 @@ pub unsafe extern "C" fn hlp_condition_try_acquire(c: *mut c_void) -> bool {
     if c.is_null() {
         return false;
     }
-    libc::pthread_mutex_trylock(&mut (*(c as *mut HlCondition)).mutex) == 0
+    sys::mutex_try_lock(&mut (*(c as *mut HlCondition)).mutex)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
     if !c.is_null() {
-        libc::pthread_mutex_unlock(&mut (*(c as *mut HlCondition)).mutex);
+        sys::mutex_unlock(&mut (*(c as *mut HlCondition)).mutex);
     }
 }
 
@@ -252,14 +374,14 @@ pub unsafe extern "C" fn hlp_condition_timed_wait(_c: *mut c_void, _timeout: f64
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_signal(c: *mut c_void) {
     if !c.is_null() {
-        libc::pthread_cond_signal(&mut (*(c as *mut HlCondition)).cond);
+        sys::cond_signal(&mut (*(c as *mut HlCondition)).cond);
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
     if !c.is_null() {
-        libc::pthread_cond_broadcast(&mut (*(c as *mut HlCondition)).cond);
+        sys::cond_broadcast(&mut (*(c as *mut HlCondition)).cond);
     }
 }
 
@@ -267,8 +389,8 @@ pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
 pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
     if !c.is_null() {
         let cv = c as *mut HlCondition;
-        libc::pthread_mutex_destroy(&mut (*cv).mutex);
-        libc::pthread_cond_destroy(&mut (*cv).cond);
+        sys::mutex_destroy(&mut (*cv).mutex);
+        sys::cond_destroy(&mut (*cv).cond);
         std::alloc::dealloc(c as *mut u8, std::alloc::Layout::new::<HlCondition>());
     }
 }
@@ -338,11 +460,7 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynami
 #[no_mangle]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
     pump_sdl_events();
-    let sleep_ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 16_000_000,
-    };
-    libc::nanosleep(&sleep_ts, std::ptr::null_mut());
+    std::thread::sleep(std::time::Duration::from_millis(16));
 }
 
 #[no_mangle]
@@ -412,6 +530,7 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
 // Thread-local storage
 // ============================================================================
 
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_alloc() -> *mut c_void {
     let mut key: libc::pthread_key_t = 0;
@@ -422,19 +541,64 @@ pub unsafe extern "C" fn hlp_tls_alloc() -> *mut c_void {
     }
 }
 
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
     libc::pthread_setspecific(tls as usize as libc::pthread_key_t, value);
 }
 
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
     libc::pthread_getspecific(tls as usize as libc::pthread_key_t)
 }
 
+#[cfg(unix)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
     libc::pthread_key_delete(tls as usize as libc::pthread_key_t);
+}
+
+// The Win32 slot index is biased by one on the way out: index 0 is perfectly
+// valid but would travel back as a null handle, which every caller reads as
+// "allocation failed".
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_tls_alloc() -> *mut c_void {
+    use windows_sys::Win32::System::Threading::{TlsAlloc, TLS_OUT_OF_INDEXES};
+    let index = TlsAlloc();
+    if index == TLS_OUT_OF_INDEXES {
+        ptr::null_mut()
+    } else {
+        (index as usize + 1) as *mut c_void
+    }
+}
+
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
+    if tls.is_null() {
+        return;
+    }
+    windows_sys::Win32::System::Threading::TlsSetValue(tls as usize as u32 - 1, value);
+}
+
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
+    if tls.is_null() {
+        return ptr::null_mut();
+    }
+    windows_sys::Win32::System::Threading::TlsGetValue(tls as usize as u32 - 1)
+}
+
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
+    if tls.is_null() {
+        return;
+    }
+    windows_sys::Win32::System::Threading::TlsFree(tls as usize as u32 - 1);
 }
 
 // ============================================================================
@@ -443,7 +607,16 @@ pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
-    libc::pthread_self() as usize as *mut c_void
+    #[cfg(unix)]
+    {
+        libc::pthread_self() as usize as *mut c_void
+    }
+    // Only ever compared for identity, so the thread id stands in for the
+    // pthread_t handle.
+    #[cfg(windows)]
+    {
+        windows_sys::Win32::System::Threading::GetCurrentThreadId() as usize as *mut c_void
+    }
 }
 
 #[no_mangle]

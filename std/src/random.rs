@@ -68,6 +68,9 @@ pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
     _r.cur = 0;
     _r.seeds.copy_from_slice(INIT_SEEDS);
     for i in 0..hl::NSEEDS {
-        _r.seeds[i as usize] ^= s as u64;
+        // seeds is `unsigned long`, which is 32-bit on MSVC and 64-bit on unix;
+        // widen through c_ulong so the seed mixes at the platform's width like
+        // the C `r->seeds[i] ^= s` does, instead of a hardcoded u64.
+        _r.seeds[i as usize] ^= s as ::std::os::raw::c_ulong;
     }
 }

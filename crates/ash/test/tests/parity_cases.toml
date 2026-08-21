@@ -201,6 +201,19 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Narrow values (i1/i8/i16) written through a dynamic field, all of which
+# reach hlp_dyn_seti's i32 parameter. Passing a Bool's i1 register straight
+# through built a call the LLVM verifier rejected, which drops the whole
+# program to the interpreter rather than failing loudly.
+name = "TestDynSetNarrow"
+main = "TestDynSetNarrow"
+hl = "test_dynset_narrow.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 name = "TestTrapLocals"
 main = "TestTrapLocals"
 hl = "test_trap_locals.hl"

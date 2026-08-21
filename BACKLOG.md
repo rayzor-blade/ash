@@ -100,32 +100,28 @@ The two FP cases are intended: compiled code fuses multiply-add, the
 interpreter rounds every opcode. The remaining five are worth a lane in the
 parity matrix once they are down.
 
-### Map value iteration disagrees between interp and jit
+### Map Int-values iteration is wrong under --mode jit — settled and cornered
 
-`for (v in someStringIntMap)` yields boxed pointers under `--mode jit` and
-the right integers under the interpreter. Four corpus cases hit it
-(TestMapSimple, TestMapIter, TestMapDebug2, TestMapDebug3).
+`for (v in map)` over an Int-VALUED map returns heap addresses under the
+whole-module JIT. Settled against stock HashLink 1.15 (agrees with ash's
+interpreter to the digit), so this is a jit defect, not interpreter
+permissiveness — the earlier open question here is closed.
 
-Isolated to exactly this shape — all of these are correct under both modes:
-iterating `Array<Int>`, iterating `Array<Dynamic>`, `var i:Int = someDynamic`,
-`var i:Int = callReturningDynamic()`, and `var i:Int = nativeArrayOfDynamic[0]`.
-Map *keys* are correct too. Only map values are wrong.
+The discriminator table, from TestMapIterAll (the committed fixture):
 
-`hlp_hbvalues` looks right: it allocates a `varray` of `hlt_dyn()` and fills
-it with the stored `vdynamic*`, and the printed addresses are 16 bytes
-apart, i.e. genuinely boxed. `BytesMap.iterator()` is
-`NativeArrayIterator<Dynamic>(valuesArray())`, and the Map abstract types it
-as `Iterator<Int>`, so a Dynamic→Int conversion has to happen somewhere. The
-interpreter gets the right answer because its registers are NaN-boxed and
-carry their own type; the JIT is statically typed and prints the pointer.
+    interp                          correct
+    hybrid                          correct
+    hybrid --jit-threshold 1        correct   <- EVERY function through the
+                                                 same LLVM lowering
+    hybrid --jit-tier cranelift     correct
+    --mode jit                      WRONG, Int values only
 
-That difference means the opcode is probably an `UnsafeCast`, which by
-definition does not convert — in which case ash's interpreter is being
-permissive rather than the JIT being wrong, and the question is what stock
-HashLink does. **Settling this needs a reference run**, which is exactly
-what `scripts/haxe_conformance.py --reference <hl>` provides; `hl` does not
-run on Apple Silicon, but the Linux conformance CI can. Do that before
-changing either side.
+String-valued maps, keys(), and keyValueIterator().value are correct even
+under jit. Since forcing every function through the identical lowering is
+correct while whole-module compilation is not, the defect is MODULE-LEVEL
+state only --mode jit sets up (its own constants/type-table init in
+jit/module.rs), not the shared per-function lowering — start there, not in
+the SafeCast/GetArray emission.
 
 ---
 

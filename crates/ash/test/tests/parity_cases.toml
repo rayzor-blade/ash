@@ -214,6 +214,19 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Map families x iterator forms, order-independent sums. Gates interp and
+# hybrid (both correct, agreeing with stock HashLink); the whole-module
+# JIT's Int-values mis-unbox is a known open defect tracked in BACKLOG —
+# this case is its fixture and its regression net once fixed.
+name = "TestMapIterAll"
+main = "TestMapIterAll"
+hl = "test_map_iter_all.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 # Sys.args(): the CLI used to reject the program's own arguments outright,
 # and the runtime's hlp_sys_init had no caller. Args here include a
 # hyphenated one, which is the form that clap ate.

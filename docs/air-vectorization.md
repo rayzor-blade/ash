@@ -1,107 +1,119 @@
-# Why AIR does not vectorize, and what it would take
+# Loop vectorization in AIR: why we have none, and what it needs
 
-Status as of 2026-08-21: **AIR has no vector notion at all** — no vector type,
-no vector instruction, no vectorizing pass. The Cranelift tier therefore emits
-purely scalar code, and the only SIMD in the product is whatever LLVM's own
-loop vectorizer finds after the fact. This is a gap in our IR, not a property
-of the backends: Cranelift's CLIF has full 128-bit SIMD on both targets, and
-it is emitting none of it because we never ask.
+Status 2026-08-21. **Nothing in the product vectorizes a loop.** Not the
+Cranelift tier, not the LLVM tier, not AIR. What LLVM contributes is SLP —
+straight-line vectorization *within one iteration* — which is a different
+transform that leaves the iteration count untouched.
 
-## Measured state (nbody, the FP kernel with independent lanes)
+## What the machine code actually shows
 
-| tier | vector arithmetic | evidence |
+nbody's inner loop, disassembled from the LLVM tier's own IR
+(`llc -mcpu=apple-m1`):
+
+```asm
+    fsub    d4, d2, d4          ; dz  — scalar
+    ldur    q5, [x17, #8]       ; load {x, y} as one 128-bit pair
+    fsub.2d v5, v1, v5          ; {dx, dy} — two lanes
+    fmul.2d v6, v5, v5          ; {dx², dy²}
+    faddp.2d d6, v6             ; HORIZONTAL add: dx² + dy²
+    fmadd   d6, d4, d4, d6      ; + dz²  — scalar
+    fsqrt   d6, d6              ; scalar
+    fdiv    d6, d0, d6          ; scalar
+```
+
+`faddp` is a horizontal reduce, and `fsqrt`/`fdiv` are scalar. That is the
+signature of **SLP on the x/y/z triple**: it packs two of the three spatial
+components into one register for the subtraction and squaring, then collapses
+them immediately. One loop iteration still computes one body pair.
+
+A *loop* vectorizer would do the opposite: keep two (or four) **iterations** in
+flight, so `fsqrt` and `fdiv` become `fsqrt.2d`/`fdiv.2d` and there is no
+horizontal op in the loop at all. That transform exists nowhere in our stack.
+
+The Cranelift tier is further back still: a full CLIF dump for nbody contains
+18 scalar FP instructions and **zero** vector types — no `f64x2`, no `f32x4`,
+nothing. It emits no SIMD of any kind.
+
+## Which of our loops are actually vectorizable
+
+| loop | vectorizable across iterations? | why |
 |---|---|---|
-| LLVM | **235 vector ops in IR → 173 NEON instructions** | `fmul.2d` ×65, `fmla.2d` ×42, `fsub.2d` ×22, `faddp.2d` ×22, `fmls.2d` ×21, `dup.2d` ×1, against 198 scalar FP — assembled from the dumped IR with `llc -mcpu=apple-m1` |
-| Cranelift | **zero** | full CLIF dump for nbody: 18 scalar FP ops; `f64x2`/`f32x4`/`i32x4`/`i8x16` appear zero times |
+| nbody `advance` inner `j` loop | **yes**, with work | `b[j]` reads/writes are independent per `j`; `a.vx/vy/vz` are **reductions**; needs a proof that `a` and `b[j]` do not alias (guaranteed by `j` starting at `i+1`, but the compiler must establish it) |
+| nbody final `for (body in bodies)` | **yes**, easily | pure elementwise over an array, no loop-carried values |
+| mandelbrot escape loop | **no** | `z = z² + c` is serial by construction |
+| mandelbrot pixel loop | yes *in principle* | vectorize across **pixels** — the classic mandelbrot SIMD shape — but trip counts diverge per lane, so it needs masking and a per-lane exit |
+| call benches (`sum = sum*31 + i%8`) | **no** | loop-carried multiply chain, chosen deliberately by the benchmark so the work survives optimization |
 
-Read the IR carefully when checking this: the count of `<2 x double>` *text*
-matches is misleading, because most of those are vector loads, stores,
-`insertelement` and `shufflevector`, which are memory traffic rather than
-arithmetic. Match `= fmul <flags> <N x T>` — the flags (`contract`) sit
-between the mnemonic and the type.
+So the payoff is concentrated in nbody and in masked outer-loop mandelbrot,
+and the Cranelift tier gains on every shape because it currently emits nothing.
 
-## Why AIR cannot express a vector today
+## What blocks it in AIR — corrected
 
-Three structural blockers, in order of depth:
+Earlier notes listed three blockers. One of them does not apply to a loop
+vectorizer, and that changes the shape of the work:
 
-1. **There is no type space to name `f64x2` in.** `TypeRef` is an opaque `u32`
-   index into the *embedder's* HL type table, and `air` never interprets it —
-   the crate's only type predicate is "is this float", carried as a sorted
-   `Vec<TypeRef>` and answered by binary search. A lane count has nowhere to
-   live. Either AIR mints a synthetic TypeRef space the embedder is taught to
-   skip, or lane information rides on the instruction as an immediate.
+1. **No type space for a lane count.** `TypeRef` is an opaque index into the
+   embedder's HL type table; `air` never interprets it, and its only type
+   predicate is "is this float". A vector type has nowhere to live today.
+   Lane info can ride on the instruction as an immediate instead of inventing
+   a type space — which is what rayzor does, deliberately, because
+   register-type inference is lost across inlining.
 
-2. **Every value is pinned to an HL register.** `ValueData { ty, reg }`, where
-   `reg` is the register de-SSA assigns the value back to. A 128-bit value has
-   no HL register to be assigned back to. The pass framework states this as a
-   hard invariant, and `privatize` exists to maintain it.
+2. **Values are pinned to HL registers.** `ValueData { ty, reg }`, where `reg`
+   is where de-SSA assigns the value. A 128-bit value has no HL register.
 
-3. **Every instruction must round-trip to scalar HL bytecode.** `serialize.rs`
-   emits an HL opcode array that the interpreter and the LLVM tier both read.
-   `Fma` is the existing precedent for an IR-only instruction and it pays this
-   tax explicitly: with no HL fused-multiply-add opcode, it serializes back to
-   `Mul tmp, a, b` + `Add dst, tmp, c` through an appended temporary. A vector
-   instruction would have to scalarize the same way (emit N scalar ops), or
-   the serialize path would need permission to fail for vector functions.
+3. ~~Every instruction must round-trip to scalar bytecode.~~ **Not a blocker
+   here.** The serialized array exists for the interpreter's SSA body and the
+   LLVM tier; the Cranelift tier calls `lower_air_function(..., &opt.ir, ...)`
+   and reads the **IR directly**. A vectorizer that runs as a late,
+   codegen-only pass — after `serialize` has taken its scalar snapshot —
+   produces vector values that never need an HL opcode at all. That is also
+   the correct place for it on general principle: vectorization is a
+   target-shaped transform, not a source-semantics one.
 
-Supporting gap: `analysis.rs` has `CfgInfo`, dominators, a `LoopForest` and an
-`AliasClass` lattice — but **no loop-carried dependence test and no
-stride/affine index analysis**, which is the analysis a vectorizer is mostly
-made of.
+   Consequence: blocker 2 softens too. Vector values are exempt from the
+   register invariant precisely because they never reach de-SSA.
 
-## How the sibling projects do it
+The genuine gap is **analysis**, not representation. `analysis.rs` gives us
+`CfgInfo`, dominators, a `LoopForest` and an `AliasClass` lattice. A loop
+vectorizer additionally needs:
 
-Both vectorize in their own IR and lower vectors themselves. Neither relies on
-a backend autovectorizer.
+- **induction variable + trip count** recognition (affine `i = i0 + k*n`);
+- **stride analysis** on memory accesses, so `b[j].x` is known to walk memory
+  at a constant stride;
+- **loop-carried dependence testing**, including recognizing a reduction
+  (`a.vx -= ...`) as a legal accumulator rather than a barrier;
+- **alias disambiguation** strong enough to prove `a` and `b[j]` are distinct,
+  or a runtime overlap guard when it cannot.
 
-**zyntax** — `HirType::Vector(elem, lanes)` plus 9 vector instructions; three
-passes (`auto_vectorize.rs`, `loop_vectorize.rs`, `reduction_vectorize.rs`,
-~4.7k lines together), a target-width model (`target_vector.rs`), and FMA
-contraction (`fma_contract.rs`). Lowering is implemented independently for
-Cranelift CLIF, LLVM via inkwell, wasm v128, and their bytecode interpreter,
-with IR-verification tests asserting on emitted LLVM IR and WAT text. Known
-gap on their side: no memory dependence or alias analysis, acknowledged as a
-TODO, and no runtime overlap guard.
+Both sibling projects list exactly this analysis as their outstanding hole:
+zyntax's three vectorization passes (~4.7k lines) have no memory dependence
+analysis and emit no runtime overlap guard, and rayzor's `LoopVectorizationPass`
+(2056 lines) is O3-only, requires a compile-time-constant trip count, and does
+no dependence analysis either. In both projects the SIMD that actually ships
+comes from hand-written kernels, not the automatic pass — which is a warning
+about where the effort really goes.
 
-**rayzor** — `IrType::Vector { element, count }` plus 13 `Vector*` opcodes
-(`VectorLoad/Store/BinOp/Splat/Extract/Insert/Reduce/UnaryOp/MinMax/Dot/
-Shuffle/Convert/Narrow`), lowered to CLIF (`F32X4`/`I32X4`/`I8X16`, `splat`,
-`extractlane`, `fma`, `iadd_pairwise`, `swizzle`), LLVM, wasm and C. Two of
-their opcodes are explicit cross-backend *contracts* — `VectorShuffle`
-documents the intersection of `pshufb` / `tbl1` / `i8x16.swizzle` semantics so
-one opcode lowers to one instruction everywhere, and `VectorDot` names its
-signedness variants. They carry lane type on the instruction rather than
-inferring it, because register-type inference is lost across inlining. Their
-`LoopVectorizationPass` (2056 lines) is O3-only, needs a constant trip count,
-and does no dependence analysis; in practice most of their SIMD comes from a
-hand-written `@:coreType` SIMD API that lowers straight to those opcodes.
+## Ordered path
 
-The lesson from both: the **opcode set and its lowering contracts** are the
-durable part; the automatic pass is the thin, fragile part that arrives later.
+1. **Analysis first, transform second.** Induction/trip-count + stride +
+   dependence testing on top of the existing `LoopForest`. This is the
+   majority of the work and it is independently testable against the corpus
+   before any codegen changes.
+2. **A codegen-only vector value.** Lane count as an instruction immediate;
+   vector values valid only after `serialize`, never reaching de-SSA.
+3. **Widen + epilogue.** The standard transform: vector body for
+   `trip - trip % W` iterations, scalar epilogue for the remainder. Reductions
+   get a vector accumulator plus one horizontal collapse *after* the loop —
+   which is exactly the `faddp` that today sits *inside* it.
+4. **Cranelift lowering.** CLIF's `fadd`/`fmul`/`fma`/`fsqrt`/`fdiv` are
+   already polymorphic over lane types, so this is short, and it is the tier
+   with zero SIMD today.
+5. **LLVM tier.** Either teach it to consume the vector IR the same way, or
+   let its own vectorizer keep the shapes it already finds — the tier that
+   gains least should not gate the tier that gains most.
+6. **Masked/divergent loops** (mandelbrot across pixels) last: per-lane exit
+   masks are a strictly harder transform than the uniform case.
 
-## The path for AIR
-
-Ordered so that each step is useful on its own:
-
-1. **Vector values in the IR.** Pick the type-space answer (synthetic TypeRef
-   vs. lane immediates on instructions) and the register answer (most likely:
-   vector values are exempt from `ValueData::reg`, with a validity rule that
-   they never survive to `serialize`). This is the decision that gates
-   everything else.
-2. **A small vector opcode set with lowering contracts**, in rayzor's style:
-   elementwise binop, splat, load/store, extract/insert, and a reduction.
-   Each one documented by the *intersection* of what aarch64 NEON and x86-64
-   SSE2/AVX2 can do in one instruction.
-3. **Cranelift lowering first.** It is the tier with zero SIMD today, so it
-   gains most, and CLIF's polymorphic `fadd`/`fmul`/`fma` over lane types
-   makes the lowering short.
-4. **A source-level SIMD API** (the rayzor/zyntax pattern) so hand-written
-   kernels can reach the opcodes without waiting for the automatic pass.
-5. **Dependence analysis, then the automatic pass.** Stride/affine index
-   analysis plus a loop-carried dependence test; without those a loop
-   vectorizer is unsound, and both sibling projects list exactly this as their
-   outstanding hole.
-
-Reduction-shaped loops (nbody's accumulation) need step 5's dependence work
-plus a reassociation decision, since fp reduction reassociation changes
-results — the same class of decision the FMA policy already documents.
+FP reduction reassociation changes results, so step 3 needs the same explicit
+policy decision the FMA contraction already documents.

@@ -82,18 +82,22 @@ pub(crate) fn mode() -> AirMode {
     })
 }
 
-/// The v2 opt level, from `ASH_AIR_LEVEL` — the same variable the whole-module
-/// sweep in `ash_cli` reads. O2 by default, which is the level v1 runs at, so
-/// the two pipelines are compared at the same nominal strength.
+/// The v2 opt level, from `ASH_AIR_LEVEL` — the same variable, and now the
+/// same default, as [`air_pipeline::default_level`], which is what the
+/// Cranelift tier and the interpreter's SSA body already consume.
+///
+/// This used to default to O2 while the shared cache defaulted to O3, and
+/// the two passes that differ are exactly the two that matter: the inliner,
+/// and SROA behind it. HL hands every `new C(...)` straight to a constructor
+/// call, so an allocation escapes until that constructor is inlined — which
+/// meant the LLVM tier kept per-iteration allocations the Cranelift tier had
+/// already dissolved, and mandelbrot's LLVM code ran ~2x slower than its
+/// Cranelift code (917ms against 420ms, two `hlp_alloc_obj` calls per
+/// escape-loop iteration visible in the IR). The top tier was optimizing
+/// less than the middle one.
 fn level() -> AirOptLevel {
     static LEVEL: OnceLock<AirOptLevel> = OnceLock::new();
-    *LEVEL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
-        Ok(s) if !s.is_empty() => air_pipeline::parse_level(&s).unwrap_or_else(|| {
-            eprintln!("[air] invalid ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O2");
-            AirOptLevel::O2
-        }),
-        _ => AirOptLevel::O2,
-    })
+    *LEVEL.get_or_init(air_pipeline::default_level)
 }
 
 /// v2 pass options. Only the FMA peephole is exposed, via `ASH_AIR_FMA=0`,

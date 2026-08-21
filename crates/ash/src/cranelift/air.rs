@@ -240,9 +240,16 @@ struct RetierState {
 static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierState>>> =
     std::sync::Mutex::new(None);
 
+/// Off by default, and the reason is measured, not cautious: the exits work
+/// (a mandelbrot frame reaches LLVM mid-loop, which its checksum proves),
+/// but this tier's LLVM code is currently SLOWER than its Cranelift code on
+/// FP kernels — mandelbrot best-of-3 goes 389ms -> 636ms when frames climb.
+/// The call benches gain (inlined 163 -> 147, method 210 -> 196), so this
+/// flips on the day the LLVM-tier deficit is fixed. `ASH_CL_RETIER=1` opts
+/// in meanwhile.
 fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v != "0"))
 }
 
 /// Allocate (once) and return this function's re-tier state as codegen wants
@@ -288,6 +295,47 @@ pub(super) fn retier_state_for(
         .filter_map(|(b, pc)| st.slots.get(pc).map(|&s| (b as u32, s)))
         .collect();
     (exits, st.buf)
+}
+
+/// Whether a loop header should carry a re-tier poll.
+///
+/// The poll is a load and a branch per iteration, so its cost is set by what
+/// else the iteration does. In a tight leaf loop it is ruinous: mandelbrot's
+/// escape loop is ~10 instructions running ~180M times, and the poll cost
+/// 249ms of a 391ms run — measured with the exits compiled in but never
+/// fired, so this is the poll itself, not the transfer.
+///
+/// The rule is nesting, not body size: poll a loop unless it is a LEAF loop
+/// that some other loop encloses. An enclosing loop divides the poll's
+/// iteration count by the inner loop's trip count, and its own header
+/// catches the frame soon enough — a frame cannot stay in an inner loop
+/// forever without the outer one advancing. A leaf loop with no parent is
+/// the only loop its frame can be stuck in, so it must carry the poll; that
+/// is the call benches' single loop, and they are what the top tier helps.
+///
+/// Body size was tried first and is the wrong measure: this IR splits a
+/// loop across many small blocks, so mandelbrot's ~10-instruction escape
+/// loop sums well past any threshold and kept its poll.
+fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
+    let cfg = air::v2::CfgInfo::build(f);
+    let forest = air::v2::LoopForest::analyze(f, &cfg);
+    let Some(l) = forest
+        .innermost_first()
+        .into_iter()
+        .find(|&l| forest.get(l).header.0 == header)
+    else {
+        return false;
+    };
+    // OUTERMOST loops only. An enclosed header costs more than its own
+    // polls: the exit must materialize a register image, which keeps every
+    // dominating definition live at the header, and for a header wrapping a
+    // hot inner loop that pressure lands inside the inner loop's register
+    // allocation. Polling mandelbrot's pixel loop — 437k iterations, so the
+    // loads themselves are noise — still cost ~200ms of a 467ms run that
+    // way. The outermost header pays no such cost, and bounds the transfer
+    // latency by one of its own iterations, which is what a frame stuck
+    // anywhere inside actually needs.
+    forest.get(l).parent.is_none()
 }
 
 /// Publish an LLVM OSR entry address into the slot for `(findex, pc)`.
@@ -412,9 +460,20 @@ fn try_air_codegen(
             let headers: Vec<(u32, usize)> = plan
                 .entry_headers
                 .iter()
+                .filter(|&&h| retier_worth_polling(&opt.ir, h))
                 .filter_map(|&h| opt.ser.block_pcs.get(h as usize).map(|&pc| (h, pc)))
                 .collect();
-            retier_alloc(findex, &headers, opt.ser.reg_types.len())
+            if std::env::var("ASH_OSR_LOG").is_ok() {
+                eprintln!(
+                    "[retier] findex={findex} eligible={:?} polled={:?}",
+                    plan.entry_headers, headers
+                );
+            }
+            if headers.is_empty() {
+                (HashMap::new(), 0)
+            } else {
+                retier_alloc(findex, &headers, opt.ser.reg_types.len())
+            }
         } else {
             (HashMap::new(), 0)
         }

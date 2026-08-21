@@ -506,10 +506,18 @@ impl AirCodegen<'_, '_> {
         self.b.set_cold_block(exit);
 
         let slot_addr = self.b.ins().iconst(types::I64, slot as i64);
+        // A PLAIN load, deliberately: an acquire load is a barrier, and one
+        // barrier per iteration serialized mandelbrot's FP pipeline (371ms
+        // -> 619ms measured). A naturally-aligned pointer-width load is
+        // indivisible on both targets, the publisher stores a pointer to
+        // code that was finalized before the store, and the consumer's only
+        // use of the value is as a branch target — an address dependency,
+        // which no reordering can break. Missing a publication for a few
+        // iterations is also harmless: the next iteration takes the exit.
         let target = self
             .b
             .ins()
-            .atomic_load(types::I64, MemFlags::trusted(), slot_addr);
+            .load(types::I64, MemFlags::trusted(), slot_addr, 0);
         self.b.ins().brif(target, exit, &[], body, &[]);
 
         // ---- cold exit: spill the image, call the entry, return ----------

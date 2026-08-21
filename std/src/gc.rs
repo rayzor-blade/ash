@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, mem};
@@ -322,6 +322,31 @@ static GC_STATS: GcStatCounters = GcStatCounters {
     pause_ns_total: AtomicU64::new(0),
     pause_ns_max: AtomicU64::new(0),
 };
+
+// ── Collection switch (`Gc.enable`) ─────────────────────────────────────────
+
+/// Upstream's `gc_is_active`: consulted by the automatic trigger only.
+/// Explicit collections and the heap-exhaustion backstop ignore it, so
+/// disabling never turns an allocation into a hard failure. An atomic rather
+/// than a heap field because callers reach `hlp_gc_enable` from anywhere,
+/// including from under the GC lock.
+static GC_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Pressure at which a disabled collector collects anyway.
+///
+/// `Gc.enable(false)` with no matching re-enable is a real pattern — a load
+/// screen that throws, a `finally` that never runs — and honouring it to the
+/// end of the heap converts a pause the program asked to defer into an
+/// out-of-memory abort. Four times the adaptive ceiling is far past any
+/// legitimate no-collect window while still leaving most of the default
+/// reservation in hand.
+const GC_DISABLED_MAX_PRESSURE: usize = TRIGGER_CEILING * 4;
+
+/// Is a *triggered* collection allowed to run right now? `pressure` is the
+/// byte total the trigger fired on.
+fn triggered_collection_allowed(pressure: usize) -> bool {
+    GC_ENABLED.load(Ordering::Relaxed) || pressure >= GC_DISABLED_MAX_PRESSURE
+}
 
 fn fmt_mb(bytes: u64) -> String {
     format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
@@ -876,9 +901,13 @@ impl ImmixAllocator {
                 || (self.heap.alloc_count & 1023 == 0
                     && self.heap.last_collect.elapsed() >= HEARTBEAT)
         };
-        if due || self.heap.collect_pending {
-            self.collect_garbage();
+        if !(due || self.heap.collect_pending) {
+            return;
         }
+        if !triggered_collection_allowed(pressure) {
+            return;
+        }
+        self.collect_garbage();
     }
 
     fn maybe_collect(&mut self) {
@@ -903,6 +932,12 @@ impl ImmixAllocator {
                     && self.heap.last_collect.elapsed() >= HEARTBEAT)
         };
         if !due {
+            return;
+        }
+        // A disabled collector still gives ground to runaway pressure; the
+        // accumulated counters are not cleared here, so re-enabling collects
+        // at the very next allocation.
+        if !triggered_collection_allowed(pressure) {
             return;
         }
         if self.heap.safepoint_mode {
@@ -2108,6 +2143,161 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
 pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
     let mut gc = gc_locked_init();
     gc.track_external(bytes as usize);
+}
+
+/// Upstream hl_gc_enable (gc.c): flip the automatic collector on or off.
+///
+/// Only the *trigger* is suppressed. `Gc.major`, the heap-exhaustion backstop
+/// in [`ImmixAllocator::allocate`], and the runaway-pressure escape hatch
+/// ([`GC_DISABLED_MAX_PRESSURE`]) all still collect, so a program that
+/// disables the GC and never re-enables it loses collections, not the heap.
+/// Nothing here takes a lock, so it cannot deadlock against a collection in
+/// flight on another thread.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_enable(b: bool) {
+    GC_ENABLED.store(b, Ordering::Relaxed);
+}
+
+/// Read a NUL-terminated UTF-8 C string, bounded so a caller that forgets the
+/// terminator walks a page rather than the address space.
+///
+/// UTF-8, not the usual UTF-16: `hl_gc_dump_memory` takes `const char*` and
+/// `hl.Gc.dumpMemory` passes `fileName.toUtf8()`.
+unsafe fn c_utf8_path(p: *const hl::vbyte) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < 4096 && *p.add(len) != 0 {
+        len += 1;
+    }
+    if len == 0 {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(p, len);
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Upstream hl_gc_dump_memory (gc.c): mark, then write the heap out for
+/// offline analysis.
+///
+/// The file is NOT HashLink's `HMD1`. That format is a transcript of
+/// HashLink's own allocator — `gc_pheader`, page kinds, per-page block
+/// iteration — and ash's Immix heap has none of those structures to
+/// transcribe. Writing ash's numbers under HashLink's magic would make
+/// `hl memory` mis-parse the file instead of rejecting it, so the magic says
+/// what the file actually is and the body is self-describing text.
+///
+/// The mark is a real one (it is what makes the per-block census mean
+/// anything), but nothing is swept: a dump must not change what the program
+/// can still reach. The bits it sets are left standing rather than cleared —
+/// a mark bit only ever *retains* a block, and the next sweep clears them all
+/// — so the cost of dumping is at most one extra conservative cycle. Clearing
+/// them would be the unsafe direction: it would also drop the marks
+/// allocation-time marking had already set.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
+    use std::io::Write;
+
+    let path = c_utf8_path(filename).unwrap_or_else(|| "hlmemory.dump".to_string());
+    let Ok(file) = std::fs::File::create(&path) else {
+        eprintln!("[gc] dump_memory: cannot create {path}");
+        return;
+    };
+    let mut out = std::io::BufWriter::new(file);
+
+    let mut gc = gc_locked_init();
+
+    // Before the mutator has entered user code there is no stack to scan
+    // conservatively, and marking from a partial root set would report
+    // live data as garbage.
+    let marked = gc.stack_top != 0;
+    if marked {
+        gc.mark_roots();
+    }
+
+    let heap_base = gc.heap.memory.as_ptr() as usize;
+    let heap_len = gc.heap.memory.len;
+    let roots = gc.roots.borrow();
+
+    let mut w = |line: String| {
+        let _ = writeln!(out, "{line}");
+    };
+    w("ASHMEM1 ash-immix".into());
+    w(format!("pointer-size {}", mem::size_of::<usize>()));
+    w(format!("heap-base {heap_base:#x}"));
+    w(format!("heap-size {heap_len}"));
+    w(format!("block-size {BLOCK_SIZE}"));
+    w(format!("line-size {LINE_SIZE}"));
+    w(format!("blocks-total {}", heap_len / BLOCK_SIZE));
+    w(format!("blocks-used {}", gc.heap.used_blocks.len()));
+    w(format!("blocks-free {}", gc.heap.free_blocks.len()));
+    w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
+    match gc.heap.tlab_block {
+        Some(b) => w(format!("tlab-block {:#x}", heap_base + b)),
+        None => w("tlab-block none".into()),
+    }
+    w(format!("alloc-count {}", gc.heap.alloc_count));
+    w(format!("bytes-since-gc {}", gc.heap.bytes_since_gc));
+    w(format!("external-since-gc {}", gc.heap.external_since_gc));
+    w(format!("trigger-threshold {}", gc.heap.trigger_threshold));
+    w(format!(
+        "collector-enabled {}",
+        GC_ENABLED.load(Ordering::Relaxed)
+    ));
+    w(format!("safepoint-mode {}", gc.heap.safepoint_mode));
+    w(format!(
+        "collections {}",
+        GC_STATS.collections.load(Ordering::Relaxed)
+    ));
+    w(format!(
+        "blocks-reclaimed {}",
+        GC_STATS.blocks_reclaimed.load(Ordering::Relaxed)
+    ));
+    w(format!(
+        "bytes-allocated {}",
+        GC_STATS.bytes_allocated.load(Ordering::Relaxed)
+    ));
+    w(format!(
+        "external-bytes {}",
+        GC_STATS.external_bytes.load(Ordering::Relaxed)
+    ));
+    w(format!(
+        "pause-ns-total {}",
+        GC_STATS.pause_ns_total.load(Ordering::Relaxed)
+    ));
+    w(format!(
+        "pause-ns-max {}",
+        GC_STATS.pause_ns_max.load(Ordering::Relaxed)
+    ));
+    w(format!("roots-globals {}", roots.globals.len()));
+    w(format!("roots-stack {}", roots.stack_roots.len()));
+    w(format!("roots-persistent {}", roots.persistent_roots.len()));
+    w(format!("scan-ranges {}", roots.scan_ranges.len()));
+    w(format!("marked {marked}"));
+
+    // One line per retained block: address, live lines, live bytes at line
+    // granularity. Line marks are the finest liveness ash records — reclaim
+    // is whole-block, so a block's marked-line count is its real occupancy.
+    w("# block <addr> <live-lines> <live-bytes>".into());
+    let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
+    used.sort_unstable();
+    for block_addr in used {
+        let live = gc.blocks[block_addr / BLOCK_SIZE]
+            .mark_bits
+            .iter()
+            .filter(|m| **m)
+            .count();
+        w(format!(
+            "block {:#x} {live} {}",
+            heap_base + block_addr,
+            live * LINE_SIZE
+        ));
+    }
+    w("end".into());
+
+    drop(roots);
+    let _ = out.flush();
 }
 
 // ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────

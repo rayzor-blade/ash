@@ -568,6 +568,31 @@ pub unsafe extern "C" fn hlp_alloc_enum_dyn(
     e
 }
 
+/// Upstream hl_enum_parameters (types.c): the constructor arguments of an
+/// enum value, boxed into a `Dynamic` array in declaration order.
+///
+/// The prim is declared `_ARR enum_parameters(_DYN)`, so a caller can hand
+/// over any dynamic — including one that is not an enum. Upstream would walk
+/// a garbage `tenum` there; an empty array is the answer that cannot corrupt
+/// the heap.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_enum_parameters(e: *mut venum) -> *mut varray {
+    if e.is_null() || (*e).t.is_null() || (*(*e).t).kind != hl_type_kind_HENUM {
+        return hlp_alloc_array(hlt_dyn(), 0);
+    }
+    let tenum = (*(*e).t).__bindgen_anon_1.tenum;
+    if tenum.is_null() || (*e).index < 0 || (*e).index >= (*tenum).nconstructs {
+        return hlp_alloc_array(hlt_dyn(), 0);
+    }
+    let c = (*tenum).constructs.add((*e).index as usize);
+    let a = hlp_alloc_array(hlt_dyn(), (*c).nparams);
+    for i in 0..(*c).nparams as usize {
+        let field = (e as *mut u8).add(*(*c).offsets.add(i) as usize) as *mut c_void;
+        *hl_aptr::<*mut vdynamic>(a).add(i) = crate::cast::hlp_make_dyn(field, *(*c).params.add(i));
+    }
+    a
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varray {
     // Use persistent hlt_bytes() so the at pointer does not dangle after return

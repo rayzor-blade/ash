@@ -638,6 +638,28 @@ pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray 
     a
 }
 
+/// Upstream _MNAME(clear) (maps.h): zero the whole map header. That is also
+/// the shape `allocate_map(0)` hands back, so the cleared map takes the same
+/// resize-on-first-set path a fresh one does; the cell/entry/value arrays it
+/// dropped are ordinary GC allocations and are reclaimed by the collector.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbclear(m: *mut hl::hl_hb_map) {
+    if m.is_null() {
+        return;
+    }
+    ptr::write_bytes(m as *mut u8, 0, mem::size_of::<hl::hl_hb_map>());
+}
+
+/// Upstream _MNAME(size) (maps.h).
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
+    if m.is_null() {
+        0
+    } else {
+        (*m).nentries
+    }
+}
+
 // ============================================================================
 // IntMap (hi*) — HashMap<i32, *mut vdynamic>
 // ============================================================================

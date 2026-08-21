@@ -220,87 +220,95 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
     len: i32,
     size: *mut i32,
 ) -> *mut vbyte {
-    if str.is_null() || size.is_null() {
+    if str.is_null() {
         return ptr::null_mut();
     }
-
     let str = str as *const uchar;
 
-    let mut utf8_len = 0;
-    let mut i = 0;
-
-    // First pass: count the number of UTF-8 bytes needed
-    while i < len {
-        let c = *str.offset(i as isize);
-        if c < 0x80 {
-            utf8_len += 1;
-        } else if c < 0x800 {
-            utf8_len += 2;
-        } else if (0xD800..=0xDBFF).contains(&c) && i + 1 < len {
-            // Surrogate pair
-            let c2 = *str.offset((i + 1) as isize);
-            if (0xDC00..=0xDFFF).contains(&c2) {
-                utf8_len += 4;
-                i += 1;
-            } else {
-                utf8_len += 3;
-            }
-        } else {
-            utf8_len += 3;
+    // `len == 0` means "scan to the NUL", it does not mean "empty". Upstream
+    // is `end = len == 0 ? NULL : c + len`, and `hl_to_utf8` — which is how
+    // `Sys.getPath` reaches this function for every sys.io.File call — passes
+    // exactly 0. Treating it as a length produced an empty string, so every
+    // file operation opened "" and threw SysError.
+    let count = if len > 0 {
+        len as usize
+    } else {
+        let mut n = 0usize;
+        while *str.add(n) != 0 {
+            n += 1;
         }
-        i += 1;
+        n
+    };
+
+    // Both passes must agree on how many UTF-16 units each character spans,
+    // so the surrogate decision is made once here.
+    let unit_len = |i: usize| -> (u32, usize) {
+        let c = *str.add(i) as u32;
+        if (0xD800..=0xDBFF).contains(&c) && i + 1 < count {
+            let c2 = *str.add(i + 1) as u32;
+            if (0xDC00..=0xDFFF).contains(&c2) {
+                return (0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00)), 2);
+            }
+        }
+        (c, 1)
+    };
+
+    let mut utf8_len = 0usize;
+    let mut i = 0usize;
+    while i < count {
+        let (c, units) = unit_len(i);
+        utf8_len += match c {
+            0..=0x7F => 1,
+            0x80..=0x7FF => 2,
+            0x800..=0xFFFF => 3,
+            _ => 4,
+        };
+        i += units;
     }
 
-    // Allocate memory for the UTF-8 string
-    let result = crate::bytes::hlp_alloc_bytes(utf8_len + 1) as *mut vbyte;
+    let result = crate::bytes::hlp_alloc_bytes(utf8_len as i32 + 1) as *mut vbyte;
     if result.is_null() {
         return ptr::null_mut();
     }
 
-    // Second pass: convert UTF-16 to UTF-8
-    let mut j = 0;
+    let mut j = 0isize;
     i = 0;
-    while i < len {
-        let mut c = *str.offset(i as isize) as u32;
-        if c < 0x80 {
-            *result.offset(j) = c as vbyte;
-            j += 1;
-        } else if c < 0x800 {
-            *result.offset(j) = (0xC0 | (c >> 6)) as vbyte;
-            *result.offset(j + 1) = (0x80 | (c & 0x3F)) as vbyte;
-            j += 2;
-        } else if (0xD800..=0xDBFF).contains(&c) && i + 1 < len {
-            // Surrogate pair
-            let c2 = *str.offset((i + 1) as isize) as u32;
-            if (0xDC00..=0xDFFF).contains(&c2) {
-                c = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00));
-                *result.offset(j) = (0xF0 | (c >> 18)) as vbyte;
-                *result.offset(j + 1) = (0x80 | ((c >> 12) & 0x3F)) as vbyte;
-                *result.offset(j + 2) = (0x80 | ((c >> 6) & 0x3F)) as vbyte;
-                *result.offset(j + 3) = (0x80 | (c & 0x3F)) as vbyte;
-                j += 4;
-                i += 1;
-            } else {
+    while i < count {
+        let (c, units) = unit_len(i);
+        match c {
+            0..=0x7F => {
+                *result.offset(j) = c as vbyte;
+                j += 1;
+            }
+            0x80..=0x7FF => {
+                *result.offset(j) = (0xC0 | (c >> 6)) as vbyte;
+                *result.offset(j + 1) = (0x80 | (c & 0x3F)) as vbyte;
+                j += 2;
+            }
+            0x800..=0xFFFF => {
                 *result.offset(j) = (0xE0 | (c >> 12)) as vbyte;
                 *result.offset(j + 1) = (0x80 | ((c >> 6) & 0x3F)) as vbyte;
                 *result.offset(j + 2) = (0x80 | (c & 0x3F)) as vbyte;
                 j += 3;
             }
-        } else {
-            *result.offset(j) = (0xE0 | (c >> 12)) as vbyte;
-            *result.offset(j + 1) = (0x80 | ((c >> 6) & 0x3F)) as vbyte;
-            *result.offset(j + 2) = (0x80 | (c & 0x3F)) as vbyte;
-            j += 3;
+            _ => {
+                *result.offset(j) = (0xF0 | (c >> 18)) as vbyte;
+                *result.offset(j + 1) = (0x80 | ((c >> 12) & 0x3F)) as vbyte;
+                *result.offset(j + 2) = (0x80 | ((c >> 6) & 0x3F)) as vbyte;
+                *result.offset(j + 3) = (0x80 | (c & 0x3F)) as vbyte;
+                j += 4;
+            }
         }
-        i += 1;
+        i += units;
     }
-
-    // Null-terminate the UTF-8 string
     *result.offset(j) = 0;
 
-    // *size is the UTF-16 length in BYTES (callers compute chars as size>>1,
-    // matching upstream hl_utf8_to_utf16), not the UTF-8 source length.
-    *size = j as i32;
+    // A null `size` is legal and is what `hl_to_utf8` passes; rejecting it
+    // returned null for every caller that did not want the length back.
+    // The value is the UTF-8 byte count, excluding the terminator.
+    if !size.is_null() {
+        *size = j as i32;
+    }
 
     result
 }

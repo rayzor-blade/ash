@@ -741,6 +741,40 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
 }
 
 // ============================================================================
+// GC blocking sections
+// ============================================================================
+
+thread_local! {
+    /// Nesting depth of `Gc.blocking(true)` on this OS thread.
+    static GC_BLOCKING_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Upstream hl_blocking (gc.c): enter or leave a section during which the
+/// collector must not wait for this thread.
+///
+/// There is nothing here for it to wait on. ash's collector never stops the
+/// world — it runs on whichever thread allocated, under the GC lock — and
+/// Haxe threads are krio fibers sharing the mutator's OS thread, so a fiber
+/// parked in a blocking section is simply not on the stack the conservative
+/// scanner walks. The depth is therefore bookkeeping: it records the state a
+/// stop-the-world protocol would need, and suspends nothing.
+///
+/// Upstream raises "Unblocked thread" on an unmatched `blocking(false)`. Not
+/// here: interleaved fibers share this one counter, so a correctly paired
+/// program could still see another fiber's decrement and die on the error.
+/// The depth saturates at zero instead.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_blocking(b: bool) {
+    GC_BLOCKING_DEPTH.with(|d| {
+        d.set(if b {
+            d.get().saturating_add(1)
+        } else {
+            d.get().saturating_sub(1)
+        });
+    });
+}
+
+// ============================================================================
 // Memory tracking stubs
 // ============================================================================
 

@@ -4860,7 +4860,9 @@ impl<'ctx> JITModule<'ctx> {
         reg_types: &[BasicTypeEnum<'ctx>],
         a: &crate::opcodes::Reg,
         b: &crate::opcodes::Reg,
-        a_kind: u32,
+        // The bindgen alias, not a bare integer: MSVC types the C enum i32
+        // where clang types it u32, so only the alias compiles on both.
+        a_kind: crate::hl::hl_type_kind,
         int_pred: IntPredicate,
         float_pred: FloatPredicate,
         i: usize,

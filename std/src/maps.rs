@@ -347,7 +347,6 @@ pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
 }
 
 #[no_mangle]
-#[allow(clippy::useless_assignment)]
 pub unsafe extern "C" fn hlp_hbset(
     mut m: *mut hl::hl_hb_map,
     key: *mut hl::uchar,
@@ -397,7 +396,7 @@ pub unsafe extern "C" fn hlp_hbset(
         ptr::write(dst, ptr::read(src));
         ptr::write(
             ((*m).cells as *mut i32).wrapping_add(ckey as usize),
-            c as i32,
+            c,
         );
     }
     (*(*m).values.wrapping_add(c as usize)).value = value;

@@ -7,9 +7,9 @@ fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .expect("usage: codegen_gate <file.hl>");
-    ash::native_lib::init_std_library()?;
-    let bc = ash::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
-    let m = ash::air_pipeline::AshModule::new(&bc);
+    ash_core::native_lib::init_std_library()?;
+    let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
+    let m = ash_core::air_pipeline::AshModule::new(&bc);
 
     let (mut both, mut neither, mut widened, mut narrowed, mut failed) = (0, 0, 0, 0, 0);
     let mut opcode_reasons: Vec<(String, usize)> = Vec::new();
@@ -23,19 +23,19 @@ fn main() -> anyhow::Result<()> {
     };
 
     for f in &bc.functions {
-        let by_opcode = ash::cranelift::lower::lowering_reject_reason(&bc, f);
+        let by_opcode = ash_core::cranelift::lower::lowering_reject_reason(&bc, f);
         if let Some(r) = &by_opcode {
             tally(&mut opcode_reasons, r);
         }
-        let opt = match ash::air_pipeline::optimized(&m, f) {
+        let opt = match ash_core::air_pipeline::optimized(&m, f) {
             Ok(o) => o,
             Err(_) => {
                 failed += 1;
                 continue;
             }
         };
-        let by_air = ash::cranelift::lower::signature_reject_reason(&bc, f)
-            .or_else(|| ash::cranelift::codegen::reject_reason(&opt.ir));
+        let by_air = ash_core::cranelift::lower::signature_reject_reason(&bc, f)
+            .or_else(|| ash_core::cranelift::codegen::reject_reason(&opt.ir));
         if let Some(r) = &by_air {
             tally(&mut air_reasons, r);
         }

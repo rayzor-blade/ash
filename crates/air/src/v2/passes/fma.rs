@@ -175,11 +175,10 @@ fn reg_untouched_between(f: &Function, b: usize, from: usize, to: usize, reg: u3
             }
         }
         match ins {
-            Instr::CellSet { cell, .. } | Instr::CellIncr { cell } | Instr::CellDecr { cell } => {
-                if f.cells[cell.idx()].reg == reg {
+            Instr::CellSet { cell, .. } | Instr::CellIncr { cell } | Instr::CellDecr { cell }
+                if f.cells[cell.idx()].reg == reg => {
                     return false;
                 }
-            }
             Instr::Asm { reg: r, .. } if *r == reg => return false,
             _ => {}
         }

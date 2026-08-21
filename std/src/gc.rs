@@ -1,3 +1,8 @@
+// `static mut` + raw-pointer access is this module's deliberate story (the
+// VM's single-threaded invariant): `static_mut_refs` demands the
+// `&raw`/deref spelling, and these two style lints then flag exactly that
+// spelling. The trio cannot all be satisfied at once.
+#![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use crate::error::{HLException, TrapContext, VDynamicException};
 use crate::hl::{self, hl_type, hl_type_obj, vclosure, vdynamic, HL_WSIZE};
 use crate::types::hlp_type_size;
@@ -589,14 +594,14 @@ impl std::ops::DerefMut for GcRef {
 /// Acquire the GC lock and return a handle to the (initialized) singleton.
 pub(crate) fn gc_locked() -> GcRef {
     let guard = gc_guard();
-    let gc = unsafe { GC.get_mut().expect("GC not initialized") as *mut ImmixAllocator };
+    let gc = unsafe { (*(&raw mut GC)).get_mut().expect("GC not initialized") as *mut ImmixAllocator };
     GcRef { gc, _guard: guard }
 }
 
 /// Acquire the GC lock, initializing the singleton if needed.
 pub(crate) fn gc_locked_init() -> GcRef {
     let guard = gc_guard();
-    let gc = unsafe { GC.get_mut_or_init(ImmixAllocator::new) as *mut ImmixAllocator };
+    let gc = unsafe { (*(&raw mut GC)).get_mut_or_init(ImmixAllocator::new) as *mut ImmixAllocator };
     GcRef { gc, _guard: guard }
 }
 
@@ -669,7 +674,6 @@ struct ImmixHeap {
 #[derive(Debug, Clone)]
 struct Block {
     mark_bits: [bool; LINES_PER_BLOCK],
-    evacuation_candidate: bool,
     /// True while any multi-line allocation span is recorded in this block.
     /// The marker's walk-back only exists to find span starts; a block that
     /// never held one (every TLAB churn block) marks in O(1) instead of
@@ -708,6 +712,12 @@ pub(crate) struct FiberStackInfo {
     pub size: usize,
     /// SP recorded at the stack's last switch-out; 0 = never suspended.
     pub saved_sp: usize,
+}
+
+impl Default for ImmixAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ImmixAllocator {
@@ -749,7 +759,6 @@ impl ImmixAllocator {
             Block {
                 mark_bits: [false; LINES_PER_BLOCK],
                 has_span: false,
-                evacuation_candidate: false,
             };
             heap_size / BLOCK_SIZE
         ];
@@ -956,7 +965,7 @@ impl ImmixAllocator {
             // up so its tail line is not shared: a small object packed after
             // it would make the walk-back ambiguous.
             let start_line = point / LINE_SIZE;
-            let num_lines = (aligned_size + LINE_SIZE - 1) / LINE_SIZE;
+            let num_lines = aligned_size.div_ceil(LINE_SIZE);
             for b in start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK {
                 if let Some(blk) = self.blocks.get_mut(b) {
                     blk.has_span = true;
@@ -980,7 +989,7 @@ impl ImmixAllocator {
     }
 
     pub fn allocate_large(&mut self, size: usize) -> Option<NonNull<u8>> {
-        let blocks_needed = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let blocks_needed = size.div_ceil(BLOCK_SIZE);
         // Find contiguous free blocks by sorting the free list and scanning for a run.
         self.heap.free_blocks.sort_unstable();
 
@@ -1019,7 +1028,7 @@ impl ImmixAllocator {
                     .bytes_allocated
                     .fetch_add((blocks_needed * BLOCK_SIZE) as u64, Ordering::Relaxed);
                 // Record allocation size for GC multi-line marking
-                let num_lines = (size + LINE_SIZE - 1) / LINE_SIZE;
+                let num_lines = size.div_ceil(LINE_SIZE);
                 let start_line = start_addr / LINE_SIZE;
                 for b in start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK
                 {
@@ -1096,7 +1105,7 @@ impl ImmixAllocator {
         }
 
         // Calculate the line index within the block
-        let line_index = ((addr % BLOCK_SIZE) / LINE_SIZE) as usize;
+        let line_index = (addr % BLOCK_SIZE) / LINE_SIZE;
 
         // Check if the line is marked (i.e., in use)
         if !self.blocks[block_index].mark_bits[line_index] {
@@ -1120,11 +1129,10 @@ impl ImmixAllocator {
                 | hl::hl_type_kind_HARRAY
                 | hl::hl_type_kind_HVIRTUAL
                 | hl::hl_type_kind_HDYNOBJ
-                | hl::hl_type_kind_HBYTES => {
-                    if !self.is_gc_ptr(vd.v.ptr) {
+                | hl::hl_type_kind_HBYTES
+                    if !self.is_gc_ptr(vd.v.ptr) => {
                         return false;
                     }
-                }
                 _ => {} // Other types don't have additional pointers to check
             }
         }
@@ -1146,7 +1154,7 @@ impl ImmixAllocator {
         let mut start = line;
         loop {
             let b = start / LINES_PER_BLOCK;
-            if self.blocks.get(b).map_or(true, |blk| !blk.has_span) {
+            if self.blocks.get(b).is_none_or(|blk| !blk.has_span) {
                 start = line; // no span can cover `line`
                 break;
             }
@@ -1214,7 +1222,7 @@ impl ImmixAllocator {
             // actually lives. Decoding here lets the buffers be scanned
             // directly. A junk word that happens to decode in-bounds only
             // over-retains, which is the conservative contract already.
-            let mut consider = |val: usize, this: &mut Self, out: &mut Vec<(usize, usize)>| {
+            let consider = |val: usize, this: &mut Self, out: &mut Vec<(usize, usize)>| {
                 if val >= heap_start && val < heap_end {
                     let offset = val - heap_start;
                     let line = offset / LINE_SIZE;
@@ -1702,7 +1710,7 @@ impl ImmixAllocator {
                     let base = self.heap.memory.as_ptr() as usize;
                     let lo = base + block_addr;
                     let hi = lo + BLOCK_SIZE;
-                    let mut audit = |src: &str, start: usize, end: usize| {
+                    let audit = |src: &str, start: usize, end: usize| {
                         let mut p = start & !7;
                         while p + 8 <= end {
                             let w = unsafe { *(p as *const usize) };
@@ -1774,7 +1782,7 @@ impl ImmixAllocator {
                 let base = self.heap.memory.as_mut_ptr();
                 let mut run_start = hand_back[0];
                 let mut run_len = BLOCK_SIZE;
-                let mut advise = |start: usize, len: usize| unsafe {
+                let advise = |start: usize, len: usize| unsafe {
                     #[cfg(target_os = "macos")]
                     let advice = libc::MADV_FREE_REUSABLE;
                     #[cfg(not(target_os = "macos"))]
@@ -1926,7 +1934,7 @@ pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {
 #[no_mangle]
 pub extern "C" fn hlp_mark_size(data_size: i32) -> i32 {
     let data_size = data_size as usize;
-    let ptr_count = (data_size + HL_WSIZE as usize - 1) / HL_WSIZE as usize;
+    let ptr_count = data_size.div_ceil(HL_WSIZE as usize);
     (((ptr_count + 31) >> 5) * std::mem::size_of::<i32>() as usize)
         .try_into()
         .unwrap()
@@ -1940,7 +1948,7 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
     ctx: *mut c_void,
 ) {
     let _guard = gc_guard();
-    let gc = match GC.get_mut() {
+    let gc = match (*(&raw mut GC)).get_mut() {
         Some(g) => g,
         None => return,
     };

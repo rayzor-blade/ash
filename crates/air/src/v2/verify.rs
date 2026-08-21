@@ -255,11 +255,10 @@ pub fn verify(f: &Function) -> Result<()> {
         }
         for ins in &blk.instrs {
             match ins {
-                Instr::Copy { dst, src } => {
-                    if f.value_ty(*dst) != f.value_ty(*src) {
+                Instr::Copy { dst, src }
+                    if f.value_ty(*dst) != f.value_ty(*src) => {
                         bail!("b{}: Copy between different types", b);
                     }
-                }
                 Instr::BinOp { dst, a, b: rb, .. } => {
                     let ty = f.value_ty(*dst);
                     if f.value_ty(*a) != ty || f.value_ty(*rb) != ty {
@@ -275,21 +274,18 @@ pub fn verify(f: &Function) -> Result<()> {
                         bail!("b{}: Fma on non-float type {:?}", b, ty);
                     }
                 }
-                Instr::UnOp { dst, src, .. } => {
-                    if f.value_ty(*dst) != f.value_ty(*src) {
+                Instr::UnOp { dst, src, .. }
+                    if f.value_ty(*dst) != f.value_ty(*src) => {
                         bail!("b{}: UnOp operand/result type mismatch", b);
                     }
-                }
-                Instr::CellGet { dst, cell } => {
-                    if f.value_ty(*dst) != f.cells[cell.idx()].ty {
+                Instr::CellGet { dst, cell }
+                    if f.value_ty(*dst) != f.cells[cell.idx()].ty => {
                         bail!("b{}: CellGet type mismatch", b);
                     }
-                }
-                Instr::CellSet { cell, src } => {
-                    if f.value_ty(*src) != f.cells[cell.idx()].ty {
+                Instr::CellSet { cell, src }
+                    if f.value_ty(*src) != f.cells[cell.idx()].ty => {
                         bail!("b{}: CellSet type mismatch", b);
                     }
-                }
                 _ => {}
             }
         }
@@ -471,7 +467,7 @@ pub fn condense_cfg(f: &Function) -> CondensedCfg {
         }
     };
     let mut leader = vec![usize::MAX; nb];
-    for b in 0..nb {
+    for (b, l) in leader.iter_mut().enumerate() {
         let mut cur = b;
         let mut seen = vec![b];
         while let Some(p) = absorbed(cur) {
@@ -481,7 +477,7 @@ pub fn condense_cfg(f: &Function) -> CondensedCfg {
             seen.push(p);
             cur = p;
         }
-        leader[b] = cur;
+        *l = cur;
     }
     // Compact node ids, entry (leader of block 0) first, then ascending.
     let mut leaders: Vec<usize> = (0..nb).filter(|&b| leader[b] == b).collect();

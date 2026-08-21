@@ -19,6 +19,11 @@
 //! so this is acceptable for bring-up; the hardening fix is per-fiber
 //! scan_ranges.
 
+// `static mut` + raw-pointer access is this module's deliberate story (the
+// VM's single-threaded invariant): `static_mut_refs` demands the
+// `&raw`/deref spelling, and these two style lints then flag exactly that
+// spelling. The trio cannot all be satisfied at once.
+#![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
 use krio_fiber::{Fiber, FiberState};
@@ -64,11 +69,7 @@ static mut MAIN_EXC: *mut vdynamic = std::ptr::null_mut();
 const FIBER_STACK_SIZE: usize = 256 * 1024;
 
 pub(crate) unsafe fn fibers_active() -> bool {
-    !FIBERS.is_empty()
-}
-
-pub(crate) unsafe fn on_fiber() -> bool {
-    CURRENT.is_some()
+    !(*(&raw const FIBERS)).is_empty()
 }
 
 unsafe fn run_closure(c: *mut vclosure) {
@@ -116,7 +117,7 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     // stacks translate into collections (wren_lift core/fiber.rs:189-199).
     crate::gc::hlp_gc_track_external(len as u64);
 
-    FIBERS.push(VmFiber {
+    (*(&raw mut FIBERS)).push(VmFiber {
         fiber,
         id,
         closure: c,
@@ -135,16 +136,16 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
 /// Resume every runnable fiber once (single round-robin pass). Runs on the
 /// main context only. Returns true if any fiber was resumed.
 pub(crate) unsafe fn schedule_step() -> bool {
-    if CURRENT.is_some() {
+    if (*(&raw const CURRENT)).is_some() {
         // A fiber calling this should yield instead — never nest resumes.
         return false;
     }
     let mut resumed = false;
     let mut i = 0;
-    while i < FIBERS.len() {
-        let state = FIBERS[i].fiber.state();
+    while i < (*(&raw const FIBERS)).len() {
+        let state = (*(&raw const FIBERS))[i].fiber.state();
         if matches!(state, FiberState::Done | FiberState::Errored) {
-            let f = FIBERS.swap_remove(i);
+            let f = (*(&raw mut FIBERS)).swap_remove(i);
             crate::gc::gc_unregister_fiber_stack(f.id);
             crate::gc::gc_remove_persistent(f.closure as *mut vdynamic);
             if let FiberState::Errored = state {
@@ -158,20 +159,26 @@ pub(crate) unsafe fn schedule_step() -> bool {
         // this fiber's exception state into the live cells.
         let probe: usize = 0;
         crate::gc::gc_update_fiber_sp(0, &probe as *const usize as usize);
-        let (mut trap, mut exc) = (FIBERS[i].trap_head, FIBERS[i].exc_value);
+        let (mut trap, mut exc) = (
+            (*(&raw const FIBERS))[i].trap_head,
+            (*(&raw const FIBERS))[i].exc_value,
+        );
         crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
         MAIN_TRAP = trap;
         MAIN_EXC = exc;
-        CURRENT = Some(FIBERS[i].id);
+        CURRENT = Some((*(&raw const FIBERS))[i].id);
 
-        FIBERS[i].fiber.resume();
+        (*(&raw mut FIBERS))[i].fiber.resume();
 
         CURRENT = None;
         let (mut trap, mut exc) = (MAIN_TRAP, MAIN_EXC);
         crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
-        FIBERS[i].trap_head = trap;
-        FIBERS[i].exc_value = exc;
-        crate::gc::gc_update_fiber_sp(FIBERS[i].id, FIBERS[i].fiber.saved_sp() as usize);
+        (*(&raw mut FIBERS))[i].trap_head = trap;
+        (*(&raw mut FIBERS))[i].exc_value = exc;
+        crate::gc::gc_update_fiber_sp(
+            (*(&raw const FIBERS))[i].id,
+            (*(&raw const FIBERS))[i].fiber.saved_sp() as usize,
+        );
 
         i += 1;
     }
@@ -182,7 +189,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
 /// on the main context, run other fibers, and keep the window alive with an
 /// SDL pump + short nap when nothing is runnable.
 pub(crate) unsafe fn block_yield() {
-    if CURRENT.is_some() {
+    if (*(&raw const CURRENT)).is_some() {
         krio_fiber::yield_now();
     } else {
         schedule_step();

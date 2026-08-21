@@ -106,7 +106,7 @@ pub static T_SIZES: [isize; 23] = [
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_size(t: *mut hl_type) -> isize {
-    return T_SIZES[(*t).kind as usize];
+    T_SIZES[(*t).kind as usize]
 }
 
 #[no_mangle]
@@ -262,8 +262,8 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                 || oto.is_null()
                 || (o_init as usize) < 0x10000
                 || (oto as usize) < 0x10000
-                || (o_init as usize) % std::mem::align_of::<usize>() != 0
-                || (oto as usize) % std::mem::align_of::<usize>() != 0
+                || !(o_init as usize).is_multiple_of(std::mem::align_of::<usize>())
+                || !(oto as usize).is_multiple_of(std::mem::align_of::<usize>())
             {
                 return false;
             }
@@ -276,7 +276,7 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                     return false;
                 }
                 let sup = (*o).super_;
-                if (sup as usize) < 0x10000 || (sup as usize) % std::mem::align_of::<usize>() != 0 {
+                if (sup as usize) < 0x10000 || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>()) {
                     return false;
                 }
                 if (*sup).kind != hl::hl_type_kind_HOBJ && (*sup).kind != hl::hl_type_kind_HSTRUCT {
@@ -285,7 +285,7 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                 let sup_obj = (*sup).__bindgen_anon_1.obj;
                 if sup_obj.is_null()
                     || (sup_obj as usize) < 0x10000
-                    || (sup_obj as usize) % std::mem::align_of::<usize>() != 0
+                    || !(sup_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
                 {
                     return false;
                 }

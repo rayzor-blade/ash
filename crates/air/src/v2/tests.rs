@@ -8,6 +8,9 @@
 //! plus (where the mini interpreter covers the ops) identical input/output
 //! behavior, plus register-type-table preservation.
 
+// Test-local closures and expectation tables use big ad-hoc tuple types.
+#![allow(clippy::type_complexity)]
+
 use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
 use super::ir::*;
 use super::lower::{lower, lower_with, ModuleBuilder};
@@ -2126,7 +2129,7 @@ fn fma_fuses_when_product_is_the_right_addend() {
         },
         Opcode::Ret { ret: Reg(4) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let mut f = float_fn(&ops, &[t(1); 5]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 1);
     let fma = f.blocks[1]
@@ -2158,7 +2161,7 @@ fn fma_sub_with_product_as_minuend_negates_the_addend() {
         },
         Opcode::Ret { ret: Reg(4) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let mut f = float_fn(&ops, &[t(1); 5]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 1);
     let body = &f.blocks[1].instrs;
@@ -2189,7 +2192,7 @@ fn fma_sub_with_product_as_subtrahend_negates_a_multiplicand() {
         },
         Opcode::Ret { ret: Reg(4) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let mut f = float_fn(&ops, &[t(1); 5]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 1);
     let body = &f.blocks[1].instrs;
@@ -2231,7 +2234,7 @@ fn fma_refuses_when_the_product_has_two_uses() {
         },
         Opcode::Ret { ret: Reg(5) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 6]);
+    let mut f = float_fn(&ops, &[t(1); 6]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 0, "a two-use product must not be fused");
     assert_eq!(count_instrs(&f, |i| matches!(i, Instr::Fma { .. })), 0);
@@ -2263,7 +2266,7 @@ fn fma_refuses_across_blocks() {
         },
         Opcode::Ret { ret: Reg(4) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let mut f = float_fn(&ops, &[t(1); 5]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 0, "cross-block fusion is refused");
 }
@@ -2288,7 +2291,7 @@ fn fma_refuses_when_an_operand_register_is_overwritten() {
         },
         Opcode::Ret { ret: Reg(4) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 5]);
+    let mut f = float_fn(&ops, &[t(1); 5]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(
         stats.fused, 0,
@@ -2418,7 +2421,7 @@ fn fma_sub_forms_serialize_to_the_original_arithmetic() {
         ),
     ] {
         let args = [1.0 + f64::EPSILON, 1.0 + f64::EPSILON, 2.0];
-        let mut f = float_fn(&sub_ops, &vec![t(1); 5]);
+        let mut f = float_fn(&sub_ops, &[t(1); 5]);
         let unfused_ir = eval_f64(&f, &[], &args);
         run_pass(&mut f, &FmaPeephole, PassOptions::default());
         let out = serialize(&f).unwrap();
@@ -2455,7 +2458,7 @@ fn fma_fuses_one_product_per_add() {
         },
         Opcode::Ret { ret: Reg(6) },
     ];
-    let mut f = float_fn(&ops, &vec![t(1); 7]);
+    let mut f = float_fn(&ops, &[t(1); 7]);
     let stats = run_pass(&mut f, &FmaPeephole, PassOptions::default());
     assert_eq!(stats.fused, 1);
     assert_eq!(

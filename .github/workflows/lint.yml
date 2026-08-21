@@ -1,0 +1,48 @@
+name: lint
+
+# Clippy across the whole workspace and every target, warnings denied.
+# The build scripts run under clippy, so the job needs the same LLVM 21 /
+# libclang environment as a real build.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clippy:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+
+      - name: Install LLVM 21 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+
+      # ash_std first: its cdylib is embedded by the other crates' build
+      # scripts, which also run under clippy.
+      - name: Clippy
+        run: |
+          cargo build -p ash_std
+          cargo clippy --workspace --all-targets -- -D warnings

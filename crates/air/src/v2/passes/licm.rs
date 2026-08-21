@@ -9,6 +9,9 @@ use crate::v2::ir::*;
 use anyhow::{bail, Result};
 use std::collections::HashSet;
 
+/// Incoming phi sources: `(predecessor block, value)` pairs.
+type PhiSources = Vec<(BlockId, ValueId)>;
+
 /// Hoists loop-invariant computations into a loop preheader.
 ///
 /// Guarantees:
@@ -157,23 +160,6 @@ fn has_candidate(f: &Function, cfg: &CfgInfo, forest: &LoopForest, l: LoopId) ->
     false
 }
 
-/// Move every hoistable instruction of `l` into `ph`, to a fixed point.
-
-/// Move allocations the loop cannot let escape into the preheader, so one
-/// object serves every iteration instead of one per iteration.
-///
-/// The judgement is [`super::escape`]'s: the pointer must not outlive the
-/// iteration, and every field the loop reads must be written first on every
-/// path that reaches the read, so no iteration can observe what the previous
-/// one left behind. What remains here is the mechanics — the same
-/// `privatize` / remove / push as ordinary hoisting, and the same refusal to
-/// cross a trap-region boundary.
-///
-/// The allocation is what moves; the field writes stay in the loop and
-/// re-initialize the object each time round. That is what makes this cheaper
-/// than scalar replacement, which has to understand the object rather than
-/// merely outlive it.
-
 /// Hoists loop allocations that cannot escape the iteration.
 ///
 /// Separate from [`LoopInvariantCodeMotion`], and scheduled after it and after
@@ -227,6 +213,20 @@ impl Pass for LoopAllocHoisting {
     }
 }
 
+/// Move allocations the loop cannot let escape into the preheader, so one
+/// object serves every iteration instead of one per iteration.
+///
+/// The judgement is [`super::escape`]'s: the pointer must not outlive the
+/// iteration, and every field the loop reads must be written first on every
+/// path that reaches the read, so no iteration can observe what the previous
+/// one left behind. What remains here is the mechanics — the same
+/// `privatize` / remove / push as ordinary hoisting, and the same refusal to
+/// cross a trap-region boundary.
+///
+/// The allocation is what moves; the field writes stay in the loop and
+/// re-initialize the object each time round. That is what makes this cheaper
+/// than scalar replacement, which has to understand the object rather than
+/// merely outlive it.
 pub(super) fn hoist_allocs_into(
     f: &mut Function,
     forest: &LoopForest,
@@ -274,6 +274,7 @@ pub(super) fn hoist_allocs_into(
     moved
 }
 
+/// Move every hoistable instruction of `l` into `ph`, to a fixed point.
 fn hoist_into(
     f: &mut Function,
     cfg: &CfgInfo,
@@ -389,7 +390,7 @@ pub(super) fn create_preheader(
     // sources stay.
     for pi in 0..f.blocks[header.idx()].phis.len() {
         let phi = f.blocks[header.idx()].phis[pi].clone();
-        let (entry_srcs, back_srcs): (Vec<(BlockId, ValueId)>, Vec<(BlockId, ValueId)>) = phi
+        let (entry_srcs, back_srcs): (PhiSources, PhiSources) = phi
             .incoming
             .iter()
             .copied()

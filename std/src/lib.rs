@@ -1,3 +1,12 @@
+//! HashLink standard library reimplemented in Rust, exported as C ABI
+//! entry points for the interpreter and both JIT tiers.
+// This crate's public surface is `#[no_mangle] extern "C"` shims consumed
+// through the HashLink FFI contract, not a Rust API: per-function `# Safety`
+// sections would restate the single contract (pointers come from the VM and
+// follow HashLink's layout rules), and the FFI signatures are what they are.
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
 #![feature(once_cell_get_mut)]
 #![feature(c_variadic)]
 #![allow(non_upper_case_globals)]

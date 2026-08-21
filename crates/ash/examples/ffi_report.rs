@@ -9,20 +9,20 @@
 use std::collections::HashMap;
 
 fn main() -> anyhow::Result<()> {
-    ash::native_lib::init_std_library()?;
+    ash_core::native_lib::init_std_library()?;
     // symbol -> (sites, max loop depth, sites at depth >= 1)
     let mut agg: HashMap<String, (usize, usize, usize)> = HashMap::new();
 
     for path in std::env::args().skip(1) {
-        let bc = ash::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
-        let m = ash::air_pipeline::AshModule::new(&bc);
+        let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
+        let m = ash_core::air_pipeline::AshModule::new(&bc);
         let natives: HashMap<usize, String> = bc
             .natives
             .iter()
             .map(|n| (n.findex as usize, format!("{}@{}", n.lib, n.name)))
             .collect();
         for f in &bc.functions {
-            let Ok(opt) = ash::air_pipeline::optimized(&m, f) else {
+            let Ok(opt) = ash_core::air_pipeline::optimized(&m, f) else {
                 continue;
             };
             let ir = &opt.ir;
@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut rows: Vec<_> = agg.into_iter().collect();
-    rows.sort_by(|a, b| (b.1 .1, b.1 .2, b.1 .0).cmp(&(a.1 .1, a.1 .2, a.1 .0)));
+    rows.sort_by_key(|r| std::cmp::Reverse((r.1 .1, r.1 .2, r.1 .0)));
     println!("{:<40} {:>6} {:>9} {:>10}", "native", "sites", "in-loop", "max-depth");
     for (sym, (sites, maxd, inloop)) in rows {
         println!("{sym:<40} {sites:>6} {inloop:>9} {maxd:>10}");

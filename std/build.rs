@@ -23,7 +23,13 @@ pub fn pin_libclang() {
     let Some(prefix) = env::var_os("LLVM_SYS_211_PREFIX") else {
         return; // not set: leave clang-sys to its default search
     };
-    let libdir = PathBuf::from(prefix).join("lib");
+    let prefix = PathBuf::from(prefix);
+    // Windows LLVM ships libclang.dll in bin\, everything else uses lib/.
+    let libdir = if cfg!(windows) && prefix.join("bin").join("libclang.dll").exists() {
+        prefix.join("bin")
+    } else {
+        prefix.join("lib")
+    };
     let has_libclang = ["libclang.so", "libclang.dylib", "libclang.dll"]
         .iter()
         .any(|n| libdir.join(n).exists())

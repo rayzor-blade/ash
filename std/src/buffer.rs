@@ -270,7 +270,7 @@ pub unsafe extern "C" fn hlp_type_str(t: *mut hl_type) -> *const uchar {
     }
     let b = hlp_alloc_buffer();
     hlp_type_str_rec(b, t, std::ptr::null_mut());
-    return hlp_buffer_content(b, std::ptr::null_mut());
+    hlp_buffer_content(b, std::ptr::null_mut())
 }
 
 pub unsafe extern "C" fn hlp_buffer_addr(
@@ -391,28 +391,24 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
     match kind {
         hl_type_kind_HVOID => {
             hlp_buffer_str_sub(b, str_to_uchar_ptr("void"), 4);
-            return;
         }
         hl_type_kind_HUI8 => {
             let _str = format!("{}", (*v).v.ui8);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HUI16 => {
             let _str = format!("{}", (*v).v.ui16);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HI32 => {
             let _str = format!("{}", (*v).v.i);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
 
         hl_type_kind_HI64 => {
@@ -420,14 +416,12 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HF64 => {
             let _str = crate::strings::format_g((*v).v.d, 17);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HBOOL => {
             if (*v).v.b {
@@ -435,18 +429,15 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             } else {
                 hlp_buffer_str_sub(b, str_to_uchar_ptr("false"), 5);
             }
-            return;
         }
         hl_type_kind_HF32 => {
             let _str = format!("{:.9}", (*v).v.f);
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HBYTES => {
             hlp_buffer_str(b, (*v).v.bytes as *const uchar);
-            return;
         }
         hl_type_kind_HFUN => {
             hlp_buffer_str_sub(b, str_to_uchar_ptr("function#"), 9);
@@ -454,7 +445,6 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HMETHOD => {
             hlp_buffer_str_sub(b, str_to_uchar_ptr("method#"), 7);
@@ -462,7 +452,6 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let s = str_to_uchar_ptr(_str.as_str());
             let len = hlp_utf16_length(s);
             hlp_buffer_str_sub(b, s, len as i32);
-            return;
         }
         hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
             let o = (*(*v).t).__bindgen_anon_1.obj;
@@ -472,15 +461,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             // (not an interpreter stub where findex+1 is stored as a small integer)
             let to_string_fn = if !rt.is_null() {
                 let proto = hlp_get_obj_proto((*v).t);
-                if let Some(f) = (*proto).toStringFun {
-                    if (f as usize) > 0x100000 {
-                        Some(f)
-                    } else {
-                        None // Interpreter stub, not callable
-                    }
-                } else {
-                    None
-                }
+                (*proto).toStringFun.filter(|&f| (f as usize) > 0x100000)
             } else {
                 None
             };
@@ -523,11 +504,9 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 }
                 hlp_buffer_str(b, (*o).name);
             }
-            return;
         }
         hl_type_kind_HTYPE => {
             hlp_buffer_str(b, hlp_type_str((*v).v.ptr as *mut hl::hl_type));
-            return;
         }
         hl_type_kind_HREF => {
             hlp_buffer_str_sub(b, str_to_uchar_ptr("ref"), 3);
@@ -554,7 +533,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 }
                 hlp_buffer_addr(
                     b,
-                    (hl_aptr(a) as *mut c_void).add(i * stride as usize),
+                    hl_aptr::<c_void>(a).add(i * stride as usize),
                     at,
                     &mut l as *mut vlist,
                 );
@@ -669,8 +648,7 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
 
             for i in 0..(*o).nfields as usize {
                 let f = (*o).lookup.add(i);
-                *indexes_ptr.add(((*f).field_index as usize >> HL_DYNOBJ_INDEX_SHIFT) as usize) =
-                    i as i32;
+                *indexes_ptr.add((*f).field_index as usize >> HL_DYNOBJ_INDEX_SHIFT) = i as i32;
             }
 
             for i in 0..(*o).nfields as usize {
@@ -753,5 +731,5 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_buffer_val(b: *mut hl_buffer, v: *mut vdynamic) {
-    return hlp_buffer_rec(b, v, std::ptr::null_mut());
+    hlp_buffer_rec(b, v, std::ptr::null_mut())
 }

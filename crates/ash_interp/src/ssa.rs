@@ -9,7 +9,7 @@
 //! before it runs once.
 //!
 //! So this module executes the IR. The pipeline stops at
-//! [`ash::air_pipeline::prepare_ir`], and the CFG, the phis and the cells are
+//! [`ash_core::air_pipeline::prepare_ir`], and the CFG, the phis and the cells are
 //! what run.
 //!
 //! # The frame is the register file
@@ -73,9 +73,9 @@
 use std::sync::OnceLock;
 
 use air::v2::{Function, Instr};
-use ash::air_pipeline::{prepare_ir, AirOptLevel, AshModule};
-use ash::bytecode::DecodedBytecode;
-use ash::types::{HLFunction, TypeRef};
+use ash_core::air_pipeline::{prepare_ir, AirOptLevel, AshModule};
+use ash_core::bytecode::DecodedBytecode;
+use ash_core::types::{HLFunction, TypeRef};
 
 /// Whether the interpreter executes AIR v2 SSA directly.
 ///
@@ -100,7 +100,7 @@ fn logging() -> bool {
 fn level() -> AirOptLevel {
     static CELL: OnceLock<AirOptLevel> = OnceLock::new();
     *CELL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
-        Ok(s) if !s.is_empty() => match ash::air_pipeline::parse_level(&s) {
+        Ok(s) if !s.is_empty() => match ash_core::air_pipeline::parse_level(&s) {
             Some(l) => l,
             None => {
                 eprintln!("[ssa] ignoring ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O2");
@@ -136,6 +136,7 @@ enum Body {
 }
 
 /// Per-function prepared IR, plus the module view it was lowered against.
+#[derive(Default)]
 pub struct Cache {
     module: Option<(*const DecodedBytecode, &'static AshModule<'static>)>,
     /// Indexed by index into `bytecode.functions`, like `func_idx` elsewhere.
@@ -144,16 +145,6 @@ pub struct Cache {
     refused: usize,
 }
 
-impl Default for Cache {
-    fn default() -> Self {
-        Cache {
-            module: None,
-            bodies: Vec::new(),
-            prepared: 0,
-            refused: 0,
-        }
-    }
-}
 
 impl Cache {
     /// Decide `func_idx`'s body, if it has not been decided already.

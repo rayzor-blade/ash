@@ -1,3 +1,8 @@
+// `static mut` + raw-pointer access is this module's deliberate story (the
+// VM's single-threaded invariant): `static_mut_refs` demands the
+// `&raw`/deref spelling, and these two style lints then flag exactly that
+// spelling. The trio cannot all be satisfied at once.
+#![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use std::alloc::alloc;
 use std::sync::RwLock;
 use std::{
@@ -5,14 +10,14 @@ use std::{
     cmp::Ordering,
     ffi::{c_int, c_void, CStr},
     mem, ptr,
-    sync::{LazyLock, Mutex, OnceLock},
+    sync::{LazyLock, Mutex},
 };
 
 use crate::{
     buffer::hlp_type_str,
     cast::*,
     error::hlp_error,
-    gc::{hlp_mark_size, hlp_zalloc, HL_GLOBAL_LOCK},
+    gc::{hlp_mark_size, HL_GLOBAL_LOCK},
     hl::{self, *},
     strings::str_to_uchar_ptr,
     types::{
@@ -70,7 +75,6 @@ static USTR_GET_FIELD: &[u16] = &[
     0,
 ];
 
-static HL_CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 #[derive(Clone)]
 struct Cache {
     data: *mut hl_field_lookup,
@@ -85,8 +89,6 @@ static mut HL_CACHE: LazyLock<RwLock<Cache>> = LazyLock::new(|| {
         capacity: 0,
     })
 });
-static mut HL_CACHE_COUNT: i32 = 0;
-static mut HL_CACHE_SIZE: i32 = 0;
 static INITIAL_CACHE_CAPACITY: usize = 16;
 
 pub static cache_lock: Mutex<i32> = Mutex::new(0);
@@ -104,7 +106,7 @@ pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvir
     if let Some(virt) = allocator.alloc_virtual(t) {
         return virt.as_ptr();
     }
-    return std::ptr::null_mut();
+    std::ptr::null_mut()
 }
 
 #[no_mangle]
@@ -205,7 +207,7 @@ pub unsafe extern "C" fn hlp_write_dyn(
         mark_bits: ptr::null_mut(),
     };
 
-    match std::mem::transmute::<u32, hl_type_kind>((*t).kind) {
+    match (*t).kind {
         hl_type_kind_HUI8 => {
             *(data as *mut u8) = hlp_dyn_casti(&v as *const _ as *mut c_void, _hlt_dyn, t) as u8;
         }
@@ -251,7 +253,7 @@ pub unsafe extern "C" fn hlp_obj_lookup(
     hfield: i32,
     t: *mut *mut hl_type,
 ) -> *mut c_void {
-    match std::mem::transmute::<u32, hl_type_kind>((*(*d).t).kind) {
+    match (*(*d).t).kind {
         hl_type_kind_HDYNOBJ => {
             let o = d as *mut vdynobj;
             let f = hlp_lookup_find((*o).lookup, (*o).nfields, hfield);
@@ -325,6 +327,7 @@ pub fn hlp_dynobj_order(f: *const hl_field_lookup) -> u32 {
 }
 
 // Debug function to print cache state
+#[allow(dead_code)] // diagnostic kept for the commented-out cache tracing below
 fn print_cache_state(cache: &Cache, msg: &str) {
     println!(
         "{}: Cache state - data: {:?}, size: {}, capacity: {}",
@@ -371,7 +374,7 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
     }
 
     // Guard against misaligned pointers (e.g., from byte strings cast to u16*)
-    if (name as usize) % 2 != 0 {
+    if !(name as usize).is_multiple_of(2) {
         return 0;
     }
 
@@ -391,7 +394,7 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
         // println!("Attempting to cache the name");
 
         // First, try to read from the cache
-        if let Ok(cache) = HL_CACHE.read() {
+        if let Ok(cache) = (*(&raw const HL_CACHE)).read() {
             // print_cache_state(&cache, "Read lock acquired");
 
             if !cache.data.is_null() {
@@ -440,12 +443,11 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
         }
 
         // If we're here, we need to write to the cache (sorted insertion)
-        if let Ok(mut cache) = HL_CACHE.write() {
-            if cache.data.is_null() || cache.size >= cache.capacity {
-                if !grow_cache(&mut cache) {
+        if let Ok(mut cache) = (*(&raw const HL_CACHE)).write() {
+            if (cache.data.is_null() || cache.size >= cache.capacity)
+                && !grow_cache(&mut cache) {
                     return h;
                 }
-            }
 
             let new_name = ustrdup(oname);
             if !new_name.is_null() {
@@ -580,13 +582,13 @@ pub unsafe extern "C" fn hlp_lookup_find_index(
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_field_name(hash: c_int) -> *mut vbyte {
-    if let Ok(cache) = HL_CACHE.read() {
+    if let Ok(cache) = (*(&raw const HL_CACHE)).read() {
         let l = hlp_lookup_find(cache.data, cache.size as i32, hash);
         if !l.is_null() {
             return (*l).t as *mut vbyte;
         }
     }
-    return str_to_uchar_ptr("???") as *mut vbyte;
+    str_to_uchar_ptr("???") as *mut vbyte
 }
 
 pub(crate) unsafe fn obj_resolve_field(o: *const hl_type_obj, hfield: i32) -> *mut hl_field_lookup {
@@ -654,7 +656,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
         }
     } else {
-        (*ot).vobj_proto = 1 as *mut *mut c_void;
+        (*ot).vobj_proto = std::ptr::dangling_mut::<*mut c_void>();
     }
 
     (*t).methods = allocator
@@ -798,7 +800,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             None
         } else {
             Some(mem::transmute::<
-                _,
+                *mut c_void,
                 unsafe extern "C" fn(*mut vdynamic) -> *const u16,
             >(fptr))
         }
@@ -812,7 +814,10 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         if (fptr as usize) < 0x10000 {
             None
         } else {
-            Some(mem::transmute(fptr))
+            Some(mem::transmute::<
+                *mut c_void,
+                unsafe extern "C" fn(*mut vdynamic, *mut vdynamic) -> c_int,
+            >(fptr))
         }
     } else {
         None
@@ -826,7 +831,10 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         if (fptr as usize) < 0x10000 {
             None
         } else {
-            Some(mem::transmute(fptr))
+            Some(mem::transmute::<
+                *mut c_void,
+                unsafe extern "C" fn(*mut vdynamic, *mut hl_type) -> *mut vdynamic,
+            >(fptr))
         }
     } else {
         None
@@ -838,7 +846,10 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         if (fptr as usize) < 0x10000 {
             None
         } else {
-            Some(mem::transmute(fptr))
+            Some(mem::transmute::<
+                *mut c_void,
+                unsafe extern "C" fn(*mut vdynamic, c_int) -> *mut vdynamic,
+            >(fptr))
         }
     } else {
         None
@@ -879,8 +890,8 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
-    let kind = (*ot).kind;
-    if kind != hl_type_kind_HOBJ && kind != hl_type_kind_HSTRUCT {}
+    let _kind = (*ot).kind;
+    
     let o = (*ot).__bindgen_anon_1.obj;
     let m = (*o).m;
 
@@ -1105,7 +1116,10 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             // Look up the actual function pointer from the module's functions table
             let fptr = *(*m).functions_ptrs.add((*pr).findex as usize);
             if !fptr.is_null() {
-                (*t).compareFun = Some(mem::transmute(fptr));
+                (*t).compareFun = Some(mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*mut vdynamic, *mut vdynamic) -> c_int,
+                >(fptr));
             }
         }
     }
@@ -1254,7 +1268,7 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
             }
             if f.is_null() {
                 let rt = (*obj).rt;
-                if !(*rt).getFieldFun.is_none() {
+                if (*rt).getFieldFun.is_some() {
                     return (*rt).getFieldFun.unwrap()(d, hfield);
                 }
             }
@@ -1347,13 +1361,13 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
             if hl_is_ptr((*f).t) {
                 continue;
             }
-            raw_size += hlp_pad_size(raw_size as i32, (*f).t);
+            raw_size += hlp_pad_size(raw_size, (*f).t);
             raw_size += hlp_type_size((*f).t) as i32;
         }
         if raw_size > (*o).raw_size {
             raw_size = (*o).raw_size;
         }
-        let pad = hlp_pad_size(raw_size as i32, t) as usize;
+        let pad = hlp_pad_size(raw_size, t) as usize;
         let size = hlp_type_size(t) as usize;
 
         if raw_size as usize + pad > HL_DYNOBJ_INDEX_MASK as usize {
@@ -1373,20 +1387,20 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
                 if hl_is_ptr((*f).t) {
                     continue;
                 }
-                raw_size += hlp_pad_size(raw_size as i32, (*f).t);
+                raw_size += hlp_pad_size(raw_size, (*f).t);
                 ptr::copy_nonoverlapping(
                     (*o).raw_data.add(index as usize),
                     new_data.add(raw_size as usize),
                     hlp_type_size((*f).t) as usize,
                 );
                 (*f).field_index =
-                    (raw_size as i32) | ((hlp_dynobj_order(f) << HL_DYNOBJ_INDEX_SHIFT) as i32);
+                    raw_size | ((hlp_dynobj_order(f) << HL_DYNOBJ_INDEX_SHIFT) as i32);
                 if index != raw_size {
                     hlp_dynobj_remap_virtuals(o, f, 0);
                 }
                 raw_size += hlp_type_size((*f).t) as i32;
             }
-            (*o).raw_size = raw_size as i32;
+            (*o).raw_size = raw_size;
         }
         address_offset = new_data.offset_from((*o).raw_data);
         (*o).raw_data = new_data;
@@ -1404,7 +1418,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     let f = new_lookup.add(field_pos as usize);
     (*f).t = t;
     (*f).hashed_name = hfield;
-    (*f).field_index = index | (((*o).nfields << HL_DYNOBJ_INDEX_SHIFT) as i32);
+    (*f).field_index = index | ((*o).nfields << HL_DYNOBJ_INDEX_SHIFT);
     ptr::copy_nonoverlapping(
         (*o).lookup.add(field_pos as usize),
         new_lookup.add((field_pos + 1) as usize),
@@ -2123,8 +2137,8 @@ pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) ->
     // The method signature is fn(this: *obj) -> result
     let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
         std::mem::transmute(method_ptr);
-    let result = method_fn(obj);
-    result
+    
+    method_fn(obj)
 }
 
 unsafe fn should_recast(t: *mut hl_type, vt: *mut hl_type) -> bool {
@@ -2146,7 +2160,7 @@ unsafe fn should_recast(t: *mut hl_type, vt: *mut hl_type) -> bool {
     if (*vt).kind == hl::hl_type_kind_HOBJ
         && (*t).kind == hl::hl_type_kind_HOBJ
         && !(*(*vt).__bindgen_anon_1.obj).rt.is_null()
-        && !(*(*(*vt).__bindgen_anon_1.obj).rt).castFun.is_none()
+        && (*(*(*vt).__bindgen_anon_1.obj).rt).castFun.is_some()
     {
         return true;
     }
@@ -2183,7 +2197,7 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let mut HLT_F64: hl_type = hl_type {
-        kind: hl_type_kind_HF64 as u32,
+        kind: hl_type_kind_HF64,
         __bindgen_anon_1: hl_type__bindgen_ty_1 {
             obj: ptr::null_mut(),
         },
@@ -2192,7 +2206,7 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
     };
     let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_F64, &mut t);
 
-    if (*t).kind == hl_type_kind_HF64 as u32 {
+    if (*t).kind == hl_type_kind_HF64 {
         *(addr as *mut f64) = value;
     } else {
         let mut tmp = vdynamic {
@@ -2208,7 +2222,7 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let mut HLT_F32: hl_type = hl_type {
-        kind: hl_type_kind_HF32 as u32,
+        kind: hl_type_kind_HF32,
         __bindgen_anon_1: hl_type__bindgen_ty_1 {
             obj: ptr::null_mut(),
         },
@@ -2217,7 +2231,7 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
     };
     let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_F32, &mut t);
 
-    if (*t).kind == hl_type_kind_HF32 as u32 {
+    if (*t).kind == hl_type_kind_HF32 {
         *(addr as *mut f32) = value;
     } else {
         let mut tmp = vdynamic {
@@ -2233,7 +2247,7 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let mut HLT_I64: hl_type = hl_type {
-        kind: hl_type_kind_HI64 as u32,
+        kind: hl_type_kind_HI64,
         __bindgen_anon_1: hl_type__bindgen_ty_1 {
             obj: ptr::null_mut(),
         },
@@ -2242,7 +2256,7 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
     };
     let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_I64, &mut ft);
 
-    match std::mem::transmute::<u32, hl_type_kind>((*ft).kind) {
+    match (*ft).kind {
         hl_type_kind_HUI8 => *(addr as *mut u8) = value as u8,
         hl_type_kind_HUI16 => *(addr as *mut u16) = value as u16,
         hl_type_kind_HI32 => *(addr as *mut i32) = value as i32,
@@ -2275,7 +2289,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
         );
     }
 
-    match std::mem::transmute::<u32, hl_type_kind>((*ft).kind) {
+    match (*ft).kind {
         hl_type_kind_HUI8 => *(addr as *mut u8) = value as u8,
         hl_type_kind_HUI16 => *(addr as *mut u16) = value as u16,
         hl_type_kind_HI32 => *(addr as *mut i32) = value,
@@ -2316,7 +2330,7 @@ pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
         }
     }
 
-    if (*ft).kind == hl_type_kind_HF32 as u32 {
+    if (*ft).kind == hl_type_kind_HF32 {
         *(addr as *mut f32)
     } else {
         hlp_dyn_castf(addr, ft)
@@ -2346,7 +2360,7 @@ pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
         }
     }
 
-    if (*ft).kind == hl_type_kind_HF64 as u32 {
+    if (*ft).kind == hl_type_kind_HF64 {
         *(addr as *mut f64)
     } else {
         hlp_dyn_castd(addr, ft)
@@ -2481,14 +2495,14 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
         mark_bits: ptr::null_mut(),
     };
 
-    let result = match std::mem::transmute::<u32, hl_type_kind>((*(*obj).t).kind) {
+    
+
+    match (*(*obj).t).kind {
         hl_type_kind_HOBJ | hl_type_kind_HVIRTUAL | hl_type_kind_HDYNOBJ | hl_type_kind_HSTRUCT => {
             hlp_dyn_getp(obj, hfield, _hlt_dyn) as *mut vdynamic
         }
         _ => ptr::null_mut(),
-    };
-
-    result
+    }
 }
 
 #[no_mangle]
@@ -2532,7 +2546,7 @@ pub unsafe extern "C" fn hlp_obj_has_field(obj: *mut vdynamic, hfield: i32) -> b
         return false;
     }
 
-    match std::mem::transmute::<u32, hl_type_kind>((*(*obj).t).kind) {
+    match (*(*obj).t).kind {
         hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
             let l = obj_resolve_field((*(*obj).t).__bindgen_anon_1.obj, hfield);
             !l.is_null() && (*l).field_index >= 0
@@ -2564,7 +2578,7 @@ pub unsafe extern "C" fn hlp_obj_delete_field(obj: *mut vdynamic, hfield: i32) -
         return false;
     }
 
-    match std::mem::transmute::<u32, hl_type_kind>((*(*obj).t).kind) {
+    match (*(*obj).t).kind {
         hl_type_kind_HDYNOBJ => {
             let d = obj as *mut vdynobj;
             let f = hlp_lookup_find((*d).lookup, (*d).nfields, hfield);
@@ -2755,7 +2769,6 @@ pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varra
 #[no_mangle]
 /// Flush a type's cached vtable/proto so it gets re-populated from `functions_ptrs`
 /// on the next method dispatch. Used during hot-reload after function pointers are updated.
-#[no_mangle]
 pub unsafe extern "C" fn hlp_flush_proto(ot: *mut hl_type) {
     if ot.is_null() {
         return;

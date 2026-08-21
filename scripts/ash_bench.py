@@ -1204,9 +1204,9 @@ def cargo_build(repo_root: pathlib.Path, needed: set[str]) -> None:
     """
     pkgs = ["ash_std"]
     if needed:
-        # The unified `ash` binary is built by the ash_cli package; the ash
+        # The unified `ash` package builds the binary; the ash_core
         # library (and its LLVM link) comes in as its dependency.
-        pkgs.append("ash_cli")
+        pkgs.append("ash")
 
     build_target = os.environ.get("CARGO_BUILD_TARGET")
     for pkg in pkgs:
@@ -1297,7 +1297,7 @@ def main(argv=None) -> int:
         raise SystemExit(
             f"binary/binaries {', '.join(missing)} not found under "
             f"{repo_root / 'target'}. Run with --build, or:\n"
-            f"  cargo build -p ash_std && cargo build -p ash_cli"
+            f"  cargo build -p ash_std && cargo build -p ash"
         )
 
     oracle = load_oracle(pathlib.Path(args.oracle).resolve() if args.oracle else None)

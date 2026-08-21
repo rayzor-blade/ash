@@ -32,9 +32,9 @@
 
 use std::sync::OnceLock;
 
-use ash::air_pipeline::{optimized, AshModule};
-use ash::bytecode::DecodedBytecode;
-use ash::types::{HLFunction, TypeRef};
+use ash_core::air_pipeline::{optimized, AshModule};
+use ash_core::bytecode::DecodedBytecode;
+use ash_core::types::{HLFunction, TypeRef};
 
 /// Whether the interpreter runs AIR-v2-optimized bodies.
 ///
@@ -100,6 +100,7 @@ enum Body {
 
 /// Per-function optimized bodies, plus the module view they were lowered
 /// against.
+#[derive(Default)]
 pub struct Cache {
     /// The `AshModule` AIR lowers against, keyed by the bytecode it was built
     /// from. See [`Cache::prepare`] for why the key is load-bearing.
@@ -111,16 +112,6 @@ pub struct Cache {
     refused: usize,
 }
 
-impl Default for Cache {
-    fn default() -> Self {
-        Cache {
-            module: None,
-            bodies: Vec::new(),
-            optimized: 0,
-            refused: 0,
-        }
-    }
-}
 
 impl Cache {
     /// Decide `func_idx`'s body, if it has not been decided already.

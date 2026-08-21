@@ -546,7 +546,6 @@ impl Instr {
             | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
             | Instr::Intrinsic { dst, .. }
-            | Instr::Intrinsic { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }

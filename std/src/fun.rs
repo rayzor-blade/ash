@@ -25,7 +25,7 @@ pub type HlcStaticCallType = unsafe extern "C" fn(
 ) -> *mut c_void;
 
 pub unsafe extern "C" fn empty_fun_wrapper(_t: *mut hl_type) -> *mut c_void {
-    return ptr::null_mut();
+    ptr::null_mut()
 }
 
 pub unsafe extern "C" fn empty_static_call(
@@ -34,7 +34,7 @@ pub unsafe extern "C" fn empty_static_call(
     _args: *mut *mut c_void,
     _out: *mut vdynamic,
 ) -> *mut c_void {
-    return ptr::null_mut();
+    ptr::null_mut()
 }
 
 /// Dynamic function call for aarch64 — marshals args according to function type
@@ -255,8 +255,8 @@ pub static mut hlc_call_flags: i32 = 0;
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_setup_callbacks2(c: *mut c_void, w: *mut c_void, flags: i32) {
-    hlc_get_wrapper = mem::transmute(w);
-    hlc_static_call = mem::transmute(c);
+    hlc_get_wrapper = mem::transmute::<*mut c_void, HlcFunWrapperType>(w);
+    hlc_static_call = mem::transmute::<*mut c_void, HlcStaticCallType>(c);
     hlc_call_flags = flags;
 }
 
@@ -311,7 +311,7 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
     let mut cl = c as *mut vclosure;
     if !(*c).t.is_null() && (*(*c).t).kind == hl_type_kind_HFUN {
         let wrapped_addr = (*c).v.ptr as usize;
-        if wrapped_addr >= 0x10000 && (wrapped_addr % std::mem::align_of::<usize>() == 0) {
+        if wrapped_addr >= 0x10000 && wrapped_addr.is_multiple_of(std::mem::align_of::<usize>()) {
             let wrapped = wrapped_addr as *mut vdynamic;
             // Only dereference if it's a valid GC heap pointer, not JIT code
             let gc = crate::gc::gc_locked();
@@ -339,7 +339,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     if cl.is_null() {
         return ptr::null_mut();
     }
-    let vargs = hl_aptr(args) as *mut *mut vdynamic;
+    let vargs = hl_aptr::<*mut vdynamic>(args);
     let mut pargs: [*mut libc::c_void; HL_MAX_ARGS] = [ptr::null_mut(); HL_MAX_ARGS];
     let mut tmp: [mem::MaybeUninit<libc::c_double>; HL_MAX_ARGS] =
         unsafe { mem::MaybeUninit::uninit().assume_init() };
@@ -499,7 +499,7 @@ pub unsafe extern "C" fn hlp_get_closure_type(t: *mut hl_type) -> *mut hl_type {
         ft.closure.parent = t;
     }
 
-    mem::transmute(&mut ft.closure_type)
+    &mut ft.closure_type as *mut _ as *mut hl_type
 }
 
 #[no_mangle]
@@ -631,9 +631,9 @@ pub unsafe extern "C" fn hlp_make_closure(c: *mut vdynamic, v: *mut vdynamic) ->
         return hlp_make_closure((*wrapper).wrappedFun as *mut vdynamic, v);
     }
 
-    if (*(*t).__bindgen_anon_1.fun.as_ref().unwrap()).nargs == 0
+    if (*t).__bindgen_anon_1.fun.as_ref().unwrap().nargs == 0
         || v.is_null()
-        || !hlp_safe_cast((*v).t, *(*(*t).__bindgen_anon_1.fun.as_ref().unwrap()).args)
+        || !hlp_safe_cast((*v).t, *(*t).__bindgen_anon_1.fun.as_ref().unwrap().args)
     {
         return ptr::null_mut();
     }
@@ -761,7 +761,7 @@ pub unsafe extern "C" fn hlp_dyn_call(
 #[no_mangle]
 pub extern "C" fn hlp_prim_not_loaded() {
     unsafe {
-        hlp_error((b"Primitive or library is missing\0").as_ptr() as *const u16);
+        hlp_error(c"Primitive or library is missing".as_ptr() as *const u16);
     }
 }
 

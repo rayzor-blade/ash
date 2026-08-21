@@ -322,8 +322,8 @@ static mut IS_GL_OPTIONS_SET: bool = false;
 unsafe extern "C" fn sdl_init_once() -> bool {
     eprintln!("[ash_sdl] init_once called");
     SDL_SetHint(
-        b"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS\0".as_ptr() as _,
-        b"1\0".as_ptr() as _,
+        c"SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS".as_ptr(),
+        c"1".as_ptr(),
     );
     if SDL_Init(SDL_INIT_EVERYTHING) != 0 {
         eprintln!("[ash_sdl] SDL_Init failed");
@@ -584,7 +584,7 @@ unsafe extern "C" fn sdl_get_global_mouse_state(x: *mut i32, y: *mut i32) -> i32
     SDL_GetGlobalMouseState(x, y) as i32
 }
 unsafe extern "C" fn sdl_detect_keyboard_layout() -> *const u8 {
-    b"qwerty\0".as_ptr()
+    c"qwerty".as_ptr() as *const u8
 }
 unsafe extern "C" fn sdl_show_cursor(show: bool) {
     SDL_ShowCursor(if show { 1 } else { 0 });
@@ -626,7 +626,7 @@ unsafe extern "C" fn sdl_win_create_ex(w: i32, h: i32, x: i32, y: i32, flags: i3
     };
     let w = if w <= 0 { 800 } else { w };
     let h = if h <= 0 { 600 } else { h };
-    let win = SDL_CreateWindow(b"Ash\0".as_ptr() as _, px, py, w, h, sdl_flags);
+    let win = SDL_CreateWindow(c"Ash".as_ptr(), px, py, w, h, sdl_flags);
     eprintln!("[ash_sdl] SDL_CreateWindow -> {:p} ({}x{})", win, w, h);
     win
 }
@@ -737,7 +737,7 @@ unsafe extern "C" fn sdl_set_clipboard_text(_t: *const u8) -> bool {
     false
 }
 unsafe extern "C" fn sdl_get_clipboard_text() -> *const u8 {
-    b"\0".as_ptr()
+    c"".as_ptr() as *const u8
 }
 unsafe extern "C" fn sdl_set_drag_and_drop_enabled(_e: bool) {}
 unsafe extern "C" fn sdl_get_drag_and_drop_enabled() -> bool {
@@ -774,7 +774,7 @@ unsafe extern "C" fn sdl_gctrl_get_id(_c: *mut c_void) -> i32 {
     0
 }
 unsafe extern "C" fn sdl_gctrl_get_name(_c: *mut c_void) -> *const u8 {
-    b"\0".as_ptr()
+    c"".as_ptr() as *const u8
 }
 unsafe extern "C" fn sdl_joy_count() -> i32 {
     0
@@ -796,7 +796,7 @@ unsafe extern "C" fn sdl_joy_get_id(_j: *mut c_void) -> i32 {
     0
 }
 unsafe extern "C" fn sdl_joy_get_name(_j: *mut c_void) -> *const u8 {
-    b"\0".as_ptr()
+    c"".as_ptr() as *const u8
 }
 unsafe extern "C" fn sdl_haptic_open(_c: *mut c_void) -> *mut c_void {
     ptr::null_mut()

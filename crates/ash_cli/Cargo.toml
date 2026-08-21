@@ -1,19 +1,13 @@
 [package]
-name = "ash_cli"
+name = "ash"
 version = "0.1.0"
 edition = "2021"
 authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
 description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
 
-# The one user-facing binary: interpreter, tiered hybrid, and whole-module
-# JIT behind a single flag set.
-[[bin]]
-name = "ash"
-path = "src/main.rs"
-
 [dependencies]
-ash = { path = "../ash" }
+ash_core = { path = "../ash" }
 ash_interp = { path = "../ash_interp" }
 anyhow = { workspace = true }
 inkwell = { workspace = true }

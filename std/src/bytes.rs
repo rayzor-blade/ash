@@ -1,3 +1,8 @@
+// `static mut` + raw-pointer access is this module's deliberate story (the
+// VM's single-threaded invariant): `static_mut_refs` demands the
+// `&raw`/deref spelling, and these two style lints then flag exactly that
+// spelling. The trio cannot all be satisfied at once.
+#![allow(clippy::deref_addrof, dangerous_implicit_autorefs)]
 use std::ffi::*;
 
 use crate::{hl, sort::hl_bsort};
@@ -26,9 +31,8 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
         panic!("invalid size for bytes allocation")
     }
     let _size: usize = size as usize;
-    let bytes_ptr = crate::gc::gc_alloc(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte;
 
-    bytes_ptr
+    crate::gc::gc_alloc(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte
 }
 
 #[no_mangle]
@@ -111,6 +115,12 @@ pub struct BoyerMooreHorspool {
     shift: [usize; 256],
 }
 
+impl Default for BoyerMooreHorspool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BoyerMooreHorspool {
     pub fn new() -> Self {
         BoyerMooreHorspool { shift: [0; 256] }
@@ -163,7 +173,7 @@ impl BoyerMooreHorspool {
 pub fn memfind_rb(block: &[u8], pattern: &[u8], repeat_find: &mut bool) -> Option<usize> {
     static mut BMH: Option<BoyerMooreHorspool> = None;
 
-    let bmh = unsafe { BMH.get_or_insert_with(BoyerMooreHorspool::new) };
+    let bmh = unsafe { (*(&raw mut BMH)).get_or_insert_with(BoyerMooreHorspool::new) };
 
     let result = bmh.find(block, pattern, *repeat_find);
     *repeat_find = true;

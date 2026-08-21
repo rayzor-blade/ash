@@ -143,7 +143,7 @@ jobs:
       - name: Build ash (release)
         run: |
           cargo build --release -p ash_std
-          cargo build --release -p ash_cli
+          cargo build --release -p ash
 
       - name: Bench ash (${{ matrix.bench }})
         run: |

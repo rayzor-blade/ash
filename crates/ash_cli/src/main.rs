@@ -1,6 +1,6 @@
 use anyhow::Result;
-use ash::bytecode::BytecodeDecoder;
-use ash::native_lib::{init_std_library, NativeFunctionResolver};
+use ash_core::bytecode::BytecodeDecoder;
+use ash_core::native_lib::{init_std_library, NativeFunctionResolver};
 use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
@@ -95,10 +95,10 @@ fn main() {
     // Start profiling before any work happens, and on this thread: the sampler
     // interrupts whichever thread calls init, and that must be the one that
     // runs the program.
-    ash::profile::init();
+    ash_core::profile::init();
 
     let result = run();
-    ash::profile::report();
+    ash_core::profile::report();
     if let Err(e) = result {
         eprintln!("Error: {:#}", e);
         process::exit(1);
@@ -381,7 +381,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     // Startup diagnostics go to stderr, which the parity harness compares
     // against an oracle's. --quiet has to reach them.
-    ash::native_lib::set_quiet(cli.quiet);
+    ash_core::native_lib::set_quiet(cli.quiet);
 
     let hl_path = cli.file.unwrap_or_else(|| {
         let mut cwd = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -398,23 +398,23 @@ fn run() -> Result<()> {
     // standalone `ash` binary did — so it branches off before the
     // interpreter-oriented prep below.
     if matches!(cli.mode, Mode::Jit) {
-        return ash::jit::run_whole_module(&hl_path);
+        return ash_core::jit::run_whole_module(&hl_path);
     }
 
     {
-        let _p = ash::profile::scope("init stdlib");
+        let _p = ash_core::profile::scope("init stdlib");
         init_std_library()?;
     }
 
     let bytecode = {
-        let _p = ash::profile::scope("decode bytecode");
+        let _p = ash_core::profile::scope("decode bytecode");
         BytecodeDecoder::decode(&hl_path)?
     };
     let mut native_resolver = NativeFunctionResolver::new();
 
     // Give the profiler findex → name so sampled JIT frames and hot
     // interpreted functions print as names. Built once, only when profiling.
-    if ash::profile::enabled() {
+    if ash_core::profile::enabled() {
         let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
         for f in &bytecode.functions {
             names.insert(f.findex as u32, f.name().to_string());
@@ -422,7 +422,7 @@ fn run() -> Result<()> {
         for n in &bytecode.natives {
             names.insert(n.findex as u32, format!("{}@{}", n.lib, n.name));
         }
-        ash::profile::set_name_resolver(move |fx| names.get(&fx).cloned());
+        ash_core::profile::set_name_resolver(move |fx| names.get(&fx).cloned());
     }
 
     // Discover and load external HDLL libraries from the .hl file's directory
@@ -430,7 +430,7 @@ fn run() -> Result<()> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     {
-        let _p = ash::profile::scope("load hdlls");
+        let _p = ash_core::profile::scope("load hdlls");
         native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
     }
 
@@ -524,8 +524,8 @@ fn run() -> Result<()> {
                 .types
                 .iter()
                 .filter(|t| {
-                    t.kind == ash::hl_bindings::hl_type_kind_HOBJ
-                        || t.kind == ash::hl_bindings::hl_type_kind_HSTRUCT
+                    t.kind == ash_core::hl_bindings::hl_type_kind_HOBJ
+                        || t.kind == ash_core::hl_bindings::hl_type_kind_HSTRUCT
                 })
                 .count();
             if mismatches.is_empty() {
@@ -554,22 +554,22 @@ fn run() -> Result<()> {
     if let Ok(mode) = std::env::var("ASH_VERIFY_AIR") {
         if !mode.is_empty() && mode != "0" {
             let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
-                _ => ash::air_pipeline::AirOptLevel::O2,
+                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+                _ => ash_core::air_pipeline::AirOptLevel::O2,
             };
-            let opts = ash::air_pipeline::AirPassOptions::default();
+            let opts = ash_core::air_pipeline::AirPassOptions::default();
             if let Some(want) = mode
                 .strip_prefix("dump:")
                 .and_then(|s| s.parse::<i32>().ok())
             {
-                for line in ash::air_pipeline::dump(&bytecode, want, level, &opts) {
+                for line in ash_core::air_pipeline::dump(&bytecode, want, level, &opts) {
                     eprintln!("[air] {line}");
                 }
                 return Ok(());
             }
-            for line in ash::air_pipeline::report(&bytecode, level, &opts) {
+            for line in ash_core::air_pipeline::report(&bytecode, level, &opts) {
                 eprintln!("[air] {line}");
             }
             if mode == "only" {
@@ -586,12 +586,12 @@ fn run() -> Result<()> {
     if let Ok(mode) = std::env::var("ASH_VERIFY_TRAPS") {
         if !mode.is_empty() && mode != "0" {
             let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
-                _ => ash::air_pipeline::AirOptLevel::O2,
+                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+                _ => ash_core::air_pipeline::AirOptLevel::O2,
             };
-            let (funcs, sites, covered) = ash::air_pipeline::trap_report(&bytecode, level);
+            let (funcs, sites, covered) = ash_core::air_pipeline::trap_report(&bytecode, level);
             eprintln!("[traps] {funcs} functions have a block under a handler");
             eprintln!(
                 "[traps] {sites} may-throw sites, {covered} inside a handler ({:.1}%)",
@@ -610,12 +610,12 @@ fn run() -> Result<()> {
     if let Ok(mode) = std::env::var("ASH_ESCAPE") {
         if !mode.is_empty() && mode != "0" {
             let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
-                _ => ash::air_pipeline::AirOptLevel::O2,
+                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+                _ => ash_core::air_pipeline::AirOptLevel::O2,
             };
-            for line in ash::air_pipeline::escape_report(&bytecode, level) {
+            for line in ash_core::air_pipeline::escape_report(&bytecode, level) {
                 eprintln!("[escape] {line}");
             }
             if mode == "only" {
@@ -629,14 +629,14 @@ fn run() -> Result<()> {
     // is mostly measuring code that cannot run.
     if let Ok(mode) = std::env::var("ASH_REACH") {
         if !mode.is_empty() && mode != "0" {
-            for line in ash::reachable::report(&bytecode) {
+            for line in ash_core::reachable::report(&bytecode) {
                 eprintln!("[reach] {line}");
             }
             if let Some(fx) = std::env::var("ASH_REACH_WHY")
                 .ok()
                 .and_then(|v| v.trim().parse::<i32>().ok())
             {
-                for line in ash::reachable::why(&bytecode, fx) {
+                for line in ash_core::reachable::why(&bytecode, fx) {
                     eprintln!("[reach] why({fx}) {line}");
                 }
             }
@@ -652,12 +652,12 @@ fn run() -> Result<()> {
     if let Ok(mode) = std::env::var("ASH_VERIFY_OSR") {
         if !mode.is_empty() && mode != "0" {
             let level = match std::env::var("ASH_AIR_LEVEL").ok().as_deref() {
-                Some("O0") => ash::air_pipeline::AirOptLevel::O0,
-                Some("O1") => ash::air_pipeline::AirOptLevel::O1,
-                Some("O3") => ash::air_pipeline::AirOptLevel::O3,
-                _ => ash::air_pipeline::AirOptLevel::O2,
+                Some("O0") => ash_core::air_pipeline::AirOptLevel::O0,
+                Some("O1") => ash_core::air_pipeline::AirOptLevel::O1,
+                Some("O3") => ash_core::air_pipeline::AirOptLevel::O3,
+                _ => ash_core::air_pipeline::AirOptLevel::O2,
             };
-            for line in ash::air_pipeline::osr_report(&bytecode, level) {
+            for line in ash_core::air_pipeline::osr_report(&bytecode, level) {
                 eprintln!("[osr] {line}");
             }
             if mode == "only" {
@@ -670,7 +670,7 @@ fn run() -> Result<()> {
         Mode::Interp => {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             let result = {
-                let _p = ash::profile::scope("run");
+                let _p = ash_core::profile::scope("run");
                 interpreter.execute_entrypoint(&bytecode, &native_resolver)?
             };
             if !cli.quiet {
@@ -705,11 +705,11 @@ fn run() -> Result<()> {
                 tier_mode,
             };
             {
-                let _p = ash::profile::scope("tiered prewarm");
+                let _p = ash_core::profile::scope("tiered prewarm");
                 interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
             }
             let result = {
-                let _p = ash::profile::scope("run");
+                let _p = ash_core::profile::scope("run");
                 interpreter.execute_entrypoint(&bytecode, &native_resolver)?
             };
             if let Some(stats) = interpreter.tiered_stats() {

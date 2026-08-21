@@ -1,3 +1,6 @@
+// Shared by both test binaries; each compiles this module independently,
+// so helpers one binary doesn't call read as dead code there.
+#![allow(dead_code)]
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

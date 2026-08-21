@@ -22,13 +22,13 @@ unsafe fn get_sdl_poll_event() -> Option<unsafe extern "C" fn(*mut u8) -> i32> {
     SDL_POLL_INIT.call_once(|| {
         // SDL2 is already loaded via sdl.hdll with RTLD_GLOBAL,
         // so SDL_PollEvent should be resolvable via RTLD_DEFAULT.
-        let sym = libc::dlsym(
-            libc::RTLD_DEFAULT,
-            b"SDL_PollEvent\0".as_ptr() as *const libc::c_char,
-        );
+        let sym = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr());
         if !sym.is_null() {
             eprintln!("[ash] SDL_PollEvent resolved at {:p}", sym);
-            SDL_POLL_EVENT_FN = Some(std::mem::transmute(sym));
+            SDL_POLL_EVENT_FN = Some(std::mem::transmute::<
+                *mut libc::c_void,
+                unsafe extern "C" fn(*mut u8) -> i32,
+            >(sym));
         } else {
             eprintln!("[ash] WARNING: SDL_PollEvent not found via dlsym");
         }
@@ -429,7 +429,7 @@ pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
-    libc::pthread_getspecific(tls as usize as libc::pthread_key_t) as *mut c_void
+    libc::pthread_getspecific(tls as usize as libc::pthread_key_t)
 }
 
 #[no_mangle]

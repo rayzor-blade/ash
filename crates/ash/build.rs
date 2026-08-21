@@ -15,7 +15,13 @@ fn pin_libclang() {
     let Some(prefix) = env::var_os("LLVM_SYS_211_PREFIX") else {
         return;
     };
-    let libdir = PathBuf::from(prefix).join("lib");
+    let prefix = PathBuf::from(prefix);
+    // Windows LLVM ships libclang.dll in bin\, everything else uses lib/.
+    let libdir = if cfg!(windows) && prefix.join("bin").join("libclang.dll").exists() {
+        prefix.join("bin")
+    } else {
+        prefix.join("lib")
+    };
     let has_libclang = ["libclang.so", "libclang.dylib", "libclang.dll"]
         .iter()
         .any(|n| libdir.join(n).exists())
@@ -69,16 +75,14 @@ fn main() {
     // Generate target-specific HL C bindings in this crate's OUT_DIR.
     generate_hl_bindings(&out_dir);
 
-    let lib_filename = format!(
-        "libash_std.{}",
-        if target.contains("apple") {
-            "dylib"
-        } else if target.contains("windows") {
-            "dll"
-        } else {
-            "so"
-        }
-    );
+    // MSVC drops the `lib` prefix on cdylibs: ash_std.dll, not libash_std.dll.
+    let lib_filename = if target.contains("windows") {
+        "ash_std.dll".to_string()
+    } else if target.contains("apple") {
+        "libash_std.dylib".to_string()
+    } else {
+        "libash_std.so".to_string()
+    };
 
     // Where cargo puts the ash_std cdylib depends on whether a target triple
     // was requested. `cargo build` writes <target-dir>/debug/, while
@@ -88,7 +92,7 @@ fn main() {
     // operator asks for it explicitly. Try both rather than assuming one.
     let target_dir = match env::var_os("CARGO_TARGET_DIR") {
         Some(dir) => PathBuf::from(dir),
-        None => PathBuf::from(env::current_dir().unwrap()).join("../../target"),
+        None => env::current_dir().unwrap().join("../../target"),
     };
     // PROFILE is "debug" or "release"; ash_std may only have been built in
     // debug, so fall back to it.

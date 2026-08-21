@@ -54,8 +54,8 @@ pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos: i32) -> usize 
         return 0;
     }
 
-    let len = hlp_utf16_length(s.wrapping_add(pos as usize));
-    len
+
+    hlp_utf16_length(s.wrapping_add(pos as usize))
 }
 
 #[no_mangle]
@@ -145,7 +145,6 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(
         return ptr::null_mut();
     }
 
-    let mut utf8_len = 0;
     let mut utf16_len = 0;
     let mut i = pos as isize;
 
@@ -165,7 +164,6 @@ pub unsafe extern "C" fn hlp_utf8_to_utf16(
             utf16_len += 2; // Surrogate pair
             i += 4;
         }
-        utf8_len += 1;
     }
 
     // Allocate memory for the UTF-16 string
@@ -238,10 +236,10 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
             utf8_len += 1;
         } else if c < 0x800 {
             utf8_len += 2;
-        } else if c >= 0xD800 && c <= 0xDBFF && i + 1 < len {
+        } else if (0xD800..=0xDBFF).contains(&c) && i + 1 < len {
             // Surrogate pair
             let c2 = *str.offset((i + 1) as isize);
-            if c2 >= 0xDC00 && c2 <= 0xDFFF {
+            if (0xDC00..=0xDFFF).contains(&c2) {
                 utf8_len += 4;
                 i += 1;
             } else {
@@ -271,10 +269,10 @@ pub unsafe extern "C" fn hlp_utf16_to_utf8(
             *result.offset(j) = (0xC0 | (c >> 6)) as vbyte;
             *result.offset(j + 1) = (0x80 | (c & 0x3F)) as vbyte;
             j += 2;
-        } else if c >= 0xD800 && c <= 0xDBFF && i + 1 < len {
+        } else if (0xD800..=0xDBFF).contains(&c) && i + 1 < len {
             // Surrogate pair
             let c2 = *str.offset((i + 1) as isize) as u32;
-            if c2 >= 0xDC00 && c2 <= 0xDFFF {
+            if (0xDC00..=0xDFFF).contains(&c2) {
                 c = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00));
                 *result.offset(j) = (0xF0 | (c >> 18)) as vbyte;
                 *result.offset(j + 1) = (0x80 | ((c >> 12) & 0x3F)) as vbyte;
@@ -519,7 +517,8 @@ pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) 
         return str_to_uchar_ptr("null") as *mut vbyte;
     }
     let kind = (*t).kind;
-    let result = match kind {
+
+    match kind {
         hl_type_kind_HI32 => hlp_itos((*d).v.i, len),
         hl_type_kind_HF64 => hlp_ftos((*d).v.d, len),
         _ => {
@@ -527,11 +526,13 @@ pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) 
             hlp_buffer_val(b, d);
             hlp_buffer_content(b, len) as *mut vbyte
         }
-    };
-    result
+    }
 }
 
 #[cfg(test)]
+// The explicit digit strings below are printf format-test vectors; approximating
+// well-known constants is the point, so clippy::approx_constant does not apply.
+#[allow(clippy::approx_constant)]
 mod format_g_tests {
     use super::format_g;
 

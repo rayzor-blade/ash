@@ -23,6 +23,10 @@ use crate::opcodes::{Opcode, Reg};
 use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Per-block phi state during the renaming walk: (base reg, dst value,
+/// incoming `(pred, value)` edges).
+type PhiNode = (u32, Option<ValueId>, Vec<(BlockId, ValueId)>);
+
 /// Lower HL opcodes to an AIR v2 function without module declarations.
 ///
 /// Convenience wrapper over [`lower_with`] with [`NoModuleInfo`]: the result
@@ -275,9 +279,7 @@ pub fn lower_with(
                 end += 1;
             }
             let bid = runs.len() + 1;
-            for j in start..=end {
-                op_block[j] = Some(bid);
-            }
+            op_block[start..=end].fill(Some(bid));
             runs.push((start, end));
             i = end + 1;
         }
@@ -420,7 +422,7 @@ pub fn lower_with(
     };
 
     // Per-block phi state: (base reg, dst value, incoming).
-    let mut phi_nodes: Vec<Vec<(u32, Option<ValueId>, Vec<(BlockId, ValueId)>)>> = phi_regs
+    let mut phi_nodes: Vec<Vec<PhiNode>> = phi_regs
         .iter()
         .map(|regs| regs.iter().map(|&r| (r, None, vec![])).collect())
         .collect();
@@ -455,8 +457,7 @@ pub fn lower_with(
         }
 
         let mut instrs: Vec<Instr> = Vec::new();
-        let term: Terminator;
-        if b == 0 {
+        let term = if b == 0 {
             // Synthetic entry: Param values for every non-pinned register.
             for r in 0..num_regs {
                 if !is_pinned(r as u32) {
@@ -468,10 +469,10 @@ pub fn lower_with(
                     stacks[r].push(v);
                 }
             }
-            term = Terminator::Jump { target: BlockId(1) };
+            Terminator::Jump { target: BlockId(1) }
         } else {
             let (start, end) = runs[b - 1];
-            term = convert_ops(
+            convert_ops(
                 ops,
                 start,
                 end,
@@ -483,8 +484,8 @@ pub fn lower_with(
                 &mut func,
                 &mut stacks,
                 &mut instrs,
-            )?;
-        }
+            )?
+        };
 
         // Fill phi sources in CFG successors.
         for &s in &succs[b] {
@@ -768,6 +769,9 @@ fn convert_ops(
         }};
     }
 
+    // Index loop kept: the body re-reads `ops[i]` in nested matches and uses
+    // `i` for jump-target arithmetic; an enumerate rewrite would obscure both.
+    #[allow(clippy::needless_range_loop)]
     for i in start..=end {
         let is_last = i == end;
         match &ops[i] {

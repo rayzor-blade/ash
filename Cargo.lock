@@ -105,6 +105,19 @@ checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 name = "ash"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "ash_core",
+ "ash_interp",
+ "clap",
+ "inkwell",
+ "libc",
+ "tikv-jemallocator",
+]
+
+[[package]]
+name = "ash_core"
+version = "0.1.0"
+dependencies = [
  "air",
  "anyhow",
  "ash_macro",
@@ -128,25 +141,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ash_cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ash",
- "ash_interp",
- "clap",
- "inkwell",
- "libc",
- "tikv-jemallocator",
-]
-
-[[package]]
 name = "ash_interp"
 version = "0.1.0"
 dependencies = [
  "air",
  "anyhow",
- "ash",
+ "ash_core",
  "beadie",
  "inkwell",
  "libc",

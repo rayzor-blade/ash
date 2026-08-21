@@ -13,14 +13,14 @@ fn main() -> anyhow::Result<()> {
     let want: i32 = args.next().expect("findex").parse()?;
     let with_ops = args.any(|a| a == "--ops");
 
-    ash::native_lib::init_std_library()?;
-    let bc = ash::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
-    let m = ash::air_pipeline::AshModule::new(&bc);
+    ash_core::native_lib::init_std_library()?;
+    let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
+    let m = ash_core::air_pipeline::AshModule::new(&bc);
     for f in &bc.functions {
         if f.findex != want {
             continue;
         }
-        let opt = ash::air_pipeline::optimized(&m, f)
+        let opt = ash_core::air_pipeline::optimized(&m, f)
             .map_err(|e| anyhow::anyhow!("pipeline: {}", e.brief()))?;
         println!("=== AIR (optimized) findex={want} {} ===", f.name());
         println!("{}", opt.ir.dump());

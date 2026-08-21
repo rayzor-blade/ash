@@ -30,6 +30,12 @@ pub struct StackFrame {
     pub line_number: i32,
 }
 
+impl Default for StackTrace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StackTrace {
     pub fn new() -> Self {
         StackTrace { frames: Vec::new() }
@@ -79,6 +85,12 @@ pub struct TrapContext {
     /// restores the lock to this depth before longjmp, releasing guards
     /// held by the frames being jumped over (their Drop never runs).
     pub saved_lock_depth: usize,
+}
+
+impl Default for TrapContext {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrapContext {
@@ -197,7 +209,7 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 
         // Fill the array with stack frame information
         for (i, frame) in stack_trace.frames.iter().enumerate() {
-            *((hl_aptr(varray_ptr) as *mut *const vbyte).add(i as usize)) =
+            *(hl_aptr::<*const vbyte>(varray_ptr).add(i)) =
                 str_to_uchar_ptr(&format!(
                     "{}:{} {}",
                     frame.file_name, frame.line_number, frame.function_name
@@ -370,7 +382,7 @@ pub unsafe extern "C" fn hlp_set_error_handler(handler: *mut vclosure) {
 
     gc.set_exception_handler(Box::new(move |exp: &mut HLException| {
         let gc = crate::gc::gc_locked();
-        let mut value = exp.value.clone();
+        let mut value = exp.value;
         gc.run_with_trap(move || hlp_dyn_call(handler, &mut value, 1))
     }));
 }

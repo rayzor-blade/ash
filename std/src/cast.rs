@@ -345,7 +345,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     let mut t = t;
     let mut data = data;
 
-    let mut gc = crate::gc::gc_locked();
+    let gc = crate::gc::gc_locked();
 
     if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
         let v = *(data as *mut *mut vdynamic);
@@ -399,8 +399,8 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 || t2.is_null()
                 || (t1_obj as usize) < 0x10000
                 || (t2 as usize) < 0x10000
-                || (t1_obj as usize) % std::mem::align_of::<usize>() != 0
-                || (t2 as usize) % std::mem::align_of::<usize>() != 0
+                || !(t1_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
+                || !(t2 as usize).is_multiple_of(std::mem::align_of::<usize>())
             {
                 return ptr::null_mut();
             }
@@ -413,7 +413,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                     break;
                 }
                 let sup = (*t1).super_;
-                if (sup as usize) < 0x10000 || (sup as usize) % std::mem::align_of::<usize>() != 0 {
+                if (sup as usize) < 0x10000 || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>()) {
                     break;
                 }
                 if (*sup).kind != hl_type_kind_HOBJ {
@@ -422,7 +422,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 let sup_obj = (*sup).__bindgen_anon_1.obj;
                 if sup_obj.is_null()
                     || (sup_obj as usize) < 0x10000
-                    || (sup_obj as usize) % std::mem::align_of::<usize>() != 0
+                    || !(sup_obj as usize).is_multiple_of(std::mem::align_of::<usize>())
                 {
                     break;
                 }
@@ -433,7 +433,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 && (t_obj_for_cast as usize) >= 0x10000
                 && !(*t_obj_for_cast).rt.is_null()
                 && ((*t_obj_for_cast).rt as usize) >= 0x10000
-                && !(*(*t_obj_for_cast).rt).castFun.is_none()
+                && (*(*t_obj_for_cast).rt).castFun.is_some()
             {
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 && (t_obj_for_cast as usize) >= 0x10000
                 && !(*t_obj_for_cast).rt.is_null()
                 && ((*t_obj_for_cast).rt as usize) >= 0x10000
-                && !(*(*t_obj_for_cast).rt).castFun.is_none()
+                && (*(*t_obj_for_cast).rt).castFun.is_some()
             {
                 let cast_fn = (*(*t_obj_for_cast).rt).castFun.unwrap();
                 let obj_val = *(data as *mut *mut vdynamic);
@@ -684,9 +684,7 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                     let rt = (*obj).rt;
                     if !rt.is_null() {
                         if let Some(compare_fn) = (*rt).compareFun {
-                            let f: unsafe extern "C" fn(*mut vdynamic, *mut vdynamic) -> i32 =
-                                std::mem::transmute(compare_fn);
-                            return f(a, b);
+                            return compare_fn(a, b);
                         }
                         // String-like objects (first field is HBYTES): compare content
                         if (*obj).nfields >= 1

@@ -104,7 +104,7 @@ jobs:
         run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
       - name: Run parity matrix (interp)
-        run: cargo test -p ash_cli --test parity_matrix parity_matrix_interp -- --nocapture
+        run: cargo test -p ash --test parity_matrix parity_matrix_interp -- --nocapture
 
   parity-hybrid:
     runs-on: ubuntu-22.04
@@ -148,10 +148,10 @@ jobs:
         run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
       - name: Run parity matrix (hybrid default)
-        run: cargo test -p ash_cli --test parity_matrix parity_matrix_hybrid_default -- --nocapture
+        run: cargo test -p ash --test parity_matrix parity_matrix_hybrid_default -- --nocapture
 
       - name: Run parity matrix (hybrid promotion-heavy)
-        run: cargo test -p ash_cli --test parity_matrix parity_matrix_hybrid_promotion_heavy -- --nocapture
+        run: cargo test -p ash --test parity_matrix parity_matrix_hybrid_promotion_heavy -- --nocapture
 
   parity-nightly-slow:
     if: github.event_name == 'schedule'
@@ -198,4 +198,4 @@ jobs:
         run: cargo build -p ash_std --target "${CARGO_BUILD_TARGET}"
 
       - name: Run parity matrix (slow nightly)
-        run: cargo test -p ash_cli --test parity_matrix -- --nocapture
+        run: cargo test -p ash --test parity_matrix -- --nocapture

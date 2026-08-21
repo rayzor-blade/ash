@@ -54,7 +54,7 @@ pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
     let pid = std::process::id();
     let now = std::time::SystemTime::now();
     let elapsed = now.elapsed().expect("expected to get elapsed system time");
-    let time: u32 = (elapsed.as_secs() as u32 * 1000000 * elapsed.as_micros() as u32).into();
+    let time: u32 = elapsed.as_secs() as u32 * 1000000 * elapsed.as_micros() as u32 ;
     hlp_rnd_set_seed(r, (time ^ (pid | (pid << 16))) as i32);
     r
 }
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn hlp_rnd_set_seed(r: *mut hl::rnd, s: c_int) {
 
     let _r = &mut *r;
     _r.cur = 0;
-    _r.seeds.copy_from_slice(&INIT_SEEDS[..]);
+    _r.seeds.copy_from_slice(INIT_SEEDS);
     for i in 0..hl::NSEEDS {
         _r.seeds[i as usize] ^= s as u64;
     }

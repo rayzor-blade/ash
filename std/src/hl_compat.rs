@@ -15,9 +15,10 @@ use std::ptr;
 // Each is a static hl_type with the correct kind field set.
 // ============================================================================
 
-// Wrapper to make hl_type Sync for static globals
+// Wrapper to make hl_type Sync for static globals.
+// Public because the `pub static` hlt_* globals below expose it in their type.
 #[repr(transparent)]
-struct SyncHlType(hl_type);
+pub struct SyncHlType(hl_type);
 unsafe impl Sync for SyncHlType {}
 
 macro_rules! hlt_global {
@@ -46,8 +47,7 @@ hlt_global!(hlt_array, 12); // HARRAY
 hlt_global!(hlt_dynobj, 16); // HDYNOBJ
 hlt_global!(hlt_abstract, 17); // HABSTRACT
 
-use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vbyte, vdynamic};
-use crate::strings;
+use crate::hl::{self, hl_buffer, hl_type, hl_type__bindgen_ty_1, varray, vdynamic};
 
 // ============================================================================
 // Direct aliases: forward hl_XXX to hlp_XXX
@@ -118,7 +118,7 @@ pub unsafe extern "C" fn hl_dyn_call(c: *mut vdynamic, args: *mut varray) -> *mu
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_alloc_buffer(init: *const hl::uchar) -> *mut c_void {
+pub unsafe extern "C" fn hl_alloc_buffer(_init: *const hl::uchar) -> *mut c_void {
     crate::buffer::hlp_alloc_buffer() as *mut c_void
 }
 
@@ -238,8 +238,8 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
     }
     let bytes = std::slice::from_raw_parts(str, len as usize);
     let s = String::from_utf8_lossy(bytes);
-    let ptr = crate::strings::str_to_uchar_ptr(&s);
-    ptr
+
+    crate::strings::str_to_uchar_ptr(&s)
 }
 
 #[no_mangle]

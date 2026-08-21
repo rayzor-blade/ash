@@ -40,6 +40,9 @@ use crate::opcodes::{
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, HashSet};
 
+/// A sequence of `(dst, src)` register moves.
+type Movs = Vec<(u32, u32)>;
+
 /// Serialization result: standard HL bytecode plus the register-type table
 /// (original registers preserved verbatim, copy temporaries appended).
 #[derive(Debug, Clone)]
@@ -129,7 +132,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     // ---- 3. placement decisions -------------------------------------------
     let mut inline: Vec<Option<Vec<(u32, u32)>>> = vec![None; nb];
     // Fall-through-constrained copy block right after block p: (movs, succ).
-    let mut fall_copy: Vec<Option<(Vec<(u32, u32)>, usize)>> = vec![None; nb];
+    let mut fall_copy: Vec<Option<(Movs, usize)>> = vec![None; nb];
     // Copy blocks appended at the end, keyed by edge.
     let mut end_copy: BTreeMap<(usize, usize), Vec<(u32, u32)>> = BTreeMap::new();
 

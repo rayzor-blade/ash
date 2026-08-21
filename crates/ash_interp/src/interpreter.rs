@@ -8,13 +8,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use beadie::{Bead, HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter, TieredBound};
 
-use ash::bytecode::DecodedBytecode;
-use ash::c_types::CTypeFactory;
-use ash::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT};
-use ash::jit::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
-use ash::native_lib::NativeFunctionResolver;
-use ash::opcodes::{Opcode, Reg};
-use ash::types::{HLFunction, ValueTypeKind};
+use ash_core::bytecode::DecodedBytecode;
+use ash_core::c_types::CTypeFactory;
+use ash_core::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT};
+use ash_core::jit::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
+use ash_core::native_lib::NativeFunctionResolver;
+use ash_core::opcodes::{Opcode, Reg};
+use ash_core::types::{HLFunction, ValueTypeKind};
 use inkwell::context::Context;
 
 use crate::air::Cache as AirCache;
@@ -302,6 +302,9 @@ struct LlvmModule(ManuallyDrop<JITModule<'static>>);
 // by the mutex instead of by there being only one broker.
 unsafe impl Send for LlvmModule {}
 
+// One tier-state cell per process, touched only at promotion time — boxing the
+// large pre-warm variant would add indirection for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 enum LlvmState {
     /// Handed off from the main thread's pre-warm, not yet claimed.
     Pending(PrewarmedJit),
@@ -313,8 +316,8 @@ enum LlvmState {
 /// Cranelift middle tier, built lazily on the broker thread at the first
 /// promotion (~1 ms; deliberately not part of startup).
 struct CraneliftTier {
-    backend: ash::cranelift::AshCraneliftBackend,
-    ctx: ash::cranelift::CraneliftTierContext,
+    backend: ash_core::cranelift::AshCraneliftBackend,
+    ctx: ash_core::cranelift::CraneliftTierContext,
 }
 
 /// Raw handles the Cranelift lowering needs; all process-lifetime shared
@@ -524,7 +527,7 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
     // `cranelift::air::lower_best`; a function both decline still reaches the
     // LLVM tier, because a declining Cranelift compile returns an error and
     // this returns null on it.
-    if let Some(reason) = ash::cranelift::signature_reject_reason(bytecode, func) {
+    if let Some(reason) = ash_core::cranelift::signature_reject_reason(bytecode, func) {
         if ctx.tier_log {
             eprintln!("[tier] decline findex={findex} tier=cranelift reason={reason}");
         }
@@ -536,12 +539,12 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
         if slot.is_none() {
             let built = (|| -> Result<Arc<CraneliftTier>> {
                 let t0 = std::time::Instant::now();
-                let backend = ash::cranelift::AshCraneliftBackend::new()?;
+                let backend = ash_core::cranelift::AshCraneliftBackend::new()?;
                 // SAFETY: `bytecode` is the process-lifetime decoded bytecode
                 // published by `set_bytecode`; the arrays are the shared
                 // runtime tables that outlive every tier.
                 let cl_ctx = unsafe {
-                    ash::cranelift::CraneliftTierContext::new(
+                    ash_core::cranelift::CraneliftTierContext::new(
                         &backend,
                         bytecode,
                         ctx.arrays.globals_data as *mut c_void as *mut *mut c_void,
@@ -584,7 +587,7 @@ fn compile_with_cranelift(ctx: &TieredSharedCtx, findex: usize, bead: &Arc<Bead>
     match result {
         Ok(Ok((addr, meta))) => {
             ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
-            ash::profile::register_jit_code(findex as u32, ash::profile::Tier::Cranelift, addr);
+            ash_core::profile::register_jit_code(findex as u32, ash_core::profile::Tier::Cranelift, addr);
             if ctx.tier_log {
                 eprintln!(
                     "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
@@ -701,7 +704,7 @@ fn produce_cranelift_osr_entries(
     bead: &Arc<Bead>,
     findex: usize,
 ) {
-    if !osr_transfer_enabled() || !ash::air_pipeline::air_enabled() {
+    if !osr_transfer_enabled() || !ash_core::air_pipeline::air_enabled() {
         return;
     }
     let pcs: Vec<usize> = match ctx
@@ -723,10 +726,10 @@ fn produce_cranelift_osr_entries(
     else {
         return;
     };
-    let Ok(opt) = ash::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
+    let Ok(opt) = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
         return;
     };
-    let plan = ash::osr::analyze(&opt.ir);
+    let plan = ash_core::osr::analyze(&opt.ir);
     if !plan.eligible() {
         return;
     }
@@ -741,7 +744,7 @@ fn produce_cranelift_osr_entries(
         if !eligible.contains(&pc) {
             continue;
         }
-        match ash::cranelift::codegen::compile_osr_entry(
+        match ash_core::cranelift::codegen::compile_osr_entry(
             &tier.backend,
             &tier.ctx,
             bead,
@@ -753,9 +756,9 @@ fn produce_cranelift_osr_entries(
                 // Without this the entry's samples land in the profiler's
                 // `unknown` bucket — 73% of a NUC mandelbrot run was an
                 // unregistered OSR entry.
-                ash::profile::register_jit_code(
+                ash_core::profile::register_jit_code(
                     findex as u32,
-                    ash::profile::Tier::Cranelift,
+                    ash_core::profile::Tier::Cranelift,
                     addr,
                 );
                 entries.push(OsrEntry {
@@ -833,10 +836,10 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     // when it is off. The serializer's `block_pcs` maps the plan's headers
     // to pcs, which is what lets a probed pc be validated as an eligible
     // header rather than gating on the whole function.
-    let m = ash::air_pipeline::AshModule::new(bytecode);
+    let m = ash_core::air_pipeline::AshModule::new(bytecode);
     let (plan, body, sites): (_, std::borrow::Cow<HLFunction>, Vec<usize>) =
-        if ash::air_pipeline::air_enabled() {
-            match ash::air_pipeline::optimized(&m, raw) {
+        if ash_core::air_pipeline::air_enabled() {
+            match ash_core::air_pipeline::optimized(&m, raw) {
                 Ok(opt) => {
                     let mut b = raw.clone();
                     b.ops = opt.ser.ops.clone();
@@ -844,12 +847,12 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
                         .ser
                         .reg_types
                         .iter()
-                        .map(|t| ash::types::TypeRef(t.0 as usize))
+                        .map(|t| ash_core::types::TypeRef(t.0 as usize))
                         .collect();
                     // The pipeline renumbers opcodes; `debug` indices no
                     // longer line up (mirrors `air::Cache::prepare`).
                     b.debug = Vec::new();
-                    let plan = ash::osr::analyze(&opt.ir);
+                    let plan = ash_core::osr::analyze(&opt.ir);
                     // Only headers that have actually been probed hot. An
                     // entry duplicates the rest of the function, so building
                     // one per statically eligible header compiled ~20 bodies
@@ -875,10 +878,10 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
             // namespace, so use those. Headers probed after the promote are
             // missed in this mode; it is the diagnostic configuration, not
             // the shipping one.
-            let opts = ash::air_pipeline::AirPassOptions::default();
-            match ash::air_pipeline::prepare_ir(&m, raw, ash::air_pipeline::AirOptLevel::O0, &opts)
+            let opts = ash_core::air_pipeline::AirPassOptions::default();
+            match ash_core::air_pipeline::prepare_ir(&m, raw, ash_core::air_pipeline::AirOptLevel::O0, &opts)
             {
-                Ok((f, _)) => (ash::osr::analyze(&f), std::borrow::Cow::Borrowed(raw), pcs),
+                Ok((f, _)) => (ash_core::osr::analyze(&f), std::borrow::Cow::Borrowed(raw), pcs),
                 Err(_) => return,
             }
         };
@@ -1099,7 +1102,7 @@ pub struct HLInterpreter {
     targets: Vec<CallTarget>,
     /// Hot-reloaded bytecode (replaces the original for function lookup).
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
-    reloaded_bytecode: Option<&'static ash::bytecode::DecodedBytecode>,
+    reloaded_bytecode: Option<&'static ash_core::bytecode::DecodedBytecode>,
     /// AIR v2 optimized bodies, filled on first execution of each function.
     /// Inert unless `ASH_AIR=v2-serialize`; see `crate::air`.
     air: AirCache,
@@ -1186,17 +1189,8 @@ pub struct HLInterpreter {
     field_hash_cache: HashMap<usize, i32>,
     /// Fallback storage for HVIRTUAL fields when runtime virtual indexes are unavailable.
     virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
-    /// Hash-keyed fallback storage for HVIRTUAL dynamic field access via hl.Api/Reflect.
-    virtual_hash_fields: HashMap<(usize, i32), NanBoxedValue>,
     /// Optional tiered runtime (hybrid mode).
     tiered_runtime: Option<TieredRuntime>,
-    /// Saved event thread closure (findex, bound_value) from intercepted thread_create.
-    /// Used for cooperative event dispatch: the event closure is called during lock_wait
-    /// to pump SDL events on the main thread without actual threading.
-    event_thread_closure: Option<(usize, Option<NanBoxedValue>)>,
-    /// Whether we're currently inside the event thread closure dispatch
-    /// (prevents recursive calls during lock_wait → event_closure → lock_wait).
-    in_event_dispatch: bool,
 }
 
 impl Drop for HLInterpreter {
@@ -1386,10 +1380,7 @@ impl HLInterpreter {
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
-            virtual_hash_fields: HashMap::new(),
             tiered_runtime: None,
-            event_thread_closure: None,
-            in_event_dispatch: false,
         }
     }
 
@@ -1453,7 +1444,7 @@ impl HLInterpreter {
         if hot_reload {
             // Build the functions_ptrs snapshot from the module context.
             // Use bytecode function/native count to size the table.
-            let old_bc = ash::bytecode::BytecodeDecoder::decode(&hl_path);
+            let old_bc = ash_core::bytecode::BytecodeDecoder::decode(&hl_path);
             let max_findex = old_bc.as_ref().map_or(0, |bc| {
                 let max_fn = bc
                     .functions
@@ -1482,7 +1473,7 @@ impl HLInterpreter {
                 .collect();
 
             if let Ok(old_bc) = old_bc {
-                ash::reload::init_reload_context(
+                ash_core::reload::init_reload_context(
                     hl_path.to_path_buf(),
                     old_bc,
                     fptrs,
@@ -1495,7 +1486,7 @@ impl HLInterpreter {
                 {
                     type FnSetCb = unsafe extern "C" fn(unsafe extern "C" fn(*const u16) -> bool);
                     let set_cb: FnSetCb = unsafe { std::mem::transmute(set_cb_fn) };
-                    unsafe { set_cb(ash::reload::reload_callback) };
+                    unsafe { set_cb(ash_core::reload::reload_callback) };
                     eprintln!("[hot-reload] reload callback registered");
                 }
             }
@@ -1613,7 +1604,7 @@ impl HLInterpreter {
 
     /// Check the compile-time layout oracle against the runtime's own answers.
     ///
-    /// [`ash::layout`] exists so field access can become a constant-offset load
+    /// [`ash_core::layout`] exists so field access can become a constant-offset load
     /// instead of a call, which is only safe if it reproduces
     /// `hlp_get_obj_rt` exactly — a disagreement is silent memory corruption
     /// rather than a wrong answer. This forces every `HOBJ`/`HSTRUCT` runtime
@@ -1626,17 +1617,17 @@ impl HLInterpreter {
         &self,
         bytecode: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,
-    ) -> Result<Vec<ash::layout::LayoutMismatch>> {
+    ) -> Result<Vec<ash_core::layout::LayoutMismatch>> {
         type GetObjRt = unsafe extern "C" fn(
-            *mut ash::hl_bindings::hl_type,
-        ) -> *mut ash::hl_bindings::hl_runtime_obj;
+            *mut ash_core::hl_bindings::hl_type,
+        ) -> *mut ash_core::hl_bindings::hl_runtime_obj;
         let addr = native_resolver
             .resolve_function("std", "hlp_get_obj_rt")
             .map_err(|e| anyhow!("cannot verify layout without hlp_get_obj_rt: {e}"))?;
         let get_obj_rt: GetObjRt = unsafe { std::mem::transmute(addr) };
 
         Ok(unsafe {
-            ash::layout::verify_against_runtime(&bytecode.types, |ti| {
+            ash_core::layout::verify_against_runtime(&bytecode.types, |ti| {
                 let t = self.c_type_factory.get(ti);
                 if t.is_null() {
                     return None;
@@ -1856,30 +1847,6 @@ impl HLInterpreter {
         }
     }
 
-    unsafe fn resolve_virtual_field_index_and_type(
-        obj_ptr: *mut c_void,
-        hfield: i32,
-    ) -> Option<(usize, *mut hl_type)> {
-        if obj_ptr.is_null() {
-            return None;
-        }
-        let t = *(obj_ptr as *const *mut hl_type);
-        if t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL {
-            return None;
-        }
-        let virt = (*t).__bindgen_anon_1.virt;
-        if virt.is_null() || (*virt).fields.is_null() {
-            return None;
-        }
-        for i in 0..(*virt).nfields as usize {
-            let f = &*(*virt).fields.add(i);
-            if f.hashed_name == hfield {
-                return Some((i, f.t));
-            }
-        }
-        None
-    }
-
     #[inline]
     fn is_primitive_or_bytes_kind(kind: u32) -> bool {
         matches!(
@@ -1982,10 +1949,10 @@ impl HLInterpreter {
             // Only attempt unboxing if the pointer looks like a valid vdynamic:
             // aligned, non-tiny address, and type pointer field also looks valid.
             let addr = val.as_ptr();
-            if addr > 0x10000 && addr % std::mem::align_of::<usize>() == 0 {
+            if addr > 0x10000 && addr.is_multiple_of(std::mem::align_of::<usize>()) {
                 let d = addr as *const hl::vdynamic;
                 let t = unsafe { (*d).t };
-                if !t.is_null() && (t as usize) % std::mem::align_of::<usize>() == 0 {
+                if !t.is_null() && (t as usize).is_multiple_of(std::mem::align_of::<usize>()) {
                     let kind = unsafe { (*t).kind };
                     // Only unbox if the source type IS a boxed primitive
                     if Self::is_unboxable_primitive_kind(kind) {
@@ -2009,202 +1976,6 @@ impl HLInterpreter {
             };
         }
         val
-    }
-
-    fn try_handle_virtual_obj_get_field(
-        &mut self,
-        args: &[NanBoxedValue],
-    ) -> Option<NanBoxedValue> {
-        if args.len() < 2 {
-            return Some(NanBoxedValue::null());
-        }
-        let obj = args[0];
-        if obj.is_null() || obj.is_void() {
-            return Some(NanBoxedValue::null());
-        }
-        let obj_ptr = obj.as_ptr();
-        if obj_ptr == 0 {
-            return Some(NanBoxedValue::null());
-        }
-        let hfield = args[1].as_i32();
-        let meta =
-            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none()
-            && unsafe {
-                let t = *(obj_ptr as *const *mut hl_type);
-                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-            }
-        {
-            return None;
-        }
-        let found = self
-            .virtual_fields
-            .get(&(obj_ptr, meta.map_or(usize::MAX, |(idx, _)| idx)))
-            .copied()
-            .or_else(|| self.virtual_hash_fields.get(&(obj_ptr, hfield)).copied());
-        if env_flag!("ASH_DBG_DYN") {
-            eprintln!(
-                "[VGET] self={:p} obj={obj_ptr:#x} hfield={hfield} meta={:?} found={found:?} maps={}/{}",
-                self as *const _,
-                meta.map(|(i, _)| i),
-                self.virtual_fields.len(),
-                self.virtual_hash_fields.len()
-            );
-        }
-        match found {
-            Some(val) if !val.is_null() && !val.is_void() => {
-                if val.is_ptr() {
-                    return Some(NanBoxedValue::from_ptr(val.as_ptr()));
-                }
-                let field_t = meta.map_or(std::ptr::null_mut(), |(_, ft)| ft);
-                Some(self.box_value_as_dynamic_with_type(val, field_t))
-            }
-            _ => {
-                // Field not in interpreter maps — fall through to native hlp_obj_get_field
-                // which can read from the virtual object's backing memory.
-                None
-            }
-        }
-    }
-
-    fn try_handle_virtual_obj_set_field(
-        &mut self,
-        args: &[NanBoxedValue],
-    ) -> Option<NanBoxedValue> {
-        if args.len() < 3 {
-            return Some(NanBoxedValue::void());
-        }
-        let obj = args[0];
-        if obj.is_null() || obj.is_void() {
-            return Some(NanBoxedValue::void());
-        }
-        let obj_ptr = obj.as_ptr();
-        if obj_ptr == 0 {
-            return Some(NanBoxedValue::void());
-        }
-        let hfield = args[1].as_i32();
-        let src_val = args[2];
-        let meta =
-            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none()
-            && unsafe {
-                let t = *(obj_ptr as *const *mut hl_type);
-                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-            }
-        {
-            return None;
-        }
-
-        match meta {
-            Some((idx, field_t)) => {
-                let stored = if src_val.is_null() || src_val.is_void() {
-                    NanBoxedValue::null()
-                } else {
-                    let kind = unsafe { (*field_t).kind };
-                    if Self::is_primitive_or_bytes_kind(kind) && src_val.is_ptr() {
-                        unsafe {
-                            Self::unbox_dynamic_to_kind(src_val.as_ptr() as *mut hl::vdynamic, kind)
-                                .unwrap_or(src_val)
-                        }
-                    } else {
-                        src_val
-                    }
-                };
-                self.virtual_fields.insert((obj_ptr, idx), stored);
-                self.virtual_hash_fields.insert((obj_ptr, hfield), stored);
-            }
-            None => {
-                self.virtual_hash_fields.insert((obj_ptr, hfield), src_val);
-            }
-        }
-        if env_flag!("ASH_DBG_DYN") {
-            eprintln!(
-                "[VSET] self={:p} obj={obj_ptr:#x} hfield={hfield} meta={:?} maps={}/{}",
-                self as *const _,
-                meta.map(|(i, _)| i),
-                self.virtual_fields.len(),
-                self.virtual_hash_fields.len()
-            );
-        }
-        Some(NanBoxedValue::void())
-    }
-
-    fn try_handle_virtual_obj_has_field(
-        &mut self,
-        args: &[NanBoxedValue],
-    ) -> Option<NanBoxedValue> {
-        if args.len() < 2 {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let obj = args[0];
-        if obj.is_null() || obj.is_void() {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let obj_ptr = obj.as_ptr();
-        if obj_ptr == 0 {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let hfield = args[1].as_i32();
-        let meta =
-            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none()
-            && unsafe {
-                let t = *(obj_ptr as *const *mut hl_type);
-                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-            }
-        {
-            return None;
-        }
-        let found = match meta {
-            Some((idx, _)) => {
-                self.virtual_fields.contains_key(&(obj_ptr, idx))
-                    || self.virtual_hash_fields.contains_key(&(obj_ptr, hfield))
-            }
-            None => self.virtual_hash_fields.contains_key(&(obj_ptr, hfield)),
-        };
-        Some(NanBoxedValue::from_bool(found))
-    }
-
-    fn try_handle_virtual_obj_delete_field(
-        &mut self,
-        args: &[NanBoxedValue],
-    ) -> Option<NanBoxedValue> {
-        if args.len() < 2 {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let obj = args[0];
-        if obj.is_null() || obj.is_void() {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let obj_ptr = obj.as_ptr();
-        if obj_ptr == 0 {
-            return Some(NanBoxedValue::from_bool(false));
-        }
-        let hfield = args[1].as_i32();
-        let meta =
-            unsafe { Self::resolve_virtual_field_index_and_type(obj_ptr as *mut c_void, hfield) };
-        if meta.is_none()
-            && unsafe {
-                let t = *(obj_ptr as *const *mut hl_type);
-                t.is_null() || (*t).kind != hl::hl_type_kind_HVIRTUAL
-            }
-        {
-            return None;
-        }
-        let removed = match meta {
-            Some((idx, _)) => {
-                self.virtual_fields.remove(&(obj_ptr, idx)).is_some()
-                    || self
-                        .virtual_hash_fields
-                        .remove(&(obj_ptr, hfield))
-                        .is_some()
-            }
-            None => self
-                .virtual_hash_fields
-                .remove(&(obj_ptr, hfield))
-                .is_some(),
-        };
-        Some(NanBoxedValue::from_bool(removed))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2680,7 +2451,7 @@ impl HLInterpreter {
         // shared functions_ptrs/vtable/closure slots and re-enters the
         // interpreter through this bridge instead of SIGBUSing on them.
         // Args/result are raw i64 words per the callee's declared bytecode
-        // signature (see ash::jit::stub_bridge for the encoding contract).
+        // signature (see ash_core::jit::stub_bridge for the encoding contract).
         // Same raw-pointer-context justification as the closure runner above:
         // JIT code only runs within execute_entrypoint's dynamic extent, on
         // this OS thread.
@@ -2751,7 +2522,7 @@ impl HLInterpreter {
                 Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
             }
         }
-        ash::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
+        ash_core::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
 
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
@@ -2894,7 +2665,7 @@ impl HLInterpreter {
                 {
                     let (gd, nglobals) = self.c_type_factory.globals_data();
                     if !gd.is_null() && global_idx < nglobals {
-                        unsafe { *gd.add(global_idx) = obj_ptr as *mut c_void };
+                        unsafe { *gd.add(global_idx) = obj_ptr };
                     }
                 }
 
@@ -2968,7 +2739,7 @@ impl HLInterpreter {
                                     unsafe { alloc_cl(field_c_type as *mut c_void, func_ptr) };
                                 if !closure.is_null() {
                                     unsafe {
-                                        *(field_addr as *mut *mut c_void) = closure as *mut c_void;
+                                        *(field_addr as *mut *mut c_void) = closure;
                                     }
                                 }
                             }
@@ -3210,16 +2981,16 @@ impl HLInterpreter {
             .lock()
             .expect("llvm_done mutex poisoned")
             .contains(&findex);
-        if !ash::air_pipeline::air_enabled() {
+        if !ash_core::air_pipeline::air_enabled() {
             return; // raw-opcode mode has no block_pcs to validate against
         }
 
         let raw = &bytecode.functions[func_idx];
-        let m = ash::air_pipeline::AshModule::new(bytecode);
-        let Ok(opt) = ash::air_pipeline::optimized(&m, raw) else {
+        let m = ash_core::air_pipeline::AshModule::new(bytecode);
+        let Ok(opt) = ash_core::air_pipeline::optimized(&m, raw) else {
             return;
         };
-        let plan = ash::osr::analyze(&opt.ir);
+        let plan = ash_core::osr::analyze(&opt.ir);
         let eligible = plan
             .entry_headers
             .iter()
@@ -3248,7 +3019,7 @@ impl HLInterpreter {
             else {
                 return;
             };
-            match ash::cranelift::codegen::compile_osr_entry(
+            match ash_core::cranelift::codegen::compile_osr_entry(
                 &tier.backend,
                 &tier.ctx,
                 bound.bead(),
@@ -3257,9 +3028,9 @@ impl HLInterpreter {
                 header_pc,
             ) {
                 Ok(a) => {
-                    ash::profile::register_jit_code(
+                    ash_core::profile::register_jit_code(
                         findex as u32,
-                        ash::profile::Tier::Cranelift,
+                        ash_core::profile::Tier::Cranelift,
                         a,
                     );
                     a as u64
@@ -3338,16 +3109,16 @@ impl HLInterpreter {
         // `osr::analyze` answers from the IR whether a transfer may enter at
         // all: a live trap region or a register whose address escaped means no.
         if osr_logging() {
-            let m = ash::air_pipeline::AshModule::new(bytecode);
-            let opts = ash::air_pipeline::AirPassOptions::default();
-            let plan = ash::air_pipeline::prepare_ir(
+            let m = ash_core::air_pipeline::AshModule::new(bytecode);
+            let opts = ash_core::air_pipeline::AirPassOptions::default();
+            let plan = ash_core::air_pipeline::prepare_ir(
                 &m,
                 &bytecode.functions[func_idx],
-                ash::air_pipeline::AirOptLevel::O2,
+                ash_core::air_pipeline::AirOptLevel::O2,
                 &opts,
             )
             .ok()
-            .map(|(f, _)| ash::osr::analyze(&f));
+            .map(|(f, _)| ash_core::osr::analyze(&f));
             match &plan {
                 Some(p) if p.eligible() => {
                     eprintln!("[osr] hot loop findex={findex} pc={header_pc} ELIGIBLE")
@@ -3481,7 +3252,7 @@ impl HLInterpreter {
             unsafe { remove() };
         }
 
-        ash::profile::count("osr transfers", 1);
+        ash_core::profile::count("osr transfers", 1);
         Ok(Some(self.wrap_native_result(raw, ret_kind)))
     }
 
@@ -3659,7 +3430,7 @@ impl HLInterpreter {
                     .unwrap_or(0)
             );
         }
-        tiered.entries[findex] = Some(entry.clone());
+        tiered.entries[findex] = Some(entry);
         Some(entry)
     }
 
@@ -3713,7 +3484,7 @@ impl HLInterpreter {
         // tier cannot lower must not register a bead at all — a null tier-0
         // result would blacklist it instead of leaving it interpreted.
         if config.tier_mode == TierMode::Cranelift {
-            if let Some(reason) = ash::cranelift::lowering_reject_reason(bytecode, func) {
+            if let Some(reason) = ash_core::cranelift::lowering_reject_reason(bytecode, func) {
                 return Err(format!("cranelift_{reason}"));
             }
         }
@@ -3997,9 +3768,9 @@ impl HLInterpreter {
         // The findex is published for the sampling profiler so a sample landing
         // in the interpreter (or in a runtime helper it called) can be charged
         // to the bytecode function being executed, not just to the loop.
-        let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
+        let prev_findex = ash_core::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.interpret_loop(bc, native_resolver, func_idx);
-        ash::profile::leave_interp(prev_findex);
+        ash_core::profile::leave_interp(prev_findex);
         if let Some(f) = self.stack.pop() {
             if self.reg_pool.len() < POOL_CAP {
                 self.reg_pool.push(f.into_buffer());
@@ -4082,7 +3853,7 @@ impl HLInterpreter {
                 }
                 StepResult::Call {
                     findex,
-                    mut args,
+                    args,
                     dst,
                 } => {
                     if env_flag!("ASH_TRACE_NATIVE") {
@@ -4108,8 +3879,8 @@ impl HLInterpreter {
                             self.stack.last_mut().unwrap().pc += 1;
 
                             // Check deferred hot-reload flag after native calls
-                            if ash::reload::take_reload_pending() {
-                                if let Some(new_bc) = ash::reload::do_reload() {
+                            if ash_core::reload::take_reload_pending() {
+                                if let Some(new_bc) = ash_core::reload::do_reload() {
                                     // Leak the old utf16_strings cache — live NanBoxed registers
                                     // in the current (old) frame hold raw pointers into those
                                     // Vec<u16> buffers. Clearing would create dangling pointers.
@@ -5009,7 +4780,7 @@ impl HLInterpreter {
                     NanBoxedValue::from_i32(0)
                 } else {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
-                    NanBoxedValue::from_i32(unsafe { *(addr as *const u8) as i32 })
+                    NanBoxedValue::from_i32(unsafe { *addr as i32 })
                 };
                 frame.registers.set(dst.0, val);
             }
@@ -5146,7 +4917,7 @@ impl HLInterpreter {
                     unsafe {
                         let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
                         let c = &*(*tenum).constructs.add(construct.0);
-                        let base = val as *mut u8;
+                        let base = val;
                         for (i, arg_reg) in args.iter().enumerate() {
                             if i >= c.nparams as usize {
                                 break;
@@ -5474,7 +5245,7 @@ impl HLInterpreter {
             // varray: t@0, at@8, size@16, data@24
             let arr_ptr = arr_val.as_ptr() as *const u8;
             if (arr_ptr as usize) < 0x1000
-                || (arr_ptr as usize) % std::mem::align_of::<usize>() != 0
+                || !(arr_ptr as usize).is_multiple_of(std::mem::align_of::<usize>())
             {
                 static BAD_ARR_COUNT: std::sync::atomic::AtomicU32 =
                     std::sync::atomic::AtomicU32::new(0);
@@ -5713,7 +5484,7 @@ impl HLInterpreter {
                             static CAST_COUNT: std::sync::atomic::AtomicU32 =
                                 std::sync::atomic::AtomicU32::new(0);
                             let c = CAST_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            if c >= 9 && c < 12 {
+                            if (9..12).contains(&c) {
                                 // trace casts #9+
                                 let obj_ptr = val.as_ptr() as *const hl::vdynamic;
                                 let header_t = unsafe { (*obj_ptr).t };
@@ -5819,7 +5590,7 @@ impl HLInterpreter {
                                 return Ok(StepResult::Call {
                                     findex,
                                     args: vec![val, type_val],
-                                    dst: dst,
+                                    dst,
                                 });
                             } else {
                                 val // no __cast, just copy
@@ -6562,7 +6333,7 @@ impl HLInterpreter {
                                 }
                             }
                             // Try super class
-                            obj_hl_type = (*obj).super_ as *mut hl_type;
+                            obj_hl_type = (*obj).super_;
                         }
                         found
                     } else {
@@ -6576,7 +6347,7 @@ impl HLInterpreter {
                 return Ok(StepResult::Call {
                     findex,
                     args: arg_vals,
-                    dst: dst,
+                    dst,
                 });
             }
         }
@@ -6589,7 +6360,7 @@ impl HLInterpreter {
                 let vobj_proto = (*type_ptr).vobj_proto;
                 if !vobj_proto.is_null() && vobj_proto as usize > 1 {
                     let method_ptr = *vobj_proto.add(field);
-                    if (method_ptr as u64) < ash::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                    if (method_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
                         // Interpreter stub: the slot encodes findex+1.
                         (method_ptr as usize).wrapping_sub(1)
                     } else {
@@ -6666,9 +6437,9 @@ impl HLInterpreter {
         self.stack.push(frame);
         self.sync_gc_scan_roots();
 
-        let prev_findex = ash::profile::enter_interp(bc.functions[func_idx].findex as u32);
+        let prev_findex = ash_core::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.ssa_loop(bc, native_resolver, func_idx, prep, args);
-        ash::profile::leave_interp(prev_findex);
+        ash_core::profile::leave_interp(prev_findex);
         if let Some(f) = self.stack.pop() {
             if self.reg_pool.len() < POOL_CAP {
                 self.reg_pool.push(f.into_buffer());
@@ -7030,7 +6801,7 @@ impl HLInterpreter {
                 use air::v2::ir::IntrinsicKind as K;
                 let r = match kind {
                     K::PtrCompare => {
-                        let (pa, pb) = (get!(&a[0]).as_ptr() as usize, get!(&a[1]).as_ptr() as usize);
+                        let (pa, pb) = (get!(&a[0]).as_ptr(), get!(&a[1]).as_ptr());
                         NanBoxedValue::from_i32(match pa.cmp(&pb) {
                             std::cmp::Ordering::Equal => 0,
                             std::cmp::Ordering::Greater => 1,
@@ -7365,7 +7136,7 @@ impl HLInterpreter {
                     unsafe {
                         let tenum = (*c_type_ptr).__bindgen_anon_1.tenum;
                         let c = &*(*tenum).constructs.add(*construct);
-                        let base = val as *mut u8;
+                        let base = val;
                         for (i, v) in argv.into_iter().enumerate() {
                             if i >= c.nparams as usize {
                                 break;
@@ -9026,7 +8797,7 @@ impl HLInterpreter {
         let out = if ret.is_void() {
             NanBoxedValue::null()
         } else {
-            let ret_t = self.c_type_factory.get(ret_type_idx) as *mut hl_type;
+            let ret_t = self.c_type_factory.get(ret_type_idx);
             self.box_value_as_dynamic_with_type(ret, ret_t)
         };
         if dbg {
@@ -9041,17 +8812,20 @@ impl HLInterpreter {
     /// Pumps SDL events (so the window stays responsive and close works)
     /// and swaps the GL buffer (so rendered content is presented).
     /// Returns false if SDL_QUIT was received (app should exit).
+    // Kept for the in-flight Heaps/EventLoop work: the call site returns when
+    // the fiber-based sys.thread pump lands (see heaps_rendering_status).
+    #[allow(dead_code)]
     fn pump_events_and_swap(&mut self) -> bool {
         let mut alive = true;
         unsafe {
-            let poll = libc::dlsym(libc::RTLD_DEFAULT, b"SDL_PollEvent\0".as_ptr() as *const i8);
+            let poll = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr());
             let swap = libc::dlsym(
                 libc::RTLD_DEFAULT,
-                b"SDL_GL_SwapWindow\0".as_ptr() as *const i8,
+                c"SDL_GL_SwapWindow".as_ptr(),
             );
             let get_win = libc::dlsym(
                 libc::RTLD_DEFAULT,
-                b"SDL_GL_GetCurrentWindow\0".as_ptr() as *const i8,
+                c"SDL_GL_GetCurrentWindow".as_ptr(),
             );
 
             if !poll.is_null() {
@@ -9128,7 +8902,7 @@ impl HLInterpreter {
         // Use raw pointer to avoid borrow conflict inside sort_by closure
         let self_raw = self as *mut Self;
         let bytecode_raw = bytecode as *const DecodedBytecode;
-        let resolver_raw = native_resolver as *const ash::native_lib::NativeFunctionResolver;
+        let resolver_raw = native_resolver as *const ash_core::native_lib::NativeFunctionResolver;
         let mut sort_err: Option<anyhow::Error> = None;
 
         data.sort_by(|&a, &b| {
@@ -9183,7 +8957,7 @@ impl HLInterpreter {
 
         let self_raw = self as *mut Self;
         let bytecode_raw = bytecode as *const DecodedBytecode;
-        let resolver_raw = native_resolver as *const ash::native_lib::NativeFunctionResolver;
+        let resolver_raw = native_resolver as *const ash_core::native_lib::NativeFunctionResolver;
         let mut sort_err: Option<anyhow::Error> = None;
 
         data.sort_by(|&a, &b| {
@@ -9238,7 +9012,7 @@ impl HLInterpreter {
 
         let self_raw = self as *mut Self;
         let bytecode_raw = bytecode as *const DecodedBytecode;
-        let resolver_raw = native_resolver as *const ash::native_lib::NativeFunctionResolver;
+        let resolver_raw = native_resolver as *const ash_core::native_lib::NativeFunctionResolver;
         let mut sort_err: Option<anyhow::Error> = None;
 
         data.sort_by(|&a, &b| {
@@ -9565,7 +9339,7 @@ impl HLInterpreter {
         }
 
         let offset = *(*rt).fields_indexes.add(field_idx);
-        let field_addr = obj_ptr.add(offset as usize) as *mut u8;
+        let field_addr = obj_ptr.add(offset as usize);
 
         Self::write_value_at(field_addr, src_kind, val);
     }
@@ -9575,13 +9349,13 @@ impl HLInterpreter {
         use ValueTypeKind::*;
         match ValueTypeKind::try_from(kind).unwrap_or(HDYN) {
             HVOID => NanBoxedValue::void(),
-            HUI8 => NanBoxedValue::from_i32(*(addr as *const u8) as i32),
+            HUI8 => NanBoxedValue::from_i32(*addr as i32),
             HUI16 => NanBoxedValue::from_i32(*(addr as *const u16) as i32),
             HI32 => NanBoxedValue::from_i32(*(addr as *const i32)),
             HI64 => NanBoxedValue::from_i64(*(addr as *const i64)),
             HF32 => NanBoxedValue::from_f64(*(addr as *const f32) as f64),
             HF64 => NanBoxedValue::from_f64(*(addr as *const f64)),
-            HBOOL => NanBoxedValue::from_bool(*(addr as *const u8) != 0),
+            HBOOL => NanBoxedValue::from_bool(*addr != 0),
             _ => {
                 // Pointer types (OBJ, DYN, FUN, ARRAY, BYTES, ENUM, etc.)
                 let ptr = *(addr as *const usize);
@@ -9633,13 +9407,13 @@ impl HLInterpreter {
         use ValueTypeKind::*;
         match ValueTypeKind::try_from(kind).unwrap_or(HDYN) {
             HVOID => {}
-            HUI8 => *(addr as *mut u8) = val.as_i32() as u8,
+            HUI8 => *addr = val.as_i32() as u8,
             HUI16 => *(addr as *mut u16) = val.as_i32() as u16,
             HI32 => *(addr as *mut i32) = val.as_i32(),
             HI64 => *(addr as *mut i64) = val.as_i64_lossy(),
             HF32 => *(addr as *mut f32) = val.as_f64() as f32,
             HF64 => *(addr as *mut f64) = val.as_f64(),
-            HBOOL => *(addr as *mut u8) = val.as_bool() as u8,
+            HBOOL => *addr = val.as_bool() as u8,
             _ => {
                 // Pointer types — but the NanBoxed value might actually
                 // be a primitive (e.g., HDYN register holding an I32).
@@ -9687,7 +9461,7 @@ impl HLInterpreter {
 #[cfg(test)]
 mod stub_bridge_tests {
     use super::*;
-    use ash::native_lib::init_std_library;
+    use ash_core::native_lib::init_std_library;
 
     /// The stub bridge must never report a failure by returning a value:
     /// compiled code consumes that word as the callee's declared return type,

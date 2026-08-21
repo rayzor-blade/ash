@@ -1181,8 +1181,8 @@ mod tests {
     #[test]
     fn demangles_rust_legacy_symbols() {
         assert_eq!(
-            demangle("_ZN3ash7profile6report17h0123456789abcdefE"),
-            "ash::profile::report"
+            demangle("_ZN8ash_core7profile6report17h0123456789abcdefE"),
+            "ash_core::profile::report"
         );
         // Already-readable C symbols pass through.
         assert_eq!(demangle("hlp_get_obj_rt"), "hlp_get_obj_rt");

@@ -260,8 +260,8 @@ pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
     if out.is_null() {
         return std::ptr::null_mut();
     }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out as *mut u8, bytes.len());
-    *(out as *mut u8).add(bytes.len()) = 0;
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len());
+    *out.add(bytes.len()) = 0;
     out
 }
 
@@ -294,7 +294,7 @@ pub unsafe extern "C" fn hlp_sys_is_dir(path: *const vbyte) -> bool {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_file_open(name: *const vbyte, mode: *const vbyte) -> *mut c_void {
+pub unsafe extern "C" fn hlp_file_open(_name: *const vbyte, _mode: *const vbyte) -> *mut c_void {
     std::ptr::null_mut() // Stub
 }
 

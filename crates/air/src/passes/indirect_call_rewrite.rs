@@ -21,11 +21,11 @@ impl IndirectCallRewritePass {
 
     /// Run the pass, rewriting direct calls to bytecode functions into indirect calls.
     /// Returns the number of opcodes rewritten.
-    pub fn run(&self, ops: &mut Vec<Opcode>) -> usize {
+    pub fn run(&self, ops: &mut [Opcode]) -> usize {
         let mut rewritten = 0;
 
-        for i in 0..ops.len() {
-            let rewrite = match &ops[i] {
+        for op in ops.iter_mut() {
+            let rewrite = match &*op {
                 Opcode::Call0 { dst, fun } if !self.native_findexes.contains(&fun.0) => {
                     Some(Opcode::IndirectCall {
                         dst: *dst,
@@ -84,7 +84,7 @@ impl IndirectCallRewritePass {
             };
 
             if let Some(new_op) = rewrite {
-                ops[i] = new_op;
+                *op = new_op;
                 rewritten += 1;
             }
         }

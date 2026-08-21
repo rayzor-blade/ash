@@ -376,7 +376,7 @@ unsafe extern "C" fn gl_get_program_info_bytes(p: *mut vdynamic) -> *const u8 {
     let mut len: i32 = 0;
     glGetProgramiv(zidx(p), 0x8B84, &mut len); // GL_INFO_LOG_LENGTH
     if len <= 0 {
-        return b"\0".as_ptr();
+        return c"".as_ptr() as *const u8;
     }
     let buf = hl_alloc_bytes(len + 1);
     glGetProgramInfoLog(zidx(p), len + 1, ptr::null_mut(), buf);
@@ -461,7 +461,7 @@ unsafe extern "C" fn gl_get_shader_info_bytes(s: *mut vdynamic) -> *const u8 {
     let mut len: i32 = 0;
     glGetShaderiv(zidx(s), 0x8B84, &mut len); // GL_INFO_LOG_LENGTH
     if len <= 0 {
-        return b"\0".as_ptr();
+        return c"".as_ptr() as *const u8;
     }
     let buf = hl_alloc_bytes(len + 1);
     glGetShaderInfoLog(zidx(s), len + 1, ptr::null_mut(), buf);

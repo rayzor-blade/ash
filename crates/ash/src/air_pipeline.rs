@@ -305,7 +305,7 @@ pub fn optimize(
 /// Whether AIR runs at all, from `ASH_AIR`. The one reader of that variable.
 ///
 /// There were four, and they disagreed. `ash_interp::air` treated unset as on;
-/// `ash::jit::air` treated unset as V2; `ash::cranelift::air` treated unset as
+/// `ash_core::jit::air` treated unset as V2; `ash_core::cranelift::air` treated unset as
 /// **Off**, so the Cranelift tier had never once compiled optimized AIR in a
 /// default run; and `ash_interp::ssa` matched only the exact string "v2".
 /// Every one of them was a private `OnceLock` reading the same variable to a

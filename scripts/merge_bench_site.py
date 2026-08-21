@@ -100,7 +100,11 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
     return row
 
 
-HL_LABELS = {"hashlink-jit": "HashLink JIT", "hashlink-c": "HashLink/C"}
+HL_LABELS = {
+    "hashlink-jit": "HashLink JIT",
+    "hashlink-hl2": "HashLink hl2-ir",
+    "hashlink-c": "HashLink/C",
+}
 
 
 def hl_row(doc: dict, bench: str, engine: str) -> dict | None:
@@ -175,6 +179,11 @@ def main() -> int:
         if row:
             rows.append(row)
         for doc in hl_docs:
+            row = hl_row(doc, name, "hashlink-hl2")
+            if row:
+                rows.append(row)
+                break
+        for doc in hl_docs:
             row = hl_row(doc, name, "hashlink-c")
             if row:
                 rows.append(row)
@@ -196,6 +205,7 @@ def main() -> int:
     git = first.get("git") or {}
     system = first.get("system") or {}
     hl_version = next((d.get("hl_version") for d in hl_docs if d.get("hl_version")), None)
+    hl2_version = next((d.get("hl2_version") for d in hl_docs if d.get("hl2_version")), None)
 
     out = {
         "schema_version": 1,
@@ -204,6 +214,7 @@ def main() -> int:
         "commit": (git.get("commit") or "")[:12],
         "branch": git.get("branch"),
         "hl_version": hl_version,
+        "hl2_version": hl2_version,
         "system": {
             "os": system.get("os"),
             "arch": system.get("arch"),

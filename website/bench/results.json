@@ -1,10 +1,11 @@
 {
   "schema_version": 1,
-  "generated_iso": "2026-08-21T06:40:38Z",
+  "generated_iso": "2026-08-21T09:15:12Z",
   "source": "local",
   "commit": "f53bb5c87011",
   "branch": "main",
   "hl_version": null,
+  "hl2_version": null,
   "system": {
     "os": "darwin",
     "arch": "arm64",

@@ -9,6 +9,10 @@ truth for the corpus and its accepted answers) and runs two lanes:
 
   hashlink-jit  `hl <bench>.hl` on the committed bytecode — needs a working
                 `hl` on PATH (or --hl).
+  hashlink-hl2  the same, on a second VM built from HashLink's active
+                `hl2_ir_rebase` branch (--hl2). That branch is their JIT-IR
+                rewrite, so it is the moving target worth measuring against;
+                the released VM stays as the stable reference.
   hashlink-c    `haxe -main <Main> -hl main.c` recompiled with the system C
                 compiler against libhl, then the native binary timed — needs
                 `haxe`, a C compiler, and --hashlink-dir pointing at a
@@ -162,6 +166,9 @@ def main() -> int:
     ap.add_argument("--manifest", type=Path, default=None)
     ap.add_argument("--hl", default=None,
                     help="hl binary for the JIT lane (default: PATH)")
+    ap.add_argument("--hl2", default=None,
+                    help="hl binary built from HashLink's hl2_ir_rebase "
+                         "branch; adds the hashlink-hl2 lane")
     ap.add_argument("--haxe", default=None,
                     help="haxe binary for the HL/C lane (default: PATH)")
     ap.add_argument("--cc", default=os.environ.get("CC", "cc"))
@@ -216,6 +223,15 @@ def main() -> int:
     hl = args.hl or shutil.which("hl")
     version = hl_version(hl, run_env) if hl else None
 
+    hl2 = args.hl2
+    hl2_env = dict(run_env)
+    if hl2:
+        # Its libhl sits beside it, not beside the released VM.
+        for var in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            prev = os.environ.get(var, "")
+            hl2_env[var] = f"{Path(hl2).parent}{':' + prev if prev else ''}"
+    hl2_version = hl_version(hl2, hl2_env) if hl2 else None
+
     haxe = args.haxe or shutil.which("haxe")
     cc = shutil.which(args.cc)
 
@@ -249,6 +265,7 @@ def main() -> int:
         "generated_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "hl_binary": hl,
         "hl_version": version,
+        "hl2_version": hl2_version,
         "haxe_binary": haxe if hlc_ready else None,
         "system": {
             "os": platform.system().lower(),
@@ -279,6 +296,25 @@ def main() -> int:
             wall = rec.get("wall_ms")
             shown = f"{wall['median_ms']:.1f}ms" if wall else rec["detail"]
             print(f"[hl-bench] {bench['name']} (jit) {rec['status']} {shown}",
+                  flush=True)
+        out["results"].append(rec)
+
+        # ---- hashlink-hl2 lane (their JIT-IR rewrite) --------------------
+        rec = {"benchmark": bench["name"], "engine": "hashlink-hl2",
+               "hl": bench["hl"]}
+        if hl2_version is None:
+            rec.update(status="UNAVAILABLE",
+                       detail="no --hl2 binary (hl2_ir_rebase build)")
+        elif not hl_path.exists():
+            rec.update(status="SKIP", detail=f"missing {hl_path}")
+        else:
+            print(f"[hl-bench] {bench['name']} (hl2) ...", flush=True)
+            rec.update(time_command([hl2, str(hl_path)], bench,
+                                    args.iterations, args.warmups, timeout,
+                                    env=hl2_env))
+            wall = rec.get("wall_ms")
+            shown = f"{wall['median_ms']:.1f}ms" if wall else rec["detail"]
+            print(f"[hl-bench] {bench['name']} (hl2) {rec['status']} {shown}",
                   flush=True)
         out["results"].append(rec)
 

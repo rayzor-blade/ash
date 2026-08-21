@@ -41,6 +41,9 @@ concurrency:
 
 env:
   HASHLINK_VERSION: "1.15"
+  # HashLink's active JIT-IR rewrite. Benched alongside the release so the
+  # table shows both the stable reference and the moving target.
+  HASHLINK_HL2_REF: "hl2_ir_rebase"
 
 jobs:
   benchmark:
@@ -124,6 +127,26 @@ jobs:
           make -C ~/hashlink libhl hl -j"$(nproc)" && test -x ~/hashlink/hl \
             || { echo "::warning::HashLink build failed"; rm -rf ~/hashlink; }
 
+      - name: Cache HashLink hl2-ir build
+        id: hl2-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/hashlink-hl2
+          key: hashlink-${{ env.HASHLINK_HL2_REF }}-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: hashlink-${{ env.HASHLINK_HL2_REF }}-${{ runner.os }}-
+
+      # A branch under active development, so the cache key carries the run id
+      # and only restores as a warm start; a build failure here costs the
+      # comparison row, never the run.
+      - name: Build HashLink ${{ env.HASHLINK_HL2_REF }}
+        continue-on-error: true
+        run: |
+          rm -rf ~/hashlink-hl2
+          git clone --depth 1 --branch "${HASHLINK_HL2_REF}" \
+            https://github.com/HaxeFoundation/hashlink.git ~/hashlink-hl2
+          make -C ~/hashlink-hl2 libhl hl -j"$(nproc)" && test -x ~/hashlink-hl2/hl \
+            || { echo "::warning::hl2_ir_rebase build failed"; rm -rf ~/hashlink-hl2; }
+
       - name: Put HashLink on PATH
         continue-on-error: true
         run: |
@@ -158,11 +181,14 @@ jobs:
             --ignore-load \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
-      - name: Bench HashLink JIT and HL/C (${{ matrix.bench }})
+      - name: Bench HashLink (release JIT, hl2-ir, HL/C) (${{ matrix.bench }})
         run: |
+          HL2=()
+          [ -x ~/hashlink-hl2/hl ] && HL2=(--hl2 "$HOME/hashlink-hl2/hl")
           ./scripts/hl_bench.py \
             --benchmarks "${{ matrix.bench }}" \
             --hashlink-dir ~/hashlink \
+            "${HL2[@]}" \
             --iterations 7 \
             --warmups 1 \
             --timeout-scale 3 \

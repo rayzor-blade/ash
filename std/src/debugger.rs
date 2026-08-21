@@ -59,6 +59,8 @@ fn hl_detect_debugger() -> bool {
         return true;
     }
 
+    // The macOS arm (sysctl) needs the unsafe block; the Linux arm does not.
+    #[allow(unused_unsafe)]
     let debugger_present = unsafe {
         #[cfg(target_os = "windows")]
         {

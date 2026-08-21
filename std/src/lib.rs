@@ -8,6 +8,9 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::too_many_arguments)]
 #![feature(once_cell_get_mut)]
+// c_variadic stabilized in 1.99; the attribute stays so older nightlies
+// still build, and stable_features quiets newer ones.
+#![allow(stable_features)]
 #![feature(c_variadic)]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]

@@ -33,6 +33,7 @@ const TRIGGER_CEILING: usize = 64 * 1024 * 1024;
 const HEARTBEAT: Duration = Duration::from_secs(30);
 /// Throttle for malloc_zone_pressure_relief (avoid per-alloc syscalls in
 /// stress mode).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // macOS-only mechanism
 const PRESSURE_RELIEF_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
 // ── Env-gated config (OnceLock-cached — uncached getenv on the alloc hot
@@ -651,6 +652,7 @@ struct ImmixHeap {
     /// Wall-clock heartbeat anchor.
     last_collect: Instant,
     /// Throttle anchor for malloc_zone_pressure_relief.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // macOS-only mechanism
     last_pressure_relief: Instant,
     /// Blocks currently madvised MADV_FREE_REUSABLE; must be MADV_FREE_REUSE'd
     /// before reuse so live data can't be discarded under memory pressure.

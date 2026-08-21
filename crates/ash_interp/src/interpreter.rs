@@ -5644,20 +5644,50 @@ impl HLInterpreter {
                                             }
                                             h.wrapping_rem(0x1FFFFF7B)
                                         };
-                                        // Search proto array in hl_type_obj
+                                        // Walk the runtime super chain: __cast is
+                                        // inherited (ArrayObj relies on ArrayBase's).
+                                        let dst_c0 = self.c_type_factory.get(dst_type_idx);
+                                        let dst_obj0 = if !dst_c0.is_null()
+                                            && (dst_c0 as usize) >= 0x10000
+                                            && (*dst_c0).kind == hl::hl_type_kind_HOBJ
+                                        {
+                                            (*dst_c0).__bindgen_anon_1.obj
+                                        } else {
+                                            std::ptr::null_mut()
+                                        };
                                         let mut found: Option<usize> = None;
-                                        let nproto = (*obj_t).nproto;
-                                        let proto_ptr = (*obj_t).proto;
-                                        if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
-                                            for i in 0..nproto as usize {
-                                                let proto = &*proto_ptr.add(i);
-                                                if proto.hashed_name == cast_hash {
-                                                    found = Some(proto.findex as usize);
-                                                    break;
+                                        let mut curo = obj_t;
+                                        let mut upcast = false;
+                                        let mut depth = 0;
+                                        while !curo.is_null() && (curo as usize) >= 0x10000 && depth < 64 {
+                                            if !dst_obj0.is_null() && curo == dst_obj0 {
+                                                upcast = true;
+                                                break;
+                                            }
+                                            if found.is_none() {
+                                                let nproto = (*curo).nproto;
+                                                let proto_ptr = (*curo).proto;
+                                                if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
+                                                    for i in 0..nproto as usize {
+                                                        let proto = &*proto_ptr.add(i);
+                                                        if proto.hashed_name == cast_hash {
+                                                            found = Some(proto.findex as usize);
+                                                            break;
+                                                        }
+                                                    }
                                                 }
                                             }
+                                            let sup = (*curo).super_;
+                                            if sup.is_null() || (sup as usize) < 0x10000 {
+                                                break;
+                                            }
+                                            if (*sup).kind != hl::hl_type_kind_HOBJ {
+                                                break;
+                                            }
+                                            curo = (*sup).__bindgen_anon_1.obj;
+                                            depth += 1;
                                         }
-                                        found
+                                        if upcast { None } else { found }
                                     } else {
                                         None
                                     }
@@ -5729,11 +5759,9 @@ impl HLInterpreter {
                 | hl::hl_type_kind_HUI16
                 // HABSTRACT is a pointer but not a dynamic kind, so a raw
                 // copy leaves a Dynamic whose first word is the abstract's
-                // own payload rather than an hl_type — which is exactly the
-                // word hl_dyn_castp reads on the way back out. sys.io.Process
-                // keeps its handle in a Dynamic field, so every stdin.write
-                // was an immediate SIGSEGV. Upstream's OToDyn boxes every
-                // non-dynamic kind for this reason.
+                // own payload, not an hl_type. hl_dyn_castp reads that word
+                // on the way back out. Upstream's OToDyn boxes every
+                // non-dynamic kind for exactly this reason.
                 | hl::hl_type_kind_HABSTRACT
         );
 
@@ -7012,7 +7040,20 @@ impl HLInterpreter {
                         self.op_to_dyn(bc, func, func_idx, dst.0, src.0)?;
                     }
                     K::SafeCast => {
-                        self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
+                        // A converting cast (HOBJ -> unrelated HOBJ) is not a
+                        // value the opcode can produce on its own: it has to run
+                        // the class's `__cast`, which op_safe_cast hands back as
+                        // a staged `StepResult::Call`. Dropping that staged call
+                        // leaves `dst` holding the scratch value op_safe_cast
+                        // parked there — the *source* pointer — so the cast
+                        // silently degrades to the reinterpret this opcode
+                        // exists to avoid, and the next field read dereferences
+                        // an integer. Dispatch it the way CallMethod and
+                        // CallClosure dispatch theirs.
+                        let staged = self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
+                        if matches!(staged, StepResult::Call { .. }) {
+                            return self.ssa_staged_call(bc, native_resolver, func, staged);
+                        }
                     }
                     K::ToSFloat => {
                         let v = get!(src);

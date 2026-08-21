@@ -3607,6 +3607,36 @@ impl<'ctx> JITModule<'ctx> {
                         registers[dst.0 as usize],
                         result.try_as_basic_value().basic().unwrap(),
                     )?;
+                } else if src_type_idx != dst_type_idx
+                    && ((src_kind == hl_type_kind_HOBJ && dst_kind == hl_type_kind_HOBJ)
+                        || (src_kind == hl_type_kind_HSTRUCT
+                            && dst_kind == hl_type_kind_HSTRUCT))
+                {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let src_type_ptr = self
+                        .get_initialized_type(src_type_idx)?
+                        .into_pointer_value();
+                    let dst_type_ptr = self
+                        .get_initialized_type(dst_type_idx)?
+                        .into_pointer_value();
+                    let dyn_castp = self.declare_native(
+                        "hlp_dyn_castp",
+                        &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let result = self.builder.build_call(
+                        dyn_castp,
+                        &[
+                            registers[src.0 as usize].into(),
+                            src_type_ptr.into(),
+                            dst_type_ptr.into(),
+                        ],
+                        "dyn_castp_obj",
+                    )?;
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        result.try_as_basic_value().basic().unwrap(),
+                    )?;
                 } else {
                     // Same type or non-dynamic: simple pointer copy
                     let src_val = self.builder.build_load(

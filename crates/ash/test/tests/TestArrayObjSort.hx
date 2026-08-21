@@ -20,6 +20,21 @@
 //     a generic swap, and a comparator passed as a parameter and called all
 //     work. The distinguishing move is ArrayObj's `cast this` to Array<T>.
 //   * Predates this session's work; reproduces on binaries built before it.
+//   * The faulting function is `HLInterpreter::op_field_get`, from
+//     ASH_CRASH_BACKTRACE=1. It faults dereferencing its *object* operand,
+//     which means a register that should hold an object holds an integer —
+//     so an earlier field read returned the wrong field.
+//   * That fits the layout exactly. `ArrayObj<T> extends ArrayBase`, and
+//     ArrayBase contributes `length:Int` ahead of ArrayObj's own
+//     `array:hl.NativeArray<Dynamic>`. Reading `array` one index low yields
+//     `length` — an Int whose value is precisely the fault address we see.
+//     `ArrayDyn` is the other suspect: its `length` is a property
+//     (`length(get,never)`), not a stored field, so any field numbering that
+//     counts properties shifts `array` and `allowReinterpret` by one.
+//   * THE SAME INSTRUCTION faults on the official Haxe suite. pc and lr agree
+//     in their low 12 bits (0x878 / 0x91c — ASLR only shifts by whole pages)
+//     across this repro, tests/unit and tests/sys. One defect is holding up
+//     the entire conformance suite; see scripts/haxe_conformance.py.
 class TestArrayObjSort {
     static function main() {
         var f = function(a:String, b:String) return a < b ? -1 : (a > b ? 1 : 0);

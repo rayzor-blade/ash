@@ -12,6 +12,11 @@ ash_interp = { path = "../ash_interp" }
 anyhow = { workspace = true }
 inkwell = { workspace = true }
 clap = { workspace = true }
+
+# Both deps below serve only the unix crash-handler complex in main.rs
+# (sigaction/SA_SIGINFO + the frame walk), which is #[cfg(unix)] as a unit;
+# Windows runs without a crash handler for now (docs/windows-port.md).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 # Crash-handler frame names: dladdr returns v0-mangled Rust symbols, and a
 # crash report you cannot read is half a crash report.

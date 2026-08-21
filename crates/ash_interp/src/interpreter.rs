@@ -264,6 +264,17 @@ pub struct TieredStats {
     pub llvm_promotions: u64,
 }
 
+/// Widen a type kind to the `u32` that `ValueTypeKind::try_from` takes.
+///
+/// The cast is a no-op under clang (bindgen types `hl_type_kind` u32) but a
+/// real conversion under MSVC (i32), so clippy's `unnecessary_cast` is wrong
+/// on exactly one platform — hence the allow lives here, once.
+#[allow(clippy::unnecessary_cast)]
+#[inline(always)]
+fn kind_u32(kind: hl::hl_type_kind) -> u32 {
+    kind as u32
+}
+
 /// Everything needed to call one promoted function, cached per findex.
 ///
 /// `Copy`, deliberately. This is read on every invocation of every compiled
@@ -275,14 +286,18 @@ pub struct TieredStats {
 #[derive(Debug, Clone, Copy)]
 struct CompiledFunctionEntry {
     fn_addr: usize,
-    arg_kinds: [u32; 8],
+    // Kinds carry the bindgen alias, not a bare integer: MSVC types the C
+    // enum i32 where clang types it u32, so only the alias compiles on both.
+    // Must stay agreed with ash_core's `CompiledFunctionMeta`, which is
+    // alias-typed the same way.
+    arg_kinds: [hl::hl_type_kind; 8],
     nargs: u8,
-    ret_kind: u32,
+    ret_kind: hl::hl_type_kind,
 }
 
 impl CompiledFunctionEntry {
     #[inline(always)]
-    fn args(&self) -> &[u32] {
+    fn args(&self) -> &[hl::hl_type_kind] {
         &self.arg_kinds[..self.nargs as usize]
     }
 }
@@ -450,7 +465,7 @@ struct TieredRuntime {
     entries: Vec<Option<CompiledFunctionEntry>>,
     /// findex-indexed marshaling signature, derived from the bytecode and
     /// therefore identical for every tier.
-    sigs: Vec<Option<([u32; 8], u8, u32)>>,
+    sigs: Vec<Option<([hl::hl_type_kind; 8], u8, hl::hl_type_kind)>>,
     shared_ctx: Arc<TieredSharedCtx>,
     /// Interp-side counters; broker-side counters live in `shared_ctx`.
     stats: TieredStats,
@@ -1923,7 +1938,7 @@ impl HLInterpreter {
     }
 
     #[inline]
-    fn is_primitive_or_bytes_kind(kind: u32) -> bool {
+    fn is_primitive_or_bytes_kind(kind: hl::hl_type_kind) -> bool {
         matches!(
             kind,
             hl::hl_type_kind_HI32
@@ -1938,7 +1953,7 @@ impl HLInterpreter {
 
     /// Kinds where a pointer return should be unboxed from vdynamic.
     /// HBYTES is excluded — bytes pointers are raw buffers, not boxed primitives.
-    fn is_unboxable_primitive_kind(kind: u32) -> bool {
+    fn is_unboxable_primitive_kind(kind: hl::hl_type_kind) -> bool {
         matches!(
             kind,
             hl::hl_type_kind_HI32
@@ -1952,7 +1967,7 @@ impl HLInterpreter {
     }
 
     #[inline]
-    fn is_numeric_or_bool_kind(kind: u32) -> bool {
+    fn is_numeric_or_bool_kind(kind: hl::hl_type_kind) -> bool {
         matches!(
             kind,
             hl::hl_type_kind_HI32
@@ -2015,7 +2030,11 @@ impl HLInterpreter {
     }
 
     #[inline]
-    fn coerce_value_for_static_kind(&self, val: NanBoxedValue, dst_kind: u32) -> NanBoxedValue {
+    fn coerce_value_for_static_kind(
+        &self,
+        val: NanBoxedValue,
+        dst_kind: hl::hl_type_kind,
+    ) -> NanBoxedValue {
         if val.is_ptr()
             && !val.is_null()
             && val.as_ptr() != 0
@@ -2057,7 +2076,7 @@ impl HLInterpreter {
     fn dyn_get_field_by_hash(
         obj_ptr: *mut c_void,
         hfield: i32,
-        dst_kind: u32,
+        dst_kind: hl::hl_type_kind,
         dst_type_ptr: *mut c_void,
         fn_dyn_getd: *mut c_void,
         fn_dyn_getf: *mut c_void,
@@ -2127,7 +2146,7 @@ impl HLInterpreter {
         obj_ptr: *mut c_void,
         hfield: i32,
         src_val: NanBoxedValue,
-        src_kind: u32,
+        src_kind: hl::hl_type_kind,
         src_type_ptr: *mut c_void,
         fn_dyn_setd: *mut c_void,
         fn_dyn_setf: *mut c_void,
@@ -3430,7 +3449,7 @@ impl HLInterpreter {
                         tiered.beads[findex] = Some(bound);
                         let f = &bytecode.functions[func_idx];
                         if let Some(tf) = bytecode.types[f.type_.0].fun.as_ref() {
-                            let mut arg_kinds = [0u32; 8];
+                            let mut arg_kinds = [hl::hl_type_kind_HVOID; 8];
                             let nargs = tf.args.len().min(8);
                             for (i, a) in tf.args.iter().take(8).enumerate() {
                                 arg_kinds[i] = bytecode.types[a.0].kind;
@@ -3630,7 +3649,8 @@ impl HLInterpreter {
         let arg_kinds = entry.args();
         let ret_kind = entry.ret_kind;
 
-        let is_float_kind = |k: u32| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
+        let is_float_kind =
+            |k: hl::hl_type_kind| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
         let ret_is_float = is_float_kind(ret_kind);
         let float_mask: u32 = arg_kinds.iter().enumerate().fold(0u32, |acc, (i, &k)| {
             if is_float_kind(k) {
@@ -4775,10 +4795,11 @@ impl HLInterpreter {
             Opcode::GetTID { dst, src } => {
                 // GetTID returns the kind field of the hl_type* in src.
                 // src should hold an hl_type* (result of GetType).
-                // hl_type.kind is a u32 at offset 0.
+                // hl_type.kind is the C enum at offset 0 — read it through the
+                // bindgen alias, whose width is the platform's enum width.
                 let val = frame.registers.get(src.0);
                 let kind = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
-                    unsafe { *(val.as_ptr() as *const u32) as i32 }
+                    unsafe { *(val.as_ptr() as *const hl::hl_type_kind) as i32 }
                 } else {
                     // Fallback to static type kind
                     let type_ref = &func.regs[src.0 as usize];
@@ -7225,7 +7246,7 @@ impl HLInterpreter {
             I::GetTID { dst, src } => {
                 let v = get!(src);
                 let k = if v.is_ptr() && !v.is_null() && v.as_ptr() != 0 {
-                    unsafe { *(v.as_ptr() as *const u32) as i32 }
+                    unsafe { *(v.as_ptr() as *const hl::hl_type_kind) as i32 }
                 } else {
                     bc.types[func.regs[src.0 as usize].0].kind as i32
                 };
@@ -7804,9 +7825,9 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         func: &HLFunction,
         reg_idx: usize,
-        reg_kind: u32,
+        reg_kind: hl::hl_type_kind,
         val: NanBoxedValue,
-    ) -> Option<(Option<NanBoxedValue>, u32)> {
+    ) -> Option<(Option<NanBoxedValue>, hl::hl_type_kind)> {
         if reg_kind != hl::hl_type_kind_HNULL {
             return Some((Some(val), reg_kind));
         }
@@ -7907,7 +7928,7 @@ impl HLInterpreter {
         }
     }
 
-    fn numeric_as_f64(v: NanBoxedValue, kind: u32) -> Option<f64> {
+    fn numeric_as_f64(v: NanBoxedValue, kind: hl::hl_type_kind) -> Option<f64> {
         match kind {
             k if k == hl::hl_type_kind_HI32 => Some(v.as_i32() as f64),
             k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as f64),
@@ -7919,7 +7940,7 @@ impl HLInterpreter {
         }
     }
 
-    fn numeric_as_i64(v: NanBoxedValue, kind: u32) -> Option<i64> {
+    fn numeric_as_i64(v: NanBoxedValue, kind: hl::hl_type_kind) -> Option<i64> {
         match kind {
             k if k == hl::hl_type_kind_HI32 => Some(v.as_i32() as i64),
             k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as i64),
@@ -7930,7 +7951,7 @@ impl HLInterpreter {
         }
     }
 
-    fn numeric_as_u64(v: NanBoxedValue, kind: u32) -> Option<u64> {
+    fn numeric_as_u64(v: NanBoxedValue, kind: hl::hl_type_kind) -> Option<u64> {
         match kind {
             k if k == hl::hl_type_kind_HI32 => Some((v.as_i32() as u32) as u64),
             k if k == hl::hl_type_kind_HUI8 => Some((v.as_i32() as u8) as u64),
@@ -7968,7 +7989,7 @@ impl HLInterpreter {
     unsafe fn string_operand_utf16(
         &self,
         v: NanBoxedValue,
-        kind: u32,
+        kind: hl::hl_type_kind,
     ) -> Option<(*const u16, i32)> {
         if v.is_null() || v.is_void() {
             return None;
@@ -8166,7 +8187,10 @@ impl HLInterpreter {
         }
     }
 
-    unsafe fn unbox_dynamic_to_kind(d: *mut hl::vdynamic, dst_kind: u32) -> Option<NanBoxedValue> {
+    unsafe fn unbox_dynamic_to_kind(
+        d: *mut hl::vdynamic,
+        dst_kind: hl::hl_type_kind,
+    ) -> Option<NanBoxedValue> {
         if d.is_null() || (*d).t.is_null() {
             return None;
         }
@@ -8377,7 +8401,7 @@ impl HLInterpreter {
         let ret_kind = bytecode.types[type_fun.ret.0].kind;
 
         // Get argument type kinds for extraction
-        let arg_kinds: Vec<u32> = type_fun
+        let arg_kinds: Vec<hl::hl_type_kind> = type_fun
             .args
             .iter()
             .map(|a| bytecode.types[a.0].kind)
@@ -8400,7 +8424,8 @@ impl HLInterpreter {
         // Check if any argument or return type involves floats.
         // On ARM64, floats use separate FP registers (d0-d7) vs integer registers (x0-x7),
         // so we must use typed dispatch with explicit f64 in the right positions.
-        let is_float_kind = |k: u32| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
+        let is_float_kind =
+            |k: hl::hl_type_kind| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
         let ret_is_float = is_float_kind(ret_kind);
         let float_mask: u32 = arg_kinds.iter().enumerate().fold(0u32, |acc, (i, &k)| {
             if is_float_kind(k) {
@@ -8868,7 +8893,11 @@ impl HLInterpreter {
         self.call_function(bytecode, native_resolver, findex, &full_args)
     }
 
-    fn dynamic_to_value_for_kind(&self, d: *mut hl::vdynamic, dst_kind: u32) -> NanBoxedValue {
+    fn dynamic_to_value_for_kind(
+        &self,
+        d: *mut hl::vdynamic,
+        dst_kind: hl::hl_type_kind,
+    ) -> NanBoxedValue {
         if d.is_null() {
             return NanBoxedValue::null();
         }
@@ -8934,7 +8963,7 @@ impl HLInterpreter {
         &self,
         bytecode: &DecodedBytecode,
         findex: usize,
-    ) -> Option<(Vec<u32>, usize)> {
+    ) -> Option<(Vec<hl::hl_type_kind>, usize)> {
         if let Some(fidx) = func_of(&self.targets, findex) {
             let t_idx = bytecode.functions[fidx].type_.0;
             let tf = bytecode.types[t_idx].fun.as_ref()?;
@@ -9290,7 +9319,7 @@ impl HLInterpreter {
         &self,
         func_ptr: *mut std::ffi::c_void,
         args: &[NanBoxedValue],
-        arg_kinds: &[u32],
+        arg_kinds: &[hl::hl_type_kind],
         float_mask: u32,
         ret_is_float: bool,
     ) -> Result<i64> {
@@ -9410,9 +9439,9 @@ impl HLInterpreter {
 
     /// Convert a NanBoxedValue to an i64 for FFI passing.
     /// Uses the HL type kind to correctly interpret the value.
-    fn value_to_i64(&self, val: NanBoxedValue, type_kind: u32) -> i64 {
+    fn value_to_i64(&self, val: NanBoxedValue, type_kind: hl::hl_type_kind) -> i64 {
         use ValueTypeKind::*;
-        match ValueTypeKind::try_from(type_kind).unwrap_or(HNULL) {
+        match ValueTypeKind::try_from(kind_u32(type_kind)).unwrap_or(HNULL) {
             HVOID => 0,
             HI32 | HUI8 | HUI16 => val.as_i32() as i64,
             HI64 => val.as_i64_lossy(),
@@ -9439,9 +9468,9 @@ impl HLInterpreter {
     }
 
     /// Wrap a raw i64 return value from a native function based on the HL return type.
-    fn wrap_native_result(&self, raw: i64, ret_kind: u32) -> NanBoxedValue {
+    fn wrap_native_result(&self, raw: i64, ret_kind: hl::hl_type_kind) -> NanBoxedValue {
         use ValueTypeKind::*;
-        match ValueTypeKind::try_from(ret_kind).unwrap_or(HNULL) {
+        match ValueTypeKind::try_from(kind_u32(ret_kind)).unwrap_or(HNULL) {
             HVOID => NanBoxedValue::void(),
             HI32 => NanBoxedValue::from_i32(raw as i32),
             // A callee returning bool/u8/u16 only defines the low bits of the
@@ -9470,9 +9499,9 @@ impl HLInterpreter {
     unsafe fn read_obj_field(
         obj_ptr: *mut u8,
         field_idx: usize,
-        dst_kind: u32,
+        dst_kind: hl::hl_type_kind,
         obj_c_type: *mut c_void,
-        obj_kind: u32,
+        obj_kind: hl::hl_type_kind,
         fn_get_obj_rt: *mut c_void,
     ) -> NanBoxedValue {
         if fn_get_obj_rt.is_null() {
@@ -9538,10 +9567,10 @@ impl HLInterpreter {
     unsafe fn write_obj_field(
         obj_ptr: *mut u8,
         field_idx: usize,
-        src_kind: u32,
+        src_kind: hl::hl_type_kind,
         val: NanBoxedValue,
         obj_c_type: *mut c_void,
-        obj_kind: u32,
+        obj_kind: hl::hl_type_kind,
         fn_get_obj_rt: *mut c_void,
     ) {
         if fn_get_obj_rt.is_null() {
@@ -9580,9 +9609,9 @@ impl HLInterpreter {
     }
 
     /// Read a value from a raw memory address based on the HL type kind.
-    unsafe fn read_value_at(addr: *const u8, kind: u32) -> NanBoxedValue {
+    unsafe fn read_value_at(addr: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
         use ValueTypeKind::*;
-        match ValueTypeKind::try_from(kind).unwrap_or(HDYN) {
+        match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
             HVOID => NanBoxedValue::void(),
             HUI8 => NanBoxedValue::from_i32(*addr as i32),
             HUI16 => NanBoxedValue::from_i32(*(addr as *const u16) as i32),
@@ -9638,9 +9667,9 @@ impl HLInterpreter {
     }
 
     /// Write a value to a raw memory address based on the HL type kind.
-    unsafe fn write_value_at(addr: *mut u8, kind: u32, val: NanBoxedValue) {
+    unsafe fn write_value_at(addr: *mut u8, kind: hl::hl_type_kind, val: NanBoxedValue) {
         use ValueTypeKind::*;
-        match ValueTypeKind::try_from(kind).unwrap_or(HDYN) {
+        match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
             HVOID => {}
             HUI8 => *addr = val.as_i32() as u8,
             HUI16 => *(addr as *mut u16) = val.as_i32() as u16,
@@ -9683,12 +9712,12 @@ impl HLInterpreter {
     }
 
     /// Read a NanBoxedValue from a raw memory pointer using the given type kind.
-    fn read_value_from_ptr(ptr: *const u8, kind: u32) -> NanBoxedValue {
+    fn read_value_from_ptr(ptr: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
         unsafe { Self::read_value_at(ptr, kind) }
     }
 
     /// Write a NanBoxedValue to a raw memory pointer using the given type kind.
-    fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: u32) {
+    fn write_value_to_ptr(ptr: *mut u8, val: NanBoxedValue, kind: hl::hl_type_kind) {
         unsafe { Self::write_value_at(ptr, kind, val) }
     }
 }

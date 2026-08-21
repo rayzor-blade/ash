@@ -5,6 +5,9 @@ use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process;
+// Only the unix crash handler reads a OnceLock (the ASH_CRASH_BACKTRACE
+// latch); on Windows there is no handler and no latch.
+#[cfg(unix)]
 use std::sync::OnceLock;
 
 #[derive(Parser)]
@@ -71,6 +74,7 @@ enum Mode {
 /// Read from `ASH_CRASH_BACKTRACE` exactly once, during `main`, before any
 /// handler can fire: `getenv` is not async-signal-safe, and neither is the
 /// capture itself (see [`crash_handler_siginfo`]).
+#[cfg(unix)]
 static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
 
 
@@ -80,23 +84,33 @@ static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-    // Resolve the crash-time options before installing the handler, so the
-    // handler itself never touches the environment (getenv is not
-    // async-signal-safe and may be mid-mutation when the fault lands).
-    let _ = CRASH_BACKTRACE.set(
-        std::env::var("ASH_CRASH_BACKTRACE")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false),
-    );
+    // The crash-reporting complex below is unix signal machinery
+    // (sigaction/SA_SIGINFO, siginfo_t, a signal-context register walk), so
+    // it installs as one unit on unix only. Windows runs without a crash
+    // handler for now: the counterpart is an SEH/vectored exception filter —
+    // a different architecture, not a per-line substitution — tracked in
+    // docs/windows-port.md. An access violation there dies with the OS
+    // default (exit code 0xC0000005), exactly as any unhandled fault does.
+    #[cfg(unix)]
+    {
+        // Resolve the crash-time options before installing the handler, so
+        // the handler itself never touches the environment (getenv is not
+        // async-signal-safe and may be mid-mutation when the fault lands).
+        let _ = CRASH_BACKTRACE.set(
+            std::env::var("ASH_CRASH_BACKTRACE")
+                .map(|v| v != "0" && !v.is_empty())
+                .unwrap_or(false),
+        );
 
-    // Install signal handlers with sigaction for faulting address info
-    unsafe {
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = crash_handler_siginfo as *const () as usize;
-        sa.sa_flags = libc::SA_SIGINFO;
-        libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
+        // Install signal handlers with sigaction for faulting address info
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = crash_handler_siginfo as *const () as usize;
+            sa.sa_flags = libc::SA_SIGINFO;
+            libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGBUS, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
+        }
     }
 
     // Start profiling before any work happens, and on this thread: the sampler
@@ -119,7 +133,7 @@ unsafe fn errno() -> i32 {
     *libc::__error()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 unsafe fn errno() -> i32 {
     *libc::__errno_location()
 }
@@ -128,6 +142,12 @@ unsafe fn errno() -> i32 {
 ///
 /// `write(2)` is async-signal-safe; `eprintln!` is not (it takes a lock and
 /// the formatting machinery can allocate).
+///
+/// unix-only, like every one of its callers: raw fd 2 and `EINTR` are the
+/// unix contract, and the only consumer is the signal handler above/below.
+/// A Windows crash handler would write via
+/// `WriteFile(GetStdHandle(STD_ERROR_HANDLE))` and lands with it.
+#[cfg(unix)]
 unsafe fn write_stderr(bytes: &[u8]) {
     let mut off = 0usize;
     while off < bytes.len() {
@@ -147,6 +167,7 @@ unsafe fn write_stderr(bytes: &[u8]) {
 }
 
 /// Append `src` to `buf` at `len`, truncating at the buffer's end.
+#[cfg(unix)]
 fn push_bytes(buf: &mut [u8], len: &mut usize, src: &[u8]) {
     for &b in src {
         if *len >= buf.len() {
@@ -158,6 +179,7 @@ fn push_bytes(buf: &mut [u8], len: &mut usize, src: &[u8]) {
 }
 
 /// Append `v` in decimal. Manual formatting: `format!` allocates.
+#[cfg(unix)]
 fn push_dec(buf: &mut [u8], len: &mut usize, v: u64) {
     let mut digits = [0u8; 20];
     let mut n = 0;
@@ -177,6 +199,7 @@ fn push_dec(buf: &mut [u8], len: &mut usize, v: u64) {
 }
 
 /// Append `v` in hex, no `0x` prefix. Manual formatting: `format!` allocates.
+#[cfg(unix)]
 fn push_hex(buf: &mut [u8], len: &mut usize, v: u64) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut digits = [0u8; 16];
@@ -281,10 +304,13 @@ unsafe fn signal_registers(ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64,
     ))
 }
 
-#[cfg(not(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "linux", target_arch = "x86_64")
-)))]
+#[cfg(all(
+    unix,
+    not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))
+))]
 unsafe fn signal_registers(_ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64, u64)> {
     None
 }
@@ -307,6 +333,7 @@ unsafe fn signal_registers(_ctx: *mut std::ffi::c_void) -> Option<(u64, u64, u64
 /// strictly best-effort and formally unsafe (it can deadlock or double-fault
 /// exactly as before); use it only when the fault is known not to involve the
 /// allocator.
+#[cfg(unix)]
 unsafe extern "C" fn crash_handler_siginfo(
     sig: i32,
     info: *mut libc::siginfo_t,

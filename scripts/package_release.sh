@@ -23,15 +23,15 @@ mkdir -p "$DIST"
 cp "$BIN" "$DIST/ash"
 cp LICENSE "$DIST/" 2>/dev/null || true
 
-# Ship the runtime beside the binary even though the binary also embeds it.
+# Ship the runtime beside the binary, for the diagnostic path only.
 #
-# ash resolves ash_std in three steps: a system libhl, then a sibling next to
-# the executable, then — as a last resort — writing the embedded copy to a
-# fresh temp file, spawning codesign over it, and dlopening that. A release
-# tarball that carries only `ash` skips straight to the last resort, so every
-# run of an installed ash paid a temp write plus a codesign process before it
-# executed a single opcode. Installing the sibling costs a few MB and turns
-# that into a plain dlopen of an already-signed, stable path.
+# ash_std is linked into `ash` now, so a normal run never loads this file —
+# that change is what took startup from 189ms to 17ms, by removing the temp
+# write and codesign an installed binary used to pay on every launch.
+# ASH_STD_LINKAGE=dynamic still dlopens, for A/B comparison against the
+# linked-in copy, and without a sibling here that falls back to extracting
+# the embedded copy to a temp file. Two megabytes to keep the comparison
+# honest is worth it; drop this block if the escape hatch ever goes away.
 if [[ "$(uname -s)" == "Darwin" ]]; then
   STD_LIB="libash_std.dylib"
 else

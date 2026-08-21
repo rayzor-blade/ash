@@ -61,6 +61,9 @@ jobs:
           - closure_call
     env:
       LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      # ash_std's build.rs runs bindgen; the runner's system libclang is too
+      # old for the pinned bindgen and silently degrades structs to opaque.
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
     steps:
       - uses: actions/checkout@v4
 
@@ -69,6 +72,8 @@ jobs:
           python-version: "3.12"
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # bindgen pretty-prints through it
 
       # Haxe recompiles each bench to C for the HashLink/C (AOT) lane.
       - uses: krdlab/setup-haxe@v1

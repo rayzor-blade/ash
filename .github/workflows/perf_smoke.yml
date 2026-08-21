@@ -20,6 +20,7 @@ jobs:
     env:
       HAXE_VERSION: "4.3.4"
       LLVM_SYS_211_PREFIX: "/usr/lib/llvm-21"
+      LIBCLANG_PATH: "/usr/lib/llvm-21/lib"
       CARGO_BUILD_TARGET: "x86_64-unknown-linux-gnu"
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +30,8 @@ jobs:
           python-version: "3.11"
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
 
       - uses: krdlab/setup-haxe@v1
         with:

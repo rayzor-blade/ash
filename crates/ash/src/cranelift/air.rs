@@ -240,16 +240,15 @@ struct RetierState {
 static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierState>>> =
     std::sync::Mutex::new(None);
 
-/// Off by default, and the reason is measured, not cautious: the exits work
-/// (a mandelbrot frame reaches LLVM mid-loop, which its checksum proves),
-/// but this tier's LLVM code is currently SLOWER than its Cranelift code on
-/// FP kernels — mandelbrot best-of-3 goes 389ms -> 636ms when frames climb.
-/// The call benches gain (inlined 163 -> 147, method 210 -> 196), so this
-/// flips on the day the LLVM-tier deficit is fixed. `ASH_CL_RETIER=1` opts
-/// in meanwhile.
+/// On by default. It was off while the exits were placed on enclosed loop
+/// headers, where mandelbrot lost 50x; restricting them to outermost,
+/// un-nested loops removed that, and the measured position on an idle
+/// x86_64 box is a clear net win — method_call 194ms -> 153ms, closure_call
+/// 269ms -> 176ms, mandelbrot 313ms -> 305ms, against 8ms and 5ms costs on
+/// free_call and inlined_call. `ASH_CL_RETIER=0` turns it off.
 pub fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v != "0"))
+    *ON.get_or_init(|| !std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "0"))
 }
 
 /// Allocate (once) and return this function's re-tier state as codegen wants

@@ -81,6 +81,13 @@ jobs:
         with:
           haxe-version: "4.3.4"
 
+      # The Haxe compiler refuses the HL/C target without the hashlink
+      # haxelib, even though the generated code only needs HashLink's C
+      # headers (rayzor's CI learned this the same way).
+      - name: Install hashlink haxelib
+        continue-on-error: true
+        run: haxelib install hashlink --always
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: bench-runner

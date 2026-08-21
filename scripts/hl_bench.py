@@ -136,8 +136,11 @@ def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
         print(f"[hl-bench] haxe -hl failed for {main}:\n{full}", flush=True)
         return None, f"haxe -hl main.c failed: {full.strip()[:500]}", 0.0
     binary = workdir / "app"
+    # -fno-strict-aliasing: hlc's generated unity build is not strict-
+    # aliasing clean; rayzor's CI compiles it the same way.
     link = [
-        cc, "-O3", "-o", str(binary), str(out_c),
+        cc, "-O2", "-std=c11", "-fno-strict-aliasing", "-o", str(binary),
+        str(out_c),
         "-I", str(workdir), "-I", str(hashlink_dir / "src"),
         "-L", str(hashlink_dir), "-lhl", "-lm",
     ]
@@ -215,12 +218,27 @@ def main() -> int:
 
     haxe = args.haxe or shutil.which("haxe")
     cc = shutil.which(args.cc)
+
+    def haxelib_has_hashlink() -> bool:
+        # The Haxe compiler refuses `-hl main.c` without the hashlink
+        # haxelib installed, so its absence is an UNAVAILABLE lane, not a
+        # per-bench FAIL.
+        try:
+            return subprocess.run(
+                ["haxelib", "path", "hashlink"],
+                capture_output=True, timeout=30,
+            ).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    have_haxelib = bool(haxe) and haxelib_has_hashlink()
     hlc_ready = bool(
-        haxe and cc and args.hashlink_dir
+        haxe and have_haxelib and cc and args.hashlink_dir
         and (args.hashlink_dir / "src" / "hlc.h").exists()
     )
     hlc_missing = (
         "haxe" if not haxe else
+        "the hashlink haxelib (haxelib install hashlink)" if not have_haxelib else
         "C compiler" if not cc else
         "--hashlink-dir with src/hlc.h" if not hlc_ready else ""
     )

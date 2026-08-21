@@ -228,8 +228,7 @@ HashLink Bytecode Runtime
 <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
 <div style="display:flex;flex-wrap:wrap;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#5c5450">
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#c7bdb2;display:inline-block"></span>HashLink JIT</span>
-<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#dcbf9d;display:inline-block"></span>compile</span>
-<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>execute</span>
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>Ash</span>
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C</span>
 </div>
 <div id="bench-scale-note" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is better · median ms · 1.00× = HashLink JIT total</div>
@@ -240,7 +239,7 @@ HashLink Bytecode Runtime
 <noscript><div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">The benchmark table needs JavaScript; the raw numbers live in <a href="bench/results.json">bench/results.json</a>.</div></noscript>
 </div>
 </div>
-<div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">HashLink/C is compiled ahead of time, so it pays no compile cost inside the run. Ash's compile segment is broker-side tier installation — Cranelift and LLVM compile on background threads while the program runs, so the segments overlap rather than add. Every row is verified against the benchmark's accepted checksums before it is published.</div>
+<div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is pure wall time for one run, nothing added: Ash's Cranelift and LLVM tiers compile on background threads while the program executes (the tooltip shows how much broker-side compile overlapped the run), and HashLink/C is compiled ahead of time so its AOT build is excluded the same way. Every row is verified against the benchmark's accepted checksums before it is published.</div>
 </div>
 
 <p id="bench-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
@@ -342,23 +341,11 @@ HashLink Bytecode Runtime
 
         var track = el('div', 'bench-track');
         var total = r.median_ms * unit;
-        if (r.engine === 'ash') {
-          var compile = Math.min(r.compile_ms || 0, r.median_ms * 0.9) * unit;
-          if (compile > 0.4) {
-            var segC = el('div', 'seg-compile');
-            segC.style.width = compile + '%';
-            track.appendChild(segC);
-          } else {
-            compile = 0;
-          }
-          var segE = el('div', 'seg-exec');
-          segE.style.width = Math.max(total - compile, 1.2) + '%';
-          track.appendChild(segE);
-        } else {
-          var seg = el('div', r.engine === 'hashlink-c' ? 'seg-hlc' : 'seg-hl');
-          seg.style.width = Math.max(total, 0.6) + '%';
-          track.appendChild(seg);
-        }
+        var segClass = r.engine === 'ash' ? 'seg-exec'
+          : r.engine === 'hashlink-c' ? 'seg-hlc' : 'seg-hl';
+        var seg = el('div', segClass);
+        seg.style.width = Math.max(total, 1.2) + '%';
+        track.appendChild(seg);
         line.appendChild(track);
 
         var num = el('div', 'bench-num');

@@ -49,31 +49,63 @@ if ! "$DEST/ash" --help >/dev/null 2>&1; then
   fi
 fi
 
-case ":${PATH}:" in
-  *":$DEST:"*) on_path=1 ;;
-  *) on_path=0 ;;
+# A shell-agnostic env file, so there is always exactly one thing to
+# source regardless of which rc the user's shell actually reads.
+env_file="$(dirname "$DEST")/env"
+cat > "$env_file" <<EOF
+# Added by the ash installer. Source this from your shell config.
+case ":\${PATH}:" in
+  *":$DEST:"*) ;;
+  *) export PATH="$DEST:\$PATH" ;;
+esac
+EOF
+
+line=". \"$env_file\""
+
+# Which rc this user's shell actually reads. Picking the first rc that
+# happens to exist gets it wrong for anyone whose login shell is not the
+# first match, so start from $SHELL.
+case "$(basename "${SHELL:-sh}")" in
+  zsh)  rcs="$HOME/.zshrc" ;;
+  bash) rcs="$HOME/.bashrc" ;;
+  fish) rcs="" ;;
+  *)    rcs="$HOME/.profile" ;;
 esac
 
-if [ "$on_path" = "0" ]; then
-  line="export PATH=\"$DEST:\$PATH\""
-  added=""
-  for rc in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.profile"; do
-    [ -f "$rc" ] || continue
-    if ! grep -qs "$DEST" "$rc"; then
-      printf '\n# Added by the ash installer\n%s\n' "$line" >> "$rc"
-    fi
-    added="$rc"
-    break
-  done
-  if [ -n "$added" ]; then
-    echo "added $DEST to PATH in $added — open a new shell, or run:"
-  else
-    echo "add $DEST to your PATH:"
+added=""
+for rc in $rcs; do
+  [ -e "$rc" ] || : > "$rc"
+  if ! grep -qs "$env_file" "$rc"; then
+    printf '\n# Added by the ash installer\n%s\n' "$line" >> "$rc"
   fi
-  echo "  $line"
-fi
+  added="$rc"
+  break
+done
 
+echo
 echo "installed: $DEST/ash"
 "$DEST/ash" --help 2>/dev/null | head -3 || true
+
+case ":${PATH}:" in
+  *":$DEST:"*)
+    echo
+    echo "ash is on your PATH. Try:  ash --mode hybrid main.hl"
+    exit 0
+    ;;
+esac
+
+# This script runs in its own shell and cannot change the PATH of the
+# shell that invoked it — which is exactly why the next line matters.
 echo
-echo "run a HashLink bytecode file:  ash --mode hybrid main.hl"
+echo "----------------------------------------------------------------"
+if [ -n "$added" ]; then
+  echo "PATH updated in $added, but NOT in this shell."
+  echo "Run this now (or open a new terminal):"
+else
+  echo "Add ash to your PATH — run this now, and add it to your shell config:"
+fi
+echo
+echo "    $line"
+echo
+echo "then:  ash --mode hybrid main.hl"
+echo "----------------------------------------------------------------"

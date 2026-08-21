@@ -277,7 +277,14 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     // any GcGuards they hold never run Drop. Restore the lock depth recorded
     // at trap setup (= the depth held at the setjmp site).
     crate::gc::gc_lock_unwind_to(saved_lock_depth);
+    // darwin and glibc export `_longjmp` (the no-signal-mask variant); MSVC's
+    // setjmp.h declares only `longjmp`, so the generated bindings differ by
+    // exactly this underscore per platform. Windows longjmp never touches
+    // signal masks, so the two calls are the same operation.
+    #[cfg(not(windows))]
     hl::_longjmp(buf_copy.as_mut_ptr(), 1);
+    #[cfg(windows)]
+    hl::longjmp(buf_copy.as_mut_ptr(), 1);
 }
 
 /// Arm a trap on this thread, reusing a retired context when one is available.

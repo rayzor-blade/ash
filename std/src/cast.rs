@@ -707,7 +707,8 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
         };
     }
 
-    let as_num = |v: *mut vdynamic, k: u32| -> Option<f64> {
+    // `hl_type_kind`, not u32 — the alias is i32 under MSVC, u32 under clang.
+    let as_num = |v: *mut vdynamic, k: hl::hl_type_kind| -> Option<f64> {
         match k {
             hl_type_kind_HI32 => Some(unsafe { (*v).v.i as f64 }),
             hl_type_kind_HUI8 => Some(unsafe { (*v).v.ui8 as f64 }),

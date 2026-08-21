@@ -46,3 +46,30 @@ jobs:
         run: |
           cargo build -p ash_std
           cargo clippy --workspace --all-targets -- -D warnings
+
+  # ash_std against REAL Windows headers, on every push — not the macOS
+  # cross-check, which borrows darwin headers and therefore type-checks a
+  # different set of bindings than Windows ever sees. That gap shipped two
+  # whole classes of error to the release workflow's dispatch-only Windows
+  # job: `hl::_longjmp` (MSVC declares only `longjmp`) and every explicit
+  # `u32` written where `hl_type_kind` was meant (MSVC enums are i32).
+  # `cargo check` rather than build: it stops before linking, so the job
+  # needs nothing beyond what the runner image already has — bindgen finds
+  # the image's own libclang.
+  windows-check:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # bindgen pretty-prints through it
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-check
+
+      - name: cargo check -p ash_std (real Windows headers)
+        shell: bash
+        run: cargo check -p ash_std

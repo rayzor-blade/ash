@@ -14,7 +14,9 @@ use crate::{
 /// Returns a persistent `*mut hl_type` for a given type kind.
 /// Uses `Box::leak` so the pointer is valid for the program's lifetime.
 /// Used to avoid storing stack-local `hl_type` pointers into heap-allocated objects.
-fn persistent_type(kind: u32) -> *mut hl_type {
+// `hl::hl_type_kind`, not u32: bindgen maps the C enum to i32 under MSVC and
+// u32 under clang, so any explicit width compiles on exactly one platform.
+fn persistent_type(kind: hl::hl_type_kind) -> *mut hl_type {
     Box::leak(Box::new(hl_type {
         kind,
         __bindgen_anon_1: hl_type__bindgen_ty_1 {

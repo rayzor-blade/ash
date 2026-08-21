@@ -8,6 +8,13 @@ code guarantees today; anything that should change lives here.
 **Status**: Heaps Base2D renders through the real init path under
 `--mode interp`, reaching `Main.init()` in ~1.5s.
 
+One more sighting for the rate ledger (2026-08-21 evening):
+parity_matrix_hybrid_default failed once during a full three-leg run while
+two agent workflows were compiling at peak load, then passed solo and in
+three consecutive full runs. 1-in-5 under heavy load, 0-in-4 after; the
+failing case name was lost to output truncation. Same intermittency family;
+the parity corpus reproduces it far more weakly than the Heaps sample.
+
 `--mode hybrid` on the same program **crashes about four runs in five**
 (SIGSEGV, `fault_addr=0x0`, after roughly four Cranelift installs). This
 entry previously read "sustains 19 promoted functions with no crashes";

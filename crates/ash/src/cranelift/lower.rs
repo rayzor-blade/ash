@@ -1287,11 +1287,23 @@ impl Lowerer<'_, '_> {
         let cond = if ta.is_float() {
             self.b.ins().fcmp(fcc, va, vb)
         } else if class == AbiClass::Ptr {
-            // Boxed values compare by content via hlp_dyn_compare; every
-            // other pointer kind compares by identity — same split the LLVM
-            // tier makes.
+            // A String's identity is not its value, and hlp_dyn_compare is the
+            // one place that knows the difference: it uses the type's compareFun
+            // when there is one, then compares the UTF-16 payload of
+            // String-shaped objects, and only then falls back to pointers — so
+            // routing HOBJ through it fixes `a == b` on strings while leaving
+            // identity semantics intact for every other object.
+            //
+            // Passing an object pointer as a vdynamic* is sound because an
+            // object's first word IS its hl_type*, which is all dyn_compare
+            // reads of it. HBYTES and HSTRUCT must NOT come here: a raw byte
+            // buffer and a struct both lack that header, so dyn_compare would
+            // read their payload as a type.
             let kind = self.ctx.reg_kind(self.regs, a)?;
-            if kind == hl::hl_type_kind_HDYN || kind == hl::hl_type_kind_HNULL {
+            if kind == hl::hl_type_kind_HDYN
+                || kind == hl::hl_type_kind_HNULL
+                || kind == hl::hl_type_kind_HOBJ
+            {
                 let res = self.call_dyn_compare(va, vb)?;
                 self.b.ins().icmp_imm(icc, res, 0)
             } else {

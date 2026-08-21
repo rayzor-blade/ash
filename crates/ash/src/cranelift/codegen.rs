@@ -2893,11 +2893,23 @@ impl AirCodegen<'_, '_> {
         let cond = if ta.is_float() {
             self.b.ins().fcmp(fcc, va, vb)
         } else if class == AbiClass::Ptr {
-            // Boxed values compare by content through hlp_dyn_compare; every
-            // other pointer kind compares by identity — the same split the
-            // LLVM tier makes.
+            // A String's identity is not its value, and hlp_dyn_compare is the
+            // one place that knows the difference: it uses the type's compareFun
+            // when there is one, then compares the UTF-16 payload of
+            // String-shaped objects, and only then falls back to pointers — so
+            // routing HOBJ through it fixes `a == b` on strings while leaving
+            // identity semantics intact for every other object.
+            //
+            // Passing an object pointer as a vdynamic* is sound because an
+            // object's first word IS its hl_type*, which is all dyn_compare
+            // reads of it. HBYTES and HSTRUCT must NOT come here: a raw byte
+            // buffer and a struct both lack that header, so dyn_compare would
+            // read their payload as a type.
             let hl_kind = self.ctx.type_kind(self.f.value_ty(a).0 as usize)?;
-            if hl_kind == hl::hl_type_kind_HDYN || hl_kind == hl::hl_type_kind_HNULL {
+            if hl_kind == hl::hl_type_kind_HDYN
+                || hl_kind == hl::hl_type_kind_HNULL
+                || hl_kind == hl::hl_type_kind_HOBJ
+            {
                 let addr = self.ctx.dyn_compare_addr()?;
                 let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I32));
                 let callee = self.b.ins().iconst(types::I64, addr as i64);

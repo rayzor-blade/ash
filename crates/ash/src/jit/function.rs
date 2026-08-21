@@ -14,11 +14,11 @@ use inkwell::{
 
 use super::module::{CompiledFunctionMeta, JITModule};
 use crate::hl::{
-    hl_obj_field, hl_runtime_obj, hl_type, hl_type_kind_HBOOL, hl_type_kind_HBYTES,
-    hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32, hl_type_kind_HF64,
-    hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
-    hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
-    hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
+    hl_obj_field, hl_runtime_obj, hl_type, hl_type_kind_HABSTRACT, hl_type_kind_HBOOL,
+    hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32,
+    hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL,
+    hl_type_kind_HOBJ, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16,
+    hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
 };
 use crate::opcodes::Opcode;
 use crate::types::{HLNative, HLTypeFun, Str};
@@ -3143,8 +3143,12 @@ impl<'ctx> JITModule<'ctx> {
                     registers[src.0 as usize],
                     "todyn_src",
                 )?;
-                // For pointer types (objects, strings, etc.), just copy the pointer
-                if src_val.is_pointer_value() {
+                // For pointer types (objects, strings, etc.), just copy the pointer.
+                // HABSTRACT is excepted: it is a pointer whose target has no
+                // hl_type header, so a Dynamic holding it raw makes the
+                // hl_dyn_castp on the way back out read the payload as a type.
+                let src_is_abstract = self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
+                if src_val.is_pointer_value() && !src_is_abstract {
                     self.builder
                         .build_store(registers[dst.0 as usize], src_val)?;
                 } else {
@@ -4853,10 +4857,22 @@ impl<'ctx> JITModule<'ctx> {
                 "cmp",
             )?,
             AnyTypeEnum::PointerType(_) => {
-                // Only use hlp_dyn_compare for Dynamic/Null types (boxed values).
-                // For other pointer types (HOBJ, HBYTES, etc.), use pointer comparison
-                // (identity check), matching the original HashLink C VM behavior.
-                if a_kind == hl_type_kind_HDYN || a_kind == hl_type_kind_HNULL {
+                // A String's identity is not its value, and hlp_dyn_compare is the
+                // one place that knows the difference: it uses the type's compareFun
+                // when there is one, then compares the UTF-16 payload of
+                // String-shaped objects, and only then falls back to pointers — so
+                // routing HOBJ through it fixes `a == b` on strings while leaving
+                // identity semantics intact for every other object.
+                //
+                // Passing an object pointer as a vdynamic* is sound because an
+                // object's first word IS its hl_type*, which is all dyn_compare
+                // reads of it. HBYTES and HSTRUCT must NOT come here: a raw byte
+                // buffer and a struct both lack that header, so dyn_compare would
+                // read their payload as a type.
+                if a_kind == hl_type_kind_HDYN
+                    || a_kind == hl_type_kind_HNULL
+                    || a_kind == hl_type_kind_HOBJ
+                {
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let i32_type = self.context.i32_type();
                     let dyn_compare = self.declare_native(

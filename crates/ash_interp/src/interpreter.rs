@@ -5727,6 +5727,14 @@ impl HLInterpreter {
                 | hl::hl_type_kind_HBYTES
                 | hl::hl_type_kind_HUI8
                 | hl::hl_type_kind_HUI16
+                // HABSTRACT is a pointer but not a dynamic kind, so a raw
+                // copy leaves a Dynamic whose first word is the abstract's
+                // own payload rather than an hl_type — which is exactly the
+                // word hl_dyn_castp reads on the way back out. sys.io.Process
+                // keeps its handle in a Dynamic field, so every stdin.write
+                // was an immediate SIGSEGV. Upstream's OToDyn boxes every
+                // non-dynamic kind for this reason.
+                | hl::hl_type_kind_HABSTRACT
         );
 
         if needs_boxing && !self.fn_make_dyn.is_null() {

@@ -214,6 +214,19 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Sys.args(): the CLI used to reject the program's own arguments outright,
+# and the runtime's hlp_sys_init had no caller. Args here include a
+# hyphenated one, which is the form that clap ate.
+name = "TestSysArgs"
+main = "TestSysArgs"
+hl = "test_sys_args.hl"
+program_args = ["alpha", "beta", "--gamma=1"]
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 # Relational comparison between strings. `<` and `>` on HOBJ (String)
 # operands fell through to a pointer comparison that has no ordering, so
 # every one of them answered false while equality kept working.

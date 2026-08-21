@@ -13,6 +13,13 @@ struct Cli {
     /// Path to a HashLink bytecode (.hl) file
     file: Option<PathBuf>,
 
+    /// Everything after the file belongs to the PROGRAM, exactly as the
+    /// stock `hl` CLI behaves: `ash [options] file.hl [args...]`. Without
+    /// the trailing capture, clap rejected the program's own arguments as
+    /// unknown options and ash refused to start at all.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    program_args: Vec<String>,
+
     /// Execution mode
     #[arg(long, value_enum, default_value_t = Mode::Interp)]
     mode: Mode,
@@ -484,6 +491,37 @@ fn run() -> Result<()> {
 
     if !hl_path.exists() {
         anyhow::bail!("Bytecode file not found: {}", hl_path.display());
+    }
+
+    // Hand the program its argv before any mode runs. The runtime side
+    // (hlp_sys_init in ash_std) has existed for a while with no caller, so
+    // Sys.args() answered from nothing. The linkage choice and init are
+    // idempotent (Once-guarded), so doing them here is safe for the jit
+    // path, which repeats them inside JITModule::new.
+    {
+        ash_core::native_lib::choose_std_linkage(&hl_path);
+        init_std_library()?;
+        let addr = ash_core::native_lib::std_symbol_addr("hlp_sys_init")
+            .ok_or_else(|| anyhow::anyhow!("hlp_sys_init not found in ash_std"))?;
+        type SysInit = unsafe extern "C" fn(*mut *mut u8, i32, *mut u8);
+        let sys_init: SysInit = unsafe { std::mem::transmute(addr) };
+        // NUL-terminated UTF-8, the pchar contract sys.rs documents.
+        let mut bufs: Vec<Vec<u8>> = cli
+            .program_args
+            .iter()
+            .map(|a| {
+                let mut b = a.as_bytes().to_vec();
+                b.push(0);
+                b
+            })
+            .collect();
+        let mut ptrs: Vec<*mut u8> = bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+        let mut file_buf = hl_path.to_string_lossy().as_bytes().to_vec();
+        file_buf.push(0);
+        unsafe {
+            sys_init(ptrs.as_mut_ptr(), ptrs.len() as i32, file_buf.as_mut_ptr());
+        }
+        // hlp_sys_init copies everything out, so the temporaries may drop.
     }
 
     // The whole-module JIT is its own world: it decodes, initializes the

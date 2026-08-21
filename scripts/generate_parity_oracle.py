@@ -90,7 +90,10 @@ def main():
         if not hl_path.exists():
             raise SystemExit(f"missing .hl file for {name}: {hl_path}")
 
-        code, out, err = run(["hl", str(hl_path)], timeout=timeout_secs)
+        # The program's own argv, when the case declares any — identical to
+        # what the harness hands ash, or the oracle asserts a different run.
+        prog_args = [str(a) for a in case.get("program_args", [])]
+        code, out, err = run(["hl", str(hl_path), *prog_args], timeout=timeout_secs)
 
         case_dir = out_cases / name
         case_dir.mkdir(parents=True, exist_ok=True)

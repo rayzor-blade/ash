@@ -9,3 +9,4 @@ dist/
 
 # Agent/session scratch, not project source
 .claude/
+ash_fileio_tmp/

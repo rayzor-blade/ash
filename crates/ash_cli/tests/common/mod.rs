@@ -26,6 +26,11 @@ pub struct ParityCase {
     pub name: String,
     pub main: String,
     pub hl: String,
+    /// Arguments handed to the PROGRAM (after the .hl on the command line),
+    /// for cases that exercise Sys.args(). Passed identically to ash, the
+    /// reference `hl`, and the oracle generator, or the comparison means
+    /// nothing.
+    pub program_args: Vec<String>,
     pub slow: bool,
     pub timeout_secs: u64,
     pub expectation: ExpectationKind,
@@ -207,23 +212,32 @@ pub fn run_haxe_interp(tests_dir: &Path, case: &ParityCase) -> Option<Output> {
         return None;
     }
     let mut cmd = Command::new("haxe");
-    cmd.arg("--cwd")
-        .arg(tests_dir)
-        .arg("-main")
-        .arg(&case.main)
-        .arg("--interp");
+    cmd.arg("--cwd").arg(tests_dir);
+    if case.program_args.is_empty() {
+        cmd.arg("-main").arg(&case.main).arg("--interp");
+    } else {
+        // `--interp` gives Sys.args() the COMPILER'S argv (--cwd, -main, ...),
+        // which is an invalid oracle for any case that reads its arguments.
+        // `--run` is Haxe's form for exactly this: everything after the module
+        // name goes to the program, hyphenated or not — verified identical to
+        // stock hl's behaviour for the same bytecode.
+        cmd.arg("--run").arg(&case.main);
+        cmd.args(&case.program_args);
+    }
     Some(run(cmd))
 }
 
-pub fn run_hashlink(hl_path: &Path, timeout: Option<Duration>) -> RunResult {
+pub fn run_hashlink(hl_path: &Path, program_args: &[String], timeout: Option<Duration>) -> RunResult {
     let mut cmd = Command::new("hl");
     cmd.arg(hl_path);
+    cmd.args(program_args);
     run_with_optional_timeout(cmd, timeout)
 }
 
 pub fn run_ash(
     ash_cli: &Path,
     hl_path: &Path,
+    program_args: &[String],
     mode: AshMode,
     timeout: Option<Duration>,
 ) -> RunResult {
@@ -253,7 +267,25 @@ pub fn run_ash(
     }
     cmd.arg("--quiet");
     cmd.arg(hl_path);
+    cmd.args(program_args);
     run_with_optional_timeout(cmd, timeout)
+}
+
+/// A single-line TOML array of strings: `["a", "b"]`. The file parser is
+/// line-based by design, so a multi-line array is rejected loudly rather
+/// than half-read.
+fn parse_string_array(raw: &str, lineno: usize) -> Vec<String> {
+    let v = raw.trim();
+    let inner = v
+        .strip_prefix('[')
+        .and_then(|x| x.strip_suffix(']'))
+        .unwrap_or_else(|| panic!("program_args must be a single-line array, line {}", lineno + 1));
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(parse_string)
+        .collect()
 }
 
 fn parse_string(raw: &str) -> String {
@@ -292,6 +324,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 name: String::new(),
                 main: String::new(),
                 hl: String::new(),
+                program_args: Vec::new(),
                 slow: false,
                 timeout_secs: 60,
                 expectation: ExpectationKind::Exact,
@@ -319,6 +352,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             "name" => c.name = parse_string(value),
             "main" => c.main = parse_string(value),
             "hl" => c.hl = parse_string(value),
+            "program_args" => c.program_args = parse_string_array(value, lineno),
             "slow" => c.slow = parse_bool(value),
             "timeout_secs" => c.timeout_secs = parse_u64(value),
             "expectation" => {

@@ -208,7 +208,7 @@ HashLink Bytecode Runtime
 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode hybrid --jit-tier cranelift --jit-log main.hl</span></div>
 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode jit main.hl</span> <span style="color:#8a807a"># compile everything up front</span></div>
 </div>
-<button class="copy-btn" data-copy="ash --mode hybrid main.hl&#10;ash --mode jit main.hl">Copy</button>
+<button class="copy-btn" data-copy="ash --mode hybrid main.hl&#10;ash --mode hybrid --jit-tier cranelift --jit-log main.hl&#10;ash --mode jit main.hl">Copy</button>
 </div>
 </div>
 <div style="margin-top:14px;padding:14px 16px;border:1px dashed rgba(34,29,26,0.2);border-radius:8px;font-size:13px;line-height:1.65;color:#5c5450">Building from source instead? That's the contributor path — Rust nightly and LLVM 21, with the <code>std/</code> rebuild steps spelled out in the <a href="https://github.com/rayzor-blade/ash#building" target="_blank" rel="noopener">README</a>.</div>

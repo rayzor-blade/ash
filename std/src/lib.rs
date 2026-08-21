@@ -35,6 +35,7 @@ pub mod hl_compat;
 pub mod maps;
 pub mod math;
 pub mod obj;
+pub mod process;
 pub mod random;
 pub mod regexp;
 pub mod socket;

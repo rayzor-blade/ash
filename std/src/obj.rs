@@ -2681,6 +2681,95 @@ pub unsafe extern "C" fn hlp_obj_fields(obj: *mut vdynamic) -> *mut varray {
     }
 }
 
+/// Shallow copy of a dynamic object, `hl_obj_copy` in upstream's obj.c.
+///
+/// Only the two kinds that own their field storage answer: HDYNOBJ, whose
+/// three arrays are duplicated, and HVIRTUAL, whose data block is. An HOBJ
+/// has no copy semantics to give -- upstream returns NULL for it, and
+/// `Reflect.copy` reads that as "not copyable".
+// DEFINE_PRIM(_DYN, obj_copy, _DYN)
+#[no_mangle]
+pub unsafe extern "C" fn hlp_obj_copy(obj: *mut vdynamic) -> *mut vdynamic {
+    if obj.is_null() || (*obj).t.is_null() {
+        return ptr::null_mut();
+    }
+    match (*(*obj).t).kind {
+        hl_type_kind_HDYNOBJ => {
+            let o = obj as *mut vdynobj;
+            let c = hlp_alloc_dynobj();
+            if c.is_null() {
+                return ptr::null_mut();
+            }
+            let nfields = (*o).nfields.max(0) as usize;
+            let nvalues = (*o).nvalues.max(0) as usize;
+            let raw_size = (*o).raw_size.max(0) as usize;
+
+            (*c).raw_size = raw_size as c_int;
+            (*c).nfields = nfields as c_int;
+            (*c).nvalues = nvalues as c_int;
+            // The virtual views bound to the original keep pointing at it;
+            // the copy starts with none, as upstream's NULL does.
+            (*c).virtuals = ptr::null_mut();
+
+            let lsize = mem::size_of::<hl_field_lookup>() * nfields;
+            (*c).lookup = crate::gc::gc_alloc(lsize)
+                .expect("Failed to allocate dynobj lookup copy")
+                .as_ptr() as *mut hl_field_lookup;
+            (*c).raw_data = crate::gc::gc_alloc(raw_size)
+                .expect("Failed to allocate dynobj raw_data copy")
+                .as_ptr() as *mut std::os::raw::c_char;
+            (*c).values = crate::gc::gc_alloc(nvalues * mem::size_of::<*mut c_void>())
+                .expect("Failed to allocate dynobj values copy")
+                .as_ptr() as *mut *mut c_void;
+
+            if nfields > 0 && !(*o).lookup.is_null() {
+                ptr::copy_nonoverlapping((*o).lookup, (*c).lookup, nfields);
+            }
+            if raw_size > 0 && !(*o).raw_data.is_null() {
+                ptr::copy_nonoverlapping(
+                    (*o).raw_data as *const u8,
+                    (*c).raw_data as *mut u8,
+                    raw_size,
+                );
+            }
+            if nvalues > 0 && !(*o).values.is_null() {
+                ptr::copy_nonoverlapping((*o).values, (*c).values, nvalues);
+            }
+            c as *mut vdynamic
+        }
+        hl_type_kind_HVIRTUAL => {
+            let v = obj as *mut vvirtual;
+            // A virtual backed by a dynobj is a view of it, so the copy is
+            // of what it views, not of the view.
+            if !(*v).value.is_null() {
+                return hlp_obj_copy((*v).value);
+            }
+            let virt = (*(*v).t).__bindgen_anon_1.virt;
+            if virt.is_null() {
+                return ptr::null_mut();
+            }
+            let v2 = hlp_alloc_virtual((*v).t);
+            if v2.is_null() {
+                return ptr::null_mut();
+            }
+            // vfields[0..nfields] are addresses into this object; only the
+            // data block past them is copyable, and hlp_alloc_virtual has
+            // already pointed the new object's slots at its own copy.
+            let nfields = (*virt).nfields.max(0) as usize;
+            let data_size = (*virt).dataSize.max(0) as usize;
+            if data_size > 0 {
+                ptr::copy_nonoverlapping(
+                    hl_vfields(v).add(nfields) as *const u8,
+                    hl_vfields(v2).add(nfields) as *mut u8,
+                    data_size,
+                );
+            }
+            v2 as *mut vdynamic
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_instance_fields(t: *mut hl_type) -> *mut varray {
     use crate::{

@@ -201,6 +201,19 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Arithmetic where an operand is Dynamic, i.e. std@hlp_dyn_op — which ash did
+# not implement at all, so the official Haxe unit suite could not even start.
+# Pins the trap: the arithmetic operators yield a Float even for two boxed
+# Ints, the shifts and bitwise operators yield an Int.
+name = "TestDynOp"
+main = "TestDynOp"
+hl = "test_dyn_op.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 # Relational comparison between strings. `<` and `>` on HOBJ (String)
 # operands fell through to a pointer comparison that has no ordering, so
 # every one of them answered false while equality kept working.

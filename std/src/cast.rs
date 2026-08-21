@@ -732,3 +732,132 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 
     hlp_ptr_compare(a, b)
 }
+
+/// Dynamic arithmetic: `a <op> b` where at least one side arrives boxed.
+///
+/// Mirrors `hl_dyn_op` in HashLink's std/cast.c, including the part that
+/// surprises people: the arithmetic operators always yield an f64, even for
+/// two boxed ints, because both operands go through `dyn_castd` on the way
+/// in. Only the shifts and bitwise operators produce an i32. Matching that
+/// exactly matters more than it looks — Haxe code that adds two Dynamics and
+/// then checks `Std.isOfType(v, Int)` observes the difference.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_op(
+    op: i32,
+    a: *mut vdynamic,
+    b: *mut vdynamic,
+) -> *mut vdynamic {
+    const OP_ADD: i32 = 0;
+    const OP_SUB: i32 = 1;
+    const OP_MUL: i32 = 2;
+    const OP_MOD: i32 = 3;
+    const OP_DIV: i32 = 4;
+    const OP_SHL: i32 = 5;
+    const OP_SHR: i32 = 6;
+    const OP_USHR: i32 = 7;
+    const OP_AND: i32 = 8;
+    const OP_OR: i32 = 9;
+    const OP_XOR: i32 = 10;
+    const OP_LAST: i32 = 11;
+
+    const OP_NAMES: [&str; OP_LAST as usize] =
+        ["+", "-", "*", "%", "/", "<<", ">>", ">>>", "&", "|", "^"];
+
+    if !(0..OP_LAST).contains(&op) {
+        hlp_error(str_to_uchar_ptr(&format!("Invalid op {op}")));
+        return ptr::null_mut();
+    }
+
+    // Two nulls are not an error: division and modulo yield NaN, everything
+    // else yields null, which is what `null + null` evaluates to in Haxe.
+    if a.is_null() && b.is_null() {
+        if op == OP_DIV || op == OP_MOD {
+            let nan = f64::NAN;
+            return hlp_make_dyn(&nan as *const f64 as *mut c_void, crate::types::hlt_f64());
+        }
+        return ptr::null_mut();
+    }
+
+    // A null operand counts as a number here (it casts to 0 / NaN), matching
+    // upstream's `!a || is_number(a->t)`.
+    let numeric = |v: *mut vdynamic| -> bool {
+        if v.is_null() {
+            return true;
+        }
+        let t = (*v).t;
+        if t.is_null() {
+            return false;
+        }
+        // HUI8 (1) through HBOOL (7) — upstream's is_number, and ash's kind
+        // numbering is identical to hl.h's.
+        (hl::hl_type_kind_HUI8..=hl::hl_type_kind_HBOOL).contains(&(*t).kind)
+    };
+
+    if numeric(a) && numeric(b) {
+        let mut pa = a;
+        let mut pb = b;
+        let dyn_t = crate::types::hlt_dyn();
+        // `dyn_castd`/`dyn_casti` take the address of the operand, not the
+        // operand, exactly as the C does with `&a`.
+        let da = &mut pa as *mut *mut vdynamic as *mut c_void;
+        let db = &mut pb as *mut *mut vdynamic as *mut c_void;
+
+        let as_f64 = |v: f64| -> *mut vdynamic {
+            hlp_make_dyn(&v as *const f64 as *mut c_void, crate::types::hlt_f64())
+        };
+        let as_i32 = |v: i32| -> *mut vdynamic {
+            hlp_make_dyn(&v as *const i32 as *mut c_void, crate::types::hlt_i32())
+        };
+
+        match op {
+            OP_ADD | OP_SUB | OP_MUL | OP_DIV | OP_MOD => {
+                let va = hlp_dyn_castd(da, dyn_t);
+                let vb = hlp_dyn_castd(db, dyn_t);
+                return as_f64(match op {
+                    OP_ADD => va + vb,
+                    OP_SUB => va - vb,
+                    OP_MUL => va * vb,
+                    OP_DIV => va / vb,
+                    _ => va % vb, // Rust's % on f64 is fmod, including sign
+                });
+            }
+            _ => {
+                let i32_t = crate::types::hlt_i32();
+                let va = hlp_dyn_casti(da, dyn_t, i32_t);
+                let vb = hlp_dyn_casti(db, dyn_t, i32_t);
+                return as_i32(match op {
+                    // Upstream shifts with C's operators, which are undefined
+                    // past the width; wrapping keeps the result defined
+                    // without changing it for the in-range shifts real code
+                    // performs.
+                    OP_SHL => va.wrapping_shl(vb as u32),
+                    OP_SHR => va.wrapping_shr(vb as u32),
+                    OP_USHR => ((va as u32).wrapping_shr(vb as u32)) as i32,
+                    OP_AND => va & vb,
+                    OP_OR => va | vb,
+                    OP_XOR => va ^ vb,
+                    // Unreachable: the range check at the top rejected every
+                    // other op. A value rather than a panic, because an
+                    // unwind here would cross the FFI boundary.
+                    _ => 0,
+                });
+            }
+        }
+    }
+
+    let name = |v: *mut vdynamic| -> String {
+        if v.is_null() || (*v).t.is_null() {
+            return "null".to_string();
+        }
+        CStr::from_ptr(hlp_type_str((*v).t) as *const i8)
+            .to_string_lossy()
+            .into_owned()
+    };
+    hlp_error(str_to_uchar_ptr(&format!(
+        "Can't perform dyn op {} {} {}",
+        name(a),
+        OP_NAMES[op as usize],
+        name(b)
+    )));
+    ptr::null_mut()
+}

@@ -1076,6 +1076,17 @@ pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
     std::ptr::null_mut()
 }
 
+/// Whether a debugger is attached.
+///
+/// Not in HashLink 1.15 — the bytecode a 4.3.6 Haxe emits asks for it anyway,
+/// and an unresolved native is a hard failure at startup rather than at the
+/// call. ash has no debugger protocol, so the honest answer is false; see
+/// std/src/debugger.rs for what does exist.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_has_debugger() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

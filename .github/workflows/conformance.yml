@@ -91,6 +91,20 @@ jobs:
       # examples/ are Mach-O and useless here, so build a Linux set from
       # HashLink itself. Best-effort: without them those suites report a load
       # failure, which the baseline comparison already accounts for.
+      # Runtime dependencies for the HDLLs, deliberately OUTSIDE the cached
+      # build step below. apt state is not part of the cache, so installing
+      # them there meant a cache hit restored the .hdll files while the
+      # libraries they link against were never installed — and every suite
+      # then failed with "libmbedtls.so.14: cannot open shared object file"
+      # for a library that had been present on the day the cache was written.
+      # The -dev packages pull their runtime .so in, so naming those is
+      # enough and avoids guessing soname-suffixed package names.
+      - name: Install HDLL runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpng-dev libturbojpeg0-dev libvorbis-dev \
+            libmbedtls-dev libsqlite3-dev zlib1g-dev
+
       - name: Cache HashLink HDLLs
         id: hdll-cache
         uses: actions/cache@v4
@@ -102,8 +116,6 @@ jobs:
         if: steps.hdll-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
-          sudo apt-get install -y libpng-dev libturbojpeg0-dev libvorbis-dev \
-            libmbedtls-dev libsqlite3-dev zlib1g-dev || true
           git clone --depth 1 --branch 1.15 \
             https://github.com/HaxeFoundation/hashlink.git /tmp/hlsrc
           # `hl` as well as libhl: this runner can execute stock HashLink,
@@ -148,6 +160,38 @@ jobs:
       # The suite checkout is a blobless sparse clone of one tag — it never
       # changes for that tag, so caching it removes a git fetch from every
       # run. Deliberately not under target/, which rust-cache owns.
+      # Whether the set was just built or restored from cache, prove it can
+      # load before the suites depend on it. ldd turns "the suite mysteriously
+      # failed" into a named missing library at a step that can say so.
+      - name: Verify the HDLLs resolve
+        run: |
+          if [ ! -d ~/hl-hdll ]; then
+            echo "::warning::no HDLL directory; suites needing ssl/fmt/sqlite cannot load"
+            exit 0
+          fi
+          bad=0
+          for f in ~/hl-hdll/*.hdll ~/hl-hdll/libhl.so*; do
+            [ -e "$f" ] || continue
+            missing=$(LD_LIBRARY_PATH="$HOME/hl-hdll" ldd "$f" 2>/dev/null \
+                        | grep "not found" || true)
+            if [ -n "$missing" ]; then
+              bad=1
+              echo "::warning::$(basename "$f") has unresolved dependencies:"
+              echo "$missing"
+            else
+              echo "ok  $(basename "$f")"
+            fi
+          done
+          if [ -x ~/hl-hdll/hl ]; then
+            LD_LIBRARY_PATH="$HOME/hl-hdll" ~/hl-hdll/hl --version \
+              && echo "ok  reference VM runs" \
+              || echo "::warning::the reference HashLink VM does not run"
+          fi
+          # Not a hard failure: a suite that cannot load still reports that,
+          # and the row is honest. But it must be visible here rather than
+          # discovered as a mystery three steps later.
+          [ "$bad" = "0" ] || echo "::warning::some HDLLs will fail to load"
+
       - name: Cache the Haxe suite checkout
         uses: actions/cache@v4
         with:

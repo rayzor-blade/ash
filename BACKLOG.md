@@ -34,9 +34,9 @@ registered full-jit-only until this closes.
 On the release binary, interp crashes 5/5: four of five at a PAGE-ALIGNED
 heap address (0x14ae04000, 0x13fe04000, ... ~350-420ms in), one of five at
 the small-int fault (0x6, ~27s in) that is the OSafeCast/__cast defect.
-Under a build carrying the pending SafeCast fix the small-int mode
-disappears and the page fault remains, arriving earlier — so DeltaBlue is
-two stacked defects, and the SafeCast fix peels off only the first.
+The SafeCast fix has landed and peeled off the small-int mode; the
+page-aligned fault is what remains, and it is the GC investigation's
+quarry.
 
 hybrid does not SIGSEGV at all: it dies on an uncaught "Null access",
 consistent with compiled code loading from a page the GC reclaimed and
@@ -80,6 +80,19 @@ Not blocking the bench (normal-mode runs are what CI measures), but it means
 the GC stress gate currently proves less than it claims.
 
 ---
+
+## Conformance: the next three blockers, one per suite
+
+The OSafeCast fix removed the shared fault_addr=0x9 wall; each suite now
+fails on its own defect, in order of value:
+
+  * unit — "Assert hit at pc 3": the `Assert` opcode is unimplemented in
+    the interpreter. The whole main suite is behind this one opcode.
+  * threads — std/src/obj.rs:979 "Failed to allocate memory" in
+    hlp_get_obj_rt on a spawned thread; the EventLoop/fiber area MEMORY.md
+    already flags.
+  * sys — a new SIGSEGV at fault_addr=0x30; also fails under stock
+    HashLink here (helper-spawning suite), so attribute before fixing.
 
 ## `--mode jit` is not checked against anything
 

@@ -214,6 +214,19 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Array<String>.sort through ArrayObj's `cast this` — the OSafeCast-
+# reinterpret defect's fixture, registered the day the fix landed. Guards
+# all three lowering sites at once, since sorting requires the ArrayDyn
+# wrapper to actually exist.
+name = "TestArrayObjSort"
+main = "TestArrayObjSort"
+hl = "test_arrayobj_sort.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 # Map families x iterator forms, order-independent sums. Gates interp and
 # hybrid (both correct, agreeing with stock HashLink); the whole-module
 # JIT's Int-values mis-unbox is a known open defect tracked in BACKLOG —

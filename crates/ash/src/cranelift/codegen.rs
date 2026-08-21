@@ -1848,7 +1848,10 @@ impl AirCodegen<'_, '_> {
             match op {
                 BinOp::Add => self.b.ins().iadd(va, vb),
                 BinOp::Sub => self.b.ins().isub(va, vb),
-                BinOp::Mul => self.b.ins().imul(va, vb),
+                BinOp::Mul => match self.int_const_of(b) {
+                    Some(c) => self.const_mul(va, ta, c),
+                    None => self.b.ins().imul(va, vb),
+                },
                 BinOp::And => self.b.ins().band(va, vb),
                 BinOp::Or => self.b.ins().bor(va, vb),
                 BinOp::Xor => self.b.ins().bxor(va, vb),
@@ -1881,6 +1884,51 @@ impl AirCodegen<'_, '_> {
             }
         }
         None
+    }
+
+    /// Multiplication by a compile-time constant, strength-reduced.
+    ///
+    /// `imul` is a 3-cycle-latency instruction, and when the multiply sits on
+    /// a loop-carried dependence every one of those cycles is the loop's
+    /// period. Shifts and adds are one cycle each, so a constant one away
+    /// from a power of two costs two cycles instead of three — which is the
+    /// whole gap on the call benchmarks, whose accumulator is `sum * 31`:
+    /// gcc emits `(sum << 5) - sum` there and runs the loop in 3 cycles
+    /// against our 4, a 1.33x ratio that matched the measured 99ms against
+    /// 76ms almost exactly.
+    ///
+    /// Only the forms that are unambiguously cheaper are taken. A general
+    /// decomposition into shift-add chains can cost more than the multiply it
+    /// replaces once it needs three or more terms, and Cranelift's own
+    /// lowering already handles the plain powers of two.
+    fn const_mul(&mut self, va: Value, ty: Type, c: i64) -> Value {
+        let bits = i64::from(ty.bits());
+        let pow2 = |v: i64| v > 0 && v & (v - 1) == 0;
+        // Shifting by the full width is undefined; leave those to `imul`.
+        let fits = |k: u32| i64::from(k) < bits;
+
+        match c {
+            0 => self.b.ins().iconst(ty, 0),
+            1 => va,
+            -1 => self.b.ins().ineg(va),
+            _ if pow2(c) && fits(c.trailing_zeros()) => {
+                self.b.ins().ishl_imm(va, i64::from(c.trailing_zeros()))
+            }
+            // 2^k - 1, e.g. 31 => (x << 5) - x
+            _ if c > 0 && pow2(c + 1) && fits((c + 1).trailing_zeros()) => {
+                let sh = self.b.ins().ishl_imm(va, i64::from((c + 1).trailing_zeros()));
+                self.b.ins().isub(sh, va)
+            }
+            // 2^k + 1, e.g. 33 => (x << 5) + x
+            _ if c > 1 && pow2(c - 1) && fits((c - 1).trailing_zeros()) => {
+                let sh = self.b.ins().ishl_imm(va, i64::from((c - 1).trailing_zeros()));
+                self.b.ins().iadd(sh, va)
+            }
+            _ => {
+                let vb = self.b.ins().iconst(ty, c);
+                self.b.ins().imul(va, vb)
+            }
+        }
     }
 
     /// Division/remainder by a compile-time constant. The zero and INT_MIN/-1

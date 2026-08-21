@@ -209,17 +209,26 @@ fn hybrid_promotions_observable() {
         );
         let stderr = String::from_utf8_lossy(&run.output.stderr).into_owned();
         let attempted = parse_metric(&stderr, "attempted").unwrap_or(0);
-        let succeeded = parse_metric(&stderr, "succeeded").unwrap_or(0);
+
         let compiled_calls = parse_metric(&stderr, "compiled_calls").unwrap_or(0);
-        if attempted > 0 && succeeded > 0 && compiled_calls > 0 {
+        // `compiled_calls` counts INTERPRETER -> compiled dispatches, and it
+        // legitimately reaches zero now that the Cranelift tier compiles
+        // 99.4% of a program: once the entrypoint itself is compiled, the
+        // rest of the run happens inside compiled code and the interpreter
+        // never dispatches into it again. The promotion counters are what
+        // still observe the ladder, so assert on those; `compiled_calls` is
+        // reported for the failure message but no longer gates.
+        let cranelift = parse_metric(&stderr, "cranelift").unwrap_or(0);
+        let llvm = parse_metric(&stderr, "llvm").unwrap_or(0);
+        if attempted > 0 && cranelift + llvm > 0 {
             last = None;
             break;
         }
-        last = Some((attempted, succeeded, compiled_calls, stderr));
+        last = Some((attempted, cranelift + llvm, compiled_calls, stderr));
     }
     if let Some((attempted, succeeded, compiled_calls, stderr)) = last {
         panic!(
-            "expected visible hybrid promotions in 3 attempts, last got attempted={attempted} succeeded={succeeded} compiled_calls={compiled_calls}\nstderr:\n{stderr}"
+            "expected visible hybrid promotions in 3 attempts, last got attempted={attempted} promotions={succeeded} compiled_calls={compiled_calls}\nstderr:\n{stderr}"
         );
     }
 }

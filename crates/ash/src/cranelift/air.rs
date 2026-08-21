@@ -341,7 +341,31 @@ fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
     // single-loop call benchmarks. Where the exit cannot be taken promptly,
     // it should not be placed at all.
     let lp = forest.get(l);
-    lp.parent.is_none() && lp.children.is_empty()
+    if lp.parent.is_some() || !lp.children.is_empty() {
+        return false;
+    }
+
+    // And only where the iteration already pays for a call.
+    //
+    // The poll is a load and a branch on every iteration — visible in the
+    // CLIF as two instructions ahead of the loop's own guard. Against an
+    // iteration that makes a call, that is noise, and reaching the top tier
+    // is worth far more: method_call 194ms -> 153ms, closure_call 269ms ->
+    // 176ms. Against a call-free arithmetic loop it is pure overhead, and
+    // those loops are already within ~1.3x of hand-written C, so there is
+    // nothing for the top tier to recover: free_call 107ms -> 115ms,
+    // inlined_call 108ms -> 113ms. The benchmarks that lose are exactly the
+    // ones whose callee AIR already inlined away.
+    lp.blocks.iter().any(|b| {
+        f.blocks[b.idx()].instrs.iter().any(|i| {
+            matches!(
+                i,
+                air::v2::ir::Instr::Call { .. }
+                    | air::v2::ir::Instr::CallMethod { .. }
+                    | air::v2::ir::Instr::CallClosure { .. }
+            )
+        })
+    })
 }
 
 /// Publish an LLVM OSR entry address into the slot for `(findex, pc)`.

@@ -94,6 +94,42 @@ no dependence analysis either. In both projects the SIMD that actually ships
 comes from hand-written kernels, not the automatic pass — which is a warning
 about where the effort really goes.
 
+## What the analysis pass actually found
+
+`crates/air/src/v2/vectorize.rs` now answers this per loop, and
+`cargo run --example vec_report -- <file.hl>` reports it. Over nbody,
+mandelbrot, stdlib, jsonparse and a call bench — **388 loops, 5
+vectorizable**:
+
+```
+224  call in body                 89  multiple exits
+151  non-affine memory access     83  no induction variable
+ 71/65/11  Cell{Get,Incr,Set}     58  Cast (before no-op casts were allowed)
+```
+
+Two hypotheses died on contact with the data, and both are worth recording
+because they are the obvious guesses:
+
+* **"The multi-exit loops are bounds checks."** They are not. Teaching the
+  analysis that a throw-only exit is a guard rather than divergence moved the
+  count by zero. Dumping them shows genuine early-`break` loops —
+  `while (cond) { ...; if (x) break; }` — which is what scanning and parsing
+  code is made of, and stdlib/jsonparse are most of this corpus. Those need
+  early-exit vectorization (speculate, mask, find-first), a substantially
+  harder transform than the uniform case.
+* **"nbody's inner loop just needs a vectorizer."** It does not. It is
+  refused because `bodies[j].x` reads a field of a per-iteration *pointer*:
+  array-of-structs, so consecutive lanes are not contiguous and would need a
+  gather that NEON does not have. This is the same wall LLVM hit, which is
+  why it emitted SLP on the x/y/z triple instead of vectorizing across `j`.
+
+So the honest reading of this corpus is that its loops are mostly not
+classically vectorizable — the scanning loops break early, the FP kernel is
+blocked by data layout, and mandelbrot's escape loop is serial by
+construction. A loop vectorizer is still worth building, but its payoff here
+is bounded by those three facts, and the largest single unlock is **not** the
+transform: it is either an AoS→SoA layout change or gather support.
+
 ## Ordered path
 
 1. **Analysis first, transform second.** Induction/trip-count + stride +

@@ -133,6 +133,12 @@ pub struct LoopPlan {
     /// For a multi-exit refusal: what each exiting block ends with. A second
     /// exit that throws is a guard (a bounds check), not real divergence.
     pub exit_terms: Vec<(BlockId, &'static str)>,
+    /// Blocks whose only way out of the loop leads to a throw — bounds
+    /// checks and null checks. The loop is vectorizable *provided* the
+    /// transform hoists each of these to a single pre-loop check covering
+    /// the whole vector range; a plan with these non-empty is not a plan the
+    /// transform may take without doing that.
+    pub guard_exits: Vec<BlockId>,
 }
 
 impl LoopPlan {
@@ -199,6 +205,7 @@ fn analyze_loop(
         accesses: Vec::new(),
         body_size,
         exit_terms: Vec::new(),
+        guard_exits: Vec::new(),
     };
 
     if !lp.children.is_empty() {
@@ -206,26 +213,46 @@ fn analyze_loop(
         return plan;
     }
 
-    // Exactly one block may leave: with several, lanes diverge and the
-    // transform needs masks.
-    let exits: Vec<BlockId> = lp
-        .blocks
-        .iter()
-        .copied()
-        .filter(|b| {
-            f.blocks[b.idx()]
-                .term
-                .successors()
-                .iter()
-                .any(|s| !in_loop.contains(s))
-        })
-        .collect();
+    // Which blocks can leave, and whether each leaves NORMALLY.
+    //
+    // An exit whose out-of-loop target only ever reaches a `Throw` is not
+    // divergence — it is a guard, and in HL that is overwhelmingly an array
+    // bounds check. The scalar loop never takes it on a run that completes,
+    // so it does not make lanes exit at different iterations; what it does
+    // require is that the check be proven for the whole vector range before
+    // the loop, which is a hoist the transform must perform. Counting those
+    // as ordinary exits refused most loops in the corpus for a branch no
+    // completing run takes.
+    let mut exits: Vec<BlockId> = Vec::new();
+    let mut guards: Vec<BlockId> = Vec::new();
+    for b in &lp.blocks {
+        let leaves: Vec<BlockId> = f.blocks[b.idx()]
+            .term
+            .successors()
+            .into_iter()
+            .filter(|s| !in_loop.contains(s))
+            .collect();
+        if leaves.is_empty() {
+            continue;
+        }
+        if leaves.iter().all(|&t| always_throws(f, t, &in_loop)) {
+            guards.push(*b);
+        } else {
+            exits.push(*b);
+        }
+    }
+    plan.guard_exits = guards;
     if exits.len() > 1 {
         plan.refusals.push(Refusal::MultipleExits);
         plan.exit_terms = exits
             .iter()
             .map(|b| (*b, term_name(&f.blocks[b.idx()].term)))
             .collect();
+        return plan;
+    }
+    if exits.is_empty() {
+        // Every way out throws: the loop has no normal exit at all.
+        plan.refusals.push(Refusal::MultipleExits);
         return plan;
     }
 
@@ -663,4 +690,26 @@ fn term_name(t: &Terminator) -> &'static str {
         Terminator::Rethrow { .. } => "Rethrow",
         Terminator::Trap { .. } => "Trap",
     }
+}
+
+/// Whether `start`, and everything reachable from it without re-entering the
+/// loop, ends in a throw. Bounded by the block count; a cycle outside the
+/// loop that never throws simply answers `false`.
+fn always_throws(f: &Function, start: BlockId, in_loop: &HashSet<BlockId>) -> bool {
+    let mut seen: HashSet<BlockId> = HashSet::new();
+    let mut work = vec![start];
+    let mut saw_throw = false;
+    while let Some(b) = work.pop() {
+        if in_loop.contains(&b) || !seen.insert(b) {
+            continue;
+        }
+        match &f.blocks[b.idx()].term {
+            Terminator::Throw { .. } | Terminator::Rethrow { .. } => saw_throw = true,
+            // Anything that returns or traps is a normal way out of the
+            // function, so this path is not a guard.
+            Terminator::Ret { .. } | Terminator::Trap { .. } => return false,
+            t => work.extend(t.successors()),
+        }
+    }
+    saw_throw
 }

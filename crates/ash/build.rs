@@ -48,8 +48,15 @@ fn generate_hl_bindings(out_dir: &Path) {
     println!("cargo:rerun-if-changed={}", wrapper.display());
     println!("cargo:rerun-if-changed={}", hl_header.display());
 
+    // Same gate as std/build.rs: layout tests only when the headers being
+    // parsed are the target's own. The macOS->Windows cross-check borrows
+    // darwin headers, and asserting darwin struct sizes under MSVC layout
+    // rules yields guaranteed E0080s that assert nothing about ash.
+    let cross = env::var("HOST").unwrap_or_default() != env::var("TARGET").unwrap_or_default();
+
     let bindings = bindgen::Builder::default()
         .header(wrapper.to_string_lossy().into_owned())
+        .layout_tests(!cross)
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate HL bindings");
@@ -289,9 +296,12 @@ fn main() {
     // Read the library file into a byte array
     let lib_bytes = fs::read(lib_path).expect("Failed to read cdylib file");
 
-    // Write the byte array to a file in OUT_DIR
-    let mut output_path = out_dir.join(lib_filename);
-    output_path.set_extension("a");
+    // Write the byte array to a file in OUT_DIR. The name is FIXED:
+    // native_lib.rs does include_bytes!(concat!(env!("OUT_DIR"),
+    // "/libash_std.a")), and deriving the name from the platform's dylib
+    // filename broke Windows — MSVC's cdylib is ash_std.dll (no lib prefix),
+    // so this wrote ash_std.a and the include failed to resolve.
+    let output_path = out_dir.join("libash_std.a");
 
     fs::write(&output_path, &lib_bytes).expect("Failed to write cdylib binary file");
 }

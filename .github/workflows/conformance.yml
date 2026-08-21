@@ -1,0 +1,173 @@
+name: haxe-conformance
+
+# Does ash run what Haxe developers actually write?
+#
+# ash's own corpus is 43 programs, each written because ash was once wrong
+# about the thing it tests. That is a good regression net and a poor
+# conformance signal — it only ever asks questions someone already thought to
+# ask, which is how a stdlib missing forty natives and an always-false string
+# comparison reached a user before they reached a test.
+#
+# The Haxe project's suite asks thousands of questions and targets HashLink
+# bytecode directly, so it needs no adaptation to point at ash.
+#
+# This job reports rather than blocks by default: today most of it does not
+# pass, and a gate that is red from the first commit teaches everyone to
+# ignore it. It fails only on REGRESSION against a committed baseline for the
+# same platform — something that passed and stopped passing — which is the
+# signal worth interrupting someone for.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "std/**"
+      - "scripts/haxe_conformance.py"
+      - ".github/workflows/conformance.yml"
+  schedule:
+    # Weekly, so a slow drift in the stdlib surfaces without waiting for a
+    # push that happens to touch the right paths.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HAXE_VERSION: "4.3.6"
+  LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+  LIBCLANG_PATH: /usr/lib/llvm-21/lib
+
+jobs:
+  conformance:
+    name: Official Haxe suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # ash_std's bindgen pretty-prints through it
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: conformance
+
+      - name: Install LLVM 21
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+
+      # Two invocations, not one: ash_std is a cdylib that ash's build.rs
+      # embeds, and cargo has no ordering edge between them, so a single
+      # invocation can embed a stale runtime.
+      - name: Build ash
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      # The suite pulls utest; the harness installs it too, but doing it here
+      # keeps a haxelib outage out of the middle of a run.
+      - name: Install utest
+        run: haxelib install utest --always
+
+      # HDLLs are needed to *load* several suites at all — they declare
+      # natives from ssl and fmt even in tests that never call them, and a
+      # missing library is a hard load error. The copies committed under
+      # examples/ are Mach-O and useless here, so build a Linux set from
+      # HashLink itself. Best-effort: without them those suites report a load
+      # failure, which the baseline comparison already accounts for.
+      - name: Cache HashLink HDLLs
+        id: hdll-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/hl-hdll
+          key: hl-hdll-1.15-ubuntu-24.04-v2
+
+      - name: Build HashLink HDLLs
+        if: steps.hdll-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y libpng-dev libturbojpeg0-dev libvorbis-dev \
+            libmbedtls-dev libuv1-dev zlib1g-dev || true
+          git clone --depth 1 --branch 1.15 \
+            https://github.com/HaxeFoundation/hashlink.git /tmp/hlsrc
+          # Only the two the suites actually need to load. Asking for all of
+          # LIBS drags in SDL and OpenAL, whose headers are not here and whose
+          # failure would take the rest down with them.
+          make -C /tmp/hlsrc libhl fmt.hdll ssl.hdll -j"$(nproc)" || true
+          mkdir -p ~/hl-hdll
+          cp /tmp/hlsrc/*.hdll ~/hl-hdll/ 2>/dev/null || true
+          cp /tmp/hlsrc/libhl.so* ~/hl-hdll/ 2>/dev/null || true
+          ls -la ~/hl-hdll/ || true
+
+      - name: Run the suite
+        run: |
+          HD=()
+          if [ -d "$HOME/hl-hdll" ] && ls "$HOME/hl-hdll"/*.hdll >/dev/null 2>&1; then
+            HD=(--hdll-dir "$HOME/hl-hdll")
+          fi
+          BASE=()
+          if [ -f crates/ash/test/conformance_baseline_linux.json ]; then
+            BASE=(--baseline crates/ash/test/conformance_baseline_linux.json)
+          else
+            echo "::notice::no Linux baseline committed yet — reporting only. \
+          Commit the uploaded results.json as crates/ash/test/conformance_baseline_linux.json to start gating."
+          fi
+          LD_LIBRARY_PATH="$HOME/hl-hdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+          ./scripts/haxe_conformance.py \
+            --modes interp \
+            "${HD[@]}" "${BASE[@]}" \
+            --json conformance.json \
+            | tee conformance.log
+
+      # The natives list is the most directly actionable thing this produces:
+      # every name here is a Haxe API that will fail on a user's machine.
+      - name: Summarize
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("conformance.json")
+          if not p.is_file():
+              print("The run produced no JSON — see the job log.")
+              raise SystemExit
+          d = json.loads(p.read_text())
+          print(f"## Official Haxe suite @ {d['suite_tag']}\n")
+          print("| suite | engine | status | detail |")
+          print("|---|---|---|---|")
+          for r in d["results"]:
+              # A pipe inside a crash line would split the table cell.
+              detail = r.get("detail", "")[:110].replace("|", "\\|")
+              print(f"| {r['suite']} | {r['engine']} | **{r['status']}** | {detail} |")
+          nat = d.get("missing_natives") or []
+          print(f"\n### Unresolved natives ({len(nat)})\n")
+          print("Every name here is a Haxe API that fails on a user's machine.\n"
+                if nat else "None — the stdlib resolves everything these suites ask for.\n")
+          for n in nat:
+              print(f"- `{n}`")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: conformance-results
+          path: |
+            conformance.json
+            conformance.log
+          if-no-files-found: warn
+          retention-days: 90

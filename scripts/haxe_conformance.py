@@ -56,15 +56,18 @@ SUITES = {
     },
     "threads": {
         "dir": "tests/threads",
-        "hxml": "compile-hl.hxml",
-        "programs": ["bin/hl/threads.hl"],
+        # This one carries no target in its hxml -- upstream CI supplies it on
+        # the command line -- so the target is passed here instead.
+        "hxml": "build.hxml",
+        "args": ["-hl", "bin/threads.hl"],
+        "programs": ["bin/threads.hl"],
         "needs": ["utest"],
         "about": "Threads, locks, mutexes, deques.",
     },
 }
 
-# utest reports per-assertion; these are the lines worth parsing out of a run.
-RE_ASSERT = re.compile(r"(\d+)\s+(?:assertions?|tests?)", re.I)
+# utest's own verdict lines. A suite that neither fails nor announces success
+# is treated as a pass only if it also exited zero -- see classify().
 RE_FAIL = re.compile(r"\b(FAILED|ERROR|Error:)\b")
 RE_OK = re.compile(r"\bOK\b|\bSUCCESS\b|\ball tests? (?:passed|ok)\b", re.I)
 
@@ -117,7 +120,23 @@ def ensure_libs(libs, haxelib: str) -> list[str]:
     return missing
 
 
-def stage_hdlls(dest: pathlib.Path, repo_root: pathlib.Path) -> int:
+def hdll_sources(repo_root: pathlib.Path, explicit: str | None) -> list[pathlib.Path]:
+    """Where to find HDLLs for this platform.
+
+    The copies committed under examples/heaps_base2d/bin are Mach-O. Staging
+    those on Linux would not merely fail to help -- ash would report a load
+    error that reads like an ash defect and is really an architecture
+    mismatch. So they are used only on macOS, and elsewhere the caller must
+    say where a native set lives (a HashLink build tree, typically).
+    """
+    if explicit:
+        return sorted(pathlib.Path(explicit).glob("*.hdll"))
+    if sys.platform == "darwin":
+        return sorted((repo_root / "examples/heaps_base2d/bin").glob("*.hdll"))
+    return []
+
+
+def stage_hdlls(dest: pathlib.Path, srcs: list[pathlib.Path]) -> int:
     """Put the HDLLs beside the bytecode.
 
     Several suites declare natives from ssl/fmt/sqlite even in tests that
@@ -125,7 +144,6 @@ def stage_hdlls(dest: pathlib.Path, repo_root: pathlib.Path) -> int:
     lazy one -- so without these the suite does not start at all and reports
     nothing about ash.
     """
-    srcs = list((repo_root / "examples/heaps_base2d/bin").glob("*.hdll"))
     dest.mkdir(parents=True, exist_ok=True)
     for s in srcs:
         shutil.copy2(s, dest / s.name)
@@ -181,6 +199,9 @@ def main(argv=None) -> int:
     ap.add_argument("--json", type=pathlib.Path, default=None)
     ap.add_argument("--baseline", type=pathlib.Path, default=None,
                     help="a previous --json; exit 1 if any suite got worse")
+    ap.add_argument("--hdll-dir", default=None,
+                    help="directory of .hdll files for this platform; the "
+                         "committed macOS set is used automatically on darwin")
     ap.add_argument("--skip-build", action="store_true",
                     help="reuse bytecode already built under the checkout")
     args = ap.parse_args(argv)
@@ -205,6 +226,12 @@ def main(argv=None) -> int:
     print(f"haxe:  {ver}  ->  suite tag {tag}")
     if args.reference:
         print(f"ref:   {args.reference}")
+
+    hdlls = hdll_sources(root, args.hdll_dir)
+    if hdlls:
+        print(f"hdll:  {len(hdlls)} from {hdlls[0].parent}")
+    elif sys.platform != "darwin":
+        print("hdll:  none (pass --hdll-dir); suites needing ssl/fmt will not load")
 
     src = ensure_checkout(work, tag)
     wanted = [s.strip() for s in args.suites.split(",") if s.strip()]
@@ -238,7 +265,8 @@ def main(argv=None) -> int:
 
         if not args.skip_build:
             print(f"   building {spec['hxml']} ...", flush=True)
-            r = run([args.haxe, spec["hxml"]], cwd=str(sdir), timeout=args.timeout)
+            r = run([args.haxe, spec["hxml"], *spec.get("args", [])],
+                    cwd=str(sdir), timeout=args.timeout)
             if r.returncode != 0:
                 err = (r.stdout + r.stderr).strip().splitlines()
                 detail = next((l for l in err if "ERROR" in l or "Error" in l), err[-1] if err else "")
@@ -253,7 +281,7 @@ def main(argv=None) -> int:
                 report["results"].append({"suite": name, "mode": "-", "status": "SKIP",
                                           "detail": f"{prog} not produced"})
                 continue
-            stage_hdlls(p.parent, root)
+            stage_hdlls(p.parent, hdlls)
 
             engines = [(f"ash:{m}", [ash, "--mode", m]) for m in modes]
             if args.reference:

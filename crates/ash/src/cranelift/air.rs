@@ -335,7 +335,14 @@ fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
     // way. The outermost header pays no such cost, and bounds the transfer
     // latency by one of its own iterations, which is what a frame stuck
     // anywhere inside actually needs.
-    forest.get(l).parent.is_none()
+    // Outermost AND un-nested. A frame inside a nested loop reaches its
+    // outer header rarely, so the exit is taken late and the LLVM entry it
+    // lands in has to restore a large register image before it can run —
+    // measured on mandelbrot as a 50x loss, against a clear win on the
+    // single-loop call benchmarks. Where the exit cannot be taken promptly,
+    // it should not be placed at all.
+    let lp = forest.get(l);
+    lp.parent.is_none() && lp.children.is_empty()
 }
 
 /// Publish an LLVM OSR entry address into the slot for `(findex, pc)`.

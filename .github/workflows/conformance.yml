@@ -96,7 +96,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/hl-hdll
-          key: hl-hdll-1.15-ubuntu-24.04-v3
+          key: hl-hdll-1.15-ubuntu-24.04-v4
 
       - name: Build HashLink HDLLs
         if: steps.hdll-cache.outputs.cache-hit != 'true'
@@ -128,9 +128,22 @@ jobs:
           cp /tmp/hlsrc/hl ~/hl-hdll/ 2>/dev/null || true
           cp /tmp/hlsrc/libhl.so* ~/hl-hdll/ 2>/dev/null || true
           ls -la ~/hl-hdll/ || true
-          # An empty result must not be cached under this key, or every later
-          # run restores nothing and skips the build that would have fixed it.
-          if ! ls ~/hl-hdll/*.hdll >/dev/null 2>&1; then rm -rf ~/hl-hdll; fi
+          # An INCOMPLETE result must not be cached, not merely an empty one.
+          # A previous version of this step staged the .hdll files without
+          # libhl.so, which they link against — so every suite failed with
+          # "libhl.so: cannot open shared object file" while the directory
+          # looked populated enough to cache. The next run then restored it,
+          # skipped the build, and failed identically. The guard therefore
+          # checks the whole set the run actually needs, not just that
+          # something is there.
+          ok=1
+          ls ~/hl-hdll/*.hdll >/dev/null 2>&1 || ok=0
+          ls ~/hl-hdll/libhl.so* >/dev/null 2>&1 || ok=0
+          test -x ~/hl-hdll/hl || ok=0
+          if [ "$ok" = "0" ]; then
+            echo "::warning::the HDLL set is incomplete; discarding it rather than caching a directory that cannot work"
+            rm -rf ~/hl-hdll
+          fi
 
       # The suite checkout is a blobless sparse clone of one tag — it never
       # changes for that tag, so caching it removes a git fetch from every

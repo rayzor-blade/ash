@@ -44,9 +44,9 @@
 use std::collections::HashMap;
 
 use crate::hl::{
-    hl_type_kind_HBOOL, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64,
-    hl_type_kind_HOBJ, hl_type_kind_HPACKED, hl_type_kind_HSTRUCT, hl_type_kind_HUI16,
-    hl_type_kind_HUI8, hl_type_kind_HVOID,
+    hl_type_kind, hl_type_kind_HBOOL, hl_type_kind_HF32, hl_type_kind_HF64, hl_type_kind_HI32,
+    hl_type_kind_HI64, hl_type_kind_HOBJ, hl_type_kind_HPACKED, hl_type_kind_HSTRUCT,
+    hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVOID,
 };
 use crate::types::HLType;
 
@@ -59,7 +59,7 @@ const HL_WSIZE: i32 = 8;
 /// `HBOOL` is 2, not 1. `HVOID` and `HPACKED` are 0 — the latter because a
 /// packed field's size comes from the referenced type's runtime object, which
 /// is why [`object_layout`] refuses to lay out types containing one.
-fn type_size(kind: u32) -> i32 {
+fn type_size(kind: hl_type_kind) -> i32 {
     match kind {
         hl_type_kind_HVOID => 0,
         hl_type_kind_HUI8 => 1,
@@ -86,7 +86,7 @@ fn type_size(kind: u32) -> i32 {
 /// Shared so the two compiled tiers cannot drift: each used to carry its own
 /// copy of this table, which is the shape of bug that only shows up once the
 /// tiers disagree about one element kind on one program.
-pub fn array_elem_size(kind: u32) -> i32 {
+pub fn array_elem_size(kind: hl_type_kind) -> i32 {
     match kind {
         hl_type_kind_HVOID | hl_type_kind_HPACKED => HL_WSIZE,
         _ => type_size(kind),
@@ -129,7 +129,7 @@ pub fn field_name_hash(name: &str) -> i32 {
 
 /// Padding to insert before a field of `kind` at byte `size`, mirroring
 /// `hlp_pad_struct`.
-fn pad_struct(size: i32, kind: u32) -> i32 {
+fn pad_struct(size: i32, kind: hl_type_kind) -> i32 {
     let align: i32 = match kind {
         hl_type_kind_HVOID => return 0,
         hl_type_kind_HUI8 => 1,
@@ -158,7 +158,7 @@ pub struct ObjLayout {
     /// the register the value happens to live in. The two usually agree, but
     /// where they do not, using the register's width writes past the field and
     /// silently corrupts its neighbour.
-    pub field_kinds: Vec<u32>,
+    pub field_kinds: Vec<hl_type_kind>,
     /// Instance size including trailing padding.
     pub size: i32,
     /// Trailing padding included in `size`. A subclass resumes laying out at
@@ -193,7 +193,7 @@ pub fn field_offset_and_kind(
     types: &[HLType],
     type_index: usize,
     field_index: usize,
-) -> Option<(i32, u32)> {
+) -> Option<(i32, hl_type_kind)> {
     let l = object_layout(types, type_index)?;
     Some((
         *l.field_offsets.get(field_index)?,
@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use crate::types::{HLObjField, HLTypeObj, TypeRef};
 
-    fn scalar(kind: u32) -> HLType {
+    fn scalar(kind: hl_type_kind) -> HLType {
         HLType {
             kind,
             ..Default::default()

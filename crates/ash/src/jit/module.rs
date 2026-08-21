@@ -56,8 +56,10 @@ unsafe impl Sync for SharedRuntimeHandles {}
 pub struct CompiledFunctionMeta {
     pub findex: usize,
     pub fn_addr: usize,
-    pub arg_kinds: Vec<u32>,
-    pub ret_kind: u32,
+    // Kinds carry the bindgen alias, not a bare integer: MSVC types the C
+    // enum i32 where clang types it u32, so only the alias compiles on both.
+    pub arg_kinds: Vec<hl_type_kind>,
+    pub ret_kind: hl_type_kind,
 }
 
 pub struct JITModule<'ctx> {

@@ -194,8 +194,10 @@ impl AshCraneliftBackend {
 
 /// Marshaling metadata produced alongside the compiled code.
 pub struct LoweredMeta {
-    pub arg_kinds: Vec<u32>,
-    pub ret_kind: u32,
+    // Alias-typed on purpose: bindgen gives `hl_type_kind` u32 under clang
+    // and i32 under MSVC, so a fixed-width field here breaks one platform.
+    pub arg_kinds: Vec<hl::hl_type_kind>,
+    pub ret_kind: hl::hl_type_kind,
     pub num_ops: usize,
 }
 

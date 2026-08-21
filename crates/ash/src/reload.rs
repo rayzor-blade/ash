@@ -108,7 +108,9 @@ fn check_type_layout_compatibility(
     false
 }
 
-fn is_obj_kind(kind: u32) -> bool {
+// Kind params carry the bindgen alias, not a bare integer: MSVC types the C
+// enum i32 where clang types it u32, so only the alias compiles on both.
+fn is_obj_kind(kind: hl::hl_type_kind) -> bool {
     kind == hl::hl_type_kind_HOBJ || kind == hl::hl_type_kind_HSTRUCT
 }
 
@@ -348,7 +350,7 @@ pub fn compute_field_patches(
     patches
 }
 
-fn field_byte_size(kind: u32) -> usize {
+fn field_byte_size(kind: hl::hl_type_kind) -> usize {
     match kind {
         hl::hl_type_kind_HBOOL | hl::hl_type_kind_HUI8 => 1,
         hl::hl_type_kind_HUI16 => 2,
@@ -359,7 +361,11 @@ fn field_byte_size(kind: u32) -> usize {
     }
 }
 
-fn encode_constant_value(field_value: i32, kind: u32, bc: &DecodedBytecode) -> Vec<u8> {
+fn encode_constant_value(
+    field_value: i32,
+    kind: hl::hl_type_kind,
+    bc: &DecodedBytecode,
+) -> Vec<u8> {
     match kind {
         hl::hl_type_kind_HI32
         | hl::hl_type_kind_HBOOL

@@ -96,6 +96,67 @@ pub fn std_symbol_addr(name: &str) -> Option<usize> {
 static STD_INIT: Once = Once::new();
 pub static mut STD_LIBRARY: Option<Library> = None;
 
+/// A system-wide libhl that is safe to prefer over the embedded ash_std, or
+/// `None` to take the embedded/on-disk path.
+///
+/// Preferring the system libhl makes HDLLs and the interpreter share the SAME
+/// library instance (and thus the same GC static) — C hdlls resolve their
+/// libhl.dylib install-name dependency to this path regardless of what we
+/// dlopen. BUT only if it is not stale: a system libhl missing the canary
+/// symbol predates the current stdlib ABI and silently shadows every freshly
+/// built ash_std (this cost months: all EventLoop debugging since March ran
+/// against a stale root-owned build).
+/// Override with ASH_LIBHL=system|embedded.
+/// Bump the canary when the stdlib ABI changes materially.
+#[cfg(unix)]
+fn usable_system_libhl(ext: &str) -> Option<std::path::PathBuf> {
+    const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
+    let force = std::env::var("ASH_LIBHL").unwrap_or_default();
+    if force == "embedded" {
+        return None;
+    }
+    let system_libhl = std::path::Path::new("/usr/local/lib").join(format!("libhl.{}", ext));
+    if !system_libhl.exists() {
+        return None;
+    }
+    let system_ok = force == "system" || unsafe {
+        let path_cstr = std::ffi::CString::new(system_libhl.to_str().unwrap()).unwrap();
+        let probe = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        if probe.is_null() {
+            false
+        } else {
+            let has_canary =
+                !libc::dlsym(probe, CANARY_SYMBOL.as_ptr() as *const libc::c_char).is_null();
+            libc::dlclose(probe);
+            has_canary
+        }
+    };
+    if system_ok {
+        Some(system_libhl)
+    } else {
+        if !quiet() {
+            eprintln!(
+                "[ash] WARNING: {} exists but is STALE (missing canary symbol) — \
+                 using embedded ash_std instead. C hdlls may still bind the stale \
+                 copy; refresh it with: sudo cp <target>/libash_std.dylib {}",
+                system_libhl.display(),
+                system_libhl.display()
+            );
+        }
+        None
+    }
+}
+
+/// Windows has no system libhl to defer to: there is no /usr/local/lib install
+/// convention, and DLL imports bind at load time rather than through a global
+/// symbol search order, so the sharing argument above cannot arise. The
+/// embedded/on-disk path is taken unconditionally (and `std_is_static`
+/// defaults on anyway, so this branch is A/B-diagnosis-only to begin with).
+#[cfg(not(unix))]
+fn usable_system_libhl(_ext: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
 pub fn init_std_library() -> Result<()> {
     if std_is_static() {
         // No loader, no temp file, no codesign, no signature registration —
@@ -116,51 +177,13 @@ pub fn init_std_library() -> Result<()> {
                 "so"
             };
 
-            // Prefer the system libhl.dylib so HDLLs and the interpreter share
-            // the SAME library instance (and thus the same GC static) — C hdlls
-            // resolve their libhl.dylib install-name dependency to this path
-            // regardless of what we dlopen. BUT only if it is not stale: a
-            // system libhl missing the canary symbol predates the current
-            // stdlib ABI and silently shadows every freshly built ash_std
-            // (this cost months: all EventLoop debugging since March ran
-            // against a stale root-owned build).
-            // Override with ASH_LIBHL=system|embedded.
-            // Bump the canary when the stdlib ABI changes materially.
-            const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
-            let system_libhl =
-                std::path::Path::new("/usr/local/lib").join(format!("libhl.{}", ext));
-
-            let force = std::env::var("ASH_LIBHL").unwrap_or_default();
-            let system_ok = system_libhl.exists()
-                && (force == "system" || {
-                    let path_cstr = std::ffi::CString::new(system_libhl.to_str().unwrap()).unwrap();
-                    let probe = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
-                    if probe.is_null() {
-                        false
-                    } else {
-                        let has_canary =
-                            !libc::dlsym(probe, CANARY_SYMBOL.as_ptr() as *const libc::c_char)
-                                .is_null();
-                        libc::dlclose(probe);
-                        has_canary
-                    }
-                });
-
-            let lib_path = if system_ok && force != "embedded" {
+            // The system-libhl preference (and its staleness probe) is a unix
+            // concern; see usable_system_libhl for the reasoning and the
+            // ASH_LIBHL override. On Windows it always answers None.
+            let lib_path = if let Some(system_libhl) = usable_system_libhl(ext) {
                 eprintln!("[ash] Using system libhl at {}", system_libhl.display());
                 system_libhl
             } else {
-                if system_libhl.exists() && force != "embedded" {
-                    if !quiet() {
-                        eprintln!(
-                            "[ash] WARNING: {} exists but is STALE (missing canary symbol) — \
-                             using embedded ash_std instead. C hdlls may still bind the stale \
-                             copy; refresh it with: sudo cp <target>/libash_std.dylib {}",
-                            system_libhl.display(),
-                            system_libhl.display()
-                        );
-                    }
-                }
                 // Fallback 1: dlopen a real on-disk build artifact directly.
                 // Extracting a fresh temp copy every run forces the kernel to
                 // register a new code signature on each dlopen (fcntl

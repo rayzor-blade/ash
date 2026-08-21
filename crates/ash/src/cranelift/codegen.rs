@@ -240,7 +240,8 @@ pub fn lower_air_function(
         bail!("{reason}");
     }
 
-    let arg_kinds: Vec<u32> = tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
+    let arg_kinds: Vec<hl::hl_type_kind> =
+        tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
     let ret_kind = bytecode.types[tf.ret.0].kind;
 
     let mut sig = backend.make_signature();

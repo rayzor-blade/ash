@@ -313,7 +313,7 @@ impl BytecodeDecoder {
     fn compute_enum_offsets(types: &mut Vec<HLType>) {
         // Build a lookup: type_index → (size, alignment) for fast access.
         // Must snapshot before mutating, so collect kinds first.
-        let kinds: Vec<u32> = types.iter().map(|t| t.kind).collect();
+        let kinds: Vec<hl::hl_type_kind> = types.iter().map(|t| t.kind).collect();
 
         for t in types.iter_mut() {
             if let Some(ref mut tenum) = t.tenum {
@@ -321,7 +321,7 @@ impl BytecodeDecoder {
                     // venum header: hl_type*(8) + int index(4) + pad(4) = 16 bytes
                     let mut offset: usize = 16;
                     for (i, param_ref) in construct.params.iter().enumerate() {
-                        let kind = kinds.get(param_ref.0).copied().unwrap_or(0);
+                        let kind = kinds.get(param_ref.0).copied().unwrap_or(hl::hl_type_kind_HVOID);
                         let (size, align) = Self::type_size_align(kind);
                         // Align to this type's natural alignment
                         offset = (offset + align - 1) & !(align - 1);
@@ -336,7 +336,7 @@ impl BytecodeDecoder {
     }
 
     /// Returns (size_bytes, alignment_bytes) for a given HL type kind.
-    fn type_size_align(kind: u32) -> (usize, usize) {
+    fn type_size_align(kind: hl::hl_type_kind) -> (usize, usize) {
         use crate::hl::*;
         match kind {
             hl_type_kind_HBOOL | hl_type_kind_HUI8 => (1, 1),
@@ -360,7 +360,10 @@ impl BytecodeDecoder {
     }
 
     fn read_type(&mut self, r: &mut impl BufRead) -> Result<HLType, std::io::Error> {
-        let kind = r.read_u8()? as u32;
+        // `hl_type_kind` is whatever bindgen makes of the C enum — unsigned under
+        // clang, signed under MSVC — so the byte widens to the alias, never to a
+        // hand-picked width.
+        let kind = r.read_u8()? as hl::hl_type_kind;
 
         let mut _type = HLType::default();
 

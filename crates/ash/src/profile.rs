@@ -64,6 +64,8 @@
 //! compilation is already covered deterministically by phase scopes.
 
 use std::collections::HashMap;
+// `c_void` only appears in signal-context and dladdr code, all of it unix.
+#[cfg(unix)]
 use std::ffi::c_void;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -135,6 +137,7 @@ static WALL_START: OnceLock<Instant> = OnceLock::new();
 /// the thread-scoped clock is readable directly rather than having to be asked
 /// of another thread. Returns 0 where the clock is unavailable, which makes the
 /// report fall back to assuming every tick landed.
+#[cfg(unix)]
 fn thread_cpu_ms() -> f64 {
     unsafe {
         let mut ts: libc::timespec = std::mem::zeroed();
@@ -143,6 +146,15 @@ fn thread_cpu_ms() -> f64 {
         }
         ts.tv_sec as f64 * 1e3 + ts.tv_nsec as f64 / 1e6
     }
+}
+
+/// No thread-scoped CPU clock is wired up on this platform (the unix version
+/// reads CLOCK_THREAD_CPUTIME_ID). Only the sampler's report consumes this,
+/// and the sampler does not run here, so 0 — the documented "unavailable"
+/// value — is never actually read.
+#[cfg(not(unix))]
+fn thread_cpu_ms() -> f64 {
+    0.0
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -430,6 +442,7 @@ pub fn leave_interp(prev: u32) {
 // Sampler
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 mod sampler {
     use super::*;
 
@@ -704,6 +717,39 @@ mod sampler {
     }
 }
 
+/// The sampler is a unix mechanism end to end — SIGPROF delivery, a
+/// pthread_kill ticker, and a PC read out of the signal context — and none of
+/// it has a Win32 equivalent wired up (that would be a SuspendThread +
+/// GetThreadContext port, deliberately out of scope for now). Requesting it
+/// degrades honestly: [`start`] errors, [`init`] prints the reason once to
+/// stderr, `SAMPLING_ON` stays false, and the phase-tree profiler keeps
+/// working. The statics exist only so `write_sample_profile` — compiled on
+/// every platform, reachable on none of these — typechecks; `recorded()` is 0,
+/// so it never gets past its empty-profile early return.
+#[cfg(not(unix))]
+mod sampler {
+    use super::*;
+
+    pub(super) static PCS: OnceLock<Box<[AtomicU64]>> = OnceLock::new();
+    pub(super) static LRS: OnceLock<Box<[AtomicU64]>> = OnceLock::new();
+    pub(super) static TAGS: OnceLock<Box<[AtomicU64]>> = OnceLock::new();
+    pub(super) static DROPPED: AtomicUsize = AtomicUsize::new(0);
+    pub(super) static HZ: AtomicU64 = AtomicU64::new(997);
+    pub(super) static START_CPU_MS: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) fn recorded() -> usize {
+        0
+    }
+
+    pub(super) fn start() -> Result<(), String> {
+        Err("the sampling profiler is unix-only (SIGPROF + pthread_kill); \
+             the phase tree (ASH_PROFILE=phases) still works on this platform"
+            .to_string())
+    }
+
+    pub(super) fn stop() {}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Classification
 // ─────────────────────────────────────────────────────────────────────────────
@@ -841,6 +887,7 @@ fn mapping_name(pc: usize) -> Option<String> {
 }
 
 /// Resolve `pc` to `(symbol, image path)` via `dladdr`.
+#[cfg(unix)]
 fn dladdr_symbol(pc: u64) -> Option<(String, String)> {
     unsafe {
         let mut info: libc::Dl_info = std::mem::zeroed();
@@ -859,6 +906,13 @@ fn dladdr_symbol(pc: u64) -> Option<(String, String)> {
         };
         Some((sym, image))
     }
+}
+
+/// No `dladdr` here, and no sampler to feed it PCs (see [`sampler`]) — this is
+/// only ever compiled for the sake of [`classify`]'s cross-platform body.
+#[cfg(not(unix))]
+fn dladdr_symbol(_pc: u64) -> Option<(String, String)> {
+    None
 }
 
 /// Turn the mangled name `dladdr` returns into something readable.

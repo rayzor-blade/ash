@@ -43,8 +43,10 @@ use crate::types::{HLFunction, HLTypeFun, TypeRef};
 /// A lowered function plus the marshaling metadata the interpreter needs.
 pub struct LoweredFunction {
     pub def: CraneliftFunctionDef,
-    pub arg_kinds: Vec<u32>,
-    pub ret_kind: u32,
+    // `hl::hl_type_kind` is the bindgen alias — u32 under clang, i32 under
+    // MSVC — so kinds must carry the alias, never a fixed-width integer.
+    pub arg_kinds: Vec<hl::hl_type_kind>,
+    pub ret_kind: hl::hl_type_kind,
     /// Opcode count, for the promotion log.
     pub num_ops: usize,
 }
@@ -259,7 +261,8 @@ pub fn lower_function(
         .as_ref()
         .ok_or_else(|| anyhow!("no function type"))?;
 
-    let arg_kinds: Vec<u32> = tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
+    let arg_kinds: Vec<hl::hl_type_kind> =
+        tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
     let ret_kind = bytecode.types[tf.ret.0].kind;
 
     let sig = entry_signature(backend, ctx, tf)?;
@@ -671,7 +674,7 @@ impl Lowerer<'_, '_> {
     }
 
     /// The declared HL type kind of a register.
-    fn reg_kind(&self, r: Reg) -> Result<u32> {
+    fn reg_kind(&self, r: Reg) -> Result<hl::hl_type_kind> {
         let type_index = self
             .regs
             .get(r.0 as usize)

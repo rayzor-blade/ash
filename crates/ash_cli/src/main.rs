@@ -371,7 +371,7 @@ unsafe extern "C" fn crash_handler_siginfo(
     if let Some((pc0, lr, mut fp, _sp)) = signal_registers(ctx) {
         write_stderr(b"[ash] frames (innermost first):\n");
         let mut frame = 0usize;
-        let mut emit = |pc: u64, frame: usize| {
+        let emit = |pc: u64, frame: usize| {
             let mut b = [0u8; 192];
             let mut l = 0usize;
             push_bytes(&mut b, &mut l, b"  #");

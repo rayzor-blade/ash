@@ -201,6 +201,18 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
+# Relational comparison between strings. `<` and `>` on HOBJ (String)
+# operands fell through to a pointer comparison that has no ordering, so
+# every one of them answered false while equality kept working.
+name = "TestStringOrder"
+main = "TestStringOrder"
+hl = "test_string_order.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+
+[[case]]
 # Narrow values (i1/i8/i16) written through a dynamic field, all of which
 # reach hlp_dyn_seti's i32 parameter. Passing a Bool's i1 register straight
 # through built a call the LLVM verifier rejected, which drops the whole

@@ -7526,6 +7526,36 @@ impl HLInterpreter {
             }
             return result;
         }
+        // Ordering between strings. Without this the operands fall through to
+        // NanBoxedValue::compare, which has no ordering for pointers and
+        // answers None -> false, so every `<` and `>` between strings was
+        // false. That is not merely a wrong answer: haxe.ds.ArraySort — which
+        // is what Array<String>.sort delegates to, there being no native
+        // object sort — relies on a consistent comparator, and an always-false
+        // one walks its merge off the end of the array and segfaults.
+        if matches!(
+            op,
+            CmpOp::SLt | CmpOp::SGt | CmpOp::SLte | CmpOp::SGte
+        ) {
+            let sa = unsafe { self.string_operand_utf16(va, ak) };
+            let sb = unsafe { self.string_operand_utf16(vb, bk) };
+            if let (Some((ap, al)), Some((bp, bl))) = (sa, sb) {
+                let ord = unsafe { Self::utf16_cmp(ap, al, bp, bl) };
+                let result = match op {
+                    CmpOp::SLt => ord.is_lt(),
+                    CmpOp::SGt => ord.is_gt(),
+                    CmpOp::SLte => ord.is_le(),
+                    _ => ord.is_ge(),
+                };
+                if env_flag!("ASH_TRACE_EQ") {
+                    eprintln!(
+                        "[CMP] f{} op={:?} ak={} bk={} (string-order) -> {}",
+                        func_idx, op, ak, bk, result
+                    );
+                }
+                return result;
+            }
+        }
         if op == CmpOp::Eq || op == CmpOp::NotEq {
             if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
                 let pa = if va.is_null() || va.is_void() {
@@ -7861,6 +7891,57 @@ impl HLInterpreter {
             }
             i += 1;
         }
+    }
+
+    /// The UTF-16 buffer behind a comparison operand, for HBYTES (which is
+    /// NUL-terminated) and for a String object (which carries an explicit
+    /// length). Returns None for anything that is not a string.
+    unsafe fn string_operand_utf16(
+        &self,
+        v: NanBoxedValue,
+        kind: u32,
+    ) -> Option<(*const u16, i32)> {
+        if v.is_null() || v.is_void() {
+            return None;
+        }
+        if kind == hl::hl_type_kind_HBYTES {
+            let p = v.as_ptr() as *const u16;
+            if p.is_null() {
+                return None;
+            }
+            let mut n = 0i32;
+            while *p.add(n as usize) != 0 {
+                n += 1;
+            }
+            return Some((p, n));
+        }
+        if kind == hl::hl_type_kind_HOBJ {
+            let name = self.dynamic_type_name(v.as_ptr() as *mut hl::vdynamic);
+            if !matches!(name.as_deref(), Some("String") | Some("S")) {
+                return None;
+            }
+            return self.try_extract_string_object_raw(v.as_ptr() as *mut c_void);
+        }
+        None
+    }
+
+    /// Lexicographic order over UTF-16 code units, shorter-is-less on a
+    /// common prefix — the ordering `hl_dyn_compare` gives strings, and the
+    /// one Haxe's `<` on String is defined to produce.
+    unsafe fn utf16_cmp(
+        a: *const u16,
+        alen: i32,
+        b: *const u16,
+        blen: i32,
+    ) -> std::cmp::Ordering {
+        let n = alen.min(blen).max(0) as usize;
+        for i in 0..n {
+            let (x, y) = (*a.add(i), *b.add(i));
+            if x != y {
+                return x.cmp(&y);
+            }
+        }
+        alen.cmp(&blen)
     }
 
     unsafe fn utf16_len_eq(a: *const u16, b: *const u16, len: usize) -> bool {

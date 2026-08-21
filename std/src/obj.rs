@@ -2033,6 +2033,170 @@ pub unsafe extern "C" fn hlp_vresolve_method_hashed(
     }
 }
 
+/// A varray of HDYN elements, for callers (JIT-emitted code) that need to
+/// stage boxed arguments without holding a dyn type pointer of their own.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_alloc_dyn_array(n: i32) -> *mut varray {
+    crate::array::hlp_alloc_array(crate::types::hlt_dyn(), n)
+}
+
+/// Boxed virtual-method call: resolve by field hash, call the method through
+/// its OWN runtime type, return the result boxed.
+///
+/// This is the semantic HashLink's hl_dyn_call_obj implements, and the part
+/// that matters is whose signature the call uses. A virtual declares the
+/// field's type as the INTERFACE sees it — Iterator<Int>.next is () -> i32 —
+/// but the implementation behind it may be generic, compiled as () -> Dynamic.
+/// The JIT used to call the resolved pointer with the DECLARED signature,
+/// which read the low 32 bits of a returned vdynamic* as the Int: map
+/// iteration over Int values returned truncated box addresses. Here the
+/// method's own hl_type comes from the module context every hl_type_obj
+/// carries (tobj.m -> functions_types[findex]), and hlp_call_method's
+/// marshaller does the rest; the caller unboxes the result to the declared
+/// kind, which is a defined dyn cast rather than an ABI pun.
+///
+/// Returns null when the method cannot be resolved or typed; the caller
+/// stores the declared kind's zero, same as before.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_vcall_dyn(
+    target: *mut vdynamic,
+    hfield: i32,
+    args: *mut varray,
+) -> *mut vdynamic {
+    // Unwrap vvirtual wrappers to the concrete backing value.
+    let mut cur = target;
+    loop {
+        if cur.is_null() {
+            return ptr::null_mut();
+        }
+        let t = (*cur).t;
+        if t.is_null() {
+            return ptr::null_mut();
+        }
+        if (*t).kind == hl::hl_type_kind_HVIRTUAL {
+            cur = (*(cur as *mut vvirtual)).value;
+            continue;
+        }
+        break;
+    }
+    let t = (*cur).t;
+    let nargs = if args.is_null() { 0 } else { (*args).size };
+    match (*t).kind {
+        hl::hl_type_kind_HOBJ => {
+            let Some(tobj) = (*t).__bindgen_anon_1.obj.as_ref() else {
+                return ptr::null_mut();
+            };
+            let f = obj_resolve_field(tobj, hfield);
+            if f.is_null() || (*f).field_index >= 0 {
+                return ptr::null_mut();
+            }
+            let mut rt = tobj.rt;
+            if rt.is_null() || (*rt).methods.is_null() {
+                rt = hl_get_obj_proto(t);
+            }
+            if rt.is_null() || (*rt).methods.is_null() {
+                return ptr::null_mut();
+            }
+            let method_idx = (-(*f).field_index - 1) as usize;
+            if method_idx >= (*rt).nmethods as usize {
+                return ptr::null_mut();
+            }
+            let method_ptr: *mut c_void = *(*rt).methods.add(method_idx);
+            // The findex, for the method's own type: walk the declaring chain
+            // for the proto entry with this hash. obj_resolve_field already
+            // proved one exists somewhere on the chain.
+            let mut findex: Option<usize> = None;
+            let mut scan_t = t;
+            'chain: while !scan_t.is_null() {
+                let Some(so) = (*scan_t).__bindgen_anon_1.obj.as_ref() else {
+                    break;
+                };
+                for i in 0..so.nproto as usize {
+                    let pr = &*so.proto.add(i);
+                    if pr.hashed_name == hfield {
+                        findex = Some(pr.findex as usize);
+                        break 'chain;
+                    }
+                }
+                scan_t = so.super_;
+            }
+            let Some(findex) = findex else {
+                return ptr::null_mut();
+            };
+            let m = tobj.m;
+            if m.is_null() || (*m).functions_types.is_null() {
+                return ptr::null_mut();
+            }
+            let fun_type = *(*m).functions_types.add(findex);
+            if fun_type.is_null() || (*fun_type).kind != hl::hl_type_kind_HFUN {
+                return ptr::null_mut();
+            }
+            let addr = method_ptr as usize;
+            if addr == 0 {
+                return ptr::null_mut();
+            }
+            if addr < 0x100000 {
+                // Interpreter stub sentinel: the bridge decodes the findex and
+                // runs the interpreter with its own typing, boxed both ways.
+                if let Some(runner) = crate::fiber::closure_runner() {
+                    let mut cl = vclosure {
+                        t: fun_type,
+                        fun: method_ptr,
+                        hasValue: 1,
+                        stackCount: 0,
+                        value: cur as *mut c_void,
+                    };
+                    let aptr = if nargs == 0 {
+                        ptr::null_mut()
+                    } else {
+                        crate::types::hl_aptr::<*mut vdynamic>(args)
+                    };
+                    return runner(&mut cl, aptr, nargs);
+                }
+                return ptr::null_mut();
+            }
+            // hlp_call_method marshals per the closure's own type but
+            // rejects value-carrying closures, and functions_types[findex]
+            // includes `this` as arg0 anyway — so `this` rides in the args
+            // array itself (an HOBJ pointer is its own dynamic) and the
+            // closure carries no value.
+            let call_args = hlp_alloc_dyn_array(nargs + 1);
+            let dst = crate::types::hl_aptr::<*mut vdynamic>(call_args);
+            *dst = cur;
+            if nargs > 0 {
+                let src = crate::types::hl_aptr::<*mut vdynamic>(args);
+                for i in 0..nargs as usize {
+                    *dst.add(i + 1) = *src.add(i);
+                }
+            }
+            let mut cl = vclosure {
+                t: fun_type,
+                fun: method_ptr,
+                hasValue: 0,
+                stackCount: 0,
+                value: ptr::null_mut(),
+            };
+            crate::fun::hlp_call_method(&mut cl as *mut vclosure as *mut vdynamic, call_args)
+        }
+        hl::hl_type_kind_HDYNOBJ => {
+            // A closure-valued field carries its own type; hlp_dyn_call
+            // handles both plain and value-carrying closures, which is what
+            // HL's hl_dyn_call_obj does here.
+            let cl = hlp_dyn_getp(cur, hfield, crate::types::hlt_dyn());
+            if cl.is_null() {
+                return ptr::null_mut();
+            }
+            let aptr = if nargs == 0 {
+                ptr::null_mut()
+            } else {
+                crate::types::hl_aptr::<*mut vdynamic>(args)
+            };
+            crate::fun::hlp_dyn_call(cl as *mut vclosure, aptr, nargs)
+        }
+        _ => ptr::null_mut(),
+    }
+}
+
 /// Virtual method dispatch fallback used by JIT code, keyed by field hash.
 ///
 /// `target` is whatever the HVIRTUAL-typed register held at runtime. At the

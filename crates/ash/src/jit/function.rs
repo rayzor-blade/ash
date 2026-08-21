@@ -2708,88 +2708,150 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_unconditional_branch(merge_block)?;
 
                     // --- Fallback path: not a vvirtual, or vfield is null ---
-                    // Resolve the method pointer by field-name hash from the
-                    // value's RUNTIME kind (vvirtual chain/HOBJ/HDYNOBJ), then
-                    // call it with the full, correctly-typed argument list
-                    // through the stub-guarded indirect call — an interpreter
-                    // stub sentinel re-enters the interpreter via the bridge
-                    // with all arguments (the old hlp_vcall_virtual_0 helper
-                    // dropped every argument beyond `this`).
+                    // The vfield being null means the DECLARED signature is
+                    // not the implementation's: the interface says
+                    // Iterator<Int>.next is () -> i32 while the generic
+                    // implementation behind it was compiled () -> Dynamic.
+                    // Calling the resolved pointer through the declared ABI
+                    // reads the low 32 bits of a returned box pointer as the
+                    // value (map iteration over Ints yielded truncated
+                    // vdynamic addresses). So this path never guesses an ABI:
+                    // box every argument by its static register type, let
+                    // hlp_vcall_dyn call the method through its OWN runtime
+                    // type, and dyn-cast the boxed result to the declared
+                    // kind.
                     self.builder.position_at_end(fallback_block);
                     let i32_type = self.context.i32_type();
-                    let resolve = self.declare_native(
-                        "hlp_vresolve_method_hashed",
+                    let n_tail = args.len() - 1;
+                    let arr_val: BasicValueEnum = if n_tail == 0 {
+                        ptr_type.const_null().into()
+                    } else {
+                        let alloc_arr = self.declare_native(
+                            "hlp_alloc_dyn_array",
+                            &[i32_type.into()],
+                            Some(ptr_type.into()),
+                        );
+                        let arr = self
+                            .builder
+                            .build_call(
+                                alloc_arr,
+                                &[i32_type.const_int(n_tail as u64, false).into()],
+                                "vcall_args_arr",
+                            )?
+                            .try_as_basic_value()
+                            .basic()
+                            .unwrap()
+                            .into_pointer_value();
+                        let make_dyn = self.declare_native(
+                            "hlp_make_dyn",
+                            &[ptr_type.into(), ptr_type.into()],
+                            Some(ptr_type.into()),
+                        );
+                        for (i, arg) in args[1..].iter().enumerate() {
+                            let src_type_idx = f.regs[arg.0 as usize].0;
+                            let loaded = self.builder.build_load(
+                                reg_types[arg.0 as usize],
+                                registers[arg.0 as usize],
+                                "vcall_arg",
+                            )?;
+                            // Same boxing rule as ToDyn: pointers are already
+                            // dyn-compatible (except HABSTRACT), primitives go
+                            // through hlp_make_dyn with their static type.
+                            let src_is_abstract =
+                                self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
+                            let boxed: BasicValueEnum =
+                                if loaded.is_pointer_value() && !src_is_abstract {
+                                    loaded
+                                } else {
+                                    let temp = self
+                                        .builder
+                                        .build_alloca(loaded.get_type(), "vcall_box_slot")?;
+                                    self.builder.build_store(temp, loaded)?;
+                                    let type_ptr = self
+                                        .get_initialized_type(src_type_idx)?
+                                        .into_pointer_value();
+                                    self.builder
+                                        .build_call(
+                                            make_dyn,
+                                            &[temp.into(), type_ptr.into()],
+                                            "vcall_box",
+                                        )?
+                                        .try_as_basic_value()
+                                        .basic()
+                                        .unwrap()
+                                };
+                            // varray data starts at offset 24.
+                            let slot_gep = unsafe {
+                                self.builder.build_gep(
+                                    self.context.i8_type(),
+                                    arr,
+                                    &[self
+                                        .context
+                                        .i64_type()
+                                        .const_int(24 + i as u64 * 8, false)],
+                                    "vcall_arg_gep",
+                                )?
+                            };
+                            self.builder.build_store(slot_gep, boxed)?;
+                        }
+                        arr.into()
+                    };
+                    let vcall = self.declare_native(
+                        "hlp_vcall_dyn",
                         &[ptr_type.into(), i32_type.into(), ptr_type.into()],
                         Some(ptr_type.into()),
                     );
-                    // Entry-block slot for the resolved `this` out-param.
-                    let this_slot = {
-                        let saved = self.builder.get_insert_block();
-                        let entry = function.get_first_basic_block().unwrap();
-                        match entry.get_first_instruction() {
-                            Some(first) => self.builder.position_before(&first),
-                            None => self.builder.position_at_end(entry),
-                        }
-                        let slot = self.builder.build_alloca(ptr_type, "vcall_this_slot")?;
-                        if let Some(block) = saved {
-                            self.builder.position_at_end(block);
-                        }
-                        slot
-                    };
                     let hash_val = i32_type.const_int(field_hash as u32 as u64, false);
-                    let method_ptr = self
+                    let ret_dyn = self
                         .builder
                         .build_call(
-                            resolve,
-                            &[vvirt.into(), hash_val.into(), this_slot.into()],
-                            "vcall_resolve",
+                            vcall,
+                            &[vvirt.into(), hash_val.into(), arr_val.into()],
+                            "vcall_dyn",
                         )?
                         .try_as_basic_value()
                         .basic()
                         .unwrap()
                         .into_pointer_value();
-                    let resolve_failed = self
-                        .builder
-                        .build_is_null(method_ptr, "vcall_resolve_null")?;
-                    let vgo_block = self.context.append_basic_block(function, "vcall_resolved");
-                    let vfail_block = self
-                        .context
-                        .append_basic_block(function, "vcall_unresolved");
-                    self.builder.build_conditional_branch(
-                        resolve_failed,
-                        vfail_block,
-                        vgo_block,
-                    )?;
-
-                    // Resolved: call with this + args (sentinel-safe).
-                    self.builder.position_at_end(vgo_block);
-                    let this_val = self
-                        .builder
-                        .build_load(ptr_type, this_slot, "vcall_this")?
-                        .into_pointer_value();
-                    let mut fb_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len());
-                    fb_args.push(this_val.into());
-                    fb_args.extend(build_tail_args(self)?);
-                    if let Some(ret_val) = self.build_stub_guarded_indirect_call(
-                        fn_type, method_ptr, &fb_args, "vcall_fb",
-                    )? {
-                        let store_val = if ret_val.get_type() != reg_types[dst.0 as usize] {
-                            self.cast_for_call(ret_val, reg_types[dst.0 as usize])?
+                    if dst_kind != hl_type_kind_HVOID {
+                        let dst_ty = reg_types[dst.0 as usize];
+                        let store_val: BasicValueEnum = if dst_ty.is_pointer_type() {
+                            // Objects/strings/dynamics ARE their own box; an
+                            // unresolved call's null return is dst's null.
+                            ret_dyn.into()
                         } else {
-                            ret_val
+                            // Primitive dst: dyn-cast the box (null -> zero,
+                            // numeric coercion when the box holds a wider
+                            // kind), then narrow to the register width.
+                            let (helper, helper_ret): (&str, BasicTypeEnum) =
+                                if dst_kind == hl_type_kind_HF64 {
+                                    ("hlp_dyn_todouble", self.context.f64_type().into())
+                                } else if dst_kind == hl_type_kind_HF32 {
+                                    ("hlp_dyn_tofloat", self.context.f32_type().into())
+                                } else if dst_kind == hl_type_kind_HI64 {
+                                    ("hlp_dyn_toi64", self.context.i64_type().into())
+                                } else {
+                                    ("hlp_dyn_toint", i32_type.into())
+                                };
+                            let unbox = self.declare_native(
+                                helper,
+                                &[ptr_type.into()],
+                                Some(helper_ret),
+                            );
+                            let raw = self
+                                .builder
+                                .build_call(unbox, &[ret_dyn.into()], "vcall_unbox")?
+                                .try_as_basic_value()
+                                .basic()
+                                .unwrap();
+                            if raw.get_type() != dst_ty {
+                                self.cast_for_call(raw, dst_ty)?
+                            } else {
+                                raw
+                            }
                         };
                         self.builder
                             .build_store(registers[dst.0 as usize], store_val)?;
-                    }
-                    self.builder.build_unconditional_branch(merge_block)?;
-
-                    // Unresolved: keep dst defined with a zero/null default.
-                    self.builder.position_at_end(vfail_block);
-                    if dst_kind != hl_type_kind_HVOID {
-                        self.builder.build_store(
-                            registers[dst.0 as usize],
-                            reg_types[dst.0 as usize].const_zero(),
-                        )?;
                     }
                     self.builder.build_unconditional_branch(merge_block)?;
 
@@ -5836,6 +5898,18 @@ impl<'ctx> JITModule<'ctx> {
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             super::module::run_middle_end(&self.module)?;
+        }
+
+        // `ASH_DUMP_FN_IR` worked only on the promote path until the map-
+        // iterator investigation needed the whole-module IR to diff against
+        // it; same flag, same post-middle-end vantage, both pipelines.
+        for (findex, fun) in self.func_cache.iter() {
+            if Self::fn_ir_dump_wanted_impl(*findex) {
+                eprintln!(
+                    "=== LLVM IR (whole-module) findex={findex} ===\n{}",
+                    fun.print_to_string().to_string()
+                );
+            }
         }
 
         // Off unless asked for. This wrote the whole module to /tmp on every

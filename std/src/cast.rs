@@ -862,3 +862,37 @@ pub unsafe extern "C" fn hlp_dyn_op(
     )));
     ptr::null_mut()
 }
+
+// --- Boxed-return unboxers for JIT-emitted dynamic virtual calls ---
+// hlp_vcall_dyn hands emitted code a vdynamic*; these coerce it to the
+// declared primitive kind with the ordinary dyn-cast rules (null -> zero).
+// They exist so emitted code never has to materialize a dyn type pointer
+// of its own — the singletons live here.
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_toint(v: *mut vdynamic) -> i32 {
+    let mut slot = v;
+    hlp_dyn_casti(
+        &mut slot as *mut _ as *mut c_void,
+        crate::types::hlt_dyn(),
+        crate::types::hlt_i32(),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_tofloat(v: *mut vdynamic) -> f32 {
+    let mut slot = v;
+    hlp_dyn_castf(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_todouble(v: *mut vdynamic) -> f64 {
+    let mut slot = v;
+    hlp_dyn_castd(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
+    let mut slot = v;
+    hlp_dyn_casti64(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
+}

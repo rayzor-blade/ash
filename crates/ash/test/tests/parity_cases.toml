@@ -227,10 +227,12 @@ expectation = "exact"
 normalize = "default"
 
 [[case]]
-# Map families x iterator forms, order-independent sums. Gates interp and
-# hybrid (both correct, agreeing with stock HashLink); the whole-module
-# JIT's Int-values mis-unbox is a known open defect tracked in BACKLOG —
-# this case is its fixture and its regression net once fixed.
+# Map families x iterator forms, order-independent sums. Gates all three
+# modes. This was the fixture for the whole-module JIT's Int-values
+# mis-unbox (CallMethod's HVIRTUAL fallback called the implementation
+# through the interface's declared ABI, reading the low 32 bits of a
+# returned box pointer as the value); fixed by boxing through
+# hlp_vcall_dyn, and this case is the regression net.
 name = "TestMapIterAll"
 main = "TestMapIterAll"
 hl = "test_map_iter_all.hl"

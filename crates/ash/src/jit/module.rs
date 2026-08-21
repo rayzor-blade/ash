@@ -720,6 +720,9 @@ impl<'ctx> JITModule<'ctx> {
         for native_f in &natives {
             let fi = native_f.findex as usize;
             if !needed.contains(&fi) {
+                if std::env::var("ASH_JIT_NATIVE_LOG").is_ok() {
+                    eprintln!("[jit-native] SHAKEN findex={} {}@{}", fi, native_f.lib, native_f.name);
+                }
                 skipped += 1;
                 continue; // Tree-shaken: not referenced by any bytecode function
             }

@@ -96,24 +96,33 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/hl-hdll
-          key: hl-hdll-1.15-ubuntu-24.04-v2
+          key: hl-hdll-1.15-ubuntu-24.04-v3
 
       - name: Build HashLink HDLLs
         if: steps.hdll-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
           sudo apt-get install -y libpng-dev libturbojpeg0-dev libvorbis-dev \
-            libmbedtls-dev libuv1-dev zlib1g-dev || true
+            libmbedtls-dev libsqlite3-dev zlib1g-dev || true
           git clone --depth 1 --branch 1.15 \
             https://github.com/HaxeFoundation/hashlink.git /tmp/hlsrc
-          # Only the two the suites actually need to load. Asking for all of
-          # LIBS drags in SDL and OpenAL, whose headers are not here and whose
-          # failure would take the rest down with them.
-          make -C /tmp/hlsrc libhl fmt.hdll ssl.hdll -j"$(nproc)" || true
+          make -C /tmp/hlsrc libhl -j"$(nproc)"
+          # The targets are `fmt`/`ssl`/`sqlite` — the phony names — not
+          # `fmt.hdll`, which is only the file each one writes. Built one at a
+          # time and each allowed to fail: they are independent, and asking
+          # for all of LIBS at once would drag in SDL and OpenAL, whose
+          # headers are not here and whose failure would take the rest with
+          # them. These three are what `unit` and `sys` need in order to LOAD.
+          for lib in fmt ssl sqlite; do
+            make -C /tmp/hlsrc "$lib" -j"$(nproc)" \
+              || echo "::warning::hdll $lib did not build; suites needing it cannot load"
+          done
           mkdir -p ~/hl-hdll
           cp /tmp/hlsrc/*.hdll ~/hl-hdll/ 2>/dev/null || true
-          cp /tmp/hlsrc/libhl.so* ~/hl-hdll/ 2>/dev/null || true
           ls -la ~/hl-hdll/ || true
+          # An empty result must not be cached under this key, or every later
+          # run restores nothing and skips the build that would have fixed it.
+          if ! ls ~/hl-hdll/*.hdll >/dev/null 2>&1; then rm -rf ~/hl-hdll; fi
 
       - name: Run the suite
         run: |

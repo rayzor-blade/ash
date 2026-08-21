@@ -133,9 +133,14 @@ def ensure_checkout(root: pathlib.Path, tag: str) -> pathlib.Path:
 def ensure_libs(libs, haxelib: str) -> list[str]:
     missing = []
     for lib in libs:
-        if run([haxelib, "path", lib], timeout=120).returncode != 0:
-            if run([haxelib, "install", lib, "--always"], timeout=900).returncode != 0:
-                missing.append(lib)
+        try:
+            if run([haxelib, "path", lib], timeout=120).returncode != 0:
+                if run([haxelib, "install", lib, "--always"], timeout=900).returncode != 0:
+                    missing.append(lib)
+        except OSError:
+            # No haxelib on this machine at all. Only matters if we intend to
+            # compile; --skip-build never reaches here.
+            missing.append(lib)
     return missing
 
 
@@ -319,10 +324,16 @@ def main(argv=None) -> int:
 
     ver = haxe_version(args.haxe)
     if ver is None:
-        sys.exit(f"no working Haxe compiler at {args.haxe!r}")
+        if not args.skip_build:
+            sys.exit(f"no working Haxe compiler at {args.haxe!r}")
+        if not args.tag:
+            sys.exit("no Haxe compiler here, so the suite tag cannot be "
+                     "inferred — pass --tag to say which one the bytecode "
+                     "was built from")
+        print(f"no Haxe compiler; running pre-built bytecode for tag {args.tag}")
     tag = args.tag or ver
     print(f"ash:   {ash}  [{profile}]")
-    print(f"haxe:  {ver}  ->  suite tag {tag}")
+    print(f"haxe:  {ver or '(none, --skip-build)'}  ->  suite tag {tag}")
     if args.reference:
         print(f"ref:   {args.reference}")
 
@@ -356,7 +367,7 @@ def main(argv=None) -> int:
             continue
         print(f"\n== {name} — {spec['about']}")
 
-        gone = ensure_libs(spec.get("needs", []), args.haxelib)
+        gone = [] if args.skip_build else ensure_libs(spec.get("needs", []), args.haxelib)
         if gone:
             print(f"   SKIP: haxelib(s) unavailable: {', '.join(gone)}")
             report["results"].append({"suite": name, "mode": "-", "status": "SKIP",

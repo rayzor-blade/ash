@@ -129,7 +129,12 @@ def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
         capture_output=True, text=True, timeout=300,
     )
     if p.returncode != 0:
-        return None, f"haxe -hl main.c failed: {(p.stderr or p.stdout)[:300]}", 0.0
+        # Haxe splits the real diagnostic and the generic "Build failed"
+        # across the two streams; keep both, and put the whole thing in the
+        # job log where a truncated JSON detail can't hide it.
+        full = (p.stderr or "") + ("\n" + p.stdout if p.stdout else "")
+        print(f"[hl-bench] haxe -hl failed for {main}:\n{full}", flush=True)
+        return None, f"haxe -hl main.c failed: {full.strip()[:500]}", 0.0
     binary = workdir / "app"
     link = [
         cc, "-O3", "-o", str(binary), str(out_c),
@@ -140,7 +145,9 @@ def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
         link += ["-ldl", "-lpthread"]
     p = subprocess.run(link, capture_output=True, text=True, timeout=300)
     if p.returncode != 0:
-        return None, f"cc failed: {(p.stderr or p.stdout)[:300]}", 0.0
+        full = (p.stderr or "") + ("\n" + p.stdout if p.stdout else "")
+        print(f"[hl-bench] cc failed for {main}:\n{full}", flush=True)
+        return None, f"cc failed: {full.strip()[:500]}", 0.0
     build_ms = (time.perf_counter() - t0) * 1000.0
     return binary, "", build_ms
 

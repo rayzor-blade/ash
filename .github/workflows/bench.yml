@@ -253,13 +253,22 @@ jobs:
         run: |
           # An explicit `if`, not `test && assign`: under `bash -e` the
           # latter fails the whole step on the very case it is testing for.
+          HL=()
+          if [ -x "$HOME/hashlink/hl" ]; then
+            HL=(--hl "$HOME/hashlink/hl")
+          fi
           HL2=()
           if [ -x "$HOME/hashlink-hl2/hl" ]; then
             HL2=(--hl2 "$HOME/hashlink-hl2/hl")
           fi
+          # --hl is passed explicitly because hl_bench falls back to
+          # `shutil.which("hl")`, which finds whatever the Haxe toolchain put
+          # on PATH rather than the VM this run just built. --hashlink-dir
+          # only sets the library search path; it does not choose the binary.
           ./scripts/hl_bench.py \
             --benchmarks "${{ matrix.bench }}" \
             --hashlink-dir ~/hashlink \
+            "${HL[@]}" \
             "${HL2[@]}" \
             --iterations 7 \
             --warmups 1 \
@@ -302,15 +311,34 @@ jobs:
 
       - name: Report which comparison lanes this leg produced
         run: |
-          python3 - <<'PY'
-          import json, glob
+          # A lane whose VM is present but which still reports UNAVAILABLE is
+          # a bug in this workflow, not a legitimately absent comparison, and
+          # the difference is invisible on the published page — it just shows
+          # one fewer bar. Fail the leg so it cannot publish quietly again.
+          HAVE_HL=0
+          HAVE_HL2=0
+          if [ -x "$HOME/hashlink/hl" ]; then HAVE_HL=1; fi
+          if [ -x "$HOME/hashlink-hl2/hl" ]; then HAVE_HL2=1; fi
+          HAVE_HL=$HAVE_HL HAVE_HL2=$HAVE_HL2 python3 - <<'PY'
+          import json, glob, os, sys
+          present = {"hashlink-jit": os.environ["HAVE_HL"] == "1",
+                     "hashlink-hl2": os.environ["HAVE_HL2"] == "1"}
+          betrayed = []
           for f in sorted(glob.glob("parts/hl-*.json")):
               d = json.load(open(f))
               for r in d["results"]:
-                  status = r["status"]
+                  status, engine = r["status"], r["engine"]
                   mark = "ok " if status == "OK" else "MISSING"
-                  print(f"{mark} {r['engine']:<14} {r['benchmark']:<14} {status}"
+                  print(f"{mark} {engine:<14} {r['benchmark']:<14} {status}"
                         f"{'' if status == 'OK' else '  — ' + r.get('detail','')[:80]}")
+                  if status == "UNAVAILABLE" and present.get(engine):
+                      betrayed.append(f"{engine}/{r['benchmark']}: {r.get('detail','')}")
+          if betrayed:
+              print("\n::error title=Comparison lane lost::a VM is installed on this "
+                    "runner but its lane reported UNAVAILABLE:")
+              for b in betrayed:
+                  print(f"  {b}")
+              sys.exit(1)
           PY
 
       - name: Upload partial result

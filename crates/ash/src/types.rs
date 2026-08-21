@@ -2,7 +2,6 @@ use crate::bytecode::DecodedBytecode;
 use crate::hl;
 use crate::hl_bindings::{hl_field_lookup, hl_obj_field, hl_obj_proto, hl_type_fun__bindgen_ty_2};
 use crate::opcodes::Opcode;
-use hlbc::types::{Function, Native};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::ffi::c_void;
 use std::mem;
@@ -40,13 +39,6 @@ pub enum ValueTypeKind {
     HPACKED = 22,
     // ---------
     HLAST = 23,
-}
-
-/// Reference to a function or a native object
-#[derive(Debug, Clone)]
-pub enum FunPtr {
-    Fun(Function),
-    Native(Native),
 }
 
 // Array of argument counts for each opcode

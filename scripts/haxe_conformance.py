@@ -287,20 +287,41 @@ def main(argv=None) -> int:
     work = (args.work
             or pathlib.Path.home() / ".cache" / "ash-haxe-conformance").resolve()
 
-    ash = args.ash
+    # Release first, and never "whichever is newest".
+    #
+    # Picking by mtime meant an unrelated debug build could silently become
+    # the thing under test, and the two are not interchangeable: on the
+    # threads suite the release binary dies with SIGSEGV at 0x9 while the
+    # debug binary aborts on `misaligned pointer dereference ... is 0x9`
+    # first. Same defect, different report — so a baseline that does not
+    # record which one ran cannot be compared against anything.
+    ash, profile = args.ash, "explicit"
     if ash is None:
-        cands = [p for p in (root / "target").glob("*/ash") if p.is_file()]
-        cands += [p for p in (root / "target").glob("*/*/ash") if p.is_file()]
-        cands = [p for p in cands if os.access(p, os.X_OK)]
-        if not cands:
+        def find(kind):
+            c = [p for p in (root / "target").glob(f"{kind}/ash") if p.is_file()]
+            c += [p for p in (root / "target").glob(f"*/{kind}/ash") if p.is_file()]
+            c = [p for p in c if os.access(p, os.X_OK)]
+            return max(c, key=lambda p: p.stat().st_mtime) if c else None
+        rel, dbg = find("release"), find("debug")
+        if rel is not None:
+            ash, profile = str(rel), "release"
+        elif dbg is not None:
+            ash, profile = str(dbg), "debug"
+            print("NOTE: no release binary; measuring the debug build. Its "
+                  "assertions fire before the faults a release build shows, "
+                  "so results are not comparable to a release baseline.")
+        else:
             sys.exit("no ash binary under target/; build one or pass --ash")
-        ash = str(max(cands, key=lambda p: p.stat().st_mtime))
+    elif "/release/" in ash:
+        profile = "release"
+    elif "/debug/" in ash:
+        profile = "debug"
 
     ver = haxe_version(args.haxe)
     if ver is None:
         sys.exit(f"no working Haxe compiler at {args.haxe!r}")
     tag = args.tag or ver
-    print(f"ash:   {ash}")
+    print(f"ash:   {ash}  [{profile}]")
     print(f"haxe:  {ver}  ->  suite tag {tag}")
     if args.reference:
         print(f"ref:   {args.reference}")
@@ -323,6 +344,7 @@ def main(argv=None) -> int:
         "haxe_version": ver,
         "suite_tag": tag,
         "ash": ash,
+        "ash_profile": profile,
         "results": [],
     }
 
@@ -453,6 +475,11 @@ def main(argv=None) -> int:
 
     if args.baseline and args.baseline.is_file():
         base = json.loads(args.baseline.read_text())
+        if base.get("ash_profile") not in (None, profile):
+            print(f"\nrefusing to compare a {profile} run against a "
+                  f"{base['ash_profile']} baseline — the two report different "
+                  "failures for the same defect")
+            return 0
         was = {(r["suite"], r.get("program", ""), r["engine"]): r["status"]
                for r in base.get("results", [])}
         regressed = [

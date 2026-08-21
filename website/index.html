@@ -495,6 +495,14 @@ HashLink Bytecode Runtime
       ? 'every native these suites ask for resolves'
       : (data.missing_natives || []).join(', ');
 
+    // Stock HashLink's result for the same bytecode, when the run had a
+    // reference VM. A suite no VM passes is not an ash defect, and saying so
+    // is more useful than a red row with no attribution.
+    var refBy = {};
+    (data.results || []).forEach(function (r) {
+      if (r.engine === 'hashlink') refBy[r.suite] = r;
+    });
+
     var mount = document.getElementById('conf-rows');
     mount.textContent = '';
     rows.forEach(function (r, i) {
@@ -516,8 +524,20 @@ HashLink Bytecode Runtime
       badge.textContent = r.status;
       row.appendChild(badge);
 
+      var ref = refBy[r.suite];
+      if (ref) {
+        var refOk = ref.status === 'PASS';
+        var refEl = el('div', null,
+          "font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap");
+        refEl.textContent = refOk ? 'HashLink: passes' : 'HashLink: also fails';
+        refEl.title = refOk
+          ? 'stock HashLink runs this suite, so the difference is ash\u2019s'
+          : 'stock HashLink does not run this suite either';
+        row.appendChild(refEl);
+      }
+
       var detail = el('div', null,
-        "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;flex:1 1 220px;text-align:right");
+        "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;flex:1 1 200px;text-align:right");
       if (r.utest) {
         detail.textContent = r.utest.passed + ' / ' + r.utest.assertions + ' assertions';
       } else {

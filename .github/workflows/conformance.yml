@@ -106,7 +106,11 @@ jobs:
             libmbedtls-dev libsqlite3-dev zlib1g-dev || true
           git clone --depth 1 --branch 1.15 \
             https://github.com/HaxeFoundation/hashlink.git /tmp/hlsrc
-          make -C /tmp/hlsrc libhl -j"$(nproc)"
+          # `hl` as well as libhl: this runner can execute stock HashLink,
+          # which Apple Silicon cannot, so it is the one place a difference
+          # between ash and the reference VM can be attributed rather than
+          # guessed at.
+          make -C /tmp/hlsrc libhl hl -j"$(nproc)"
           # The targets are `fmt`/`ssl`/`sqlite` — the phony names — not
           # `fmt.hdll`, which is only the file each one writes. Built one at a
           # time and each allowed to fail: they are independent, and asking
@@ -119,6 +123,10 @@ jobs:
           done
           mkdir -p ~/hl-hdll
           cp /tmp/hlsrc/*.hdll ~/hl-hdll/ 2>/dev/null || true
+          # The VM and its library go beside the hdlls so one LD_LIBRARY_PATH
+          # serves both ash's hdll loading and the reference VM.
+          cp /tmp/hlsrc/hl ~/hl-hdll/ 2>/dev/null || true
+          cp /tmp/hlsrc/libhl.so* ~/hl-hdll/ 2>/dev/null || true
           ls -la ~/hl-hdll/ || true
           # An empty result must not be cached under this key, or every later
           # run restores nothing and skips the build that would have fixed it.
@@ -139,6 +147,15 @@ jobs:
           if [ -d "$HOME/hl-hdll" ] && ls "$HOME/hl-hdll"/*.hdll >/dev/null 2>&1; then
             HD=(--hdll-dir "$HOME/hl-hdll")
           fi
+          # Running the same bytecode under stock HashLink turns "ash fails
+          # this" into "ash fails this and HashLink does not", which is the
+          # difference between a defect and a suite that no VM passes.
+          REF=()
+          if [ -x "$HOME/hl-hdll/hl" ]; then
+            REF=(--reference "$HOME/hl-hdll/hl")
+          else
+            echo "::notice::no reference HashLink VM; failures cannot be attributed"
+          fi
           BASE=()
           if [ -f crates/ash/test/conformance_baseline_linux.json ]; then
             BASE=(--baseline crates/ash/test/conformance_baseline_linux.json)
@@ -149,7 +166,7 @@ jobs:
           LD_LIBRARY_PATH="$HOME/hl-hdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
           ./scripts/haxe_conformance.py \
             --modes interp \
-            "${HD[@]}" "${BASE[@]}" \
+            "${HD[@]}" "${REF[@]}" "${BASE[@]}" \
             --json conformance.json \
             | tee conformance.log
 

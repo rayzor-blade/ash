@@ -284,15 +284,25 @@ pub unsafe extern "C" fn hlp_call_stack_raw(_arr: *mut varray) -> i32 {
     0
 }
 
+/// `ASH_TRACE_THROW=1`: log every hlp_throw. Read once, gc.rs-style.
+fn throw_trace_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_TRACE_THROW").is_ok())
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
-    // Log the exception for debugging
-    if !v.is_null() {
-        let t = (*v).t;
-        let kind = if !t.is_null() { (*t).kind } else { 999 };
-        eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
-    } else {
-        eprintln!("[ash] hlp_throw: null");
+    // Trace throws only on request: an unconditional line here differs
+    // between engines (the interpreter throws through its own machinery)
+    // and broke every jit-vs-interp output diff that exercised exceptions.
+    if throw_trace_enabled() {
+        if !v.is_null() {
+            let t = (*v).t;
+            let kind = if !t.is_null() { (*t).kind } else { 999 };
+            eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
+        } else {
+            eprintln!("[ash] hlp_throw: null");
+        }
     }
     let mut buf_copy: hl::jmp_buf = mem::zeroed();
     // Read and pop the trap chain without the GC lock: it is this thread's

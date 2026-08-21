@@ -3606,25 +3606,39 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder
                         .build_conditional_branch(is_null, null_bb, unbox_bb)?;
 
-                    // Unbox path: load value at offset 8 (the v union in vdynamic)
+                    // Unbox path. A raw load of vdynamic.v at offset 8 is only
+                    // right when the box's runtime kind IS the destination kind
+                    // — an HDYN register can hold any numeric box, and reading
+                    // an Int box as f64 yields its bits as a denormal (Dynamic
+                    // subtraction of 7 and 2 printed 2.47e-323, div was exact
+                    // because the 2^-1074 scales cancelled). Coerce through the
+                    // dyn-cast helpers instead; they switch on the box's own
+                    // runtime type and match the interpreter and upstream.
                     self.builder.position_at_end(unbox_bb);
                     let dst_llvm_type = reg_types[dst.0 as usize];
-                    let vdyn_struct = self.context.struct_type(
-                        &[
-                            ptr_type.into(),                // t: *mut hl_type (offset 0)
-                            self.context.i64_type().into(), // v: union (offset 8)
-                        ],
-                        false,
-                    );
-                    let val_ptr = self.builder.build_struct_gep(
-                        vdyn_struct,
-                        src_ptr,
-                        1,
-                        "safecast_val_ptr",
-                    )?;
-                    let unboxed =
-                        self.builder
-                            .build_load(dst_llvm_type, val_ptr, "safecast_unboxed")?;
+                    let (helper, helper_ret): (&str, BasicTypeEnum) =
+                        if dst_kind == hl_type_kind_HF64 {
+                            ("hlp_dyn_todouble", self.context.f64_type().into())
+                        } else if dst_kind == hl_type_kind_HF32 {
+                            ("hlp_dyn_tofloat", self.context.f32_type().into())
+                        } else if dst_kind == hl_type_kind_HI64 {
+                            ("hlp_dyn_toi64", self.context.i64_type().into())
+                        } else {
+                            ("hlp_dyn_toint", self.context.i32_type().into())
+                        };
+                    let unbox_fn =
+                        self.declare_native(helper, &[ptr_type.into()], Some(helper_ret));
+                    let raw = self
+                        .builder
+                        .build_call(unbox_fn, &[src_ptr.into()], "safecast_unbox_call")?
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap();
+                    let unboxed = if raw.get_type() != dst_llvm_type {
+                        self.cast_for_call(raw, dst_llvm_type)?
+                    } else {
+                        raw
+                    };
                     self.builder
                         .build_store(registers[dst.0 as usize], unboxed)?;
                     self.builder.build_unconditional_branch(done_bb)?;

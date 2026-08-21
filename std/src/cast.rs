@@ -174,7 +174,7 @@ pub unsafe extern "C" fn hlp_dyn_castf(data: *mut c_void, t: *mut hl_type) -> f3
     match (*t).kind {
         hl::hl_type_kind_HUI8 => *(data as *mut u8) as f32,
         hl::hl_type_kind_HUI16 => *(data as *mut u16) as f32,
-        hl::hl_type_kind_HI32 => *(data as *mut f32),
+        hl::hl_type_kind_HI32 => *(data as *mut i32) as f32,
         hl::hl_type_kind_HI64 => *(data as *mut i64) as f32,
         hl::hl_type_kind_HF32 => *(data as *mut f32),
         hl::hl_type_kind_HF64 => *(data as *mut f64) as f32,
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn hlp_dyn_castd(data: *mut c_void, t: *mut hl_type) -> f6
     match (*t).kind {
         hl::hl_type_kind_HUI8 => *(data as *mut u8) as f64,
         hl::hl_type_kind_HUI16 => *(data as *mut u16) as f64,
-        hl::hl_type_kind_HI32 => *(data as *mut f64),
+        hl::hl_type_kind_HI32 => *(data as *mut i32) as f64,
         hl::hl_type_kind_HI64 => *(data as *mut i64) as f64,
         hl::hl_type_kind_HF32 => *(data as *mut f32) as f64,
         hl::hl_type_kind_HF64 => *(data as *mut f64),

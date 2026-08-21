@@ -322,6 +322,7 @@ HashLink Bytecode Runtime
       if (hl) anyBaseline = true;
 
       var baseline = hl ? hl.median_ms : null;
+      var fastest = Math.min.apply(null, rows.map(function (r) { return r.median_ms; }));
       var maxVal = Math.max.apply(null, rows.map(function (r) { return r.median_ms; }));
       // The longest bar fills 90% of the track, like the mock's 1.00 row.
       var unit = 90 / maxVal;
@@ -364,6 +365,7 @@ HashLink Bytecode Runtime
         num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : '#8a807a';
         var ms = el('span', 'ms');
         ms.textContent = fmtMs(r.median_ms);
+        if (r.median_ms === fastest) ms.style.fontWeight = '700';
         num.appendChild(ms);
         if (baseline) {
           var ratio = el('span', 'ratio');

@@ -110,6 +110,11 @@ checksums = [
 [[bench]]
 name = "mandelbrot"
 parity_case = "Mandelbrot"
+# The HashLink/C lane FAILs here by design: Haxe's HL/C generator emits
+# invalid C for a class named `Complex` (a C99 keyword) — it renames the
+# type to $Complex but keeps the bare name in function bodies. Upstream
+# Haxe bug; every mandelbrot benchmark with a Complex class hits it, which
+# is also why rayzor's published table has no HL/C mandelbrot row.
 group = "fp"
 description = "Mandelbrot 875x500, 1000 iterations. Minutes in interp mode."
 checksums = [

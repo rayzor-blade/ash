@@ -60,7 +60,9 @@ code{font-family:'IBM Plex Mono',monospace}
 .bench-line{display:flex;align-items:center;gap:10px}
 .bench-label{width:clamp(72px,18vw,104px);flex:none;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#8a807a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bench-track{flex:1;min-width:0;height:15px;background:rgba(34,29,26,0.05);border-radius:3px;overflow:hidden;display:flex}
-.bench-num{font-family:'IBM Plex Mono',monospace;font-size:12px;width:58px;flex:none;text-align:right;white-space:nowrap}
+.bench-num{font-family:'IBM Plex Mono',monospace;font-size:12px;width:76px;flex:none;text-align:right;white-space:nowrap;line-height:1.35}
+.bench-num .ms{display:block}
+.bench-num .ratio{display:block;font-size:10.5px;opacity:0.75}
 .seg-hl{height:100%;background:#c7bdb2}
 .seg-compile{height:100%;background:#dcbf9d}
 .seg-exec{height:100%;background:#a8703c}
@@ -230,7 +232,7 @@ HashLink Bytecode Runtime
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>execute</span>
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C</span>
 </div>
-<div id="bench-scale-note" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is better · 1.00× = HashLink JIT total</div>
+<div id="bench-scale-note" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is better · median ms · 1.00× = HashLink JIT total</div>
 </div>
 <div id="bench-rows">
 <div class="bench-row" id="bench-loading" style="border-bottom:none">
@@ -349,7 +351,7 @@ HashLink Bytecode Runtime
             compile = 0;
           }
           var segE = el('div', 'seg-exec');
-          segE.style.width = Math.max(total - compile, 0.6) + '%';
+          segE.style.width = Math.max(total - compile, 1.2) + '%';
           track.appendChild(segE);
         } else {
           var seg = el('div', r.engine === 'hashlink-c' ? 'seg-hlc' : 'seg-hl');
@@ -360,7 +362,14 @@ HashLink Bytecode Runtime
 
         var num = el('div', 'bench-num');
         num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : '#8a807a';
-        num.textContent = baseline ? fmtRatio(r.median_ms / baseline) : fmtMs(r.median_ms);
+        var ms = el('span', 'ms');
+        ms.textContent = fmtMs(r.median_ms);
+        num.appendChild(ms);
+        if (baseline) {
+          var ratio = el('span', 'ratio');
+          ratio.textContent = fmtRatio(r.median_ms / baseline);
+          num.appendChild(ratio);
+        }
         num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
         (r.engine === 'ash' && r.compile_ms ? ' · ' + fmtMs(r.compile_ms) + ' tier compile (background)' : '') +
         (r.aot_build_ms ? ' · AOT build excluded' : '');
@@ -383,7 +392,7 @@ HashLink Bytecode Runtime
     }
 
     document.getElementById('bench-scale-note').textContent = anyBaseline
-      ? 'lower is better · 1.00\u00d7 = HashLink JIT total'
+      ? 'lower is better · median ms · 1.00\u00d7 = HashLink JIT total'
       : 'lower is better · median wall time';
 
     var prov = document.getElementById('bench-provenance');

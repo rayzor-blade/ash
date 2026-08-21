@@ -1,0 +1,125 @@
+name: release
+
+# Prebuilt binaries for the install.sh path. A pushed v* tag publishes a
+# versioned release; a manual dispatch rebuilds the rolling `nightly` release
+# (kept marked latest so `releases/latest/download/...` always resolves).
+# One self-contained tarball per platform: the binary embeds ash_std and
+# links LLVM statically; on macOS the few remaining Homebrew dylibs are
+# bundled beside it (see scripts/package_release.sh).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux-x86_64
+          - os: macos-14
+            target: macos-aarch64
+          - os: macos-13
+            target: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # bindgen pretty-prints through it
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Install LLVM 21 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-21/lib" >> "$GITHUB_ENV"
+
+      - name: Install LLVM 21 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm zstd
+          PREFIX="$(brew --prefix llvm)"
+          "$PREFIX/bin/llvm-config" --version | grep -q '^21\.' \
+            || { echo "::error::brew llvm is not 21.x"; exit 1; }
+          echo "LLVM_SYS_211_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=$PREFIX/lib" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
+
+      # Two invocations, not one: ash_std is a cdylib the runtime crates
+      # embed via include_bytes! at build time, and cargo has no ordering
+      # edge between the packages.
+      - name: Build ash (release)
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash_cli
+
+      - name: Smoke test
+        run: |
+          ./target/release/ash --mode interp crates/ash/test/tests/test_basic.hl
+          ./target/release/ash --mode hybrid crates/ash/test/tests/test_basic.hl
+
+      - name: Package
+        run: ./scripts/package_release.sh "${{ matrix.target }}"
+
+      - name: Smoke test the packaged binary
+        run: |
+          tar xzf "dist/ash-${{ matrix.target }}.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/ash" --mode interp crates/ash/test/tests/test_basic.hl
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ash-${{ matrix.target }}
+          path: dist/ash-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ash-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          make_latest: true
+
+      - name: Publish rolling nightly
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: nightly
+          body: >
+            Rolling build of main. Prebuilt `ash` binaries for the
+            install.sh path; superseded by the next versioned release.
+          files: dist/*.tar.gz
+          prerelease: false
+          make_latest: true

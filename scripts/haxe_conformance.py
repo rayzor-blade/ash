@@ -169,6 +169,40 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
     return "PASS", ""
 
 
+# utest's PlainTextReport ends every run with this block. "assertations" is
+# its own long-standing spelling, not a typo here.
+RE_UTEST = re.compile(
+    r"^\s*(assertations|successes|errors|failures|warnings)\s*:\s*(\d+)\s*$",
+    re.I | re.M,
+)
+
+
+def parse_utest(out: str) -> dict | None:
+    """utest's tally, when the suite got far enough to print one.
+
+    This is what makes a conformance *percentage* meaningful rather than a
+    suite-level pass/fail: a run that crashes two thirds of the way through
+    still tells you how many assertions it got right first, and "3400 of 5000"
+    is a number that moves as things get fixed, where "0 of 3 suites" is not.
+    """
+    found = {m.group(1).lower(): int(m.group(2)) for m in RE_UTEST.finditer(out)}
+    if "assertations" not in found:
+        return None
+    bad = found.get("errors", 0) + found.get("failures", 0)
+    total = found.get("assertations", 0)
+    return {
+        "assertions": total,
+        "successes": found.get("successes", 0),
+        "errors": found.get("errors", 0),
+        "failures": found.get("failures", 0),
+        "warnings": found.get("warnings", 0),
+        # Assertions that did not go wrong. A crashed run reports what it
+        # reached, which is the point.
+        "passed": max(0, total - bad),
+        "all_ok": "ALL TESTS OK" in out,
+    }
+
+
 def missing_natives(out: str) -> list[str]:
     """ash narrates unresolved natives at startup; that line is a finding."""
     for line in out.splitlines():
@@ -302,6 +336,9 @@ def main(argv=None) -> int:
                 natives = missing_natives((res.stdout or "") + (res.stderr or ""))
                 rec = {"suite": name, "program": prog, "engine": label,
                        "status": status, "detail": detail, "ms": round(ms, 1)}
+                tally = parse_utest((res.stdout or "") + (res.stderr or ""))
+                if tally:
+                    rec["utest"] = tally
                 if natives:
                     rec["missing_natives"] = natives
                 report["results"].append(rec)
@@ -311,9 +348,30 @@ def main(argv=None) -> int:
                     print(f"        unresolved natives ({len(natives)}): {', '.join(natives[:6])}"
                           + (" ..." if len(natives) > 6 else ""))
 
-    passes = sum(1 for r in report["results"] if r["status"] == "PASS")
-    total = sum(1 for r in report["results"] if r["status"] != "SKIP")
-    print(f"\n{passes}/{total} passed")
+    ash_rows = [r for r in report["results"]
+                if r["engine"].startswith("ash:") and r["status"] != "SKIP"]
+    passes = sum(1 for r in ash_rows if r["status"] == "PASS")
+    total = len(ash_rows)
+    a_pass = sum(r["utest"]["passed"] for r in ash_rows if r.get("utest"))
+    a_total = sum(r["utest"]["assertions"] for r in ash_rows if r.get("utest"))
+    report["summary"] = {
+        "suites_total": total,
+        "suites_passed": passes,
+        "assertions_total": a_total,
+        "assertions_passed": a_pass,
+        # None rather than 0 when nothing reported a tally: "we do not know
+        # yet" and "we got everything wrong" are different claims, and a site
+        # that renders the second when it means the first is lying.
+        "assertion_pct": round(100.0 * a_pass / a_total, 1) if a_total else None,
+        "suite_pct": round(100.0 * passes / total, 1) if total else None,
+    }
+    print(f"\n{passes}/{total} suites passed")
+    if a_total:
+        print(f"{a_pass}/{a_total} assertions passed "
+              f"({report['summary']['assertion_pct']}%)")
+    else:
+        print("no suite reached utest's tally, so there is no assertion "
+              "percentage to report")
 
     # Every distinct unresolved native across the whole run, which is the most
     # directly actionable output this harness produces.

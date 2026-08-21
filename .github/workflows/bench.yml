@@ -33,6 +33,9 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  # deploy-site pulls the newest conformance results across from the
+  # haxe-conformance workflow; reading another workflow's artifacts needs this.
+  actions: read
 
 concurrency:
   group: pages
@@ -404,12 +407,39 @@ jobs:
           name: benchmark-results
           path: site-data
 
+      # Conformance is produced by a separate workflow on its own cadence, so
+      # it is fetched rather than rebuilt here — one Pages deployment, two
+      # sources. Best-effort: a missing artifact leaves the section saying so
+      # rather than failing a deploy whose benchmark numbers are fine.
+      - name: Fetch the latest conformance results
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RID=$(gh run list --workflow=haxe-conformance --status=success \
+                  --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          if [ -n "$RID" ]; then
+            mkdir -p conf-data
+            gh run download "$RID" -n conformance-results -D conf-data \
+              && echo "conformance from run $RID" \
+              || echo "::warning::conformance artifact could not be downloaded"
+          else
+            echo "::warning::no successful haxe-conformance run to publish yet"
+          fi
+
       # The committed website/bench/results.json is a local-run fallback for
       # previews; the deploy always ships the fresh CI numbers over it.
       - name: Assemble site
         run: |
           mkdir -p website/bench
           cp site-data/results.json website/bench/results.json
+          if [ -f conf-data/conformance.json ]; then
+            cp conf-data/conformance.json website/bench/conformance.json
+            python3 -m json.tool website/bench/conformance.json > /dev/null
+            echo "published conformance results"
+          else
+            echo "no conformance results to publish this run"
+          fi
 
       - uses: actions/configure-pages@v5
 

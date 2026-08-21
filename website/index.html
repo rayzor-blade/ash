@@ -87,6 +87,7 @@ code{font-family:'IBM Plex Mono',monospace}
 <a href="#tiers" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Tiers</a>
 <a href="#setup" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
 <a href="#benchmarks" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Benchmarks</a>
+<a href="#conformance" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
 <a href="#platforms" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Platforms</a>
 <a href="https://github.com/rayzor-blade/ash" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A7.995 7.995 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>GitHub</a>
 </nav>
@@ -245,6 +246,38 @@ HashLink Bytecode Runtime
 </div>
 
 <p id="bench-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
+
+</section>
+
+<section id="conformance" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
+<div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Conformance</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Measured against Haxe's own test suite</h2>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Being fast is worth nothing if the answers are wrong. Ash is run against the official Haxe test suite at the tag matching the compiler — the same suites the Haxe project uses to qualify a target — compiled to HashLink bytecode and executed unmodified. This is what currently passes, published from CI with every push to <code>main</code>.</p>
+
+<div style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px">
+<div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
+<div id="conf-assert-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
+<div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">assertions passed</div>
+</div>
+<div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
+<div id="conf-suite-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
+<div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">suites fully passing</div>
+</div>
+<div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
+<div id="conf-natives-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
+<div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">stdlib natives unresolved</div>
+</div>
+</div>
+
+<div style="margin-top:16px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
+<div id="conf-rows">
+<div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">Loading conformance results…</div>
+<noscript><div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">The conformance table needs JavaScript; the raw results live in <a href="bench/conformance.json">bench/conformance.json</a>.</div></noscript>
+</div>
+<div id="conf-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.1)">A suite counts as passing only when it runs to completion and utest reports no failures. Suites that stop early still contribute the assertions they reached, so the number moves as defects are fixed rather than jumping from zero.</div>
+</div>
+
+<p id="conf-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
 
 </section>
 
@@ -420,6 +453,107 @@ HashLink Bytecode Runtime
       msg.textContent = 'No published benchmark run is available yet — numbers land with the first CI publish. (' + err.message + ')';
       row.appendChild(msg);
       mount.appendChild(row);
+    });
+
+  // ---- conformance ----------------------------------------------------
+  // Renders bench/conformance.json, published by the haxe-conformance
+  // workflow. Everything here states what the run measured and nothing more:
+  // a suite that never reached utest's tally reports "not reported yet"
+  // rather than 0%, because "we do not know" and "we got it all wrong" are
+  // different claims and only one of them is true.
+  var CONF_LABEL = {
+    unit: 'unit — language core',
+    sys: 'sys — files, processes, environment',
+    threads: 'threads — threads, locks, deques'
+  };
+
+  function renderConformance(data) {
+    var sum = data.summary || {};
+    var rows = (data.results || []).filter(function (r) {
+      return (r.engine || '').indexOf('ash:') === 0 && r.status !== 'SKIP';
+    });
+
+    var assertEl = document.getElementById('conf-assert-value');
+    if (typeof sum.assertion_pct === 'number') {
+      assertEl.textContent = sum.assertion_pct + '%';
+      assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total;
+    } else {
+      assertEl.textContent = 'n/a';
+      assertEl.title = 'no suite ran far enough to report a tally';
+      assertEl.style.color = '#8a807a';
+    }
+
+    var suiteEl = document.getElementById('conf-suite-value');
+    suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
+    if (!sum.suites_passed) suiteEl.style.color = '#8a807a';
+
+    var natEl = document.getElementById('conf-natives-value');
+    var nat = (data.missing_natives || []).length;
+    natEl.textContent = String(nat);
+    natEl.style.color = nat === 0 ? '#a8703c' : '#221d1a';
+    natEl.title = nat === 0
+      ? 'every native these suites ask for resolves'
+      : (data.missing_natives || []).join(', ');
+
+    var mount = document.getElementById('conf-rows');
+    mount.textContent = '';
+    rows.forEach(function (r, i) {
+      var row = el('div', null,
+        'display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;padding:14px 24px' +
+        (i ? ';border-top:1px solid rgba(34,29,26,0.08)' : ''));
+
+      var name = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:13px;color:#221d1a;flex:1 1 260px");
+      name.textContent = CONF_LABEL[r.suite] || r.suite;
+      row.appendChild(name);
+
+      var ok = r.status === 'PASS';
+      var badge = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.08em;" +
+        'text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap;' +
+        (ok ? 'background:rgba(168,112,60,0.12);color:#a8703c'
+            : 'background:rgba(34,29,26,0.07);color:#5c5450'));
+      badge.textContent = r.status;
+      row.appendChild(badge);
+
+      var detail = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;flex:1 1 220px;text-align:right");
+      if (r.utest) {
+        detail.textContent = r.utest.passed + ' / ' + r.utest.assertions + ' assertions';
+      } else {
+        detail.textContent = 'no tally reported';
+      }
+      row.appendChild(detail);
+      mount.appendChild(row);
+    });
+
+    if (!mount.children.length) {
+      var note = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px");
+      note.textContent = 'The latest run produced no suite results.';
+      mount.appendChild(note);
+    }
+
+    var prov = document.getElementById('conf-provenance');
+    var bits = [];
+    if (data.suite_tag) bits.push('Haxe ' + data.suite_tag + ' test suite');
+    if (data.generated_iso) bits.push(data.generated_iso.slice(0, 10));
+    prov.textContent = bits.join(' \u00b7 ');
+  }
+
+  fetch('bench/conformance.json', { cache: 'no-cache' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(renderConformance)
+    .catch(function (err) {
+      var mount = document.getElementById('conf-rows');
+      mount.textContent = '';
+      var msg = el('div', null,
+        "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px");
+      msg.textContent = 'No published conformance run is available yet. (' + err.message + ')';
+      mount.appendChild(msg);
     });
 })();
 </script>

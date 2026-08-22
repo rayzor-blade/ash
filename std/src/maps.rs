@@ -292,7 +292,7 @@ pub unsafe extern "C" fn hlp_hbset(
     value: *mut hl::vdynamic,
 ) {
     use hl_hb::HbMap;
-    if std::env::var("ASH_MAP_TRACE").is_ok() {
+    if env_flag!("ASH_MAP_TRACE") {
         let k = if key.is_null() { String::new() } else {
             let mut out = String::new(); let mut p = key;
             while *p != 0 { out.push(char::from_u32(*p as u32).unwrap_or('?')); p = p.add(1); }
@@ -354,7 +354,7 @@ pub static H_PRIMES: [u32; 28] = [
 unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     // save
     let mut old = ptr::read(m);
-    let resize_trace = std::env::var("ASH_MAP_RESIZE_TRACE").is_ok();
+    let resize_trace = env_flag!("ASH_MAP_RESIZE_TRACE");
 
     if (*m).nentries != (*m).maxentries {
         panic!("assert");

@@ -5321,7 +5321,7 @@ impl HLInterpreter {
                 if val.is_null() {
                     // Throw as an HL exception (like HashLink does) so it can
                     // be caught by a Trap in the call stack.
-                    if std::env::var("ASH_TRACE_NULLACC").is_ok() {
+                    if env_flag!("ASH_TRACE_NULLACC") {
                         eprintln!(
                             "[nullacc] {} pc={} r{}",
                             func.name(),
@@ -7349,7 +7349,7 @@ impl HLInterpreter {
             }
             I::NullCheck { value } => {
                 if get!(value).is_null() {
-                    if std::env::var("ASH_TRACE_NULLACC").is_ok() {
+                    if env_flag!("ASH_TRACE_NULLACC") {
                         eprintln!("[nullacc/ssa] {} v{}", func.name(), value.0);
                     }
                     return Err(anyhow::Error::new(HLExceptionPropagation {

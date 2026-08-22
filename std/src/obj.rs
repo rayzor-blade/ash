@@ -2086,7 +2086,7 @@ pub(crate) unsafe fn cast_via_stub_castfun(
     }
     let f = obj_resolve_field(o, hlp_hash_gen(USTR_CAST.as_ptr(), false));
     if f.is_null() || (*f).field_index >= 0 {
-        if std::env::var("ASH_DBG_SC").is_ok() {
+        if env_flag!("ASH_DBG_SC") {
             eprintln!("[stub-cast] no __cast on type {:p}", t);
         }
         return ptr::null_mut();
@@ -2101,12 +2101,12 @@ pub(crate) unsafe fn cast_via_stub_castfun(
         return ptr::null_mut(); // real code: the castFun path owns it
     }
     let Some(runner) = crate::fiber::closure_runner() else {
-        if std::env::var("ASH_DBG_SC").is_ok() {
+        if env_flag!("ASH_DBG_SC") {
             eprintln!("[stub-cast] no closure runner registered");
         }
         return ptr::null_mut();
     };
-    if std::env::var("ASH_DBG_SC").is_ok() {
+    if env_flag!("ASH_DBG_SC") {
         eprintln!("[stub-cast] invoking __cast stub {:#x} to={:p}", addr, to);
     }
     // __cast(this, toType) -> Dynamic. `this` rides in the closure, the
@@ -2541,7 +2541,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let addr = hlp_obj_lookup_set(d, hfield, t, &mut ft);
-    if std::env::var("ASH_DYN_TRACE").is_ok() {
+    if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[dyn-seti] d={:#x} dkind={} hfield={hfield} value={value} addr={:#x} ftkind={}",
             d as usize,
@@ -2643,7 +2643,7 @@ pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_
     let mut ft: *mut hl_type = std::ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
     let addr = hlp_obj_lookup(d, hfield, &mut ft);
-    if std::env::var("ASH_DYN_TRACE").is_ok() {
+    if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[dyn-geti] d={:#x} dkind={} hfield={hfield} addr={:#x} ftkind={}",
             d as usize,
@@ -2741,7 +2741,7 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
     if obj.is_null() {
         return ptr::null_mut();
     }
-    if std::env::var("ASH_DYN_TRACE").is_ok() {
+    if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[obj-get] obj={:#x} kind={} hfield={hfield}",
             obj as usize, (*(*obj).t).kind
@@ -2773,7 +2773,7 @@ pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *
         hlp_error(str_to_uchar_ptr("Null access"));
         return;
     }
-    if std::env::var("ASH_DYN_TRACE").is_ok() {
+    if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[obj-set] obj={:#x} kind={} hfield={hfield} v={:#x}",
             obj as usize, (*(*obj).t).kind, v as usize

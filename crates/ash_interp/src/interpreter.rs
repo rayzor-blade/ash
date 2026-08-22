@@ -10108,6 +10108,31 @@ pub(crate) fn retier_abandoned() -> bool {
 
 /// Wait for every outstanding re-tier chase. Called once the program's
 /// entrypoint has returned, before anything the chase can touch is dropped.
+/// Stop waiting for speculative re-tier work, WITHOUT freeing anything it
+/// might still be reading.
+///
+/// An LLVM compile already in flight cannot be interrupted — deltablue's
+/// single chased compile of findex 74 takes 276ms, and the program it was
+/// speculating for finished at 65ms. Joining means the process sits there
+/// for the remaining ~210ms with nothing to do. But detaching and then
+/// dropping the interpreter is the use-after-free the join exists to
+/// prevent.
+///
+/// So: abandon, drop the handles without joining, and let the caller LEAK
+/// the interpreter. Nothing the chase reads is freed, the thread is killed
+/// by process exit, and no one waits. Only sound at the very end of the
+/// process — `retier_chase_join` remains for every other caller.
+pub fn retier_chase_abandon() {
+    RETIER_ABANDON.store(true, std::sync::atomic::Ordering::Relaxed);
+    let handles: Vec<_> = {
+        let mut g = RETIER_CHASE.lock().expect("retier chase mutex poisoned");
+        std::mem::take(&mut *g)
+    };
+    for h in handles {
+        std::mem::forget(h);
+    }
+}
+
 pub fn retier_chase_join() {
     // Abandon first, THEN join. Every chase that has not yet entered its
     // compile now returns immediately, so the join waits only on work

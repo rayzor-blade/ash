@@ -874,7 +874,13 @@ fn run() -> Result<()> {
             };
             // Any tier-chase thread still compiling touches the shared JIT
             // module; letting one outlive this scope is a use-after-free.
-            ash_interp::interpreter::retier_chase_join();
+            // Do not wait for speculative compiles the program will never
+            // call. An in-flight LLVM compile cannot be interrupted, so the
+            // only way not to wait is to not free what it is reading: the
+            // interpreter is leaked below, deliberately, and the thread dies
+            // with the process. deltablue answered at 65ms and exited at
+            // ~290ms purely because of this wait.
+            ash_interp::interpreter::retier_chase_abandon();
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(
@@ -892,6 +898,11 @@ fn run() -> Result<()> {
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
+            // A chase thread may still be inside LLVM, reading bytecode and
+            // type tables this owns. Freeing them now is exactly the
+            // use-after-free the old join avoided by waiting; leaking costs
+            // nothing at process exit and lets us not wait at all.
+            std::mem::forget(interpreter);
         }
         Mode::Jit => unreachable!("handled before the interpreter prep"),
     }

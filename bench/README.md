@@ -44,7 +44,7 @@ embedded into `ash` via `include_bytes!`, so building `ash` against a stale
 | `hybrid-auto` | `ash_cli` | `--mode hybrid --jit-tier auto` | Full ladder: interpreter → Cranelift → LLVM. |
 | `hybrid-cranelift` | `ash_cli` | `--mode hybrid --jit-tier cranelift` | Ladder pinned to the Cranelift middle tier. |
 | `hybrid-llvm` | `ash_cli` | `--mode hybrid --jit-tier llvm` | Ladder pinned to the LLVM top tier. |
-| `full-jit` | `ash` | `--mode jit` | Standalone whole-module LLVM JIT, no interpreter. |
+| `full-jit` | `ash` | `--mode jit` | Standalone whole-module LLVM JIT, no interpreter. Compiles every function in the module before `main` runs — 17× slower than `hybrid-auto` on deltablue, 9× on fib. For judging codegen without tiering, not for startup. |
 | `hybrid-off` | `ash_cli` | `--mode hybrid --jit-tier off` | Control: tiering machinery present, promotion disabled. Not in the default set. |
 | `hybrid-eager` | `ash_cli` | `--jit-threshold 1 …` | The promotion policy the old `run_perf_matrix.py` used, kept so its historical numbers stay comparable. Not in the default set. |
 

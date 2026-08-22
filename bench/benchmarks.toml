@@ -53,7 +53,18 @@ description = "Ladder pinned to the LLVM top tier."
 name = "full-jit"
 binary = "ash"
 args = ["--mode", "jit"]
-description = "Standalone whole-module LLVM JIT (no interpreter)."
+description = """Standalone whole-module LLVM JIT, no interpreter. Compiles \
+EVERY function in the module -- the program's and the stdlib's, called or \
+not -- before main runs, because with no interpreter underneath there is \
+nothing to execute a function that is not compiled yet. That is inherent to \
+the mode, not a gap in the tiering work: the hybrid ladder is where lazy \
+per-function compilation and OSR live.
+
+Measured on the NUC (i5-1250P, release, ABBA-alternated): deltablue 1150ms \
+against hybrid's 68ms, fib 844ms against hybrid's 92ms. Choose it when you \
+want peak generated code with no tiering in the picture -- judging codegen \
+quality, or a long-running program that amortises the compile. Do not \
+choose it for startup."""
 
 [[mode]]
 name = "hybrid-off"

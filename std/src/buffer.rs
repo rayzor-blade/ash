@@ -529,13 +529,20 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             // "loop acc=2147483647" printed as two mojibake characters under
             // --jit-threshold 1. So string-likes take the direct-bytes path
             // below and never re-enter; every other object gets its toString.
-            let string_like_fast_path = !rt.is_null() && {
-                let nfields = (*o).nfields;
-                nfields >= 1 && !(*rt).fields_indexes.is_null() && {
-                    let f0 = (*(*o).fields.offset(0)).t;
-                    !f0.is_null() && (*f0).kind == hl_type_kind_HBYTES
-                }
+            // Match String by NAME, not by shape. "field 0 is HBYTES" also
+            // matches hl.types.ArrayBytes_* — so arrays took the raw-bytes
+            // path and `a + ''` printed garbage instead of "[2,3,4]",
+            // regressing Issue6349 and Issue6722. String is the one type whose
+            // __string upstream returns this.bytes for; everything else,
+            // arrays included, must get its real toString.
+            let is_string_type = !(*o).name.is_null() && {
+                const S: [u16; 6] = [
+                    'S' as u16, 't' as u16, 'r' as u16, 'i' as u16, 'n' as u16, 'g' as u16,
+                ];
+                let n = (*o).name;
+                (0..6).all(|i| *n.add(i) == S[i]) && *n.add(6) == 0
             };
+            let string_like_fast_path = is_string_type;
             let this_ptr = if kind == hl_type_kind_HSTRUCT {
                 (*v).v.ptr as *mut vdynamic
             } else {

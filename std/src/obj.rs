@@ -661,7 +661,12 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         // `vobj_proto as usize > 1`. dangling_mut() is align_of::<*mut
         // c_void>() == 8, which sails through all of those guards and then
         // gets indexed as if it were a real proto array at address 8.
-        (*ot).vobj_proto = 1usize as *mut *mut c_void;
+        // `without_provenance_mut` rather than `1 as *mut _`: this is an
+        // ADDRESS used as a sentinel, never a pointer to be dereferenced, and
+        // spelling it that way is both the honest description and what stops
+        // clippy::manual_dangling_ptr from "helpfully" suggesting
+        // dangling_mut() -- which is the 8 this line exists to replace.
+        (*ot).vobj_proto = std::ptr::without_provenance_mut(1);
     }
 
     (*t).methods = allocator

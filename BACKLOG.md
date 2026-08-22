@@ -121,10 +121,22 @@ Measured 2026-08-22, debug binary, three samples on a loaded box:
 Compile: mcjit codegen 644ms, llvm middle-end 451ms, llvm lower 367ms over
 499 functions, compile pending 59ms, verify 5.5ms.
 
-Two things to take from it. **Execute is ~4ms against HashLink/C's 12ms and
-HashLink JIT's 17ms** — the engine is not the problem on this workload.
-And the website's 175x bar for deltablue is a whole-module LLVM compile of
-the program plus stdlib standing in front of a 4ms run. The published row
+What this does establish: the wall time is compile, not execution — the
+whole-module LLVM compile of the program plus the stdlib it never calls,
+standing in front of a run of a few milliseconds.
+
+What it does NOT establish is any comparison against HashLink. The site's
+12ms (HashLink/C) and 17ms (HashLink JIT) are release builds on CI
+hardware; the numbers above are a debug build on a loaded M1 Pro, and `hl`
+does not run on this machine at all, so no same-box comparison is possible
+here. "ash executes deltablue faster than HashLink/C" is NOT supported by
+this data and should not be repeated until both are measured on one box —
+CI or the NUC.
+
+Note also that execute-ms is the LEAST stable figure here: its spread over
+the three samples was 21.1%, worse than wall's 11.3%, because absolute
+noise is a larger fraction of a small number. Two modes whose execute
+times differ by less than ~20% are indistinguishable on this box today. The published row
 was full-jit only because hybrid crashed (closed above, 54312ea); with the
 mode restriction lifted the site should publish hybrid-auto, which compiles
 lazily on background threads — `fib` publishes `compile_ms: 0.64` for the

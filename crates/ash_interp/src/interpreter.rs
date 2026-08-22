@@ -669,35 +669,83 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                     .expect("llvm_done mutex poisoned")
                     .contains(&findex)
             {
-                let chase = Arc::clone(ctx);
-                if let Ok(h) = std::thread::Builder::new()
-                    .name("ash-retier-llvm".into())
-                    .spawn(move || {
-                        // Speculative work must yield to the program it is
-                        // speculating for. Unpriorit
-                        // ised, this compile competes for a core with the
-                        // mutator, and on a small machine it wins: free_call
-                        // measured 86ms against 131ms when pinned to two
-                        // cores, against 88ms against 98ms on sixteen. That
-                        // is the whole reason a 4-core CI runner did not
-                        // reproduce this box's numbers.
-                        lower_own_priority();
-                        // The program may already have finished between this
-                        // thread being spawned and being scheduled. Its
-                        // result would be installed into a runtime nobody is
-                        // going to call again, and shutdown would wait for
-                        // it: deltablue paid 5.1s at exit for exactly this,
-                        // having produced its answer at 228ms.
-                        if retier_abandoned() {
-                            return;
+                // ONE worker draining a queue, not one thread per install.
+                //
+                // This used to spawn a fresh `ash-retier-llvm` thread for every
+                // Cranelift install that looked worth chasing. It bought
+                // nothing: `compile_with_llvm` takes ctx.llvm and holds it for
+                // the entire compile, so the chases were already serialised —
+                // the extra threads only queued on that mutex. What they did
+                // cost is cores. deltablue installs 38 Cranelift functions and
+                // peaked at 24 live threads for a program that finishes in
+                // 52ms; pinned to two cores it measures ~92ms against ~66ms on
+                // sixteen, and speculative work that cannot land is charged
+                // straight to the mutator's wall clock. Same serialised order,
+                // one thread.
+                let need_worker = {
+                    let mut q = CHASE_QUEUE.lock().expect("chase queue mutex poisoned");
+                    q.pending.push_back(findex);
+                    let spawn = !q.worker_live;
+                    q.worker_live = spawn;
+                    spawn
+                };
+                if need_worker {
+                    let chase = Arc::clone(ctx);
+                    let spawned = std::thread::Builder::new()
+                        .name("ash-retier-llvm".into())
+                        .spawn(move || {
+                            // Speculative work must yield to the program it is
+                            // speculating for. Unprioritised, this compile
+                            // competes for a core with the mutator, and on a
+                            // small machine it wins: free_call measured 86ms
+                            // against 131ms when pinned to two cores, against
+                            // 88ms against 98ms on sixteen. That is the whole
+                            // reason a 4-core CI runner did not reproduce this
+                            // box's numbers.
+                            lower_own_priority();
+                            loop {
+                                let next = {
+                                    let mut q = CHASE_QUEUE
+                                        .lock()
+                                        .expect("chase queue mutex poisoned");
+                                    // The program may already have finished.
+                                    // Anything still queued would be installed
+                                    // into a runtime nobody is going to call
+                                    // again: deltablue paid 5.1s at exit for
+                                    // exactly this, having produced its answer
+                                    // at 228ms. Drop the rest and go.
+                                    if retier_abandoned() {
+                                        q.pending.clear();
+                                        q.worker_live = false;
+                                        return;
+                                    }
+                                    match q.pending.pop_front() {
+                                        Some(f) => f,
+                                        None => {
+                                            // Cleared under the same lock the
+                                            // producer pushes under, so a
+                                            // findex enqueued concurrently
+                                            // always gets a worker.
+                                            q.worker_live = false;
+                                            return;
+                                        }
+                                    }
+                                };
+                                compile_with_llvm(&chase, 1, next);
+                            }
+                        });
+                    match spawned {
+                        Ok(h) => RETIER_CHASE
+                            .lock()
+                            .expect("retier chase mutex poisoned")
+                            .push(h),
+                        Err(_) => {
+                            CHASE_QUEUE
+                                .lock()
+                                .expect("chase queue mutex poisoned")
+                                .worker_live = false;
                         }
-                        compile_with_llvm(&chase, 1, findex);
-                    })
-                {
-                    RETIER_CHASE
-                        .lock()
-                        .expect("retier chase mutex poisoned")
-                        .push(h);
+                    }
                 }
             }
             addr as *mut ()
@@ -10198,6 +10246,21 @@ fn llvm_chase_enabled() -> bool {
 /// use-after-free.
 static RETIER_CHASE: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
     std::sync::Mutex::new(Vec::new());
+
+/// Work queue for the LLVM chase, plus whether a worker is draining it.
+///
+/// Both live under ONE mutex on purpose: the "is a worker running" flag has to
+/// be tested and set in the same critical section that pushes, or a findex
+/// enqueued just as a worker decides the queue is empty is never compiled.
+struct ChaseQueue {
+    pending: std::collections::VecDeque<usize>,
+    worker_live: bool,
+}
+
+static CHASE_QUEUE: std::sync::Mutex<ChaseQueue> = std::sync::Mutex::new(ChaseQueue {
+    pending: std::collections::VecDeque::new(),
+    worker_live: false,
+});
 
 /// Set once the program's entrypoint has returned. A chase that has not yet
 /// begun its LLVM compile checks this and gives up instead of starting work

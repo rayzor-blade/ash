@@ -177,6 +177,11 @@ pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) ->
 }
 
 pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, parents: *mut tlist) {
+    // Same guard as hlp_type_str: describing a corrupt type must not panic.
+    if t.is_null() || (*t).kind as usize >= TSTR.len() {
+        hlp_buffer_str(b, str_to_uchar_ptr("?"));
+        return;
+    }
     let c = TSTR[(*t).kind as usize];
     if c != "null" {
         hlp_buffer_str(b, str_to_uchar_ptr(c));
@@ -263,7 +268,18 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
 }
 
 pub unsafe extern "C" fn hlp_type_str(t: *mut hl_type) -> *const uchar {
-    let _c = TSTR[(*t).kind as usize];
+    // A kind outside the table is a corrupt or non-type pointer; naming it
+    // "?" beats indexing out of bounds, which panics inside the very
+    // routine that exists to describe what went wrong (TestMisc,
+    // Issue2937).
+    if t.is_null() {
+        return str_to_uchar_ptr("?");
+    }
+    let kind = (*t).kind as usize;
+    if kind >= TSTR.len() {
+        return str_to_uchar_ptr("?");
+    }
+    let _c = TSTR[kind];
     let c = str_to_uchar_ptr(_c);
     if _c != "null" {
         return c;

@@ -1933,7 +1933,20 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynamic {
-    (*((*v).v.ptr as *mut vvirtual)).value
+    // Reached from Reflect with whatever a Dynamic slot held, which is not
+    // always a virtual (nor always a box). Two dereferences deep with no
+    // check aborted the VM on TestJson and TestReflect.
+    if v.is_null() {
+        return ptr::null_mut();
+    }
+    let inner = (*v).v.ptr as *mut vvirtual;
+    if inner.is_null()
+        || (inner as usize) < 0x10000
+        || !(inner as usize).is_multiple_of(std::mem::align_of::<usize>())
+    {
+        return ptr::null_mut();
+    }
+    (*inner).value
 }
 
 /// Invoke a resolved method pointer with `this` as the only argument.

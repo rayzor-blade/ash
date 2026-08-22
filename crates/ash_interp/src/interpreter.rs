@@ -421,24 +421,6 @@ struct TieredSharedCtx {
 }
 
 impl TieredSharedCtx {
-    /// Publish the bytecode the brokers lower from (idempotent).
-    fn set_bytecode(&self, bytecode: &Arc<DecodedBytecode>) {
-        use std::sync::atomic::Ordering;
-        if self.bytecode.get().is_some() {
-            return;
-        }
-        let max_findex = bytecode
-            .functions
-            .iter()
-            .map(|f| f.findex as usize)
-            .chain(bytecode.natives.iter().map(|n| n.findex as usize))
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
-        self.max_findex.store(max_findex, Ordering::Release);
-        let _ = self.bytecode.set(Arc::clone(bytecode));
-    }
-
     /// The bytecode, borrowed from this context's own Arc. No unsafe, and no
     /// lifetime obligation on the caller: the borrow cannot outlive the
     /// context, and every compile thread holds the context by Arc.
@@ -561,7 +543,7 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                 let t0 = std::time::Instant::now();
                 let backend = ash_core::cranelift::AshCraneliftBackend::new()?;
                 // SAFETY: `bytecode` is the process-lifetime decoded bytecode
-                // published by `set_bytecode`; the arrays are the shared
+                // published by `enable_tiered`; the arrays are the shared
                 // runtime tables that outlive every tier.
                 let cl_ctx = unsafe {
                     ash_core::cranelift::CraneliftTierContext::new(
@@ -1755,8 +1737,9 @@ impl HLInterpreter {
         }
 
         let published_bytecode = Arc::clone(bytecode);
-        // Publishing the bytecode used to go through set_bytecode, which also
-        // computed this. Setting the OnceLock directly skipped it, and a
+        // Publishing the bytecode once went through a set_bytecode helper
+        // (since deleted — this is now its only caller and it was dead code),
+        // which also computed this. Setting the OnceLock directly skipped it, and a
         // max_findex of 0 silently disables the functions_ptrs update in
         // install_function_address — every virtual dispatch from compiled
         // code then falls back to the interpreter bridge. deltablue went from
@@ -3562,14 +3545,6 @@ impl HLInterpreter {
             .unwrap_or(func_idx)
     }
 
-    /// Fallback for callers with no `bytecode` to hand: the old scan.
-    fn bytecode_findex(&self, func_idx: usize) -> usize {
-        self.targets
-            .iter()
-            .position(|t| matches!(t, CallTarget::Func(i) if *i as usize == func_idx))
-            .unwrap_or(func_idx)
-    }
-
     /// `ASH_TIERED_SHADOW` membership, parsed once.
     fn shadow_findex(findex: usize) -> bool {
         static V: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
@@ -4972,15 +4947,22 @@ impl HLInterpreter {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
+            // "Not less than" is the NEGATION of Lt, which is not the same
+            // thing as Gte once floats are involved: every comparison against
+            // NaN is false, so !(a < b) is TRUE for NaN while (a >= b) is
+            // FALSE, and the branch went the wrong way. Integers are a total
+            // order, so the old mapping was right for them and wrong only
+            // where it mattered. HashLink treats these two opcodes as a
+            // special case for exactly this reason -- jit.c:1845 tests
+            // JNParity and hand-sets the flags for OJNotLt/OJNotGte after
+            // COMISD.
             Opcode::JNotLt { a, b, offset } => {
-                // JNotLt is equivalent to JGte (signed)
-                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SGte) {
+                if !self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLt) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
             Opcode::JNotGte { a, b, offset } => {
-                // JNotGte is equivalent to JLt (signed)
-                if self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLt) {
+                if !self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SGte) {
                     return Ok(StepResult::Jump(*offset));
                 }
             }

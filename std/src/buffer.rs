@@ -139,6 +139,38 @@ pub unsafe extern "C" fn hlp_buffer_char(b: *mut hl_buffer, c: hl::uchar) {
 use std::ffi::c_void;
 use std::ptr;
 
+/// `toStringFun` may be an INTERPRETER STUB — a findex+1 sentinel stored as a
+/// small integer — rather than a real code pointer, and under `--mode interp`
+/// it always is: the module's function table is filled with sentinels, so no
+/// `__string` in the program has a native address. Route a stub back through
+/// the interpreter, exactly as `obj::vcall_fn_or_stub` already does for every
+/// sibling method.
+///
+/// Returns null when there is no callable at all, which is the ONLY case
+/// upstream prints the class name for (hashlink src/std/buffer.c:236).
+unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const uchar {
+    let addr = f as usize;
+    if addr == 0 {
+        return ptr::null();
+    }
+    if addr < 0x100000 {
+        let Some(runner) = crate::fiber::closure_runner() else {
+            return ptr::null();
+        };
+        let mut cl = vclosure {
+            t: crate::types::hlt_dyn(),
+            fun: f,
+            hasValue: 1,
+            stackCount: 0,
+            value: this as *mut c_void,
+        };
+        return runner(&mut cl, ptr::null_mut(), 0) as *const uchar;
+    }
+    let g: unsafe extern "C" fn(*mut vdynamic) -> *const uchar = std::mem::transmute(f);
+    g(this)
+}
+
+
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
     // Get the global GC instance
     let mut gc = crate::gc::gc_locked();
@@ -473,26 +505,53 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let o = (*(*v).t).__bindgen_anon_1.obj;
             let rt = (*o).rt;
 
-            // Check if toStringFun exists and is a real callable pointer
-            // (not an interpreter stub where findex+1 is stored as a small integer)
+            // Do NOT filter out interpreter stubs here. The old
+            // `.filter(|&f| (f as usize) > 0x100000)` discarded every
+            // `__string` in an interpreted program -- all of them are
+            // sentinels in that mode -- and silently fell through to the
+            // class-name path below, so `"" + obj` printed the class name
+            // instead of calling toString. Upstream reaches the name path
+            // only when there is no toStringFun at all (buffer.c:236).
             let to_string_fn = if !rt.is_null() {
                 let proto = hlp_get_obj_proto((*v).t);
-                (*proto).toStringFun.filter(|&f| (f as usize) > 0x100000)
+                (*proto).toStringFun
             } else {
                 None
             };
+            // A String is field-0-is-HBYTES shaped, and its bytes ARE its
+            // string form: upstream's String.__string hands back this.bytes
+            // with no allocation, so calling it is free there. ash's is a
+            // bytecode function that BUILDS a new string, and running it from
+            // in here re-enters the buffer machinery this call is already
+            // inside. Measured: the receiver was intact (this.bytes = "loop
+            // a...", len 19) while the returned pointer was a fresh
+            // allocation 0x50 further on holding garbage, which is how
+            // "loop acc=2147483647" printed as two mojibake characters under
+            // --jit-threshold 1. So string-likes take the direct-bytes path
+            // below and never re-enter; every other object gets its toString.
+            let string_like_fast_path = !rt.is_null() && {
+                let nfields = (*o).nfields;
+                nfields >= 1 && !(*rt).fields_indexes.is_null() && {
+                    let f0 = (*(*o).fields.offset(0)).t;
+                    !f0.is_null() && (*f0).kind == hl_type_kind_HBYTES
+                }
+            };
+            let this_ptr = if kind == hl_type_kind_HSTRUCT {
+                (*v).v.ptr as *mut vdynamic
+            } else {
+                v
+            };
+            let to_string_out = match to_string_fn {
+                Some(f) if !string_like_fast_path => {
+                    call_tostring_or_stub(f as *mut c_void, this_ptr)
+                }
+                _ => ptr::null(),
+            };
 
-            if let Some(f) = to_string_fn {
-                hlp_buffer_str(
-                    b,
-                    f(if kind == hl_type_kind_HSTRUCT {
-                        (*v).v.ptr as *mut vdynamic
-                    } else {
-                        v
-                    }),
-                );
+            if !to_string_out.is_null() {
+                hlp_buffer_str(b, to_string_out);
             } else if !rt.is_null() {
-                // toStringFun is unavailable (interpreter stub or missing).
+                // No callable toString (or it produced nothing).
                 // For String objects (field 0 is HBYTES), read the bytes pointer directly.
                 let fi = (*rt).fields_indexes;
                 let nfields = (*o).nfields;

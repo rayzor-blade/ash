@@ -609,14 +609,29 @@ static GC_LOCK: ReentrantGcLock = ReentrantGcLock {
     cond: std::sync::Condvar::new(),
 };
 
-/// Unique, never-zero token for the current thread: its pthread handle, or
-/// on Windows its thread id — which the kernel never hands out as 0 either,
-/// so the "0 means free" encoding in `owner` survives the port.
-/// The previous `thread_local!` token cost a `_tlv_get_addr` call (with its
-/// lazy-init branch) on EVERY lock operation — 11.6% of an allocation-bound
-/// profile; `pthread_self` is a register read.
-#[inline]
+/// Unique, never-zero token for the current thread.
+///
+/// History worth keeping, because the comment here was wrong twice. A
+/// `thread_local!` token cost a `_tlv_get_addr` call with a lazy-init
+/// branch on every lock operation — 11.6% of an allocation-bound profile.
+/// It was replaced by `libc::pthread_self` and this comment then claimed
+/// that was "a register read". It is not: on Mach-O it goes through a
+/// lazy-bind stub (adrp + GOT load + indirect branch + the libSystem body),
+/// twice per lock hold, and the disassembly of `acquire`/`release` shows
+/// the `bl` plainly.
+///
+/// `thread_self_fast` is the one that really is a register read — TPIDRRO_EL0
+/// on macOS/aarch64, TPIDR_EL0 on linux/aarch64, fs:0x10 on linux/x86_64,
+/// GetCurrentThreadId on Windows — and it is what this should have been
+/// using all along. Its value is never 0 on any of those, so the "0 means
+/// free" encoding in `owner` survives.
+#[inline(always)]
 fn gc_thread_token() -> u64 {
+    thread_self_fast()
+}
+
+#[allow(dead_code)]
+fn gc_thread_token_unused() -> u64 {
     #[cfg(unix)]
     unsafe {
         libc::pthread_self() as u64
@@ -664,12 +679,19 @@ impl ReentrantGcLock {
 
     fn release(&self) {
         use std::sync::atomic::Ordering;
-        let me = gc_thread_token();
-        debug_assert_eq!(
-            self.owner.load(Ordering::Relaxed),
-            me,
-            "GC lock released by non-owner thread"
-        );
+        // The token is needed ONLY by the assert below, and an opaque extern
+        // call cannot be dead-code-eliminated in release — the shipped dylib
+        // called it and then never read the result. Gate it with the assert
+        // it serves.
+        #[cfg(debug_assertions)]
+        {
+            let me = gc_thread_token();
+            debug_assert_eq!(
+                self.owner.load(Ordering::Relaxed),
+                me,
+                "GC lock released by non-owner thread"
+            );
+        }
         if self.depth.load(Ordering::Relaxed) > 1 {
             self.depth.fetch_sub(1, Ordering::Relaxed);
             return;

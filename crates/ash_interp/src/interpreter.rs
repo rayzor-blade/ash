@@ -3123,7 +3123,7 @@ impl HLInterpreter {
     /// ignored `--jit-tier`, blocked the main thread, and left no path to tier
     /// up afterwards -- one error with four symptoms.
     fn note_hot_loop(&mut self, bytecode: &DecodedBytecode, func_idx: usize, header_pc: usize) {
-        let findex = self.bytecode_findex(func_idx);
+        let findex = self.bytecode_findex_of(bytecode, func_idx);
 
         // Publish the header before ticking: a tick can be the one that
         // submits the LLVM compile, and the broker reads this map when that
@@ -3367,7 +3367,7 @@ impl HLInterpreter {
         if !osr_transfer_enabled() {
             return Ok(None);
         }
-        let findex = self.bytecode_findex(func_idx);
+        let findex = self.bytecode_findex_of(bytecode, func_idx);
         let site = header_pc as u64;
         let addr = {
             let tiered = self.tiered_runtime.as_ref();
@@ -3470,6 +3470,20 @@ impl HLInterpreter {
     }
 
     /// The findex of a function by its index in `bytecode.functions`.
+    ///
+    /// `targets` is built as exactly this inversion, so scanning it to undo
+    /// the inversion is work the bytecode already answers directly. It ran
+    /// twice per 64 back-edges from note_hot_loop and try_osr_transfer — the
+    /// interpreter's hottest loop path.
+    fn bytecode_findex_of(&self, bytecode: &DecodedBytecode, func_idx: usize) -> usize {
+        bytecode
+            .functions
+            .get(func_idx)
+            .map(|f| f.findex as usize)
+            .unwrap_or(func_idx)
+    }
+
+    /// Fallback for callers with no `bytecode` to hand: the old scan.
     fn bytecode_findex(&self, func_idx: usize) -> usize {
         self.targets
             .iter()
@@ -4143,7 +4157,22 @@ impl HLInterpreter {
                         use std::io::Write;
                         std::io::stderr().flush().ok();
                     }
-                    match self.call_function(bytecode, native_resolver, findex, &args) {
+                    let call_result = self.call_function(bytecode, native_resolver, findex, &args);
+                    // Hand the buffer back. The Call arms pop from arg_pool but
+                    // nothing on this path ever pushed, so the pool was
+                    // permanently empty and every interpreted call above arity
+                    // zero paid a malloc and a free. The callee has already
+                    // copied the arguments into its own registers by the time
+                    // call_function returns, on both the Ok and Err paths — so
+                    // recycle on both, or an exception unwind drains the pool.
+                    {
+                        let mut args = args;
+                        if self.arg_pool.len() < POOL_CAP {
+                            args.clear();
+                            self.arg_pool.push(args);
+                        }
+                    }
+                    match call_result {
                         Ok(ret) => {
                             let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
                             let coerced = self.coerce_value_for_static_kind(ret, dst_kind);

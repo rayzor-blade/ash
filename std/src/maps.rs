@@ -7,7 +7,6 @@ use std::{
 use crate::{
     gc::ImmixAllocator,
     hl::{self, hl_hb_map},
-    strings,
 };
 
 // pub type HLBytesMap = HashMap<flexstr::SharedStr, HLVDynamic>;
@@ -57,74 +56,6 @@ impl ImmixAllocator {
         NonNull::new(map_ptr.as_ptr() as *mut hl::hl_hb_map)
     }
 
-    fn mark_map(&mut self, map_ptr: *mut hl::hl_hb_map) {
-        if map_ptr.is_null() {
-            return;
-        }
-
-        // Mark the hl_hb_map struct itself
-        self.mark_memory(map_ptr as *mut u8, std::mem::size_of::<hl::hl_hb_map>());
-
-        unsafe {
-            let map = &*map_ptr;
-
-            // Mark the cells and nexts arrays
-            if !map.cells.is_null() {
-                self.mark_memory(
-                    map.cells as *mut u8,
-                    map.ncells as usize * std::mem::size_of::<*mut std::os::raw::c_void>(),
-                );
-            }
-            if !map.nexts.is_null() {
-                self.mark_memory(
-                    map.nexts as *mut u8,
-                    map.ncells as usize * std::mem::size_of::<*mut std::os::raw::c_void>(),
-                );
-            }
-
-            // Mark the entries array
-            if !map.entries.is_null() {
-                self.mark_memory(
-                    map.entries as *mut u8,
-                    map.maxentries as usize * std::mem::size_of::<hl::hl_hb_entry>(),
-                );
-            }
-
-            // Mark the values array and its contents
-            if !map.values.is_null() {
-                self.mark_memory(
-                    map.values as *mut u8,
-                    map.maxentries as usize * std::mem::size_of::<hl::hl_hb_value>(),
-                );
-
-                for i in 0..map.nentries {
-                    let value = &*map.values.add(i as usize);
-
-                    // Mark the key (assuming it's a string)
-                    if !value.key.is_null() {
-                        let key_len = strings::hlp_utf16_length(value.key);
-                        self.mark_memory(
-                            value.key as *mut u8,
-                            key_len * std::mem::size_of::<hl::uchar>(),
-                        );
-                    }
-
-                    // Mark the value (assuming it's a vdynamic)
-                    if !value.value.is_null() {
-                        self.mark_vdynamic(value.value);
-                    }
-                }
-            }
-
-            // Mark the free list
-            if !map.lfree.buckets.is_null() {
-                self.mark_memory(
-                    map.lfree.buckets as *mut u8,
-                    map.lfree.nbuckets as usize * std::mem::size_of::<hl::hl_free_bucket>(),
-                );
-            }
-        }
-    }
 }
 
 unsafe fn hl_freelist_add_range(f: *mut hl::hl_free_list, pos: i32, count: i32) {
@@ -342,7 +273,15 @@ pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
     let allocated_map = allocator
         .allocate_map(0)
         .expect("could not allocate bytes map");
-    allocator.mark_map(allocated_map.as_ptr());
+    // Deliberately NOT pre-marked. Setting mark bits at allocation time
+    // poisoned the first collection after it: the tracer only scans lines
+    // whose mark bit it just flipped, so a line marked here was treated as
+    // already-visited and its interior pointers were never followed — the
+    // map struct survived while every array it pointed to was swept. A
+    // 16k-entry StringMap then answered null for ~5k keys after hbget
+    // SIGSEGV'd on the freed entries (unit-suite Null access, "hang" at
+    // 20k). Maps are reached like everything else: conservatively, through
+    // whatever references the map struct.
     allocated_map.as_ptr()
 }
 
@@ -415,6 +354,7 @@ pub static H_PRIMES: [u32; 28] = [
 unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     // save
     let mut old = ptr::read(m);
+    let resize_trace = std::env::var("ASH_MAP_RESIZE_TRACE").is_ok();
 
     if (*m).nentries != (*m).maxentries {
         panic!("assert");
@@ -495,6 +435,22 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
                 c = _old.m_next(c as u32);
             }
         }
+    }
+    if resize_trace {
+        eprintln!(
+            "[hb-resize] map={:#x} maxentries {}->{} ncells {}->{} entries={:#x}+{:#x} values={:#x}+{:#x} cells={:#x} nexts={:#x}",
+            m as usize,
+            old.maxentries,
+            (*m).maxentries,
+            old.ncells,
+            (*m).ncells,
+            (*m).entries as usize,
+            (*m).maxentries as usize * mem::size_of::<hl::hl_hb_entry>(),
+            (*m).values as usize,
+            (*m).maxentries as usize * mem::size_of::<hl::hl_hb_value>(),
+            (*m).cells as usize,
+            (*m).nexts as usize,
+        );
     }
 }
 

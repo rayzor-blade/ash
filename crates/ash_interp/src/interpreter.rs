@@ -1340,6 +1340,15 @@ pub struct HLInterpreter {
     fn_gc_set_scan_roots: *mut c_void,
     /// Reused across publishes so building the range list allocates once.
     scan_range_buf: Vec<(usize, usize)>,
+    /// c_type pointers for the primitive kinds, resolved once, used to BOX a
+    /// value entering a Dynamic slot. std's `hlt_i32()` and friends are plain
+    /// Rust fns rather than `#[no_mangle]` exports, so the native resolver
+    /// cannot find them; the bytecode's own type table always carries these
+    /// kinds instead. Plain fields rather than a map so they can be copied
+    /// out before a `frame` borrow is taken.
+    prim_t_i32: *mut c_void,
+    prim_t_f64: *mut c_void,
+    prim_t_bool: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_scan_roots_done
     fn_gc_scan_roots_done: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_stack_top
@@ -1399,6 +1408,17 @@ impl HLInterpreter {
 
         // Create C-level type structures for native interop
         let c_type_factory = CTypeFactory::new(bytecode);
+        // Resolved once: see `box_for_dynamic_slot`.
+        let mut c_type_factory = c_type_factory;
+        let find_prim = |f: &mut CTypeFactory, k: hl::hl_type_kind| -> usize {
+            match bytecode.types.iter().position(|t| t.kind == k) {
+                Some(i) => f.get(i) as usize,
+                None => 0,
+            }
+        };
+        let prim_t_i32 = find_prim(&mut c_type_factory, hl::hl_type_kind_HI32);
+        let prim_t_f64 = find_prim(&mut c_type_factory, hl::hl_type_kind_HF64);
+        let prim_t_bool = find_prim(&mut c_type_factory, hl::hl_type_kind_HBOOL);
 
         // Resolve internal stdlib function pointers for object operations
         let fn_alloc_obj = native_resolver
@@ -1545,6 +1565,9 @@ impl HLInterpreter {
             fn_gc_add_scan_root,
             fn_gc_set_scan_roots,
             scan_range_buf: Vec::new(),
+            prim_t_i32: prim_t_i32 as *mut c_void,
+            prim_t_f64: prim_t_f64 as *mut c_void,
+            prim_t_bool: prim_t_bool as *mut c_void,
             fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
@@ -2066,6 +2089,64 @@ impl HLInterpreter {
             None
         } else {
             Some(off as usize)
+        }
+    }
+
+    /// A Dynamic slot in memory holds a POINTER TO A BOX, never a raw payload
+    /// — the invariant rayzor states outright with its
+    /// `DynamicValue { type_id, value_ptr }`, and the one HashLink assumes
+    /// whenever it reads such a slot as `vdynamic*`.
+    ///
+    /// ash may legitimately keep an unboxed primitive in a Dynamic-typed
+    /// REGISTER — that is a fine in-register optimisation — but the box has to
+    /// exist by the time the value crosses into memory. `write_value_at`'s
+    /// pointer arm did the opposite:
+    /// `else if val.is_i32() { *(addr as *mut i32) = val.as_i32(); }`
+    /// wrote four raw bytes into an eight-byte slot and left the top half
+    /// stale, so reading it back as a `vdynamic*` produced a torn pointer.
+    /// unit.spec.TestMap died on "misaligned pointer dereference: address must
+    /// be a multiple of 0x8 but is 0x2" — 0x2 being the integer 2 sitting
+    /// where a boxed Int belonged.
+    ///
+    /// Same defect class as the hlp_safe_cast HNULL rules (aade420): a raw
+    /// payload where a box is required. Fixing the cast path exposed this one.
+    #[allow(clippy::too_many_arguments)]
+    fn box_for_dynamic_slot(
+        fn_make_dyn: *mut c_void,
+        t_i32: *mut c_void,
+        t_f64: *mut c_void,
+        t_bool: *mut c_void,
+        dst_kind: hl::hl_type_kind,
+        val: NanBoxedValue,
+    ) -> NanBoxedValue {
+        if !matches!(
+            dst_kind,
+            hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
+        ) {
+            return val;
+        }
+        if fn_make_dyn.is_null() || val.is_null() || val.is_void() {
+            return val;
+        }
+        let (t, mut data): (*mut c_void, i64) = if val.is_i32() {
+            (t_i32, val.as_i32() as i64)
+        } else if val.is_bool() {
+            (t_bool, val.as_bool() as i64)
+        } else if val.is_f64() {
+            (t_f64, val.as_f64().to_bits() as i64)
+        } else {
+            return val; // already a pointer
+        };
+        if t.is_null() {
+            return val;
+        }
+        let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            unsafe { std::mem::transmute(fn_make_dyn) };
+        let boxed = unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, t) };
+        if boxed.is_null() {
+            val
+        } else {
+            NanBoxedValue::from_ptr(boxed as usize)
         }
     }
 
@@ -4807,9 +4888,18 @@ impl HLInterpreter {
                 let src_type_idx = func.regs[src.0 as usize].0;
                 let src_kind = bytecode.types[src_type_idx].kind;
                 let get_rt = self.fn_get_obj_rt;
+                let (mk_dyn, pt_i32, pt_f64, pt_bool) =
+                    (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
                 let obj_val = frame.registers.get(0); // reg 0 is 'this'
                 if !obj_val.is_null() && !obj_val.is_void() {
-                    let src_val = frame.registers.get(src.0);
+                    let src_val = Self::box_for_dynamic_slot(
+                        mk_dyn,
+                        pt_i32,
+                        pt_f64,
+                        pt_bool,
+                        src_kind,
+                        frame.registers.get(src.0),
+                    );
                     if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         if env_flag!("ASH_DBG_FIELD") {
@@ -6302,6 +6392,8 @@ impl HLInterpreter {
         field: usize,
         src: u32,
     ) -> Result<StepResult> {
+        let (mk_dyn, pt_i32, pt_f64, pt_bool) =
+            (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
         let frame = self.stack.last_mut().unwrap();
         let obj_type_idx = func.regs[obj as usize].0;
         let obj_kind = bytecode.types[obj_type_idx].kind;
@@ -6325,7 +6417,16 @@ impl HLInterpreter {
                 );
         }
         if !obj_val.is_null() && !obj_val.is_void() {
-            let src_val = frame.registers.get(src);
+            // A Dynamic slot takes a box, not a raw payload. See
+            // `box_for_dynamic_slot`.
+            let src_val = Self::box_for_dynamic_slot(
+                mk_dyn,
+                pt_i32,
+                pt_f64,
+                pt_bool,
+                src_kind,
+                frame.registers.get(src),
+            );
             if obj_kind == hl::hl_type_kind_HOBJ || obj_kind == hl::hl_type_kind_HSTRUCT {
                 let obj_ptr = obj_val.as_ptr() as *mut u8;
                 if env_flag!("ASH_DBG_FIELD") {

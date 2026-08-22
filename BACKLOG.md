@@ -3,7 +3,7 @@
 Known gaps, deferred refinements, and open defects. Code docs describe what the
 code guarantees today; anything that should change lives here.
 
-**Last updated**: 2026-08-21
+**Last updated**: 2026-08-22
 
 **Status**: Heaps Base2D renders through the real init path under
 `--mode interp`, reaching `Main.init()` in ~1.5s.
@@ -68,14 +68,22 @@ tracing), ASH_GC_NO_RECLAIM, ASH_GC_POISON, ASH_GC_QUARANTINE,
 [gc-collect] origin+seq tracing, [gc-reuse], and a NaN-box-aware sweep
 audit with a second pass over live retained lines.
 
-OPEN — hybrid dies deterministically (10/10) on an uncaught "HL exception:
-Null access" even with the interp fix in place. Bisect on the same build:
-`--jit-tier off` → Checksum: 14065400 (correct); `--jit-tier cranelift` →
-Null access; `--jit-tier llvm` → Null access. Not the interpreter, and not
-one backend's codegen — the shared promotion/compiled path is implicated.
-parity_matrix's hybrid modes pass, so the defect needs DeltaBlue-shaped
-polymorphic-dispatch density to show. Belongs to the tiering workstream;
-the bench stays full-jit-only until this closes.
+CLOSED 2026-08-22 (54312ea) — and the bisect above was reading the right
+signal: not the interpreter, not one backend, the shared promotion path.
+`CallMethod` resolves its target from the receiver's vobj_proto; when a
+promotion has patched that row with real code the findex has to be
+re-derived, and it was re-derived from the register's DECLARED type. For an
+overridden method that is the base class, so every call through a patched
+row ran the base implementation. Which rows happened to be patched decided
+what broke, hence "sometimes a wrong answer, sometimes a Null access".
+Resolution now walks the RUNTIME type's proto chain child-first, the order
+vobj_proto is itself built in. DeltaBlue is 5/5 at 14065400 in hybrid with
+either tier; benchmarks.toml is back to all four modes.
+
+Pinning it needed a new gate: ASH_TIERED_ONLY_FINDEXES promotes only the
+listed findexes. Skip-lists cannot bisect a promotion defect — each
+exclusion just lets the next-hottest function promote instead, so the
+tested set never converges.
 
 ---
 
@@ -101,18 +109,72 @@ the GC stress gate currently proves less than it claims.
 
 ---
 
-## Conformance: the next three blockers, one per suite
+## full-JIT startup dominates any short program
 
-The OSafeCast fix removed the shared fault_addr=0x9 wall; each suite now
-fails on its own defect, in order of value:
+Measured 2026-08-22, debug binary, three samples on a loaded box:
 
-  * unit — "Assert hit at pc 3": the `Assert` opcode is unimplemented in
-    the interpreter. The whole main suite is behind this one opcode.
-  * threads — std/src/obj.rs:979 "Failed to allocate memory" in
-    hlp_get_obj_rt on a spawned thread; the EventLoop/fiber area MEMORY.md
-    already flags.
-  * sys — a new SIGSEGV at fault_addr=0x30; also fails under stock
-    HashLink here (helper-spawning suite), so attribute before fixing.
+    deltablue --mode jit    wall 1827 / 1640 / 1634 ms
+      compile               95.0% / 96.5% / 96.5% of wall
+      execute               4.42 / 3.57 / 4.10 ms
+      jit init              73 / 48 / 48 ms
+
+Compile: mcjit codegen 644ms, llvm middle-end 451ms, llvm lower 367ms over
+499 functions, compile pending 59ms, verify 5.5ms.
+
+Two things to take from it. **Execute is ~4ms against HashLink/C's 12ms and
+HashLink JIT's 17ms** — the engine is not the problem on this workload.
+And the website's 175x bar for deltablue is a whole-module LLVM compile of
+the program plus stdlib standing in front of a 4ms run. The published row
+was full-jit only because hybrid crashed (closed above, 54312ea); with the
+mode restriction lifted the site should publish hybrid-auto, which compiles
+lazily on background threads — `fib` publishes `compile_ms: 0.64` for the
+same reason.
+
+Quote the compile/execute RATIO, not wall. Across those three samples wall
+swung 12% while the ratio held within 1.5 points: a ratio of two things
+measured inside one run cancels machine noise that wall time absorbs whole.
+
+Open, in order:
+  * Nothing lazy about full-JIT: every function in the module is lowered
+    before main runs, including the whole stdlib the program never calls.
+    HashLink JIT compiles AND runs deltablue in 17ms total.
+  * `heaps_game` is still pinned to full-jit for unrelated reasons (its SDL
+    loop never returns under an interpreter), so it carries the same shape.
+  * Not yet measured in RELEASE. llvm middle-end and llvm lower are our
+    Rust code and should shrink a lot; mcjit codegen is LLVM's own and
+    should not. The compile share stays dominant either way, but the
+    absolute numbers above are debug and must not be quoted against the
+    site's release figures.
+
+---
+
+## Conformance: measured per case, and what is left
+
+Superseded 2026-08-22. "The whole main suite is behind this one opcode" was
+true of every entry this section ever had, and that was the real problem:
+one process for 1195 cases means one crash reports as total failure, so the
+number could not move until the LAST crash was fixed. `--isolate` (864e27b)
+runs each case in its own process.
+
+First real measurement (interp, 4.3.6, macOS): **937/1195 cases, 78.4%**,
+233 failed, 25 crashed. `Assert` is implemented in all four engines
+(cd60b89); the other eight blockers found behind it are in the same commit.
+
+Next, in order of value:
+
+  * The crash column is mostly ONE structural gap: "hlp_throw called
+    without active trap; aborting". The interpreter installs no trap around
+    native calls, so any `hl_error` raised inside a native takes the process
+    down instead of propagating as a catchable exception the suite would
+    record as an ordinary failure. `call_compiled_function` already does
+    this correctly and is the model.
+  * 233 failures, 191 of them `unit.issues.*`, holding 2634 assertions of
+    which only 397 are bad — most cases are close, not broken.
+  * threads — std/src/obj.rs "Failed to allocate memory" in hlp_get_obj_rt
+    on a spawned thread; the EventLoop/fiber area MEMORY.md already flags.
+  * sys — SIGSEGV at fault_addr=0x30; also fails under stock HashLink here
+    (helper-spawning suite), so attribute before fixing.
+  * Isolation is unit-only so far. sys and threads still report whole-suite.
 
 ## `--mode jit` is not checked against anything
 

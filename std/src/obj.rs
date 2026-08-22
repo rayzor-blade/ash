@@ -806,19 +806,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         let fptr = *(*t)
             .methods
             .offset((-((*str_field).field_index + 1)).try_into().unwrap());
-        // KEEP interpreter stubs. Upstream stores the method pointer
-        // unconditionally (hashlink src/std/obj.c:395); ash used to drop
-        // anything below 0x10000, and in interpreter mode that is EVERY
-        // __string in the program, because the function table holds findex+1
-        // sentinels rather than code addresses. toStringFun was therefore
-        // always None and `"" + obj` printed the class name instead of
-        // calling toString -- the class-name path is the one upstream takes
-        // only when there is no __string at all (buffer.c:236).
-        //
-        // The single reader, buffer.rs, routes a stub back through the
-        // interpreter (see call_tostring_or_stub). Any future reader MUST do
-        // the same rather than calling this as a raw function pointer.
-        if fptr.is_null() {
+        if (fptr as usize) < 0x10000 {
             None
         } else {
             Some(mem::transmute::<

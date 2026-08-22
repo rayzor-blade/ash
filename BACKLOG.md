@@ -142,15 +142,47 @@ still compiling while the interpreter tears down segfaults, roughly one run
 in ten — so shutdown joins them. For a program that ends in 228ms, every
 one of those compiles is dead work the process still waits for.
 
-The chase itself is worth keeping: it exists because a Cranelift-compiled
-function stops accruing call counts, so the (Auto, 1) rung starves and the
-top tier is never reached (fib(40): 362ms Cranelift vs 87ms LLVM).
+**The chase does not pay for itself on any benchmark we have.** An earlier
+draft of this entry said it was "worth keeping", citing the code comment at
+its spawn site (fib(40): 362ms Cranelift vs 87ms LLVM). That was repeating
+a comment, not a measurement. A/B over the whole bench set — same release
+binary, the two arms differing ONLY by ASH_LLVM_CHASE, alternated within
+each round so drift hits both equally, three rounds, medians:
 
-Fix direction: make the chase CANCELLABLE rather than joinable-only. A
-shutdown flag checked before each chase begins its LLVM compile would
-retire the whole queue instantly; only a compile already in flight need be
-waited on. Do not simply detach — the segfault above is why the join is
-there.
+    benchmark          chase ON      chase OFF      delta
+    array_access        426 ms        326 ms       +30.7%
+    binary_trees        643 ms        605 ms        +6.3%  (within noise)
+    closure_call        299 ms        276 ms        +8.3%  (within noise)
+    deltablue          3705 ms        759 ms      +388.1%
+    fib                 559 ms        559 ms        +0.0%  (within noise)
+    field_access        189 ms        192 ms        -1.6%  (within noise)
+    free_call           158 ms        157 ms        +0.6%  (within noise)
+    inlined_call        142 ms        140 ms        +1.4%  (within noise)
+    method_call         238 ms        210 ms       +13.3%
+    mandelbrot          625 ms        405 ms       +54.3%
+    nbody               696 ms        583 ms       +19.4%
+
+It costs 13-388% on five benchmarks and is indistinguishable on six. It
+wins on none — field_access is the only nominal win and it is inside the
+noise floor. Notably it does not pay on **fib**, the benchmark its own
+justification names: 559ms both arms, and the chase-on arm carried 36%
+spread against 3% for chase-off, so it adds variance as well as time.
+
+The honest scope of that result: every benchmark we own finishes in
+0.14-3.7s. The chase's theoretical case is a long-running program where
+better code amortises over many iterations, and we have no such benchmark.
+So this refutes "the chase pays on our suite", not "the chase can never
+pay" — but the burden is now on producing a workload where it does.
+
+Fix direction, in order:
+  1. Make the chase CANCELLABLE rather than joinable-only: a shutdown flag
+     checked before each chase starts its compile retires the queue
+     instantly, leaving only an in-flight compile to wait on. Do NOT simply
+     detach — the segfault above is why the join exists. This alone should
+     take deltablue from 3705ms to near its 228ms answer time.
+  2. Then re-run this A/B. If the chase still cannot win once shutdown
+     stops charging for it, default it off and keep ASH_LLVM_CHASE=1 as the
+     opt-in for the long-running case it was designed for.
 
 Consequences worth stating:
   * The published deltablue row should NOT switch to hybrid on the strength

@@ -880,7 +880,26 @@ fn run() -> Result<()> {
             // interpreter is leaked below, deliberately, and the thread dies
             // with the process. deltablue answered at 65ms and exited at
             // ~290ms purely because of this wait.
+            // Abandon THEN join. The flag retires every chase that has not
+            // begun its compile, which is what made the original join take
+            // 5.1s on deltablue; what remains is only genuinely in-flight
+            // work, and that must be waited for.
+            //
+            // Not joining was tried (551347e) and is wrong: the broker reads
+            // structures owned by this scope through raw pointers published
+            // at registration, so returning without waiting frees them under
+            // a running compile. Leaking the two known offenders was
+            // whack-a-mole -- it fixed the lower.rs index panic and CI still
+            // SIGSEGV'd elsewhere, because the set of things the broker can
+            // read is not something a caller can enumerate by hand.
+            //
+            // The real fix is for the shared context to OWN what it reads
+            // (Arc<DecodedBytecode> instead of a published raw pointer), at
+            // which point this can go back to not waiting. Until then,
+            // correctness costs ~225ms on deltablue and that is the right
+            // trade.
             ash_interp::interpreter::retier_chase_abandon();
+            ash_interp::interpreter::retier_chase_join();
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(
@@ -898,19 +917,9 @@ fn run() -> Result<()> {
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
-            // A chase thread may still be inside LLVM, reading bytecode and
-            // type tables. Freeing them now is exactly the use-after-free the
-            // old join avoided by waiting; leaking costs nothing at process
-            // exit and lets us not wait at all.
-            //
-            // BOTH must be leaked, not just the interpreter. The broker
-            // publishes a raw pointer to `bytecode` via set_bytecode and
-            // reads `bytecode.types` while lowering; leaking only the
-            // interpreter left that pointer dangling once main dropped the
-            // decode, and the broker then indexed a freed Vec with whatever
-            // the memory now held — "len is 469 but the index is
-            // 14155380286610417437" from cranelift/lower.rs, at ~20% of runs
-            // under --jit-threshold 1.
+            // Belt and braces while the raw-pointer publication stands: the
+            // join above has already waited, so these cost nothing, but they
+            // mean a chase that somehow outlives it still reads live memory.
             std::mem::forget(interpreter);
             std::mem::forget(bytecode);
         }

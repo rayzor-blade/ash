@@ -282,7 +282,18 @@ impl<'ctx> JITModule<'ctx> {
         cache.borrow_mut().insert(type_ref.0, placeholder);
 
         // Now convert the type
-        let rust_type = self.types_[type_ref.0].clone();
+        // Reborrow rather than clone. `types_` is assigned once when the
+        // module is built (module.rs:208 and :439) and never mutated after --
+        // there is no push/insert/resize/&mut on it anywhere -- so the Vec's
+        // buffer cannot move while this recursion runs.
+        //
+        // This was `self.types_[type_ref.0].clone()`: a DEEP clone of the type
+        // (its obj fields, fun args, enum constructs) taken once per type per
+        // promotion, purely to release the immutable borrow before the
+        // `&mut self` recursive calls below. perf put HLType, HLTypeObj and
+        // HLTypeFun clone plus the malloc/memmove churn they cause at ~15% of
+        // deltablue's whole-process CPU, all of it on the promoter thread.
+        let rust_type: &HLType = unsafe { &*(&self.types_[type_ref.0] as *const HLType) };
         let mut c_type = hl_type {
             kind: rust_type.kind,
             __bindgen_anon_1: hl_type__bindgen_ty_1 {

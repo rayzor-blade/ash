@@ -1480,7 +1480,8 @@ impl<'ctx> JITModule<'ctx> {
 
             Opcode::New { dst } => {
                 let type_index = f.regs.clone()[dst.0 as usize].0;
-                let type_kind = self.types_.clone()[type_index].kind;
+                // `kind` is Copy; cloning the whole type table to read it was pure waste.
+                let type_kind = self.types_[type_index].kind;
 
                 match type_kind {
                     hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
@@ -6122,11 +6123,16 @@ impl<'ctx> FunctionBuilder<'ctx> {
     }
 
     pub fn build(&mut self, module: &mut JITModule<'ctx>) -> Result<()> {
-        let types = module.types_.clone();
         let regs = &self.fun.regs;
-        let type_ = types.get(self.fun.type_.0).expect("Unknown type");
-        let fun = type_.fun.as_ref().expect("Expected to get function type");
-        self.type_ = module.create_function_type(fun).ok();
+        // One HLTypeFun, not a deep clone of every type in the module.
+        let fun = module
+            .types_
+            .get(self.fun.type_.0)
+            .expect("Unknown type")
+            .fun
+            .clone()
+            .expect("Expected to get function type");
+        self.type_ = module.create_function_type(&fun).ok();
         self.value = module.create_function_value(self.fun.findex as usize).ok();
         Ok(())
     }

@@ -768,9 +768,13 @@ impl<'ctx> JITModule<'ctx> {
         for i in 0..funs_len {
             let findex = (&funs[i]).findex as usize;
             self.findexes.insert(findex, FuncPtr::Fun(funs[i].clone()));
-            let types = self.types_.clone();
+            // Clone the one small HLTypeFun, not the entire type table. This
+            // sat inside the per-function loop, so it was O(functions x types)
+            // deep clones; perf put HLType/HLTypeObj/HLTypeFun::clone and the
+            // malloc+memmove churn behind them at the top of the profile.
             let tindex = funs[i].type_.clone();
-            let type_fun = types[tindex.0.clone()].fun.as_ref().unwrap();
+            let type_fun = self.types_[tindex.0].fun.clone().expect("Expected function type");
+            let type_fun = &type_fun;
             self.func_types[findex] = unsafe {
                 Box::into_raw(Box::new(hl_type {
                     kind: hl_type_kind_HFUN,
@@ -812,9 +816,10 @@ impl<'ctx> JITModule<'ctx> {
             let findex = (&natives[i]).findex as usize;
             self.findexes
                 .insert(findex, FuncPtr::Native(natives[i].clone()));
-            let types = self.types_.clone();
+            // Same as the funs loop above: one HLTypeFun, not the table.
             let tindex = natives[i].type_.clone();
-            let type_fun = types[tindex.0.clone()].fun.as_ref().unwrap();
+            let type_fun = self.types_[tindex.0].fun.clone().expect("Expected function type");
+            let type_fun = &type_fun;
             self.func_types[findex] = unsafe {
                 Box::into_raw(Box::new(hl_type {
                     kind: hl_type_kind_HFUN,
@@ -1231,11 +1236,17 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub fn get_or_create_any_type(&mut self, type_idx: usize) -> Result<AnyTypeEnum<'ctx>> {
-        let types = self.types_.clone();
+        // The cache lookup below is the whole point of this function, so the
+        // table must NOT be cloned in front of it: this used to deep-clone
+        // every HLType in the module on every call, including the calls that
+        // then hit the cache and never touched the clone. Only the miss path
+        // needs a type, and it needs exactly one -- cloned to release the
+        // borrow before the `&mut self` conversion call.
         if let Some(type_) = self.type_cache.get(&type_idx) {
             Ok(type_.clone())
         } else {
-            let t = self.convert_hl_type_to_llvm_type(&types[type_idx])?;
+            let one = self.types_[type_idx].clone();
+            let t = self.convert_hl_type_to_llvm_type(&one)?;
             self.type_cache.insert(type_idx, t);
             Ok(t)
         }

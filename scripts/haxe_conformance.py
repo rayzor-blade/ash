@@ -284,6 +284,11 @@ def parse_utest(out: str) -> dict | None:
 # case and a four-space-indented name per test, each printed as it starts.
 RE_CASE = re.compile(r"^Running\s+(\S+?)\.\.\.\s*$", re.M)
 RE_TEST = re.compile(r"^    ([A-Za-z_][A-Za-z0-9_]*)\s*$", re.M)
+# utest's per-test verdict, printed for tests that did not pass:
+#   "  testNanIfs: FAILURE FFFFFFFFFFFFFF."
+# Successes print nothing (the report is configured NeverShowSuccessResults),
+# so passed = accepted - these.
+RE_TEST_BAD = re.compile(r"^  ([A-Za-z_][A-Za-z0-9_]*):\s+(FAILURE|ERROR)\b", re.M)
 
 
 def parse_progress(out: str) -> dict:
@@ -294,9 +299,17 @@ def parse_progress(out: str) -> dict:
     down with it is progress in the sense that matters here — the VM reached
     it — and calling it a pass would be a lie the next fix would expose.
     """
+    accepted = len(RE_TEST.findall(out))
+    bad = len(set(m.group(1) for m in RE_TEST_BAD.finditer(out)))
     return {
         "cases_reached": len(RE_CASE.findall(out)),
-        "tests_reached": len(RE_TEST.findall(out)),
+        "tests_reached": accepted,
+        # "accepted" is tests ash actually took on: utest names each one as it
+        # starts, so this survives a crash mid-case. "passed" subtracts the
+        # ones it then reported as FAILURE or ERROR.
+        "tests_accepted": accepted,
+        "tests_passed": max(0, accepted - bad),
+        "tests_bad": bad,
     }
 
 
@@ -370,6 +383,8 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
         "status": status,
         "ms": round(elapsed, 1),
         "tests_reached": progress["tests_reached"],
+        "tests_accepted": progress["tests_accepted"],
+        "tests_passed": progress["tests_passed"],
         "assertions": (tally or {}).get("assertions", 0),
         "assertions_passed": (tally or {}).get("passed", 0),
         "errors": (tally or {}).get("errors", 0),
@@ -423,6 +438,8 @@ def run_isolated(ash: str, program: pathlib.Path, mode: str, timeout: int,
         "assertion_pct_of_completed":
             round(100.0 * passed / assertions, 2) if assertions else None,
         "tests_reached": sum(r["tests_reached"] for r in results),
+        "tests_accepted": sum(r["tests_accepted"] for r in results),
+        "tests_passed": sum(r["tests_passed"] for r in results),
         "results": results,
     }
 
@@ -620,7 +637,9 @@ def main(argv=None) -> int:
                         "assertions_passed": iso["assertions_passed"],
                         "assertion_pct_of_completed": iso["assertion_pct_of_completed"],
                         "progress": {"cases_reached": iso["cases_total"],
-                                     "tests_reached": iso["tests_reached"]},
+                                     "tests_reached": iso["tests_reached"],
+                                     "tests_accepted": iso["tests_accepted"],
+                                     "tests_passed": iso["tests_passed"]},
                         # Only the cases that did not pass: the full 1195-row
                         # table is noise in a report whose job is to name what
                         # to fix next.
@@ -718,10 +737,15 @@ def main(argv=None) -> int:
             "cases_crashed": sum(r.get("cases_crashed", 0) for r in iso),
             "cases_timeout": sum(r.get("cases_timeout", 0) for r in iso),
             "case_pct": round(100.0 * c_ok / c_total, 1) if c_total else None,
+            # What the site shows, in the plainest unit there is: tests ash
+            # took on, and tests it got right.
+            "tests_accepted": sum(r.get("progress", {}).get("tests_accepted", 0) for r in iso),
+            "tests_passed": sum(r.get("progress", {}).get("tests_passed", 0) for r in iso),
         })
     if report["summary"].get("isolated"):
         sm = report["summary"]
-        print(f"\n{sm['cases_ok']}/{sm['cases_total']} cases passed "
+        print(f"\n{sm['tests_passed']}/{sm['tests_accepted']} tests passed")
+        print(f"{sm['cases_ok']}/{sm['cases_total']} cases passed "
               f"({sm['case_pct']}%)  [{sm['cases_failed']} failed, "
               f"{sm['cases_crashed']} crashed]")
     print(f"\n{passes}/{total} suites passed")

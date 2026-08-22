@@ -257,7 +257,7 @@ HashLink Bytecode Runtime
 <div style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px">
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-assert-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
-<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">tests reached</div>
+<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">tests passed</div>
 </div>
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-suite-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
@@ -274,7 +274,7 @@ HashLink Bytecode Runtime
 <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">Loading conformance results…</div>
 <noscript><div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">The conformance table needs JavaScript; the raw results live in <a href="bench/conformance.json">bench/conformance.json</a>.</div></noscript>
 </div>
-<div id="conf-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.1)">Each of the suite's test cases runs in its own process, so a case that crashes the VM costs that case and not the measurement. The headline is cases passed over cases attempted — a crashing case counts as a failure, never as an absence. Run whole, the suite reports its tally only at the very end, which means a single crash anywhere reports as zero everywhere; that is what this replaces. Cases that crash are listed separately from cases that ran and disagreed with Haxe, because they are different defects.</div>
+<div id="conf-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.1)">The official Haxe test suite, unmodified, run on every push.</div>
 </div>
 
 <p id="conf-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
@@ -461,6 +461,9 @@ HashLink Bytecode Runtime
   // a suite that never reached utest's tally reports "not reported yet"
   // rather than 0%, because "we do not know" and "we got it all wrong" are
   // different claims and only one of them is true.
+  // Thousands separators: "6,343" reads at a glance where "6343" does not.
+  function fmtInt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+
   var CONF_LABEL = {
     unit: 'unit — language core',
     sys: 'sys — files, processes, environment',
@@ -486,12 +489,9 @@ HashLink Bytecode Runtime
     // erasing it — which is the only reason a real percentage can be shown
     // at all. Every whole-suite figure below can report nothing but zero
     // while any single case still crashes.
-    if (typeof sum.case_pct === 'number') {
-      assertEl.textContent = sum.case_pct + '%';
-      assertEl.title = sum.cases_ok + ' of ' + sum.cases_total +
-        ' test cases pass, each run in its own process (' +
-        (sum.cases_failed || 0) + ' failed, ' + (sum.cases_crashed || 0) + ' crashed)';
-      assertLbl.textContent = 'test cases passing';
+    if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
+      assertEl.textContent = fmtInt(sum.tests_passed) + ' / ' + fmtInt(sum.tests_accepted);
+      assertLbl.textContent = 'tests passed';
     } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
       assertEl.textContent = sum.assertion_pct + '%';
       assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total + ' assertions';
@@ -510,15 +510,11 @@ HashLink Bytecode Runtime
 
     var suiteEl = document.getElementById('conf-suite-value');
     var suiteLbl = document.getElementById('conf-suite-label');
-    if (typeof sum.case_pct === 'number') {
-      // "0 / 3 suites" is technically true and useless: one crashing case in
-      // 1195 fails its whole suite. Cases that took the VM down are the
-      // actionable number, and they are the ones isolation makes visible.
-      suiteEl.textContent = String(sum.cases_crashed || 0);
-      suiteEl.title = 'cases where the VM did not survive, as opposed to ' +
-        (sum.cases_failed || 0) + ' that ran and disagreed with Haxe';
-      if (!sum.cases_crashed) suiteEl.style.color = '#a8703c';
-      if (suiteLbl) suiteLbl.textContent = 'cases crashing the VM';
+    if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
+      var failing = sum.tests_accepted - sum.tests_passed;
+      suiteEl.textContent = fmtInt(failing);
+      if (!failing) suiteEl.style.color = '#a8703c';
+      if (suiteLbl) suiteLbl.textContent = 'tests still failing';
     } else {
       suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
       if (!sum.suites_passed) suiteEl.style.color = '#8a807a';

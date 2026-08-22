@@ -23,6 +23,8 @@ a baseline it always exits 0: a first run is a measurement, not a verdict.
 """
 
 import argparse
+import collections
+import concurrent.futures as cf
 import json
 import os
 import pathlib
@@ -128,6 +130,57 @@ def ensure_checkout(root: pathlib.Path, tag: str) -> pathlib.Path:
                if sc.returncode else "")
         )
     return src
+
+
+# The suite's own runner takes no filter: TestMain builds a fixed array of
+# case instances and adds every one of them. That is fine until the VM under
+# test crashes — utest's tally is printed once, at the end, so ONE bad case
+# takes the whole measurement down with it and the run reports as though
+# nothing worked. Isolation mode needs two things the suite does not offer:
+# enumerate the cases, and run exactly one. This adds both, guarded behind
+# argv flags so an unpatched invocation behaves identically.
+ISOLATION_HOOK = """\
+	var runner = new Runner();
+	var __ashArgs = Sys.args();
+	var __ashOnly = null;
+	for (__i in 0...__ashArgs.length) {
+		if (__ashArgs[__i] == "--ash-list") {
+			for (__c in classes) Sys.println("ASHCASE " + Type.getClassName(Type.getClass(__c)));
+			return;
+		}
+		if (__ashArgs[__i] == "--ash-only" && __i + 1 < __ashArgs.length) __ashOnly = __ashArgs[__i + 1];
+	}
+	for (c in classes) {
+		if (__ashOnly != null && Type.getClassName(Type.getClass(c)) != __ashOnly) continue;
+		runner.addCase(c);
+	}
+"""
+
+ISOLATION_ORIGINAL = """\
+	var runner = new Runner();
+	for (c in classes) {
+		runner.addCase(c);
+	}
+"""
+
+
+def patch_for_isolation(src: pathlib.Path) -> bool:
+    """Teach the unit suite's TestMain to list and to filter its cases.
+
+    Returns True when the suite is patched (already or newly). Idempotent, and
+    a no-op returning False if upstream's runner setup ever stops matching —
+    isolation is then simply unavailable rather than silently mismeasuring.
+    """
+    main_hx = src / "tests" / "unit" / "src" / "unit" / "TestMain.hx"
+    if not main_hx.is_file():
+        return False
+    text = main_hx.read_text()
+    if "--ash-only" in text:
+        return True
+    if ISOLATION_ORIGINAL not in text:
+        return False
+    main_hx.write_text(text.replace(ISOLATION_ORIGINAL, ISOLATION_HOOK))
+    return True
 
 
 def ensure_libs(libs, haxelib: str) -> list[str]:
@@ -247,6 +300,133 @@ def parse_progress(out: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Isolation mode
+#
+# One process per test case. The whole reason this exists: the suite's runner
+# holds every case in one process and prints its tally once, at the end, so a
+# VM that crashes in case 72 of 1195 reports exactly what a VM that crashes in
+# case 1 reports — nothing. That makes the headline number a crash detector
+# rather than a conformance measure, and it cannot improve until the LAST
+# crash is fixed. Run each case on its own and a crash costs one case: every
+# other case still votes, the percentage is real from the first run, and it
+# rises with every fix instead of staying at zero.
+# ---------------------------------------------------------------------------
+
+RE_ASHCASE = re.compile(r"^ASHCASE\s+(\S+)\s*$", re.M)
+
+
+def list_cases(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
+    """Ask the patched suite to name its cases."""
+    r = run([ash, "--mode", mode, str(program), "--ash-list"],
+            cwd=str(program.parent.parent), timeout=timeout)
+    return RE_ASHCASE.findall(r.stdout or "")
+
+
+def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
+                 timeout: int) -> dict:
+    """Run a single case in its own process and classify the outcome.
+
+    `crash` is kept distinct from `fail` on purpose. A failing case is ash
+    disagreeing with Haxe about a result — a conformance gap. A crashing case
+    is ash losing the VM — a defect of a different severity, and the thing
+    isolation exists to stop from swallowing everything after it.
+    """
+    started = time.time()
+    timed_out = False
+    try:
+        r = run([ash, "--mode", mode, str(program), "--ash-only", case],
+                cwd=str(program.parent.parent), timeout=timeout)
+        out = (r.stdout or "") + (r.stderr or "")
+        rc = r.returncode
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        rc, timed_out = -1, True
+    elapsed = (time.time() - started) * 1000.0
+
+    tally = parse_utest(out)
+    progress = parse_progress(out)
+    if timed_out:
+        status = "TIMEOUT"
+    elif tally is None:
+        # No tally printed at all: the VM did not survive to the end of the
+        # case, whatever the exit code claims.
+        status = "CRASH"
+    elif tally["all_ok"]:
+        status = "OK"
+    else:
+        status = "FAIL"
+
+    detail = ""
+    if status in ("CRASH", "TIMEOUT"):
+        for line in out.splitlines():
+            if "CRASH:" in line or "panicked at" in line or "uncaught exception" in line:
+                detail = line.strip()[:300]
+                break
+        if not detail and rc:
+            detail = f"exit {rc}"
+    return {
+        "case": case,
+        "status": status,
+        "ms": round(elapsed, 1),
+        "tests_reached": progress["tests_reached"],
+        "assertions": (tally or {}).get("assertions", 0),
+        "assertions_passed": (tally or {}).get("passed", 0),
+        "errors": (tally or {}).get("errors", 0),
+        "failures": (tally or {}).get("failures", 0),
+        "detail": detail,
+    }
+
+
+def run_isolated(ash: str, program: pathlib.Path, mode: str, timeout: int,
+                 jobs: int, limit: int | None = None) -> dict:
+    """Every case, each in its own process, aggregated into one verdict."""
+    cases = list_cases(ash, program, mode, timeout)
+    if not cases:
+        return {"error": "no cases enumerated (is the suite patched and rebuilt?)"}
+    if limit:
+        cases = cases[:limit]
+    print(f"  isolation: {len(cases)} cases, {jobs} at a time", flush=True)
+
+    results: list[dict] = []
+    with cf.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futs = {pool.submit(run_one_case, ash, program, mode, c, timeout): c
+                for c in cases}
+        done = 0
+        for fut in cf.as_completed(futs):
+            results.append(fut.result())
+            done += 1
+            if done % 100 == 0 or done == len(cases):
+                print(f"    {done}/{len(cases)} cases", flush=True)
+
+    results.sort(key=lambda r: r["case"])
+    counts = collections.Counter(r["status"] for r in results)
+    assertions = sum(r["assertions"] for r in results)
+    passed = sum(r["assertions_passed"] for r in results)
+    return {
+        # The headline. Its denominator is the case list itself, so it cannot
+        # be gamed by a crash: a case that takes the VM down is a case that
+        # did not pass, and it still counts against us.
+        "cases_total": len(results),
+        "cases_ok": counts["OK"],
+        "cases_failed": counts["FAIL"],
+        "cases_crashed": counts["CRASH"],
+        "cases_timeout": counts["TIMEOUT"],
+        "case_pct": round(100.0 * counts["OK"] / len(results), 2) if results else None,
+        # Finer grained, and deliberately NOT the headline: a crashed case
+        # prints no tally, so its assertions are missing from BOTH sides of
+        # this ratio. That flatters us — the more cases crash, the higher it
+        # reads. Quote it only alongside cases_crashed, or against a
+        # reference denominator (see assertions_reference below).
+        "assertions_of_completed": assertions,
+        "assertions_passed": passed,
+        "assertion_pct_of_completed":
+            round(100.0 * passed / assertions, 2) if assertions else None,
+        "tests_reached": sum(r["tests_reached"] for r in results),
+        "results": results,
+    }
+
+
 def missing_natives(out: str) -> list[str]:
     """ash narrates unresolved natives at startup; that line is a finding."""
     for line in out.splitlines():
@@ -283,6 +463,16 @@ def main(argv=None) -> int:
                          "committed macOS set is used automatically on darwin")
     ap.add_argument("--skip-build", action="store_true",
                     help="reuse bytecode already built under the checkout")
+    ap.add_argument("--isolate", action="store_true",
+                    help="run each test case in its own process, so one crash "
+                         "costs one case instead of the whole measurement "
+                         "(unit suite only; patches the suite's TestMain)")
+    ap.add_argument("--isolate-jobs", type=int, default=8,
+                    help="cases to run concurrently in --isolate (default 8)")
+    ap.add_argument("--isolate-timeout", type=int, default=60,
+                    help="per-case timeout in seconds for --isolate (default 60)")
+    ap.add_argument("--isolate-limit", type=int, default=None,
+                    help="run only the first N cases (for a quick check)")
     args = ap.parse_args(argv)
 
     root = args.repo_root.resolve()
@@ -367,6 +557,12 @@ def main(argv=None) -> int:
             continue
         print(f"\n== {name} — {spec['about']}")
 
+        isolating = bool(args.isolate) and name == "unit"
+        if isolating and not patch_for_isolation(src):
+            print("   NOTE: could not patch TestMain for isolation; "
+                  "falling back to whole-suite runs")
+            isolating = False
+
         gone = [] if args.skip_build else ensure_libs(spec.get("needs", []), args.haxelib)
         if gone:
             print(f"   SKIP: haxelib(s) unavailable: {', '.join(gone)}")
@@ -397,6 +593,53 @@ def main(argv=None) -> int:
             engines = [(f"ash:{m}", [ash, "--mode", m]) for m in modes]
             if args.reference:
                 engines.append(("hashlink", [args.reference]))
+
+            if isolating:
+                for m in modes:
+                    label = f"ash:{m}"
+                    print(f"   {label}: per-case isolation", flush=True)
+                    iso = run_isolated(ash, p, m, args.isolate_timeout,
+                                       args.isolate_jobs, args.isolate_limit)
+                    if "error" in iso:
+                        print(f"   SKIP: {iso['error']}")
+                        report["results"].append({
+                            "suite": name, "program": prog, "engine": label,
+                            "status": "SKIP", "detail": iso["error"]})
+                        continue
+                    status = "OK" if iso["cases_ok"] == iso["cases_total"] else "PARTIAL"
+                    rec = {
+                        "suite": name, "program": prog, "engine": label,
+                        "status": status, "isolated": True,
+                        "cases_total": iso["cases_total"],
+                        "cases_ok": iso["cases_ok"],
+                        "cases_failed": iso["cases_failed"],
+                        "cases_crashed": iso["cases_crashed"],
+                        "cases_timeout": iso["cases_timeout"],
+                        "case_pct": iso["case_pct"],
+                        "assertions_of_completed": iso["assertions_of_completed"],
+                        "assertions_passed": iso["assertions_passed"],
+                        "assertion_pct_of_completed": iso["assertion_pct_of_completed"],
+                        "progress": {"cases_reached": iso["cases_total"],
+                                     "tests_reached": iso["tests_reached"]},
+                        # Only the cases that did not pass: the full 1195-row
+                        # table is noise in a report whose job is to name what
+                        # to fix next.
+                        "cases": [r for r in iso["results"] if r["status"] != "OK"],
+                    }
+                    report["results"].append(rec)
+                    print(f"     cases {iso['cases_ok']}/{iso['cases_total']} ok "
+                          f"({iso['case_pct']}%)  "
+                          f"[{iso['cases_failed']} failed, "
+                          f"{iso['cases_crashed']} crashed, "
+                          f"{iso['cases_timeout']} timed out]")
+                    print(f"     assertions {iso['assertions_passed']}/"
+                          f"{iso['assertions_of_completed']} "
+                          f"({iso['assertion_pct_of_completed']}%) "
+                          f"among cases that ran to completion")
+                if args.reference:
+                    engines = [e for e in engines if e[0] == "hashlink"]
+                else:
+                    engines = []
 
             for label, argv0 in engines:
                 t0 = time.perf_counter()

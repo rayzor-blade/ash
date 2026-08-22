@@ -676,6 +676,15 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                         // is the whole reason a 4-core CI runner did not
                         // reproduce this box's numbers.
                         lower_own_priority();
+                        // The program may already have finished between this
+                        // thread being spawned and being scheduled. Its
+                        // result would be installed into a runtime nobody is
+                        // going to call again, and shutdown would wait for
+                        // it: deltablue paid 5.1s at exit for exactly this,
+                        // having produced its answer at 228ms.
+                        if retier_abandoned() {
+                            return;
+                        }
                         compile_with_llvm(&chase, 1, findex);
                     })
                 {
@@ -1039,6 +1048,20 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
     use std::sync::atomic::Ordering;
     let t0 = std::time::Instant::now();
     let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
+    // Every promotion serialises on this one mutex and holds it for the whole
+    // compile — ~500ms on this machine. Checking the abandon flag only before
+    // the lock is useless: by the time the program ends, the chases are
+    // already queued ON it, and each still runs to completion before the next
+    // sees the flag. deltablue answered at 228ms and exited at 4.5s, with the
+    // main thread 97.7% blocked in __ulock_wait behind exactly this queue.
+    //
+    // Checking here, holding the lock, drains that queue at lock-handoff
+    // speed. Safe for every caller: retier_chase_join runs after
+    // execute_entrypoint has fully returned (the event loop included), so
+    // nothing can call the code this would have produced.
+    if retier_abandoned() {
+        return std::ptr::null_mut();
+    }
     if let LlvmState::Pending(_) = &*guard {
         let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
             unreachable!()
@@ -10072,9 +10095,27 @@ fn llvm_chase_enabled() -> bool {
 static RETIER_CHASE: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Set once the program's entrypoint has returned. A chase that has not yet
+/// begun its LLVM compile checks this and gives up instead of starting work
+/// whose result can no longer be used by anyone.
+static RETIER_ABANDON: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether speculative re-tier work should give up now.
+pub(crate) fn retier_abandoned() -> bool {
+    RETIER_ABANDON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Wait for every outstanding re-tier chase. Called once the program's
 /// entrypoint has returned, before anything the chase can touch is dropped.
 pub fn retier_chase_join() {
+    // Abandon first, THEN join. Every chase that has not yet entered its
+    // compile now returns immediately, so the join waits only on work
+    // genuinely in flight. Detaching instead is not an option: a chase still
+    // compiling while the interpreter is torn down touches the shared JIT
+    // module and segfaults (about one run in ten under --jit-log), which is
+    // why this join exists at all.
+    RETIER_ABANDON.store(true, std::sync::atomic::Ordering::Relaxed);
     let handles: Vec<_> = {
         let mut g = RETIER_CHASE.lock().expect("retier chase mutex poisoned");
         std::mem::take(&mut *g)

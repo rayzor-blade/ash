@@ -899,10 +899,20 @@ fn run() -> Result<()> {
                 eprintln!("Interpreter returned: {:?}", result);
             }
             // A chase thread may still be inside LLVM, reading bytecode and
-            // type tables this owns. Freeing them now is exactly the
-            // use-after-free the old join avoided by waiting; leaking costs
-            // nothing at process exit and lets us not wait at all.
+            // type tables. Freeing them now is exactly the use-after-free the
+            // old join avoided by waiting; leaking costs nothing at process
+            // exit and lets us not wait at all.
+            //
+            // BOTH must be leaked, not just the interpreter. The broker
+            // publishes a raw pointer to `bytecode` via set_bytecode and
+            // reads `bytecode.types` while lowering; leaking only the
+            // interpreter left that pointer dangling once main dropped the
+            // decode, and the broker then indexed a freed Vec with whatever
+            // the memory now held — "len is 469 but the index is
+            // 14155380286610417437" from cranelift/lower.rs, at ~20% of runs
+            // under --jit-threshold 1.
             std::mem::forget(interpreter);
+            std::mem::forget(bytecode);
         }
         Mode::Jit => unreachable!("handled before the interpreter prep"),
     }

@@ -482,8 +482,17 @@ pub unsafe extern "C" fn hlp_get_closure_type(t: *mut hl_type) -> *mut hl_type {
         .expect("Type is not a function");
 
     if ft.closure_type.kind != hl_type_kind_HFUN {
+        // Already stripped: a closure type has no `this` left to remove, so
+        // stripping again is a no-op rather than an error. Upstream asserts
+        // here because its callers only ever pass full method types; ash has
+        // one more caller than upstream does. hlp_alloc_closure_ptr now
+        // stores the stripped type on the closure (so a method closure is not
+        // one argument too wide), and the JIT hands that same type back to
+        // this function when it lowers InstanceClosure/VirtualClosure —
+        // which turned a 1-arg method into a 0-arg type and aborted the VM
+        // on test_stdlib under --mode jit.
         if ft.nargs == 0 {
-            panic!("assert");
+            return t;
         }
 
         ft.closure_type.kind = hl_type_kind_HFUN;

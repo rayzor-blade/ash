@@ -226,21 +226,6 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
     if (*to).kind == hl::hl_type_kind_HDYN {
         return hlp_is_dynamic(t);
     }
-    // HNULL<T> is castable to T and vice versa
-    if (*t).kind == hl::hl_type_kind_HNULL {
-        let tp = (*t).__bindgen_anon_1.tparam;
-        if tp.is_null() || (tp as usize) < 0x10000 {
-            return false;
-        }
-        return hlp_safe_cast(tp, to);
-    }
-    if (*to).kind == hl::hl_type_kind_HNULL {
-        let tp = (*to).__bindgen_anon_1.tparam;
-        if tp.is_null() || (tp as usize) < 0x10000 {
-            return false;
-        }
-        return hlp_safe_cast(t, tp);
-    }
     // HFUN and HMETHOD are interchangeable for safe casting
     let t_kind = (*t).kind;
     let to_kind = (*to).kind;

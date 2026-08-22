@@ -656,7 +656,12 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             }
         }
     } else {
-        (*ot).vobj_proto = std::ptr::dangling_mut::<*mut c_void>();
+        // HashLink's "this type has no proto" sentinel is exactly 1
+        // (hashlink src/std/obj.c:312), and every reader in ash tests
+        // `vobj_proto as usize > 1`. dangling_mut() is align_of::<*mut
+        // c_void>() == 8, which sails through all of those guards and then
+        // gets indexed as if it were a real proto array at address 8.
+        (*ot).vobj_proto = 1usize as *mut *mut c_void;
     }
 
     (*t).methods = allocator

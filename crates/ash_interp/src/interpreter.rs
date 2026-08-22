@@ -733,10 +733,23 @@ fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mut c_void) {
             }
             // The full vtable: own protos plus everything inherited.
             // `pindex` is the absolute slot, so no offsetting is needed.
+            //
+            // An inherited proto must NOT claim a slot the child overrides.
+            // This walk goes most-derived first, so the first claim of a slot
+            // is the override and every later one is the base it replaced.
+            // Registering those too meant compiling a base method wrote its
+            // address into the CHILD's slot, clobbering the override: on
+            // deltablue, promoting findex 41 -- a base predicate whose body
+            // really is `return false` -- silently redirected every
+            // overriding call to it, and the solver's total came out ~0.4%
+            // low with a different wrong value each run, depending on which
+            // functions happened to promote.
+            let mut claimed: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
             let mut cur = t.obj.as_ref();
             while let Some(o) = cur {
                 for p in &o.proto {
-                    if p.pindex >= 0 {
+                    if p.pindex >= 0 && claimed.insert(p.pindex as usize) {
                         m.entry(p.findex as usize)
                             .or_default()
                             .push((tidx, p.pindex as usize));

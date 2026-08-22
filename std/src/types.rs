@@ -45,6 +45,12 @@ pub fn hlt_bytes() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl_type_kind_HBYTES) as usize) as *mut hl_type
 }
 
+/// Persistent type singleton for HTYPE.
+pub fn hlt_type() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HTYPE) as usize) as *mut hl_type
+}
+
 /// Persistent type singleton for HDYN.
 pub fn hlt_dyn() -> *mut hl_type {
     static CELL: OnceLock<usize> = OnceLock::new();

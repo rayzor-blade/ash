@@ -2473,8 +2473,8 @@ impl HLInterpreter {
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
         unsafe extern "C" fn fiber_closure_runner(
             c: *mut c_void,
-            _args: *mut *mut c_void,
-            _nargs: i32,
+            args: *mut *mut c_void,
+            nargs: i32,
         ) -> *mut c_void {
             let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
                 return std::ptr::null_mut();
@@ -2495,6 +2495,40 @@ impl HLInterpreter {
             }
             let interp = &mut *ctx.interp;
             let bytecode = &*ctx.bytecode;
+            // Marshal the caller's arguments. These were dropped outright
+            // until now — the parameters were literally named `_args` and
+            // `_nargs` — so every stub closure invoked from native code ran
+            // with `this` and nothing else, and the callee saw uninitialised
+            // parameters. ArrayDyn.__cast(t) compares `t` against a type and
+            // returned null for want of ever receiving one, which is what
+            // made Array<Dynamic> -> Array<Int> casts fail under the
+            // interpreter.
+            //
+            // The bridge contract is an array of `vdynamic*`, so each word is
+            // converted against the callee's declared parameter kind — the
+            // same rule try_handle_call_method_native applies.
+            let n = nargs.max(0) as usize;
+            if n > 0 && !args.is_null() {
+                let declared: Vec<hl::hl_type_kind> = func_of(&interp.targets, findex)
+                    .and_then(|fi| {
+                        bytecode.types[bytecode.functions[fi].type_.0]
+                            .fun
+                            .as_ref()
+                            .map(|f| f.args.iter().map(|a| bytecode.types[a.0].kind).collect())
+                    })
+                    .unwrap_or_default();
+                // `this` already occupies slot 0 when the closure carries a
+                // value, so the caller's first argument is declared arg 1.
+                let shift = args_v.len();
+                for i in 0..n {
+                    let raw = *(args as *mut *mut hl::vdynamic).add(i);
+                    let kind = declared
+                        .get(i + shift)
+                        .copied()
+                        .unwrap_or(hl::hl_type_kind_HDYN);
+                    args_v.push(interp.dynamic_to_value_for_kind(raw, kind));
+                }
+            }
             match interp.call_function(bytecode, &*ctx.resolver, findex, &args_v) {
                 Ok(v) => {
                     // Box the result as a vdynamic* for the native caller.
@@ -9097,6 +9131,10 @@ impl HLInterpreter {
     ) -> NanBoxedValue {
         if d.is_null() {
             return NanBoxedValue::null();
+        }
+        // Not every word arriving here is a box — see is_derefable_dynamic.
+        if !Self::is_derefable_dynamic(d) {
+            return NanBoxedValue::from_ptr(d as usize);
         }
         if dst_kind == hl::hl_type_kind_HDYN {
             return NanBoxedValue::from_ptr(d as usize);

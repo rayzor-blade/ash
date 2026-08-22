@@ -469,6 +469,14 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
+            } else {
+                // castFun could not be stored because __cast is an
+                // interpreter stub; run it through the bridge instead.
+                let v = crate::obj::cast_via_stub_castfun(
+                    t, *(data as *mut *mut vdynamic), to);
+                if !v.is_null() {
+                    return v as *mut c_void;
+                }
             }
         }
         (hl_type_kind_HSTRUCT, hl_type_kind_HSTRUCT) => {
@@ -500,6 +508,14 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                     std::io::Write::flush(&mut std::io::stderr()).ok();
                 }
                 let v = cast_fn(obj_val, to);
+                if !v.is_null() {
+                    return v as *mut c_void;
+                }
+            } else {
+                // castFun could not be stored because __cast is an
+                // interpreter stub; run it through the bridge instead.
+                let v = crate::obj::cast_via_stub_castfun(
+                    t, *(data as *mut *mut vdynamic), to);
                 if !v.is_null() {
                     return v as *mut c_void;
                 }

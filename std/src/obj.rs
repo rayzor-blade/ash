@@ -2050,6 +2050,87 @@ pub unsafe extern "C" fn hlp_vresolve_method_hashed(
     }
 }
 
+/// Invoke a type's `__cast` when the runtime slot could not hold it.
+///
+/// `hl_runtime_obj.castFun` is a bare C function pointer, so it can only
+/// hold real code — an interpreter stub sentinel (findex+1) stored there
+/// would be called as an address and SIGBUS. hlp_get_obj_rt therefore
+/// stores None for a stub, which is correct AND means `__cast` never runs
+/// under the interpreter at all: every method is a stub there. Casts that
+/// Haxe defines entirely in terms of __cast — Array<Dynamic> to Array<Int>
+/// and friends, via ArrayBase.__cast — then failed with invalid_cast.
+///
+/// This re-resolves `__cast` on the object's own type and calls it through
+/// the interpreter bridge when it is a stub. Returns null when the type has
+/// no __cast, when it is real code (the caller's castFun path already
+/// handled that), or when no bridge is registered.
+pub(crate) unsafe fn cast_via_stub_castfun(
+    t: *mut hl_type,
+    obj: *mut vdynamic,
+    to: *mut hl_type,
+) -> *mut vdynamic {
+    if t.is_null() || obj.is_null() {
+        return ptr::null_mut();
+    }
+    let Some(o) = (*t).__bindgen_anon_1.obj.as_ref() else {
+        return ptr::null_mut();
+    };
+    // Build the runtime object FIRST: obj_resolve_field walks rt->parent, so
+    // with a null rt it answers "no such field" for every field there is.
+    let mut rt = o.rt;
+    if rt.is_null() || (*rt).methods.is_null() {
+        rt = hl_get_obj_proto(t);
+    }
+    if rt.is_null() || (*rt).methods.is_null() {
+        return ptr::null_mut();
+    }
+    let f = obj_resolve_field(o, hlp_hash_gen(USTR_CAST.as_ptr(), false));
+    if f.is_null() || (*f).field_index >= 0 {
+        if std::env::var("ASH_DBG_SC").is_ok() {
+            eprintln!("[stub-cast] no __cast on type {:p}", t);
+        }
+        return ptr::null_mut();
+    }
+    let idx = (-(*f).field_index - 1) as usize;
+    if idx >= (*rt).nmethods as usize {
+        return ptr::null_mut();
+    }
+    let fptr: *mut c_void = *(*rt).methods.add(idx);
+    let addr = fptr as usize;
+    if addr == 0 || addr >= 0x100000 {
+        return ptr::null_mut(); // real code: the castFun path owns it
+    }
+    let Some(runner) = crate::fiber::closure_runner() else {
+        if std::env::var("ASH_DBG_SC").is_ok() {
+            eprintln!("[stub-cast] no closure runner registered");
+        }
+        return ptr::null_mut();
+    };
+    if std::env::var("ASH_DBG_SC").is_ok() {
+        eprintln!("[stub-cast] invoking __cast stub {:#x} to={:p}", addr, to);
+    }
+    // __cast(this, toType) -> Dynamic. `this` rides in the closure, the
+    // target type is the single argument; hl_type* is passed as the opaque
+    // pointer the callee expects.
+    let mut cl = vclosure {
+        t: (*f).t,
+        fun: fptr,
+        hasValue: 1,
+        stackCount: 0,
+        value: obj as *mut c_void,
+    };
+    // The bridge's contract is an array of vdynamic*, so the target type is
+    // boxed rather than passed raw: an hl_type* handed over as if it were a
+    // box gets its `kind` word read as a type pointer.
+    let mut t_slot = to;
+    let boxed = crate::cast::hlp_make_dyn(
+        &mut t_slot as *mut _ as *mut c_void,
+        crate::types::hlt_type(),
+    );
+    let mut arg: *mut vdynamic = boxed;
+    runner(&mut cl, &mut arg as *mut *mut vdynamic, 1)
+}
+
 /// A varray of HDYN elements, for callers (JIT-emitted code) that need to
 /// stage boxed arguments without holding a dyn type pointer of their own.
 #[no_mangle]

@@ -238,16 +238,14 @@ expectation = "checksum"
 checksums = [{ value = "14065400", label = "reference" }]
 timeout_secs = 300
 group = "oop"
-# full-jit only, for now, and deliberately: the bench found real defects in
-# the other modes the day it was added. The interp SIGSEGV is root-caused
-# and fixed (type-name misdecode in the interpreter's string-equality fast
-# path — not GC; verified 20/20 at checksum 14065400), but hybrid still
-# dies 10/10 on an uncaught Null access with either compiled tier
-# (--jit-tier off is correct). --mode jit is correct and agrees with stock
-# HashLink 1.15 on x86_64. Widen modes when BACKLOG's "DeltaBlue" entry
-# closes.
-modes = ["full-jit"]
-modes_reason = "hybrid dies on Null access via the compiled tiers; see BACKLOG"
+# All modes. The bench found real defects in every mode the day it was
+# added, which is why it exists: the interp SIGSEGV was a type-name
+# misdecode in the string-equality fast path, and the hybrid Null access
+# was CallMethod resolving a promotion-patched vtable row from the
+# register's DECLARED type — every overridden method dispatched the base
+# class's code once its row was patched. Both fixed; hybrid now 5/5 at
+# the reference checksum with either compiled tier.
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
 description = """DeltaBlue constraint solver, verbatim from rayzor's suite \
 (40 x chainTest(100) + projectionTest(100)) so the row is directly comparable \
 with rayzor's published numbers. Real polymorphic dispatch over a constraint \

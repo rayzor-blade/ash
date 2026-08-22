@@ -121,6 +121,11 @@ impl NanBoxedValue {
     // --- Type checks ---
 
     #[inline(always)]
+    /// The raw NaN-box word, for bit-exact comparison in diagnostics.
+    pub fn raw_bits(&self) -> u64 {
+        self.0
+    }
+
     pub fn is_f64(&self) -> bool {
         let exp_bits = (self.0 >> 52) & 0x7FF;
         if exp_bits != 0x7FF {

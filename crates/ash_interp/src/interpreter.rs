@@ -3373,6 +3373,17 @@ impl HLInterpreter {
             .unwrap_or(func_idx)
     }
 
+    /// `ASH_TIERED_SHADOW` membership, parsed once.
+    fn shadow_findex(findex: usize) -> bool {
+        static V: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+        V.get_or_init(|| {
+            std::env::var("ASH_TIERED_SHADOW")
+                .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+                .unwrap_or_default()
+        })
+        .contains(&findex)
+    }
+
     pub fn call_function(
         &mut self,
         bytecode: &DecodedBytecode,
@@ -3388,6 +3399,38 @@ impl HLInterpreter {
             // code once beadie's broker has installed it.
             if self.tiered_runtime.is_some() {
                 if let Some(entry) = self.tiered_on_invoke(bytecode, findex, func_idx) {
+                    // ASH_TIERED_SHADOW=1,2,3: run the listed findexes through
+                    // BOTH the compiled entry and the interpreter, compare the
+                    // NaN-boxed results bit for bit, and log any divergence
+                    // with the argument bits. Returns the interpreter's answer
+                    // so the program's continued behaviour says whether the
+                    // divergence is the whole story. Only sound for functions
+                    // free of side effects — it executes them twice.
+                    if Self::shadow_findex(findex) {
+                        let compiled = self.call_compiled_function(findex, &entry, args);
+                        let interp =
+                            self.execute_hl_function(bytecode, native_resolver, func_idx, args);
+                        match (&compiled, &interp) {
+                            (Ok(c), Ok(i)) => {
+                                if c.raw_bits() != i.raw_bits() {
+                                    eprintln!(
+                                        "[shadow] findex={} DIVERGE compiled={:#018x} interp={:#018x} args={:?}",
+                                        findex,
+                                        c.raw_bits(),
+                                        i.raw_bits(),
+                                        args.iter().map(|a| a.raw_bits()).collect::<Vec<u64>>()
+                                    );
+                                }
+                            }
+                            _ => eprintln!(
+                                "[shadow] findex={} compiled_ok={} interp_ok={}",
+                                findex,
+                                compiled.is_ok(),
+                                interp.is_ok()
+                            ),
+                        }
+                        return interp;
+                    }
                     match self.call_compiled_function(findex, &entry, args) {
                         Ok(v) => {
                             if let Some(tiered) = self.tiered_runtime.as_mut() {
@@ -3564,6 +3607,21 @@ impl HLInterpreter {
             });
             if skip.contains(&(func.findex as usize)) {
                 return Err("skipped_by_env".to_string());
+            }
+        }
+        // The inverse gate: ASH_TIERED_ONLY_FINDEXES=1,2,3 promotes ONLY the
+        // listed findexes. Skip-lists cannot bisect promotion defects — every
+        // exclusion lets the next-hottest function promote instead, so the
+        // tested set never converges. This pins it exactly.
+        {
+            static ONLY: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+            let only = ONLY.get_or_init(|| {
+                std::env::var("ASH_TIERED_ONLY_FINDEXES")
+                    .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+                    .unwrap_or_default()
+            });
+            if !only.is_empty() && !only.contains(&(func.findex as usize)) {
+                return Err("not_in_only_set".to_string());
             }
         }
         // Static signature arg count; call_compiled_function marshals at most 8.
@@ -4981,6 +5039,16 @@ impl HLInterpreter {
                 // Dereference a Ref pointer to read back the value.
                 let ptr_val = frame.registers.get(src.0);
                 let ptr = ptr_val.as_ptr() as *const i64;
+                if (ptr as usize) != 0 && (ptr as usize) < 0x10000 {
+                    return Err(anyhow!(
+                        "Unref of non-pointer {:#x} (raw {:#018x}) at pc {} in {} (src reg={})",
+                        ptr as usize,
+                        ptr_val.raw_bits(),
+                        frame.pc,
+                        func.name(),
+                        src.0
+                    ));
+                }
                 if !ptr.is_null() {
                     let val = unsafe { *ptr };
                     let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
@@ -6521,20 +6589,36 @@ impl HLInterpreter {
                         (method_ptr as usize).wrapping_sub(1)
                     } else {
                         // A real code pointer — `patch_vtable_slots` wrote the
-                        // compiled address into this row on promotion. The
-                        // interpreter dispatches by findex (its call path then
-                        // finds the compiled entry through the bead), so
-                        // resolve the findex from the bytecode instead of
-                        // decoding the pointer as one — which produced
-                        // "findex 47297429503 not found".
-                        self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                        // compiled address into this row on promotion, so the
+                        // findex has to be re-derived. It MUST come from the
+                        // RUNTIME type's proto chain: this branch only ever
+                        // runs after a promotion, and resolving from the
+                        // register's declared type silently dispatched the
+                        // base class's code for every overridden method — the
+                        // whole hybrid-DeltaBlue corruption (Null access,
+                        // "Projection 4 failed", checksum 10940085) was this
+                        // line, triggered by whichever rows happened to be
+                        // patched. The static resolver stays as last resort
+                        // for a malformed chain.
+                        Self::find_runtime_proto_findex(type_ptr, field)
+                            .or_else(|| {
+                                self.resolve_method_findex_from_bytecode(
+                                    bytecode, func, &args[0], field,
+                                )
+                            })
                             .ok_or_else(|| {
                                 anyhow!("Cannot resolve method field={} on type", field)
                             })?
                     }
                 } else {
-                    // Fallback: resolve from bytecode type proto
-                    self.resolve_method_findex_from_bytecode(bytecode, func, &args[0], field)
+                    // vtable not materialized; the runtime type header is
+                    // still the dispatch truth for overridden methods.
+                    Self::find_runtime_proto_findex(type_ptr, field)
+                        .or_else(|| {
+                            self.resolve_method_findex_from_bytecode(
+                                bytecode, func, &args[0], field,
+                            )
+                        })
                         .ok_or_else(|| anyhow!("Cannot resolve method field={} on type", field))?
                 }
             } else {
@@ -9630,6 +9714,33 @@ impl HLInterpreter {
                 }
             }
         }
+    }
+
+    /// Resolve a vtable slot to its findex from the object's RUNTIME type:
+    /// walk the C proto chain child-first for the entry with this absolute
+    /// `pindex`, so an override shadows its ancestor. This is the same truth
+    /// `vobj_proto` itself is built from.
+    ///
+    /// # Safety contract
+    /// `type_ptr` must be a live `hl_type` (it came from an object header).
+    unsafe fn find_runtime_proto_findex(type_ptr: *mut hl_type, pindex: usize) -> Option<usize> {
+        let mut t = type_ptr;
+        while !t.is_null()
+            && ((*t).kind == hl::hl_type_kind_HOBJ || (*t).kind == hl::hl_type_kind_HSTRUCT)
+        {
+            let obj = (*t).__bindgen_anon_1.obj;
+            if obj.is_null() {
+                break;
+            }
+            for i in 0..(*obj).nproto as usize {
+                let pr = &*(*obj).proto.add(i);
+                if pr.pindex >= 0 && pr.pindex as usize == pindex {
+                    return Some(pr.findex as usize);
+                }
+            }
+            t = (*obj).super_;
+        }
+        None
     }
 
     /// Resolve a method findex from bytecode type proto (fallback when vobj_proto unavailable).

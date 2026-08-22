@@ -1380,15 +1380,20 @@ impl AirCodegen<'_, '_> {
                 self.def(*dst, v)?;
             }
 
-            // HL's debug break, emitted where control is meant never to
-            // arrive. The LLVM tier states that as `unreachable`, which is a
-            // licence to miscompile if it ever IS reached; a debug break
-            // states the same thing and stops instead. Deliberately not
-            // CLIF's `trap`, which is a terminator: splitting the block here
-            // would leave the rest of it outside the dominator of every
-            // value it still uses.
+            // Upstream OAssert is hl_assert(): hl_error("assert"), a
+            // catchable exception the unit suite triggers on purpose — a
+            // debug break here took the whole process down instead of the
+            // one test. Same emission as emit_null_check's throw block;
+            // hlp_error longjmps out of this frame, so nothing after the
+            // call executes and the block's remaining instructions keep
+            // their dominator.
             Instr::Assert => {
-                self.b.ins().debugtrap();
+                let addr = self.ctx.hl_error_addr()?;
+                let msg = self.ctx.utf16_message("assert");
+                let sig = self.helper_sigref(&[types::I64], None);
+                let callee = self.b.ins().iconst(types::I64, addr as i64);
+                let msg_val = self.b.ins().iconst(types::I64, msg as i64);
+                self.b.ins().call_indirect(sig, callee, &[msg_val]);
             }
 
             // A cache hint with no CLIF spelling — Cranelift has neither a

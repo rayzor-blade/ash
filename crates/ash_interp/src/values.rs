@@ -160,6 +160,11 @@ impl NanBoxedValue {
     }
 
     #[inline(always)]
+    pub fn is_i64(&self) -> bool {
+        !self.is_f64() && self.tag() == Self::TAG_I64
+    }
+
+    #[inline(always)]
     pub fn is_bool(&self) -> bool {
         !self.is_f64() && self.tag() == Self::TAG_BOOL
     }
@@ -255,6 +260,55 @@ impl NanBoxedValue {
                 IntBinOp::Shl => l.wrapping_shl(r as u32),
                 IntBinOp::SShr => l.wrapping_shr(r as u32),
                 IntBinOp::UShr => ((l as u32).wrapping_shr(r as u32)) as i32,
+                IntBinOp::And => l & r,
+                IntBinOp::Or => l | r,
+                IntBinOp::Xor => l ^ r,
+            }));
+        }
+        // Int64 (either side): compute at 64 bits, widening an i32 partner.
+        // haxe.Int64 lowers to these opcodes with i64 operands (shift counts
+        // stay i32), and there was no arm for them at all — the gap hid
+        // behind ToInt's old always-i32 boxing until that was fixed. NOTE:
+        // the NaN-box carries 48 payload bits, so values beyond ±2^47 are
+        // already lossy at the representation layer; this arm is exact
+        // within that range.
+        let as_wide = |v: &Self| -> Option<i64> {
+            if v.is_i64() {
+                Some(v.as_i64_lossy())
+            } else if v.is_i32() {
+                Some(v.as_i32() as i64)
+            } else {
+                None
+            }
+        };
+        if self.is_i64() || other.is_i64() {
+            let l = as_wide(&self)?;
+            let r = as_wide(&other)?;
+            return Some(Self::from_i64(match op {
+                IntBinOp::Add => l.wrapping_add(r),
+                IntBinOp::Sub => l.wrapping_sub(r),
+                IntBinOp::Mul => l.wrapping_mul(r),
+                IntBinOp::SDiv => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.wrapping_div(r)
+                }
+                IntBinOp::UDiv => {
+                    if r == 0 {
+                        return None;
+                    }
+                    ((l as u64).wrapping_div(r as u64)) as i64
+                }
+                IntBinOp::SMod => {
+                    if r == 0 {
+                        return None;
+                    }
+                    l.wrapping_rem(r)
+                }
+                IntBinOp::Shl => l.wrapping_shl(r as u32),
+                IntBinOp::SShr => l.wrapping_shr(r as u32),
+                IntBinOp::UShr => ((l as u64).wrapping_shr(r as u32)) as i64,
                 IntBinOp::And => l & r,
                 IntBinOp::Or => l | r,
                 IntBinOp::Xor => l ^ r,

@@ -4791,8 +4791,41 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
 
-            // --- Assert: unreachable ---
+            // --- Assert: throw "assert", catchably ---
+            // Upstream OAssert calls hl_assert() -> hl_error("assert"). The
+            // unit suite EXECUTES this opcode on purpose (assert-testing
+            // cases), so `unreachable` here was a licence to miscompile a
+            // path that runs. hlp_error longjmps to the active trap.
             Opcode::Assert => {
+                let hlp_error_addr = self
+                    .native_function_resolver
+                    .resolve_function("std", "hlp_error")
+                    .map_err(|e| anyhow!("cannot lower Assert (no hlp_error): {}", e))?
+                    as usize;
+                static ASSERT_MSG: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
+                let msg_addr = ASSERT_MSG
+                    .get_or_init(|| "assert".encode_utf16().chain(std::iter::once(0)).collect())
+                    .as_ptr() as u64;
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let err_fn_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
+                let err_ptr = self.builder.build_int_to_ptr(
+                    self.context
+                        .i64_type()
+                        .const_int(hlp_error_addr as u64, false),
+                    ptr_type,
+                    "hlp_error",
+                )?;
+                let msg_ptr = self.builder.build_int_to_ptr(
+                    self.context.i64_type().const_int(msg_addr, false),
+                    ptr_type,
+                    "assert_msg",
+                )?;
+                self.builder.build_indirect_call(
+                    err_fn_type,
+                    err_ptr,
+                    &[msg_ptr.into()],
+                    "assert_throw",
+                )?;
                 self.builder.build_unreachable()?;
             }
 

@@ -22,10 +22,23 @@ use crate::{
 };
 
 pub unsafe extern "C" fn invalid_cast(from: *mut hl_type, to: *mut hl_type) {
+    // hlp_type_str returns UTF-16; reading it as a C string stops at the
+    // first NUL — the high byte of the first ASCII char — so every message
+    // was one character ("Can't cast ( to (" for function types).
+    let utf16 = |p: *const uchar| -> String {
+        if p.is_null() {
+            return "?".into();
+        }
+        let mut n = 0usize;
+        while n < 4096 && *p.add(n) != 0 {
+            n += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+    };
     hlp_error(str_to_uchar_ptr(&format!(
         "Can't cast {} to {}",
-        CStr::from_ptr(hlp_type_str(from) as *const i8).to_string_lossy(),
-        CStr::from_ptr(hlp_type_str(to) as *const i8).to_string_lossy()
+        utf16(hlp_type_str(from)),
+        utf16(hlp_type_str(to))
     )));
 }
 
@@ -331,7 +344,15 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     t: *mut hl_type,
     to: *mut hl_type,
 ) -> *mut c_void {
-    if t.is_null() || to.is_null() {
+    // `t` here is often read out of a value's header, and a Dynamic slot
+    // holding an UNBOXED payload yields a garbage "type" — the recursive
+    // arms below (HVIRTUAL->HOBJ passes `(*(*v).value).t`) then SIGSEGV'd
+    // on addresses like 0xc00000000000. Validate before dereferencing.
+    let sane_type = |p: *mut hl_type| -> bool {
+        let a = p as usize;
+        !p.is_null() && a >= 0x1000 && a.is_multiple_of(std::mem::align_of::<usize>())
+    };
+    if !sane_type(t) || !sane_type(to) {
         return ptr::null_mut();
     }
     if (*t).kind > 22 || (*to).kind > 22 {
@@ -487,9 +508,38 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         (hl_type_kind_HFUN, hl_type_kind_HFUN) => {
             let c = *(data as *mut *mut vclosure);
             if !c.is_null() {
-                let c = hlp_make_fun_wrapper(c, to);
-                if !c.is_null() {
-                    return c as *mut c_void;
+                let w = hlp_make_fun_wrapper(c, to);
+                if !w.is_null() {
+                    return w as *mut c_void;
+                }
+                // No wrapper generator is registered in interpreter mode
+                // (hlc_get_wrapper is a JIT service), so a signature-bending
+                // cast used to die in invalid_cast even when no trampoline
+                // is needed. When arity matches and every arg and the
+                // return agree in machine class (both pointers, or the
+                // exact same primitive kind), the closure IS callable under
+                // the target type as it stands — the dynamic call paths
+                // re-marshal per the callee's own type on every invocation,
+                // which is where upstream's wrapper would have done its
+                // coercion anyway (Issue5082: (String,dynamic)->Content
+                // cast to (String,dynamic)->virtual<...>).
+                let cf = (*(*c).t).__bindgen_anon_1.fun.as_ref();
+                let tf = (*to).__bindgen_anon_1.fun.as_ref();
+                if let (Some(cf), Some(tf)) = (cf, tf) {
+                    let abi_compat = |a: *mut hl_type, b: *mut hl_type| -> bool {
+                        let (ka, kb) = ((*a).kind, (*b).kind);
+                        if ka == kb {
+                            return true;
+                        }
+                        ka >= hl_type_kind_HBYTES && kb >= hl_type_kind_HBYTES
+                    };
+                    if cf.nargs == tf.nargs
+                        && abi_compat(cf.ret, tf.ret)
+                        && (0..cf.nargs as usize)
+                            .all(|i| abi_compat(*cf.args.add(i), *tf.args.add(i)))
+                    {
+                        return c as *mut c_void;
+                    }
                 }
             }
         }

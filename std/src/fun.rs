@@ -533,6 +533,25 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
     fun: *mut std::ffi::c_void,
     ptr: *mut std::ffi::c_void,
 ) -> *mut vclosure {
+    // Upstream hl_alloc_closure_ptr stores hl_get_closure_type(fullt) — the
+    // method's type WITHOUT `this`, whose fun->parent points back at the
+    // full type. Storing the full type instead made every dynamically
+    // fetched method closure look one arg wider than its call site's
+    // declared closure type, so a plain `untyped obj.method(...)` chain
+    // died in invalid_cast ("Can't cast (Content (Content,String,dynamic))
+    // to (... (String,dynamic))", unit suite Issue5082) — and
+    // hlp_dyn_call's parent-based this-boxing could never fire.
+    // A zero-arg fun type has no `this` to strip — some of our internal
+    // callers (constants init) build value-carrying closures over plain
+    // functions, a shape upstream never feeds this path. Keep their type
+    // untouched rather than assert like hl_get_closure_type does.
+    let t = {
+        let ft = (*t).__bindgen_anon_1.fun.as_ref();
+        match ft {
+            Some(f) if f.nargs > 0 => hlp_get_closure_type(t),
+            _ => t,
+        }
+    };
     let mut gc = crate::gc::gc_locked();
 
     let c_ptr = gc.allocate_closure_ptr(t, fun, ptr);

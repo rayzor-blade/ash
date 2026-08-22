@@ -1258,8 +1258,12 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
             let obj = (*(*d).t).__bindgen_anon_1.obj;
             let f = obj_resolve_field(obj, hfield);
             if !f.is_null() && (*f).field_index < 0 {
-                let mut allocator = crate::gc::gc_locked();
-                let closure = allocator.allocate_closure_ptr(
+                // Through the canonical allocator so the closure gets the
+                // method's CLOSURE type (this stripped, parent set) — the
+                // raw allocate_closure_ptr call here kept the full type and
+                // made `untyped obj.method(...)` chains fail their fun->fun
+                // cast one arg too wide (Issue5082).
+                let closure = crate::fun::hlp_alloc_closure_ptr(
                     (*f).t,
                     *(*(*obj).rt).methods.offset(-(*f).field_index as isize - 1),
                     d as *mut std::ffi::c_void,

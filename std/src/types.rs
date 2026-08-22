@@ -69,9 +69,16 @@ pub fn hlt_void() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HVOID) as usize) as *mut hl_type
 }
 
-pub static TSTR: [&str; 22] = [
-    "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "array",
-    "type", "null", "null", "dynobj", "null", "null", "null", "null", "null", "null",
+// Indexed by hl_type_kind; "null" is the marker for kinds rendered
+// recursively by hlp_type_str_rec (fun/obj/ref/virtual/...). This table had
+// ONE slot missing after "dynamic", shifting every name from HOBJ onward:
+// cast errors printed "array" for objects and "dynobj" for virtuals, which
+// sent the Issue5082 diagnosis chasing phantom array types. Kind count is
+// 23 (through HPACKED) — the old 22-entry table was also an
+// out-of-bounds panic waiting on any packed type's name.
+pub static TSTR: [&str; 23] = [
+    "void", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "bytes", "dynamic", "null", "null",
+    "array", "type", "null", "null", "dynobj", "null", "null", "null", "null", "null", "null",
 ];
 
 #[inline]

@@ -4808,7 +4808,14 @@ impl HLInterpreter {
             }
             Opcode::Nop => {}
             Opcode::Assert => {
-                return Err(anyhow!("Assert hit at pc {}", frame.pc));
+                // Upstream OAssert is hl_assert(): hl_error("assert") — a
+                // CATCHABLE exception, and the unit suite executes it
+                // deliberately. A hard interpreter error killed the whole
+                // suite at the first assert-testing case (Issue3702).
+                return Err(anyhow::Error::new(HLExceptionPropagation {
+                    value: NanBoxedValue::null(),
+                    message: Some("assert".to_string()),
+                }));
             }
 
             // ===== Type Operations =====
@@ -4828,7 +4835,10 @@ impl HLInterpreter {
                 let src_kind = bytecode.types[type_ref.0].kind;
                 let val = frame.registers.get(src.0);
 
-                let type_ptr: usize = if val.is_ptr() && !val.is_null() && val.as_ptr() != 0 {
+                let type_ptr: usize = if val.is_ptr()
+                    && !val.is_null()
+                    && Self::is_derefable_dynamic(val.as_ptr() as *const hl::vdynamic)
+                {
                     match src_kind {
                         hl::hl_type_kind_HDYN
                         | hl::hl_type_kind_HOBJ
@@ -4889,13 +4899,33 @@ impl HLInterpreter {
                 frame.registers.set(dst.0, NanBoxedValue::from_f64(f));
             }
             Opcode::ToInt { dst, src } => {
+                // OToInt converts to the DESTINATION register's int width.
+                // haxe.Int64 lowers i32->i64 through this opcode; boxing the
+                // result as i32 regardless made every Int64 widen produce a
+                // 32-bit value (unit suite Issue4842: And saw I32 where the
+                // mask field was I64).
                 let val = frame.registers.get(src.0);
-                let i = if val.is_f64() {
-                    val.as_f64() as i32
+                let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
+                let out = if dst_kind == hl::hl_type_kind_HI64 {
+                    let i = if val.is_f64() {
+                        val.as_f64() as i64
+                    } else if val.is_i32() {
+                        val.as_i32() as i64
+                    } else {
+                        val.as_i64_lossy()
+                    };
+                    NanBoxedValue::from_i64(i)
                 } else {
-                    val.as_i32()
+                    let i = if val.is_f64() {
+                        val.as_f64() as i32
+                    } else if val.is_i32() {
+                        val.as_i32()
+                    } else {
+                        val.as_i64_lossy() as i32
+                    };
+                    NanBoxedValue::from_i32(i)
                 };
-                frame.registers.set(dst.0, NanBoxedValue::from_i32(i));
+                frame.registers.set(dst.0, out);
             }
             Opcode::SafeCast { dst, src } => {
                 return self.op_safe_cast(bytecode, func, func_idx, dst.0, src.0);
@@ -5234,6 +5264,14 @@ impl HLInterpreter {
                 if val.is_null() {
                     // Throw as an HL exception (like HashLink does) so it can
                     // be caught by a Trap in the call stack.
+                    if std::env::var("ASH_TRACE_NULLACC").is_ok() {
+                        eprintln!(
+                            "[nullacc] {} pc={} r{}",
+                            func.name(),
+                            frame.pc,
+                            reg.0
+                        );
+                    }
                     return Err(anyhow::Error::new(HLExceptionPropagation {
                         value: NanBoxedValue::null(),
                         message: Some("Null access".to_string()),
@@ -5636,6 +5674,31 @@ impl HLInterpreter {
             } else {
                 let src_type_idx = func.regs[src as usize].0;
                 let src_kind = bytecode.types[src_type_idx].kind;
+
+                // Closure destination: pass the closure through unchanged.
+                // Upstream adapts signatures with hl_make_fun_wrapper (a
+                // marshalling trampoline); the interpreter needs none — its
+                // closures are stub sentinels and EVERY invocation already
+                // marshals per the callee's own type, so the declared
+                // signature never touches an ABI. Routing this through
+                // hlp_dyn_castp instead hit invalid_cast ("Can't cast
+                // (fun...) to (fun...)", unit suite Issue5082) and aborted.
+                // Guarded on the runtime value actually being a closure so a
+                // genuine bad cast still fails.
+                if dst_kind == hl::hl_type_kind_HFUN {
+                    let rt_kind = unsafe {
+                        let d = val.as_ptr() as *mut hl::vdynamic;
+                        if !d.is_null() && !(*d).t.is_null() {
+                            (*(*d).t).kind
+                        } else {
+                            hl::hl_type_kind_HVOID
+                        }
+                    };
+                    if rt_kind == hl::hl_type_kind_HFUN || rt_kind == hl::hl_type_kind_HMETHOD {
+                        frame.registers.set(dst, val);
+                        return Ok(StepResult::Continue);
+                    }
+                }
 
                 if (src_kind == hl::hl_type_kind_HDYN || src_kind == hl::hl_type_kind_HNULL)
                     && !self.fn_dyn_castp.is_null()
@@ -7193,13 +7256,30 @@ impl HLInterpreter {
                         set!(dst, NanBoxedValue::from_f64(f));
                     }
                     K::ToInt => {
+                        // Same dst-width rule as the opcode dispatcher: the
+                        // destination decides i32 vs i64 (haxe.Int64 widens
+                        // through this cast).
                         let v = get!(src);
-                        let i = if v.is_f64() {
-                            v.as_f64() as i32
+                        let dk = kind!(dst);
+                        if dk == hl::hl_type_kind_HI64 {
+                            let i = if v.is_f64() {
+                                v.as_f64() as i64
+                            } else if v.is_i32() {
+                                v.as_i32() as i64
+                            } else {
+                                v.as_i64_lossy()
+                            };
+                            set!(dst, NanBoxedValue::from_i64(i));
                         } else {
-                            v.as_i32()
-                        };
-                        set!(dst, NanBoxedValue::from_i32(i));
+                            let i = if v.is_f64() {
+                                v.as_f64() as i32
+                            } else if v.is_i32() {
+                                v.as_i32()
+                            } else {
+                                v.as_i64_lossy() as i32
+                            };
+                            set!(dst, NanBoxedValue::from_i32(i));
+                        }
                     }
                     // ToVirtual is a no-op here for the same reason it is in the
                     // opcode dispatcher: virtual dispatch resolves off the raw
@@ -7212,6 +7292,9 @@ impl HLInterpreter {
             }
             I::NullCheck { value } => {
                 if get!(value).is_null() {
+                    if std::env::var("ASH_TRACE_NULLACC").is_ok() {
+                        eprintln!("[nullacc/ssa] {} v{}", func.name(), value.0);
+                    }
                     return Err(anyhow::Error::new(HLExceptionPropagation {
                         value: NanBoxedValue::null(),
                         message: Some("Null access".to_string()),
@@ -7555,7 +7638,14 @@ impl HLInterpreter {
             }
 
             // ---- misc ---------------------------------------------------
-            I::Assert => return Err(anyhow!("Assert hit in {}", func.name())),
+            I::Assert => {
+                // Catchable, like upstream hl_assert() — see the classic
+                // dispatcher's Opcode::Assert.
+                return Err(anyhow::Error::new(HLExceptionPropagation {
+                    value: NanBoxedValue::null(),
+                    message: Some("assert".to_string()),
+                }));
+            }
             I::Prefetch { .. } | I::Asm { .. } => {}
         }
 
@@ -8204,6 +8294,12 @@ impl HLInterpreter {
         if a.is_null() || b.is_null() {
             return false;
         }
+        // Unboxed payloads in Dynamic slots are not boxes — see
+        // is_derefable_dynamic. Distinct non-box words are simply unequal
+        // (the identity case above already answered equal ones).
+        if !Self::is_derefable_dynamic(a) || !Self::is_derefable_dynamic(b) {
+            return false;
+        }
         let ta = (*a).t;
         let tb = (*b).t;
         if ta.is_null() || tb.is_null() {
@@ -8271,10 +8367,27 @@ impl HLInterpreter {
         }
     }
 
+    /// Whether a word from a Dynamic-typed slot can be dereferenced as a
+    /// `vdynamic`.
+    ///
+    /// Slots typed Dynamic do not always hold a box: an unboxed small value
+    /// (a bool's 0x1, a raw enum index) arrives as a "pointer", and under
+    /// Rust's UB checks dereferencing one is a misaligned-pointer ABORT —
+    /// the whole VM dies where a C runtime would have read garbage. A real
+    /// box is word-aligned and above the first page.
+    #[inline]
+    fn is_derefable_dynamic(d: *const hl::vdynamic) -> bool {
+        let addr = d as usize;
+        addr >= 0x10000 && addr.is_multiple_of(std::mem::align_of::<usize>())
+    }
+
     unsafe fn unbox_dynamic_to_kind(
         d: *mut hl::vdynamic,
         dst_kind: hl::hl_type_kind,
     ) -> Option<NanBoxedValue> {
+        if !Self::is_derefable_dynamic(d) {
+            return None;
+        }
         if d.is_null() || (*d).t.is_null() {
             return None;
         }
@@ -9043,32 +9156,23 @@ impl HLInterpreter {
         }
     }
 
-    fn closure_arg_kinds_and_ret_type(
+    /// The callee's argument TYPE INDICES (not just kinds) and return type
+    /// index. HREF marshalling needs the full type — the ref's tparam decides
+    /// the cell the value is coerced into, and a kind alone has lost it.
+    fn closure_arg_type_idxs_and_ret(
         &self,
         bytecode: &DecodedBytecode,
         findex: usize,
-    ) -> Option<(Vec<hl::hl_type_kind>, usize)> {
-        if let Some(fidx) = func_of(&self.targets, findex) {
-            let t_idx = bytecode.functions[fidx].type_.0;
-            let tf = bytecode.types[t_idx].fun.as_ref()?;
-            let arg_kinds = tf
-                .args
-                .iter()
-                .map(|a| bytecode.types[a.0].kind)
-                .collect::<Vec<_>>();
-            return Some((arg_kinds, tf.ret.0));
-        }
-        if let Some(nidx) = native_of(&self.targets, findex) {
-            let t_idx = bytecode.natives[nidx].type_.0;
-            let tf = bytecode.types[t_idx].fun.as_ref()?;
-            let arg_kinds = tf
-                .args
-                .iter()
-                .map(|a| bytecode.types[a.0].kind)
-                .collect::<Vec<_>>();
-            return Some((arg_kinds, tf.ret.0));
-        }
-        None
+    ) -> Option<(Vec<usize>, usize)> {
+        let t_idx = if let Some(fidx) = func_of(&self.targets, findex) {
+            bytecode.functions[fidx].type_.0
+        } else if let Some(nidx) = native_of(&self.targets, findex) {
+            bytecode.natives[nidx].type_.0
+        } else {
+            return None;
+        };
+        let tf = bytecode.types[t_idx].fun.as_ref()?;
+        Some((tf.args.iter().map(|a| a.0).collect(), tf.ret.0))
     }
 
     fn try_handle_call_method_native(
@@ -9094,9 +9198,13 @@ impl HLInterpreter {
         }
 
         let (findex, bound) = self.closure_findex_and_value(closure_val);
-        let (arg_kinds, ret_type_idx) = self
-            .closure_arg_kinds_and_ret_type(bytecode, findex)
+        let (arg_type_idxs, ret_type_idx) = self
+            .closure_arg_type_idxs_and_ret(bytecode, findex)
             .unwrap_or((Vec::new(), 0));
+        let arg_kinds: Vec<hl::hl_type_kind> = arg_type_idxs
+            .iter()
+            .map(|&ti| bytecode.types[ti].kind)
+            .collect();
         let arg_shift = if bound.is_some() { 1usize } else { 0usize };
         if dbg {
             eprintln!(
@@ -9121,7 +9229,45 @@ impl HLInterpreter {
                 .get(i + arg_shift)
                 .copied()
                 .unwrap_or(hl::hl_type_kind_HDYN);
-            let v = self.dynamic_to_value_for_kind(dyn_arg, expected_kind);
+            // A byref parameter: upstream hl_dyn_castp coerces the boxed
+            // value into a fresh GC cell and passes the CELL — passing the
+            // box's payload gave the callee an "address" of 0x2 for
+            // Type.createInstance(ClassWithCtorDefaultValues, [2, "bar"]).
+            // Null stays null: that is the callee's use-the-default signal.
+            let v = if expected_kind == hl::hl_type_kind_HREF
+                && !dyn_arg.is_null()
+                && !self.fn_dyn_castp.is_null()
+            {
+                let to_t = self.c_type_factory.get(arg_type_idxs[i + arg_shift]);
+                let dyn_t = bytecode
+                    .types
+                    .iter()
+                    .position(|t| t.kind == hl::hl_type_kind_HDYN)
+                    .map(|ti| self.c_type_factory.get(ti));
+                match dyn_t {
+                    Some(dyn_t) if !to_t.is_null() && !dyn_t.is_null() => unsafe {
+                        let castp: unsafe extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ) -> *mut c_void = std::mem::transmute(self.fn_dyn_castp);
+                        let mut slot = dyn_arg;
+                        let cell = castp(
+                            &mut slot as *mut _ as *mut c_void,
+                            dyn_t as *mut c_void,
+                            to_t as *mut c_void,
+                        );
+                        if cell.is_null() {
+                            NanBoxedValue::null()
+                        } else {
+                            NanBoxedValue::from_ptr(cell as usize)
+                        }
+                    },
+                    _ => self.dynamic_to_value_for_kind(dyn_arg, expected_kind),
+                }
+            } else {
+                self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
+            };
             if dbg {
                 let sk = unsafe {
                     if dyn_arg.is_null() || (*dyn_arg).t.is_null() {

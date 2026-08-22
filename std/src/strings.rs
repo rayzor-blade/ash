@@ -515,7 +515,14 @@ pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_
 #[no_mangle]
 pub unsafe extern "C" fn hlp_value_to_string(d: *mut vdynamic, len: *mut c_int) -> *const vbyte {
     // removed debug counter
-    if d.is_null() {
+    // A Dynamic slot can hold an UNBOXED small value (a bool's 0x1, a raw
+    // enum index) rather than a box; reading its `t` is a misaligned
+    // dereference, which under Rust's checks aborts the VM outright. Real
+    // boxes are word-aligned and above the first page.
+    if d.is_null()
+        || (d as usize) < 0x10000
+        || !(d as usize).is_multiple_of(std::mem::align_of::<usize>())
+    {
         *len = 4;
         return str_to_uchar_ptr("null") as *mut vbyte;
     }

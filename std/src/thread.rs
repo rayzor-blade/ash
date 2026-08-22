@@ -480,11 +480,29 @@ pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
     Box::into_raw(deque) as *mut c_void
 }
 
+/// A queued message is a GC object whose only reference is the Vec above,
+/// which lives on the malloc heap the collector never scans -- so without an
+/// explicit root it is collectable the moment the sender drops its copy. That
+/// is the same defect the Int/Object maps had. Persistent roots fit a deque
+/// better than a GC-allocated backing array: O(1) per enqueue, and they work
+/// across threads.
+///
+/// Rooting happens *before* the message is published, so there is no window in
+/// which it is reachable only from the unscanned Vec. `persistent_roots` is a
+/// set, so a pointer queued twice roots once -- pop therefore only unroots when
+/// no copy remains.
+unsafe fn deque_root(msg: *mut vdynamic) {
+    if !msg.is_null() {
+        crate::gc::gc_add_persistent(msg);
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_deque_add(d: *mut c_void, msg: *mut vdynamic) {
     if d.is_null() {
         return;
     }
+    deque_root(msg);
     let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
     if let Ok(mut v) = deque.lock() {
         v.push(msg as *mut c_void);
@@ -496,6 +514,7 @@ pub unsafe extern "C" fn hlp_deque_push(d: *mut c_void, msg: *mut vdynamic) {
     if d.is_null() {
         return;
     }
+    deque_root(msg);
     let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
     if let Ok(mut v) = deque.lock() {
         v.insert(0, msg as *mut c_void);
@@ -509,12 +528,24 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
     }
     let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
     loop {
+        let popped;
         if let Ok(mut v) = deque.lock() {
-            if !v.is_empty() {
-                return v.remove(0) as *mut vdynamic;
-            }
+            popped = if v.is_empty() {
+                None
+            } else {
+                let m = v.remove(0) as *mut vdynamic;
+                Some((m, v.contains(&(m as *mut c_void))))
+            };
         } else {
             return ptr::null_mut();
+        }
+        // The deque lock is released here; the GC lock is only ever taken
+        // after it, never the other way round.
+        if let Some((m, still_queued)) = popped {
+            if !still_queued && !m.is_null() {
+                crate::gc::gc_remove_persistent(m);
+            }
+            return m;
         }
         // Empty: blocking pop waits cooperatively while fibers exist;
         // otherwise keep the non-blocking null return (single-threaded,

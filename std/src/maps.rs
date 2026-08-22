@@ -617,20 +617,146 @@ pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
 }
 
 // ============================================================================
-// IntMap (hi*) — HashMap<i32, *mut vdynamic>
+// IntMap (hi*) and ObjectMap (ho*)
+//
+// The index stays a Rust HashMap, but it must not be the only holder of a GC
+// pointer. The malloc heap it lives on is never scanned by the collector, so
+// values reachable only from there had no root at all: `ii.set(10, 100)` boxes
+// 100 into a GC vdynamic, and the first collection after the set reclaimed it.
+// Reading the key back then returned whatever had reused the line, which is
+// how a boxed Int came back as a heap address -- under ASH_GC_STRESS,
+// test_map_iter_all died on `Add: incompatible types I32(100) + Ptr(...)`.
+// ASH_GC_NO_RECLAIM=1 gave the correct checksum on every run and reclamation
+// alone failed on every run, which is what pinned it to rooting rather than
+// to the hash logic. Object maps were doubly exposed: keying on `key as usize`
+// left the key object unrooted too.
+//
+// So every GC pointer now lives in `slots`, a GC-allocated array hanging off a
+// GC-allocated `RootedMap` header -- the pointer handed back to the Haxe Map
+// object. conservative_trace reaches the header from the Map object, the array
+// from the header, and each key and value from the array. The HashMap maps a
+// key to a slot index and holds no GC pointer of its own.
 // ============================================================================
 
 use std::collections::HashMap;
-type IntMap = HashMap<i32, *mut hl::vdynamic>;
+
+#[repr(C)]
+struct RootedMap {
+    /// GC array of GC pointers. Int maps use one slot per entry (the value);
+    /// object maps use two (key, then value).
+    slots: *mut *mut hl::vdynamic,
+    capacity: usize,
+    /// Box<SlotIndex<K>> on the malloc heap. Deliberately holds no GC pointer;
+    /// the tracer bounds-checks this word and ignores it.
+    index: *mut c_void,
+}
+
+/// Slot bookkeeping, kept off the GC heap.
+struct SlotIndex<K> {
+    slot_of: HashMap<K, usize>,
+    free: Vec<usize>,
+    high: usize,
+}
+
+impl<K: std::hash::Hash + Eq> SlotIndex<K> {
+    fn new() -> Self {
+        SlotIndex {
+            slot_of: HashMap::new(),
+            free: Vec::new(),
+            high: 0,
+        }
+    }
+}
+
+/// GC memory for a map's header and slots. `gc_alloc` already returns zeroed
+/// memory and takes the TLAB fast path for the small sizes, so this must not
+/// memset again -- doing so outside the allocator's lock would also leave a
+/// window where a collection could sweep the block before it was written.
+unsafe fn gc_alloc_zeroed(bytes: usize) -> *mut u8 {
+    match crate::gc::gc_alloc(bytes) {
+        Some(nn) => nn.as_ptr(),
+        None => ptr::null_mut(),
+    }
+}
+
+unsafe fn rooted_alloc<K: std::hash::Hash + Eq>() -> *mut c_void {
+    let hdr = gc_alloc_zeroed(mem::size_of::<RootedMap>()) as *mut RootedMap;
+    if hdr.is_null() {
+        return ptr::null_mut();
+    }
+    (*hdr).index = Box::into_raw(Box::new(SlotIndex::<K>::new())) as *mut c_void;
+    hdr as *mut c_void
+}
+
+/// Grow `slots` to hold at least `need` pointers. The old array stays reachable
+/// through `rm.slots` until the new one is installed, so a collection triggered
+/// by this allocation cannot reclaim the entries being copied.
+unsafe fn slots_reserve(rm: *mut RootedMap, need: usize) -> bool {
+    if need <= (*rm).capacity {
+        return true;
+    }
+    let mut cap = if (*rm).capacity == 0 {
+        8
+    } else {
+        (*rm).capacity
+    };
+    while cap < need {
+        cap *= 2;
+    }
+    let fresh =
+        gc_alloc_zeroed(cap * mem::size_of::<*mut hl::vdynamic>()) as *mut *mut hl::vdynamic;
+    if fresh.is_null() {
+        return false;
+    }
+    if !(*rm).slots.is_null() {
+        ptr::copy_nonoverlapping((*rm).slots, fresh, (*rm).capacity);
+    }
+    (*rm).slots = fresh;
+    (*rm).capacity = cap;
+    true
+}
+
+/// Reserve a slot run of `stride` pointers for a key not yet in the map.
+unsafe fn slot_claim<K: std::hash::Hash + Eq>(
+    rm: *mut RootedMap,
+    idx: &mut SlotIndex<K>,
+    stride: usize,
+) -> Option<usize> {
+    let slot = match idx.free.pop() {
+        Some(s) => s,
+        None => {
+            let s = idx.high;
+            idx.high += 1;
+            s
+        }
+    };
+    if !slots_reserve(rm, (slot + 1) * stride) {
+        idx.free.push(slot);
+        return None;
+    }
+    Some(slot)
+}
+
+type IntIndex = SlotIndex<i32>;
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hialloc() -> *mut c_void {
-    Box::into_raw(Box::new(IntMap::new())) as *mut c_void
+    rooted_alloc::<i32>()
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hiset(m: *mut c_void, key: i32, value: *mut hl::vdynamic) {
-    if !m.is_null() {
-        (*(m as *mut IntMap)).insert(key, value);
+    if m.is_null() {
+        return;
+    }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut IntIndex);
+    if let Some(&slot) = idx.slot_of.get(&key) {
+        *(*rm).slots.add(slot) = value;
+        return;
+    }
+    if let Some(slot) = slot_claim(rm, idx, 1) {
+        *(*rm).slots.add(slot) = value;
+        idx.slot_of.insert(key, slot);
     }
 }
 #[no_mangle]
@@ -638,33 +764,47 @@ pub unsafe extern "C" fn hlp_hiexists(m: *mut c_void, key: i32) -> bool {
     if m.is_null() {
         return false;
     }
-    (*(m as *const IntMap)).contains_key(&key)
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const IntIndex);
+    idx.slot_of.contains_key(&key)
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_higet(m: *mut c_void, key: i32) -> *mut hl::vdynamic {
     if m.is_null() {
         return ptr::null_mut();
     }
-    (*(m as *const IntMap))
-        .get(&key)
-        .copied()
-        .unwrap_or(ptr::null_mut())
+    let rm = m as *const RootedMap;
+    match (*((*rm).index as *const IntIndex)).slot_of.get(&key) {
+        Some(&slot) => *(*rm).slots.add(slot),
+        None => ptr::null_mut(),
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hiremove(m: *mut c_void, key: i32) -> bool {
     if m.is_null() {
         return false;
     }
-    (*(m as *mut IntMap)).remove(&key).is_some()
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut IntIndex);
+    match idx.slot_of.remove(&key) {
+        Some(slot) => {
+            // Drop the reference so the value becomes collectable.
+            *(*rm).slots.add(slot) = ptr::null_mut();
+            idx.free.push(slot);
+            true
+        }
+        None => false,
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hikeys(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
     }
-    let map = &*(m as *const IntMap);
-    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i32(), map.len() as i32);
-    for (i, &key) in map.keys().enumerate() {
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const IntIndex);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i32(), idx.slot_of.len() as i32);
+    for (i, &key) in idx.slot_of.keys().enumerate() {
         *(crate::types::hl_aptr::<i32>(arr)).add(i) = key;
     }
     arr
@@ -674,42 +814,62 @@ pub unsafe extern "C" fn hlp_hivalues(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
     }
-    let map = &*(m as *const IntMap);
-    let hlt_dyn = crate::types::hlt_dyn();
-    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
-    for (i, &val) in map.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = val;
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const IntIndex);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+    for (i, &slot) in idx.slot_of.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
     }
     arr
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hiclear(m: *mut c_void) {
-    if !m.is_null() {
-        (*(m as *mut IntMap)).clear();
+    if m.is_null() {
+        return;
     }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut IntIndex);
+    for &slot in idx.slot_of.values() {
+        *(*rm).slots.add(slot) = ptr::null_mut();
+    }
+    idx.slot_of.clear();
+    idx.free.clear();
+    idx.high = 0;
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 {
     if m.is_null() {
-        0
-    } else {
-        (*(m as *const IntMap)).len() as i32
+        return 0;
     }
+    let rm = m as *const RootedMap;
+    (*((*rm).index as *const IntIndex)).slot_of.len() as i32
 }
 
 // ============================================================================
-// ObjectMap (ho*) — HashMap<usize, *mut vdynamic>
+// ObjectMap (ho*) -- two slots per entry so the key object is rooted too.
 // ============================================================================
-type ObjMap = HashMap<usize, *mut hl::vdynamic>;
+type ObjIndex = SlotIndex<usize>;
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hoalloc() -> *mut c_void {
-    Box::into_raw(Box::new(ObjMap::new())) as *mut c_void
+    rooted_alloc::<usize>()
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hoset(m: *mut c_void, key: *mut hl::vdynamic, val: *mut hl::vdynamic) {
-    if !m.is_null() && !key.is_null() {
-        (*(m as *mut ObjMap)).insert(key as usize, val);
+    if m.is_null() || key.is_null() {
+        return;
+    }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut ObjIndex);
+    if let Some(&slot) = idx.slot_of.get(&(key as usize)) {
+        *(*rm).slots.add(slot * 2) = key;
+        *(*rm).slots.add(slot * 2 + 1) = val;
+        return;
+    }
+    if let Some(slot) = slot_claim(rm, idx, 2) {
+        *(*rm).slots.add(slot * 2) = key;
+        *(*rm).slots.add(slot * 2 + 1) = val;
+        idx.slot_of.insert(key as usize, slot);
     }
 }
 #[no_mangle]
@@ -717,35 +877,49 @@ pub unsafe extern "C" fn hlp_hoexists(m: *mut c_void, key: *mut hl::vdynamic) ->
     if m.is_null() || key.is_null() {
         return false;
     }
-    (*(m as *const ObjMap)).contains_key(&(key as usize))
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const ObjIndex);
+    idx.slot_of.contains_key(&(key as usize))
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hoget(m: *mut c_void, key: *mut hl::vdynamic) -> *mut hl::vdynamic {
     if m.is_null() || key.is_null() {
         return ptr::null_mut();
     }
-    (*(m as *const ObjMap))
-        .get(&(key as usize))
-        .copied()
-        .unwrap_or(ptr::null_mut())
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const ObjIndex);
+    match idx.slot_of.get(&(key as usize)) {
+        Some(&slot) => *(*rm).slots.add(slot * 2 + 1),
+        None => ptr::null_mut(),
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_horemove(m: *mut c_void, key: *mut hl::vdynamic) -> bool {
     if m.is_null() || key.is_null() {
         return false;
     }
-    (*(m as *mut ObjMap)).remove(&(key as usize)).is_some()
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut ObjIndex);
+    match idx.slot_of.remove(&(key as usize)) {
+        Some(slot) => {
+            *(*rm).slots.add(slot * 2) = ptr::null_mut();
+            *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
+            idx.free.push(slot);
+            true
+        }
+        None => false,
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hokeys(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
     }
-    let map = &*(m as *const ObjMap);
-    let hlt_dyn = crate::types::hlt_dyn();
-    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
-    for (i, &key) in map.keys().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = key as *mut hl::vdynamic;
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const ObjIndex);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+    for (i, &slot) in idx.slot_of.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot * 2);
     }
     arr
 }
@@ -754,25 +928,34 @@ pub unsafe extern "C" fn hlp_hovalues(m: *mut c_void) -> *mut hl::varray {
     if m.is_null() {
         return ptr::null_mut();
     }
-    let map = &*(m as *const ObjMap);
-    let hlt_dyn = crate::types::hlt_dyn();
-    let arr = crate::array::hlp_alloc_array(hlt_dyn, map.len() as i32);
-    for (i, &val) in map.values().enumerate() {
-        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = val;
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const ObjIndex);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+    for (i, &slot) in idx.slot_of.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot * 2 + 1);
     }
     arr
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hoclear(m: *mut c_void) {
-    if !m.is_null() {
-        (*(m as *mut ObjMap)).clear();
+    if m.is_null() {
+        return;
     }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut ObjIndex);
+    for &slot in idx.slot_of.values() {
+        *(*rm).slots.add(slot * 2) = ptr::null_mut();
+        *(*rm).slots.add(slot * 2 + 1) = ptr::null_mut();
+    }
+    idx.slot_of.clear();
+    idx.free.clear();
+    idx.high = 0;
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 {
     if m.is_null() {
-        0
-    } else {
-        (*(m as *const ObjMap)).len() as i32
+        return 0;
     }
+    let rm = m as *const RootedMap;
+    (*((*rm).index as *const ObjIndex)).slot_of.len() as i32
 }

@@ -1305,6 +1305,11 @@ pub struct HLInterpreter {
     fn_gc_clear_scan_roots: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_add_scan_root
     fn_gc_add_scan_root: *mut c_void,
+    /// Batched replacement for clear+add-per-frame+done. See
+    /// `sync_gc_scan_roots`.
+    fn_gc_set_scan_roots: *mut c_void,
+    /// Reused across publishes so building the range list allocates once.
+    scan_range_buf: Vec<(usize, usize)>,
     /// Resolved stdlib function pointer: hlp_gc_scan_roots_done
     fn_gc_scan_roots_done: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_stack_top
@@ -1456,6 +1461,9 @@ impl HLInterpreter {
         let fn_gc_add_scan_root = native_resolver
             .resolve_function("std", "hlp_gc_add_scan_root")
             .unwrap_or(std::ptr::null_mut());
+        let fn_gc_set_scan_roots = native_resolver
+            .resolve_function("std", "hlp_gc_set_scan_roots")
+            .unwrap_or(std::ptr::null_mut());
         let fn_gc_set_stack_top = native_resolver
             .resolve_function("std", "hlp_gc_set_stack_top")
             .unwrap_or(std::ptr::null_mut());
@@ -1505,6 +1513,8 @@ impl HLInterpreter {
             fn_type_name,
             fn_gc_clear_scan_roots,
             fn_gc_add_scan_root,
+            fn_gc_set_scan_roots,
+            scan_range_buf: Vec::new(),
             fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
@@ -1897,6 +1907,27 @@ impl HLInterpreter {
         type FnAdd = unsafe extern "C" fn(*const c_void, usize);
         let clear: FnClear = unsafe { std::mem::transmute(self.fn_gc_clear_scan_roots) };
         let add: FnAdd = unsafe { std::mem::transmute(self.fn_gc_add_scan_root) };
+
+        // One call, one lock hold, when std offers the batched entry point.
+        // The per-frame loop below is O(depth) cross-dylib calls each taking
+        // and dropping the GC lock, and the interpreter publishes twice per
+        // call — so root publication was quadratic in call depth.
+        if !self.fn_gc_set_scan_roots.is_null() {
+            type FnSet = unsafe extern "C" fn(*const (usize, usize), usize);
+            let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
+            let mut buf = std::mem::take(&mut self.scan_range_buf);
+            buf.clear();
+            for frame in &self.stack {
+                let regs = frame.registers.as_slice();
+                if !regs.is_empty() {
+                    buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
+                }
+            }
+            unsafe { set(buf.as_ptr(), buf.len()) };
+            self.scan_range_buf = buf;
+            return;
+        }
+
         unsafe { clear() };
         // Register each frame's LIVE register buffer, not a filtered copy.
         // The copy was a point-in-time snapshot: any value written to a

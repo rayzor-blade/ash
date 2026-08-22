@@ -2362,6 +2362,35 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
     gc.add_scan_range(ptr, size);
 }
 
+/// Replace the whole interpreter-provided scan set in ONE lock hold.
+///
+/// The old shape was clear(), then add() per stack frame, then done() —
+/// each a separate cross-dylib call taking and dropping the GC lock. That
+/// makes root publication O(depth) in lock holds, and the interpreter
+/// publishes twice per call, so the work is quadratic in call depth.
+///
+/// `ranges` points at `count` (addr, size) pairs. Same semantics as the
+/// sequence it replaces, including honouring a deferred collection only
+/// once the set is complete — never against a half-built one.
+///
+/// # Safety
+/// `ranges` must point to `count` initialised `(usize, usize)` pairs, and
+/// each pair must describe memory that stays valid until the next publish.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
+    let mut gc = gc_locked();
+    gc.clear_scan_ranges();
+    if !ranges.is_null() {
+        for i in 0..count {
+            let (addr, size) = *ranges.add(i);
+            if size != 0 {
+                gc.add_scan_range(addr as *const c_void, size);
+            }
+        }
+    }
+    gc.scan_roots_done();
+}
+
 /// Charge off-heap memory (fiber stacks, native buffers, JIT structures) as
 /// GC allocation pressure. The charge participates in the byte-driven
 /// collection trigger and resets after every collection.

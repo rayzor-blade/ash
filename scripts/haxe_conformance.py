@@ -700,6 +700,30 @@ def main(argv=None) -> int:
         "assertion_pct": round(100.0 * a_pass / a_total, 1) if a_total else None,
         "suite_pct": round(100.0 * passes / total, 1) if total else None,
     }
+
+    # Per-case isolation, when it ran. This is the only conformance figure the
+    # site can honestly show a percentage for: its denominator is the case
+    # list, so a crash counts against it and cannot be hidden. The
+    # whole-suite metrics above can only ever report zero while any case
+    # crashes, which is why every published run so far has said 0%.
+    iso = [r for r in ash_rows if r.get("isolated")]
+    if iso:
+        c_total = sum(r.get("cases_total", 0) for r in iso)
+        c_ok = sum(r.get("cases_ok", 0) for r in iso)
+        report["summary"].update({
+            "isolated": True,
+            "cases_total": c_total,
+            "cases_ok": c_ok,
+            "cases_failed": sum(r.get("cases_failed", 0) for r in iso),
+            "cases_crashed": sum(r.get("cases_crashed", 0) for r in iso),
+            "cases_timeout": sum(r.get("cases_timeout", 0) for r in iso),
+            "case_pct": round(100.0 * c_ok / c_total, 1) if c_total else None,
+        })
+    if report["summary"].get("isolated"):
+        sm = report["summary"]
+        print(f"\n{sm['cases_ok']}/{sm['cases_total']} cases passed "
+              f"({sm['case_pct']}%)  [{sm['cases_failed']} failed, "
+              f"{sm['cases_crashed']} crashed]")
     print(f"\n{passes}/{total} suites passed")
     if t_total:
         print(f"{t_reached}/{t_total} tests reached "

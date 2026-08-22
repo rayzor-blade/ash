@@ -221,8 +221,13 @@ jobs:
           Commit the uploaded results.json as crates/ash/test/conformance_baseline_linux.json to start gating."
           fi
           LD_LIBRARY_PATH="$HOME/hl-hdll${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+          # --isolate runs each of the suite's ~1195 cases in its own
+          # process. Without it one crashing case reports as total failure —
+          # utest prints its tally once, at the end — so the published figure
+          # could never leave 0% until the last crash was fixed, however much
+          # of the suite actually passed.
           ./scripts/haxe_conformance.py \
-            --modes interp \
+            --modes interp --isolate --isolate-jobs 4 \
             "${HD[@]}" "${REF[@]}" "${BASE[@]}" \
             --json conformance.json \
             | tee conformance.log

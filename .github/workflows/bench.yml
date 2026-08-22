@@ -27,6 +27,18 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/bench.yml"
+  # Conformance runs on its own workflow and takes ~24 min against this
+  # sweep's ~12, both starting from the same push. So at deploy time the only
+  # SUCCESSFUL conformance run is always the PREVIOUS commit's, and the site
+  # was published one commit behind for ever -- a +45-case improvement sat
+  # unpublished because of exactly this. Rather than make the deploy sit and
+  # wait for it, let conformance's completion trigger a republish of its own.
+  # The heavy jobs below are skipped on that path; only deploy-site runs, and
+  # it reuses the newest sweep's benchmark numbers.
+  workflow_run:
+    workflows: ["haxe-conformance"]
+    types: [completed]
+
   workflow_dispatch:
 
 permissions:
@@ -53,6 +65,8 @@ env:
 jobs:
   build:
     name: Build ash and the comparison VMs
+    # A conformance-triggered run republishes the site only.
+    if: ${{ github.event_name != 'workflow_run' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -360,7 +374,7 @@ jobs:
     # `needs` alone would skip this whenever any matrix leg failed, and a
     # skipped aggregate skips the deploy — one crashing benchmark would take
     # the whole published page down rather than just its own rows.
-    if: ${{ always() && needs.benchmark.result != 'cancelled' }}
+    if: ${{ always() && github.event_name != 'workflow_run' && needs.benchmark.result != 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -394,7 +408,10 @@ jobs:
   deploy-site:
     name: Deploy website to GitHub Pages
     needs: aggregate
-    if: ${{ always() && needs.aggregate.result == 'success' }}
+    if: >-
+      ${{ always() && (needs.aggregate.result == 'success' ||
+          (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.conclusion == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     environment:
@@ -404,10 +421,27 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Download merged results
+        if: ${{ github.event_name != 'workflow_run' }}
         uses: actions/download-artifact@v4
         with:
           name: benchmark-results
           path: site-data
+
+      # Republishing for fresh conformance data must not re-run 12 minutes of
+      # benchmarks, so reuse the newest completed sweep's numbers verbatim.
+      - name: Reuse the newest benchmark results
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RID=$(gh run list --workflow=benchmarks --status=success \
+                  --limit 1 --json databaseId --jq '.[0].databaseId')
+          if [ -z "$RID" ]; then
+            echo "::error::no successful benchmarks run to reuse"; exit 1
+          fi
+          mkdir -p site-data
+          gh run download "$RID" -n benchmark-results -D site-data
+          echo "benchmark numbers reused from run $RID"
 
       # Conformance is produced by a separate workflow on its own cadence, so
       # it is fetched rather than rebuilt here — one Pages deployment, two
@@ -417,9 +451,15 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          TRIGGERING_RUN: ${{ github.event.workflow_run.id }}
         run: |
-          RID=$(gh run list --workflow=haxe-conformance --status=success \
-                  --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          # On a conformance-triggered republish this is the run that just
+          # finished -- exactly the data this deploy exists to publish.
+          RID="${TRIGGERING_RUN}"
+          if [ -z "$RID" ]; then
+            RID=$(gh run list --workflow=haxe-conformance --status=success \
+                    --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          fi
           if [ -n "$RID" ]; then
             mkdir -p conf-data
             gh run download "$RID" -n conformance-results -D conf-data \

@@ -1647,13 +1647,20 @@ impl HLInterpreter {
         // has proven worth the heavier compile.
         let threshold = u32::try_from(config.jit_threshold).unwrap_or(u32::MAX);
         let queue_ahead = (threshold / 5).max(1);
+        // The LLVM rung was `threshold * 100`, which made the two rungs
+        // impossible to tune apart: lowering the LLVM threshold to see whether
+        // the top tier pays also dropped Cranelift to promoting on the first
+        // call. ASH_TIER1 sets it independently; the default is unchanged, so
+        // this is a knob rather than a policy change until a measurement says
+        // otherwise.
+        let tier1 = std::env::var("ASH_TIER1")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or_else(|| threshold.saturating_mul(100));
         let tier0: Box<dyn HotnessPolicy> =
             Box::new(ThresholdPolicy::new(threshold).queue_ahead(queue_ahead));
         let policies: Vec<Box<dyn HotnessPolicy>> = match config.tier_mode {
-            TierMode::Auto => vec![
-                tier0,
-                Box::new(ThresholdPolicy::new(threshold.saturating_mul(100))),
-            ],
+            TierMode::Auto => vec![tier0, Box::new(ThresholdPolicy::new(tier1))],
             _ => vec![tier0],
         };
         let adapter = TieredAdapter::new(policies);
@@ -1663,7 +1670,7 @@ impl HLInterpreter {
             config.tier_mode.name(),
             threshold,
             match config.tier_mode {
-                TierMode::Auto => format!("tier1={} (llvm)", threshold.saturating_mul(100)),
+                TierMode::Auto => format!("tier1={} (llvm)", tier1),
                 _ => "single tier".to_string(),
             }
             );

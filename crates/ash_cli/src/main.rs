@@ -566,9 +566,13 @@ fn run() -> Result<()> {
         init_std_library()?;
     }
 
+    // Arc, not a bare value: the tiered brokers lower from this on their own
+    // threads and must own a share of it. Publishing a raw pointer instead
+    // (as this used to) put the lifetime in a comment, and the comment was
+    // wrong — see TieredSharedCtx::bytecode.
     let bytecode = {
         let _p = ash_core::profile::scope("decode bytecode");
-        BytecodeDecoder::decode(&hl_path)?
+        std::sync::Arc::new(BytecodeDecoder::decode(&hl_path)?)
     };
     let mut native_resolver = NativeFunctionResolver::new();
 
@@ -866,7 +870,7 @@ fn run() -> Result<()> {
             };
             {
                 let _p = ash_core::profile::scope("tiered prewarm");
-                interpreter.enable_tiered(&hl_path, &native_resolver, cfg)?;
+                interpreter.enable_tiered(&hl_path, &native_resolver, &bytecode, cfg)?;
             }
             let result = {
                 let _p = ash_core::profile::scope("run");
@@ -880,26 +884,20 @@ fn run() -> Result<()> {
             // interpreter is leaked below, deliberately, and the thread dies
             // with the process. deltablue answered at 65ms and exited at
             // ~290ms purely because of this wait.
-            // Abandon THEN join. The flag retires every chase that has not
-            // begun its compile, which is what made the original join take
-            // 5.1s on deltablue; what remains is only genuinely in-flight
-            // work, and that must be waited for.
+            // Abandon without joining. The flag retires every chase that has
+            // not begun its compile; an in-flight one is left to finish and
+            // die with the process, because nothing it reads is freed
+            // underneath it: TieredSharedCtx now OWNS the bytecode through an
+            // Arc that every compile thread holds a share of.
             //
-            // Not joining was tried (551347e) and is wrong: the broker reads
-            // structures owned by this scope through raw pointers published
-            // at registration, so returning without waiting frees them under
-            // a running compile. Leaking the two known offenders was
-            // whack-a-mole -- it fixed the lower.rs index panic and CI still
-            // SIGSEGV'd elsewhere, because the set of things the broker can
-            // read is not something a caller can enumerate by hand.
-            //
-            // The real fix is for the shared context to OWN what it reads
-            // (Arc<DecodedBytecode> instead of a published raw pointer), at
-            // which point this can go back to not waiting. Until then,
-            // correctness costs ~225ms on deltablue and that is the right
-            // trade.
+            // Two earlier attempts at this were wrong and are worth naming.
+            // Not joining while the ctx published a RAW pointer to the
+            // decode was a use-after-free (551347e). Leaking the decode by
+            // hand fixed the first crash site and CI found the next
+            // (f61799e), because the set of state a broker can reach is not
+            // something a caller can enumerate. Ownership is the fix; the
+            // join was the symptom-level workaround.
             ash_interp::interpreter::retier_chase_abandon();
-            ash_interp::interpreter::retier_chase_join();
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(
@@ -917,11 +915,13 @@ fn run() -> Result<()> {
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
-            // Belt and braces while the raw-pointer publication stands: the
-            // join above has already waited, so these cost nothing, but they
-            // mean a chase that somehow outlives it still reads live memory.
+            // The interpreter still hands the brokers raw handles for the
+            // globals and functions_ptrs arrays (SharedArrayHandles), so it
+            // is leaked rather than dropped while a chase may still be
+            // reading. The bytecode no longer needs this — the context owns
+            // it — but giving those handles the same Arc treatment is the
+            // remaining half of this cleanup.
             std::mem::forget(interpreter);
-            std::mem::forget(bytecode);
         }
         Mode::Jit => unreachable!("handled before the interpreter prep"),
     }

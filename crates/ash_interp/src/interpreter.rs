@@ -365,9 +365,20 @@ struct TieredSharedCtx {
     /// construction has been tried and failed.
     cranelift: Mutex<Option<Option<Arc<CraneliftTier>>>>,
     arrays: SharedArrayHandles,
-    /// Set on the first tiered invocation: the decoded bytecode, which lives
-    /// for the whole process (owned by the CLI entry point).
-    bytecode: std::sync::atomic::AtomicUsize,
+    /// The decoded bytecode the brokers lower from — OWNED, not borrowed.
+    ///
+    /// This was an AtomicUsize holding a raw pointer published by the CLI,
+    /// with a SAFETY note asking the caller to keep the decode alive for the
+    /// whole process. That contract is unenforceable and was duly broken:
+    /// removing the exit-time join let main drop the decode while a broker
+    /// was still lowering, and the broker indexed a freed Vec ("len is 469
+    /// but the index is 14155380286610417437"). Leaking the decode by hand
+    /// fixed that one site and CI found the next.
+    ///
+    /// Holding an Arc makes the lifetime a fact rather than a request: every
+    /// compile thread captures this context by Arc, so the bytecode cannot
+    /// outlive its readers or be dropped beneath them.
+    bytecode: OnceLock<Arc<DecodedBytecode>>,
     /// `max(findex) + 1`, matching the length of `functions_ptrs`.
     max_findex: std::sync::atomic::AtomicUsize,
     /// Findexes whose installed code already came from LLVM — a tier-1
@@ -410,10 +421,10 @@ struct TieredSharedCtx {
 }
 
 impl TieredSharedCtx {
-    /// Publish the process-wide bytecode pointer (idempotent).
-    fn set_bytecode(&self, bytecode: &DecodedBytecode) {
+    /// Publish the bytecode the brokers lower from (idempotent).
+    fn set_bytecode(&self, bytecode: &Arc<DecodedBytecode>) {
         use std::sync::atomic::Ordering;
-        if self.bytecode.load(Ordering::Acquire) != 0 {
+        if self.bytecode.get().is_some() {
             return;
         }
         let max_findex = bytecode
@@ -425,19 +436,14 @@ impl TieredSharedCtx {
             .map(|m| m + 1)
             .unwrap_or(0);
         self.max_findex.store(max_findex, Ordering::Release);
-        self.bytecode
-            .store(bytecode as *const _ as usize, Ordering::Release);
+        let _ = self.bytecode.set(Arc::clone(bytecode));
     }
 
-    fn bytecode_ptr(&self) -> Option<&'static DecodedBytecode> {
-        let p = self.bytecode.load(std::sync::atomic::Ordering::Acquire);
-        if p == 0 {
-            None
-        } else {
-            // SAFETY: published by `set_bytecode` from the interpreter's own
-            // `&DecodedBytecode`, which the CLI keeps alive for the process.
-            Some(unsafe { &*(p as *const DecodedBytecode) })
-        }
+    /// The bytecode, borrowed from this context's own Arc. No unsafe, and no
+    /// lifetime obligation on the caller: the borrow cannot outlive the
+    /// context, and every compile thread holds the context by Arc.
+    fn bytecode_ptr(&self) -> Option<&DecodedBytecode> {
+        self.bytecode.get().map(|b| &**b)
     }
 }
 
@@ -1514,6 +1520,7 @@ impl HLInterpreter {
         &mut self,
         hl_path: &Path,
         _native_resolver: &NativeFunctionResolver,
+        bytecode: &Arc<DecodedBytecode>,
         mut config: TieredConfig,
     ) -> Result<()> {
         if config.tier_mode == TierMode::Off {
@@ -1689,6 +1696,22 @@ impl HLInterpreter {
             );
         }
 
+        let published_bytecode = Arc::clone(bytecode);
+        // Publishing the bytecode used to go through set_bytecode, which also
+        // computed this. Setting the OnceLock directly skipped it, and a
+        // max_findex of 0 silently disables the functions_ptrs update in
+        // install_function_address — every virtual dispatch from compiled
+        // code then falls back to the interpreter bridge. deltablue went from
+        // 119ms to 700ms with the right answer, which is exactly how a
+        // "performance only" field hides.
+        let published_max_findex = published_bytecode
+            .functions
+            .iter()
+            .map(|f| f.findex as usize)
+            .chain(published_bytecode.natives.iter().map(|n| n.findex as usize))
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let shared_ctx = Arc::new(TieredSharedCtx {
             log_promotions,
             tier_log: log_promotions || std::env::var("ASH_TIER_LOG").is_ok(),
@@ -1710,8 +1733,12 @@ impl HLInterpreter {
                     }
                 },
             },
-            bytecode: std::sync::atomic::AtomicUsize::new(0),
-            max_findex: std::sync::atomic::AtomicUsize::new(0),
+            bytecode: {
+                let c = OnceLock::new();
+                let _ = c.set(published_bytecode);
+                c
+            },
+            max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
             hot_loop_pcs: Mutex::new(HashMap::new()),
             vtable_slots: OnceLock::new(),
@@ -3561,8 +3588,8 @@ impl HLInterpreter {
             }
             if !tiered.gate_checked[findex] {
                 tiered.gate_checked[findex] = true;
-                // Publish the bytecode the Cranelift tier lowers from.
-                tiered.shared_ctx.set_bytecode(bytecode);
+                // The bytecode is published once, by enable_tiered, from an
+                // Arc the context owns — not lazily from a borrow here.
                 match Self::tierable_reason(bytecode, func_idx, &tiered.config) {
                     Ok(()) => {
                         let bound = tiered.adapter.register(findex as beadie::CoreHandle, None);

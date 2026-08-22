@@ -109,6 +109,63 @@ the GC stress gate currently proves less than it claims.
 
 ---
 
+## Hybrid blocks process exit on LLVM chases whose results are never used
+
+Measured 2026-08-22, RELEASE binary, interleaved A/B/C/D over three rounds
+(consecutive blocks would put drift entirely on whichever mode ran last).
+deltablue, checksum verified 14065400 on all twelve runs:
+
+    mode          wall (3 runs, ms)        execute/run    peak RSS
+    interp        733.8 / 711.9 / 735.2    ~724 ms        35 MB
+    hybrid-auto   3726 / 3448 / 3752       ~57 ms         87 MB
+    hybrid-llvm   801.8 / 808.7 / 1147.8   ~813 ms        80 MB
+    full-jit      1484 / 1541 / 1868       ~3.6 ms       108 MB
+
+Hybrid is the SLOWEST mode on wall and the FASTEST to the answer:
+
+    hybrid --jit-tier auto   checksum at  228 ms   exit at 5331 ms
+    hybrid --jit-tier off    checksum at  896 ms   exit at  927 ms
+
+228ms to a correct answer — 3x better than the interpreter — then 5.1
+seconds of nothing. The phase tree accounts for ~100ms of that wall
+(`run` 83ms), so the time is outside every instrumented phase: it is
+`retier_chase_join()` at shutdown.
+
+Confirmed by the gate:
+
+    ASH_LLVM_CHASE=0   exit at 1110 / 866 ms
+    default            exit at 4994 / 4780 ms
+
+Each Cranelift install spawns a thread chasing the LLVM tier (38 Cranelift
++ 14 LLVM installs on this program). Those threads cannot be detached — one
+still compiling while the interpreter tears down segfaults, roughly one run
+in ten — so shutdown joins them. For a program that ends in 228ms, every
+one of those compiles is dead work the process still waits for.
+
+The chase itself is worth keeping: it exists because a Cranelift-compiled
+function stops accruing call counts, so the (Auto, 1) rung starves and the
+top tier is never reached (fib(40): 362ms Cranelift vs 87ms LLVM).
+
+Fix direction: make the chase CANCELLABLE rather than joinable-only. A
+shutdown flag checked before each chase begins its LLVM compile would
+retire the whole queue instantly; only a compile already in flight need be
+waited on. Do not simply detach — the segfault above is why the join is
+there.
+
+Consequences worth stating:
+  * The published deltablue row should NOT switch to hybrid on the strength
+    of "hybrid works now". It is correct, and it is 2.4x SLOWER on wall
+    than full-jit. An earlier note in this file predicted the opposite; it
+    was wrong and this measurement replaces it.
+  * If exit stopped waiting, hybrid on deltablue lands near its 228ms
+    answer time — the best of the four modes by a wide margin, and roughly
+    12x better than the row we publish today.
+  * hybrid-llvm's `run` (~813ms) is no better than the interpreter's: pinned
+    to the top tier, promotion arrives too late to pay for itself on a
+    program this short. Only the Cranelift rung (hybrid-auto, ~57ms) does.
+
+---
+
 ## full-JIT startup dominates any short program
 
 Measured 2026-08-22, debug binary, three samples on a loaded box:

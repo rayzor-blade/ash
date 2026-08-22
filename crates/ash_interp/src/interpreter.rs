@@ -4147,6 +4147,56 @@ impl HLInterpreter {
         // array over a register file, so it takes its own entry path. A
         // function it refuses falls through to the opcode dispatcher below,
         // which is the reference either way.
+        // Coerce arguments to the callee's DECLARED parameter kinds before
+        // either body shape binds them.
+        //
+        // Arguments arrive verbatim from the caller, and a dynamic call site
+        // can hand a BOXED primitive to a parameter the callee declares as
+        // Int/Float/Bool. The callee then operates on the box: unit.spec.
+        // TestArray died on "And: incompatible types Ptr(0x14bce5c00), I32(1)
+        // in Fun_8573 at pc=1", and dumping that function shows the Ptr is
+        // Reg(0) — a parameter — being ANDed with a constant. Nothing was
+        // wrong with the operator; the box should never have reached it.
+        //
+        // `coerce_value_for_static_kind` is the same conservative helper the
+        // field paths use: it unboxes only when the destination is a
+        // primitive AND the pointer really is a boxed primitive (aligned,
+        // plausible, with a primitive type header), and returns the value
+        // untouched otherwise. It also maps null to a typed zero.
+        //
+        // Done here rather than in either body so the serialize and SSA paths
+        // cannot disagree, and the scan runs before the Vec so the common case
+        // — every argument already the right shape — allocates nothing.
+        let coerced_args: Vec<NanBoxedValue>;
+        let args: &[NanBoxedValue] = {
+            let params = bc.types[bc.functions[func_idx].type_.0]
+                .fun
+                .as_ref()
+                .map(|f| f.args.as_slice())
+                .unwrap_or(&[]);
+            let needs = args.iter().enumerate().any(|(i, a)| {
+                i < params.len()
+                    && (a.is_ptr() || a.is_null())
+                    && Self::is_unboxable_primitive_kind(bc.types[params[i].0].kind)
+            });
+            if needs {
+                coerced_args = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        if i < params.len() {
+                            self.coerce_value_for_static_kind(*a, bc.types[params[i].0].kind)
+                        } else {
+                            *a
+                        }
+                    })
+                    .collect();
+                &coerced_args
+            } else {
+                args
+            }
+        };
+
         self.ssa.prepare(bc, func_idx);
         if let Some(prep) = self.ssa.body(func_idx) {
             return self.execute_ssa_function(bc, native_resolver, func_idx, prep, args);

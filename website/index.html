@@ -257,7 +257,7 @@ HashLink Bytecode Runtime
 <div style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px">
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-assert-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
-<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">tests passed</div>
+<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">cases passed</div>
 </div>
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-suite-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
@@ -489,9 +489,25 @@ HashLink Bytecode Runtime
     // erasing it — which is the only reason a real percentage can be shown
     // at all. Every whole-suite figure below can report nothing but zero
     // while any single case still crashes.
-    if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
-      assertEl.textContent = fmtInt(sum.tests_passed) + ' / ' + fmtInt(sum.tests_accepted);
-      assertLbl.textContent = 'tests passed';
+    // CASES, not tests. The comment above is the reason, and the tests_*
+    // figures do not have the property it describes: tests_accepted counts
+    // only tests a case lived long enough to report, so a case that starts
+    // CRASHING removes its tests from the denominator instead of counting
+    // them as failures. That reads as progress. Removing two bad rules from
+    // hlp_safe_cast fixed 45 cases and moved 7 tests from failing to passing,
+    // yet the tests_* pair would have announced "126 tests still failing" ->
+    // "64" -- an 8x overstatement, 55 of the 62 being tests that merely
+    // stopped being counted. cases_total is the case list and does not move,
+    // so this number can only change for a real reason.
+    if (typeof sum.cases_ok === 'number' && sum.cases_total) {
+      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(sum.cases_total);
+      assertLbl.textContent = 'cases passed';
+      if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
+        assertEl.title = fmtInt(sum.tests_passed) + ' of ' +
+          fmtInt(sum.tests_accepted) + ' individual tests passed in the cases ' +
+          'that ran to completion (a crashing case reports fewer, which is why ' +
+          'the headline counts cases)';
+      }
     } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
       assertEl.textContent = sum.assertion_pct + '%';
       assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total + ' assertions';
@@ -510,11 +526,19 @@ HashLink Bytecode Runtime
 
     var suiteEl = document.getElementById('conf-suite-value');
     var suiteLbl = document.getElementById('conf-suite-label');
-    if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
-      var failing = sum.tests_accepted - sum.tests_passed;
+    if (typeof sum.cases_ok === 'number' && sum.cases_total) {
+      // Failed AND crashed: a crash is a worse outcome than a wrong answer,
+      // so it must never be the cheaper one to report.
+      var failing = sum.cases_total - sum.cases_ok;
       suiteEl.textContent = fmtInt(failing);
       if (!failing) suiteEl.style.color = '#a8703c';
-      if (suiteLbl) suiteLbl.textContent = 'tests still failing';
+      if (suiteLbl) {
+        suiteLbl.textContent = 'cases still failing';
+        if (typeof sum.cases_crashed === 'number' && sum.cases_crashed) {
+          suiteEl.title = fmtInt(sum.cases_failed || 0) + ' fail, ' +
+            fmtInt(sum.cases_crashed) + ' crash';
+        }
+      }
     } else {
       suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
       if (!sum.suites_passed) suiteEl.style.color = '#8a807a';

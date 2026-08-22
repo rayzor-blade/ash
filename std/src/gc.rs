@@ -2259,8 +2259,8 @@ pub unsafe extern "C" fn hlp_zalloc(size: i32) -> *mut std::os::raw::c_void {
 
     let size_usize = size as usize;
 
-    // gc_alloc returns zeroed memory; the write_bytes this used to do on
-    // top of it was the same double-zero hlp_alloc_obj had.
+    // gc_alloc returns zeroed memory, so zeroing again here is redundant
+    // and would run outside the allocator's lock.
     match gc_alloc(size_usize) {
         Some(ptr) => ptr.as_ptr() as *mut std::os::raw::c_void,
         None => ptr::null_mut(),
@@ -2364,10 +2364,9 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
 
 /// Replace the whole interpreter-provided scan set in ONE lock hold.
 ///
-/// The old shape was clear(), then add() per stack frame, then done() —
-/// each a separate cross-dylib call taking and dropping the GC lock. That
-/// makes root publication O(depth) in lock holds, and the interpreter
-/// publishes twice per call, so the work is quadratic in call depth.
+/// One cross-dylib call and one lock acquisition per publish. Doing it per
+/// stack frame instead makes root publication O(depth) in lock holds, and the
+/// interpreter publishes twice per call, so the cost is quadratic in depth.
 ///
 /// `ranges` points at `count` (addr, size) pairs. Same semantics as the
 /// sequence it replaces, including honouring a deferred collection only

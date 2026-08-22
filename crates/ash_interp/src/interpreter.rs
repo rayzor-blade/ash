@@ -653,17 +653,12 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
             {
                 // ONE worker draining a queue, not one thread per install.
                 //
-                // This used to spawn a fresh `ash-retier-llvm` thread for every
-                // Cranelift install that looked worth chasing. It bought
-                // nothing: `compile_with_llvm` takes ctx.llvm and holds it for
-                // the entire compile, so the chases were already serialised —
-                // the extra threads only queued on that mutex. What they did
-                // cost is cores. deltablue installs 38 Cranelift functions and
-                // peaked at 24 live threads for a program that finishes in
-                // 52ms; pinned to two cores it measures ~92ms against ~66ms on
-                // sixteen, and speculative work that cannot land is charged
-                // straight to the mutator's wall clock. Same serialised order,
-                // one thread.
+                // `compile_with_llvm` takes ctx.llvm and holds it for the whole
+                // compile, so chases are serialised regardless; a thread per
+                // install would only queue on that mutex while occupying a
+                // core. Speculative work that cannot land is charged to the
+                // mutator's wall clock, and on a core-starved machine that is
+                // the whole cost.
                 let need_worker = {
                     let mut q = CHASE_QUEUE.lock().expect("chase queue mutex poisoned");
                     q.pending.push_back(findex);
@@ -2092,24 +2087,15 @@ impl HLInterpreter {
         }
     }
 
-    /// A Dynamic slot in memory holds a POINTER TO A BOX, never a raw payload
-    /// — the invariant rayzor states outright with its
-    /// `DynamicValue { type_id, value_ptr }`, and the one HashLink assumes
-    /// whenever it reads such a slot as `vdynamic*`.
+    /// Box a primitive on its way into a Dynamic slot.
     ///
-    /// ash may legitimately keep an unboxed primitive in a Dynamic-typed
-    /// REGISTER — that is a fine in-register optimisation — but the box has to
-    /// exist by the time the value crosses into memory. `write_value_at`'s
-    /// pointer arm did the opposite:
-    /// `else if val.is_i32() { *(addr as *mut i32) = val.as_i32(); }`
-    /// wrote four raw bytes into an eight-byte slot and left the top half
-    /// stale, so reading it back as a `vdynamic*` produced a torn pointer.
-    /// unit.spec.TestMap died on "misaligned pointer dereference: address must
-    /// be a multiple of 0x8 but is 0x2" — 0x2 being the integer 2 sitting
-    /// where a boxed Int belonged.
+    /// A Dynamic in MEMORY is a pointer to a box (`vdynamic*`); HashLink reads
+    /// every such slot that way. A Dynamic in a REGISTER may hold an unboxed
+    /// primitive, which is a deliberate in-register optimisation — so the box
+    /// has to be created at the crossing, not maintained throughout.
     ///
-    /// Same defect class as the hlp_safe_cast HNULL rules (aade420): a raw
-    /// payload where a box is required. Fixing the cast path exposed this one.
+    /// Writing a raw primitive into an 8-byte slot leaves the upper bytes
+    /// stale and the next read of that slot yields a torn pointer.
     #[allow(clippy::too_many_arguments)]
     fn box_for_dynamic_slot(
         fn_make_dyn: *mut c_void,
@@ -2561,12 +2547,10 @@ impl HLInterpreter {
     ///
     /// `closure_type` is the destination register's declared type — the
     /// signature *without* the bound `this`, which is exactly what a
-    /// `vclosure.t` must carry. Leaving it null (as this used to) breaks every
-    /// later cast of the closure: `hl_dyn_castp` reads the source type out of
-    /// the value's header and bails on null, so `SafeCast` of a closure held
-    /// in a `Dynamic` field yielded null and the following `NullCheck` raised
-    /// "Null access" — heaps' `for( et in eventTargets ) et(e)` hit this on
-    /// every window event.
+    /// `vclosure.t` must carry. It must be non-null: `hl_dyn_castp` reads the
+    /// source type out of the value's header and bails on null, so a null
+    /// here makes every later cast of the closure yield null and the
+    /// following `NullCheck` raise "Null access".
     ///
     /// Allocation goes through `hlp_alloc_closure_ptr`, the same helper the JIT
     /// uses, so the closure lives in the GC heap and the bound value stays
@@ -4150,23 +4134,18 @@ impl HLInterpreter {
         // Coerce arguments to the callee's DECLARED parameter kinds before
         // either body shape binds them.
         //
-        // Arguments arrive verbatim from the caller, and a dynamic call site
-        // can hand a BOXED primitive to a parameter the callee declares as
-        // Int/Float/Bool. The callee then operates on the box: unit.spec.
-        // TestArray died on "And: incompatible types Ptr(0x14bce5c00), I32(1)
-        // in Fun_8573 at pc=1", and dumping that function shows the Ptr is
-        // Reg(0) — a parameter — being ANDed with a constant. Nothing was
-        // wrong with the operator; the box should never have reached it.
+        // A dynamic call site can pass a BOXED primitive to a parameter the
+        // callee declares as Int/Float/Bool, and the callee would then operate
+        // on the box. Unbox against the declared parameter kinds.
         //
-        // `coerce_value_for_static_kind` is the same conservative helper the
-        // field paths use: it unboxes only when the destination is a
+        // `coerce_value_for_static_kind` unboxes only when the destination is a
         // primitive AND the pointer really is a boxed primitive (aligned,
-        // plausible, with a primitive type header), and returns the value
-        // untouched otherwise. It also maps null to a typed zero.
+        // plausible, primitive type header); it returns the value untouched
+        // otherwise and maps null to a typed zero.
         //
-        // Done here rather than in either body so the serialize and SSA paths
-        // cannot disagree, and the scan runs before the Vec so the common case
-        // — every argument already the right shape — allocates nothing.
+        // Placed here, ahead of the body-shape dispatch, so the serialize and
+        // SSA paths cannot disagree. The scan precedes the Vec so the common
+        // case — every argument already correctly shaped — allocates nothing.
         let coerced_args: Vec<NanBoxedValue>;
         let args: &[NanBoxedValue] = {
             let params = bc.types[bc.functions[func_idx].type_.0]
@@ -5087,15 +5066,12 @@ impl HLInterpreter {
                     return Ok(StepResult::Jump(*offset));
                 }
             }
-            // "Not less than" is the NEGATION of Lt, which is not the same
-            // thing as Gte once floats are involved: every comparison against
-            // NaN is false, so !(a < b) is TRUE for NaN while (a >= b) is
-            // FALSE, and the branch went the wrong way. Integers are a total
-            // order, so the old mapping was right for them and wrong only
-            // where it mattered. HashLink treats these two opcodes as a
-            // special case for exactly this reason -- jit.c:1845 tests
-            // JNParity and hand-sets the flags for OJNotLt/OJNotGte after
-            // COMISD.
+            // "Not less than" is the NEGATION of Lt, which is not Gte once
+            // floats are involved: every comparison against NaN is false, so
+            // !(a < b) is TRUE for NaN while (a >= b) is FALSE. Integers are a
+            // total order, where the two agree. HashLink special-cases these
+            // opcodes for the same reason — jit.c:1845 tests JNParity and
+            // hand-sets the flags after COMISD.
             Opcode::JNotLt { a, b, offset } => {
                 if !self.compare_regs(bytecode, func_idx, a.0, b.0, CmpOp::SLt) {
                     return Ok(StepResult::Jump(*offset));

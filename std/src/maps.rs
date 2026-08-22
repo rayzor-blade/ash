@@ -619,23 +619,17 @@ pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
 // ============================================================================
 // IntMap (hi*) and ObjectMap (ho*)
 //
-// The index stays a Rust HashMap, but it must not be the only holder of a GC
-// pointer. The malloc heap it lives on is never scanned by the collector, so
-// values reachable only from there had no root at all: `ii.set(10, 100)` boxes
-// 100 into a GC vdynamic, and the first collection after the set reclaimed it.
-// Reading the key back then returned whatever had reused the line, which is
-// how a boxed Int came back as a heap address -- under ASH_GC_STRESS,
-// test_map_iter_all died on `Add: incompatible types I32(100) + Ptr(...)`.
-// ASH_GC_NO_RECLAIM=1 gave the correct checksum on every run and reclamation
-// alone failed on every run, which is what pinned it to rooting rather than
-// to the hash logic. Object maps were doubly exposed: keying on `key as usize`
-// left the key object unrooted too.
+// The index stays a Rust HashMap, but it must never be the only holder of a
+// GC pointer: the collector does not scan the malloc heap, so a GC object
+// reachable only from there has no root and the next collection takes it.
 //
-// So every GC pointer now lives in `slots`, a GC-allocated array hanging off a
-// GC-allocated `RootedMap` header -- the pointer handed back to the Haxe Map
-// object. conservative_trace reaches the header from the Map object, the array
-// from the header, and each key and value from the array. The HashMap maps a
-// key to a slot index and holds no GC pointer of its own.
+// Every GC pointer therefore lives in `slots`, a GC-allocated array hanging
+// off a GC-allocated `RootedMap` header — the pointer handed back to the Haxe
+// Map object. conservative_trace reaches the header from the Map object, the
+// array from the header, and each key and value from the array. The HashMap
+// maps a key to a slot index and holds no GC pointer of its own; object maps
+// take two slots per entry so the key is rooted alongside its value.
+//
 // ============================================================================
 
 use std::collections::HashMap;

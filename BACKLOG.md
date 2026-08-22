@@ -109,6 +109,55 @@ the GC stress gate currently proves less than it claims.
 
 ---
 
+## The published numbers are Mac numbers, and the Mac compiles LLVM ~3x slower
+
+Measured 2026-08-22. Same function (fib's hot findex 22), same release
+build, tier log's own compile timing, three-plus samples each:
+
+    M1 Pro (this box)   544 / 525 / 530 ms
+    NUC i5-1250P        193 / 217 / 143 / 142 ms
+
+~3.1x slower on Apple Silicon. Our benchmarks all finish in 0.1-3.7s and
+are compile-dominated, and website/bench/results.json records
+`"cpu_model": "Apple M1 Pro"` — so every number we publish is paying that
+multiplier. "Our numbers are terrible" is substantially this.
+
+The engine itself is not slow. On the NUC, where `hl` actually runs (it
+does not run on the Mac at all), fib interleaved, identical checksum
+102334155 both sides:
+
+    HashLink 1.15   1722 / 1759 / 1739 ms
+    ash hybrid        99 /   97 /  100 ms
+
+ash is ~17.5x faster than HashLink on fib. Any claim that ash is slow needs
+to name the machine before it means anything.
+
+## The ladder can be much worse than pinning the top tier
+
+Harness, release, 5 iterations, hybrid modes on the Mac:
+
+    benchmark     hybrid-auto   hybrid-cranelift   hybrid-llvm
+    fib             875.1 ms        1163.3 ms        129.8 ms   <- 6.74x
+    mandelbrot      630.4 ms          22.4 s        1111.4 ms
+    method_call     294.1 ms          17.0 s         309.3 ms
+
+For fib the default ladder is 6.7x slower than going straight to LLVM. The
+sequence is: promote to Cranelift (0.75ms compile, but much slower code),
+which stops call-count accrual, then chase LLVM whose 530ms compile lands
+too late to be used and is waited on at exit. Pinning LLVM skips all of it.
+
+This is NOT a general "pin LLVM" result — mandelbrot is 1.8x WORSE pinned
+to LLVM than on auto, and method_call is a wash. And hybrid-cranelift's
+22.4s/17.0s are functions refusing that tier and staying interpreted (tier
+counts 1/0), not Cranelift emitting slow code for them. What the fib row
+does show is that when Cranelift wins the race for a program's one hot
+function, the result can be several times worse than not promoting at all.
+
+Worth checking against e9cbe35 ("Cranelift covers 99.4% of the corpus, up
+from 57%"): raising coverage means Cranelift now wins that race for
+functions that previously went straight to LLVM. Coverage was measured;
+the effect of coverage on wall time was not.
+
 ## Hybrid blocks process exit on LLVM chases whose results are never used
 
 Measured 2026-08-22, RELEASE binary, interleaved A/B/C/D over three rounds

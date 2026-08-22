@@ -149,6 +149,34 @@ fn thread_self_fast() -> u64 {
         std::arch::asm!("mrs {}, TPIDRRO_EL0", out(reg) tpidrro, options(nomem, nostack, preserves_flags));
         tpidrro & !0x7
     }
+    // Linux/x86_64: glibc's pthread_self IS a load of the TCB self-pointer
+    // at fs:0x10 (offsetof(struct pthread, header.self)), so read it
+    // directly and skip the PLT. This is the same trick the macOS/aarch64
+    // arm above already uses, on the platform CI and the bench box actually
+    // run: an allocation-bound profile there showed 16.4% of samples in
+    // libc with pthread_self on top, from ~900MB of allocation going
+    // through on_mutator once per object.
+    //
+    // A wrong value here degrades rather than breaks: on_mutator would
+    // answer false and allocation would take the locked path, which is
+    // slower and still correct.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe {
+        let tp: u64;
+        std::arch::asm!(
+            "mov {}, qword ptr fs:[0x10]",
+            out(reg) tp,
+            options(nomem, nostack, preserves_flags)
+        );
+        tp
+    }
+    // Linux/aarch64 keeps its thread pointer in TPIDR_EL0, same idea.
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    unsafe {
+        let tp: u64;
+        std::arch::asm!("mrs {}, TPIDR_EL0", out(reg) tp, options(nomem, nostack, preserves_flags));
+        tp
+    }
     // Windows has no pthreads, and its cheapest identity is the thread id:
     // GetCurrentThreadId is a TEB field read behind a stub, so the same
     // "not a real function call" property holds.
@@ -156,7 +184,12 @@ fn thread_self_fast() -> u64 {
     unsafe {
         GetCurrentThreadId() as u64
     }
-    #[cfg(all(unix, not(all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(all(
+        unix,
+        not(all(target_os = "macos", target_arch = "aarch64")),
+        not(all(target_os = "linux", target_arch = "x86_64")),
+        not(all(target_os = "linux", target_arch = "aarch64"))
+    ))]
     unsafe {
         libc::pthread_self() as u64
     }

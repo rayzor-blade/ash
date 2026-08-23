@@ -452,14 +452,34 @@ argument, a collection.
    guarded version, not the 2x the JVM comparison might suggest. CI's
    closure_call is 2.5x its own inlined_call where the Mac's is 1.4x, so
    whatever else is slow there is a separate question.
-1. AIR pass: resolve a `CallClosure`'s `fun` through its reaching
-   definitions. One `StaticClosure` reaching it becomes a direct `Call`
-   with no guard. Several become a guarded chain on closure identity, each
-   arm direct and inlinable, with today's indirect path as the default.
-   Exit: closure_call moves, Cranelift-only mode moves too -- that is the
-   proof the rewrite landed in the IR rather than in one backend.
-2. Same pass for `CallMethod`: receiver type from the defining `New`, slot
-   to findex through the proto the JIT already resolves.
+1. DONE, as a survey rather than a rewrite. `ASH_DEVIRT_SURVEY=1` counts,
+   per function, how resolvable each dispatch is. The answer redirects the
+   work:
+
+       bench            closure single/phi/unres   CallMethod sites (distinct)
+       closure_call            0 / 1 / 0                  0
+       method_call             0 / 0 / 0                  1  (1)
+       deltablue               0 / 0 / 2                 27 (25)
+       test_stdlib             1 / 0 / 6                  7  (7)
+
+   The whole corpus holds TWO resolvable closure sites, and one of them is
+   inside the benchmark written to measure closures. A CallClosure pass
+   would optimise its own benchmark. Do not write it.
+
+   CallMethod is where the volume is: deltablue -- the row that is 73.7%
+   interpreter and the worst against rayzor -- has 27 sites across 25
+   distinct (receiver type, slot) pairs.
+
+2. So the pass to write is CallMethod, and it needs neither reaching
+   definitions nor class-hierarchy analysis. Every AIR value carries its
+   HL type (`ValueData { ty }`), so the receiver's static type plus the
+   field slot names a target; guard on the receiver's RUNTIME type pointer
+   against that static type, direct-call on the hit, vtable dispatch on the
+   miss. Sound whatever the hierarchy does, monomorphic sites always hit,
+   and the direct arm is what LLVM can inline.
+   Exit: method_call and deltablue move, and they move under
+   `--jit-tier cranelift` too -- that is the proof the rewrite landed in the
+   IR rather than in one backend.
 3. Runtime feedback per `(findex, pc)` at the interpreter's `CallClosure`
    (interpreter.rs:4855) and `CallMethod` (:4844) for the sites step 1 and
    2 cannot resolve statically: observed target, or MEGAMORPHIC once a

@@ -149,6 +149,76 @@ impl Default for PassOptions {
 }
 
 /// An AIR v2 optimization pass.
+/// Diagnostic: how resolvable is each `CallClosure` target, by reaching
+/// definitions? Counts only -- `ASH_DEVIRT_SURVEY=1` prints them.
+///
+/// Answers whether a static devirtualisation pass is worth writing, and in
+/// which form: a single reaching `StaticClosure` can be rewritten to a direct
+/// call for free, several need a guard, and anything else is out of reach
+/// without runtime feedback.
+pub fn survey_closure_targets(f: &Function) -> (usize, usize, usize) {
+    use crate::v2::ir::Instr;
+    if std::env::var("ASH_DEVIRT_SURVEY").is_err() {
+        return (0, 0, 0);
+    }
+    // ValueId -> the instruction that defines it, and whether it is a phi.
+    let mut def_static: std::collections::HashMap<u32, usize> = Default::default();
+    let mut phi_incoming: std::collections::HashMap<u32, Vec<u32>> = Default::default();
+    for b in &f.blocks {
+        for phi in &b.phis {
+            phi_incoming.insert(phi.dst.0, phi.incoming.iter().map(|(_, v)| v.0).collect());
+        }
+        for ins in &b.instrs {
+            if let Instr::StaticClosure { dst, fun } = ins {
+                def_static.insert(dst.0, *fun);
+            }
+        }
+    }
+    // CallMethod does not need a reaching-definitions walk: the receiver's
+    // static type plus the field slot names the target, provided no subtype
+    // overrides that slot. Counted here by distinct (receiver type, slot) so
+    // the size of that opportunity is visible next to the closure one.
+    let mut methods: std::collections::HashSet<(u32, usize)> = Default::default();
+    let mut method_sites = 0usize;
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            if let Instr::CallMethod { field, args, .. } = ins {
+                method_sites += 1;
+                if let Some(recv) = args.first() {
+                    methods.insert((f.values[recv.0 as usize].ty.0, *field));
+                }
+            }
+        }
+    }
+
+    let (mut single, mut multi, mut unknown) = (0, 0, 0);
+    for b in &f.blocks {
+        for ins in &b.instrs {
+            let Instr::CallClosure { fun, .. } = ins else { continue };
+            if def_static.contains_key(&fun.0) {
+                single += 1;
+            } else if let Some(inc) = phi_incoming.get(&fun.0) {
+                if !inc.is_empty() && inc.iter().all(|v| def_static.contains_key(v)) {
+                    multi += 1;
+                } else {
+                    unknown += 1;
+                }
+            } else {
+                unknown += 1;
+            }
+        }
+    }
+    if single + multi + unknown + method_sites > 0 {
+        eprintln!(
+            "[devirt-survey] fn={} single={single} phi-all-static={multi} \
+             unresolved={unknown} method-sites={method_sites} method-distinct={}",
+            f.findex.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+            methods.len()
+        );
+    }
+    (single, multi, unknown)
+}
+
 pub trait Pass {
     fn name(&self) -> &'static str;
     /// Run once over the function, to the pass's own fixed point where that

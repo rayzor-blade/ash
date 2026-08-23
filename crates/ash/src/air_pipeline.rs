@@ -499,6 +499,10 @@ pub fn optimize_full(
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
+    // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
+    // target AFTER the passes have run, which is the IR a devirtualisation
+    // pass would actually see.
+    air::v2::passes::survey_closure_targets(&ir);
 
     // Verify before serializing: a serializer fed invalid IR emits
     // plausible-looking opcodes, and the corruption only surfaces as a wrong
@@ -545,6 +549,10 @@ pub fn prepare_ir(
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
+    // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
+    // target AFTER the passes have run, which is the IR a devirtualisation
+    // pass would actually see.
+    air::v2::passes::survey_closure_targets(&ir);
 
     // The consumer executes this IR directly, so verification is the only
     // thing standing between a pass bug and a wrong answer at run time.

@@ -273,10 +273,17 @@ impl Default for TieredConfig {
 /// |---------------|-----|-------|---------------------------------------------|
 /// | `Script`      |  20 | 2 000 | one-shot CLI work; optimise only if the run lasts |
 /// | `Application` | 100 | 1 000 | the default: balanced startup and peak      |
+/// | `Game`        |  10 |   200 | frame budgets: compile during load, not play |
 /// | `Server`      |  50 |   500 | long-lived processes; compile cost amortises |
-/// | `Benchmark`   | 100 | 1 000 | peak throughput, promotions logged          |
+/// | `Benchmark`   |   2 |    10 | drive everything through every tier          |
 /// | `Development` | 100 | 5 000 | favours iteration over peak                 |
 /// | `Interpreter` | off |   off | no JIT at all                               |
+///
+/// Most of these are shaped by what a program needs day to day. `Benchmark` is
+/// not: it exists to exercise the tiers themselves, and on a short program it
+/// will be SLOWER, because compiles it cannot amortise still get paid for —
+/// at `jit_threshold` 1, bench_deltablue goes from 66ms to 468ms. A published
+/// benchmark row should therefore name the preset its readers actually run.
 ///
 /// A preset is a starting point, not a policy: take one and adjust, or build
 /// a [`TieredConfig`] directly. `ASH_TIER1` still overrides the LLVM rung at
@@ -285,6 +292,7 @@ impl Default for TieredConfig {
 pub enum TierPreset {
     Script,
     Application,
+    Game,
     Server,
     Benchmark,
     Development,
@@ -300,6 +308,7 @@ impl TierPreset {
         match s.trim().to_ascii_lowercase().as_str() {
             "script" => Some(TierPreset::Script),
             "application" | "app" => Some(TierPreset::Application),
+            "game" => Some(TierPreset::Game),
             "server" => Some(TierPreset::Server),
             "benchmark" | "bench" => Some(TierPreset::Benchmark),
             "development" | "dev" => Some(TierPreset::Development),
@@ -309,7 +318,15 @@ impl TierPreset {
     }
 
     pub fn names() -> &'static [&'static str] {
-        &["script", "application", "server", "benchmark", "development", "interpreter"]
+        &[
+            "script",
+            "application",
+            "game",
+            "server",
+            "benchmark",
+            "development",
+            "interpreter",
+        ]
     }
 
     pub fn to_config(self) -> TieredConfig {
@@ -327,17 +344,30 @@ impl TierPreset {
                 opt_threshold: 1_000,
                 ..base
             },
+            // A frame budget is the constraint, not throughput. Promote while
+            // the program is still loading so a compile does not land in the
+            // middle of frame 400: a function called once per frame passes 10
+            // in the first sixth of a second and 200 within a few seconds, so
+            // both tiers are reached during startup rather than during play.
+            TierPreset::Game => TieredConfig {
+                enabled: true,
+                jit_threshold: 10,
+                opt_threshold: 200,
+                ..base
+            },
             TierPreset::Server => TieredConfig {
                 enabled: true,
                 jit_threshold: 50,
                 opt_threshold: 500,
                 ..base
             },
+            // Not shaped by a program's needs: this one exists to pull every
+            // performance lever, promoting almost at once so every function
+            // passes through both tiers and the whole machinery is exercised.
             TierPreset::Benchmark => TieredConfig {
                 enabled: true,
-                jit_threshold: 100,
-                opt_threshold: 1_000,
-                log_promotions: true,
+                jit_threshold: 2,
+                opt_threshold: 10,
                 ..base
             },
             TierPreset::Development => TieredConfig {

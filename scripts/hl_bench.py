@@ -277,17 +277,22 @@ def main() -> int:
     haxe = args.haxe or shutil.which("haxe")
     cc = shutil.which(args.cc)
 
-    def haxelib_has_hashlink() -> bool:
-        # The Haxe compiler refuses `-hl main.c` without the hashlink
-        # haxelib installed, so its absence is an UNAVAILABLE lane, not a
-        # per-bench FAIL.
+    def haxelib_installed(name: str) -> bool:
+        # The Haxe compiler refuses a target whose support library is not
+        # installed -- `-hl main.c` without `hashlink`, `--jvm` without
+        # `hxjava`. That is an UNAVAILABLE lane, not a per-bench FAIL, so it
+        # has to be answered before the lane runs rather than read out of a
+        # compiler error afterwards.
         try:
             return subprocess.run(
-                ["haxelib", "path", "hashlink"],
+                ["haxelib", "path", name],
                 capture_output=True, timeout=30,
             ).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+    def haxelib_has_hashlink() -> bool:
+        return haxelib_installed("hashlink")
 
     have_haxelib = bool(haxe) and haxelib_has_hashlink()
     # The JVM lane needs `haxe --jvm` (4.1+) and a `java` to run the jar.
@@ -299,6 +304,11 @@ def main() -> int:
         jvm_missing = "haxe on PATH"
     elif java is None:
         jvm_missing = f"a java runtime (looked for {args.java or 'java'})"
+    elif not haxelib_installed("hxjava"):
+        # `--jvm` is the Java target's bytecode writer and still needs the
+        # target's support library; without it haxe fails the build rather
+        # than the run, which would read as a per-bench FAIL.
+        jvm_missing = "the hxjava haxelib (haxelib install hxjava)"
     jvm_ready = not jvm_missing
 
     hlc_ready = bool(

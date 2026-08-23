@@ -248,6 +248,14 @@ jobs:
         continue-on-error: true
         run: haxelib install hashlink --always
 
+      # `--jvm` writes JVM bytecode but is still the Java target, so it needs
+      # that target's support library. Without it haxe fails the BUILD, which
+      # would surface as a per-bench FAIL rather than an honest UNAVAILABLE
+      # lane -- hl_bench checks for it, and this is what makes the check pass.
+      - name: Install hxjava haxelib
+        continue-on-error: true
+        run: haxelib install hxjava --always
+
       # Pinned rather than left to whatever the image ships: the JVM row is
       # only comparable across runs if it is the same JVM. Best-effort like
       # the other comparison toolchains -- without it hl_bench records the

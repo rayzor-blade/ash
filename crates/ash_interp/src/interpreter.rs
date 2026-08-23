@@ -2064,11 +2064,39 @@ impl HLInterpreter {
         None
     }
 
+    /// `virt->indexes[i]` is a byte offset into the virtual's OWN data area,
+    /// which only exists when the virtual is self-backed — `hl_alloc_virtual`
+    /// allocates `dataSize` extra bytes and points each field there.
+    ///
+    /// A virtual produced by `hl_to_virtual` is a VIEW: `value` holds the
+    /// wrapped object, there is no data area, and the field lives in the
+    /// wrapped object instead. Applying the offset to one of those addresses
+    /// past the end of the allocation, so the caller must take the dynamic
+    /// path and reach the field through `value`.
+    ///
+    /// `value.is_null()` is the discriminator upstream uses for exactly this
+    /// (hashlink src/std/obj.c:784, mirrored by ash's own hlp_obj_lookup).
     unsafe fn resolve_virtual_field_offset(
+        obj_ptr: *mut u8,
         c_type_ptr: *mut c_void,
         field_idx: usize,
     ) -> Option<usize> {
         if c_type_ptr.is_null() {
+            return None;
+        }
+        if obj_ptr.is_null() {
+            return None;
+        }
+        // Trust the runtime header: ToVirtual is a bare register copy, so an
+        // HVIRTUAL-typed register may hold a raw object.
+        let hdr = *(obj_ptr as *const *const hl_type);
+        if hdr.is_null()
+            || !(hdr as usize).is_multiple_of(std::mem::align_of::<usize>())
+            || (*hdr).kind != hl::hl_type_kind_HVIRTUAL
+        {
+            return None;
+        }
+        if !(*(obj_ptr as *const hl::vvirtual)).value.is_null() {
             return None;
         }
         let t = c_type_ptr as *mut hl_type;
@@ -4842,7 +4870,7 @@ impl HLInterpreter {
                     frame.registers.set(dst.0, val);
                 } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
                     if let Some(offset) =
-                        unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                        unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field.0) }
                     {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
@@ -4944,7 +4972,7 @@ impl HLInterpreter {
                         }
                     } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
                         if let Some(offset) =
-                            unsafe { Self::resolve_virtual_field_offset(obj_c_type, field.0) }
+                            unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field.0) }
                         {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
@@ -6468,7 +6496,7 @@ impl HLInterpreter {
                 }
             } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
                 if let Some(offset) =
-                    unsafe { Self::resolve_virtual_field_offset(obj_c_type, field) }
+                    unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field) }
                 {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let addr = unsafe { obj_ptr.add(offset) };
@@ -6575,7 +6603,7 @@ impl HLInterpreter {
             }
             frame.registers.set(dst, val);
         } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-            if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_c_type, field) } {
+            if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field) } {
                 let obj_ptr = obj_val.as_ptr() as *mut u8;
                 let addr = unsafe { obj_ptr.add(offset) };
                 let val = unsafe { Self::read_value_at(addr, dst_kind) };

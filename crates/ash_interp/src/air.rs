@@ -152,7 +152,15 @@ impl Cache {
 
         let m = self.module.expect("module cached just above").1;
         let raw = &bc.functions[func_idx];
-        self.bodies[func_idx] = match optimized(m, raw).map(|o| o.ser.clone()) {
+        // The AIR pipeline runs HERE, on the mutator, inside the execute
+        // phase -- not on a broker thread like the tiers that consume it. Its
+        // own phase so the profile says how much of a run is spent preparing
+        // IR rather than executing: on deltablue that is ~20ms of ~51ms.
+        let prepared = {
+            let _phase = ash_core::profile::scope("air prepare (main thread)");
+            optimized(m, raw).map(|o| o.ser.clone())
+        };
+        self.bodies[func_idx] = match prepared {
             Ok(ser) => {
                 let mut opt = raw.clone();
                 opt.ops = ser.ops;

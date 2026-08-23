@@ -225,7 +225,23 @@ impl TierMode {
 #[derive(Debug, Clone)]
 pub struct TieredConfig {
     pub enabled: bool,
+    /// Invocations before a function is promoted to the Cranelift tier.
     pub jit_threshold: u64,
+    /// Invocations before a function is promoted from the baseline JIT to
+    /// the optimising tier.
+    ///
+    /// This is how many invocations it takes to reach the top tier by
+    /// counting. A very high value does not turn the tier off; it means the
+    /// counter is not what gets a function there.
+    ///
+    /// This rung is reached only by INTERPRETED calls: once a caller is itself
+    /// compiled it dispatches directly and stops ticking the callee's counter,
+    /// so a threshold far above the Cranelift one is unreachable for any
+    /// function whose callers compile. bench_fib is the shape that shows it —
+    /// at 100x the Cranelift threshold it never promotes and runs the whole
+    /// benchmark on the middle tier; at 10x it promotes and runs 5x faster,
+    /// with deltablue and binary_trees unchanged.
+    pub opt_threshold: u64,
     pub max_jit_args: usize,
     pub min_ops_for_promotion: usize,
     pub log_promotions: bool,
@@ -239,6 +255,7 @@ impl Default for TieredConfig {
         Self {
             enabled: false,
             jit_threshold: 100,
+            opt_threshold: 1_000,
             max_jit_args: 8,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
@@ -246,6 +263,97 @@ impl Default for TieredConfig {
             strict_mode: true,
             hot_reload: false,
             tier_mode: TierMode::Auto,
+        }
+    }
+}
+
+/// Threshold sets for common program shapes.
+///
+/// | Preset        | jit | opt   | Suits                                       |
+/// |---------------|-----|-------|---------------------------------------------|
+/// | `Script`      |  20 | 2 000 | one-shot CLI work; optimise only if the run lasts |
+/// | `Application` | 100 | 1 000 | the default: balanced startup and peak      |
+/// | `Server`      |  50 |   500 | long-lived processes; compile cost amortises |
+/// | `Benchmark`   | 100 | 1 000 | peak throughput, promotions logged          |
+/// | `Development` | 100 | 5 000 | favours iteration over peak                 |
+/// | `Interpreter` | off |   off | no JIT at all                               |
+///
+/// A preset is a starting point, not a policy: take one and adjust, or build
+/// a [`TieredConfig`] directly. `ASH_TIER1` still overrides the LLVM rung at
+/// runtime whatever the config says.
+#[derive(Debug, Clone)]
+pub enum TierPreset {
+    Script,
+    Application,
+    Server,
+    Benchmark,
+    Development,
+    Interpreter,
+    /// Use the given config verbatim.
+    Custom(TieredConfig),
+}
+
+impl TierPreset {
+    /// Parse a preset by name. Returns `None` for an unknown name so the
+    /// caller can report it rather than silently choosing a default.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "script" => Some(TierPreset::Script),
+            "application" | "app" => Some(TierPreset::Application),
+            "server" => Some(TierPreset::Server),
+            "benchmark" | "bench" => Some(TierPreset::Benchmark),
+            "development" | "dev" => Some(TierPreset::Development),
+            "interpreter" | "interp" | "none" => Some(TierPreset::Interpreter),
+            _ => None,
+        }
+    }
+
+    pub fn names() -> &'static [&'static str] {
+        &["script", "application", "server", "benchmark", "development", "interpreter"]
+    }
+
+    pub fn to_config(self) -> TieredConfig {
+        let base = TieredConfig::default();
+        match self {
+            TierPreset::Script => TieredConfig {
+                enabled: true,
+                jit_threshold: 20,
+                opt_threshold: 2_000,
+                ..base
+            },
+            TierPreset::Application => TieredConfig {
+                enabled: true,
+                jit_threshold: 100,
+                opt_threshold: 1_000,
+                ..base
+            },
+            TierPreset::Server => TieredConfig {
+                enabled: true,
+                jit_threshold: 50,
+                opt_threshold: 500,
+                ..base
+            },
+            TierPreset::Benchmark => TieredConfig {
+                enabled: true,
+                jit_threshold: 100,
+                opt_threshold: 1_000,
+                log_promotions: true,
+                ..base
+            },
+            TierPreset::Development => TieredConfig {
+                enabled: true,
+                jit_threshold: 100,
+                opt_threshold: 5_000,
+                ..base
+            },
+            TierPreset::Interpreter => TieredConfig {
+                enabled: false,
+                jit_threshold: u64::MAX,
+                opt_threshold: u64::MAX,
+                tier_mode: TierMode::Off,
+                ..base
+            },
+            TierPreset::Custom(c) => c,
         }
     }
 }
@@ -1731,10 +1839,12 @@ impl HLInterpreter {
         // call. ASH_TIER1 sets it independently; the default is unchanged, so
         // this is a knob rather than a policy change until a measurement says
         // otherwise.
+        // The API value is the source of truth; ASH_TIER1 overrides it so a
+        // harness can sweep the rung without rebuilding.
         let tier1 = std::env::var("ASH_TIER1")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
-            .unwrap_or_else(|| threshold.saturating_mul(100));
+            .unwrap_or_else(|| u32::try_from(config.opt_threshold).unwrap_or(u32::MAX));
         let tier0: Box<dyn HotnessPolicy> =
             Box::new(ThresholdPolicy::new(threshold).queue_ahead(queue_ahead));
         let policies: Vec<Box<dyn HotnessPolicy>> = match config.tier_mode {

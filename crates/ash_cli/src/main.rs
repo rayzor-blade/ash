@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ash_core::bytecode::BytecodeDecoder;
 use ash_core::native_lib::{init_std_library, NativeFunctionResolver};
-use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
+use ash_interp::interpreter::{HLInterpreter, TierMode, TierPreset, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 use std::process;
@@ -30,6 +30,20 @@ struct Cli {
     /// Hot-call threshold for JIT promotion in hybrid mode
     #[arg(long, default_value_t = 100)]
     jit_threshold: u64,
+
+    /// Threshold preset for the program's shape.
+    ///
+    /// script | application | server | benchmark | development | interpreter.
+    /// Explicit --jit-threshold / --opt-threshold override the preset.
+    #[arg(long, value_name = "NAME")]
+    preset: Option<String>,
+
+    /// Invocations before promoting to the optimising tier.
+    ///
+    /// Reached by INTERPRETED calls only, so a value far above
+    /// --jit-threshold is unreachable once a function's callers compile.
+    #[arg(long, default_value_t = 1_000)]
+    opt_threshold: u64,
 
     /// Enable tiered runtime promotion logs
     #[arg(long, default_value_t = false)]
@@ -858,9 +872,34 @@ fn run() -> Result<()> {
                 None => TierMode::default(),
             };
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
+            // A preset supplies the thresholds; a flag the operator actually
+            // typed still wins over it.
+            let preset_cfg = match cli.preset.as_deref() {
+                Some(name) => match TierPreset::parse(name) {
+                    Some(p) => Some(p.to_config()),
+                    None => {
+                        eprintln!(
+                            "unknown --preset '{name}'; expected one of: {}",
+                            TierPreset::names().join(", ")
+                        );
+                        std::process::exit(2);
+                    }
+                },
+                None => None,
+            };
+            let arg_given = |flag: &str| {
+                std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
+            };
             let cfg = TieredConfig {
                 enabled: true,
-                jit_threshold: cli.jit_threshold,
+                jit_threshold: match &preset_cfg {
+                    Some(p) if !arg_given("--jit-threshold") => p.jit_threshold,
+                    _ => cli.jit_threshold,
+                },
+                opt_threshold: match &preset_cfg {
+                    Some(p) if !arg_given("--opt-threshold") => p.opt_threshold,
+                    _ => cli.opt_threshold,
+                },
                 max_jit_args: cli.jit_max_args,
                 min_ops_for_promotion: cli.jit_min_ops,
                 log_promotions: cli.jit_log,

@@ -1899,6 +1899,25 @@ impl HLInterpreter {
         })
     }
 
+    /// Stop promoting, and wait out any compile already running.
+    ///
+    /// Call once the entrypoint has returned, before the process exits. LLVM
+    /// registers its own `atexit` handlers, and they tear down state a
+    /// promotion in flight is still using: observed as a SIGSEGV inside
+    /// `SelectionDAGISel` on the broker while the main thread sat in
+    /// `~GDBJITRegistrationListener`, roughly one free_call run in thirty.
+    ///
+    /// The flag stops a compile that has not started. Waiting is what covers
+    /// the one that has: a promotion holds the module lock end to end, so
+    /// taking it means no compile is running, and the flag means none can
+    /// start after.
+    pub fn quiesce_promotions(&self) {
+        retier_abandon();
+        if let Some(tiered) = self.tiered_runtime.as_ref() {
+            let _guard = tiered.shared_ctx.llvm.lock();
+        }
+    }
+
     pub fn tiered_stats(&self) -> Option<TieredStats> {
         use std::sync::atomic::Ordering;
         self.tiered_runtime.as_ref().map(|t| {

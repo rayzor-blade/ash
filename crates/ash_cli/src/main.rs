@@ -936,7 +936,7 @@ fn run() -> Result<()> {
             // (f61799e), because the set of state a broker can reach is not
             // something a caller can enumerate. Ownership is the fix; the
             // join was the symptom-level workaround.
-            ash_interp::interpreter::retier_abandon();
+            interpreter.quiesce_promotions();
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(

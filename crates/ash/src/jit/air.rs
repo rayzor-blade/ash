@@ -160,6 +160,66 @@ fn rewrite_indirect(f: &mut HLFunction, natives: Option<&HashSet<usize>>) {
     }
 }
 
+/// Whether promoting this function needs the inliner to see bodies other than
+/// its own — the question that decides whether it compiles into a private
+/// module or the shared one.
+///
+/// A private module is much cheaper to emit: MCJIT produces a module's object
+/// whole, so the shared one costs everything promoted so far (35-71ms of
+/// codegen per promotion against 0-7ms). That buys nothing, though, if the
+/// function's hot path calls something the module does not contain, because
+/// the call then survives as a call to an external declaration.
+///
+/// The discriminator is a call the AIR inliner did not already remove, on the
+/// path that actually runs:
+///
+/// - A loop that still contains a call has dispatch for LLVM to improve, and
+///   it needs the callee to do it — method_call and closure_call both lose
+///   ~10-18% without it.
+/// - A loop whose callee AIR already inlined is straight-line arithmetic;
+///   inlined_call and free_call gain ~9% from the cheaper module.
+/// - No loop at all means the cost is per invocation. A SELF call does not
+///   count: the body is already in whatever module holds the function, so
+///   fib needs nothing else and gains most of all — 72ms to 17ms.
+pub(crate) fn promotion_wants_full_module(
+    bc: &DecodedBytecode,
+    f: &HLFunction,
+    hot_reload: bool,
+) -> bool {
+    let m = if hot_reload {
+        AshModule::new(bc).without_callees()
+    } else {
+        AshModule::new(bc)
+    };
+    // Undecidable means take the safe side: the shared module is what the
+    // promote path did before this choice existed.
+    let Ok(opt) = air_pipeline::optimized(&m, f) else {
+        return true;
+    };
+    let ir = &opt.ir;
+    let self_findex = f.findex as usize;
+    let calls_out = |b: &air::v2::ir::Block, allow_self: bool| {
+        b.instrs.iter().any(|i| match i {
+            air::v2::ir::Instr::Call { fun, .. } => !allow_self || *fun != self_findex,
+            air::v2::ir::Instr::CallMethod { .. } | air::v2::ir::Instr::CallClosure { .. } => true,
+            _ => false,
+        })
+    };
+    let cfg = air::v2::CfgInfo::build(ir);
+    let forest = air::v2::LoopForest::analyze(ir, &cfg);
+    let loops = forest.innermost_first();
+    if loops.is_empty() {
+        return ir.blocks.iter().any(|b| calls_out(b, true));
+    }
+    loops.into_iter().any(|l| {
+        forest
+            .get(l)
+            .blocks
+            .iter()
+            .any(|b| calls_out(&ir.blocks[b.idx()], false))
+    })
+}
+
 /// AIR v2. Returns whether `f` was rewritten; on `false` it is untouched and
 /// the caller should run v1 instead.
 fn run_v2(bc: &DecodedBytecode, f: &mut HLFunction, hot_reload: bool) -> bool {

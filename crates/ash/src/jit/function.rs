@@ -414,6 +414,154 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// Which module a promotion compiles into.
+    ///
+    /// `ASH_PROMOTE_MODULE=0` forces the shared module for every promotion,
+    /// `=1` forces a private one; unset lets
+    /// `air::promotion_wants_full_module` decide per function, which is the
+    /// shipped behaviour.
+    fn promote_module_override() -> Option<bool> {
+        static SPEC: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+        *SPEC.get_or_init(|| std::env::var("ASH_PROMOTE_MODULE").ok().map(|v| v != "0"))
+    }
+
+    /// Whether `findex` compiles into a module of its own.
+    fn promote_uses_own_module(&self, findex: usize) -> bool {
+        if let Some(forced) = Self::promote_module_override() {
+            return forced;
+        }
+        let Some(raw) = self
+            .bytecode
+            .functions
+            .iter()
+            .find(|f| f.findex as usize == findex)
+        else {
+            return false;
+        };
+        !super::air::promotion_wants_full_module(&self.bytecode, raw, self.hot_reload)
+    }
+
+    /// Lower `findex` into a private module and hand that to the engine.
+    ///
+    /// Mirrors `compile_osr_entry`: swap the module and every by-index cache
+    /// out, build, resolve whatever the module leaves undefined against the
+    /// addresses the host already holds, and swap back. Returns the address.
+    fn promote_in_own_module(&mut self, findex: usize) -> Result<usize> {
+        let modname = format!("promote_{findex}");
+        let promo_module = self.context.create_module(&modname);
+        self.builder.clear_insertion_position();
+
+        let host_module = std::mem::replace(&mut self.module, promo_module);
+        let host_funcs = std::mem::take(&mut self.func_cache);
+        let host_ints = std::mem::take(&mut self.int_globals);
+        let host_floats = std::mem::take(&mut self.float_globals);
+        let host_strings = std::mem::take(&mut self.string_globals);
+        let host_bytes = std::mem::take(&mut self.bytes_globals);
+        let host_types = std::mem::take(&mut self.type_info_globals);
+        self.create_constant_pool_globals();
+
+        let built = self.init_required_natives().and_then(|()| {
+            self.compile_function(findex)?;
+            // Callees stay declarations, bound below to the addresses the host
+            // already holds. Lowering copies of them here costs as much as the
+            // shared module and buys nothing measurable -- a function that
+            // needs them is sent down the shared path instead.
+            self.pending_compilations.clear();
+            Ok(())
+        });
+
+        self.builder.clear_insertion_position();
+        let promo_module = std::mem::replace(&mut self.module, host_module);
+        let target = self.func_cache.get(&findex).copied();
+        self.func_cache = host_funcs;
+        self.int_globals = host_ints;
+        self.float_globals = host_floats;
+        self.string_globals = host_strings;
+        self.bytes_globals = host_bytes;
+        self.type_info_globals = host_types;
+        built?;
+
+        let target = target.ok_or_else(|| anyhow!("promote module {modname}: no function built"))?;
+        let name = target
+            .get_name()
+            .to_str()
+            .map_err(|_| anyhow!("promote module {modname}: invalid symbol name"))?
+            .to_string();
+
+        {
+            let _phase = crate::profile::scope("llvm middle-end (promote)");
+            // The module holds this promotion and nothing else, so there is
+            // nothing here to park.
+            let excluded = self.shield_trap_functions_from_optimization();
+            crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
+            let n = promo_module
+                .get_functions()
+                .filter(|f| f.count_basic_blocks() > 0)
+                .count();
+            crate::profile::count("middle-end functions processed", n as u64);
+            crate::profile::count("middle-end functions in module", n as u64);
+            super::module::run_middle_end(&promo_module)?;
+        }
+
+        if let Err(e) = promo_module.verify() {
+            return Err(anyhow!("promote module {modname} failed verification: {e}"));
+        }
+
+        let mut unresolved: Vec<String> = Vec::new();
+        for f in promo_module.get_functions() {
+            if f.count_basic_blocks() != 0 {
+                continue;
+            }
+            let Ok(sym) = f.get_name().to_str() else {
+                continue;
+            };
+            if sym.starts_with("llvm.") {
+                continue;
+            }
+            match self.execution_engine.get_function_address(sym) {
+                Ok(a) if a != 0 => self.execution_engine.add_global_mapping(&f, a as usize),
+                _ => unresolved.push(sym.to_string()),
+            }
+        }
+        if !unresolved.is_empty() {
+            return Err(anyhow!(
+                "promote module {modname} has {} unresolved symbol(s): {}",
+                unresolved.len(),
+                unresolved.join(", ")
+            ));
+        }
+
+        self.execution_engine
+            .add_module(&promo_module)
+            .map_err(|()| anyhow!("promote module {modname} rejected by the engine"))?;
+        let addr = {
+            let _phase = crate::profile::scope("mcjit codegen");
+            self.execution_engine
+                .get_function_address(&name)
+                .map_err(|e| anyhow!("promote module {modname}: {e}"))?
+        };
+        if addr == 0 {
+            return Err(anyhow!("promote module {modname}: zero address"));
+        }
+        for f in promo_module.get_functions() {
+            if f.count_basic_blocks() == 0 {
+                continue;
+            }
+            if let Ok(sym) = f.get_name().to_str() {
+                if let Ok(a) = self.execution_engine.get_function_address(sym) {
+                    if a != 0 {
+                        crate::profile::register_jit_code(
+                            findex as u32,
+                            crate::profile::Tier::Llvm,
+                            a as usize,
+                        );
+                    }
+                }
+            }
+        }
+        Ok(addr)
+    }
+
     pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
         let _phase = crate::profile::scope("llvm promote");
         crate::profile::count("llvm promotions", 1);
@@ -423,6 +571,12 @@ impl<'ctx> JITModule<'ctx> {
                 "Strict promotion failed: unknown findex {}",
                 findex
             ));
+        }
+
+        if self.promote_uses_own_module(findex) {
+            let fn_addr = self.promote_in_own_module(findex)?;
+            self.install_function_address(findex, fn_addr as *mut c_void);
+            return self.compiled_meta_for(findex, fn_addr);
         }
 
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
@@ -512,7 +666,12 @@ impl<'ctx> JITModule<'ctx> {
         }
         self.install_function_address(findex, fn_addr as *mut c_void);
 
-        // Resolve arg/return kinds from bytecode signature.
+        self.compiled_meta_for(findex, fn_addr)
+    }
+
+    /// The signature the tiered caller marshals through, read from the
+    /// bytecode rather than the compiled function: it is tier-independent.
+    fn compiled_meta_for(&self, findex: usize, fn_addr: usize) -> Result<CompiledFunctionMeta> {
         let fidx = self
             .bytecode
             .functions

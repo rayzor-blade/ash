@@ -49,13 +49,6 @@ permissions:
   # haxe-conformance workflow; reading another workflow's artifacts needs this.
   actions: read
 
-concurrency:
-  group: pages
-  # A new push queues behind an in-flight sweep rather than cancelling it —
-  # cancellation between upload-pages-artifact and deploy-pages would throw
-  # away a completed run.
-  cancel-in-progress: false
-
 env:
   HASHLINK_VERSION: "1.15"
   # HashLink's active JIT-IR rewrite. Benched alongside the release so the
@@ -408,6 +401,15 @@ jobs:
   deploy-site:
     name: Deploy website to GitHub Pages
     needs: aggregate
+    # Only the deploy is serialised. Pages allows one deployment at a time,
+    # and cancelling between upload-pages-artifact and deploy-pages would
+    # throw away a finished sweep -- but the group has to sit on this job
+    # alone. At workflow level it also serialises the sweeps, and since a
+    # group holds at most one PENDING run, two pushes close together leave
+    # the older one cancelled with no jobs at all: 202c68e never benched.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     if: >-
       ${{ always() && (needs.aggregate.result == 'success' ||
           (github.event_name == 'workflow_run' &&

@@ -108,6 +108,7 @@ dependencies = [
  "anyhow",
  "ash_core",
  "ash_interp",
+ "ash_std",
  "clap",
  "inkwell",
  "libc",

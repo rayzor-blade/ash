@@ -158,6 +158,10 @@ fn main() {
 /// things `exit` would have done.
 fn exit_without_atexit(code: i32) -> ! {
     use std::io::Write;
+    // Anything the skipped handlers would have printed has to be printed
+    // here instead. `ASH_GC_STATS` registers one; it is gated internally, so
+    // this is a no-op when it was not asked for.
+    ash_std::gc::print_stats_if_enabled();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     unsafe { libc::_exit(code) }

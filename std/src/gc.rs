@@ -32,9 +32,15 @@ const DEFAULT_HEAP_MB: usize = 512;
 /// First collection fires after this many bytes allocated (wren_lift
 /// gc_marksweep INITIAL_THRESHOLD pattern).
 const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
-/// Adaptive threshold bounds: live*2 clamped to [floor, ceiling].
+/// Adaptive threshold bounds: live*growth clamped to [floor, ceiling].
 const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
-const TRIGGER_CEILING: usize = 64 * 1024 * 1024;
+/// Bounds on the machine-derived ceiling (see `trigger_ceiling_bytes`).
+const TRIGGER_CEILING_MIN: usize = 64 * 1024 * 1024;
+const TRIGGER_CEILING_MAX: usize = 512 * 1024 * 1024;
+/// Share of usable memory the collector will let a program run through
+/// between collections. Conservative on purpose: peak RSS is roughly the
+/// live set plus this, and a runtime that sizes itself off the machine has
+/// to leave the machine to everything else on it.
 /// Wall-clock heartbeat: any allocation this long after the last collection
 /// forces one, so long-idle processes deflate (wren_lift gc.rs:715-719).
 const HEARTBEAT: Duration = Duration::from_secs(30);
@@ -254,6 +260,38 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     // sync (a superset is over-retention, never under-rooting).
     set_collect_origin(2);
     gc.maybe_collect_at_safepoint();
+    // Recycled lines first: a span in a block the sweep kept costs nothing to
+    // acquire and leaves the free list for allocations that need a whole
+    // block. Spans too small for the pending object are dropped rather than
+    // re-queued -- they are 128-byte crumbs and the list is rebuilt each
+    // sweep.
+    let want_lines = aligned.div_ceil(LINE_SIZE).max(1);
+    if recycle_lines() {
+        while let Some((rblock, start, len)) = gc.heap.recycle_spans.pop() {
+            if len < want_lines {
+                continue;
+            }
+            let lo = rblock + start * LINE_SIZE;
+            let span_bytes = len * LINE_SIZE;
+            let base = unsafe { gc.heap.memory.as_mut_ptr().add(lo) };
+            // Zeroed for the same reason a fresh block is: every caller of
+            // this path is promised zeroed memory.
+            unsafe { std::ptr::write_bytes(base, 0, span_bytes) };
+            gc.heap.tlab_block = Some(rblock);
+            gc.heap.bytes_since_gc += span_bytes;
+            gc.heap.alloc_count += 1;
+            GC_STATS
+                .bytes_allocated
+                .fetch_add(span_bytes as u64, Ordering::Relaxed);
+            GC_STATS
+                .lines_recycled
+                .fetch_add(len as u64, Ordering::Relaxed);
+            ASH_TLAB_CUR.store(base as usize + aligned, Ordering::Relaxed);
+            ASH_TLAB_LIMIT.store(base as usize + span_bytes, Ordering::Relaxed);
+            return Some(unsafe { NonNull::new_unchecked(base) });
+        }
+    }
+
     let block = match gc.acquire_free_block() {
         Some(b) => b,
         None => {
@@ -287,6 +325,50 @@ fn trace_alloc() -> bool {
 fn trace_map() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var("ASH_GC_TRACE_MAP").is_ok())
+}
+
+/// Reuse the unmarked lines of a block a sweep kept, instead of retaining the
+/// whole block because one line in it is live.
+///
+/// Off by default, and the reason is the marker rather than the allocator.
+/// Reusing a line overwrites what sits in it, so it is sound only if the trace
+/// marks EVERY live object. Block-level retention has been covering for that:
+/// an object whose root the scanner missed survives anyway if it shares a
+/// block with a marked one. The cover is already partial -- a wholly-unmarked
+/// block is freed today -- but this removes what is left of it, so a missed
+/// root becomes a corrupted object rather than a retained one. Prove the
+/// corpus clean under `ASH_GC_STRESS` before making it the default.
+/// How much new allocation to allow per unit of live data before collecting.
+///
+/// The collection count is the dominant GC cost on an allocation-heavy
+/// program, and it is this factor -- not the ceiling -- that sets it: with a
+/// 17MB live set, `live*2` collects every 34MB, so binary_trees pays 36
+/// collections for 902MB and never reaches the 64MB ceiling at all.
+///
+/// Proportional rather than fixed, so a program with a small live set still
+/// collects at a small interval -- deltablue's RSS does not move at any of
+/// these values, only binary_trees' does.
+///
+/// 4 rather than higher because the trade is throughput against pause: on
+/// binary_trees (NUC, release) 2 gives 452ms execute over 36 collections and
+/// 122MB, 4 gives 418ms over 19 and 165MB, 8 gives 400ms over 10 and 189MB.
+/// The knee is around 6, but a bigger interval means more garbage per
+/// collection, and a frame budget cares about the longest pause rather than
+/// their sum. `ASH_GC_GROWTH` overrides it.
+fn growth_factor() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("ASH_GC_GROWTH")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n >= 1)
+            .unwrap_or(4)
+    })
+}
+
+fn recycle_lines() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| matches!(std::env::var("ASH_GC_RECYCLE").as_deref(), Ok("1")))
 }
 
 /// Diagnostic: ASH_GC_NO_RECLAIM=1 makes sweep retain every block (marks
@@ -386,6 +468,8 @@ fn gc_stress_every() -> usize {
 struct GcStatCounters {
     collections: AtomicU64,
     blocks_reclaimed: AtomicU64,
+    /// Lines served from a kept block's free spans rather than a fresh block.
+    lines_recycled: AtomicU64,
     bytes_allocated: AtomicU64,
     external_bytes: AtomicU64,
     live_blocks: AtomicU64,
@@ -396,6 +480,7 @@ struct GcStatCounters {
 static GC_STATS: GcStatCounters = GcStatCounters {
     collections: AtomicU64::new(0),
     blocks_reclaimed: AtomicU64::new(0),
+    lines_recycled: AtomicU64::new(0),
     bytes_allocated: AtomicU64::new(0),
     external_bytes: AtomicU64::new(0),
     live_blocks: AtomicU64::new(0),
@@ -420,12 +505,117 @@ static GC_ENABLED: AtomicBool = AtomicBool::new(true);
 /// out-of-memory abort. Four times the adaptive ceiling is far past any
 /// legitimate no-collect window while still leaving most of the default
 /// reservation in hand.
-const GC_DISABLED_MAX_PRESSURE: usize = TRIGGER_CEILING * 4;
+const TRIGGER_CEILING_SHARE: usize = 32;
+
+/// Usable memory for this process, in bytes.
+///
+/// The cgroup limit is the real bound whenever there is one: CI runs in a
+/// container with a few GB, not on the host's total, and sizing off the host
+/// there is how a runtime gets OOM-killed. Falls back to physical memory, and
+/// to a modest guess if neither can be read.
+fn usable_ram_bytes() -> usize {
+    const FALLBACK: usize = 2 * 1024 * 1024 * 1024;
+    #[cfg(target_os = "linux")]
+    {
+        // The limit that binds is the one on THIS process's cgroup, not the
+        // root's -- reading `/sys/fs/cgroup/memory.max` reports the root's
+        // "max" and misses every container. `/proc/self/cgroup` names the
+        // path; limits are hierarchical, so the smallest along it wins.
+        let mut limit = usize::MAX;
+        if let Ok(selfcg) = std::fs::read_to_string("/proc/self/cgroup") {
+            for line in selfcg.lines() {
+                // v2: "0::/path". v1: "N:controllers:/path".
+                let rel = match line.splitn(3, ':').nth(2) {
+                    Some(r) => r.trim_start_matches('/'),
+                    None => continue,
+                };
+                let mut dir = std::path::PathBuf::from("/sys/fs/cgroup");
+                let mut probe = vec![dir.clone()];
+                for seg in rel.split('/').filter(|s| !s.is_empty()) {
+                    dir = dir.join(seg);
+                    probe.push(dir.clone());
+                }
+                for d in probe {
+                    for name in ["memory.max", "memory/memory.limit_in_bytes"] {
+                        if let Ok(t) = std::fs::read_to_string(d.join(name)) {
+                            if let Ok(n) = t.trim().parse::<usize>() {
+                                // v1 uses a sentinel near usize::MAX for
+                                // "no limit"; v2 writes the word "max",
+                                // which fails the parse and is skipped.
+                                if n > 0 && n < (1 << 60) {
+                                    limit = limit.min(n);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if limit != usize::MAX {
+            return limit;
+        }
+        if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
+            for line in t.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    if let Some(kb) = rest.split_whitespace().next() {
+                        if let Ok(kb) = kb.parse::<usize>() {
+                            return kb * 1024;
+                        }
+                    }
+                }
+            }
+        }
+        FALLBACK
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut out: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let name = c"hw.memsize";
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                &mut out as *mut u64 as *mut c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc == 0 && out > 0 {
+            out as usize
+        } else {
+            FALLBACK
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        FALLBACK
+    }
+}
+
+/// How much new allocation the collector allows between collections, at most.
+///
+/// Derived from the machine rather than fixed: 64MB is a different proposition
+/// on a 6GB CI container than on a 64GB workstation, and the collection COUNT
+/// is the dominant GC cost on an allocation-heavy program. `ASH_GC_TRIGGER_MB`
+/// still overrides it outright.
+fn trigger_ceiling_bytes() -> usize {
+    static V: OnceLock<usize> = OnceLock::new();
+    *V.get_or_init(|| {
+        (usable_ram_bytes() / TRIGGER_CEILING_SHARE)
+            .clamp(TRIGGER_CEILING_MIN, TRIGGER_CEILING_MAX)
+    })
+}
+
+/// A GC disabled by the embedder still collects under this much pressure.
+fn gc_disabled_max_pressure() -> usize {
+    trigger_ceiling_bytes().saturating_mul(4)
+}
 
 /// Is a *triggered* collection allowed to run right now? `pressure` is the
 /// byte total the trigger fired on.
 fn triggered_collection_allowed(pressure: usize) -> bool {
-    GC_ENABLED.load(Ordering::Relaxed) || pressure >= GC_DISABLED_MAX_PRESSURE
+    GC_ENABLED.load(Ordering::Relaxed) || pressure >= gc_disabled_max_pressure()
 }
 
 fn fmt_mb(bytes: u64) -> String {
@@ -441,12 +631,26 @@ fn print_gc_stats_report() {
     let pt = GC_STATS.pause_ns_total.load(Ordering::Relaxed);
     let pm = GC_STATS.pause_ns_max.load(Ordering::Relaxed);
     eprintln!("[gc] ---- GC stats ----");
+    eprintln!(
+        "[gc] sizing:           ram {} / ceiling {} / growth x{}",
+        fmt_mb(usable_ram_bytes() as u64),
+        fmt_mb(trigger_ceiling_bytes() as u64),
+        growth_factor()
+    );
     eprintln!("[gc] collections:      {}", n);
     eprintln!(
         "[gc] blocks reclaimed: {} ({})",
         freed,
         fmt_mb(freed * BLOCK_SIZE as u64)
     );
+    let recycled = GC_STATS.lines_recycled.load(Ordering::Relaxed);
+    if recycled > 0 {
+        eprintln!(
+            "[gc] lines recycled:   {} ({})",
+            recycled,
+            fmt_mb(recycled * LINE_SIZE as u64)
+        );
+    }
     eprintln!(
         "[gc] bytes allocated:  {} (+ external {})",
         fmt_mb(alloc),
@@ -473,6 +677,15 @@ extern "C" fn gc_stats_atexit() {
 #[no_mangle]
 pub extern "C" fn hlp_gc_print_stats() {
     print_gc_stats_report();
+}
+
+/// Emit the report the `atexit` handler would have, for a caller that leaves
+/// without running them. A no-op unless `ASH_GC_STATS` asked for it, so it is
+/// safe to call unconditionally on the way out.
+pub fn print_stats_if_enabled() {
+    if gc_stats_enabled() {
+        print_gc_stats_report();
+    }
 }
 
 // ── macOS return-to-OS hooks ────────────────────────────────────────────────
@@ -821,6 +1034,11 @@ struct ImmixHeap {
     memory: HeapMemory,
     free_blocks: Vec<usize>,
     used_blocks: HashSet<usize>,
+    /// Runs of unmarked lines inside blocks a sweep kept, as
+    /// `(block_addr, first_line, line_count)`. The recycling half of Immix: a
+    /// block with one live line out of 256 hands the other 255 back instead
+    /// of being retained whole. Filled only when `ASH_GC_RECYCLE=1`.
+    recycle_spans: Vec<(usize, usize, usize)>,
     allocation_point: usize,
     current_block_end: usize,
     alloc_count: usize,
@@ -923,6 +1141,7 @@ impl ImmixAllocator {
             memory: HeapMemory::new(heap_size),
             free_blocks: Vec::new(),
             used_blocks: HashSet::new(),
+            recycle_spans: Vec::new(),
             allocation_point: 0,
             current_block_end: 0,
             alloc_count: 0,
@@ -1053,7 +1272,7 @@ impl ImmixAllocator {
                 .heap
                 .trigger_threshold
                 .saturating_mul(4)
-                .max(TRIGGER_CEILING);
+                .max(trigger_ceiling_bytes());
             if pressure < hard {
                 self.heap.collect_pending = true;
                 return;
@@ -1526,8 +1745,13 @@ impl ImmixAllocator {
         // Adaptive threshold: next collection after ~live*2 bytes of new
         // allocation (wren_lift gc_marksweep.rs:464-466), bounded so tiny
         // programs don't collect constantly and big ones don't stall.
-        self.heap.trigger_threshold =
-            (live_bytes.saturating_mul(2)).clamp(trigger_floor_bytes(), TRIGGER_CEILING);
+        // An explicit `ASH_GC_TRIGGER_MB` outranks the default ceiling: asking
+        // for a floor above it is a request to collect less often, not a
+        // contradiction. Without the `max` the clamp panics with `min > max`,
+        // which is what any value over 64MB used to do.
+        let floor = trigger_floor_bytes();
+        self.heap.trigger_threshold = (live_bytes.saturating_mul(growth_factor()))
+            .clamp(floor, trigger_ceiling_bytes().max(floor));
 
         self.heap.bytes_since_gc = 0;
         self.heap.external_since_gc = 0;
@@ -1902,6 +2126,10 @@ impl ImmixAllocator {
     /// contiguous run) so RSS actually falls after a collection instead of
     /// plateauing at high-water. Returns the number of blocks reclaimed.
     pub fn sweep(&mut self) -> usize {
+        // Last cycle's spans die with last cycle's marks. Carrying them over
+        // would hand out lines in a block this sweep is about to free, and
+        // they are rebuilt below anyway.
+        self.heap.recycle_spans.clear();
         let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
         let mut freed: Vec<usize> = Vec::new();
         // The retained-heap half of the use-after-free audit needs this
@@ -1928,13 +2156,31 @@ impl ImmixAllocator {
             let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
             let mut is_empty = true;
+            // Runs of unmarked lines, harvested in the pass that resets the
+            // marks. Only for blocks this sweep KEEPS: an empty block goes
+            // back whole, and the TLAB block is still being bumped through.
+            let mut spans: Vec<(usize, usize)> = Vec::new();
+            let mut run_start: Option<usize> = None;
             for line_index in 0..LINES_PER_BLOCK {
                 if block.mark_bits[line_index] {
                     is_empty = false;
+                    if let Some(start) = run_start.take() {
+                        spans.push((start, line_index - start));
+                    }
+                } else if run_start.is_none() {
+                    run_start = Some(line_index);
                 }
                 block.mark_bits[line_index] = false; // Reset for next GC cycle
             }
+            if let Some(start) = run_start.take() {
+                spans.push((start, LINES_PER_BLOCK - start));
+            }
 
+            if !is_empty && !is_tlab && recycle_lines() {
+                for (start, len) in spans {
+                    self.heap.recycle_spans.push((block_addr, start, len));
+                }
+            }
             if is_empty && !is_tlab && !no_reclaim() {
                 self.heap.used_blocks.remove(&block_addr);
                 if trace_freed() {
@@ -2403,7 +2649,7 @@ pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
 ///
 /// Only the *trigger* is suppressed. `Gc.major`, the heap-exhaustion backstop
 /// in [`ImmixAllocator::allocate`], and the runaway-pressure escape hatch
-/// ([`GC_DISABLED_MAX_PRESSURE`]) all still collect, so a program that
+/// ([`gc_disabled_max_pressure`]) all still collect, so a program that
 /// disables the GC and never re-enables it loses collections, not the heap.
 /// Nothing here takes a lock, so it cannot deadlock against a collection in
 /// flight on another thread.

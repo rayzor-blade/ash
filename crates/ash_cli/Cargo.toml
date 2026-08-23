@@ -18,6 +18,7 @@ clap = { workspace = true }
 # Windows runs without a crash handler for now (docs/windows-port.md).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+ash_std = { path = "../../std" }
 # Crash-handler frame names: dladdr returns v0-mangled Rust symbols, and a
 # crash report you cannot read is half a crash report.
 rustc-demangle = "0.1"

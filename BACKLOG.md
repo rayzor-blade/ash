@@ -470,8 +470,24 @@ argument, a collection.
    interpreter and the worst against rayzor -- has 27 sites across 25
    distinct (receiver type, slot) pairs.
 
-2. So the pass to write is CallMethod, and it needs neither reaching
-   definitions nor class-hierarchy analysis. Every AIR value carries its
+2. IN PROGRESS. `ModuleInfo::method_target(ty, slot)` resolves a proto slot
+   against the receiver's static type (walking `super_` for an inherited
+   implementation, matching on `pindex` the way the JIT reads the slot).
+   With it the survey answers how much the pass could reach:
+
+       deltablue      27 CallMethod sites, 27 resolved (100%)
+       method_call     1 site,              1 resolved
+       test_stdlib     7 sites,             3 resolved (43%)
+
+   All of deltablue's dispatch is statically nameable. What remains is the
+   rewrite: `GetType` the receiver, `TypeConst` the static type, `CondJump
+   Eq` to a direct `Call` on the hit and today's `CallMethod` on the miss,
+   with a phi for the result. Every one of those exists in AIR v2 already
+   and all of them serialize back to HL opcodes, which matters because the
+   interpreter consumes the same IR.
+
+   The pass to write needs neither reaching definitions nor
+   class-hierarchy analysis. Every AIR value carries its
    HL type (`ValueData { ty }`), so the receiver's static type plus the
    field slot names a target; guard on the receiver's RUNTIME type pointer
    against that static type, direct-call on the hit, vtable dispatch on the

@@ -228,6 +228,19 @@ pub trait ModuleInfo {
         false
     }
 
+    /// The function a virtual call on `ty` at proto slot `slot` reaches, when
+    /// the embedder can name one.
+    ///
+    /// This is the STATIC answer -- the implementation `ty` itself carries.
+    /// A receiver whose runtime type is a subtype may reach a different one,
+    /// so a caller that acts on this must guard on the runtime type rather
+    /// than assume it. `None` -- the default -- means the embedder cannot
+    /// resolve the slot, and the call is left alone.
+    fn method_target(&self, ty: TypeRef, slot: usize) -> Option<usize> {
+        let _ = (ty, slot);
+        None
+    }
+
     /// The body of bytecode function `findex`, when the embedder can supply
     /// one.
     ///
@@ -314,6 +327,9 @@ impl<T: ModuleInfo + ?Sized> ModuleInfo for &T {
     }
     fn is_float(&self, ty: TypeRef) -> bool {
         (**self).is_float(ty)
+    }
+    fn method_target(&self, ty: TypeRef, slot: usize) -> Option<usize> {
+        (**self).method_target(ty, slot)
     }
     fn callee(&self, findex: usize) -> Option<CalleeBody> {
         (**self).callee(findex)

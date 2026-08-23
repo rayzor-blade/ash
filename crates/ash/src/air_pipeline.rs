@@ -170,6 +170,26 @@ impl<'b> ModuleInfo for AshModule<'b> {
         })
     }
 
+    /// Resolve a proto slot against the receiver's STATIC type.
+    ///
+    /// `slot` is the vtable index, not a position in `proto` -- the entry is
+    /// the one whose `pindex` matches, which is how the JIT reads it too. A
+    /// type that does not declare the slot inherits it, so the walk continues
+    /// into `super_`; the first match is the implementation this static type
+    /// carries.
+    fn method_target(&self, ty: TypeRef, slot: usize) -> Option<usize> {
+        let mut cur = Some(ty.0 as usize);
+        // The chain is finite, but a malformed table must not spin.
+        for _ in 0..64 {
+            let obj = self.bc.types.get(cur?)?.obj.as_ref()?;
+            if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == slot) {
+                return usize::try_from(p.findex).ok();
+            }
+            cur = obj.super_.as_ref().map(|t| t.0);
+        }
+        None
+    }
+
     fn callee(&self, findex: usize) -> Option<CalleeBody> {
         if !self.offer_callees {
             return None;
@@ -502,7 +522,7 @@ pub fn optimize_full(
     // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
     // target AFTER the passes have run, which is the IR a devirtualisation
     // pass would actually see.
-    air::v2::passes::survey_closure_targets(&ir);
+    air::v2::passes::survey_closure_targets(&ir, m);
 
     // Verify before serializing: a serializer fed invalid IR emits
     // plausible-looking opcodes, and the corruption only surfaces as a wrong
@@ -552,7 +572,7 @@ pub fn prepare_ir(
     // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
     // target AFTER the passes have run, which is the IR a devirtualisation
     // pass would actually see.
-    air::v2::passes::survey_closure_targets(&ir);
+    air::v2::passes::survey_closure_targets(&ir, m);
 
     // The consumer executes this IR directly, so verification is the only
     // thing standing between a pass bug and a wrong answer at run time.

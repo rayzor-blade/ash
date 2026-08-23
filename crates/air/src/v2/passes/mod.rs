@@ -156,7 +156,7 @@ impl Default for PassOptions {
 /// which form: a single reaching `StaticClosure` can be rewritten to a direct
 /// call for free, several need a guard, and anything else is out of reach
 /// without runtime feedback.
-pub fn survey_closure_targets(f: &Function) -> (usize, usize, usize) {
+pub fn survey_closure_targets(f: &Function, m: &dyn crate::v2::module::ModuleInfo) -> (usize, usize, usize) {
     use crate::v2::ir::Instr;
     if std::env::var("ASH_DEVIRT_SURVEY").is_err() {
         return (0, 0, 0);
@@ -180,12 +180,17 @@ pub fn survey_closure_targets(f: &Function) -> (usize, usize, usize) {
     // the size of that opportunity is visible next to the closure one.
     let mut methods: std::collections::HashSet<(u32, usize)> = Default::default();
     let mut method_sites = 0usize;
+    let mut method_resolved = 0usize;
     for b in &f.blocks {
         for ins in &b.instrs {
             if let Instr::CallMethod { field, args, .. } = ins {
                 method_sites += 1;
                 if let Some(recv) = args.first() {
-                    methods.insert((f.values[recv.0 as usize].ty.0, *field));
+                    let ty = f.values[recv.0 as usize].ty;
+                    methods.insert((ty.0, *field));
+                    if m.method_target(ty, *field).is_some() {
+                        method_resolved += 1;
+                    }
                 }
             }
         }
@@ -211,7 +216,8 @@ pub fn survey_closure_targets(f: &Function) -> (usize, usize, usize) {
     if single + multi + unknown + method_sites > 0 {
         eprintln!(
             "[devirt-survey] fn={} single={single} phi-all-static={multi} \
-             unresolved={unknown} method-sites={method_sites} method-distinct={}",
+             unresolved={unknown} method-sites={method_sites} \
+             method-resolved={method_resolved} method-distinct={}",
             f.findex.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
             methods.len()
         );

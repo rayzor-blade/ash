@@ -34,8 +34,11 @@ description = "Pure bytecode interpreter. The parity-validated reference."
 [[mode]]
 name = "hybrid-auto"
 binary = "ash"
-args = ["--mode", "hybrid", "--jit-tier", "auto"]
-description = "Interpreter with the full ladder: interp -> Cranelift -> LLVM."
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+description = """Interpreter with the full ladder: interp -> Cranelift -> LLVM. \
+This is the row we publish, so it names the preset it is measuring rather than \
+leaning on the CLI defaults happening to match it. Change what `application` \
+means and this number follows, which is the point."""
 
 [[mode]]
 name = "hybrid-cranelift"

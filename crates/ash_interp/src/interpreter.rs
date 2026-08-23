@@ -614,6 +614,15 @@ fn tiered_compile_tier(
 ) -> *mut () {
     use std::sync::atomic::Ordering;
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
+    if std::env::var("ASH_TIER1_PROBE").is_ok() {
+        static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let t0 = *T0.get_or_init(std::time::Instant::now);
+        eprintln!(
+            "[probe] tier={tier} findex={findex} calls={} at={:.1}ms",
+            bead.invocation_count(),
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+    }
     let code = match (ctx.mode, tier) {
         (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
         (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex),
@@ -1907,15 +1916,13 @@ impl HLInterpreter {
     /// `SelectionDAGISel` on the broker while the main thread sat in
     /// `~GDBJITRegistrationListener`, roughly one free_call run in thirty.
     ///
-    /// The flag stops a compile that has not started. Waiting is what covers
-    /// the one that has: a promotion holds the module lock end to end, so
-    /// taking it means no compile is running, and the flag means none can
-    /// start after.
+    /// Only stops what has not started. A compile already running is left
+    /// alone and ended with the process, which is sound because the caller
+    /// leaves through `_exit` -- no `atexit` handler runs, so nothing is torn
+    /// down underneath it. Waiting for it instead costs the rest of the
+    /// compile for a result nothing can call.
     pub fn quiesce_promotions(&self) {
         retier_abandon();
-        if let Some(tiered) = self.tiered_runtime.as_ref() {
-            let _guard = tiered.shared_ctx.llvm.lock();
-        }
     }
 
     pub fn tiered_stats(&self) -> Option<TieredStats> {

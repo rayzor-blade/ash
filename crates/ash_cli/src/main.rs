@@ -4,7 +4,6 @@ use ash_core::native_lib::{init_std_library, NativeFunctionResolver};
 use ash_interp::interpreter::{HLInterpreter, TierMode, TierPreset, TieredConfig};
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
-use std::process;
 // Only the unix crash handler reads a OnceLock (the ASH_CRASH_BACKTRACE
 // latch); on Windows there is no handler and no latch.
 #[cfg(unix)]
@@ -134,10 +133,34 @@ fn main() {
 
     let result = run();
     ash_core::profile::report();
-    if let Err(e) = result {
+    let code = if let Err(e) = result {
         eprintln!("Error: {:#}", e);
-        process::exit(1);
-    }
+        1
+    } else {
+        0
+    };
+    exit_without_atexit(code);
+}
+
+/// Leave without running the process's `atexit` handlers.
+///
+/// LLVM registers its own, and they tear down JIT state a promotion still
+/// running on the broker is using -- a SIGSEGV in `SelectionDAGISel` against
+/// `~GDBJITRegistrationListener` on the main thread. Waiting for that
+/// promotion also works, but it costs whatever the compile has left to run
+/// and buys nothing: the program has produced its answer and nothing can call
+/// the code being compiled. deltablue paid 22ms of a 45ms run that way.
+///
+/// Leaving without the handlers wins the same race for free. Nothing is being
+/// freed -- the interpreter is already leaked, for the raw handles the
+/// brokers hold -- so a compile still in flight is simply ended with the
+/// process. The buffers have to be flushed by hand, since that is one of the
+/// things `exit` would have done.
+fn exit_without_atexit(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { libc::_exit(code) }
 }
 
 /// `errno` for the current thread. A plain read of thread-local storage, so

@@ -370,6 +370,50 @@ the SafeCast/GetArray emission.
 
 ---
 
+## LLVM is queued on a counter, not on demand — 8 of 10 compiles are wasted
+
+Measured at 323cf15. What ash promotes to LLVM and where the demand actually
+is are different sets of functions:
+
+    bench          LLVM promoted (counter)      hot loops ELIGIBLE      OSR entered
+    deltablue      29, 308, 320, 74             242,245,248,251,252,     324
+                                                30, 324
+    binary_trees   22, 23, 24, 25               25                       25
+    nbody          28, 29                       28                       28
+
+deltablue's two sets are DISJOINT. All four of its LLVM compiles went to
+functions with no hot loop, while the one function whose frame actually
+entered OSR was never promoted. Ten compiles across the three benchmarks,
+two of them for a function with any demonstrated demand.
+
+That is what the profile costs: `beadie-promoter` is **35.7%** of deltablue's
+CPU (main thread 49.9%, broker 13.7%) for a program that finishes in 73ms.
+
+ash already computes the demand signal -- it logs loops ELIGIBLE, stages
+entries, enters frames. Nothing lets it DECIDE anything; `opt_threshold`
+decides, independently, on invocation count.
+
+**Signals that do not separate** (checked, so nobody re-checks):
+
+  - Invocation RATE at the tier-1 request. deltablue's wasteful promotion
+    runs at 585 calls/ms; binary_trees' useful one at 387/ms.
+  - Elapsed time at the request. fib asks at 1.7ms and needs it.
+
+**The signal that does** is a hot loop in the function, plus an escape hatch
+for recursion, which has no loop and still needs the top tier. Counts at the
+tier-1 request separate cleanly:
+
+    needs LLVM:  fib 7924, binary_trees 9793/8586/3180, closure_call 2449,
+                 method_call 2021
+    wasteful:    deltablue 234/503/711, binary_trees 446, nbody 242/682
+
+So: promote when the function has an eligible hot loop, OR when the count is
+high enough that recursion-shaped work repays. `opt_threshold` at 250 is why
+a 234-call function qualifies today. Note the tension already measured: a
+flat threshold at 500+ costs closure_call and method_call 12-18%, because
+their SECOND promotion has a low count -- which is the argument for the OR
+rather than simply raising the number.
+
 ## Dispatch: the JVM leads closure_call and method_call, and inlining is why
 
 Haxe's own JVM target is a benchmark lane as of `fc5c0bd`, and it beats ash

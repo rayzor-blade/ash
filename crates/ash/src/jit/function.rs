@@ -892,6 +892,15 @@ impl<'ctx> JITModule<'ctx> {
         // dangling keys behind once the module is handed to the engine.
         {
             let _p = crate::profile::scope("llvm middle-end (osr)");
+            // The callees duplicated above arrive as full bodies, traps and
+            // all, and this module gets the same `default<O2>` the promote
+            // path gets -- so it needs the same shield, or mem2reg promotes
+            // allocas across a callee's setjmp and longjmp reverts them.
+            // `func_cache` holds this module's own functions by now and
+            // `findexes` was never swapped, so the shield reads the right
+            // bodies.
+            let excluded = self.shield_trap_functions_from_optimization();
+            crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             super::module::run_middle_end(&self.module)?;
         }
         Ok(())

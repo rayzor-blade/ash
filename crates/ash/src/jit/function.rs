@@ -439,11 +439,24 @@ impl<'ctx> JITModule<'ctx> {
         // lowering output -- no mem2reg, no inlining, no GVN, no LICM -- and
         // lost to Cranelift on nbody by 1.5s, which is not a thing a top tier
         // should do. Only the whole-module path ran the middle end.
+        //
+        // Scoped to this function and its callees: a promotion pays for the
+        // function it is promoting, not for the whole module again.
         {
             let _phase = crate::profile::scope("llvm middle-end (promote)");
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
-            super::module::run_middle_end(&self.module)?;
+            let target = *self.func_cache.get(&findex).ok_or_else(|| {
+                anyhow!(
+                    "Strict promotion failed: function {} missing from cache",
+                    findex
+                )
+            })?;
+            let parked = self.park_optimized_functions(target);
+            let result = super::module::run_middle_end(&self.module);
+            self.release_parked_functions(&parked);
+            result?;
+            self.record_optimized_functions(&parked);
         }
 
         let function = *self.func_cache.get(&findex).ok_or_else(|| {
@@ -871,6 +884,12 @@ impl<'ctx> JITModule<'ctx> {
         // module, which is the price of the module being self-contained.
         self.compile_pending_functions()?;
 
+        // Unscoped, unlike the promote path: `compile_osr_entry` swapped in a
+        // module of its own, so everything here is new and needs the one run
+        // it is about to get. `optimized_fns` belongs to the host module and
+        // is deliberately left out of this — its entries do not name functions
+        // in this module, and recording this module's into it would leave
+        // dangling keys behind once the module is handed to the engine.
         {
             let _p = crate::profile::scope("llvm middle-end (osr)");
             super::module::run_middle_end(&self.module)?;
@@ -5853,6 +5872,133 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// Park the functions the middle end has already optimized, so a promotion
+    /// pays for the function it is promoting rather than for the whole module.
+    ///
+    /// `run_passes` is a module operation: unscoped, every promotion optimizes
+    /// every function compiled so far, tying promotion latency to the size of
+    /// the module instead of the size of the function — 128ms of a 491ms fib
+    /// run. The work is wasted twice over, since MCJIT has already emitted
+    /// those functions and will not re-emit them.
+    ///
+    /// `optnone` makes the pass pipeline skip a body, the same lever
+    /// `shield_trap_functions_from_optimization` uses. Two sets are exempt:
+    ///
+    /// - Anything not yet optimized, whatever reaches it. A callee is not
+    ///   always a call operand — `StaticClosure` takes an address out of
+    ///   `functions_ptrs` at runtime, `CallMethod` dispatches through a vtable,
+    ///   and under `hot_reload` every direct call is rewritten to an indirect
+    ///   one — so a keep set built from the call graph alone would leave those
+    ///   functions emitted but never optimized. Reachability decides when a
+    ///   function is compiled; this only decides when it is optimized, and
+    ///   every function compiled into the module gets that exactly once.
+    /// - The promoted function's direct callees, even when already optimized,
+    ///   because `optnone` also blocks inlining and parking a callee would
+    ///   quietly cost the promoted function the inline it was promoted to get.
+    ///
+    /// Returns the parked functions for `release_parked_functions`: a function
+    /// parked for this promotion is an inlining candidate in the next one.
+    fn park_optimized_functions(
+        &self,
+        root: inkwell::values::FunctionValue<'ctx>,
+    ) -> Vec<inkwell::values::FunctionValue<'ctx>> {
+        use inkwell::attributes::{Attribute, AttributeLoc};
+        use inkwell::values::{CallSiteValue, FunctionValue};
+
+        let noinline_id = Attribute::get_named_enum_kind_id("noinline");
+        let optnone_id = Attribute::get_named_enum_kind_id("optnone");
+        let noinline = self.context.create_enum_attribute(noinline_id, 0);
+        let optnone = self.context.create_enum_attribute(optnone_id, 0);
+
+        // Direct callees of the root, transitively: the inliner's working set.
+        // Indirect targets are not inlining candidates, so missing them here
+        // costs nothing — being unoptimized is what would cost, and the
+        // not-yet-optimized rule below already covers that.
+        let mut keep: std::collections::HashSet<FunctionValue<'ctx>> =
+            std::collections::HashSet::new();
+        let mut work: Vec<FunctionValue<'ctx>> = vec![root];
+        keep.insert(root);
+        while let Some(f) = work.pop() {
+            for bb in f.get_basic_blocks() {
+                let mut inst = bb.get_first_instruction();
+                while let Some(i) = inst {
+                    if let Ok(call) = CallSiteValue::try_from(i) {
+                        if let Some(callee) = call.get_called_fn_value() {
+                            // A declaration has no body to optimize or inline.
+                            if callee.count_basic_blocks() > 0 && keep.insert(callee) {
+                                work.push(callee);
+                            }
+                        }
+                    }
+                    inst = i.get_next_instruction();
+                }
+            }
+        }
+
+        let mut parked = Vec::new();
+        for f in self.module.get_functions() {
+            if f.count_basic_blocks() == 0 || keep.contains(&f) || !self.optimized_fns.contains(&f)
+            {
+                continue;
+            }
+            // Park only what carries neither mark, so releasing restores the
+            // function exactly as it was and cannot lift a trap shield that
+            // has to stay down.
+            if f.get_enum_attribute(AttributeLoc::Function, optnone_id)
+                .is_some()
+                || f.get_enum_attribute(AttributeLoc::Function, noinline_id)
+                    .is_some()
+            {
+                continue;
+            }
+            f.add_attribute(AttributeLoc::Function, noinline);
+            f.add_attribute(AttributeLoc::Function, optnone);
+            parked.push(f);
+        }
+
+        let with_body = self
+            .module
+            .get_functions()
+            .filter(|f| f.count_basic_blocks() > 0)
+            .count();
+        // Work this run does, against the work an unscoped run would do. The
+        // ratio between the two is the whole point of the scoping.
+        crate::profile::count(
+            "middle-end functions processed",
+            (with_body - parked.len()) as u64,
+        );
+        crate::profile::count("middle-end functions in module", with_body as u64);
+        crate::profile::count("middle-end functions parked", parked.len() as u64);
+        parked
+    }
+
+    fn release_parked_functions(&self, parked: &[inkwell::values::FunctionValue<'ctx>]) {
+        use inkwell::attributes::{Attribute, AttributeLoc};
+
+        let noinline_id = Attribute::get_named_enum_kind_id("noinline");
+        let optnone_id = Attribute::get_named_enum_kind_id("optnone");
+        for f in parked {
+            f.remove_enum_attribute(AttributeLoc::Function, optnone_id);
+            f.remove_enum_attribute(AttributeLoc::Function, noinline_id);
+        }
+    }
+
+    /// Record everything this run optimized, so the next one can park it.
+    ///
+    /// Trap-shielded functions are recorded too: the pipeline skips them under
+    /// their own permanent `optnone`, so there is nothing for a later run to
+    /// gain by keeping them in the working set.
+    fn record_optimized_functions(&mut self, parked: &[inkwell::values::FunctionValue<'ctx>]) {
+        let parked: std::collections::HashSet<_> = parked.iter().copied().collect();
+        let mut optimized = std::mem::take(&mut self.optimized_fns);
+        for f in self.module.get_functions() {
+            if f.count_basic_blocks() > 0 && !parked.contains(&f) {
+                optimized.insert(f);
+            }
+        }
+        self.optimized_fns = optimized;
+    }
+
     /// Opt functions containing `Trap` out of the LLVM middle-end.
     ///
     /// HL exceptions are setjmp/longjmp, and `longjmp` restores the machine
@@ -5946,6 +6092,9 @@ impl<'ctx> JITModule<'ctx> {
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             super::module::run_middle_end(&self.module)?;
+            // Whole-module by design here — this compiles everything once. A
+            // promotion later in the same process starts from that.
+            self.record_optimized_functions(&[]);
         }
 
         // `ASH_DUMP_FN_IR` worked only on the promote path until the map-

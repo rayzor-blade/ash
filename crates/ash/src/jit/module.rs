@@ -77,6 +77,11 @@ pub struct JITModule<'ctx> {
     pub(crate) findexes: HashMap<usize, FuncPtr>,
     pub(crate) func_types: Vec<*mut hl_type>,
     pub(crate) func_cache: HashMap<usize, FunctionValue<'ctx>>,
+    /// Functions the middle end has already optimized. `run_passes` is a
+    /// module operation, so this is what lets a promotion pay for the function
+    /// it is promoting instead of for the whole module again; see
+    /// `park_optimized_functions`.
+    pub(crate) optimized_fns: std::collections::HashSet<FunctionValue<'ctx>>,
     pub(crate) native_function_resolver: NativeFunctionResolver,
     pub(crate) int_globals: Vec<GlobalValue<'ctx>>,
     pub(crate) float_globals: Vec<GlobalValue<'ctx>>,
@@ -220,6 +225,7 @@ impl<'ctx> JITModule<'ctx> {
             initialized_type_cache: HashMap::new(),
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
+            optimized_fns: std::collections::HashSet::new(),
             native_function_resolver,
             types_,
             int_globals: Vec::new(),
@@ -449,6 +455,7 @@ impl<'ctx> JITModule<'ctx> {
             initialized_type_cache: HashMap::new(),
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
+            optimized_fns: std::collections::HashSet::new(),
             native_function_resolver,
             types_,
             int_globals: Vec::new(),

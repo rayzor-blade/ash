@@ -296,50 +296,6 @@ pub(super) fn retier_state_for(
     (exits, st.buf)
 }
 
-/// Whether promoting this function to LLVM after a Cranelift install is
-/// worth the compile.
-///
-/// The compile is not free: it runs on a background thread, and on a machine
-/// with few cores it takes one from the program. Measured pinned to two
-/// cores, free_call went 86ms -> 131ms with a chase that bought it nothing,
-/// which is why a 4-core CI runner did not reproduce a 16-thread box's
-/// numbers.
-///
-/// The discriminator is whether the hot path makes a call. A function with
-/// no loop at all is reached by call — recursion, in fib's case — and LLVM's
-/// work across that call is worth a great deal (88ms against 370ms). A loop
-/// that still contains a call has dispatch for LLVM to improve (method_call
-/// 151ms against 164ms, closure_call 185ms against 206ms). A loop whose
-/// callee AIR already inlined away is straight-line arithmetic that
-/// Cranelift compiles as well as anything, and the chase can only cost.
-pub fn llvm_chase_worthwhile(f: &air::v2::ir::Function) -> bool {
-    let has_call = |b: &air::v2::ir::Block| {
-        b.instrs.iter().any(|i| {
-            matches!(
-                i,
-                air::v2::ir::Instr::Call { .. }
-                    | air::v2::ir::Instr::CallMethod { .. }
-                    | air::v2::ir::Instr::CallClosure { .. }
-            )
-        })
-    };
-    let cfg = air::v2::CfgInfo::build(f);
-    let forest = air::v2::LoopForest::analyze(f, &cfg);
-    let loops = forest.innermost_first();
-    if loops.is_empty() {
-        // No loop: this function's cost is per invocation, and the tier that
-        // compiles calls better wins.
-        return f.blocks.iter().any(has_call);
-    }
-    loops.into_iter().any(|l| {
-        forest
-            .get(l)
-            .blocks
-            .iter()
-            .any(|b| has_call(&f.blocks[b.idx()]))
-    })
-}
-
 /// Whether a loop header should carry a re-tier poll.
 ///
 /// The poll is a load and a branch per iteration, so its cost is set by what

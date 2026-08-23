@@ -234,13 +234,16 @@ pub struct TieredConfig {
     /// counting. A very high value does not turn the tier off; it means the
     /// counter is not what gets a function there.
     ///
-    /// This rung is reached only by INTERPRETED calls: once a caller is itself
-    /// compiled it dispatches directly and stops ticking the callee's counter,
-    /// so a threshold far above the Cranelift one is unreachable for any
-    /// function whose callers compile. bench_fib is the shape that shows it —
-    /// at 100x the Cranelift threshold it never promotes and runs the whole
-    /// benchmark on the middle tier; at 10x it promotes and runs 5x faster,
-    /// with deltablue and binary_trees unchanged.
+    /// This rung is reached only by INTERPRETED calls and loop back-edges:
+    /// once a caller is itself compiled it dispatches directly and stops
+    /// ticking the callee's counter, so a threshold far above the Cranelift
+    /// one is unreachable for any function whose callers compile.
+    ///
+    /// It carries the whole tier-1 load, so it has to fire while the program
+    /// is still running. Measured against the speculative LLVM compile that
+    /// used to shadow it: at 1000 closure_call is 198ms because the rung
+    /// arrives too late, at 100-250 it is 156ms — better than the speculative
+    /// path managed (163ms), with fib, deltablue and binary_trees unchanged.
     pub opt_threshold: u64,
     pub max_jit_args: usize,
     pub min_ops_for_promotion: usize,
@@ -255,7 +258,7 @@ impl Default for TieredConfig {
         Self {
             enabled: false,
             jit_threshold: 100,
-            opt_threshold: 1_000,
+            opt_threshold: 250,
             max_jit_args: 8,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
@@ -341,7 +344,7 @@ impl TierPreset {
             TierPreset::Application => TieredConfig {
                 enabled: true,
                 jit_threshold: 100,
-                opt_threshold: 1_000,
+                opt_threshold: 250,
                 ..base
             },
             // A frame budget is the constraint, not throughput. Promote while
@@ -358,7 +361,7 @@ impl TierPreset {
             TierPreset::Server => TieredConfig {
                 enabled: true,
                 jit_threshold: 50,
-                opt_threshold: 500,
+                opt_threshold: 250,
                 ..base
             },
             // Not shaped by a program's needs: this one exists to pull every
@@ -749,120 +752,10 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                 }
             }
             patch_vtable_slots(ctx, findex, addr as *mut c_void);
-            // The entries matter to the re-tier exits, not to the chase
-            // below, which now runs whether or not any were staged.
+            // The re-tier exits a running frame climbs out through. The
+            // ladder produces the LLVM code they point at; this only carves
+            // the doors.
             let _staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
-            // A hot loop is the strongest promotion signal there is, and a
-            // function compiled here stops accruing call counts — the
-            // (Auto, 1) rung would starve. Chase the LLVM tier immediately;
-            // when its OSR entries land, `produce_osr_entries` publishes
-            // them into the re-tier slots this compile just baked, and the
-            // running frame climbs out on its next iteration.
-            // Chase the LLVM tier only when the re-tier exits exist to
-            // receive it: a function compiled here stops accruing call
-            // counts, so the (Auto, 1) rung would otherwise starve — but
-            // with no exits compiled in, the promotion has nothing to reach
-            // and only costs compile time.
-            //
-            // The chase runs on a thread of its own so the Cranelift address
-            // publishes the moment this returns, instead of after a
-            // promote-sized LLVM compile. That thread must not outlive the
-            // program: it touches the shared JIT module, and a detached one
-            // still compiling while the main thread tears the interpreter
-            // down segfaults (observed under --jit-log, roughly one run in
-            // ten). `retier_chase_join` collects it before shutdown.
-            // Not gated on the re-tier exits, and not on having staged any:
-            // a function this tier compiles stops accruing call counts, so
-            // the (Auto, 1) rung starves and the top tier is never reached
-            // at all. For a loop, the exits carry a running frame across;
-            // for a RECURSIVE function there is no loop header to carry,
-            // but every later call reads `functions_ptrs`, so simply
-            // installing the better code upgrades it. Measured on fib(40):
-            // 362ms in Cranelift against 87ms in LLVM, a rung the ladder
-            // could not otherwise climb.
-            if llvm_chase_enabled()
-                && chase_worthwhile(&tier, findex)
-                && matches!(ctx.mode, TierMode::Auto)
-                && !ctx
-                    .llvm_done
-                    .lock()
-                    .expect("llvm_done mutex poisoned")
-                    .contains(&findex)
-            {
-                // ONE worker draining a queue, not one thread per install.
-                //
-                // `compile_with_llvm` takes ctx.llvm and holds it for the whole
-                // compile, so chases are serialised regardless; a thread per
-                // install would only queue on that mutex while occupying a
-                // core. Speculative work that cannot land is charged to the
-                // mutator's wall clock, and on a core-starved machine that is
-                // the whole cost.
-                let need_worker = {
-                    let mut q = CHASE_QUEUE.lock().expect("chase queue mutex poisoned");
-                    q.pending.push_back(findex);
-                    let spawn = !q.worker_live;
-                    q.worker_live = spawn;
-                    spawn
-                };
-                if need_worker {
-                    let chase = Arc::clone(ctx);
-                    let spawned = std::thread::Builder::new()
-                        .name("ash-retier-llvm".into())
-                        .spawn(move || {
-                            // Speculative work must yield to the program it is
-                            // speculating for. Unprioritised, this compile
-                            // competes for a core with the mutator, and on a
-                            // small machine it wins: free_call measured 86ms
-                            // against 131ms when pinned to two cores, against
-                            // 88ms against 98ms on sixteen. That is the whole
-                            // reason a 4-core CI runner did not reproduce this
-                            // box's numbers.
-                            lower_own_priority();
-                            loop {
-                                let next = {
-                                    let mut q = CHASE_QUEUE
-                                        .lock()
-                                        .expect("chase queue mutex poisoned");
-                                    // The program may already have finished.
-                                    // Anything still queued would be installed
-                                    // into a runtime nobody is going to call
-                                    // again: deltablue paid 5.1s at exit for
-                                    // exactly this, having produced its answer
-                                    // at 228ms. Drop the rest and go.
-                                    if retier_abandoned() {
-                                        q.pending.clear();
-                                        q.worker_live = false;
-                                        return;
-                                    }
-                                    match q.pending.pop_front() {
-                                        Some(f) => f,
-                                        None => {
-                                            // Cleared under the same lock the
-                                            // producer pushes under, so a
-                                            // findex enqueued concurrently
-                                            // always gets a worker.
-                                            q.worker_live = false;
-                                            return;
-                                        }
-                                    }
-                                };
-                                compile_with_llvm(&chase, 1, next);
-                            }
-                        });
-                    match spawned {
-                        Ok(h) => RETIER_CHASE
-                            .lock()
-                            .expect("retier chase mutex poisoned")
-                            .push(h),
-                        Err(_) => {
-                            CHASE_QUEUE
-                                .lock()
-                                .expect("chase queue mutex poisoned")
-                                .worker_live = false;
-                        }
-                    }
-                }
-            }
             addr as *mut ()
         }
         Ok(Err(e)) => {
@@ -1877,8 +1770,18 @@ impl HLInterpreter {
             .unwrap_or_else(|| u32::try_from(config.opt_threshold).unwrap_or(u32::MAX));
         let tier0: Box<dyn HotnessPolicy> =
             Box::new(ThresholdPolicy::new(threshold).queue_ahead(queue_ahead));
+        // tier-1 gets the same head start as tier-0. An LLVM compile is the
+        // long one, so submitting it only once the count is reached means the
+        // code lands after the run that wanted it -- which is what made the
+        // rung look unreachable and got a speculative compile bolted on beside
+        // it. Queueing ahead is the mechanism for that, and it is the reason
+        // the ladder can now carry the top tier by itself.
+        let tier1_ahead = (tier1 / 5).max(1);
         let policies: Vec<Box<dyn HotnessPolicy>> = match config.tier_mode {
-            TierMode::Auto => vec![tier0, Box::new(ThresholdPolicy::new(tier1))],
+            TierMode::Auto => vec![
+                tier0,
+                Box::new(ThresholdPolicy::new(tier1).queue_ahead(tier1_ahead)),
+            ],
             _ => vec![tier0],
         };
         let adapter = TieredAdapter::new(policies);
@@ -10469,79 +10372,8 @@ impl HLInterpreter {
     }
 }
 
-/// Whether this findex's AIR says an LLVM promotion is worth its compile.
-/// Reads the shared optimized cache, so it costs a lookup rather than a
-/// pipeline run. A function the pipeline refused is not chased.
-fn chase_worthwhile(tier: &CraneliftTier, findex: usize) -> bool {
-    let bytecode = tier.ctx.bytecode();
-    let Some(raw) = bytecode
-        .functions
-        .iter()
-        .find(|f| f.findex as usize == findex)
-    else {
-        return true;
-    };
-    match ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) {
-        Ok(opt) => ash_core::cranelift::llvm_chase_worthwhile(&opt.ir),
-        Err(_) => true,
-    }
-}
-
-/// Drop the calling thread to background priority, so it runs on capacity
-/// the program is not using rather than taking a core from it.
-///
-/// Linux `nice` is per-thread, which is exactly the granularity wanted here.
-/// macOS sets a QoS class instead; its scheduler honours that the same way.
-/// A failure is ignored: the chase is still correct at normal priority, only
-/// less polite.
-fn lower_own_priority() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 10);
-    }
-    #[cfg(target_os = "macos")]
-    unsafe {
-        // QOS_CLASS_BACKGROUND
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
-    }
-}
-
-/// Whether a Cranelift install chases the LLVM tier. On by default: the
-/// rung is otherwise unreachable for a function this tier compiles, and
-/// fib(40) measures 342ms against 76ms across it. `ASH_LLVM_CHASE=0` turns
-/// it off for the cases where the middle tier's code is the better of the
-/// two, which is not knowable statically today.
-fn llvm_chase_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ASH_LLVM_CHASE").is_ok_and(|v| v != "0") || std::env::var("ASH_LLVM_CHASE").is_err())
-}
-
-/// Threads spawned to chase the LLVM tier after a Cranelift install.
-///
-/// They touch the shared JIT module, so they must be finished before the
-/// interpreter is torn down; a detached one still compiling at exit is a
-/// use-after-free.
-static RETIER_CHASE: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// Work queue for the LLVM chase, plus whether a worker is draining it.
-///
-/// Both live under ONE mutex on purpose: the "is a worker running" flag has to
-/// be tested and set in the same critical section that pushes, or a findex
-/// enqueued just as a worker decides the queue is empty is never compiled.
-struct ChaseQueue {
-    pending: std::collections::VecDeque<usize>,
-    worker_live: bool,
-}
-
-static CHASE_QUEUE: std::sync::Mutex<ChaseQueue> = std::sync::Mutex::new(ChaseQueue {
-    pending: std::collections::VecDeque::new(),
-    worker_live: false,
-});
-
-/// Set once the program's entrypoint has returned. A chase that has not yet
-/// begun its LLVM compile checks this and gives up instead of starting work
-/// whose result can no longer be used by anyone.
+/// Set once the program's entrypoint has returned, so the broker stops
+/// starting promotions whose result nothing can call any more.
 static RETIER_ABANDON: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -10550,48 +10382,12 @@ pub(crate) fn retier_abandoned() -> bool {
     RETIER_ABANDON.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Wait for every outstanding re-tier chase. Called once the program's
-/// entrypoint has returned, before anything the chase can touch is dropped.
-/// Stop waiting for speculative re-tier work, WITHOUT freeing anything it
-/// might still be reading.
-///
-/// An LLVM compile already in flight cannot be interrupted — deltablue's
-/// single chased compile of findex 74 takes 276ms, and the program it was
-/// speculating for finished at 65ms. Joining means the process sits there
-/// for the remaining ~210ms with nothing to do. But detaching and then
-/// dropping the interpreter is the use-after-free the join exists to
-/// prevent.
-///
-/// So: abandon, drop the handles without joining, and let the caller LEAK
-/// the interpreter. Nothing the chase reads is freed, the thread is killed
-/// by process exit, and no one waits. Only sound at the very end of the
-/// process — `retier_chase_join` remains for every other caller.
-pub fn retier_chase_abandon() {
+/// Stop the broker taking on new promotions. Called once the entrypoint has
+/// returned; `compile_with_llvm` checks it while holding the module lock, so
+/// an already-queued promotion drops out at lock-handoff speed rather than
+/// running a compile for a program that has finished.
+pub fn retier_abandon() {
     RETIER_ABANDON.store(true, std::sync::atomic::Ordering::Relaxed);
-    let handles: Vec<_> = {
-        let mut g = RETIER_CHASE.lock().expect("retier chase mutex poisoned");
-        std::mem::take(&mut *g)
-    };
-    for h in handles {
-        std::mem::forget(h);
-    }
-}
-
-pub fn retier_chase_join() {
-    // Abandon first, THEN join. Every chase that has not yet entered its
-    // compile now returns immediately, so the join waits only on work
-    // genuinely in flight. Detaching instead is not an option: a chase still
-    // compiling while the interpreter is torn down touches the shared JIT
-    // module and segfaults (about one run in ten under --jit-log), which is
-    // why this join exists at all.
-    RETIER_ABANDON.store(true, std::sync::atomic::Ordering::Relaxed);
-    let handles: Vec<_> = {
-        let mut g = RETIER_CHASE.lock().expect("retier chase mutex poisoned");
-        std::mem::take(&mut *g)
-    };
-    for h in handles {
-        let _ = h.join();
-    }
 }
 
 /// Whether the array-layout probe is on. See its use in `GetArray`.

@@ -68,6 +68,7 @@ code{font-family:'IBM Plex Mono',monospace}
 .seg-exec{height:100%;background:#a8703c}
 .seg-hlc{height:100%;background:#221d1a}
 .seg-hl2{height:100%;background:#8a6a4a}
+.seg-jvm{height:100%;background:#6e7f8c}
 .copy-btn{flex:none;background:none;border:1px solid rgba(234,230,225,0.2);border-radius:5px;color:#a89d91;font-family:'IBM Plex Mono',monospace;font-size:11.5px;padding:5px 10px;cursor:pointer;margin-top:2px;white-space:nowrap}
 .copy-btn:hover{border-color:rgba(234,230,225,0.45);color:#d8d2c9}
 </style>
@@ -233,6 +234,7 @@ HashLink Bytecode Runtime
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>Ash</span>
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#8a6a4a;display:inline-block"></span>HashLink hl2-ir</span>
 <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C</span>
+<span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span style="width:11px;height:11px;border-radius:2px;background:#6e7f8c;display:inline-block"></span>Haxe JVM</span>
 </div>
 <div id="bench-scale-note" style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is better · median ms · 1.00× = HashLink JIT total</div>
 </div>
@@ -378,6 +380,7 @@ HashLink Bytecode Runtime
         var total = r.median_ms * unit;
         var segClass = r.engine === 'ash' ? 'seg-exec'
           : r.engine === 'hashlink-c' ? 'seg-hlc'
+          : r.engine === 'hxjvm' ? 'seg-jvm'
           : r.engine === 'hashlink-hl2' ? 'seg-hl2' : 'seg-hl';
         var seg = el('div', segClass);
         seg.style.width = Math.max(total, 1.2) + '%';
@@ -385,7 +388,7 @@ HashLink Bytecode Runtime
         line.appendChild(track);
 
         var num = el('div', 'bench-num');
-        num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : r.engine === 'hashlink-hl2' ? '#8a6a4a' : '#8a807a';
+        num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : r.engine === 'hxjvm' ? '#6e7f8c' : r.engine === 'hashlink-hl2' ? '#8a6a4a' : '#8a807a';
         var ms = el('span', 'ms');
         ms.textContent = fmtMs(r.median_ms);
         if (r.median_ms === fastest) ms.style.fontWeight = '700';
@@ -426,6 +429,7 @@ HashLink Bytecode Runtime
     if (sys.os && sys.arch) bits.push(sys.os + '/' + sys.arch);
     if (data.hl_version) bits.push('HashLink ' + data.hl_version);
     if (data.hl2_version) bits.push('hl2-ir ' + data.hl2_version);
+    if (data.java_version) bits.push(data.java_version);
     if (data.commit) bits.push('ash@' + data.commit);
     if (data.generated_iso) bits.push(data.generated_iso.slice(0, 10));
     bits.push(data.source === 'ci' ? 'GitHub Actions' : 'local run');

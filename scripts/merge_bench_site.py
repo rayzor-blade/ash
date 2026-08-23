@@ -7,10 +7,11 @@ aggregate job consumes: `ash-<bench>.json` files are full `ash_bench.py
 files come from `hl_bench.py` and carry both HashLink lanes (JIT and HL/C).
 Output is one compact `results.json`:
 
-  { schema_version, generated_iso, source, commit, branch, hl_version,
+  { schema_version, generated_iso, source, commit, branch, hl_version, java_version,
     system: {os, arch, cpu_model, cpu_count},
     benchmarks: [ { name, title, group, rows: [
-        { engine: "hashlink-jit", label, status, median_ms, min_ms, max_ms, runs },
+        { engine: "hashlink-jit"|"hashlink-hl2"|"hashlink-c"|"hxjvm",
+          label, status, median_ms, min_ms, max_ms, runs },
         { engine: "ash", label, mode, status, median_ms, compile_ms,
           min_ms, max_ms, runs, tiers: {cranelift, llvm}, checksum } ] } ] }
 
@@ -106,6 +107,7 @@ HL_LABELS = {
     "hashlink-jit": "HashLink JIT",
     "hashlink-hl2": "HashLink hl2-ir",
     "hashlink-c": "HashLink/C",
+    "hxjvm": "Haxe JVM",
 }
 
 
@@ -190,6 +192,13 @@ def main() -> int:
             if row:
                 rows.append(row)
                 break
+        # Last: not a HashLink engine at all, so it reads as the outside
+        # reference rather than part of the family.
+        for doc in hl_docs:
+            row = hl_row(doc, name, "hxjvm")
+            if row:
+                rows.append(row)
+                break
         group = next(
             (
                 r.get("group")
@@ -208,6 +217,7 @@ def main() -> int:
     system = first.get("system") or {}
     hl_version = next((d.get("hl_version") for d in hl_docs if d.get("hl_version")), None)
     hl2_version = next((d.get("hl2_version") for d in hl_docs if d.get("hl2_version")), None)
+    java_version = next((d.get("java_version") for d in hl_docs if d.get("java_version")), None)
 
     out = {
         "schema_version": 1,
@@ -217,6 +227,7 @@ def main() -> int:
         "branch": git.get("branch"),
         "hl_version": hl_version,
         "hl2_version": hl2_version,
+        "java_version": java_version,
         "system": {
             "os": system.get("os"),
             "arch": system.get("arch"),

@@ -248,6 +248,16 @@ jobs:
         continue-on-error: true
         run: haxelib install hashlink --always
 
+      # Pinned rather than left to whatever the image ships: the JVM row is
+      # only comparable across runs if it is the same JVM. Best-effort like
+      # the other comparison toolchains -- without it hl_bench records the
+      # hxjvm lane UNAVAILABLE and the page renders without that row.
+      - uses: actions/setup-java@v4
+        continue-on-error: true
+        with:
+          distribution: temurin
+          java-version: "21"
+
       - name: Bench ash (${{ matrix.bench }})
         run: |
           mkdir -p parts
@@ -261,7 +271,7 @@ jobs:
             --ignore-load \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
-      - name: Bench HashLink (release JIT, hl2-ir, HL/C) (${{ matrix.bench }})
+      - name: Bench HashLink (JIT, hl2-ir, HL/C) and Haxe JVM (${{ matrix.bench }})
         run: |
           # An explicit `if`, not `test && assign`: under `bash -e` the
           # latter fails the whole step on the very case it is testing for.

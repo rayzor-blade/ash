@@ -17,6 +17,13 @@ truth for the corpus and its accepted answers) and runs two lanes:
                 compiler against libhl, then the native binary timed — needs
                 `haxe`, a C compiler, and --hashlink-dir pointing at a
                 HashLink checkout that has src/ headers and a built libhl.
+  hxjvm         `haxe -main <Main> --jvm out.jar` run on `java` — Haxe's own
+                JVM target, so the table has a mature JIT with a generational
+                collector in it and not only the HashLink family. Needs
+                `haxe` and a `java` (`--java` names a specific one). Timed
+                per fresh process like every other lane, which charges the
+                JVM its startup and leaves its JIT cold: read the row as
+                "run this program once", not as JVM peak throughput.
 
 Each lane degrades independently: a missing toolchain records UNAVAILABLE and
 the page renders without that row. A wrong checksum records INVALID and fails
@@ -159,6 +166,39 @@ def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
     return binary, "", build_ms
 
 
+def java_version(java: str | None) -> str | None:
+    """First line of `java -version`, which it prints on stderr."""
+    if not java:
+        return None
+    try:
+        p = subprocess.run([java, "-version"], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    line = (p.stderr or p.stdout or "").strip().splitlines()
+    return line[0].strip() if line else None
+
+
+def build_jvm(bench: dict, tests_dir: Path, haxe: str,
+              workdir: Path) -> tuple[Path | None, str, float]:
+    """Compile the bench to JVM bytecode. Returns (jar, detail, build_ms)."""
+    main = bench.get("main")
+    if not main:
+        return None, "no Haxe main class recorded for this bench", 0.0
+    jar = workdir / f"{main}.jar"
+    t0 = time.perf_counter()
+    p = subprocess.run(
+        [haxe, "--cwd", str(tests_dir), "-main", main, "--jvm", str(jar)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if p.returncode != 0:
+        # Same split-stream diagnostic as the HL/C lane.
+        full = (p.stderr or "") + ("\n" + p.stdout if p.stdout else "")
+        print(f"[hl-bench] haxe --jvm failed for {main}:\n{full}", flush=True)
+        return None, f"haxe --jvm failed: {full.strip()[:500]}", 0.0
+    return jar, "", (time.perf_counter() - t0) * 1000.0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo-root", type=Path,
@@ -175,6 +215,8 @@ def main() -> int:
     ap.add_argument("--hashlink-dir", type=Path, default=None,
                     help="HashLink checkout with src/ headers and built libhl; "
                          "enables the hashlink-c lane")
+    ap.add_argument("--java", default=None,
+                    help="java runtime for the hxjvm lane (default: java on PATH)")
     ap.add_argument("--benchmarks", default=None,
                     help="comma-separated names (default: all with checksums)")
     ap.add_argument("--iterations", type=lambda v: max(1, int(v)), default=7)
@@ -248,6 +290,17 @@ def main() -> int:
             return False
 
     have_haxelib = bool(haxe) and haxelib_has_hashlink()
+    # The JVM lane needs `haxe --jvm` (4.1+) and a `java` to run the jar.
+    # Either missing is an UNAVAILABLE lane, not a failure: the page renders
+    # without the row.
+    java = shutil.which(args.java) if args.java else shutil.which("java")
+    jvm_missing = ""
+    if haxe is None:
+        jvm_missing = "haxe on PATH"
+    elif java is None:
+        jvm_missing = f"a java runtime (looked for {args.java or 'java'})"
+    jvm_ready = not jvm_missing
+
     hlc_ready = bool(
         haxe and have_haxelib and cc and args.hashlink_dir
         and (args.hashlink_dir / "src" / "hlc.h").exists()
@@ -267,6 +320,8 @@ def main() -> int:
         "hl_version": version,
         "hl2_version": hl2_version,
         "haxe_binary": haxe if hlc_ready else None,
+        "java_binary": java,
+        "java_version": java_version(java),
         "system": {
             "os": platform.system().lower(),
             "arch": platform.machine(),
@@ -339,6 +394,35 @@ def main() -> int:
                     wall = rec.get("wall_ms")
                     shown = f"{wall['median_ms']:.1f}ms" if wall else rec["detail"]
                     print(f"[hl-bench] {bench['name']} (hl/c) "
+                          f"{rec['status']} {shown}", flush=True)
+        out["results"].append(rec)
+
+        # ---- hxjvm lane ---------------------------------------------------
+        # Haxe's own JVM target, for the comparison the HashLink lanes cannot
+        # make: a mature JIT with a generational collector, against ash's.
+        # Timed exactly like every other lane -- a fresh process per
+        # iteration -- which charges the JVM its startup and gives it no
+        # warmed-up JIT. That is the same workload the other engines are
+        # measured on, and the reason to read this row as "run this program
+        # once", not as JVM peak throughput.
+        rec = {"benchmark": bench["name"], "engine": "hxjvm"}
+        if not jvm_ready:
+            rec.update(status="UNAVAILABLE",
+                       detail=f"JVM lane needs {jvm_missing}")
+        else:
+            with tempfile.TemporaryDirectory(prefix=f"jvm-{bench['name']}-") as td:
+                jar, err, build_ms = build_jvm(bench, tests_dir, haxe, Path(td))
+                if jar is None:
+                    rec.update(status="FAIL", detail=err)
+                else:
+                    print(f"[hl-bench] {bench['name']} (jvm) ...", flush=True)
+                    rec["aot_build_ms"] = round(build_ms, 1)
+                    rec.update(time_command([java, "-jar", str(jar)], bench,
+                                            args.iterations, args.warmups,
+                                            timeout, env=run_env))
+                    wall = rec.get("wall_ms")
+                    shown = f"{wall['median_ms']:.1f}ms" if wall else rec["detail"]
+                    print(f"[hl-bench] {bench['name']} (jvm) "
                           f"{rec['status']} {shown}", flush=True)
         out["results"].append(rec)
 

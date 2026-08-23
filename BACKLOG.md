@@ -414,6 +414,53 @@ flat threshold at 500+ costs closure_call and method_call 12-18%, because
 their SECOND promotion has a low count -- which is the argument for the OR
 rather than simply raising the number.
 
+### What demand gating measured, and the two things that constrain it
+
+Implemented and measured. Demand is read off the frame a call is about to
+return into: its own hot loop, a self-call, or a caller already 64 back-edges
+into a loop of its own. A tier-1 request without demand is refused.
+
+Corpus result over all 61 cases: 20 LLVM compiles become 16, and every one
+removed is deltablue's. Wall time is unchanged everywhere within noise (worst
++1.0%, and deltablue is no slower for losing all four of its compiles --
+which is the claim in this section, now measured from the other side).
+Under 7-way CPU contention deltablue is 2.9% faster.
+
+**Demand is only observable while a function is interpreted.** `note_hot_loop`
+fires from the interpreter's dispatch loop and `on_invoke` from its call path,
+so both go silent the moment a function -- or its CALLER -- runs as compiled
+code. `step` in bench_method_call is called 100M times and its bead sees only
+the ~4ms before `main` is OSR-compiled. Gating on the function's own loop
+alone therefore starved every leaf: method_call +23.2%, closure_call +18.2%,
+nbody +15.6%. The caller's back-edge count is what makes a leaf visible, and
+it is the load-bearing signal, not a refinement.
+
+**A refused promotion is refused permanently.** beadie sets `queued[tier-1]`
+before running the compile closure and clears it only on `RevertToTier1` or
+`reset_to_interpreter`; a null return logs "keeping current tier" and leaves
+the flag set. So the gate is a veto, not a postponement -- confirmed in the
+log, where each findex prints `defer` exactly once. Today that is harmless
+because demand is decided inside the interpreted window anyway, but it caps
+what this can become: a function that turns hot later can never be
+reconsidered. The fix belongs in beadie -- clear the queued flag when the
+compile returns null, since a compile that produced no code was not a
+promotion -- and only after that does re-asking mean anything.
+
+### method_call reports two different numbers, and which one is a coin flip
+
+Noticed while A/B-ing the gate, present at HEAD and unchanged by it. Over 20
+runs of bench_method_call the LLVM set comes out one of two ways, because
+`main` is called once and reaches tier 1 only on back-edge ticks -- so whether
+its compile lands before a 100M-iteration loop ends is a race:
+
+    llvm={23,26}   14/20 runs   min 151ms  median 157ms
+    llvm={23}       6/20 runs   min 196ms  median 204ms
+
+The two modes are 30% apart. A min-of-N across them measures the mixture, not
+the change, which is what made the same binary read +0.7% and +7.9% on two
+sweeps. Compare within a mode, or report the mode split. This is also the
+first thing to check when method_call moves in CI.
+
 ## Dispatch: the JVM leads closure_call and method_call, and inlining is why
 
 Haxe's own JVM target is a benchmark lane as of `fc5c0bd`, and it beats ash

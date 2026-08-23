@@ -139,6 +139,17 @@ enum CallTarget {
 /// flight, not the calls ever made.
 const POOL_CAP: usize = 64;
 
+/// Back-edges one frame takes before its loop counts as hot.
+///
+/// Read in two places that must agree: the back-edge probe, which fires on
+/// every multiple of it, and the demand test at a call, which asks whether the
+/// calling frame is already past the first one.
+const HOT_LOOP_BACKEDGES: u32 = 64;
+
+/// Demand bits in `HLInterpreter::demand_local`.
+const DEMAND_SELF_RECURSIVE: u8 = 1;
+const DEMAND_UNDER_LOOP: u8 = 2;
+
 /// Index into `bytecode.functions` for a findex, if it names one.
 ///
 /// Free functions rather than methods on purpose: `func_of(&self.targets, ..)` would
@@ -533,6 +544,26 @@ struct TieredSharedCtx {
     /// against a separately optimized copy would name a different
     /// instruction.
     hot_loop_pcs: Mutex<HashMap<usize, Vec<usize>>>,
+    /// Functions observed calling themselves — the recursion counterpart of a
+    /// hot loop.
+    ///
+    /// A loop and a self-call are the same evidence wearing different
+    /// clothes: a frame of this function is running and has more of itself to
+    /// do, so code compiled for it has somewhere to land. Recursion is the
+    /// shape with no loop header, so `hot_loop_pcs` never sees it, and fib is
+    /// nothing else -- 340ms on the middle tier against 34ms on the top one.
+    self_recursive: Mutex<std::collections::HashSet<usize>>,
+    /// Functions observed being called from a frame that is deep in a loop of
+    /// its own -- the third shape of the same evidence.
+    ///
+    /// A leaf carries no loop and no self-call, so neither `hot_loop_pcs` nor
+    /// `self_recursive` can ever see it, and once its caller runs as compiled
+    /// code the interpreter stops seeing it at all. What is visible while the
+    /// caller is still interpreted is the caller's own back-edge count: a
+    /// frame 64 iterations into its loop has work left, and every callee it
+    /// reaches is part of that work. bench_method_call's `step` is exactly
+    /// this shape -- eleven opcodes, no loop, 100M calls from one frame.
+    called_from_loop: Mutex<std::collections::HashSet<usize>>,
     /// `findex -> [(type index, vtable slot)]`, over every HOBJ/HSTRUCT
     /// type whose vtable names the findex (own protos and inherited ones —
     /// `pindex` is absolute across the super chain, and every subclass's
@@ -600,6 +631,51 @@ struct TieredRuntime {
     stats: TieredStats,
 }
 
+/// Whether anything is waiting for LLVM code for `findex`.
+///
+/// Three shapes of one question -- is there a live frame with work left that
+/// this code could land in?
+///
+/// * a hot loop the interpreter probed, which is also what OSR needs to carry
+///   a running frame across into the new code;
+/// * a self-call, which is the same fact for a function with no loop header.
+///   fib is nothing but this shape;
+/// * a call from a frame already deep in a loop of its own, which is the only
+///   shape a leaf can have. `step` in bench_method_call has no loop and no
+///   recursion, and is called 100M times from one frame.
+///
+/// The third is not a refinement of the first two but the load-bearing one:
+/// every signal here is read from the interpreter, and the interpreter stops
+/// seeing a function the moment its CALLER is compiled. A leaf's whole
+/// observable life is the window before that.
+///
+/// Deliberately NOT a count, a rate or an elapsed time. Rate does not separate
+/// them -- deltablue's wasted promotion runs at 585 calls/ms against
+/// binary_trees' useful 387/ms -- and elapsed time does not either, since fib
+/// asks at 1.7ms and is right to.
+fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
+    if ctx
+        .hot_loop_pcs
+        .lock()
+        .expect("hot_loop_pcs mutex poisoned")
+        .contains_key(&findex)
+    {
+        return true;
+    }
+    if ctx
+        .self_recursive
+        .lock()
+        .expect("self_recursive mutex poisoned")
+        .contains(&findex)
+    {
+        return true;
+    }
+    ctx.called_from_loop
+        .lock()
+        .expect("called_from_loop mutex poisoned")
+        .contains(&findex)
+}
+
 /// Dispatch one compile job to the backend that owns `tier`.
 ///
 /// Tier 0 in `Auto` mode tries Cranelift first and falls back to LLVM: a
@@ -643,6 +719,33 @@ fn tiered_compile_tier(
             {
                 // Already LLVM code — nothing to upgrade to. A null here is
                 // harmless: the promotion broker keeps the current tier.
+                return std::ptr::null_mut();
+            }
+            // The counter proposes; demand disposes.
+            //
+            // An invocation count says how much this function HAS run, which
+            // is not the question -- an LLVM compile only repays out of what
+            // is LEFT. Demand is a frame that is still going: this function's
+            // own loop, its own recursion, or a caller's loop it is called
+            // from. Measured on this corpus, eight of ten LLVM
+            // compiles went to functions with neither, deltablue's four
+            // promoted functions and its seven with hot loops being disjoint
+            // sets, and its broker thread was 35.7% of the CPU for a program
+            // that ends in 73ms.
+            //
+            // Refusing leaves the bead on Cranelift, which is correct, but
+            // it is a veto rather than a postponement: beadie raises the
+            // tier-1 queued flag BEFORE running this closure and lowers it
+            // only on a deopt, so a null return is never proposed again. That
+            // holds together only because every signal above is read from the
+            // interpreter, which stops seeing a function once its caller is
+            // compiled -- demand is therefore decided inside that window or
+            // not at all. Promoting on evidence that arrives later needs
+            // beadie to clear the flag when a compile returns no code.
+            if !llvm_demand(ctx, findex) {
+                if ctx.tier_log {
+                    eprintln!("[tier] defer findex={findex} tier=llvm reason=no-demand");
+                }
                 return std::ptr::null_mut();
             }
             compile_with_llvm(ctx, 1, findex)
@@ -1264,6 +1367,13 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
+    /// Demand already published for a findex, bit 0 self-recursion and bit 1
+    /// reached-from-a-looping-frame.
+    ///
+    /// Indexed by findex rather than hashed: both facts are re-checked on
+    /// every interpreted call so the shared set is written exactly once, and
+    /// at that rate a hash lookup is itself the cost being avoided.
+    demand_local: Vec<u8>,
     /// OSR entries currently attached per findex — the main thread's mirror
     /// of each bead's table. `swap_compiled_with_osr` REPLACES the table, so
     /// an incremental attach must resend the entries already installed; this
@@ -1559,6 +1669,7 @@ impl HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
             max_stack_depth: 1000,
+            demand_local: Vec::new(),
             targets,
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
@@ -1852,6 +1963,8 @@ impl HLInterpreter {
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
             hot_loop_pcs: Mutex::new(HashMap::new()),
+            self_recursive: Mutex::new(std::collections::HashSet::new()),
+            called_from_loop: Mutex::new(std::collections::HashSet::new()),
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
             attempted: std::sync::atomic::AtomicU64::new(0),
@@ -3732,6 +3845,22 @@ impl HLInterpreter {
             // Hybrid tiered call path: tick the bead and dispatch to compiled
             // code once beadie's broker has installed it.
             if self.tiered_runtime.is_some() {
+                // Demand, read off the frame we are about to return into.
+                // Both shapes ask the same question -- does that frame still
+                // have work left? -- and both are O(1) reads of the caller,
+                // taking a lock only on the first sighting of a findex.
+                let caller = self.stack.last();
+                let recursive = caller.map(|fr| fr.function_index) == Some(func_idx);
+                // A caller past its first HOT_LOOP_BACKEDGES iterations is one
+                // the back-edge probe has already called hot; this callee is
+                // part of that loop's body.
+                let under_loop = caller.is_some_and(|fr| fr.backedges >= HOT_LOOP_BACKEDGES);
+                if recursive && !self.demand_seen(findex, DEMAND_SELF_RECURSIVE) {
+                    self.note_demand(findex, DEMAND_SELF_RECURSIVE);
+                }
+                if under_loop && !self.demand_seen(findex, DEMAND_UNDER_LOOP) {
+                    self.note_demand(findex, DEMAND_UNDER_LOOP);
+                }
                 if let Some(entry) = self.tiered_on_invoke(bytecode, findex, func_idx) {
                     // ASH_TIERED_SHADOW=1,2,3: run the listed findexes through
                     // BOTH the compiled entry and the interpreter, compare the
@@ -3787,6 +3916,28 @@ impl HLInterpreter {
         } else {
             Err(anyhow!("Function findex {} not found", findex))
         }
+    }
+
+    /// Whether the given demand bit is already published for this findex.
+    fn demand_seen(&self, findex: usize, bit: u8) -> bool {
+        self.demand_local.get(findex).is_some_and(|f| f & bit != 0)
+    }
+
+    /// Publish one demand bit, locally and for the broker.
+    fn note_demand(&mut self, findex: usize, bit: u8) {
+        if findex >= self.demand_local.len() {
+            self.demand_local.resize(findex + 1, 0);
+        }
+        self.demand_local[findex] |= bit;
+        let Some(t) = self.tiered_runtime.as_ref() else {
+            return;
+        };
+        let set = if bit == DEMAND_SELF_RECURSIVE {
+            &t.shared_ctx.self_recursive
+        } else {
+            &t.shared_ctx.called_from_loop
+        };
+        set.lock().expect("demand mutex poisoned").insert(findex);
     }
 
     /// beadie `TieredAdapter::on_invoke` semantics for one bytecode-function
@@ -4378,7 +4529,7 @@ impl HLInterpreter {
                             // single signal would stall the ladder at the
                             // first. The mask keeps the cost on the hot path
                             // to an add and a test.
-                            frame.backedges & 63 == 0
+                            frame.backedges & (HOT_LOOP_BACKEDGES - 1) == 0
                         } else {
                             false
                         };

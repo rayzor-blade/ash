@@ -486,8 +486,46 @@ argument, a collection.
    and all of them serialize back to HL opcodes, which matters because the
    interpreter consumes the same IR.
 
-   The pass to write needs neither reaching definitions nor
-   class-hierarchy analysis. Every AIR value carries its
+   WRITTEN AND REVERTED. The pass was built exactly as described --
+   `GetType` + `TypeConst` + `CondJump Eq` into a direct `Call`, with the
+   original `CallMethod` as the miss arm and a phi for the result -- and it
+   is correct: every checksum matched in both interp and hybrid, once it
+   learned to refuse two things it first got wrong (a result in a PINNED
+   register, which goes through a cell that a phi bypasses, and a site
+   inside a trap region, whose handler edge the split does not fix up).
+
+   It is also a large regression:
+
+       deltablue    auto        73.3ms -> 1015.7ms   (+1286%)
+       method_call  auto       140.4ms ->  209.6ms   (+49%)
+       method_call  cranelift        -13.6%
+
+   The mechanism is the miss arm. It leaves a `CallMethod` behind by
+   construction, Cranelift's opcode gate refuses functions containing one,
+   so the tier-0 attempt declines and the ladder falls back to LLVM: six
+   LLVM compiles appeared on a 73ms program. Speculating cost more than the
+   dispatch it removed.
+
+   Two things chasing that turned up, both worth knowing before anyone
+   tries again:
+
+   - Cranelift's gate (`is_cranelift_lowerable`) is an ALLOWLIST that
+     excludes several things its AIR codegen implements -- `CallClosure`,
+     `StaticClosure`, `InstanceClosure`, the `Ref`/cell family -- the same
+     staleness its own doc records for `Field`/`SetField`. Admitting
+     `CallMethod`, `CallThis`, `CallClosure`, `StaticClosure` and
+     `InstanceClosure` is CORRECT (11 programs, every checksum) and changes
+     NOTHING measurable: identical Cranelift coverage on deltablue (38
+     installs, 1 decline), closure_call and method_call. Not the blocker.
+   - deltablue's method-calling functions are already Cranelift-compiled:
+     findexes 245, 247, 248 and 249 all carry `CallMethod` sites and all
+     install. So its 73.7% "native" is NOT uncompiled code waiting for a
+     tier -- it is time in ash's own runtime helpers, which is a different
+     problem from dispatch and wants its own measurement.
+
+   A future attempt has to eliminate the miss arm rather than add one --
+   which needs the receiver's type proved, not guarded, and that is the
+   whole-program analysis this design was chosen to avoid. Every AIR value carries its
    HL type (`ValueData { ty }`), so the receiver's static type plus the
    field slot names a target; guard on the receiver's RUNTIME type pointer
    against that static type, direct-call on the hit, vtable dispatch on the

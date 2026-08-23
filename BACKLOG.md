@@ -370,6 +370,85 @@ the SafeCast/GetArray emission.
 
 ---
 
+## Dispatch: the JVM leads closure_call and method_call, and inlining is why
+
+Haxe's own JVM target is a benchmark lane as of `fc5c0bd`, and it beats ash
+on exactly two call shapes (CI, EPYC 7763, Temurin 21, 100M iterations):
+
+    closure_call   ash 317.7ms   jvm 150.4ms    3.18ns vs 1.50ns per call
+    method_call    ash 239.6ms   jvm 150.9ms    2.40ns vs 1.51ns per call
+
+ash wins fib 14.4x, mandelbrot 2.1x, nbody 1.5x, inlined_call and free_call.
+The losses are indirect dispatch and nothing else.
+
+**Target, falsifiable:** closure_call and method_call converge on
+inlined_call (locally 171.5 / 140.5 against 119.1). If speculating does not
+move them toward that number the model is wrong and this is abandoned, not
+patched.
+
+**What is already ruled out.** The `vclosure` field loads are not the cost:
+marking all three `!invariant.load` hoists them out of the loop (confirmed in
+IR) and buys +0.1%. Nor is it a stale closure pointer -- the tier-attributed
+profile shows `Fun_22 [llvm] 19.2%` against `[cranelift] 11.5%`, so the
+closure does reach LLVM code. What costs 3.18ns is the indirect call itself,
+which the JVM does not make: a monomorphic site gets an inline cache and the
+callee inlined.
+
+**Mechanism.** Profile-guided guarded devirtualisation. The interpreter runs
+before promotion, so it can record what each site saw; the JIT speculates:
+
+    %hit = icmp eq ptr %closure_fun, @Fun_T
+    br %hit, %fast, %slow
+    fast:  %a = call @Fun_T(args)        ; direct -- the inliner can take it
+    slow:  %b = <existing indirect path>
+    merge: phi [%a, %fast], [%b, %slow]
+
+The win is not a cheaper indirect call, it is no call.
+
+**Stages, each with an exit criterion.**
+
+0. DONE. Forcing a direct call at the site (unguarded probe, since removed)
+   gives closure_call 167.3ms against 138.4ms, **-17.3%**, checksum
+   unchanged, with `inlined_call` at 117.9ms for reference. The IR settles
+   what happened: the loop body becomes
+
+       %mul.i = mul i32 %reg_18, 31
+       %smod.i36 = and i32 %reg_5, 7
+       %add.i = add i32 %smod.i36, %mul.i
+
+   -- `step` fully inlined, no call left. So the mechanism works end to end
+   and the ceiling is real. Two things it also settles: the residual 20.5ms
+   against inlined_call is NOT dispatch (both loops are pure arithmetic by
+   then, 0.2ns/iteration apart), and -17.3% is the honest expectation for a
+   guarded version, not the 2x the JVM comparison might suggest. CI's
+   closure_call is 2.5x its own inlined_call where the Mac's is 1.4x, so
+   whatever else is slow there is a separate question.
+1. Record feedback per `(findex, pc)` at the interpreter's `CallClosure`
+   (interpreter.rs:4855) and `CallMethod` (:4844): observed target, or
+   MEGAMORPHIC once a second appears. AIR carries no site id, so the key
+   comes from the bytecode index.
+2. Publish through `TieredSharedCtx`, which already carries `pending_osr`
+   across that boundary.
+3. Emit the guard in the LLVM `CallClosure` lowering (function.rs ~3588),
+   monomorphic sites only.
+4. Same for `CallMethod`, guarding the loaded vtable entry.
+
+**Risks.** (a) The guard constant may never match: a closure captures
+`functions_ptrs[T]` at creation and `install_function_address` patches no
+existing `vclosure`, so a closure older than its target's promotion holds a
+stale address. Stage 0 measures the hit rate; if it bites, the answer is a
+self-updating cache that patches `vclosure.fun` on a miss -- which is also
+why `!invariant.load` was reverted rather than kept for free. (b) LLVM must
+have the callee as a body, not a declaration; a closure call is an
+un-inlined hot-path call so `promotion_wants_full_module` keeps the shared
+module, but assert it rather than assume it. (c) Polymorphic sites fall back
+to today's path: no gain, no regression. (d) Correctness is cheap -- exact
+pointer equality, miss takes the existing path, no deopt and no new
+invariant.
+
+This is NOT the binary_trees fix. That one is GC, the JVM leads it 2.83x,
+and it needs its own plan.
+
 ## Where the time actually goes
 
 Measured with the built-in profiler (`ASH_PROFILE=sample`, see the README), so

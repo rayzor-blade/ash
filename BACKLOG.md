@@ -405,6 +405,35 @@ before promotion, so it can record what each site saw; the JIT speculates:
 
 The win is not a cheaper indirect call, it is no call.
 
+**The AIR says most of this needs no profiling at all.** Dumping the two
+losing benchmarks (`ASH_AIR_DUMP`) shows the target is already recoverable
+by reaching definitions, in both cases:
+
+    closure_call, findex 23          method_call, findex 26
+      3 StaticClosure fun=RefFun(25)   3 New dst=Reg(3)        (type A)
+      5 StaticClosure fun=RefFun(22)   7 New dst=Reg(0)        (type B)
+     12 CallClosure   fun=Reg(0)      15 CallMethod field=0 args=[Reg(0)..]
+
+`Reg(0)` is a phi of two definitions whose targets are compile-time
+constants -- two `StaticClosure` with their findex in the instruction, two
+`New` whose register type names the class, so the vtable slot resolves. The
+optimized dump still emits `CallClosure { fun: Reg(0) }`, so no pass looks.
+
+That makes the FIRST mechanism a static AIR pass, not an inline cache, and
+it is better on four counts: no feedback plumbing, no `(findex, pc)` keying,
+no cross-thread publish, and it fixes **Cranelift as well as LLVM** because
+it rewrites the IR both tiers consume. Where a definition is a single
+`StaticClosure` it needs no guard at all -- it is a proved fact, not a
+speculation.
+
+Everything AIR needs is in place: `Instr::StaticClosure { dst, fun: usize }`
+carries the findex, v2 is SSA with `Phi`, and `passes/inline.rs` already
+exists to reuse.
+
+Runtime feedback stays in the plan, demoted to the fallback for sites whose
+definitions genuinely are not recoverable -- a closure out of a field, an
+argument, a collection.
+
 **Stages, each with an exit criterion.**
 
 0. DONE. Forcing a direct call at the site (unguarded probe, since removed)
@@ -423,15 +452,21 @@ The win is not a cheaper indirect call, it is no call.
    guarded version, not the 2x the JVM comparison might suggest. CI's
    closure_call is 2.5x its own inlined_call where the Mac's is 1.4x, so
    whatever else is slow there is a separate question.
-1. Record feedback per `(findex, pc)` at the interpreter's `CallClosure`
-   (interpreter.rs:4855) and `CallMethod` (:4844): observed target, or
-   MEGAMORPHIC once a second appears. AIR carries no site id, so the key
-   comes from the bytecode index.
-2. Publish through `TieredSharedCtx`, which already carries `pending_osr`
-   across that boundary.
-3. Emit the guard in the LLVM `CallClosure` lowering (function.rs ~3588),
-   monomorphic sites only.
-4. Same for `CallMethod`, guarding the loaded vtable entry.
+1. AIR pass: resolve a `CallClosure`'s `fun` through its reaching
+   definitions. One `StaticClosure` reaching it becomes a direct `Call`
+   with no guard. Several become a guarded chain on closure identity, each
+   arm direct and inlinable, with today's indirect path as the default.
+   Exit: closure_call moves, Cranelift-only mode moves too -- that is the
+   proof the rewrite landed in the IR rather than in one backend.
+2. Same pass for `CallMethod`: receiver type from the defining `New`, slot
+   to findex through the proto the JIT already resolves.
+3. Runtime feedback per `(findex, pc)` at the interpreter's `CallClosure`
+   (interpreter.rs:4855) and `CallMethod` (:4844) for the sites step 1 and
+   2 cannot resolve statically: observed target, or MEGAMORPHIC once a
+   second appears.
+4. Publish it through `TieredSharedCtx`, which already carries
+   `pending_osr` across that boundary, and speculate in the LLVM lowering
+   (function.rs ~3588).
 
 **Risks.** (a) The guard constant may never match: a closure captures
 `functions_ptrs[T]` at creation and `install_function_address` patches no

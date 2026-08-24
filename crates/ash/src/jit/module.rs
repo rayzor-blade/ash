@@ -56,14 +56,6 @@ unsafe impl Sync for SharedRuntimeHandles {}
 pub struct CompiledFunctionMeta {
     pub findex: usize,
     pub fn_addr: usize,
-    /// OSR entries built into the same module as the promotion, `(header pc,
-    /// entry address)`. Compiling them here rides the module's one middle-end
-    /// run and one object emission instead of paying for a second module of
-    /// their own -- the entry is ready the instant the promotion installs,
-    /// which is what bounds how long a frame loops on the middle tier.
-    pub osr_entries: Vec<(usize, usize)>,
-    // Kinds carry the bindgen alias, not a bare integer: MSVC types the C
-    // enum i32 where clang types it u32, so only the alias compiles on both.
     pub arg_kinds: Vec<hl_type_kind>,
     pub ret_kind: hl_type_kind,
 }

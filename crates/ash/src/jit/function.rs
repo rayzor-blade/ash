@@ -446,11 +446,7 @@ impl<'ctx> JITModule<'ctx> {
     /// Mirrors `compile_osr_entry`: swap the module and every by-index cache
     /// out, build, resolve whatever the module leaves undefined against the
     /// addresses the host already holds, and swap back. Returns the address.
-    fn promote_in_own_module(
-        &mut self,
-        findex: usize,
-        osr: Option<(&[usize], &HLFunction)>,
-    ) -> Result<(usize, Vec<(usize, usize)>)> {
+    fn promote_in_own_module(&mut self, findex: usize) -> Result<usize> {
         let modname = format!("promote_{findex}");
         let promo_module = self.context.create_module(&modname);
         self.builder.clear_insertion_position();
@@ -464,10 +460,8 @@ impl<'ctx> JITModule<'ctx> {
         let host_types = std::mem::take(&mut self.type_info_globals);
         self.create_constant_pool_globals();
 
-        let mut osr_names: Vec<(usize, String)> = Vec::new();
         let built = self.init_required_natives().and_then(|()| {
             self.compile_function(findex)?;
-            osr_names = self.build_osr_entries_inline(findex, osr);
             // Callees stay declarations, bound below to the addresses the host
             // already holds. Lowering copies of them here costs as much as the
             // shared module and buys nothing measurable -- a function that
@@ -565,24 +559,10 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
         }
-        let entries = self.resolve_osr_entries_inline(findex, &osr_names);
-        Ok((addr as usize, entries))
+        Ok(addr)
     }
 
     pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
-        self.promote_function_strict_with_osr(findex, None)
-    }
-
-    /// `promote_function_strict`, additionally building an OSR entry per
-    /// probed hot-loop header INTO the promotion's own module, riding its one
-    /// middle-end run and one object emission. `osr` carries the header pcs
-    /// and the body they index -- the shared optimized cache's copy, the same
-    /// array the interpreter executes.
-    pub fn promote_function_strict_with_osr(
-        &mut self,
-        findex: usize,
-        osr: Option<(&[usize], &HLFunction)>,
-    ) -> Result<CompiledFunctionMeta> {
         let _phase = crate::profile::scope("llvm promote");
         crate::profile::count("llvm promotions", 1);
         // Promotion currently targets bytecode functions only.
@@ -594,11 +574,9 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         if self.promote_uses_own_module(findex) {
-            let (fn_addr, entries) = self.promote_in_own_module(findex, osr)?;
+            let fn_addr = self.promote_in_own_module(findex)?;
             self.install_function_address(findex, fn_addr as *mut c_void);
-            let mut meta = self.compiled_meta_for(findex, fn_addr)?;
-            meta.osr_entries = entries;
-            return Ok(meta);
+            return self.compiled_meta_for(findex, fn_addr);
         }
 
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
@@ -609,7 +587,6 @@ impl<'ctx> JITModule<'ctx> {
         self.compile_pending_functions_strict()?;
         self.compile_function(findex)?;
         self.compile_pending_functions_strict()?;
-        let osr_names = self.build_osr_entries_inline(findex, osr);
 
         // Optimize before asking for the address, because asking is what
         // forces codegen. Without this the tiered LLVM tier shipped raw
@@ -701,70 +678,8 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
         self.install_function_address(findex, fn_addr as *mut c_void);
-        let osr_entries = self.resolve_osr_entries_inline(findex, &osr_names);
 
-        let mut meta = self.compiled_meta_for(findex, fn_addr)?;
-        meta.osr_entries = osr_entries;
-        Ok(meta)
-    }
-
-    /// Build one OSR entry per site into the CURRENT module, named so the
-    /// engine can hand their addresses back after this module's emission.
-    /// A site whose build declines is skipped -- the promote must not fail
-    /// over an entry, and `late_osr_entry` remains the retry door.
-    fn build_osr_entries_inline(
-        &mut self,
-        findex: usize,
-        osr: Option<(&[usize], &HLFunction)>,
-    ) -> Vec<(usize, String)> {
-        let Some((sites, body)) = osr else {
-            return Vec::new();
-        };
-        let mut names = Vec::new();
-        for &pc in sites {
-            if pc >= body.ops.len() {
-                continue;
-            }
-            let name = format!("osr_{findex}_{pc}");
-            if self.module.get_function(&name).is_some() {
-                continue;
-            }
-            match self.build_osr_body(findex, pc, body, &name) {
-                Ok(()) => names.push((pc, name)),
-                Err(e) => {
-                    crate::profile::count("osr inline entry declined", 1);
-                    if std::env::var_os("ASH_OSR_LOG").is_some() {
-                        eprintln!("[osr] inline entry declined findex={findex} pc={pc}: {e:#}");
-                    }
-                }
-            }
-        }
-        names
-    }
-
-    /// Fetch the addresses of entries built by `build_osr_entries_inline`,
-    /// after the module they live in has been emitted.
-    fn resolve_osr_entries_inline(
-        &mut self,
-        findex: usize,
-        names: &[(usize, String)],
-    ) -> Vec<(usize, usize)> {
-        let mut out = Vec::with_capacity(names.len());
-        for (pc, name) in names {
-            match self.execution_engine.get_function_address(name) {
-                Ok(a) if a != 0 => {
-                    crate::profile::count("osr entries compiled", 1);
-                    crate::profile::register_jit_code(
-                        findex as u32,
-                        crate::profile::Tier::Llvm,
-                        a as usize,
-                    );
-                    out.push((*pc, a as usize));
-                }
-                _ => {}
-            }
-        }
-        out
+        self.compiled_meta_for(findex, fn_addr)
     }
 
     /// The signature the tiered caller marshals through, read from the
@@ -798,7 +713,6 @@ impl<'ctx> JITModule<'ctx> {
         Ok(CompiledFunctionMeta {
             findex,
             fn_addr,
-            osr_entries: Vec::new(),
             arg_kinds,
             ret_kind,
         })

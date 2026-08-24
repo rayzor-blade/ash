@@ -629,17 +629,36 @@ cold-start that repeatedly masqueraded as a structural asymmetry). The
 `!invariant.load` on the guard loads is in place; it buys nothing while the
 cranelift phase dominates.
 
-OSR entries now ride the promotion's own module (one middle-end run, one
-object emission, entry ready the instant the install lands) instead of paying
-for a second module after -- cost-neutral locally, removes the
-promote-landed-but-entry-missing window that CI timing punishes.
-`late_osr_entry` remains the door for headers that turn hot later.
+**The entry is built BEFORE the function it belongs to** (superseding the
+ride-along attempt, which was cost-neutral and is gone). Timeline that
+settled it, method_call: cranelift installs at ~1ms, the frame transfers at
+~1.5ms, and the LLVM promote is requested at 6.8ms but takes ~36ms -- so the
+frame ran the middle tier until ~43ms of a ~131ms run. A frame that has
+already transferred can only leave through an OSR entry; the promoted body is
+for FUTURE calls, and a loop owner like `main` is called once, so for the
+frame running right now the body is worth nothing and the entry is
+everything. Building the entry into its own small module first publishes the
+re-tier slot in a fraction of the promote's time: closure_call -5.1%,
+method_call -3.7%, everything else within noise. The promote itself is
+unchanged in cost -- what changed is that nobody waits for it.
 
-**Next lever for method_call**, measured not guessed: the cranelift-phase
-dispatch. ~40% of the run executes the tier-0 OSR body at ~3.2ns/iter against
-LLVM's ~1.2; the same guarded direct call in the cranelift lowering (no
-inlining there, but it drops the vobj_proto chain and the stub guard) is the
-remaining candidate, worth an estimated 5-10ms.
+Promote composition, warm, for anyone attacking the remaining latency
+(2 promotes, method_call): mcjit codegen 17.2ms, OSR entry build 10.7ms,
+middle-end 10.0ms, lower 1.0ms.
+
+**Falsified while chasing method_call, do not retry as-is:** a "cluster"
+promote -- private module carrying the profile-named hot callees, so the
+inliner still sees them while MCJIT stops re-emitting the shared module. The
+theory was the documented "35-71ms of codegen per promotion" for the shared
+module; the measurement was neutral everywhere (+-2%), INCLUDING deltablue's
+11 promotes. At this scale there is nothing accumulated to re-emit, and the
+promote's cost is its own three phases above, not the module's other
+tenants. Revisit only with a program whose shared module is genuinely large,
+and measure the re-emission directly before building anything.
+
+**Next lever for method_call**, still open: the cranelift-phase dispatch.
+The frame now leaves the middle tier much sooner, so the window is smaller
+than the ~40% measured before -- re-measure the split before spending on it.
 
 **The AIR says most of this needs no profiling at all.** Dumping the two
 losing benchmarks (`ASH_AIR_DUMP`) shows the target is already recoverable

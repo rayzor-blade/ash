@@ -1389,10 +1389,53 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 crate::native_recovery::last_tiered_recovery_fault_addr()
             ));
         }
-        module.promote_function_strict_with_osr(
-            findex,
-            osr_plan.as_ref().map(|(s, b)| (s.as_slice(), b)),
-        )
+        // The entry first, then the function.
+        //
+        // A frame already transferred into tier-0 code can only leave through
+        // an OSR entry -- the promoted body is for FUTURE calls, and a loop
+        // owner like `main` is called once, so for the frame that is running
+        // right now the promoted body is worth nothing and the entry is worth
+        // everything. Building the entry into its own small module publishes
+        // it in a fraction of the promote's time; measured on method_call,
+        // the frame waited 43ms for the whole promote when the entry alone
+        // was ready at ~15ms, and it ran the middle tier for every one of
+        // those iterations.
+        if let Some((sites, body)) = osr_plan.as_ref() {
+            let mut entries: Vec<OsrEntry> = Vec::new();
+            for &pc in sites.iter() {
+                if let Ok(addr) = module.compile_osr_entry(findex, pc, body) {
+                    if addr != 0 {
+                        entries.push(OsrEntry {
+                            site: pc as u64,
+                            code: addr as *mut (),
+                        });
+                    }
+                }
+            }
+            for e in &entries {
+                if ash_core::cranelift::publish_retier_target(findex, e.site as usize, e.code as u64)
+                    && osr_logging()
+                {
+                    eprintln!("[osr] re-tier slot filled early findex={findex} pc={}", e.site);
+                }
+            }
+            if !entries.is_empty() {
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] staged {} entr{} for findex={findex} ahead of its promote",
+                        entries.len(),
+                        if entries.len() == 1 { "y" } else { "ies" }
+                    );
+                }
+                // Interpreter frames read the staging map on the next install
+                // they observe, the same way they do for a late entry.
+                ctx.pending_osr
+                    .lock()
+                    .expect("pending_osr mutex poisoned")
+                    .insert(findex, entries);
+            }
+        }
+        module.promote_function_strict(findex)
     }));
     crate::native_recovery::disarm_tiered_recovery();
     let result: std::result::Result<CompiledFunctionMeta, String> = match compile_result {
@@ -1411,44 +1454,9 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
             patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
-            if meta.osr_entries.is_empty() {
-                // Headers probed after the plan was taken, or a build that
-                // declined inline: the standalone producer still covers them.
-                produce_osr_entries(ctx, findex);
-            } else {
-                // Publish into the Cranelift re-tier slots: any frame looping
-                // in tier-0 code takes the exit on its next iteration. The
-                // staging map serves interpreter frames the same way.
-                let entries: Vec<OsrEntry> = meta
-                    .osr_entries
-                    .iter()
-                    .map(|&(pc, addr)| OsrEntry {
-                        site: pc as u64,
-                        code: addr as *mut (),
-                    })
-                    .collect();
-                for e in &entries {
-                    if ash_core::cranelift::publish_retier_target(
-                        findex,
-                        e.site as usize,
-                        e.code as u64,
-                    ) && osr_logging()
-                    {
-                        eprintln!("[osr] re-tier slot filled findex={findex} pc={}", e.site);
-                    }
-                }
-                if osr_logging() {
-                    eprintln!(
-                        "[osr] staged {} inline entr{} for findex={findex}",
-                        entries.len(),
-                        if entries.len() == 1 { "y" } else { "ies" }
-                    );
-                }
-                ctx.pending_osr
-                    .lock()
-                    .expect("pending_osr mutex poisoned")
-                    .insert(findex, entries);
-            }
+            // Headers probed only after the early build, or one that
+            // declined: the standalone producer covers whatever is left.
+            produce_osr_entries(ctx, findex);
             // (LLVM code registers itself with the profiler in
             // install_function_address, which every promotion passes through.)
             if ctx.tier_log {

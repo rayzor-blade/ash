@@ -446,7 +446,11 @@ impl<'ctx> JITModule<'ctx> {
     /// Mirrors `compile_osr_entry`: swap the module and every by-index cache
     /// out, build, resolve whatever the module leaves undefined against the
     /// addresses the host already holds, and swap back. Returns the address.
-    fn promote_in_own_module(&mut self, findex: usize) -> Result<usize> {
+    fn promote_in_own_module(
+        &mut self,
+        findex: usize,
+        osr: Option<(&[usize], &HLFunction)>,
+    ) -> Result<(usize, Vec<(usize, usize)>)> {
         let modname = format!("promote_{findex}");
         let promo_module = self.context.create_module(&modname);
         self.builder.clear_insertion_position();
@@ -460,8 +464,10 @@ impl<'ctx> JITModule<'ctx> {
         let host_types = std::mem::take(&mut self.type_info_globals);
         self.create_constant_pool_globals();
 
+        let mut osr_names: Vec<(usize, String)> = Vec::new();
         let built = self.init_required_natives().and_then(|()| {
             self.compile_function(findex)?;
+            osr_names = self.build_osr_entries_inline(findex, osr);
             // Callees stay declarations, bound below to the addresses the host
             // already holds. Lowering copies of them here costs as much as the
             // shared module and buys nothing measurable -- a function that
@@ -559,10 +565,24 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
         }
-        Ok(addr)
+        let entries = self.resolve_osr_entries_inline(findex, &osr_names);
+        Ok((addr as usize, entries))
     }
 
     pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
+        self.promote_function_strict_with_osr(findex, None)
+    }
+
+    /// `promote_function_strict`, additionally building an OSR entry per
+    /// probed hot-loop header INTO the promotion's own module, riding its one
+    /// middle-end run and one object emission. `osr` carries the header pcs
+    /// and the body they index -- the shared optimized cache's copy, the same
+    /// array the interpreter executes.
+    pub fn promote_function_strict_with_osr(
+        &mut self,
+        findex: usize,
+        osr: Option<(&[usize], &HLFunction)>,
+    ) -> Result<CompiledFunctionMeta> {
         let _phase = crate::profile::scope("llvm promote");
         crate::profile::count("llvm promotions", 1);
         // Promotion currently targets bytecode functions only.
@@ -574,9 +594,11 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         if self.promote_uses_own_module(findex) {
-            let fn_addr = self.promote_in_own_module(findex)?;
+            let (fn_addr, entries) = self.promote_in_own_module(findex, osr)?;
             self.install_function_address(findex, fn_addr as *mut c_void);
-            return self.compiled_meta_for(findex, fn_addr);
+            let mut meta = self.compiled_meta_for(findex, fn_addr)?;
+            meta.osr_entries = entries;
+            return Ok(meta);
         }
 
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
@@ -587,6 +609,7 @@ impl<'ctx> JITModule<'ctx> {
         self.compile_pending_functions_strict()?;
         self.compile_function(findex)?;
         self.compile_pending_functions_strict()?;
+        let osr_names = self.build_osr_entries_inline(findex, osr);
 
         // Optimize before asking for the address, because asking is what
         // forces codegen. Without this the tiered LLVM tier shipped raw
@@ -606,6 +629,19 @@ impl<'ctx> JITModule<'ctx> {
                     findex
                 )
             })?;
+            // Which bodies this promote is paying to optimize; the middle-end
+            // cost lives or dies by this list.
+            if std::env::var_os("ASH_PROMOTE_FNS").is_some() {
+                for func in self.module.get_functions() {
+                    let bbs = func.count_basic_blocks();
+                    if bbs > 0 {
+                        eprintln!(
+                            "[promote-fns] findex={findex} {} blocks={bbs}",
+                            func.get_name().to_str().unwrap_or("?")
+                        );
+                    }
+                }
+            }
             let parked = self.park_optimized_functions(target);
             let result = super::module::run_middle_end(&self.module);
             self.release_parked_functions(&parked);
@@ -665,8 +701,70 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
         self.install_function_address(findex, fn_addr as *mut c_void);
+        let osr_entries = self.resolve_osr_entries_inline(findex, &osr_names);
 
-        self.compiled_meta_for(findex, fn_addr)
+        let mut meta = self.compiled_meta_for(findex, fn_addr)?;
+        meta.osr_entries = osr_entries;
+        Ok(meta)
+    }
+
+    /// Build one OSR entry per site into the CURRENT module, named so the
+    /// engine can hand their addresses back after this module's emission.
+    /// A site whose build declines is skipped -- the promote must not fail
+    /// over an entry, and `late_osr_entry` remains the retry door.
+    fn build_osr_entries_inline(
+        &mut self,
+        findex: usize,
+        osr: Option<(&[usize], &HLFunction)>,
+    ) -> Vec<(usize, String)> {
+        let Some((sites, body)) = osr else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
+        for &pc in sites {
+            if pc >= body.ops.len() {
+                continue;
+            }
+            let name = format!("osr_{findex}_{pc}");
+            if self.module.get_function(&name).is_some() {
+                continue;
+            }
+            match self.build_osr_body(findex, pc, body, &name) {
+                Ok(()) => names.push((pc, name)),
+                Err(e) => {
+                    crate::profile::count("osr inline entry declined", 1);
+                    if std::env::var_os("ASH_OSR_LOG").is_some() {
+                        eprintln!("[osr] inline entry declined findex={findex} pc={pc}: {e:#}");
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// Fetch the addresses of entries built by `build_osr_entries_inline`,
+    /// after the module they live in has been emitted.
+    fn resolve_osr_entries_inline(
+        &mut self,
+        findex: usize,
+        names: &[(usize, String)],
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::with_capacity(names.len());
+        for (pc, name) in names {
+            match self.execution_engine.get_function_address(name) {
+                Ok(a) if a != 0 => {
+                    crate::profile::count("osr entries compiled", 1);
+                    crate::profile::register_jit_code(
+                        findex as u32,
+                        crate::profile::Tier::Llvm,
+                        a as usize,
+                    );
+                    out.push((*pc, a as usize));
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     /// The signature the tiered caller marshals through, read from the
@@ -700,6 +798,7 @@ impl<'ctx> JITModule<'ctx> {
         Ok(CompiledFunctionMeta {
             findex,
             fn_addr,
+            osr_entries: Vec::new(),
             arg_kinds,
             ret_kind,
         })
@@ -847,6 +946,18 @@ impl<'ctx> JITModule<'ctx> {
         // module, which is the failure this swap could produce.
         if let Err(e) = osr_module.verify() {
             return Err(anyhow!("osr module {name} failed verification: {}", e));
+        }
+        // The OSR entry is the body the hot loop actually executes, so IR
+        // questions about steady-state code are questions about THIS module,
+        // not the ordinary one ASH_DUMP_IR writes.
+        if let Ok(dir) = std::env::var("ASH_DUMP_OSR_IR") {
+            if !dir.is_empty() && dir != "0" {
+                let path = format!("{dir}/{name}.ll");
+                match osr_module.print_to_file(&path) {
+                    Ok(()) => eprintln!("[ash] OSR IR written to {path}"),
+                    Err(e) => eprintln!("[ash] could not write {path}: {e}"),
+                }
+            }
         }
         // Bind every symbol this module leaves undefined to the address the
         // host already has for it. MCJIT resolves across the modules it holds,
@@ -3085,35 +3196,8 @@ impl<'ctx> JITModule<'ctx> {
                         .build_load(ptr_type, obj_val, "cm_type")?
                         .into_pointer_value();
 
-                    // Load vobj_proto from hl_type (offset 16)
-                    let vobj_proto_gep = unsafe {
-                        self.builder.build_gep(
-                            self.context.i8_type(),
-                            type_ptr,
-                            &[self.context.i64_type().const_int(16, false)],
-                            "vobj_proto_gep",
-                        )?
-                    };
-                    let vobj_proto = self
-                        .builder
-                        .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
-                        .into_pointer_value();
-
-                    // Load method pointer from vobj_proto[field.0]
-                    let method_gep = unsafe {
-                        self.builder.build_gep(
-                            ptr_type,
-                            vobj_proto,
-                            &[self.context.i32_type().const_int(vtable_slot, false)],
-                            "method_gep",
-                        )?
-                    };
-                    let method_ptr = self
-                        .builder
-                        .build_load(ptr_type, method_gep, "method_ptr")?
-                        .into_pointer_value();
-
-                    // Build arg values with type casting
+                    // Build arg values with type casting (shared by both the
+                    // devirtualised and the vtable arm below).
                     let expected_params = function.count_params() as usize;
                     let mut arg_vals: Vec<BasicMetadataValueEnum> =
                         Vec::with_capacity(expected_params);
@@ -3143,6 +3227,111 @@ impl<'ctx> JITModule<'ctx> {
                         arg_vals.push(param_type.const_zero().into());
                     }
 
+                    // Guarded devirtualisation, same reasoning as CallClosure
+                    // below: the interpreter watched this site dispatch, and a
+                    // site that only ever saw one receiver type gets a
+                    // type-header compare -- the header pointer never moves,
+                    // unlike the vtable SLOT, which promotion patches -- and a
+                    // direct call the inliner can take. A different receiver
+                    // falls into the vtable path unchanged.
+                    let devirt = if self.hot_reload {
+                        None
+                    } else {
+                        crate::callsite_profile::method_receiver(f.findex as u32, i as u32)
+                            .and_then(|(type_ptr_c, target)| {
+                                match self.get_or_create_function_value(target as usize) {
+                                    Ok((callee, ph)) => {
+                                        if ph {
+                                            self.add_pending_compilation(target as usize);
+                                        }
+                                        (callee.get_type() == fn_type)
+                                            .then_some((callee, type_ptr_c))
+                                    }
+                                    Err(_) => None,
+                                }
+                            })
+                    };
+
+                    let cm_function = self
+                        .builder
+                        .get_insert_block()
+                        .unwrap()
+                        .get_parent()
+                        .unwrap();
+                    let cm_done_bb = self.context.append_basic_block(cm_function, "cm_done");
+
+                    if let Some((callee, type_ptr_c)) = devirt {
+                        crate::profile::count("devirt method fast-arm", 1);
+                        // An object's type header is written once, at
+                        // allocation, and the object is live for as long as
+                        // anything can load through this pointer -- so the
+                        // load is `!invariant.load`, which is what lets LICM
+                        // hoist the whole guard out of the loop and leave the
+                        // fast arm's inlined body running guard-free.
+                        if let Some(inst) = type_ptr.as_instruction() {
+                            let _ = inst.set_metadata(
+                                self.context.metadata_node(&[]),
+                                self.context.get_kind_id("invariant.load"),
+                            );
+                        }
+                        let hit_bb =
+                            self.context.append_basic_block(cm_function, "cm_devirt_hit");
+                        let miss_bb =
+                            self.context.append_basic_block(cm_function, "cm_devirt_miss");
+                        let type_int = self.builder.build_ptr_to_int(
+                            type_ptr,
+                            self.context.i64_type(),
+                            "cm_type_int",
+                        )?;
+                        let guard = self.builder.build_int_compare(
+                            IntPredicate::EQ,
+                            type_int,
+                            self.context.i64_type().const_int(type_ptr_c, false),
+                            "cm_devirt_guard",
+                        )?;
+                        self.builder.build_conditional_branch(guard, hit_bb, miss_bb)?;
+
+                        self.builder.position_at_end(hit_bb);
+                        let ret = self
+                            .builder
+                            .build_call(callee, &arg_vals, "cm_devirt_call")?
+                            .try_as_basic_value();
+                        if let Some(rv) = ret.basic() {
+                            self.builder.build_store(registers[dst.0 as usize], rv)?;
+                        }
+                        self.builder.build_unconditional_branch(cm_done_bb)?;
+
+                        self.builder.position_at_end(miss_bb);
+                    }
+
+                    // Load vobj_proto from hl_type (offset 16)
+                    let vobj_proto_gep = unsafe {
+                        self.builder.build_gep(
+                            self.context.i8_type(),
+                            type_ptr,
+                            &[self.context.i64_type().const_int(16, false)],
+                            "vobj_proto_gep",
+                        )?
+                    };
+                    let vobj_proto = self
+                        .builder
+                        .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
+                        .into_pointer_value();
+
+                    // Load method pointer from vobj_proto[field.0]
+                    let method_gep = unsafe {
+                        self.builder.build_gep(
+                            ptr_type,
+                            vobj_proto,
+                            &[self.context.i32_type().const_int(vtable_slot, false)],
+                            "method_gep",
+                        )?
+                    };
+                    let method_ptr = self
+                        .builder
+                        .build_load(ptr_type, method_gep, "method_ptr")?
+                        .into_pointer_value();
+
                     // Indirect call through the vtable method pointer
                     // (stub-guarded: vobj_proto slots may hold interpreter
                     // sentinels in hybrid mode)
@@ -3158,6 +3347,8 @@ impl<'ctx> JITModule<'ctx> {
                     if is_placeholder {
                         self.add_pending_compilation(findex);
                     }
+                    self.builder.build_unconditional_branch(cm_done_bb)?;
+                    self.builder.position_at_end(cm_done_bb);
                 } else {
                     // Runtime dispatch via hl_runtime_obj.methods table
                     let obj_val = self
@@ -3694,6 +3885,117 @@ impl<'ctx> JITModule<'ctx> {
                     self.context.void_type().fn_type(&extended_params, false)
                 };
 
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let call_done_bb = self.context.append_basic_block(function, "call_done");
+
+                // Guarded devirtualisation. The interpreter ran this site
+                // thousands of times before this compile; when it only ever
+                // saw one target, speculate on it. The fun field of a
+                // sentinel-form closure holds `target + 1` and is never
+                // patched, so the guard is a compare against a CONSTANT, and
+                // the fast arm is a direct call the inliner can take — which
+                // is the point: the JVM wins closure_call not by dispatching
+                // faster but by not dispatching at all. A miss falls into the
+                // ordinary indirect path below, so a wrong or stale profile
+                // costs one compare. Off under hot reload, where a direct
+                // call would dodge the function-table patch.
+                let devirt = if self.hot_reload {
+                    None
+                } else {
+                    crate::callsite_profile::closure_target(f.findex as u32, i as u32).and_then(
+                        |(target, exp_hv)| {
+                            let expected_ty =
+                                if exp_hv { extended_fn_type } else { base_fn_type };
+                            match self.get_or_create_function_value(target as usize) {
+                                Ok((callee, is_placeholder)) => {
+                                    if is_placeholder {
+                                        self.add_pending_compilation(target as usize);
+                                    }
+                                    // The guard proves the target's identity,
+                                    // not its shape: only call directly when
+                                    // the callee's real signature is the one
+                                    // this site would build.
+                                    (callee.get_type() == expected_ty)
+                                        .then_some((callee, target, exp_hv))
+                                }
+                                Err(_) => None,
+                            }
+                        },
+                    )
+                };
+
+                if let Some((callee, target, exp_hv)) = devirt {
+                    crate::profile::count("devirt closure fast-arm", 1);
+                    // A vclosure's fun, hasValue and value fields are written
+                    // once, at allocation, and never patched -- the fun field
+                    // holding the sentinel forever is the very fact the guard
+                    // stands on. `!invariant.load` lets LICM hoist the guard
+                    // chain out of a loop, leaving the inlined fast arm
+                    // guard-free on every iteration after the first.
+                    for lv in [
+                        fun_ptr.as_instruction(),
+                        has_value.as_instruction(),
+                        closure_value.as_instruction(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = lv.set_metadata(
+                            self.context.metadata_node(&[]),
+                            self.context.get_kind_id("invariant.load"),
+                        );
+                    }
+                    let devirt_bb = self.context.append_basic_block(function, "devirt_hit");
+                    let generic_bb = self.context.append_basic_block(function, "devirt_miss");
+
+                    let fun_int = self.builder.build_ptr_to_int(
+                        fun_ptr,
+                        self.context.i64_type(),
+                        "closure_fun_int",
+                    )?;
+                    let is_target = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        fun_int,
+                        self.context.i64_type().const_int(target as u64 + 1, false),
+                        "devirt_is_target",
+                    )?;
+                    let hv_matches = self.builder.build_int_compare(
+                        if exp_hv { IntPredicate::NE } else { IntPredicate::EQ },
+                        has_value,
+                        i32_type.const_zero(),
+                        "devirt_hv",
+                    )?;
+                    let guard = self
+                        .builder
+                        .build_and(is_target, hv_matches, "devirt_guard")?;
+                    self.builder
+                        .build_conditional_branch(guard, devirt_bb, generic_bb)?;
+
+                    self.builder.position_at_end(devirt_bb);
+                    let direct_args: Vec<BasicMetadataValueEnum> = if exp_hv {
+                        let mut v: Vec<BasicMetadataValueEnum> = vec![closure_value.into()];
+                        v.extend(arg_vals.iter().cloned());
+                        v
+                    } else {
+                        arg_vals.clone()
+                    };
+                    let ret = self
+                        .builder
+                        .build_call(callee, &direct_args, "devirt_call")?
+                        .try_as_basic_value();
+                    if let Some(rv) = ret.basic() {
+                        self.builder.build_store(registers[dst.0 as usize], rv)?;
+                    }
+                    self.builder.build_unconditional_branch(call_done_bb)?;
+
+                    self.builder.position_at_end(generic_bb);
+                }
+
                 // Branch based on hasValue
                 let has_value_cmp = self.builder.build_int_compare(
                     IntPredicate::NE,
@@ -3702,18 +4004,11 @@ impl<'ctx> JITModule<'ctx> {
                     "has_value_cmp",
                 )?;
 
-                let function = self
-                    .builder
-                    .get_insert_block()
-                    .unwrap()
-                    .get_parent()
-                    .unwrap();
                 let call_with_value_bb =
                     self.context.append_basic_block(function, "call_with_value");
                 let call_without_value_bb = self
                     .context
                     .append_basic_block(function, "call_without_value");
-                let call_done_bb = self.context.append_basic_block(function, "call_done");
 
                 self.builder.build_conditional_branch(
                     has_value_cmp,

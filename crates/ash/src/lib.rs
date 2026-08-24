@@ -6,6 +6,7 @@
 
 pub mod air_pipeline;
 pub mod bytecode;
+pub mod callsite_profile;
 pub mod c_types;
 pub mod cranelift;
 pub mod intrinsics;

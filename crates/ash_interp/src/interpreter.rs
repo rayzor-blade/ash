@@ -1116,6 +1116,70 @@ fn produce_cranelift_osr_entries(
 /// Silent when there is nothing to do: no probed headers, the plan refuses
 /// the function, or the pipeline declined it. `ASH_OSR=0` disables the
 /// production as well as the transfer.
+/// The OSR work a promotion of `findex` should carry: the probed hot-loop
+/// header pcs that are eligible entry sites, and the body those pcs index --
+/// the shared optimized cache's copy, the same array the interpreter runs.
+/// `None` when nothing was probed, nothing is eligible, or OSR is off.
+fn osr_plan_for(ctx: &TieredSharedCtx, findex: usize) -> Option<(Vec<usize>, HLFunction)> {
+    if !osr_transfer_enabled() {
+        return None;
+    }
+    let pcs: Vec<usize> = match ctx
+        .hot_loop_pcs
+        .lock()
+        .expect("hot_loop_pcs mutex poisoned")
+        .get(&findex)
+    {
+        Some(v) if !v.is_empty() => v.clone(),
+        _ => return None,
+    };
+    let bytecode = ctx.bytecode_ptr()?;
+    let raw = bytecode
+        .functions
+        .iter()
+        .find(|f| f.findex as usize == findex)?;
+    let m = ash_core::air_pipeline::AshModule::new(bytecode);
+    let (plan, body, sites): (_, HLFunction, Vec<usize>) =
+        if ash_core::air_pipeline::air_enabled() {
+            let opt = ash_core::air_pipeline::optimized(&m, raw).ok()?;
+            let mut b = raw.clone();
+            b.ops = opt.ser.ops.clone();
+            b.regs = opt
+                .ser
+                .reg_types
+                .iter()
+                .map(|t| ash_core::types::TypeRef(t.0 as usize))
+                .collect();
+            b.debug = Vec::new();
+            let plan = ash_core::osr::analyze(&opt.ir);
+            let eligible: std::collections::HashSet<usize> = plan
+                .entry_headers
+                .iter()
+                .filter_map(|&h| opt.ser.block_pcs.get(h as usize).copied())
+                .collect();
+            let sites = pcs
+                .iter()
+                .copied()
+                .filter(|pc| eligible.contains(pc))
+                .collect();
+            (plan, b, sites)
+        } else {
+            let opts = ash_core::air_pipeline::AirPassOptions::default();
+            let (f, _) = ash_core::air_pipeline::prepare_ir(
+                &m,
+                raw,
+                ash_core::air_pipeline::AirOptLevel::O0,
+                &opts,
+            )
+            .ok()?;
+            (ash_core::osr::analyze(&f), raw.clone(), pcs)
+        };
+    if !plan.eligible() || sites.is_empty() {
+        return None;
+    }
+    Some((sites, body))
+}
+
 fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     if !osr_transfer_enabled() {
         return;
@@ -1287,6 +1351,10 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
     if retier_abandoned() {
         return std::ptr::null_mut();
     }
+    // The OSR work this promotion should carry, computed before the compile
+    // so its entries ride the promotion's own module -- one middle-end run,
+    // one object emission -- instead of paying for a second module after.
+    let osr_plan = if tier <= 1 { osr_plan_for(ctx, findex) } else { None };
     if let LlvmState::Pending(_) = &*guard {
         let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
             unreachable!()
@@ -1321,7 +1389,10 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 crate::native_recovery::last_tiered_recovery_fault_addr()
             ));
         }
-        module.promote_function_strict(findex)
+        module.promote_function_strict_with_osr(
+            findex,
+            osr_plan.as_ref().map(|(s, b)| (s.as_slice(), b)),
+        )
     }));
     crate::native_recovery::disarm_tiered_recovery();
     let result: std::result::Result<CompiledFunctionMeta, String> = match compile_result {
@@ -1340,7 +1411,44 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
             patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
-            produce_osr_entries(ctx, findex);
+            if meta.osr_entries.is_empty() {
+                // Headers probed after the plan was taken, or a build that
+                // declined inline: the standalone producer still covers them.
+                produce_osr_entries(ctx, findex);
+            } else {
+                // Publish into the Cranelift re-tier slots: any frame looping
+                // in tier-0 code takes the exit on its next iteration. The
+                // staging map serves interpreter frames the same way.
+                let entries: Vec<OsrEntry> = meta
+                    .osr_entries
+                    .iter()
+                    .map(|&(pc, addr)| OsrEntry {
+                        site: pc as u64,
+                        code: addr as *mut (),
+                    })
+                    .collect();
+                for e in &entries {
+                    if ash_core::cranelift::publish_retier_target(
+                        findex,
+                        e.site as usize,
+                        e.code as u64,
+                    ) && osr_logging()
+                    {
+                        eprintln!("[osr] re-tier slot filled findex={findex} pc={}", e.site);
+                    }
+                }
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] staged {} inline entr{} for findex={findex}",
+                        entries.len(),
+                        if entries.len() == 1 { "y" } else { "ies" }
+                    );
+                }
+                ctx.pending_osr
+                    .lock()
+                    .expect("pending_osr mutex poisoned")
+                    .insert(findex, entries);
+            }
             // (LLVM code registers itself with the profiler in
             // install_function_address, which every promotion passes through.)
             if ctx.tier_log {
@@ -7187,8 +7295,23 @@ impl HLInterpreter {
                     let fun_ptr = (*cl_ptr).fun;
                     // Extract findex from stub pointer (findex+1)
                     let fi = (fun_ptr as usize).wrapping_sub(1);
+                    let bound_value = (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null();
+                    // What this site called, for the LLVM tier's guarded
+                    // devirtualisation. Only sentinel-form targets are worth
+                    // recording: the emitted guard compares the fun field
+                    // against `findex + 1`, which is what that form holds.
+                    if self.tiered_runtime.is_some()
+                        && (fun_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                    {
+                        ash_core::callsite_profile::record_closure(
+                            bytecode.functions[func_idx].findex as u32,
+                            frame.pc as u32,
+                            fi as u32,
+                            bound_value,
+                        );
+                    }
                     // If the closure has a bound value, prepend it as the first arg
-                    if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
+                    if bound_value {
                         let bound = NanBoxedValue::from_ptr((*cl_ptr).value as usize);
                         arg_vals.insert(0, bound);
                     }
@@ -7300,6 +7423,9 @@ impl HLInterpreter {
 
         // Try to resolve via vobj_proto (set up by hlp_get_obj_proto)
         let obj_ptr = this_val.as_ptr() as *const u8;
+        // The receiver's type header, captured for the call-site profile; a
+        // null type resolves through the bytecode fallback and records nothing.
+        let recv_type_ptr: u64 = unsafe { *(obj_ptr as *const *mut hl_type) as u64 };
         let findex = unsafe {
             let type_ptr = *(obj_ptr as *const *mut hl_type);
             if !type_ptr.is_null() {
@@ -7350,6 +7476,19 @@ impl HLInterpreter {
                     })?
             }
         };
+
+        // What this site dispatched on, for the LLVM tier's guarded
+        // devirtualisation: the receiver's type header is the guard anchor
+        // (vtable SLOTS get patched on promotion; type pointers never move).
+        if self.tiered_runtime.is_some() && recv_type_ptr != 0 {
+            let pc = self.stack.last().map(|fr| fr.pc).unwrap_or(0);
+            ash_core::callsite_profile::record_method(
+                bytecode.functions[func_idx].findex as u32,
+                pc as u32,
+                recv_type_ptr,
+                findex as u32,
+            );
+        }
 
         Ok(StepResult::Call {
             findex,

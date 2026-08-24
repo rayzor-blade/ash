@@ -604,16 +604,42 @@ closure does reach LLVM code. What costs 3.18ns is the indirect call itself,
 which the JVM does not make: a monomorphic site gets an inline cache and the
 callee inlined.
 
-**Mechanism.** Profile-guided guarded devirtualisation. The interpreter runs
-before promotion, so it can record what each site saw; the JIT speculates:
+**Mechanism — IMPLEMENTED.** Profile-guided guarded devirtualisation, LLVM
+tier. The interpreter records what every CallClosure/CallMethod site actually
+called (`ash_core::callsite_profile`, keyed by (caller findex, opcode index)
+into the shared optimized ops array both sides use); the lowering emits a
+guarded fast arm for monomorphic sites, with the whole existing indirect path
+as the miss arm, so a wrong profile costs one compare:
 
-    %hit = icmp eq ptr %closure_fun, @Fun_T
-    br %hit, %fast, %slow
-    fast:  %a = call @Fun_T(args)        ; direct -- the inliner can take it
-    slow:  %b = <existing indirect path>
-    merge: phi [%a, %fast], [%b, %slow]
+  - CallClosure guards on the fun field against the CONSTANT `target + 1` --
+    the sentinel form is never patched, which makes the closure's identity a
+    compile-time immediate -- plus a hasValue match.
+  - CallMethod guards on the receiver's type header against the recorded
+    `hl_type*` -- the header never moves, unlike the vtable SLOT, which
+    promotion patches.
 
-The win is not a cheaper indirect call, it is no call.
+Both fast arms are direct calls the inliner takes (verified in the OSR body's
+IR: `cm_devirt_hit` is the callee's mul/srem/add, no call). Measured:
+closure_call 161.8 -> 137.9 (-14.6%), checksums identical, corpus clean in
+default, v2 and promotion-heavy modes. method_call stayed ~131: its indirect
+path was already branch-predicted cheap, and its wall is dominated by the
+CRANELIFT phase -- the frame runs the tier-0 OSR body until the promote and
+its OSR entry land (~35ms warm; the first run after a build pays a ~50ms
+cold-start that repeatedly masqueraded as a structural asymmetry). The
+`!invariant.load` on the guard loads is in place; it buys nothing while the
+cranelift phase dominates.
+
+OSR entries now ride the promotion's own module (one middle-end run, one
+object emission, entry ready the instant the install lands) instead of paying
+for a second module after -- cost-neutral locally, removes the
+promote-landed-but-entry-missing window that CI timing punishes.
+`late_osr_entry` remains the door for headers that turn hot later.
+
+**Next lever for method_call**, measured not guessed: the cranelift-phase
+dispatch. ~40% of the run executes the tier-0 OSR body at ~3.2ns/iter against
+LLVM's ~1.2; the same guarded direct call in the cranelift lowering (no
+inlining there, but it drops the vobj_proto chain and the stub guard) is the
+remaining candidate, worth an estimated 5-10ms.
 
 **The AIR says most of this needs no profiling at all.** Dumping the two
 losing benchmarks (`ASH_AIR_DUMP`) shows the target is already recoverable

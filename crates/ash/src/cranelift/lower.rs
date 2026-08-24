@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlags,
+    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
     SigRef, Signature, StackSlotData, StackSlotKind, Type, Value,
 };
 use cranelift_frontend::{FunctionBuilder, Variable};
@@ -274,12 +274,15 @@ pub fn lower_function(
     // Imports must be declared before a FunctionBuilder borrows `ctx.func`.
     let native_refs = import_native_targets(backend, ctx, ops, &mut def)?;
 
+    // Capture before `builder()` takes a mutable borrow of `def`.
+    let fcfg = def.frontend_config();
     {
         let mut lo = Lowerer {
             ctx,
             ops,
             regs,
             b: def.builder(),
+            fcfg,
             vars: Vec::new(),
             reg_ty: Vec::new(),
             reg_class: Vec::new(),
@@ -390,6 +393,9 @@ struct Lowerer<'a, 'b> {
     /// bytecode function's own table when the serializer appended temporaries.
     regs: &'a [TypeRef],
     b: FunctionBuilder<'b>,
+    /// Captured from the def before `builder()` borrows it; `finalize` needs
+    /// it to size pointer-width operations.
+    fcfg: cranelift_codegen::isa::TargetFrontendConfig,
     /// One Cranelift variable per HL register.
     vars: Vec<Variable>,
     reg_ty: Vec<Type>,
@@ -489,7 +495,7 @@ impl Lowerer<'_, '_> {
     /// Consume the builder — runs cranelift-frontend's own block/seal
     /// invariant checks (debug builds) and finishes SSA construction.
     fn finish(self) {
-        self.b.finalize();
+        self.b.finalize(self.fcfg);
     }
 
     fn prepare_registers(&mut self) -> Result<()> {
@@ -612,7 +618,7 @@ impl Lowerer<'_, '_> {
     fn lower_field_load(&mut self, dst: Reg, obj: Reg, field_index: usize) -> Result<()> {
         let (off, field_ty) = self.static_field_offset(obj, field_index)?;
         let base = self.reg_val(obj);
-        let raw = self.b.ins().load(field_ty, MemFlags::trusted(), base, off);
+        let raw = self.b.ins().load(field_ty, MemFlagsData::trusted(), base, off);
         let want = self.ty_of(dst);
         let v = if field_ty == want {
             raw
@@ -633,7 +639,7 @@ impl Lowerer<'_, '_> {
         } else {
             self.coerce(raw, field_ty)?
         };
-        self.b.ins().store(MemFlags::trusted(), v, base, off);
+        self.b.ins().store(MemFlagsData::trusted(), v, base, off);
         Ok(())
     }
 
@@ -719,7 +725,7 @@ impl Lowerer<'_, '_> {
         let addr = self.b.ins().iadd(base, byte_off);
         let raw = self.b.ins().load(
             ty,
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             addr,
             crate::layout::VARRAY_DATA_OFFSET,
         );
@@ -747,7 +753,7 @@ impl Lowerer<'_, '_> {
             self.coerce(raw, ty)?
         };
         self.b.ins().store(
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             v,
             addr,
             crate::layout::VARRAY_DATA_OFFSET,
@@ -760,7 +766,7 @@ impl Lowerer<'_, '_> {
         let base = self.reg_val(array);
         let raw = self.b.ins().load(
             types::I32,
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             base,
             crate::layout::VARRAY_SIZE_OFFSET,
         );
@@ -780,7 +786,7 @@ impl Lowerer<'_, '_> {
         let base = self.reg_val(bytes);
         let idx = self.index_as_addr(index)?;
         let addr = self.b.ins().iadd(base, idx);
-        let v = self.b.ins().load(want, MemFlags::trusted(), addr, 0);
+        let v = self.b.ins().load(want, MemFlagsData::trusted(), addr, 0);
         self.set_reg(dst, v)
     }
 
@@ -790,7 +796,7 @@ impl Lowerer<'_, '_> {
         let idx = self.index_as_addr(index)?;
         let addr = self.b.ins().iadd(base, idx);
         let v = self.reg_val(src);
-        self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+        self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
         Ok(())
     }
 
@@ -968,7 +974,7 @@ impl Lowerer<'_, '_> {
                 }
                 let addr = self.ctx.global_slot_addr(global.0)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
-                let v = self.b.ins().load(types::I64, MemFlags::trusted(), base, 0);
+                let v = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, 0);
                 self.set_reg(*dst, v)?;
             }
             Opcode::SetGlobal { global, src } => {
@@ -978,7 +984,7 @@ impl Lowerer<'_, '_> {
                 let addr = self.ctx.global_slot_addr(global.0)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
                 let v = self.reg_val(*src);
-                self.b.ins().store(MemFlags::trusted(), v, base, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, base, 0);
             }
 
             Opcode::ToInt { dst, src } => {
@@ -1237,11 +1243,11 @@ impl Lowerer<'_, '_> {
         let signed = matches!(op, ArithOp::SDiv | ArithOp::SMod);
         let is_div = matches!(op, ArithOp::SDiv | ArithOp::UDiv);
 
-        let zero_div = self.b.ins().icmp_imm(IntCC::Equal, vb, 0);
+        let zero_div = self.b.ins().icmp_imm_s(IntCC::Equal, vb, 0);
         let bad = if signed {
             let min = 1i64 << (ty.bits() - 1);
-            let a_is_min = self.b.ins().icmp_imm(IntCC::Equal, va, min.wrapping_neg());
-            let b_is_neg1 = self.b.ins().icmp_imm(IntCC::Equal, vb, -1);
+            let a_is_min = self.b.ins().icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
+            let b_is_neg1 = self.b.ins().icmp_imm_s(IntCC::Equal, vb, -1);
             let overflow = self.b.ins().band(a_is_min, b_is_neg1);
             self.b.ins().bor(zero_div, overflow)
         } else {
@@ -1308,7 +1314,7 @@ impl Lowerer<'_, '_> {
                 || kind == hl::hl_type_kind_HOBJ
             {
                 let res = self.call_dyn_compare(va, vb)?;
-                self.b.ins().icmp_imm(icc, res, 0)
+                self.b.ins().icmp_imm_s(icc, res, 0)
             } else {
                 self.b.ins().icmp(icc, va, vb)
             }
@@ -1332,7 +1338,7 @@ impl Lowerer<'_, '_> {
             self.b.ins().jump(dest, &[]);
         } else {
             let v = self.reg_val(reg);
-            let is_null = self.b.ins().icmp_imm(IntCC::Equal, v, 0);
+            let is_null = self.b.ins().icmp_imm_s(IntCC::Equal, v, 0);
             if on_null {
                 self.b.ins().brif(is_null, t, &[], n, &[]);
             } else {
@@ -1560,13 +1566,13 @@ impl Lowerer<'_, '_> {
         let fn_addr = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), slot_base, 0);
+            .load(types::I64, MemFlagsData::trusted(), slot_base, 0);
         // Null takes the stub path too: the bridge reports a lookup miss
         // rather than jumping to address zero.
         let is_stub =
             self.b
                 .ins()
-                .icmp_imm(IntCC::UnsignedLessThan, fn_addr, STUB_SENTINEL_LIMIT as i64);
+                .icmp_imm_s(IntCC::UnsignedLessThan, fn_addr, STUB_SENTINEL_LIMIT as i64);
 
         let direct_bb = self.b.create_block();
         let stub_bb = self.b.create_block();
@@ -1607,16 +1613,16 @@ impl Lowerer<'_, '_> {
         for (idx, v) in args.iter().enumerate() {
             let ty = self.b.func.dfg.value_type(*v);
             let word = if ty == types::F64 {
-                self.b.ins().bitcast(types::I64, MemFlags::new(), *v)
+                self.b.ins().bitcast(types::I64, MemFlagsData::new(), *v)
             } else if ty == types::F32 {
                 let wide = self.b.ins().fpromote(types::F64, *v);
-                self.b.ins().bitcast(types::I64, MemFlags::new(), wide)
+                self.b.ins().bitcast(types::I64, MemFlagsData::new(), wide)
             } else if ty.bits() < 64 {
                 self.b.ins().uextend(types::I64, *v)
             } else {
                 *v
             };
-            self.b.ins().stack_store(word, slot, (idx * 8) as i32);
+            self.b.ins().stack_store(types::I64, word, slot, (idx * 8) as i32);
         }
         let buf = self.b.ins().stack_addr(types::I64, slot, 0);
         let stub_sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));
@@ -1634,9 +1640,9 @@ impl Lowerer<'_, '_> {
             Some(t) => {
                 let raw = self.b.inst_results(stub_call)[0];
                 let decoded = if t == types::F64 {
-                    self.b.ins().bitcast(types::F64, MemFlags::new(), raw)
+                    self.b.ins().bitcast(types::F64, MemFlagsData::new(), raw)
                 } else if t == types::F32 {
-                    let wide = self.b.ins().bitcast(types::F64, MemFlags::new(), raw);
+                    let wide = self.b.ins().bitcast(types::F64, MemFlagsData::new(), raw);
                     self.b.ins().fdemote(types::F32, wide)
                 } else if t.bits() < 64 {
                     self.b.ins().ireduce(t, raw)

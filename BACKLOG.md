@@ -437,16 +437,21 @@ alone therefore starved every leaf: method_call +23.2%, closure_call +18.2%,
 nbody +15.6%. The caller's back-edge count is what makes a leaf visible, and
 it is the load-bearing signal, not a refinement.
 
-**A refused promotion is refused permanently.** beadie sets `queued[tier-1]`
-before running the compile closure and clears it only on `RevertToTier1` or
-`reset_to_interpreter`; a null return logs "keeping current tier" and leaves
-the flag set. So the gate is a veto, not a postponement -- confirmed in the
-log, where each findex prints `defer` exactly once. Today that is harmless
-because demand is decided inside the interpreted window anyway, but it caps
-what this can become: a function that turns hot later can never be
-reconsidered. The fix belongs in beadie -- clear the queued flag when the
-compile returns null, since a compile that produced no code was not a
-promotion -- and only after that does re-asking mean anything.
+**A refused promotion re-proposes with doubling backoff** (beadie aeb9600).
+The queued flag now means exactly "in flight or installed": a null compile
+lowers it and sets a re-proposal horizon of twice the count it declined at, a
+failed submission lowers it, and a swap that finds the bead reloaded lowers
+it; jobs carry an epoch so one from before a reset touches nothing. A function
+that never earns demand is asked O(log calls) times; one whose demand arrives
+while it still ticks is compiled at the first horizon after. Reproduced with a
+leaf called 40x per iteration under a slow outer loop (BenchLateDemand): the
+latching gate deferred once and capped it at Cranelift for the run; now the
+log reads defer -> demand -> install tier=llvm 5ms later, same checksum. ash
+memoizes findexes whose LLVM compile HARD-fails (`llvm_failed`), so
+re-proposals of those cost a null return, not a recompile behind the global
+llvm mutex. `defer` lines can now repeat per findex, and `attempted` counts
+each re-ask. What the retry cannot do is act after the function stops ticking
+-- all interpreted callers compiled -- which is observability, not policy.
 
 ### Demand reaches one frame, not a chain
 
@@ -462,7 +467,20 @@ first because a live-frame mark lands as soon as either partner compiles, the
 second because Haxe inlines the leaf. Left as is until a program shows the
 loss; the fix if one does is to inherit a flag at frame push rather than walk
 the stack, and the risk is that inheriting it grants demand to everything under
-a hot loop, which is where this started.
+a hot loop, which is where this started. Since beadie re-proposes (aeb9600),
+a refusal during the blind window no longer caps anything -- the leaf promotes
+at the first backoff horizon after its demand becomes visible.
+
+### beadie reads generation as tier, and OSR attach bumps generation
+
+`swap_compiled_with_osr` bumps the bead's generation, and `maybe_promote`
+computes the next tier as generation+1. So an OSR-entry attach at tier 0 makes
+the two-tier ladder read "already at tier 1" and never propose LLVM for that
+bead -- the promotion machinery, re-proposals included, is unreachable behind
+it. Pre-existing (unrelated to the queued flag) and empirically the hot-loop
+benches still reach tier=llvm, because their tier-1 queues before any attach;
+the exposure is a header that turns hot late at tier 0. The fix belongs in
+beadie: promotion state and OSR-table versioning want separate counters.
 
 ### The gate abstains under ASH_AIR=v2, because it cannot see there
 

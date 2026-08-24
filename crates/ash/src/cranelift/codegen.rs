@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
-    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlags,
+    types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
     SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type, Value,
 };
 use cranelift_frontend::FunctionBuilder;
@@ -267,11 +267,14 @@ pub fn lower_air_function(
 
     let n_instrs: usize = air.blocks.iter().map(|b| b.instrs.len()).sum();
 
+    // Capture before `builder()` takes a mutable borrow of `def`.
+    let fcfg = def.frontend_config();
     {
         let mut cg = AirCodegen {
             ctx,
             f: air,
             b: def.builder(),
+            fcfg,
             vals: vec![None; air.values.len()],
             cells: Vec::new(),
             blocks: vec![None; air.blocks.len()],
@@ -364,11 +367,14 @@ pub fn compile_osr_entry(
     // wants to lift out, so the entry polls the same re-tier slots the
     // function's ordinary compile allocated.
     let (osr_exits, osr_buf) = super::air::retier_state_for(findex, &opt.ser.block_pcs);
+    // Capture before `builder()` takes a mutable borrow of `def`.
+    let fcfg = def.frontend_config();
     {
         let mut cg = AirCodegen {
             ctx,
             f: air,
             b: def.builder(),
+            fcfg,
             vals: vec![None; air.values.len()],
             cells: Vec::new(),
             blocks: vec![None; air.blocks.len()],
@@ -441,6 +447,9 @@ struct AirCodegen<'a, 'b> {
     ctx: &'a CraneliftTierContext,
     f: &'a AirFunction,
     b: FunctionBuilder<'b>,
+    /// Captured from the def before `builder()` borrows it; `finalize` needs
+    /// it to size pointer-width operations.
+    fcfg: cranelift_codegen::isa::TargetFrontendConfig,
     /// One CLIF value per AIR value. `None` for values of void type, which
     /// have no machine representation and are never legally used.
     vals: Vec<Option<Value>>,
@@ -560,7 +569,7 @@ impl AirCodegen<'_, '_> {
         let target = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), slot_addr, 0);
+            .load(types::I64, MemFlagsData::trusted(), slot_addr, 0);
         self.b.ins().brif(target, exit, &[], body, &[]);
 
         // ---- cold exit: spill the image, call the entry, return ----------
@@ -600,7 +609,7 @@ impl AirCodegen<'_, '_> {
                 .iconst(types::I64, (self.osr_buf + u64::from(reg) * 8) as i64);
             // Narrow stores leave the slot's high bytes stale; the entry
             // truncates every load to the register's width, so that is fine.
-            self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+            self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
         }
 
         let mut call_sig = Signature::new(self.ctx.call_conv());
@@ -629,7 +638,7 @@ impl AirCodegen<'_, '_> {
     /// Consume the builder — this is what runs cranelift-frontend's own
     /// block and seal invariant checks.
     fn finish(self) {
-        self.b.finalize();
+        self.b.finalize(self.fcfg);
     }
 
     /// Emit an ON-STACK-REPLACEMENT entry: `fn(buf: *mut u64) -> ret`.
@@ -683,7 +692,7 @@ impl AirCodegen<'_, '_> {
             ));
             self.cells.push(slot);
             let v = self.load_osr_slot(buf, cell.reg, ty)?;
-            self.b.ins().stack_store(v, slot, 0);
+            self.b.ins().stack_store(types::I64, v, slot, 0);
         }
 
         // Live-ins, in EMISSION order: any use not preceded by a definition
@@ -805,12 +814,12 @@ impl AirCodegen<'_, '_> {
     fn load_osr_slot(&mut self, buf: Value, reg: u32, ty: Type) -> Result<Value> {
         let off = (reg as i32) * 8;
         if ty == types::F64 {
-            return Ok(self.b.ins().load(types::F64, MemFlags::trusted(), buf, off));
+            return Ok(self.b.ins().load(types::F64, MemFlagsData::trusted(), buf, off));
         }
         if ty == types::F32 {
             bail!("f32 register in an OSR frame");
         }
-        let wide = self.b.ins().load(types::I64, MemFlags::trusted(), buf, off);
+        let wide = self.b.ins().load(types::I64, MemFlagsData::trusted(), buf, off);
         self.coerce(wide, ty)
     }
 
@@ -879,7 +888,7 @@ impl AirCodegen<'_, '_> {
                 self.b.ins().iconst(ty, 0)
             };
             debug_assert_eq!(ci + 1, self.cells.len());
-            self.b.ins().stack_store(init, slot, 0);
+            self.b.ins().stack_store(types::I64, init, slot, 0);
         }
         Ok(())
     }
@@ -1106,7 +1115,7 @@ impl AirCodegen<'_, '_> {
                 }
                 let addr = self.ctx.global_slot_addr(*global)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
-                let v = self.b.ins().load(types::I64, MemFlags::trusted(), base, 0);
+                let v = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, 0);
                 self.def(*dst, v)?;
             }
             Instr::SetGlobal { global, src } => {
@@ -1116,7 +1125,7 @@ impl AirCodegen<'_, '_> {
                 let addr = self.ctx.global_slot_addr(*global)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
                 let v = self.get(*src)?;
-                self.b.ins().store(MemFlags::trusted(), v, base, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, base, 0);
             }
 
             // The object type comes from AIR, which resolved it at lowering
@@ -1129,7 +1138,7 @@ impl AirCodegen<'_, '_> {
             } => {
                 let (off, fty) = self.field_offset(*obj_ty, *field)?;
                 let base = self.get(*obj)?;
-                let raw = self.b.ins().load(fty, MemFlags::trusted(), base, off);
+                let raw = self.b.ins().load(fty, MemFlagsData::trusted(), base, off);
                 self.def(*dst, raw)?;
             }
             Instr::FieldSet {
@@ -1144,7 +1153,7 @@ impl AirCodegen<'_, '_> {
                 // Narrow to the field's own width first, so the store cannot
                 // spill into whatever is laid out next to it.
                 let v = self.coerce(raw, fty)?;
-                self.b.ins().store(MemFlags::trusted(), v, base, off);
+                self.b.ins().store(MemFlagsData::trusted(), v, base, off);
             }
 
             Instr::MemGet {
@@ -1164,7 +1173,7 @@ impl AirCodegen<'_, '_> {
                 let base = self.get(*array)?;
                 let raw = self.b.ins().load(
                     types::I32,
-                    MemFlags::trusted(),
+                    MemFlagsData::trusted(),
                     base,
                     crate::layout::VARRAY_SIZE_OFFSET,
                 );
@@ -1289,13 +1298,13 @@ impl AirCodegen<'_, '_> {
                     // `FieldSet` narrows: the next parameter is laid out
                     // immediately after this one.
                     let v = self.coerce(raw, pty)?;
-                    self.b.ins().store(MemFlags::trusted(), v, e, off);
+                    self.b.ins().store(MemFlagsData::trusted(), v, e, off);
                 }
                 self.def(*dst, e)?;
             }
             Instr::EnumIndex { dst, value } => {
                 let e = self.get(*value)?;
-                let v = self.b.ins().load(types::I32, MemFlags::trusted(), e, 8);
+                let v = self.b.ins().load(types::I32, MemFlagsData::trusted(), e, 8);
                 self.def(*dst, v)?;
             }
             Instr::EnumField {
@@ -1306,7 +1315,7 @@ impl AirCodegen<'_, '_> {
             } => {
                 let (off, pty) = self.enum_param(self.f.value_ty(*value), *construct, *field)?;
                 let e = self.get(*value)?;
-                let v = self.b.ins().load(pty, MemFlags::trusted(), e, off);
+                let v = self.b.ins().load(pty, MemFlagsData::trusted(), e, off);
                 self.def(*dst, v)?;
             }
             // The construct comes off the instruction, where AIR put it once
@@ -1323,7 +1332,7 @@ impl AirCodegen<'_, '_> {
                 let e = self.get(*value)?;
                 let raw = self.get(*src)?;
                 let v = self.coerce(raw, pty)?;
-                self.b.ins().store(MemFlags::trusted(), v, e, off);
+                self.b.ins().store(MemFlagsData::trusted(), v, e, off);
             }
 
             Instr::Cast { kind, dst, src } => self.emit_cast(*kind, *dst, *src)?,
@@ -1342,7 +1351,7 @@ impl AirCodegen<'_, '_> {
             Instr::CellGet { dst, cell } => {
                 let slot = self.cell_slot(*cell)?;
                 let ty = self.clif_ty(self.f.cells[cell.idx()].ty)?;
-                let v = self.b.ins().stack_load(ty, slot, 0);
+                let v = self.b.ins().stack_load(types::I64, ty, slot, 0);
                 self.def(*dst, v)?;
             }
             Instr::CellSet { cell, src } => {
@@ -1350,7 +1359,7 @@ impl AirCodegen<'_, '_> {
                 let ty = self.clif_ty(self.f.cells[cell.idx()].ty)?;
                 let raw = self.get(*src)?;
                 let v = self.coerce(raw, ty)?;
-                self.b.ins().stack_store(v, slot, 0);
+                self.b.ins().stack_store(types::I64, v, slot, 0);
             }
             Instr::CellIncr { cell } => self.emit_cell_step(*cell, 1)?,
             Instr::CellDecr { cell } => self.emit_cell_step(*cell, -1)?,
@@ -1358,13 +1367,13 @@ impl AirCodegen<'_, '_> {
             Instr::Unref { dst, src } => {
                 let ty = self.value_clif_ty(*dst)?;
                 let p = self.get(*src)?;
-                let v = self.b.ins().load(ty, MemFlags::trusted(), p, 0);
+                let v = self.b.ins().load(ty, MemFlagsData::trusted(), p, 0);
                 self.def(*dst, v)?;
             }
             Instr::SetRef { r, value } => {
                 let p = self.get(*r)?;
                 let v = self.get(*value)?;
-                self.b.ins().store(MemFlags::trusted(), v, p, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, p, 0);
             }
 
             // A byte displacement, not an element one: the LLVM tier indexes
@@ -1413,9 +1422,9 @@ impl AirCodegen<'_, '_> {
         if ty.is_float() {
             bail!("Incr/Decr on a float cell");
         }
-        let cur = self.b.ins().stack_load(ty, slot, 0);
+        let cur = self.b.ins().stack_load(types::I64, ty, slot, 0);
         let next = self.b.ins().iadd_imm(cur, delta);
-        self.b.ins().stack_store(next, slot, 0);
+        self.b.ins().stack_store(types::I64, next, slot, 0);
         Ok(())
     }
 
@@ -1478,7 +1487,7 @@ impl AirCodegen<'_, '_> {
             MemAccess::Mem => {
                 let ty = self.value_clif_ty(dst)?;
                 let addr = self.b.ins().iadd(vbase, idx);
-                let v = self.b.ins().load(ty, MemFlags::trusted(), addr, 0);
+                let v = self.b.ins().load(ty, MemFlagsData::trusted(), addr, 0);
                 self.def(dst, v)
             }
             MemAccess::Array => {
@@ -1491,7 +1500,7 @@ impl AirCodegen<'_, '_> {
                 let addr = self.b.ins().iadd(vbase, byte_off);
                 let v = self.b.ins().load(
                     ty,
-                    MemFlags::trusted(),
+                    MemFlagsData::trusted(),
                     addr,
                     crate::layout::VARRAY_DATA_OFFSET,
                 );
@@ -1507,7 +1516,7 @@ impl AirCodegen<'_, '_> {
                     types::I16
                 };
                 let addr = self.b.ins().iadd(vbase, idx);
-                let raw = self.b.ins().load(ty, MemFlags::trusted(), addr, 0);
+                let raw = self.b.ins().load(ty, MemFlagsData::trusted(), addr, 0);
                 let want = self.value_clif_ty(dst)?;
                 let v = if want.bits() > ty.bits() {
                     self.b.ins().uextend(want, raw)
@@ -1532,7 +1541,7 @@ impl AirCodegen<'_, '_> {
         match kind {
             MemAccess::Mem => {
                 let addr = self.b.ins().iadd(vbase, idx);
-                self.b.ins().store(MemFlags::trusted(), raw, addr, 0);
+                self.b.ins().store(MemFlagsData::trusted(), raw, addr, 0);
                 Ok(())
             }
             MemAccess::Array => {
@@ -1545,7 +1554,7 @@ impl AirCodegen<'_, '_> {
                 let addr = self.b.ins().iadd(vbase, byte_off);
                 let v = self.coerce(raw, ty)?;
                 self.b.ins().store(
-                    MemFlags::trusted(),
+                    MemFlagsData::trusted(),
                     v,
                     addr,
                     crate::layout::VARRAY_DATA_OFFSET,
@@ -1560,7 +1569,7 @@ impl AirCodegen<'_, '_> {
                 };
                 let addr = self.b.ins().iadd(vbase, idx);
                 let v = self.coerce(raw, ty)?;
-                self.b.ins().store(MemFlags::trusted(), v, addr, 0);
+                self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
                 Ok(())
             }
         }
@@ -1719,7 +1728,7 @@ impl AirCodegen<'_, '_> {
                     8,
                     3,
                 ));
-                self.b.ins().stack_store(v, slot, 0);
+                self.b.ins().stack_store(types::I64, v, slot, 0);
                 let data = self.b.ins().stack_addr(types::I64, slot, 0);
                 let tyv = self.b.ins().iconst(types::I64, tp as i64);
                 let callee = self
@@ -1792,7 +1801,7 @@ impl AirCodegen<'_, '_> {
         self.b.ins().brif(p, load_bb, &[], null_bb, &[]);
 
         self.b.switch_to_block(load_bb);
-        let loaded = self.b.ins().load(ty, MemFlags::trusted(), p, 0);
+        let loaded = self.b.ins().load(ty, MemFlagsData::trusted(), p, 0);
         self.b.ins().jump(join_bb, &[BlockArg::Value(loaded)]);
 
         self.b.switch_to_block(null_bb);
@@ -2016,11 +2025,11 @@ impl AirCodegen<'_, '_> {
         let signed = matches!(op, BinOp::SDiv | BinOp::SMod);
         let is_div = matches!(op, BinOp::SDiv | BinOp::UDiv);
 
-        let zero_div = self.b.ins().icmp_imm(IntCC::Equal, vb, 0);
+        let zero_div = self.b.ins().icmp_imm_s(IntCC::Equal, vb, 0);
         let bad = if signed {
             let min = 1i64 << (ty.bits() - 1);
-            let a_is_min = self.b.ins().icmp_imm(IntCC::Equal, va, min.wrapping_neg());
-            let b_is_neg1 = self.b.ins().icmp_imm(IntCC::Equal, vb, -1);
+            let a_is_min = self.b.ins().icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
+            let b_is_neg1 = self.b.ins().icmp_imm_s(IntCC::Equal, vb, -1);
             let overflow = self.b.ins().band(a_is_min, b_is_neg1);
             self.b.ins().bor(zero_div, overflow)
         } else {
@@ -2157,7 +2166,7 @@ impl AirCodegen<'_, '_> {
     ) -> Result<()> {
         let slot_addr = self.ctx.function_slot_addr(fun)?;
         let slot = self.b.ins().iconst(types::I64, slot_addr as i64);
-        let fn_addr = self.b.ins().load(types::I64, MemFlags::trusted(), slot, 0);
+        let fn_addr = self.b.ins().load(types::I64, MemFlagsData::trusted(), slot, 0);
 
         let type_ptr = self.ctx.func_type_ptr(fun)?;
         let ty = self.b.ins().iconst(types::I64, type_ptr as i64);
@@ -2198,15 +2207,15 @@ impl AirCodegen<'_, '_> {
         let fn_addr = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), closure, 8);
+            .load(types::I64, MemFlagsData::trusted(), closure, 8);
         let has_value = self
             .b
             .ins()
-            .load(types::I32, MemFlags::trusted(), closure, 16);
+            .load(types::I32, MemFlagsData::trusted(), closure, 16);
         let bound_value = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), closure, 24);
+            .load(types::I64, MemFlagsData::trusted(), closure, 24);
 
         // Argument classes come from the closure's own signature in AIR: the
         // destination's type gives the return, the argument values give the
@@ -2393,7 +2402,7 @@ impl AirCodegen<'_, '_> {
         let fn_addr = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), slot_base, 0);
+            .load(types::I64, MemFlagsData::trusted(), slot_base, 0);
         self.stub_guarded_indirect(fn_addr, args, param_classes, ret_class)
     }
 
@@ -2410,7 +2419,7 @@ impl AirCodegen<'_, '_> {
         let is_stub =
             self.b
                 .ins()
-                .icmp_imm(IntCC::UnsignedLessThan, fn_addr, STUB_SENTINEL_LIMIT as i64);
+                .icmp_imm_s(IntCC::UnsignedLessThan, fn_addr, STUB_SENTINEL_LIMIT as i64);
 
         let direct_bb = self.b.create_block();
         let stub_bb = self.b.create_block();
@@ -2458,8 +2467,8 @@ impl AirCodegen<'_, '_> {
             let off = self.b.ins().imul_imm(findex, 8);
             let base = self.b.ins().iconst(types::I64, ptrs_base as i64);
             let slot = self.b.ins().iadd(base, off);
-            let real = self.b.ins().load(types::I64, MemFlags::trusted(), slot, 0);
-            let healed = self.b.ins().icmp_imm(
+            let real = self.b.ins().load(types::I64, MemFlagsData::trusted(), slot, 0);
+            let healed = self.b.ins().icmp_imm_s(
                 IntCC::UnsignedGreaterThanOrEqual,
                 real,
                 STUB_SENTINEL_LIMIT as i64,
@@ -2496,16 +2505,16 @@ impl AirCodegen<'_, '_> {
         for (idx, v) in args.iter().enumerate() {
             let ty = self.b.func.dfg.value_type(*v);
             let word = if ty == types::F64 {
-                self.b.ins().bitcast(types::I64, MemFlags::new(), *v)
+                self.b.ins().bitcast(types::I64, MemFlagsData::new(), *v)
             } else if ty == types::F32 {
                 let wide = self.b.ins().fpromote(types::F64, *v);
-                self.b.ins().bitcast(types::I64, MemFlags::new(), wide)
+                self.b.ins().bitcast(types::I64, MemFlagsData::new(), wide)
             } else if ty.bits() < 64 {
                 self.b.ins().uextend(types::I64, *v)
             } else {
                 *v
             };
-            self.b.ins().stack_store(word, slot, (idx * 8) as i32);
+            self.b.ins().stack_store(types::I64, word, slot, (idx * 8) as i32);
         }
         let buf = self.b.ins().stack_addr(types::I64, slot, 0);
         let stub_sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));
@@ -2523,9 +2532,9 @@ impl AirCodegen<'_, '_> {
             Some(t) => {
                 let raw = self.b.inst_results(stub_call)[0];
                 let decoded = if t == types::F64 {
-                    self.b.ins().bitcast(types::F64, MemFlags::new(), raw)
+                    self.b.ins().bitcast(types::F64, MemFlagsData::new(), raw)
                 } else if t == types::F32 {
-                    let wide = self.b.ins().bitcast(types::F64, MemFlags::new(), raw);
+                    let wide = self.b.ins().bitcast(types::F64, MemFlagsData::new(), raw);
                     self.b.ins().fdemote(types::F32, wide)
                 } else if t.bits() < 64 {
                     self.b.ins().ireduce(t, raw)
@@ -2612,14 +2621,14 @@ impl AirCodegen<'_, '_> {
         }
 
         let obj = self.get(recv)?;
-        let type_ptr = self.b.ins().load(types::I64, MemFlags::trusted(), obj, 0);
+        let type_ptr = self.b.ins().load(types::I64, MemFlagsData::trusted(), obj, 0);
         let proto = self
             .b
             .ins()
-            .load(types::I64, MemFlags::trusted(), type_ptr, 16);
+            .load(types::I64, MemFlagsData::trusted(), type_ptr, 16);
         let method = self.b.ins().load(
             types::I64,
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             proto,
             (field * std::mem::size_of::<usize>()) as i32,
         );
@@ -2840,7 +2849,7 @@ impl AirCodegen<'_, '_> {
             return Ok(match kind {
                 CondKind::True => Cond::Value(va),
                 CondKind::False => {
-                    let z = self.b.ins().icmp_imm(IntCC::Equal, va, 0);
+                    let z = self.b.ins().icmp_imm_s(IntCC::Equal, va, 0);
                     Cond::Value(z)
                 }
                 // Non-pointer values are never null, so the branch is decided
@@ -2848,11 +2857,11 @@ impl AirCodegen<'_, '_> {
                 CondKind::Null if class != AbiClass::Ptr => Cond::Always(false),
                 CondKind::NotNull if class != AbiClass::Ptr => Cond::Always(true),
                 CondKind::Null => {
-                    let z = self.b.ins().icmp_imm(IntCC::Equal, va, 0);
+                    let z = self.b.ins().icmp_imm_s(IntCC::Equal, va, 0);
                     Cond::Value(z)
                 }
                 CondKind::NotNull => {
-                    let z = self.b.ins().icmp_imm(IntCC::NotEqual, va, 0);
+                    let z = self.b.ins().icmp_imm_s(IntCC::NotEqual, va, 0);
                     Cond::Value(z)
                 }
                 _ => unreachable!("is_unary covers exactly these"),
@@ -2921,7 +2930,7 @@ impl AirCodegen<'_, '_> {
                 let callee = self.b.ins().iconst(types::I64, addr as i64);
                 let call = self.b.ins().call_indirect(sig, callee, &[va, vb]);
                 let res = self.b.inst_results(call)[0];
-                self.b.ins().icmp_imm(icc, res, 0)
+                self.b.ins().icmp_imm_s(icc, res, 0)
             } else {
                 self.b.ins().icmp(icc, va, vb)
             }

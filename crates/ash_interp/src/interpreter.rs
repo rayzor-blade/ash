@@ -539,6 +539,12 @@ struct TieredSharedCtx {
     /// Findexes whose installed code already came from LLVM — a tier-1
     /// upgrade for those would recompile identical code.
     llvm_done: Mutex<HashSet<usize>>,
+    /// Findexes whose LLVM compile already failed. beadie re-proposes a
+    /// promotion that returned no code, which is what lets a REFUSAL turn
+    /// into code later; a failed compile would just fail again at full
+    /// price, each attempt holding the global `llvm` mutex, so the answer
+    /// is memoized and the re-proposals cost a null return.
+    llvm_failed: Mutex<HashSet<usize>>,
     /// Loop headers the interpreter has probed hot, `findex -> header pcs`,
     /// written by `note_hot_loop` on the main thread and read by the broker
     /// when an LLVM promote finishes. The pcs index the SAME opcode array the
@@ -724,6 +730,17 @@ fn tiered_compile_tier(
         }
         (TierMode::Auto, 1) => {
             if ctx
+                .llvm_failed
+                .lock()
+                .expect("llvm_failed mutex poisoned")
+                .contains(&findex)
+            {
+                // Already failed once; the same compile at the same findex
+                // fails the same way, so beadie's re-proposals get their
+                // answer without the compile.
+                return std::ptr::null_mut();
+            }
+            if ctx
                 .llvm_done
                 .lock()
                 .expect("llvm_done mutex poisoned")
@@ -754,18 +771,15 @@ fn tiered_compile_tier(
             if crate::ssa::enabled() {
                 return compile_with_llvm(ctx, 1, findex);
             }
-            // Refusing leaves the bead on Cranelift, which is correct, but
-            // it is a veto rather than a postponement: beadie raises the
-            // tier-1 queued flag BEFORE running this closure and lowers it
-            // only on a deopt, so a null return is never proposed again. That
-            // holds together only because every signal above is read from the
-            // interpreter, whose view of a function narrows sharply once its
-            // caller is compiled: direct calls from compiled code do not come
-            // back through here, though closure calls still do, since
-            // `vclosure.fun` keeps its interpreter stub sentinel. Demand is
-            // therefore settled early or not at all. Promoting on evidence
-            // that arrives later needs beadie to clear the flag when a compile
-            // returns no code.
+            // Refusing leaves the bead on Cranelift and is a postponement,
+            // not a veto: beadie lowers the tier-1 queued flag when a compile
+            // returns no code and re-proposes at doubled invocation counts,
+            // so a refusal costs O(log calls) re-asks and a function whose
+            // demand arrives later is compiled at the first horizon after it
+            // does. The window is still bounded by observability -- every
+            // signal above is read from the interpreter, and a function whose
+            // callers have all compiled stops ticking, at which point no
+            // re-proposal fires and none could be answered.
             if !llvm_demand(ctx, findex) {
                 if ctx.tier_log {
                     eprintln!("[tier] defer findex={findex} tier=llvm reason=no-demand");
@@ -1344,6 +1358,10 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
             if ctx.log_promotions || reason.contains("did not verify") {
                 eprintln!("[tiered] {on_fail} findex={findex} reason={reason}");
             }
+            ctx.llvm_failed
+                .lock()
+                .expect("llvm_failed mutex poisoned")
+                .insert(findex);
             std::ptr::null_mut()
         }
     }
@@ -1986,6 +2004,7 @@ impl HLInterpreter {
             },
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
+            llvm_failed: Mutex::new(HashSet::new()),
             hot_loop_pcs: Mutex::new(HashMap::new()),
             live_frame: Mutex::new(std::collections::HashSet::new()),
             called_from_loop: Mutex::new(std::collections::HashSet::new()),

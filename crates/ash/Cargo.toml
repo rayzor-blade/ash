@@ -30,9 +30,12 @@ libc = "0.2.158"
 rustc-demangle = "0.1"
 clap = { workspace = true }
 beadie = { workspace = true }
-cranelift-codegen = "0.130"
-cranelift-frontend = "0.130"
-cranelift-module = "0.130"
+# Same wasmtime git rev as beadie-cranelift pins, so exactly ONE cranelift
+# resolves into the graph. A crates.io copy alongside the git one compiles as
+# a second, incompatible crate and none of beadie's cranelift types match.
+cranelift-codegen  = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
+cranelift-frontend = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
+cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev = "bc2f967927f9f0e839095a752bf554c4a09fdd13" }
 
 # NOTE: profiles live in the workspace root Cargo.toml. Cargo ignores a
 # [profile.*] table in a non-root package and only warns about it, which is how

@@ -516,6 +516,34 @@ to 412ms, because each promotion drags an AIR prepare onto the mutator. So the
 gate returns early when `ssa::enabled()`, leaving v2 exactly as it was. Give v2
 back-edges before giving it the gate.
 
+### closure_call's 19.7% SD is the same coin, and the private-module cure is measured worse
+
+CI: median 316.9 / min 196.4. Reproduced under 9-way local load: llvm=2 runs
+sit at ~175ms, the occasional llvm=1 run at ~257-305ms -- the modes are which
+of the TWO tier-1 compiles landed before 100M iterations ran out. Timeline of
+a clean run: the leaf (findex 22, 10 ops) is requested at 0.5ms and compiles
+in ~7ms in its own module; the loop owner (23) crosses its threshold at 7.6ms
+and takes ~23-40ms in the SHARED module -- middle-end over the 7-function
+callee cluster (~17ms) plus MCJIT object emission (~10ms), serialized behind
+the leaf on the one promoter and the global llvm mutex. Ladder complete at
+~48ms of a 165ms run locally; on 4 contended vCPUs the compile balloons
+superlinearly and usually misses, which is the 317ms median.
+
+**Falsified fix, do not retry:** compiling indirect-call loops in a private
+module (CallMethod/CallClosure no longer forcing the shared path) cuts the
+compile but costs +29.2% closure_call / +32.1% method_call STEADY STATE --
+the shared module is where the middle-end sees the callee bodies, and that
+is worth more than the latency. The doc on `promotion_wants_full_module`
+said 10-18%; it is worse than documented.
+
+Levers that remain, none taken yet: a second LLVM context so the own-module
+leaf compile and the shared-module compile overlap instead of queueing; one
+cluster promote that installs the leaf from the shared module it was already
+lowered into (today the leaf is compiled twice); a cheaper pass pipeline than
+default<O2> for promote-sized modules. Until one lands, closure_call and
+method_call medians on CI measure promotion latency, not steady state --
+their min is the number comparable across sweeps.
+
 ### method_call reports two different numbers, and which one is a coin flip
 
 Noticed while A/B-ing the gate, present at HEAD and unchanged by it. Over 20

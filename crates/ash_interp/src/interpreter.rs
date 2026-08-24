@@ -1409,6 +1409,10 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
+    /// Findexes whose tier-1 compile this interpreter has force-proposed at
+    /// an OSR transfer, so the proposal is made once per findex rather than
+    /// on every future frame that enters an entry.
+    osr_forced: std::collections::HashSet<usize>,
     /// Demand already published for a findex, bit 0 live-frame and bit 1
     /// reached-from-a-looping-frame.
     ///
@@ -1711,6 +1715,7 @@ impl HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
             max_stack_depth: 1000,
+            osr_forced: std::collections::HashSet::new(),
             demand_local: Vec::new(),
             targets,
             reg_pool: Vec::new(),
@@ -3781,6 +3786,39 @@ impl HLInterpreter {
                 "[osr] entering findex={findex} pc={header_pc} regs={} at {addr:#x}",
                 buf.len()
             );
+        }
+
+        // A frame stepping through the fast door is the loudest demand signal
+        // the ladder gets, and the last one this thread will ever emit for
+        // this findex: the transfer ends the interpreted ticks that counter-
+        // based proposal runs on, so whether tier 1 was already proposed is a
+        // race between the count reaching threshold and the cranelift install
+        // -- won locally, lost on CI, which is the whole closure_call mode
+        // split (llvm=2 at ~175ms against llvm=1 at ~317ms). Propose it here,
+        // explicitly. `force_promote`'s queued CAS makes this a no-op when
+        // the counter already got there, and `llvm_done` skips it once the
+        // top tier is installed.
+        if !self.osr_forced.contains(&findex) {
+            self.osr_forced.insert(findex);
+            if let Some(t) = self.tiered_runtime.as_ref() {
+                let already_llvm = t
+                    .shared_ctx
+                    .llvm_done
+                    .lock()
+                    .expect("llvm_done mutex poisoned")
+                    .contains(&findex);
+                if !already_llvm {
+                    if let Some(bound) = t.beads.get(findex).and_then(|b| b.as_ref()) {
+                        let ctx = Arc::clone(&t.shared_ctx);
+                        let submitted = t.adapter.force_promote(bound, 1, move |b| {
+                            tiered_compile_tier(&ctx, 1, findex, b)
+                        });
+                        if submitted && t.shared_ctx.tier_log {
+                            eprintln!("[tier] osr-transfer proposes findex={findex} tier=llvm");
+                        }
+                    }
+                }
+            }
         }
 
         // Armed exactly as the ordinary call boundary arms one: the compiled

@@ -536,13 +536,31 @@ the shared module is where the middle-end sees the callee bodies, and that
 is worth more than the latency. The doc on `promotion_wants_full_module`
 said 10-18%; it is worse than documented.
 
-Levers that remain, none taken yet: a second LLVM context so the own-module
-leaf compile and the shared-module compile overlap instead of queueing; one
-cluster promote that installs the leaf from the shared module it was already
-lowered into (today the leaf is compiled twice); a cheaper pass pipeline than
-default<O2> for promote-sized modules. Until one lands, closure_call and
-method_call medians on CI measure promotion latency, not steady state --
-their min is the number comparable across sweeps.
+**Root cause found and fixed.** The CI bench JSON showed the truth the local
+latency theory missed: the leaf's LLVM compiled in 8ms on CI -- main's tier-1
+was never PROPOSED at all (attempted=3: two tier-0, one tier-1). The ladder's
+fast door is the mechanism: cranelift installs at ~1ms, the OSR entry attaches,
+the frame transfers, and from that moment the interpreted ticks that counter-
+based proposal runs on stop. Whether tier-1 was proposed is a race between the
+count reaching threshold (200 ticks = 12.8k iterations) and the transfer --
+won on a fast interpreter, lost on CI's, hence the machine-split modes. The
+attach's generation bump seals it. Fix: try_osr_transfer force-promotes tier 1
+at the moment the frame steps through the fast door -- the transfer IS the
+demand, and it is the last signal the interpreter will ever emit for that
+findex. Verified by disabling the counter path outright (ASH_TIER1=100000):
+before, the transfer strands the run at tier 0 exactly like CI; after, the
+log reads osr-transfer proposes -> install tier=llvm. Under 9-way load the
+median drops 235 -> 193ms; steady state unchanged across the suite.
+
+Residual tail, separate cause: ~1 run in 30 both compiles slow together
+(f22 6->84ms, f23 37->70ms in the same run) -- the broker thread itself
+starved, likely E-core/QoS scheduling of beadie's promoter thread. A QoS/
+priority hint on the promoter spawn is the lever if it matters on CI.
+
+Levers not taken (latency, not correctness): a second LLVM context to overlap
+compiles; one cluster promote that installs the leaf from the shared module
+it was already lowered into (the leaf is compiled twice today); a cheaper
+pipeline than default<O2> for promote-sized modules.
 
 ### method_call reports two different numbers, and which one is a coin flip
 

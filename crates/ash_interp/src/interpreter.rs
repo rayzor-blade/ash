@@ -141,13 +141,16 @@ const POOL_CAP: usize = 64;
 
 /// Back-edges one frame takes before its loop counts as hot.
 ///
-/// Read in two places that must agree: the back-edge probe, which fires on
-/// every multiple of it, and the demand test at a call, which asks whether the
-/// calling frame is already past the first one.
+/// Read in two places that must agree: the back-edge probe, which tests it as
+/// the mask `& (HOT_LOOP_BACKEDGES - 1)` and so fires on every multiple, and
+/// the demand test at a call, which asks whether the calling frame is already
+/// past the first one. The mask makes a power of two a precondition of the two
+/// readings agreeing, not just a nice round number.
 const HOT_LOOP_BACKEDGES: u32 = 64;
+const _: () = assert!(HOT_LOOP_BACKEDGES.is_power_of_two());
 
 /// Demand bits in `HLInterpreter::demand_local`.
-const DEMAND_SELF_RECURSIVE: u8 = 1;
+const DEMAND_LIVE_FRAME: u8 = 1;
 const DEMAND_UNDER_LOOP: u8 = 2;
 
 /// Index into `bytecode.functions` for a findex, if it names one.
@@ -544,20 +547,29 @@ struct TieredSharedCtx {
     /// against a separately optimized copy would name a different
     /// instruction.
     hot_loop_pcs: Mutex<HashMap<usize, Vec<usize>>>,
-    /// Functions observed calling themselves — the recursion counterpart of a
-    /// hot loop.
+    /// Functions with a live frame of their own directly beneath a call to
+    /// them — the recursion counterpart of a hot loop.
     ///
-    /// A loop and a self-call are the same evidence wearing different
-    /// clothes: a frame of this function is running and has more of itself to
-    /// do, so code compiled for it has somewhere to land. Recursion is the
-    /// shape with no loop header, so `hot_loop_pcs` never sees it, and fib is
-    /// nothing else -- 340ms on the middle tier against 34ms on the top one.
-    self_recursive: Mutex<std::collections::HashSet<usize>>,
+    /// A loop and a re-entry are the same evidence wearing different clothes:
+    /// a frame of this function is running and has more of itself to do, so
+    /// code compiled for it has somewhere to land. Recursion is the shape with
+    /// no loop header, so `hot_loop_pcs` never sees it, and fib is nothing
+    /// else -- 340ms on the middle tier against 34ms on the top one.
+    ///
+    /// "Directly beneath" is the interpreter's view of the stack, which is
+    /// wider than a self-call: compiled frames are not on it, so mutual
+    /// recursion registers here too once either function reaches Cranelift and
+    /// stops interposing an interpreted frame. That is the same fact, not a
+    /// false positive -- the frame really is live and really will be returned
+    /// into. Before either side compiles, mutual recursion has no signal at
+    /// all; measured on a mutual fib(38) that costs nothing, because the pair
+    /// promotes as soon as the first of them compiles.
+    live_frame: Mutex<std::collections::HashSet<usize>>,
     /// Functions observed being called from a frame that is deep in a loop of
     /// its own -- the third shape of the same evidence.
     ///
-    /// A leaf carries no loop and no self-call, so neither `hot_loop_pcs` nor
-    /// `self_recursive` can ever see it, and once its caller runs as compiled
+    /// A leaf carries no loop and no re-entry, so neither `hot_loop_pcs` nor
+    /// `live_frame` can ever see it, and once its caller runs as compiled
     /// code the interpreter stops seeing it at all. What is visible while the
     /// caller is still interpreted is the caller's own back-edge count: a
     /// frame 64 iterations into its loop has work left, and every callee it
@@ -638,8 +650,8 @@ struct TieredRuntime {
 ///
 /// * a hot loop the interpreter probed, which is also what OSR needs to carry
 ///   a running frame across into the new code;
-/// * a self-call, which is the same fact for a function with no loop header.
-///   fib is nothing but this shape;
+/// * a live frame of the callee directly beneath the call, which is the same
+///   fact for a function with no loop header. fib is nothing but this shape;
 /// * a call from a frame already deep in a loop of its own, which is the only
 ///   shape a leaf can have. `step` in bench_method_call has no loop and no
 ///   recursion, and is called 100M times from one frame.
@@ -663,9 +675,9 @@ fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
         return true;
     }
     if ctx
-        .self_recursive
+        .live_frame
         .lock()
-        .expect("self_recursive mutex poisoned")
+        .expect("live_frame mutex poisoned")
         .contains(&findex)
     {
         return true;
@@ -726,22 +738,34 @@ fn tiered_compile_tier(
             // An invocation count says how much this function HAS run, which
             // is not the question -- an LLVM compile only repays out of what
             // is LEFT. Demand is a frame that is still going: this function's
-            // own loop, its own recursion, or a caller's loop it is called
-            // from. Measured on this corpus, eight of ten LLVM
-            // compiles went to functions with neither, deltablue's four
-            // promoted functions and its seven with hot loops being disjoint
-            // sets, and its broker thread was 35.7% of the CPU for a program
+            // own loop, its own re-entry, or a caller's loop it is called
+            // from. Across deltablue, binary_trees and nbody, eight of ten
+            // LLVM compiles went to a function with no hot loop at all --
+            // deltablue's four promoted and its seven looping being disjoint
+            // sets -- and its broker thread was 35.7% of the CPU for a program
             // that ends in 73ms.
             //
+            // The gate abstains where its evidence does not exist. The SSA
+            // dispatcher has no pcs, offers no OSR entry, and sees a coarser
+            // view of a frame's progress than the opcode loop; refusing on
+            // that view starved deltablue of the two promotions it makes at
+            // 8ms and 15ms and took the run from 94ms to 400ms. A signal that
+            // cannot be read must not be treated as a signal that is absent.
+            if crate::ssa::enabled() {
+                return compile_with_llvm(ctx, 1, findex);
+            }
             // Refusing leaves the bead on Cranelift, which is correct, but
             // it is a veto rather than a postponement: beadie raises the
             // tier-1 queued flag BEFORE running this closure and lowers it
             // only on a deopt, so a null return is never proposed again. That
             // holds together only because every signal above is read from the
-            // interpreter, which stops seeing a function once its caller is
-            // compiled -- demand is therefore decided inside that window or
-            // not at all. Promoting on evidence that arrives later needs
-            // beadie to clear the flag when a compile returns no code.
+            // interpreter, whose view of a function narrows sharply once its
+            // caller is compiled: direct calls from compiled code do not come
+            // back through here, though closure calls still do, since
+            // `vclosure.fun` keeps its interpreter stub sentinel. Demand is
+            // therefore settled early or not at all. Promoting on evidence
+            // that arrives later needs beadie to clear the flag when a compile
+            // returns no code.
             if !llvm_demand(ctx, findex) {
                 if ctx.tier_log {
                     eprintln!("[tier] defer findex={findex} tier=llvm reason=no-demand");
@@ -1367,7 +1391,7 @@ pub struct HLInterpreter {
     stack: Vec<InterpreterFrame>,
     /// Maximum call stack depth
     max_stack_depth: usize,
-    /// Demand already published for a findex, bit 0 self-recursion and bit 1
+    /// Demand already published for a findex, bit 0 live-frame and bit 1
     /// reached-from-a-looping-frame.
     ///
     /// Indexed by findex rather than hashed: both facts are re-checked on
@@ -1963,7 +1987,7 @@ impl HLInterpreter {
             max_findex: std::sync::atomic::AtomicUsize::new(published_max_findex),
             llvm_done: Mutex::new(HashSet::new()),
             hot_loop_pcs: Mutex::new(HashMap::new()),
-            self_recursive: Mutex::new(std::collections::HashSet::new()),
+            live_frame: Mutex::new(std::collections::HashSet::new()),
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
@@ -3850,13 +3874,13 @@ impl HLInterpreter {
                 // have work left? -- and both are O(1) reads of the caller,
                 // taking a lock only on the first sighting of a findex.
                 let caller = self.stack.last();
-                let recursive = caller.map(|fr| fr.function_index) == Some(func_idx);
+                let live_frame = caller.map(|fr| fr.function_index) == Some(func_idx);
                 // A caller past its first HOT_LOOP_BACKEDGES iterations is one
                 // the back-edge probe has already called hot; this callee is
                 // part of that loop's body.
                 let under_loop = caller.is_some_and(|fr| fr.backedges >= HOT_LOOP_BACKEDGES);
-                if recursive && !self.demand_seen(findex, DEMAND_SELF_RECURSIVE) {
-                    self.note_demand(findex, DEMAND_SELF_RECURSIVE);
+                if live_frame && !self.demand_seen(findex, DEMAND_LIVE_FRAME) {
+                    self.note_demand(findex, DEMAND_LIVE_FRAME);
                 }
                 if under_loop && !self.demand_seen(findex, DEMAND_UNDER_LOOP) {
                     self.note_demand(findex, DEMAND_UNDER_LOOP);
@@ -3923,21 +3947,30 @@ impl HLInterpreter {
         self.demand_local.get(findex).is_some_and(|f| f & bit != 0)
     }
 
-    /// Publish one demand bit, locally and for the broker.
-    fn note_demand(&mut self, findex: usize, bit: u8) {
+    /// Publish demand bits, locally and for the broker.
+    ///
+    /// Each bit names its own set, so passing more than one publishes to all
+    /// of them rather than silently picking a branch.
+    fn note_demand(&mut self, findex: usize, bits: u8) {
         if findex >= self.demand_local.len() {
             self.demand_local.resize(findex + 1, 0);
         }
-        self.demand_local[findex] |= bit;
+        self.demand_local[findex] |= bits;
         let Some(t) = self.tiered_runtime.as_ref() else {
             return;
         };
-        let set = if bit == DEMAND_SELF_RECURSIVE {
-            &t.shared_ctx.self_recursive
-        } else {
-            &t.shared_ctx.called_from_loop
-        };
-        set.lock().expect("demand mutex poisoned").insert(findex);
+        for (bit, shape, set) in [
+            (DEMAND_LIVE_FRAME, "live-frame", &t.shared_ctx.live_frame),
+            (DEMAND_UNDER_LOOP, "caller-loop", &t.shared_ctx.called_from_loop),
+        ] {
+            if bits & bit == 0 {
+                continue;
+            }
+            if t.shared_ctx.tier_log {
+                eprintln!("[tier] demand findex={findex} shape={shape}");
+            }
+            set.lock().expect("demand mutex poisoned").insert(findex);
+        }
     }
 
     /// beadie `TieredAdapter::on_invoke` semantics for one bytecode-function

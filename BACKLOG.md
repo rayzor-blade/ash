@@ -420,11 +420,13 @@ Implemented and measured. Demand is read off the frame a call is about to
 return into: its own hot loop, a self-call, or a caller already 64 back-edges
 into a loop of its own. A tier-1 request without demand is refused.
 
-Corpus result over all 61 cases: 20 LLVM compiles become 16, and every one
-removed is deltablue's. Wall time is unchanged everywhere within noise (worst
-+1.0%, and deltablue is no slower for losing all four of its compiles --
-which is the claim in this section, now measured from the other side).
-Under 7-way CPU contention deltablue is 2.9% faster.
+Corpus result over all 61 cases: the baseline compiles 18-22 functions
+depending on the sweep, the gate compiles 16 every time. Over three sweeps of
+the whole corpus the ONLY promotions it removes anywhere are deltablue's
+findexes 74 and 308; nothing else in the corpus loses or gains one. Wall time
+is unchanged everywhere within noise (worst +1.0%, and deltablue is no slower
+for losing them -- which is the claim in this section, measured from the other
+side). Under 7-way CPU contention deltablue is 2.9% faster.
 
 **Demand is only observable while a function is interpreted.** `note_hot_loop`
 fires from the interpreter's dispatch loop and `on_invoke` from its call path,
@@ -446,6 +448,33 @@ reconsidered. The fix belongs in beadie -- clear the queued flag when the
 compile returns null, since a compile that produced no code was not a
 promotion -- and only after that does re-asking mean anything.
 
+### Demand reaches one frame, not a chain
+
+`under_loop` reads `self.stack.last()` only, and `InterpreterFrame::backedges`
+is per-invocation, so a leaf below a non-looping wrapper inherits nothing from
+the loop two frames up and can be refused before it ever earns a signal. The
+window is narrower than it sounds -- compiled frames are not on the interpreter
+stack, so once the wrapper reaches Cranelift the leaf is once again called from
+whatever interpreted frame is beneath, and that frame IS the looping one. Two
+attempts to build a program that loses measurably this way (mutual fib(38), a
+leaf behind an 8-iteration inner loop) came out level with the baseline: the
+first because a live-frame mark lands as soon as either partner compiles, the
+second because Haxe inlines the leaf. Left as is until a program shows the
+loss; the fix if one does is to inherit a flag at frame push rather than walk
+the stack, and the risk is that inheriting it grants demand to everything under
+a hot loop, which is where this started.
+
+### The gate abstains under ASH_AIR=v2, because it cannot see there
+
+`ssa_loop` counts no back-edges and probes no hot loops, so under the opt-in
+v2 interpreter none of the three signals exists. Gating on absent evidence cost
+deltablue 94ms -> 400ms. Counting back-edges in the SSA dispatcher was tried
+and is not the answer either: the fix that mattered was ticking the ladder from
+loop progress, which took deltablue's tier-1 compiles from 3 to 11 and the run
+to 412ms, because each promotion drags an AIR prepare onto the mutator. So the
+gate returns early when `ssa::enabled()`, leaving v2 exactly as it was. Give v2
+back-edges before giving it the gate.
+
 ### method_call reports two different numbers, and which one is a coin flip
 
 Noticed while A/B-ing the gate, present at HEAD and unchanged by it. Over 20
@@ -456,10 +485,13 @@ its compile lands before a 100M-iteration loop ends is a race:
     llvm={23,26}   14/20 runs   min 151ms  median 157ms
     llvm={23}       6/20 runs   min 196ms  median 204ms
 
-The two modes are 30% apart. A min-of-N across them measures the mixture, not
-the change, which is what made the same binary read +0.7% and +7.9% on two
-sweeps. Compare within a mode, or report the mode split. This is also the
-first thing to check when method_call moves in CI.
+The two modes are 30% apart, so report the mode split rather than a single
+number. Note what this does NOT explain: with a 14/20 split a min-of-N lands
+in the fast mode almost surely, so the same binary reading +0.7% on one sweep
+and +7.9% on the next is ordinary between-sweep drift of the fast mode's own
+minimum (base alone came out 136.4, 141.0, 143.7 and 151ms), not a mode
+mixture. Either way a sub-10% delta on method_call means nothing without
+several sweeps, and this is the first thing to check when it moves in CI.
 
 ## Dispatch: the JVM leads closure_call and method_call, and inlining is why
 

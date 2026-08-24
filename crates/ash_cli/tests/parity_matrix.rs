@@ -249,7 +249,14 @@ fn run_parity_matrix(mode: AshMode) {
             Some(Duration::from_secs(case.timeout_secs))
         };
 
-        let ash_run = run_ash(&ash_cli, &hl_path, &case.program_args, mode, timeout);
+        let ash_run = run_ash(
+            &ash_cli,
+            &hl_path,
+            &case.program_args,
+            mode,
+            case.jit_tier.as_deref(),
+            timeout,
+        );
         if ash_run.timed_out {
             let actual_timeout = if case.slow {
                 slow_timeout_secs
@@ -270,7 +277,14 @@ fn run_parity_matrix(mode: AshMode) {
         // itself and so only checks that it succeeds; the guarantee it carries
         // is that every *other* mode matches the interpreter.
         let mut oracle = if case.oracle_is_interp {
-            let r = run_ash(&ash_cli, &hl_path, &case.program_args, AshMode::Interp, timeout);
+            let r = run_ash(
+                &ash_cli,
+                &hl_path,
+                &case.program_args,
+                AshMode::Interp,
+                None,
+                timeout,
+            );
             if r.timed_out {
                 failures.push(format!(
                     "[INTERP ORACLE TIMEOUT][{}][{}] exceeded {}s",

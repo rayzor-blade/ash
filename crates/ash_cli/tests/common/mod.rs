@@ -52,6 +52,18 @@ pub struct ParityCase {
     pub oracle_is_interp: bool,
     /// Override the oracle's exit code for comparison (e.g. when HL is known to fail).
     pub expected_exit: Option<i32>,
+    /// Pin the JIT tier for hybrid runs of this case.
+    ///
+    /// The oracle is interpreter semantics, and the promoted tiers are
+    /// allowed to differ from it exactly one way: FP contraction. The AIR
+    /// `fma` peephole fuses mul+add in the LLVM tier's body, so a case whose
+    /// checksum accumulates contractible arithmetic (the Mandelbrots) takes a
+    /// different, promotion-timing-dependent value the moment the top tier
+    /// executes its kernel. `"cranelift"` keeps the case on the tiers that
+    /// round every op the way the oracle does -- still promoting, still
+    /// exercising tier-0 codegen -- rather than pinning promotion off
+    /// entirely.
+    pub jit_tier: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -239,6 +251,7 @@ pub fn run_ash(
     hl_path: &Path,
     program_args: &[String],
     mode: AshMode,
+    jit_tier: Option<&str>,
     timeout: Option<Duration>,
 ) -> RunResult {
     let mut cmd = Command::new(ash_cli);
@@ -262,6 +275,9 @@ pub fn run_ash(
                 .arg(jit_min_ops.to_string());
             if jit_log {
                 cmd.arg("--jit-log");
+            }
+            if let Some(tier) = jit_tier {
+                cmd.arg("--jit-tier").arg(tier);
             }
         }
     }
@@ -334,6 +350,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 sanity_interp: true,
                 oracle_is_interp: false,
                 expected_exit: None,
+                jit_tier: None,
             });
             continue;
         }
@@ -386,6 +403,13 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             "compile" => c.compile = parse_bool(value),
             "sanity_interp" => c.sanity_interp = parse_bool(value),
             "oracle_is_interp" => c.oracle_is_interp = parse_bool(value),
+            "jit_tier" => {
+                let t = parse_string(value);
+                match t.as_str() {
+                    "auto" | "cranelift" | "llvm" | "off" => c.jit_tier = Some(t),
+                    other => panic!("invalid jit_tier '{}', line {}", other, lineno + 1),
+                }
+            }
             "expected_exit" => {
                 c.expected_exit = Some(value.trim().parse::<i32>().unwrap_or_else(|_| {
                     panic!("invalid expected_exit '{}', line {}", value, lineno + 1)

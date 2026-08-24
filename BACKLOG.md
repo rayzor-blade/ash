@@ -471,6 +471,29 @@ a hot loop, which is where this started. Since beadie re-proposes (aeb9600),
 a refusal during the blind window no longer caps anything -- the leaf promotes
 at the first backoff horizon after its demand becomes visible.
 
+### Hybrid ships three float arithmetics, and the Mandelbrot checksum was the race between them
+
+Found by the first parity-nightly-slow after promotion started firing properly:
+hybrid full Mandelbrot printed 112798500 or 112798779 run to run against the
+oracle's 112790102. Isolated per engine (all measured, one variable at a time):
+
+    interp                              112790102   rounds every op
+    cranelift (AIR serializes Fma back to mul+add)  112790102   bit-exact with interp
+    LLVM via AIR pipeline (fma peephole, auto tier) fused, FMF-independent
+    LLVM legacy path (--jit-tier llvm, contract FMF) 112798779 on / 112790102 off
+
+`ASH_OSR=0` snapped auto back to 112790102: the fused values enter through the
+promoted bodies, and WHICH mixed value a run prints depends on how many pixels
+compute before promotion lands -- a checksum that varies with compile latency
+can never satisfy an exact expectation. The gate fix: `jit_tier = "cranelift"`
+per case in parity_cases.toml pins the two Mandelbrots onto the tiers that
+round the way the oracle does, still promoting, still exercising tier-0
+codegen and the tiering machinery. The engine fix stays on the roadmap: fusion
+by construction in EVERY engine (interpreter included, `Fma` executed as
+f64::mul_add), at which point the pins and the oracle policy move together --
+and the legacy llvm path's contract FMF should go, since the AIR peephole is
+the mechanism that keeps engines agreeing about WHICH pairs fuse.
+
 ### beadie reads generation as tier, and OSR attach bumps generation
 
 `swap_compiled_with_osr` bumps the bead's generation, and `maybe_promote`

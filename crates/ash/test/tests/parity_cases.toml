@@ -164,6 +164,14 @@ timeout_secs = 60
 expectation = "exact"
 normalize = "default"
 
+# The two Mandelbrots pin hybrid runs to the Cranelift tier. Their checksums
+# accumulate contractible mul+add chains, and the AIR fma peephole fuses those
+# in the LLVM tier -- legally, but into a different number than the oracle's
+# op-by-op rounding, and WHICH number depends on how many pixels ran before
+# promotion landed. Cranelift re-serializes Fma as mul+add by design, so the
+# pinned run still promotes and still matches the oracle bit for bit. If
+# fusion ever becomes construction-wide (every engine, interpreter included),
+# these pins and the oracle comparison move together.
 [[case]]
 name = "MandelbrotSmall"
 main = "MandelbrotSmall"
@@ -172,6 +180,7 @@ slow = false
 timeout_secs = 120
 expectation = "checksum"
 normalize = "default"
+jit_tier = "cranelift"
 
 [[case]]
 name = "Mandelbrot"
@@ -181,6 +190,7 @@ slow = true
 timeout_secs = 600
 expectation = "checksum"
 normalize = "default"
+jit_tier = "cranelift"
 
 [[case]]
 name = "DivTest"

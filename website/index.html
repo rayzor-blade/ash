@@ -259,7 +259,7 @@ HashLink Bytecode Runtime
 <div style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px">
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-assert-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
-<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">cases passed</div>
+<div id="conf-assert-label" style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">assertions passed across all suites</div>
 </div>
 <div style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
 <div id="conf-suite-value" style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—</div>
@@ -502,32 +502,40 @@ HashLink Bytecode Runtime
     var assertLbl = document.getElementById('conf-assert-label');
     var attemptable = sum.cases_attemptable || sum.cases_total;
     if (typeof sum.assertions_passed === 'number' && sum.assertions_total) {
-      assertEl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
-        fmtInt(sum.assertions_total);
-      assertLbl.textContent = 'assertions passed across all suites';
+      var assertionPct = typeof sum.assertion_pct === 'number'
+        ? sum.assertion_pct
+        : Math.round(1000 * sum.assertions_passed / sum.assertions_total) / 10;
+      assertEl.textContent = assertionPct + '%';
+      assertLbl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
+        fmtInt(sum.assertions_total) + ' assertions passed across all suites';
       assertEl.title = 'Aggregates reported assertions from unit, sys, and threads';
       if (typeof sum.cases_ok === 'number' && attemptable) {
         assertEl.title += '. Unit isolation: ' + fmtInt(sum.cases_ok) + ' of ' +
           fmtInt(attemptable) + ' runnable cases passed';
       }
     } else if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
-      assertEl.textContent = fmtInt(sum.tests_passed) + ' / ' +
-        fmtInt(sum.tests_accepted);
-      assertLbl.textContent = 'tests passed across all suites';
+      var testsPct = Math.round(1000 * sum.tests_passed / sum.tests_accepted) / 10;
+      assertEl.textContent = testsPct + '%';
+      assertLbl.textContent = fmtInt(sum.tests_passed) + ' / ' +
+        fmtInt(sum.tests_accepted) + ' tests passed across all suites';
       assertEl.title = 'Aggregates every published Ash suite row';
     } else if (typeof sum.cases_ok === 'number' && attemptable) {
       // Compatibility with artifacts produced before all-suite totals existed.
-      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(attemptable);
-      assertLbl.textContent = 'unit cases passed';
+      var casesPct = Math.round(1000 * sum.cases_ok / attemptable) / 10;
+      assertEl.textContent = casesPct + '%';
+      assertLbl.textContent = fmtInt(sum.cases_ok) + ' / ' +
+        fmtInt(attemptable) + ' unit cases passed';
     } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
       assertEl.textContent = sum.assertion_pct + '%';
       assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total + ' assertions';
-      assertLbl.textContent = 'assertions passed';
+      assertLbl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
+        fmtInt(sum.assertions_total) + ' assertions passed';
     } else if (typeof sum.test_pct === 'number') {
       assertEl.textContent = sum.test_pct + '%';
       assertEl.title = sum.tests_reached + ' of ' + sum.tests_total +
         ' tests reached (total from stock HashLink on the same bytecode)';
-      assertLbl.textContent = 'tests reached';
+      assertLbl.textContent = fmtInt(sum.tests_reached) + ' / ' +
+        fmtInt(sum.tests_total) + ' tests reached';
     } else {
       assertEl.textContent = String(sum.tests_reached || 0);
       assertEl.title = 'no reference VM in this run, so there is no total to divide by';

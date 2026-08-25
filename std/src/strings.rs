@@ -376,7 +376,12 @@ pub unsafe extern "C" fn hlp_parse_int(bytes: *mut vbyte, pos: c_int, len: c_int
 
     // Skip whitespace
     while *p != 0
-        && (*p == b' ' as u16 || *p == b'\t' as u16 || *p == b'\r' as u16 || *p == b'\n' as u16)
+        && (*p == b' ' as u16
+            || *p == b'\t' as u16
+            || *p == b'\n' as u16
+            || *p == 0x0B
+            || *p == 0x0C
+            || *p == b'\r' as u16)
     {
         p = p.add(1);
     }
@@ -496,12 +501,21 @@ pub unsafe extern "C" fn hlp_parse_float(bytes: *mut vbyte, pos: c_int, _len: c_
                 }
             }
             if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
+                let exponent_start = end;
                 end += 1;
                 if end < bytes.len() && (bytes[end] == b'-' || bytes[end] == b'+') {
                     end += 1;
                 }
+                let exponent_digits = end;
                 while end < bytes.len() && bytes[end].is_ascii_digit() {
                     end += 1;
+                }
+                // strtod-style prefix parsing treats an incomplete exponent
+                // as trailing junk: "6e" and "6e+" both parse as 6.  Passing
+                // the incomplete suffix to Rust's strict parser instead made
+                // both return NaN.
+                if end == exponent_digits {
+                    end = exponent_start;
                 }
             }
             if end == 0 || (end == 1 && (bytes[0] == b'-' || bytes[0] == b'+')) {

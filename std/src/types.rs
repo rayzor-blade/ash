@@ -602,10 +602,14 @@ pub unsafe extern "C" fn hlp_enum_parameters(e: *mut venum) -> *mut varray {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_enum_fields(t: *mut hl::hl_type) -> *mut varray {
     // Use persistent hlt_bytes() so the at pointer does not dangle after return
-    let array = hlp_alloc_array(hlt_bytes(), (*(*t).__bindgen_anon_1.tenum).nconstructs);
+    let tenum = (*t).__bindgen_anon_1.tenum;
+    let array = hlp_alloc_array(hlt_bytes(), (*tenum).nconstructs);
 
-    for i in 0..(*(*t).__bindgen_anon_1.tenum).nconstructs as usize {
-        *(hl_aptr::<*mut vbyte>(array).add(i)) = (*(*t).__bindgen_anon_1.tenum).name as *mut vbyte;
+    for i in 0..(*tenum).nconstructs as usize {
+        // Type.initEnum builds its constructor-name map from this array.
+        // Returning tenum.name here repeated the enum TYPE name for every
+        // slot, so Type.createEnum(e, "A") could never find constructor A.
+        *(hl_aptr::<*mut vbyte>(array).add(i)) = (*(*tenum).constructs.add(i)).name as *mut vbyte;
     }
 
     array
@@ -618,8 +622,14 @@ pub unsafe extern "C" fn hlp_type_enum_values(t: *mut hl::hl_type) -> *mut varra
     let array = hlp_alloc_array(hlt_dyn(), nconstructs);
 
     for i in 0..nconstructs as usize {
-        let e = hlp_alloc_enum(t, i as i32);
-        *(hl_aptr::<*mut venum>(array).add(i)) = e;
+        let construct = (*tenum).constructs.add(i);
+        // __evalues__ contains only constructors that can exist without
+        // arguments.  Parameterized constructors stay null and are omitted
+        // by Type.allEnums; allocating them here manufactured C(0,null) and
+        // D(null) values from uninitialized/default payloads.
+        if (*construct).nparams == 0 {
+            *(hl_aptr::<*mut venum>(array).add(i)) = hlp_alloc_enum(t, i as i32);
+        }
     }
 
     array

@@ -1297,6 +1297,7 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
                 if (*rt).getFieldFun.is_some() {
                     return (*rt).getFieldFun.unwrap()(d, hfield);
                 }
+                return get_field_via_stub(d, hfield);
             }
             ptr::null_mut()
         }
@@ -1309,6 +1310,71 @@ unsafe fn hlp_obj_lookup_extra(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
         }
         _ => ptr::null_mut(),
     }
+}
+
+/// Invoke an object's `__get_field` when its runtime slot could not retain it.
+///
+/// `getFieldFun`, like `castFun`, is a bare C function pointer.  In interpreter
+/// mode the method table contains findex+1 sentinels instead, so
+/// `hlp_get_obj_rt` must leave that slot empty.  Dynamic property reads still
+/// have to run `__get_field`, though: ArrayDyn exposes its computed `length`
+/// exclusively through this hook.  Re-resolve the method and route a stub
+/// through the registered closure runner, boxing the field hash because that
+/// bridge carries `vdynamic*` arguments.
+unsafe fn get_field_via_stub(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
+    if d.is_null() || (*d).t.is_null() {
+        return ptr::null_mut();
+    }
+    let t = (*d).t;
+    if (*t).kind != hl_type_kind_HOBJ && (*t).kind != hl_type_kind_HSTRUCT {
+        return ptr::null_mut();
+    }
+    let obj = (*t).__bindgen_anon_1.obj;
+    if obj.is_null() {
+        return ptr::null_mut();
+    }
+
+    // obj_resolve_field walks the runtime parent chain, so initialize it
+    // before asking for an inherited __get_field.
+    let mut rt = (*obj).rt;
+    if rt.is_null() || (*rt).methods.is_null() {
+        rt = hl_get_obj_proto(t);
+    }
+    if rt.is_null() || (*rt).methods.is_null() {
+        return ptr::null_mut();
+    }
+    let f = obj_resolve_field(obj, hlp_hash_gen(USTR_GET_FIELD.as_ptr(), false));
+    if f.is_null() || (*f).field_index >= 0 {
+        return ptr::null_mut();
+    }
+    let idx = (-(*f).field_index - 1) as usize;
+    if idx >= (*rt).nmethods as usize {
+        return ptr::null_mut();
+    }
+    let fptr = *(*rt).methods.add(idx);
+    let addr = fptr as usize;
+    if addr == 0 || addr >= 0x100000 {
+        return ptr::null_mut(); // real code is handled by getFieldFun
+    }
+    let Some(runner) = crate::fiber::closure_runner() else {
+        return ptr::null_mut();
+    };
+
+    let mut cl = vclosure {
+        t: (*f).t,
+        fun: fptr,
+        hasValue: 1,
+        stackCount: 0,
+        value: d as *mut c_void,
+    };
+    let mut hash = hfield;
+    let boxed_hash =
+        crate::cast::hlp_make_dyn((&mut hash as *mut i32).cast(), crate::types::hlt_i32());
+    if boxed_hash.is_null() {
+        return ptr::null_mut();
+    }
+    let mut arg = boxed_hash;
+    runner(&mut cl, &mut arg, 1)
 }
 
 unsafe fn hlp_dynobj_remap_virtuals(

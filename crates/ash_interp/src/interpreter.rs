@@ -112,6 +112,15 @@ enum StepResult {
     },
 }
 
+/// Primitive payloads that can live either boxed behind `vdynamic*` or
+/// directly in an interpreter Dynamic register.
+#[derive(Clone, Copy)]
+enum DynamicScalar {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+}
+
 /// What a findex resolves to, held in a dense table indexed by findex.
 ///
 /// Functions and natives share one numbering, so one indexed load decides
@@ -2614,7 +2623,6 @@ impl HLInterpreter {
 
     #[inline]
     fn coerce_value_for_static_kind(
-        &self,
         val: NanBoxedValue,
         dst_kind: hl::hl_type_kind,
     ) -> NanBoxedValue {
@@ -2652,7 +2660,56 @@ impl HLInterpreter {
                 _ => val,
             };
         }
-        val
+
+        // Dynamic registers deliberately keep primitives unboxed.  When one
+        // crosses back into a statically typed primitive register, however,
+        // its NanBox tag must agree with that destination.  Leaving I32(5) in
+        // an HF64 register makes the next float comparison see unlike value
+        // representations even though both operands are numerically 5.  This
+        // mirrors hl_dyn_cast{ i, i64, f, d } for the in-register form that
+        // never reaches those pointer-based helpers.
+        let as_i64 = if val.is_i32() {
+            Some(val.as_i32() as i64)
+        } else if val.is_i64() {
+            Some(val.as_i64_lossy())
+        } else if val.is_f64() {
+            Some(val.as_f64() as i64)
+        } else if val.is_bool() {
+            Some(if val.as_bool() { 1 } else { 0 })
+        } else {
+            None
+        };
+        let as_f64 = if val.is_i32() {
+            Some(val.as_i32() as f64)
+        } else if val.is_i64() {
+            Some(val.as_i64_lossy() as f64)
+        } else if val.is_f64() {
+            Some(val.as_f64())
+        } else if val.is_bool() {
+            Some(if val.as_bool() { 1.0 } else { 0.0 })
+        } else {
+            None
+        };
+        match dst_kind {
+            hl::hl_type_kind_HI32 => as_i64
+                .map(|v| NanBoxedValue::from_i32(v as i32))
+                .unwrap_or(val),
+            hl::hl_type_kind_HUI8 => as_i64
+                .map(|v| NanBoxedValue::from_i32(v as u8 as i32))
+                .unwrap_or(val),
+            hl::hl_type_kind_HUI16 => as_i64
+                .map(|v| NanBoxedValue::from_i32(v as u16 as i32))
+                .unwrap_or(val),
+            hl::hl_type_kind_HI64 => as_i64.map(NanBoxedValue::from_i64).unwrap_or(val),
+            hl::hl_type_kind_HF32 => as_f64
+                .map(|v| NanBoxedValue::from_f64(v as f32 as f64))
+                .unwrap_or(val),
+            hl::hl_type_kind_HF64 => as_f64.map(NanBoxedValue::from_f64).unwrap_or(val),
+            hl::hl_type_kind_HBOOL => as_i64
+                .map(|v| NanBoxedValue::from_bool(v != 0))
+                .unwrap_or(val),
+            _ => val,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4613,10 +4670,11 @@ impl HLInterpreter {
         // callee declares as Int/Float/Bool, and the callee would then operate
         // on the box. Unbox against the declared parameter kinds.
         //
-        // `coerce_value_for_static_kind` unboxes only when the destination is a
-        // primitive AND the pointer really is a boxed primitive (aligned,
-        // plausible, primitive type header); it returns the value untouched
-        // otherwise and maps null to a typed zero.
+        // `coerce_value_for_static_kind` unboxes only when a pointer really is
+        // a boxed primitive (aligned, plausible, primitive type header). It
+        // also normalizes unboxed Dynamic scalars to the declared destination
+        // representation, returns unrelated values untouched, and maps null
+        // to a typed zero.
         //
         // Placed here, ahead of the body-shape dispatch, so the serialize and
         // SSA paths cannot disagree. The scan precedes the Vec so the common
@@ -4639,7 +4697,7 @@ impl HLInterpreter {
                     .enumerate()
                     .map(|(i, a)| {
                         if i < params.len() {
-                            self.coerce_value_for_static_kind(*a, bc.types[params[i].0].kind)
+                            Self::coerce_value_for_static_kind(*a, bc.types[params[i].0].kind)
                         } else {
                             *a
                         }
@@ -4814,7 +4872,7 @@ impl HLInterpreter {
                     match call_result {
                         Ok(ret) => {
                             let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
-                            let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
+                            let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
                             self.stack.last_mut().unwrap().registers.set(dst, coerced);
                             self.stack.last_mut().unwrap().pc += 1;
 
@@ -5620,7 +5678,18 @@ impl HLInterpreter {
                 let src_kind = bytecode.types[type_ref.0].kind;
                 let val = frame.registers.get(src.0);
 
-                let type_ptr: usize = if val.is_ptr()
+                let type_ptr: usize = if val.is_null() || val.is_void() {
+                    // hl_typeof(NULL) is &hlt_void regardless of the
+                    // register's declared type (normally HDYN here).  Using
+                    // the static Dynamic type makes Type.typeof(null) fall
+                    // through to TUnknown instead of TNull.
+                    let void_idx = bytecode
+                        .types
+                        .iter()
+                        .position(|t| t.kind == hl::hl_type_kind_HVOID)
+                        .unwrap_or(type_ref.0);
+                    self.c_type_factory.get(void_idx) as usize
+                } else if val.is_ptr()
                     && !val.is_null()
                     && Self::is_derefable_dynamic(val.as_ptr() as *const hl::vdynamic)
                 {
@@ -6668,7 +6737,10 @@ impl HLInterpreter {
                 }
             }
         } else {
-            val
+            // An unboxed primitive can inhabit HDYN/HNULL registers in the
+            // interpreter. SafeCast is the point where it re-enters a concrete
+            // register, so normalize its representation to that static kind.
+            Self::coerce_value_for_static_kind(val, dst_kind)
         };
         frame.registers.set(dst, result);
 
@@ -8221,7 +8293,14 @@ impl HLInterpreter {
             I::GetType { dst, src } => {
                 let v = get!(src);
                 let src_ty = func.regs[src.0 as usize].0;
-                let ptr: usize = if v.is_ptr() && !v.is_null() && v.as_ptr() != 0 {
+                let ptr: usize = if v.is_null() || v.is_void() {
+                    let void_idx = bc
+                        .types
+                        .iter()
+                        .position(|t| t.kind == hl::hl_type_kind_HVOID)
+                        .unwrap_or(src_ty);
+                    self.c_type_factory.get(void_idx) as usize
+                } else if v.is_ptr() && !v.is_null() && v.as_ptr() != 0 {
                     match bc.types[src_ty].kind {
                         hl::hl_type_kind_HDYN
                         | hl::hl_type_kind_HOBJ
@@ -8519,7 +8598,7 @@ impl HLInterpreter {
         match call_result {
             Ok(ret) => {
                 let dst_kind = bc.types[func.regs[dst as usize].0].kind;
-                let coerced = self.coerce_value_for_static_kind(ret, dst_kind);
+                let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
                 self.stack.last_mut().unwrap().registers.set(dst, coerced);
                 Ok(None)
             }
@@ -8723,42 +8802,53 @@ impl HLInterpreter {
                     }
                 }
             }
-            if ak == hl::hl_type_kind_HDYN && bk == hl::hl_type_kind_HDYN {
-                let pa = if va.is_null() || va.is_void() {
+            // A Dynamic register holding an object carries the raw object
+            // pointer, exactly like an HOBJ register.  Optimisation can keep
+            // the other operand at its concrete HOBJ kind (`DynamicString ==
+            // "literal"` is one such shape), so restricting content-aware
+            // comparison to HDYN/HDYN made equal Strings compare unequal.
+            // Both layouts have an hl_type header and are safe inputs to
+            // dynamic_eq; primitive mixed-kind cases take other paths.
+            if (ak == hl::hl_type_kind_HDYN && bk == hl::hl_type_kind_HDYN)
+                || (ak == hl::hl_type_kind_HDYN && bk == hl::hl_type_kind_HOBJ)
+                || (ak == hl::hl_type_kind_HOBJ && bk == hl::hl_type_kind_HDYN)
+            {
+                let pa = if !va.is_ptr() || va.is_null() || va.is_void() {
                     std::ptr::null_mut()
                 } else {
                     va.as_ptr() as *mut hl::vdynamic
                 };
-                let pb = if vb.is_null() || vb.is_void() {
+                let pb = if !vb.is_ptr() || vb.is_null() || vb.is_void() {
                     std::ptr::null_mut()
                 } else {
                     vb.as_ptr() as *mut hl::vdynamic
                 };
-                let eq = unsafe { self.dynamic_eq(pa, pb) };
+                let eq = unsafe { self.dynamic_value_eq(va, vb) };
                 if env_flag!("ASH_TRACE_EQ") {
                     eprintln!(
-                        "[CMP] f{} op={:?} ak={} bk={} (dyn) -> {}",
-                        func_idx, op, ak, bk, eq
+                        "[CMP] f{} op={:?} ak={} bk={} va={:?} vb={:?} (dyn) -> {}",
+                        func_idx, op, ak, bk, va, vb, eq
                     );
                     if !eq {
-                        let ka_dyn = if pa.is_null() || unsafe { (*pa).t.is_null() } {
+                        let ka_dyn = if pa.is_null()
+                            || !Self::is_derefable_dynamic(pa)
+                            || unsafe { (*pa).t.is_null() }
+                        {
                             0
                         } else {
                             unsafe { (*(*pa).t).kind }
                         };
-                        let kb_dyn = if pb.is_null() || unsafe { (*pb).t.is_null() } {
+                        let kb_dyn = if pb.is_null()
+                            || !Self::is_derefable_dynamic(pb)
+                            || unsafe { (*pb).t.is_null() }
+                        {
                             0
                         } else {
                             unsafe { (*(*pb).t).kind }
                         };
                         eprintln!(
-                            "[CMP_DYN] ka_dyn={} kb_dyn={} ta={:?} tb={:?} sa={:?} sb={:?}",
-                            ka_dyn,
-                            kb_dyn,
-                            self.dynamic_type_name(pa),
-                            self.dynamic_type_name(pb),
-                            self.value_to_string(pa),
-                            self.value_to_string(pb)
+                            "[CMP_DYN] ka_dyn={} kb_dyn={} pa={:#x} pb={:#x}",
+                            ka_dyn, kb_dyn, pa as usize, pb as usize
                         );
                     }
                 }
@@ -9047,35 +9137,6 @@ impl HLInterpreter {
         true
     }
 
-    unsafe fn try_extract_string_object(&self, d: *mut hl::vdynamic) -> Option<(*const u16, i32)> {
-        if d.is_null() || self.fn_obj_get_field.is_null() {
-            return None;
-        }
-        let get_field: FnObjGetField = std::mem::transmute(self.fn_obj_get_field);
-        let h_len = self.hash_literal_name("length");
-        let h_bytes = self.hash_literal_name("bytes");
-        let len_dyn = get_field(d, h_len);
-        let bytes_dyn = get_field(d, h_bytes);
-        if len_dyn.is_null() || bytes_dyn.is_null() {
-            return None;
-        }
-        if (*len_dyn).t.is_null() || (*bytes_dyn).t.is_null() {
-            return None;
-        }
-        if (*(*len_dyn).t).kind != hl::hl_type_kind_HI32 {
-            return None;
-        }
-        if (*(*bytes_dyn).t).kind != hl::hl_type_kind_HBYTES {
-            return None;
-        }
-        let len = (*len_dyn).v.i;
-        let bytes = (*bytes_dyn).v.bytes as *const u16;
-        if len < 0 || bytes.is_null() {
-            return None;
-        }
-        Some((bytes, len))
-    }
-
     unsafe fn try_extract_string_object_raw(
         &self,
         obj_ptr: *mut c_void,
@@ -9153,17 +9214,24 @@ impl HLInterpreter {
                         if ta_name == tb_name
                             && matches!(ta_name.as_deref(), Some("String"))
                         {
-                            if let (Some(sa), Some(sb)) =
-                                (self.value_to_string(a), self.value_to_string(b))
-                            {
-                                return sa == sb;
+                            if let (Some((ab, al)), Some((bb, bl))) = (
+                                self.try_extract_string_object_raw(a.cast()),
+                                self.try_extract_string_object_raw(b.cast()),
+                            ) {
+                                return al == bl && Self::utf16_len_eq(ab, bb, al as usize);
                             }
                         }
-                        let sa = self.try_extract_string_object(a);
-                        let sb = self.try_extract_string_object(b);
-                        if let (Some((ab, al)), Some((bb, bl))) = (sa, sb) {
-                            return al == bl && Self::utf16_len_eq(ab, bb, al as usize);
-                        }
+
+                        // `a` and `b` are the objects themselves, not boxes
+                        // whose payload starts at `v.ptr`.  Reading that union
+                        // member therefore reads offset 8 of the object -- its
+                        // first field.  Distinct objects with the same first
+                        // field consequently compared equal (two IntWrap(1)
+                        // instances made Array.remove remove the wrong one).
+                        // Strings are the content-equality exception handled
+                        // above; every other object uses identity, matching
+                        // hlp_dyn_compare's HOBJ fallback.
+                        return false;
                     }
                     (*a).v.ptr == (*b).v.ptr
                 }
@@ -9191,6 +9259,63 @@ impl HLInterpreter {
         match (a_num, b_num) {
             (Some(x), Some(y)) => x == y,
             _ => false,
+        }
+    }
+
+    unsafe fn dynamic_value_eq(&self, a: NanBoxedValue, b: NanBoxedValue) -> bool {
+        if a.is_null() || a.is_void() || b.is_null() || b.is_void() {
+            return (a.is_null() || a.is_void()) && (b.is_null() || b.is_void());
+        }
+        if a.is_ptr() && b.is_ptr() {
+            return self.dynamic_eq(
+                a.as_ptr() as *mut hl::vdynamic,
+                b.as_ptr() as *mut hl::vdynamic,
+            );
+        }
+        if a.raw_bits() == b.raw_bits() {
+            return true;
+        }
+
+        match (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
+            (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Int(y))) => x == y,
+            (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Float(y))) => x == y,
+            (Some(DynamicScalar::Int(x)), Some(DynamicScalar::Float(y))) => x as f64 == y,
+            (Some(DynamicScalar::Float(x)), Some(DynamicScalar::Int(y))) => x == y as f64,
+            (Some(DynamicScalar::Bool(x)), Some(DynamicScalar::Bool(y))) => x == y,
+            _ => false,
+        }
+    }
+
+    unsafe fn dynamic_scalar(v: NanBoxedValue) -> Option<DynamicScalar> {
+        if v.is_i32() {
+            return Some(DynamicScalar::Int(v.as_i32() as i64));
+        }
+        if v.is_i64() {
+            return Some(DynamicScalar::Int(v.as_i64_lossy()));
+        }
+        if v.is_f64() {
+            return Some(DynamicScalar::Float(v.as_f64()));
+        }
+        if v.is_bool() {
+            return Some(DynamicScalar::Bool(v.as_bool()));
+        }
+        if !v.is_ptr() {
+            return None;
+        }
+
+        let d = v.as_ptr() as *mut hl::vdynamic;
+        if !Self::is_derefable_dynamic(d) || (*d).t.is_null() {
+            return None;
+        }
+        match (*(*d).t).kind {
+            hl::hl_type_kind_HI32 => Some(DynamicScalar::Int((*d).v.i as i64)),
+            hl::hl_type_kind_HUI8 => Some(DynamicScalar::Int((*d).v.ui8 as i64)),
+            hl::hl_type_kind_HUI16 => Some(DynamicScalar::Int((*d).v.ui16 as i64)),
+            hl::hl_type_kind_HI64 => Some(DynamicScalar::Int((*d).v.i64_)),
+            hl::hl_type_kind_HF32 => Some(DynamicScalar::Float((*d).v.f as f64)),
+            hl::hl_type_kind_HF64 => Some(DynamicScalar::Float((*d).v.d)),
+            hl::hl_type_kind_HBOOL => Some(DynamicScalar::Bool((*d).v.b)),
+            _ => None,
         }
     }
 

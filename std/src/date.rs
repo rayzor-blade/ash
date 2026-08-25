@@ -79,6 +79,15 @@ pub unsafe extern "C" fn hlp_date_from_string(bytes: *const vbyte, len: i32) -> 
             return local_naive_to_timestamp(naive).unwrap_or(0);
         }
     }
+    if let Ok(time) = NaiveTime::parse_from_str(s, "%H:%M:%S") {
+        // HashLink defines a time-only Date string as that time on the Unix
+        // epoch date in UTC.  Treating it as an unsupported string returned
+        // timestamp zero, losing the supplied hours/minutes/seconds.
+        if let Some(date) = NaiveDate::from_ymd_opt(1970, 1, 1) {
+            let timestamp = Utc.from_utc_datetime(&NaiveDateTime::new(date, time)).timestamp();
+            return i32::try_from(timestamp).unwrap_or(0);
+        }
+    }
 
     0
 }

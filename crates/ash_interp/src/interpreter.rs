@@ -5019,9 +5019,14 @@ impl HLInterpreter {
             }
             Opcode::Bytes { dst, ptr } => {
                 let pos = bytecode.bytes_pos[ptr.0];
+                let bytes_ptr = bytecode
+                    .bytes_data
+                    .get(pos..)
+                    .ok_or_else(|| anyhow!("Bytes constant out of bounds: {}", ptr.0))?
+                    .as_ptr();
                 frame
                     .registers
-                    .set(dst.0, NanBoxedValue::from_bytes_ptr(pos));
+                    .set(dst.0, NanBoxedValue::from_bytes_ptr(bytes_ptr as usize));
             }
             Opcode::String { dst, ptr } => {
                 // HashLink uses UTF-16 strings internally.
@@ -7996,7 +8001,13 @@ impl HLInterpreter {
             I::Float { dst, idx } => set!(dst, NanBoxedValue::from_f64(bc.floats[*idx])),
             I::Bool { dst, value } => set!(dst, NanBoxedValue::from_bool(*value)),
             I::Bytes { dst, idx } => {
-                set!(dst, NanBoxedValue::from_bytes_ptr(bc.bytes_pos[*idx]))
+                let pos = bc.bytes_pos[*idx];
+                let bytes_ptr = bc
+                    .bytes_data
+                    .get(pos..)
+                    .ok_or_else(|| anyhow!("Bytes constant out of bounds: {idx}"))?
+                    .as_ptr();
+                set!(dst, NanBoxedValue::from_bytes_ptr(bytes_ptr as usize));
             }
             I::String { dst, idx } => {
                 // HashLink strings are UTF-16 internally; the cache owns the
@@ -9554,7 +9565,7 @@ impl HLInterpreter {
                     }
                 }
             }
-            return Some((a.as_ptr() as usize).cmp(&(b.as_ptr() as usize)));
+            return Some(a.as_ptr().cmp(&b.as_ptr()));
         }
 
         None
@@ -10455,6 +10466,7 @@ impl HLInterpreter {
         let mut ref_cells: Vec<Box<u64>> = Vec::new();
         for i in 0..argc {
             let dyn_arg = unsafe { *data_ptr.add(i) };
+            let expected_type_idx = arg_type_idxs.get(i + arg_shift).copied();
             let expected_kind = arg_kinds
                 .get(i + arg_shift)
                 .copied()
@@ -10488,6 +10500,46 @@ impl HLInterpreter {
                 let cell_ptr = (&mut *cell as *mut u64) as usize;
                 ref_cells.push(cell);
                 NanBoxedValue::from_ptr(cell_ptr)
+            } else if expected_kind == hl::hl_type_kind_HOBJ && !self.fn_dyn_castp.is_null() {
+                // A dynamic HOBJ still needs an exact-type cast. Kind-only
+                // conversion passes ArrayDyn to a method expecting
+                // ArrayBytes<Int>, while HashLink's hl_dyn_call routes that
+                // through hl_dyn_castp so ArrayDyn.__cast can materialize the
+                // specialized representation.
+                if let Some(expected_type_idx) = expected_type_idx {
+                    let target_type = self.c_type_factory.get(expected_type_idx);
+                    let source_type = unsafe { (*dyn_arg).t };
+                    if source_type == target_type || target_type.is_null() || source_type.is_null() {
+                        NanBoxedValue::from_ptr(dyn_arg as usize)
+                    } else if unsafe { (*source_type).kind } != hl::hl_type_kind_HOBJ {
+                        // Default-argument method shims can present their
+                        // receiver through HREF. Preserve the established
+                        // wrapper unboxing for those non-object sources.
+                        self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
+                    } else {
+                        type FnCastp = unsafe extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ) -> *mut c_void;
+                        let castp: FnCastp = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                        let mut data = dyn_arg as *mut c_void;
+                        let casted = unsafe {
+                            castp(
+                                &mut data as *mut _ as *mut c_void,
+                                source_type.cast(),
+                                target_type.cast(),
+                            )
+                        };
+                        if casted.is_null() {
+                            NanBoxedValue::null()
+                        } else {
+                            NanBoxedValue::from_ptr(casted as usize)
+                        }
+                    }
+                } else {
+                    self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
+                }
             } else {
                 self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
             };

@@ -618,6 +618,38 @@ minimum (base alone came out 136.4, 141.0, 143.7 and 151ms), not a mode
 mixture. Either way a sub-10% delta on method_call means nothing without
 several sweeps, and this is the first thing to check when it moves in CI.
 
+## Conformance: 126 of the 197 "failures" were classes with no tests
+
+The published figure was 998/1195 = 83.5%. 126 of those failing cases are
+classes whose every test method is compiled away on the hl target -- guarded by
+`#if js` / `#if jvm` / `#if !hl`, or an `#if hl` empty stub with the real body
+in the `#else`, or `@:keep static` functions utest cannot discover. utest
+reports that as "No tests executed": ONE failed assertion per run, which under
+per-case isolation is one failed CASE. Verified by stripping non-hl
+conditionals from all 126 sources -- every one is genuinely empty -- and
+corroborated by the reference VM, which runs the whole program in a single
+process where empty classes contribute nothing and the aggregate passes, which
+is why the log's own "tests reached" line already read 93.7%.
+
+The harness now classifies those as EMPTY rather than FAIL and scores against
+`cases_attemptable`:
+
+    before   998/1195  83.5%   [181 failed, 16 crashed]
+    after   1002/1069  93.7%   [ 51 failed, 16 crashed, 126 empty on target]
+
+`cases_total` and `case_pct_of_all` are still published so the change of
+denominator is auditable, and the site shows the count in its tooltip. The
+actionable list is now 67 cases, not 197.
+
+**The 67 that remain**, harvested by re-running each case and clustering the
+utest messages (the CI artifact records counts only, so this needs a local
+run): 16 crashes -- three of them `Can't cast i64 to (i32 (i32,i32))`, three
+SIGSEGV, the rest exit-1 -- and 51 failures whose largest clusters are
+`expected true` (8 cases), null-vs-value confusions (12 cases), NaN not
+produced (2), regex disagreement (1), and a denormal signature in TestCasts
+(`expected 6.077e-322 but it is 123` -- an Int box read as f64 bits, the
+interpreter's version of a bug already fixed in the JIT's SafeCast).
+
 ## The scoreboard moved: HL/C and the JVM are the targets now
 
 Latest CI medians, ash against each engine (within-row, so machine-independent):

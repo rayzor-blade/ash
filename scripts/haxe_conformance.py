@@ -336,6 +336,20 @@ def list_cases(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list
     return RE_ASHCASE.findall(r.stdout or "")
 
 
+def is_empty_on_target(out: str, tally: dict) -> bool:
+    """Did utest fail solely because the class defines no runnable tests?
+
+    Deliberately narrow: exactly one failed assertion, none passed, and the
+    reported reason is utest's own "No tests executed". A class that has
+    tests and fails them looks nothing like this.
+    """
+    if tally.get("successes") or tally.get("errors"):
+        return False
+    if tally.get("assertions") != 1 or tally.get("failures") != 1:
+        return False
+    return "No tests executed" in out
+
+
 def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
                  timeout: int) -> dict:
     """Run a single case in its own process and classify the outcome.
@@ -367,6 +381,20 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
         status = "CRASH"
     elif tally["all_ok"]:
         status = "OK"
+    elif is_empty_on_target(out, tally):
+        # The class has no test methods on the hl target -- every one of them
+        # sits behind `#if js`, `#if jvm`, `#if !hl` or similar, or they are
+        # statics utest cannot discover. utest reports that as one failed
+        # assertion ("No tests executed"), which is right for a run and wrong
+        # for a CASE: isolation puts exactly one class in each run, so a class
+        # that is empty on this target lands as a failed case.
+        #
+        # Measured on the 4.3.6 suite: 126 of 197 "failures" were this, so the
+        # headline read 83.5% where the suite ash can actually attempt is
+        # 93.4%. The reference VM agrees -- it runs the whole program in one
+        # process, where empty classes contribute nothing and the aggregate
+        # passes, which is why "tests reached" already read 93.7%.
+        status = "EMPTY"
     else:
         status = "FAIL"
 
@@ -418,16 +446,26 @@ def run_isolated(ash: str, program: pathlib.Path, mode: str, timeout: int,
     counts = collections.Counter(r["status"] for r in results)
     assertions = sum(r["assertions"] for r in results)
     passed = sum(r["assertions_passed"] for r in results)
+    # Classes with no tests on this target are not a score ash can move, so
+    # they are named and excluded from the denominator rather than counted as
+    # failures. They stay in `cases_total` so nothing is hidden.
+    empty = counts["EMPTY"]
+    attemptable = len(results) - empty
     return {
-        # The headline. Its denominator is the case list itself, so it cannot
-        # be gamed by a crash: a case that takes the VM down is a case that
-        # did not pass, and it still counts against us.
+        # The headline. Its denominator is every case that HAS a test to run
+        # on this target, so it cannot be gamed by a crash -- a case that
+        # takes the VM down did not pass and still counts against us -- nor
+        # depressed by classes the target compiles away to nothing.
         "cases_total": len(results),
+        "cases_empty": empty,
+        "cases_attemptable": attemptable,
         "cases_ok": counts["OK"],
         "cases_failed": counts["FAIL"],
         "cases_crashed": counts["CRASH"],
         "cases_timeout": counts["TIMEOUT"],
-        "case_pct": round(100.0 * counts["OK"] / len(results), 2) if results else None,
+        "case_pct": round(100.0 * counts["OK"] / attemptable, 2) if attemptable else None,
+        # Kept so the change in denominator is auditable rather than implied.
+        "case_pct_of_all": round(100.0 * counts["OK"] / len(results), 2) if results else None,
         # Finer grained, and deliberately NOT the headline: a crashed case
         # prints no tally, so its assertions are missing from BOTH sides of
         # this ratio. That flatters us — the more cases crash, the higher it
@@ -623,11 +661,14 @@ def main(argv=None) -> int:
                             "suite": name, "program": prog, "engine": label,
                             "status": "SKIP", "detail": iso["error"]})
                         continue
-                    status = "OK" if iso["cases_ok"] == iso["cases_total"] else "PARTIAL"
+                    status = ("OK" if iso["cases_ok"] == iso["cases_attemptable"]
+                              else "PARTIAL")
                     rec = {
                         "suite": name, "program": prog, "engine": label,
                         "status": status, "isolated": True,
                         "cases_total": iso["cases_total"],
+                        "cases_empty": iso["cases_empty"],
+                        "cases_attemptable": iso["cases_attemptable"],
                         "cases_ok": iso["cases_ok"],
                         "cases_failed": iso["cases_failed"],
                         "cases_crashed": iso["cases_crashed"],
@@ -646,7 +687,7 @@ def main(argv=None) -> int:
                         "cases": [r for r in iso["results"] if r["status"] != "OK"],
                     }
                     report["results"].append(rec)
-                    print(f"     cases {iso['cases_ok']}/{iso['cases_total']} ok "
+                    print(f"     cases {iso['cases_ok']}/{iso['cases_attemptable']} ok "
                           f"({iso['case_pct']}%)  "
                           f"[{iso['cases_failed']} failed, "
                           f"{iso['cases_crashed']} crashed, "
@@ -729,14 +770,19 @@ def main(argv=None) -> int:
     if iso:
         c_total = sum(r.get("cases_total", 0) for r in iso)
         c_ok = sum(r.get("cases_ok", 0) for r in iso)
+        c_empty = sum(r.get("cases_empty", 0) for r in iso)
+        c_attempt = sum(r.get("cases_attemptable", r.get("cases_total", 0)) for r in iso)
         report["summary"].update({
             "isolated": True,
             "cases_total": c_total,
+            "cases_empty": c_empty,
+            "cases_attemptable": c_attempt,
             "cases_ok": c_ok,
             "cases_failed": sum(r.get("cases_failed", 0) for r in iso),
             "cases_crashed": sum(r.get("cases_crashed", 0) for r in iso),
             "cases_timeout": sum(r.get("cases_timeout", 0) for r in iso),
-            "case_pct": round(100.0 * c_ok / c_total, 1) if c_total else None,
+            "case_pct": round(100.0 * c_ok / c_attempt, 1) if c_attempt else None,
+            "case_pct_of_all": round(100.0 * c_ok / c_total, 1) if c_total else None,
             # What the site shows, in the plainest unit there is: tests ash
             # took on, and tests it got right.
             "tests_accepted": sum(r.get("progress", {}).get("tests_accepted", 0) for r in iso),
@@ -745,9 +791,10 @@ def main(argv=None) -> int:
     if report["summary"].get("isolated"):
         sm = report["summary"]
         print(f"\n{sm['tests_passed']}/{sm['tests_accepted']} tests passed")
-        print(f"{sm['cases_ok']}/{sm['cases_total']} cases passed "
+        print(f"{sm['cases_ok']}/{sm['cases_attemptable']} cases passed "
               f"({sm['case_pct']}%)  [{sm['cases_failed']} failed, "
-              f"{sm['cases_crashed']} crashed]")
+              f"{sm['cases_crashed']} crashed, "
+              f"{sm['cases_empty']} empty on this target]")
     print(f"\n{passes}/{total} suites passed")
     if t_total:
         print(f"{t_reached}/{t_total} tests reached "

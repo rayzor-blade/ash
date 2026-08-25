@@ -518,14 +518,26 @@ HashLink Bytecode Runtime
     // "64" -- an 8x overstatement, 55 of the 62 being tests that merely
     // stopped being counted. cases_total is the case list and does not move,
     // so this number can only change for a real reason.
-    if (typeof sum.cases_ok === 'number' && sum.cases_total) {
-      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(sum.cases_total);
+    // The denominator is the cases that HAVE a test to run on this target.
+    // A class whose every test method sits behind `#if js` / `#if jvm` / a
+    // `#if hl` empty stub compiles to nothing here, and utest reports that as
+    // "No tests executed" -- one failed assertion per run, which under
+    // per-case isolation means one failed CASE. 126 of the suite's 1195 are
+    // like that, so counting them dragged the published figure from 93.7% to
+    // 83.5% for a reason ash can never fix. They are excluded here and named
+    // in the tooltip. `cases_attemptable` is absent from older results.json,
+    // hence the fallback.
+    var attemptable = sum.cases_attemptable || sum.cases_total;
+    if (typeof sum.cases_ok === 'number' && attemptable) {
+      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(attemptable);
       assertLbl.textContent = 'cases passed';
       if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
         assertEl.title = fmtInt(sum.tests_passed) + ' of ' +
           fmtInt(sum.tests_accepted) + ' individual tests passed in the cases ' +
           'that ran to completion (a crashing case reports fewer, which is why ' +
-          'the headline counts cases)';
+          'the headline counts cases)' +
+          (sum.cases_empty ? '; ' + fmtInt(sum.cases_empty) +
+            ' further classes define no test for this target and are excluded' : '');
       }
     } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
       assertEl.textContent = sum.assertion_pct + '%';
@@ -545,10 +557,10 @@ HashLink Bytecode Runtime
 
     var suiteEl = document.getElementById('conf-suite-value');
     var suiteLbl = document.getElementById('conf-suite-label');
-    if (typeof sum.cases_ok === 'number' && sum.cases_total) {
+    if (typeof sum.cases_ok === 'number' && attemptable) {
       // Failed AND crashed: a crash is a worse outcome than a wrong answer,
       // so it must never be the cheaper one to report.
-      var failing = sum.cases_total - sum.cases_ok;
+      var failing = attemptable - sum.cases_ok;
       suiteEl.textContent = fmtInt(failing);
       if (!failing) suiteEl.style.color = '#a8703c';
       if (suiteLbl) {

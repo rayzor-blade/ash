@@ -156,6 +156,7 @@ fn main() {
 /// brokers hold -- so a compile still in flight is simply ended with the
 /// process. The buffers have to be flushed by hand, since that is one of the
 /// things `exit` would have done.
+#[cfg(unix)]
 fn exit_without_atexit(code: i32) -> ! {
     use std::io::Write;
     // Anything the skipped handlers would have printed has to be printed
@@ -165,6 +166,20 @@ fn exit_without_atexit(code: i32) -> ! {
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     unsafe { libc::_exit(code) }
+}
+
+/// Windows counterpart to the Unix `_exit` path above.
+///
+/// `ExitProcess` terminates all threads and does not run the MSVC CRT's
+/// `atexit` table, which is the property this shutdown path needs.  The
+/// embedded ash_std DLL owns the GC state on Windows, so linking a second
+/// ash_std rlib here merely to print its (different) counters would be wrong.
+#[cfg(windows)]
+fn exit_without_atexit(code: i32) -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    unsafe { windows_sys::Win32::System::Threading::ExitProcess(code as u32) }
 }
 
 /// `errno` for the current thread. A plain read of thread-local storage, so

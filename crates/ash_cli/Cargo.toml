@@ -23,6 +23,9 @@ ash_std = { path = "../../std" }
 # crash report you cannot read is half a crash report.
 rustc-demangle = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading"] }
+
 # glibc's allocator returns freed memory to the process lazily, which wren_lift
 # measured as a large loss on Linux; jemalloc frees on time. Linux-only — macOS
 # libmalloc does not have the problem.

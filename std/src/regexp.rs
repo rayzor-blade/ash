@@ -1,6 +1,6 @@
 use std::ffi::c_void;
 
-use regex::{Regex, RegexBuilder};
+use fancy_regex::{Regex, RegexBuilder};
 
 use crate::{error::hlp_error, hl::vbyte, strings::str_to_uchar_ptr};
 
@@ -57,7 +57,7 @@ fn build_regex(pattern: &str, options: &str) -> Option<Regex> {
                 builder.dot_matches_new_line(true);
             }
             'u' => {
-                builder.unicode(true);
+                builder.unicode_mode(true);
             }
             _ => {}
         }
@@ -110,7 +110,10 @@ pub unsafe extern "C" fn hlp_regexp_match(
     // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
     // spuriously match after every zero-width global match, because each new
     // offset appeared to be the start of a fresh string.
-    if let Some(caps) = state.regex.captures_at(visible_subject, start_byte) {
+    if let Ok(Some(caps)) = state
+        .regex
+        .captures_from_pos(visible_subject, start_byte)
+    {
         let mut groups = Vec::with_capacity(caps.len());
         for i in 0..caps.len() {
             if let Some(m) = caps.get(i) {

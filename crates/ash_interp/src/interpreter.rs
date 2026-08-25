@@ -5159,6 +5159,8 @@ impl HLInterpreter {
                 let val = frame.registers.get(src.0);
                 let result = if val.is_i32() {
                     NanBoxedValue::from_i32(val.as_i32().wrapping_neg())
+                } else if val.is_i64() {
+                    NanBoxedValue::from_i64(val.as_i64_lossy().wrapping_neg())
                 } else if val.is_f64() {
                     NanBoxedValue::from_f64(-val.as_f64())
                 } else {
@@ -5170,6 +5172,8 @@ impl HLInterpreter {
                 let val = frame.registers.get(src.0);
                 let result = if val.is_i32() {
                     NanBoxedValue::from_i32(!val.as_i32())
+                } else if val.is_i64() {
+                    NanBoxedValue::from_i64(!val.as_i64_lossy())
                 } else if val.is_bool() {
                     NanBoxedValue::from_bool(!val.as_bool())
                 } else {
@@ -5183,6 +5187,11 @@ impl HLInterpreter {
                     frame
                         .registers
                         .set(dst.0, NanBoxedValue::from_i32(val.as_i32().wrapping_add(1)));
+                } else if val.is_i64() {
+                    frame.registers.set(
+                        dst.0,
+                        NanBoxedValue::from_i64(val.as_i64_lossy().wrapping_add(1)),
+                    );
                 } else if val.is_f64() {
                     frame
                         .registers
@@ -5195,6 +5204,11 @@ impl HLInterpreter {
                     frame
                         .registers
                         .set(dst.0, NanBoxedValue::from_i32(val.as_i32().wrapping_sub(1)));
+                } else if val.is_i64() {
+                    frame.registers.set(
+                        dst.0,
+                        NanBoxedValue::from_i64(val.as_i64_lossy().wrapping_sub(1)),
+                    );
                 } else if val.is_f64() {
                     frame
                         .registers
@@ -6879,6 +6893,8 @@ impl HLInterpreter {
             // Create a stack slot holding the raw value for hlp_make_dyn
             let mut data: i64 = if val.is_i32() {
                 val.as_i32() as i64
+            } else if val.is_i64() {
+                val.as_i64_lossy()
             } else if val.is_f64() {
                 val.as_f64().to_bits() as i64
             } else if val.is_bool() {
@@ -8068,6 +8084,8 @@ impl HLInterpreter {
                     air::v2::UnOp::Incr => {
                         if v.is_i32() {
                             NanBoxedValue::from_i32(v.as_i32().wrapping_add(1))
+                        } else if v.is_i64() {
+                            NanBoxedValue::from_i64(v.as_i64_lossy().wrapping_add(1))
                         } else if v.is_f64() {
                             NanBoxedValue::from_f64(v.as_f64() + 1.0)
                         } else {
@@ -8077,6 +8095,8 @@ impl HLInterpreter {
                     air::v2::UnOp::Decr => {
                         if v.is_i32() {
                             NanBoxedValue::from_i32(v.as_i32().wrapping_sub(1))
+                        } else if v.is_i64() {
+                            NanBoxedValue::from_i64(v.as_i64_lossy().wrapping_sub(1))
                         } else if v.is_f64() {
                             NanBoxedValue::from_f64(v.as_f64() - 1.0)
                         } else {
@@ -8086,6 +8106,8 @@ impl HLInterpreter {
                     air::v2::UnOp::Neg => {
                         if v.is_i32() {
                             NanBoxedValue::from_i32(v.as_i32().wrapping_neg())
+                        } else if v.is_i64() {
+                            NanBoxedValue::from_i64(v.as_i64_lossy().wrapping_neg())
                         } else if v.is_f64() {
                             NanBoxedValue::from_f64(-v.as_f64())
                         } else {
@@ -8095,6 +8117,8 @@ impl HLInterpreter {
                     air::v2::UnOp::Not => {
                         if v.is_i32() {
                             NanBoxedValue::from_i32(!v.as_i32())
+                        } else if v.is_i64() {
+                            NanBoxedValue::from_i64(!v.as_i64_lossy())
                         } else if v.is_bool() {
                             NanBoxedValue::from_bool(!v.as_bool())
                         } else {
@@ -8629,6 +8653,11 @@ impl HLInterpreter {
                     frame
                         .registers
                         .set(slot, NanBoxedValue::from_i32(v.as_i32().wrapping_add(1)));
+                } else if v.is_i64() {
+                    frame.registers.set(
+                        slot,
+                        NanBoxedValue::from_i64(v.as_i64_lossy().wrapping_add(1)),
+                    );
                 } else if v.is_f64() {
                     frame
                         .registers
@@ -8643,6 +8672,11 @@ impl HLInterpreter {
                     frame
                         .registers
                         .set(slot, NanBoxedValue::from_i32(v.as_i32().wrapping_sub(1)));
+                } else if v.is_i64() {
+                    frame.registers.set(
+                        slot,
+                        NanBoxedValue::from_i64(v.as_i64_lossy().wrapping_sub(1)),
+                    );
                 } else if v.is_f64() {
                     frame
                         .registers
@@ -8814,6 +8848,33 @@ impl HLInterpreter {
                 );
             }
             return result;
+        }
+        // The generic NanBox comparison fast path only knows i32 and f64.
+        // Type-directed numeric comparison is also required for HI64 and for
+        // mixed-width operands (the checks inside Int64.parseString and
+        // Int64.toInt are ordinary jump opcodes, not nullable comparisons).
+        if let Some(result) = Self::compare_numeric_values(va, ak, vb, bk, op) {
+            return result;
+        }
+        // Haxe lowers relational operators on `Dynamic` values to the same
+        // jump opcodes as concrete values.  The registers still have HDYN
+        // type, though, so the concrete numeric path above cannot interpret
+        // their boxes.  HashLink compares the boxed payloads (and String
+        // contents) rather than the box addresses.
+        if matches!(
+            op,
+            CmpOp::SLt | CmpOp::SGt | CmpOp::SLte | CmpOp::SGte | CmpOp::ULt | CmpOp::UGte
+        ) && (ak == hl::hl_type_kind_HDYN || bk == hl::hl_type_kind_HDYN)
+        {
+            if let Some(ord) = unsafe { self.dynamic_value_cmp(va, vb) } {
+                return match op {
+                    CmpOp::SLt | CmpOp::ULt => ord.is_lt(),
+                    CmpOp::SGt => ord.is_gt(),
+                    CmpOp::SLte => ord.is_le(),
+                    CmpOp::SGte | CmpOp::UGte => ord.is_ge(),
+                    _ => unreachable!(),
+                };
+            }
         }
         // Ordering between strings. Without this the operands fall through to
         // NanBoxedValue::compare, which has no ordering for pointers and
@@ -9420,6 +9481,83 @@ impl HLInterpreter {
             (Some(DynamicScalar::Bool(x)), Some(DynamicScalar::Bool(y))) => x == y,
             _ => false,
         }
+    }
+
+    unsafe fn dynamic_value_cmp(
+        &self,
+        a: NanBoxedValue,
+        b: NanBoxedValue,
+    ) -> Option<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        let a_null = a.is_null() || a.is_void();
+        let b_null = b.is_null() || b.is_void();
+        if a_null || b_null {
+            return Some(match (a_null, b_null) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                _ => unreachable!(),
+            });
+        }
+        if a.raw_bits() == b.raw_bits() {
+            return Some(Ordering::Equal);
+        }
+
+        let scalar_number = |v| match v {
+            DynamicScalar::Int(x) => x as f64,
+            DynamicScalar::Float(x) => x,
+            DynamicScalar::Bool(x) => if x { 1.0 } else { 0.0 },
+        };
+        if let (Some(x), Some(y)) = (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
+            // Match hl_dyn_compare: NaN is neither less nor greater, so it
+            // compares equal for ordering purposes.
+            let (x, y) = (scalar_number(x), scalar_number(y));
+            return Some(if x < y {
+                Ordering::Less
+            } else if x > y {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            });
+        }
+
+        if a.is_ptr() && b.is_ptr() {
+            let (ap, bp) = (
+                a.as_ptr() as *mut hl::vdynamic,
+                b.as_ptr() as *mut hl::vdynamic,
+            );
+            if Self::is_derefable_dynamic(ap)
+                && Self::is_derefable_dynamic(bp)
+                && !(*ap).t.is_null()
+                && !(*bp).t.is_null()
+            {
+                let (ak, bk) = ((*(*ap).t).kind, (*(*bp).t).kind);
+                if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
+                    let (ab, bb) = ((*ap).v.bytes as *const u16, (*bp).v.bytes as *const u16);
+                    let mut al = 0i32;
+                    let mut bl = 0i32;
+                    while !ab.is_null() && *ab.add(al as usize) != 0 {
+                        al += 1;
+                    }
+                    while !bb.is_null() && *bb.add(bl as usize) != 0 {
+                        bl += 1;
+                    }
+                    return Some(Self::utf16_cmp(ab, al, bb, bl));
+                }
+                if ak == hl::hl_type_kind_HOBJ && bk == hl::hl_type_kind_HOBJ {
+                    if let (Some((ab, al)), Some((bb, bl))) = (
+                        self.try_extract_string_object_raw(ap.cast()),
+                        self.try_extract_string_object_raw(bp.cast()),
+                    ) {
+                        return Some(Self::utf16_cmp(ab, al, bb, bl));
+                    }
+                }
+            }
+            return Some((a.as_ptr() as usize).cmp(&(b.as_ptr() as usize)));
+        }
+
+        None
     }
 
     unsafe fn dynamic_scalar(v: NanBoxedValue) -> Option<DynamicScalar> {

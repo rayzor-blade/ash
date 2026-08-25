@@ -12,7 +12,7 @@ use std::fmt;
 /// ## Type Tags (bits 48-50)
 /// - 0x0: Pointer (48-bit address - covers all userspace on ARM64/x86_64)
 /// - 0x1: I32 (32-bit signed integer)
-/// - 0x2: I64 (lossy 48-bit, or heap-spilled for full range)
+/// - 0x2: I64 (inline, or a spill pointer marked within the payload)
 /// - 0x3: Bool (0 or 1)
 /// - 0x4: Null
 /// - 0x5: Void
@@ -62,6 +62,13 @@ impl NanBoxedValue {
     const TAG_FUNC: u64 = 0x0006_0000_0000_0000;
     const TAG_BYTES: u64 = 0x0007_0000_0000_0000;
 
+    // I64 payloads whose top two bits are `10` hold an immutable spill
+    // pointer in the low 46 bits. Positive inline values start with `0` and
+    // inline negative values use `11`, so the marker is unambiguous.
+    const I64_SPILL_BITS: u64 = 0x0000_C000_0000_0000;
+    const I64_SPILL_MARK: u64 = 0x0000_8000_0000_0000;
+    const I64_SPILL_PTR_MASK: u64 = 0x0000_3FFF_FFFF_FFFF;
+
     #[inline(always)]
     pub const fn void() -> Self {
         Self(Self::NAN_TAG | Self::TAG_VOID)
@@ -95,7 +102,25 @@ impl NanBoxedValue {
 
     #[inline(always)]
     pub fn from_i64(v: i64) -> Self {
-        Self(Self::NAN_TAG | Self::TAG_I64 | ((v as u64) & Self::PAYLOAD_MASK))
+        const INLINE_MIN: i64 = -(1i64 << 46);
+        const INLINE_MAX: i64 = (1i64 << 47) - 1;
+        if (INLINE_MIN..=INLINE_MAX).contains(&v) {
+            Self(Self::NAN_TAG | Self::TAG_I64 | ((v as u64) & Self::PAYLOAD_MASK))
+        } else {
+            // NanBoxedValue is Copy, so a spill cannot carry ownership. Keep
+            // the immutable word alive for the process lifetime; only Int64
+            // values outside the inline fast range pay this cost.
+            let ptr = Box::into_raw(Box::new(v)) as usize;
+            debug_assert_eq!(ptr & 7, 0);
+            let compressed_ptr = ptr >> 3;
+            debug_assert_eq!(compressed_ptr & !(Self::I64_SPILL_PTR_MASK as usize), 0);
+            Self(
+                Self::NAN_TAG
+                    | Self::TAG_I64
+                    | Self::I64_SPILL_MARK
+                    | compressed_ptr as u64,
+            )
+        }
     }
 
     #[inline(always)]
@@ -204,6 +229,10 @@ impl NanBoxedValue {
     #[inline(always)]
     pub fn as_i64_lossy(&self) -> i64 {
         let payload = self.payload();
+        if payload & Self::I64_SPILL_BITS == Self::I64_SPILL_MARK {
+            let ptr = ((payload & Self::I64_SPILL_PTR_MASK) << 3) as *const i64;
+            return unsafe { *ptr };
+        }
         // Sign extend from 48 bits
         if payload & 0x0000_8000_0000_0000 != 0 {
             (payload | 0xFFFF_0000_0000_0000) as i64
@@ -437,4 +466,44 @@ pub enum CmpOp {
     UGte,
     Eq,
     NotEq,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NanBoxedValue;
+
+    #[test]
+    fn i64_round_trips_inline_boundaries_and_spills() {
+        for value in [
+            i64::MIN,
+            -(1i64 << 46) - 1,
+            -(1i64 << 46),
+            -(1i64 << 47),
+            -1,
+            0,
+            (1i64 << 47) - 1,
+            1i64 << 47,
+            i64::MAX,
+        ] {
+            let boxed = NanBoxedValue::from_i64(value);
+            assert!(boxed.is_i64());
+            assert_eq!(boxed.as_i64_lossy(), value);
+        }
+    }
+
+    #[test]
+    fn byte_pointers_keep_their_distinct_tag() {
+        let value = NanBoxedValue::from_bytes_ptr(0x1234);
+        assert!(!value.is_ptr());
+        assert!(value.is_bytes());
+        assert_eq!(value.as_ptr(), 0x1234);
+    }
+
+    #[test]
+    fn function_indices_use_small_pointer_tokens() {
+        let value = NanBoxedValue::from_func_index(42);
+        assert!(!value.is_ptr());
+        assert!(value.is_func());
+        assert_eq!(value.as_func_index(), 42);
+    }
 }

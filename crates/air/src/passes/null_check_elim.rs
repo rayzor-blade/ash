@@ -90,8 +90,7 @@ impl Pass for NullCheckElimPass {
         }
 
         // Second pass: actually eliminate redundant NullChecks
-        for block_idx in 0..num_blocks {
-            let block = &cfg.blocks[block_idx];
+        for block in cfg.blocks.iter().take(num_blocks) {
 
             let mut nonnull: HashSet<u32> = if block.predecessors.is_empty() {
                 HashSet::new()

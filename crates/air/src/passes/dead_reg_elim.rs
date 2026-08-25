@@ -64,8 +64,7 @@ impl Pass for DeadRegElimPass {
         // eliminate pure writes to dead registers.
         let mut eliminated = 0;
 
-        for block_idx in 0..num_blocks {
-            let block = &cfg.blocks[block_idx];
+        for block in cfg.blocks.iter().take(num_blocks) {
 
             // Start with live_out for this block
             let mut live: HashSet<u32> = HashSet::new();

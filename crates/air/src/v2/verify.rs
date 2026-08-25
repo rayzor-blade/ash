@@ -147,8 +147,8 @@ pub fn verify(f: &Function) -> Result<()> {
         })
         .collect();
     let dom = build_domtree_from_succs(&succs);
-    for b in 0..nb {
-        if dom.rpo_number[b] == usize::MAX {
+    for (b, &rpo) in dom.rpo_number.iter().enumerate().take(nb) {
+        if rpo == usize::MAX {
             bail!("block b{} is unreachable from the entry", b);
         }
     }

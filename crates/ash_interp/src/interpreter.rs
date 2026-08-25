@@ -3590,18 +3590,18 @@ impl HLInterpreter {
         let (gd, nglobals) = self.c_type_factory.globals_data();
         if !gd.is_null() {
             let n = nglobals.min(self.globals.len());
-            for i in 0..n {
+            for (i, slot) in self.globals.iter_mut().enumerate().take(n) {
                 let raw = unsafe { *gd.add(i) };
-                if !raw.is_null() && self.globals[i].is_null() {
-                    self.globals[i] = NanBoxedValue::from_ptr(raw as usize);
+                if !raw.is_null() && slot.is_null() {
+                    *slot = NanBoxedValue::from_ptr(raw as usize);
                 }
             }
-            for i in 0..n {
-                if unsafe { *gd.add(i) }.is_null() {
-                    let v = self.globals[i];
-                    if !v.is_null() && !v.is_void() {
-                        unsafe { *gd.add(i) = v.as_ptr() as *mut c_void };
-                    }
+            for (i, slot) in self.globals.iter().enumerate().take(n) {
+                if unsafe { *gd.add(i) }.is_null()
+                    && !slot.is_null()
+                    && !slot.is_void()
+                {
+                    unsafe { *gd.add(i) = slot.as_ptr() as *mut c_void };
                 }
             }
         }

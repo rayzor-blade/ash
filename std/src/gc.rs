@@ -2170,8 +2170,8 @@ impl ImmixAllocator {
             // back whole, and the TLAB block is still being bumped through.
             let mut spans: Vec<(usize, usize)> = Vec::new();
             let mut run_start: Option<usize> = None;
-            for line_index in 0..LINES_PER_BLOCK {
-                if block.mark_bits[line_index] {
+            for (line_index, mark) in block.mark_bits.iter_mut().enumerate() {
+                if *mark {
                     is_empty = false;
                     if let Some(start) = run_start.take() {
                         spans.push((start, line_index - start));
@@ -2179,7 +2179,7 @@ impl ImmixAllocator {
                 } else if run_start.is_none() {
                     run_start = Some(line_index);
                 }
-                block.mark_bits[line_index] = false; // Reset for next GC cycle
+                *mark = false; // Reset for next GC cycle
             }
             if let Some(start) = run_start.take() {
                 spans.push((start, LINES_PER_BLOCK - start));
@@ -2264,9 +2264,7 @@ impl ImmixAllocator {
                 }
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;
-                for l in base_line..base_line + LINES_PER_BLOCK {
-                    self.heap.alloc_sizes[l] = 0;
-                }
+                self.heap.alloc_sizes[base_line..base_line + LINES_PER_BLOCK].fill(0);
                 self.blocks[block_index].has_span = false;
                 freed.push(block_addr);
             }

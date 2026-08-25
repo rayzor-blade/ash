@@ -773,13 +773,13 @@ pub unsafe extern "C" fn hlp_dyn_call(
             *(*ctmp.t).__bindgen_anon_1.fun.as_ref().unwrap().args,
         );
         tmp.a.size += 1;
-        for i in 0..nargs as usize {
-            tmp.args[i + 1] = *args.add(i);
+        for (i, slot) in tmp.args.iter_mut().skip(1).take(nargs as usize).enumerate() {
+            *slot = *args.add(i);
         }
         c_ptr = &mut ctmp;
     } else {
-        for i in 0..nargs as usize {
-            tmp.args[i] = *args.add(i);
+        for (i, slot) in tmp.args.iter_mut().take(nargs as usize).enumerate() {
+            *slot = *args.add(i);
         }
     }
 

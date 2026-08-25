@@ -351,8 +351,8 @@ pub fn lower_with(
     }
 
     let dom = build_domtree_from_succs(&succs);
-    for b in 0..n_blocks {
-        if dom.rpo_number[b] == usize::MAX {
+    for (b, &rpo) in dom.rpo_number.iter().enumerate().take(n_blocks) {
+        if rpo == usize::MAX {
             bail!("block {} unreachable in block-level CFG (lowering bug)", b);
         }
     }

@@ -143,9 +143,8 @@ fn escape_reason(
     let mut read_blocks: HashMap<usize, Vec<BlockId>> = HashMap::new();
     let mut write_blocks: HashMap<usize, Vec<BlockId>> = HashMap::new();
 
-    for b in 0..f.blocks.len() {
+    for (b, block) in f.blocks.iter().enumerate() {
         let bid = BlockId(b as u32);
-        let block = &f.blocks[b];
 
         // A phi naming the value carries it across an edge — the back edge
         // included, which is how a result becomes the next iteration's input.

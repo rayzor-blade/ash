@@ -85,6 +85,23 @@ pub(crate) unsafe fn current_handle() -> Option<*mut c_void> {
     (*(&raw const CURRENT)).map(|id| ((id as usize) << 4 | 1) as *mut c_void)
 }
 
+/// Whether `c` is the closure at the root of the currently running fiber.
+///
+/// Native helpers also use the closure runner to re-enter interpreted AIR V2
+/// methods. Those nested calls must propagate exceptions through their active
+/// native trap; only a real thread body's outermost call owns an uncaught
+/// exception and may terminate the fiber.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_fiber_is_root_closure(c: *mut vclosure) -> bool {
+    let Some(id) = *(&raw const CURRENT) else {
+        return false;
+    };
+    (*(&raw const FIBERS))
+        .iter()
+        .find(|fiber| fiber.id == id)
+        .is_some_and(|fiber| fiber.closure == c)
+}
+
 unsafe fn notify_switch(from: u32, to: u32) {
     if let Some(hook) = FIBER_SWITCH_HOOK {
         hook(from, to);

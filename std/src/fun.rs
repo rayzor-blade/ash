@@ -269,6 +269,19 @@ pub unsafe extern "C" fn _fun_var_args() {
 
 pub static mut fun_var_args: unsafe extern "C" fn() = _fun_var_args;
 
+// Every closure produced by `hlp_make_var_args` retains this type pointer for
+// its entire lifetime. HashLink's descriptor is static for the same reason;
+// making it a function-local value leaves each closure pointing into a dead
+// native stack frame, where the kind later reads as HVOID (or arbitrary data).
+static mut HLT_VAR_ARGS_TYPE: hl_type = hl_type {
+    kind: hl_type_kind_HFUN,
+    __bindgen_anon_1: hl_type__bindgen_ty_1 {
+        obj: ptr::null_mut(),
+    },
+    vobj_proto: ptr::null_mut(),
+    mark_bits: ptr::null_mut(),
+};
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type) -> *mut vclosure {
     let wrap = hlc_get_wrapper(to);
@@ -720,18 +733,9 @@ pub unsafe extern "C" fn hlp_fun_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_var_args(c: *mut vclosure) -> *mut vdynamic {
-    let mut HLT_VAR_ARGS: hl_type = hl_type {
-        kind: hl_type_kind_HFUN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-
     // Allocate and initialize the closure
     let closure = hlp_alloc_closure_ptr(
-        &mut HLT_VAR_ARGS as *mut _,
+        &raw mut HLT_VAR_ARGS_TYPE,
         fun_var_args as *mut _,
         c as *mut _,
     );

@@ -1613,12 +1613,20 @@ pub struct HLInterpreter {
     fn_get_obj_rt: *mut c_void,
     /// Resolved stdlib function pointer: hlp_make_dyn
     fn_make_dyn: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_alloc_array
+    fn_alloc_array: *mut c_void,
+    /// HashLink's sentinel body for closures created by hlp_make_var_args.
+    fn_fun_var_args: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_enum
     fn_alloc_enum: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_dynobj
     fn_alloc_dynobj: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_virtual
     fn_alloc_virtual: *mut c_void,
+    /// Resolve a structural view without replacing the interpreter's raw value.
+    fn_to_virtual: *mut c_void,
+    /// Boxed virtual dispatch for implementation/interface signature mismatches.
+    fn_vcall_dyn: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_closure_void
     fn_alloc_closure_void: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_closure_ptr (bound closures)
@@ -1680,6 +1688,7 @@ pub struct HLInterpreter {
     prim_t_f64: *mut c_void,
     prim_t_bool: *mut c_void,
     prim_t_bytes: *mut c_void,
+    prim_t_dyn: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_scan_roots_done
     fn_gc_scan_roots_done: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_stack_top
@@ -1759,6 +1768,7 @@ impl HLInterpreter {
         let prim_t_f64 = find_prim(&mut c_type_factory, hl::hl_type_kind_HF64);
         let prim_t_bool = find_prim(&mut c_type_factory, hl::hl_type_kind_HBOOL);
         let prim_t_bytes = find_prim(&mut c_type_factory, hl::hl_type_kind_HBYTES);
+        let prim_t_dyn = find_prim(&mut c_type_factory, hl::hl_type_kind_HDYN);
 
         // Resolve internal stdlib function pointers for object operations
         let fn_alloc_obj = native_resolver
@@ -1770,6 +1780,12 @@ impl HLInterpreter {
         let fn_make_dyn = native_resolver
             .resolve_function("std", "hlp_make_dyn")
             .unwrap_or(std::ptr::null_mut());
+        let fn_alloc_array = native_resolver
+            .resolve_function("std", "hlp_alloc_array")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_fun_var_args = native_resolver
+            .resolve_function("std", "_fun_var_args")
+            .unwrap_or(std::ptr::null_mut());
         let fn_alloc_enum = native_resolver
             .resolve_function("std", "hlp_alloc_enum")
             .unwrap_or(std::ptr::null_mut());
@@ -1778,6 +1794,12 @@ impl HLInterpreter {
             .unwrap_or(std::ptr::null_mut());
         let fn_alloc_virtual = native_resolver
             .resolve_function("std", "hlp_alloc_virtual")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_to_virtual = native_resolver
+            .resolve_function("std", "hl_to_virtual")
+            .unwrap_or(std::ptr::null_mut());
+        let fn_vcall_dyn = native_resolver
+            .resolve_function("std", "hlp_vcall_dyn")
             .unwrap_or(std::ptr::null_mut());
         let fn_alloc_closure_void = native_resolver
             .resolve_function("std", "hlp_alloc_closure_void")
@@ -1880,9 +1902,13 @@ impl HLInterpreter {
             fn_alloc_obj,
             fn_get_obj_rt,
             fn_make_dyn,
+            fn_alloc_array,
+            fn_fun_var_args,
             fn_alloc_enum,
             fn_alloc_dynobj,
             fn_alloc_virtual,
+            fn_to_virtual,
+            fn_vcall_dyn,
             fn_alloc_closure_void,
             fn_alloc_closure_ptr,
             fn_dyn_getd,
@@ -1912,6 +1938,7 @@ impl HLInterpreter {
             prim_t_f64: prim_t_f64 as *mut c_void,
             prim_t_bool: prim_t_bool as *mut c_void,
             prim_t_bytes: prim_t_bytes as *mut c_void,
+            prim_t_dyn: prim_t_dyn as *mut c_void,
             fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
@@ -3175,6 +3202,7 @@ impl HLInterpreter {
             interp: *mut HLInterpreter,
             bytecode: *const DecodedBytecode,
             resolver: *const NativeFunctionResolver,
+            fiber_is_root_closure: *mut c_void,
         }
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
         unsafe extern "C" fn fiber_closure_runner(
@@ -3195,6 +3223,13 @@ impl HLInterpreter {
                 return std::ptr::null_mut();
             }
             let findex = fun.wrapping_sub(1);
+            let is_fiber_root = if ctx.fiber_is_root_closure.is_null() {
+                false
+            } else {
+                let is_root: unsafe extern "C" fn(*mut c_void) -> bool =
+                    std::mem::transmute(ctx.fiber_is_root_closure);
+                is_root(c)
+            };
             let mut args_v = Vec::new();
             if (*cl).hasValue != 0 && !(*cl).value.is_null() {
                 args_v.push(NanBoxedValue::from_ptr((*cl).value as usize));
@@ -3272,8 +3307,21 @@ impl HLInterpreter {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
-                    std::ptr::null_mut()
+                    if is_fiber_root {
+                        eprintln!("[ash] fiber thread uncaught exception: {:#}", e);
+                        std::ptr::null_mut()
+                    } else {
+                        // Native virtual/dynamic helpers re-enter AIR V2
+                        // through this same runner. Their call_native boundary
+                        // has an HL trap armed, so preserve normal Haxe
+                        // exception semantics instead of silently converting
+                        // the exception to null.
+                        HLInterpreter::raise_stub_bridge_failure(
+                            &*ctx.resolver,
+                            findex,
+                            e,
+                        )
+                    }
                 }
             }
         }
@@ -3291,10 +3339,14 @@ impl HLInterpreter {
             interp.sync_gc_scan_roots();
         }
         unsafe {
+            let fiber_is_root_closure = native_resolver
+                .resolve_function("std", "hlp_fiber_is_root_closure")
+                .unwrap_or(std::ptr::null_mut());
             CLOSURE_RUN_CTX = Some(ClosureRunCtx {
                 interp: self as *mut _,
                 bytecode: bytecode as *const _,
                 resolver: native_resolver as *const _,
+                fiber_is_root_closure,
             });
             let set = native_resolver
                 .resolve_function("std", "hlp_set_closure_runner")
@@ -5933,7 +5985,10 @@ impl HLInterpreter {
                 frame.registers.set(dst.0, val);
             }
             Opcode::ToVirtual { dst, src } => {
-                // TODO: Convert object to virtual interface (Phase 3)
+                // Keep raw objects in virtual-typed registers. The interpreter
+                // resolves structural fields and methods from the runtime
+                // object at the use site, where it still has the bytecode type
+                // needed to marshal interpreter stubs safely.
                 let val = frame.registers.get(src.0);
                 frame.registers.set(dst.0, val);
             }
@@ -6673,12 +6728,40 @@ impl HLInterpreter {
         dst: u32,
         src: u32,
     ) -> Result<StepResult> {
-        let frame = self.stack.last_mut().unwrap();
-        let val = frame.registers.get(src);
+        let mut val = self.stack.last().unwrap().registers.get(src);
         let dst_type_idx = func.regs[dst as usize].0;
         let dst_kind = bytecode.types[dst_type_idx].kind;
         let src_type_idx = func.regs[src as usize].0;
-        let src_kind = bytecode.types[src_type_idx].kind;
+        let mut src_kind = bytecode.types[src_type_idx].kind;
+
+        // Virtual registers retain raw objects for interpreter dispatch. At a
+        // checked object cast, recover the concrete backing object so the
+        // normal HOBJ path below can select its most-derived `__cast` proto
+        // (ArrayDyn's override, rather than ArrayBase's inherited fallback).
+        if src_kind == hl::hl_type_kind_HVIRTUAL
+            && dst_kind == hl::hl_type_kind_HOBJ
+            && val.is_ptr()
+            && !val.is_null()
+        {
+            let header = unsafe { *(val.as_ptr() as *const *mut hl_type) };
+            if !header.is_null() {
+                let runtime_kind = unsafe { (*header).kind };
+                if runtime_kind == hl::hl_type_kind_HVIRTUAL {
+                    let view = val.as_ptr() as *mut hl::vvirtual;
+                    let backing = unsafe { (*view).value };
+                    if !backing.is_null() {
+                        val = NanBoxedValue::from_ptr(backing as usize);
+                        src_kind = unsafe { (*(*backing).t).kind };
+                    }
+                } else {
+                    // AIR V2 intentionally retains the concrete object in an
+                    // HVIRTUAL register. It is already the value this cast is
+                    // trying to recover; asking hl_to_virtual for a view here
+                    // can also touch an uninitialised inline interface cache.
+                    src_kind = runtime_kind;
+                }
+            }
+        }
 
         let result = if val.is_null() || val.is_void() {
             match dst_kind {
@@ -6724,10 +6807,12 @@ impl HLInterpreter {
                                     NanBoxedValue::from_f64(raw as f64)
                                 }
                                 hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(raw != 0),
-                                _ => return Self::invalid_cast_step(frame),
+                                _ => {
+                                    return Self::invalid_cast_step(self.stack.last_mut().unwrap());
+                                }
                             }
                         } else {
-                            return Self::invalid_cast_step(frame);
+                            return Self::invalid_cast_step(self.stack.last_mut().unwrap());
                         }
                     }
                 }
@@ -6752,7 +6837,7 @@ impl HLInterpreter {
                         }
                     };
                     if rt_kind == hl::hl_type_kind_HFUN || rt_kind == hl::hl_type_kind_HMETHOD {
-                        frame.registers.set(dst, val);
+                        self.stack.last_mut().unwrap().registers.set(dst, val);
                         return Ok(StepResult::Continue);
                     }
                 }
@@ -6779,9 +6864,6 @@ impl HLInterpreter {
                     // For HOBJ→HOBJ: call hlp_dyn_castp for type-safe cast
                     // (validates supertype chain, returns null on mismatch).
                     // For other pointer casts: plain copy.
-                    let src_type_idx = func.regs[src as usize].0;
-                    let src_kind = bytecode.types[src_type_idx].kind;
-
                     {
                         // Debug: trace HOBJ→HOBJ super chain
                         if src_kind == hl::hl_type_kind_HOBJ
@@ -6928,7 +7010,7 @@ impl HLInterpreter {
                                 let dst_c_type = self.c_type_factory.get(dst_type_idx);
                                 let type_val = NanBoxedValue::from_ptr(dst_c_type as usize);
                                 // Store args in registers and dispatch as a call
-                                frame.registers.set(dst, val); // temp: store obj in dst
+                                self.stack.last_mut().unwrap().registers.set(dst, val);
                                 return Ok(StepResult::Call {
                                     findex,
                                     args: vec![val, type_val],
@@ -6937,7 +7019,7 @@ impl HLInterpreter {
                             } else if upcast {
                                 val
                             } else {
-                                return Self::invalid_cast_step(frame);
+                                return Self::invalid_cast_step(self.stack.last_mut().unwrap());
                             }
                         } else {
                             val // non-HOBJ cast, just copy
@@ -6951,7 +7033,7 @@ impl HLInterpreter {
             // register, so normalize its representation to that static kind.
             Self::coerce_value_for_static_kind(val, dst_kind)
         };
-        frame.registers.set(dst, result);
+        self.stack.last_mut().unwrap().registers.set(dst, result);
 
         Ok(StepResult::Continue)
     }
@@ -7571,6 +7653,47 @@ impl HLInterpreter {
         Ok(StepResult::Continue)
     }
 
+    /// Build the `Array<Dynamic>` passed to the closure wrapped by
+    /// `Reflect.makeVarArgs`.
+    fn pack_varargs_array(
+        &mut self,
+        func: &HLFunction,
+        args: &[Reg],
+        values: &[NanBoxedValue],
+    ) -> Result<NanBoxedValue> {
+        if self.fn_alloc_array.is_null() || self.prim_t_dyn.is_null() {
+            return Err(anyhow!("HashLink varargs array allocator is unavailable"));
+        }
+        type FnAllocArray = unsafe extern "C" fn(*mut hl_type, i32) -> *mut hl::varray;
+        let alloc: FnAllocArray = unsafe { std::mem::transmute(self.fn_alloc_array) };
+        let array = unsafe { alloc(self.prim_t_dyn as *mut hl_type, values.len() as i32) };
+        if array.is_null() {
+            return Err(anyhow!("HashLink varargs array allocation failed"));
+        }
+
+        let data = unsafe {
+            (array as *mut u8).add(std::mem::size_of::<hl::varray>()) as *mut *mut hl::vdynamic
+        };
+        for (i, (&reg, &value)) in args.iter().zip(values).enumerate() {
+            let type_idx = func.regs[reg.0 as usize].0;
+            let c_type = self.c_type_factory.get(type_idx);
+            let boxed = self.box_value_as_dynamic_with_type(value, c_type);
+            let ptr = if boxed.is_null() || boxed.is_void() {
+                std::ptr::null_mut()
+            } else if boxed.is_ptr() {
+                boxed.as_ptr() as *mut hl::vdynamic
+            } else {
+                return Err(anyhow!(
+                    "could not box vararg {} with type index {}",
+                    i,
+                    type_idx
+                ));
+            };
+            unsafe { *data.add(i) = ptr };
+        }
+        Ok(NanBoxedValue::from_ptr(array as usize))
+    }
+
     /// Resolve and stage a call through a closure value.
     ///
     /// Extracted from `execute_opcode` so the SSA dispatcher in
@@ -7587,13 +7710,19 @@ impl HLInterpreter {
         fun: u32,
         args: &[Reg],
     ) -> Result<StepResult> {
-        let frame = self.stack.last_mut().unwrap();
-        let closure_val = frame.registers.get(fun);
-        let mut arg_vals: Vec<NanBoxedValue> =
-            args.iter().map(|r| frame.registers.get(r.0)).collect();
+        let (closure_val, mut arg_vals, call_pc) = {
+            let frame = self.stack.last_mut().unwrap();
+            (
+                frame.registers.get(fun),
+                args.iter()
+                    .map(|r| frame.registers.get(r.0))
+                    .collect::<Vec<_>>(),
+                frame.pc,
+            )
+        };
 
         if closure_val.is_null() || closure_val.is_void() {
-            return Err(anyhow!("CallClosure on null closure (pc={})", frame.pc));
+            return Err(anyhow!("CallClosure on null closure (pc={call_pc})"));
         }
 
         // The closure value might be:
@@ -7618,6 +7747,42 @@ impl HLInterpreter {
                 }
                 unsafe {
                     let fun_ptr = (*cl_ptr).fun;
+
+                    // `hlp_make_var_args` does not store an interpreter stub
+                    // in `fun`: it stores HashLink's real `fun_var_args`
+                    // sentinel and keeps the original Haxe closure in
+                    // `value`. Native HashLink recognizes that sentinel,
+                    // packs the typed arguments into Array<Dynamic>, then
+                    // invokes the wrapped closure. Treating the native
+                    // address as `findex + 1` produced enormous bogus
+                    // findexes on both arm64 and x86-64.
+                    if !self.fn_fun_var_args.is_null() && fun_ptr == self.fn_fun_var_args {
+                        let wrapped = (*cl_ptr).value as *const _vclosure;
+                        if wrapped.is_null() {
+                            return Err(anyhow!("varargs closure has no wrapped closure"));
+                        }
+                        let packed = self.pack_varargs_array(func, args, &arg_vals)?;
+                        let wrapped_fun = (*wrapped).fun as usize;
+                        let fi = wrapped_fun.wrapping_sub(1);
+                        if func_of(&self.targets, fi).is_none()
+                            && native_of(&self.targets, fi).is_none()
+                        {
+                            return Err(anyhow!(
+                                "varargs wrapped closure has invalid findex {fi}"
+                            ));
+                        }
+                        arg_vals.clear();
+                        if (*wrapped).hasValue != 0 && !(*wrapped).value.is_null() {
+                            arg_vals.push(NanBoxedValue::from_ptr((*wrapped).value as usize));
+                        }
+                        arg_vals.push(packed);
+                        return Ok(StepResult::Call {
+                            findex: fi,
+                            args: arg_vals,
+                            dst,
+                        });
+                    }
+
                     // Extract findex from stub pointer (findex+1)
                     let fi = (fun_ptr as usize).wrapping_sub(1);
                     let bound_value = (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null();
@@ -7630,7 +7795,7 @@ impl HLInterpreter {
                     {
                         ash_core::callsite_profile::record_closure(
                             bytecode.functions[func_idx].findex as u32,
-                            frame.pc as u32,
+                            call_pc as u32,
                             fi as u32,
                             bound_value,
                         );
@@ -7669,7 +7834,6 @@ impl HLInterpreter {
         field: usize,
         args: &[Reg],
     ) -> Result<StepResult> {
-        let frame = self.stack.last_mut().unwrap();
         // CallMethod: args[0] is 'this'. CallThis: the receiver is
         // IMPLICITLY register 0 (HashLink OCallThis semantics) and
         // args hold only the real arguments — prepend Reg(0), else
@@ -7683,14 +7847,22 @@ impl HLInterpreter {
             args.to_vec()
         };
         let args = &args_with_this;
-        let arg_vals: Vec<NanBoxedValue> = args.iter().map(|r| frame.registers.get(r.0)).collect();
+        let (arg_vals, call_pc) = {
+            let frame = self.stack.last().unwrap();
+            (
+                args.iter()
+                    .map(|r| frame.registers.get(r.0))
+                    .collect::<Vec<_>>(),
+                frame.pc,
+            )
+        };
         let this_val = arg_vals[0];
 
         if this_val.is_null() || this_val.is_void() {
             return Err(anyhow!(
                 "CallMethod on null object (field={}, pc={})",
                 field,
-                frame.pc
+                call_pc
             ));
         }
 
@@ -7704,43 +7876,252 @@ impl HLInterpreter {
         {
             let virt_type = self.c_type_factory.get(this_reg_type_idx);
             let obj_ptr = this_val.as_ptr() as *const u8;
-            let findex_opt = unsafe {
+            let (findex_opt, receiver, hfield, needs_boxed_dispatch) = unsafe {
                 // Get hashed_name of the virtual field
                 let virt = (*virt_type).__bindgen_anon_1.virt.as_ref();
                 if let Some(virt_data) = virt {
                     if (field as i32) < virt_data.nfields {
                         let virt_field = &*virt_data.fields.add(field);
                         let hname = virt_field.hashed_name;
-                        // Walk the runtime obj's proto chain for hname
-                        let mut obj_hl_type = *(obj_ptr as *const *mut hl_type);
-                        let mut found = None;
-                        'search: while !obj_hl_type.is_null()
-                            && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
-                                || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
+                        // ToVirtual can leave a raw object in the register, or
+                        // native field access can materialize a real vvirtual
+                        // view. A view dispatches against its wrapped object
+                        // and passes that object as `this`; looking for an
+                        // object proto on the HVIRTUAL header itself finds
+                        // nothing and made every iterator-style interface call
+                        // fail at field zero.
+                        let header = *(obj_ptr as *const *mut hl_type);
+                        let dispatch_obj = if !header.is_null()
+                            && (*header).kind == hl::hl_type_kind_HVIRTUAL
                         {
-                            let obj = (*obj_hl_type).__bindgen_anon_1.obj;
-                            for i in 0..(*obj).nproto as usize {
-                                let pr = &*(*obj).proto.add(i);
-                                if pr.hashed_name == hname {
-                                    found = Some(pr.findex as usize);
-                                    break 'search;
+                            let value = (*(obj_ptr as *const hl::vvirtual)).value;
+                            if value.is_null() {
+                                std::ptr::null()
+                            } else {
+                                value as *const u8
+                            }
+                        } else {
+                            obj_ptr
+                        };
+                        if !header.is_null() && (*header).kind == hl::hl_type_kind_HVIRTUAL {
+                            let dispatch_type = if dispatch_obj.is_null() {
+                                std::ptr::null_mut()
+                            } else {
+                                *(dispatch_obj as *const *mut hl_type)
+                            };
+                            if dispatch_obj.is_null()
+                                || (!dispatch_type.is_null()
+                                    && (*dispatch_type).kind == hl::hl_type_kind_HDYNOBJ)
+                            {
+                                // A virtual over an anonymous object stores an
+                                // address for each matching field immediately
+                                // after the vvirtual header. Function fields
+                                // are closure slots, not object protos. A
+                                // self-backed virtual uses the same layout with
+                                // `value == null`; invoke that closure and omit
+                                // the structural wrapper from the argument list.
+                                let fields = obj_ptr
+                                    .add(std::mem::size_of::<hl::vvirtual>())
+                                    as *const *mut c_void;
+                                let slot = *fields.add(field);
+                                if !slot.is_null() {
+                                    let closure = *(slot as *const *const _vclosure);
+                                    if !closure.is_null() {
+                                        let fi = ((*closure).fun as usize).wrapping_sub(1);
+                                        if func_of(&self.targets, fi).is_some()
+                                            || native_of(&self.targets, fi).is_some()
+                                        {
+                                            let mut call_args = arg_vals[1..].to_vec();
+                                            if (*closure).hasValue != 0
+                                                && !(*closure).value.is_null()
+                                            {
+                                                call_args.insert(
+                                                    0,
+                                                    NanBoxedValue::from_ptr(
+                                                        (*closure).value as usize,
+                                                    ),
+                                                );
+                                            }
+                                            return Ok(StepResult::Call {
+                                                findex: fi,
+                                                args: call_args,
+                                                dst,
+                                            });
+                                        }
+                                    }
                                 }
                             }
-                            // Try super class
-                            obj_hl_type = (*obj).super_;
                         }
-                        found
+                        if dispatch_obj.is_null() {
+                            (None, this_val, hname, false)
+                        } else {
+                            // Walk the runtime obj's proto chain for hname.
+                            let mut obj_hl_type = *(dispatch_obj as *const *mut hl_type);
+                            let mut found = None;
+                            'search: while !obj_hl_type.is_null()
+                                && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
+                                    || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
+                            {
+                                let obj = (*obj_hl_type).__bindgen_anon_1.obj;
+                                for i in 0..(*obj).nproto as usize {
+                                    let pr = &*(*obj).proto.add(i);
+                                    if pr.hashed_name == hname {
+                                        found = Some(pr.findex as usize);
+                                        break 'search;
+                                    }
+                                }
+                                // Try super class.
+                                obj_hl_type = (*obj).super_;
+                            }
+
+                            // A class value can satisfy a structural function
+                            // field with one of its static closures. Such a
+                            // field is object data, not an instance proto, so
+                            // resolve it by hash and invoke the closure without
+                            // passing the structural receiver as `this`.
+                            if found.is_none()
+                                && !header.is_null()
+                                && (*header).kind == hl::hl_type_kind_HOBJ
+                            {
+                                let closure_value = Self::dyn_get_field_by_hash(
+                                    dispatch_obj as *mut c_void,
+                                    hname,
+                                    (*virt_field.t).kind,
+                                    virt_field.t as *mut c_void,
+                                    self.fn_dyn_getd,
+                                    self.fn_dyn_getf,
+                                    self.fn_dyn_geti64,
+                                    self.fn_dyn_geti,
+                                    self.fn_dyn_getp,
+                                );
+                                if closure_value.is_ptr() {
+                                    let closure = closure_value.as_ptr() as *const _vclosure;
+                                    if !closure.is_null() {
+                                        let fi = ((*closure).fun as usize).wrapping_sub(1);
+                                        if func_of(&self.targets, fi).is_some()
+                                            || native_of(&self.targets, fi).is_some()
+                                        {
+                                            let mut call_args = arg_vals[1..].to_vec();
+                                            if (*closure).hasValue != 0
+                                                && !(*closure).value.is_null()
+                                            {
+                                                call_args.insert(
+                                                    0,
+                                                    NanBoxedValue::from_ptr(
+                                                        (*closure).value as usize,
+                                                    ),
+                                                );
+                                            }
+                                            return Ok(StepResult::Call {
+                                                findex: fi,
+                                                args: call_args,
+                                                dst,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            let receiver = NanBoxedValue::from_ptr(dispatch_obj as usize);
+                            let needs_boxed_dispatch = if found.is_some()
+                                && !self.fn_to_virtual.is_null()
+                            {
+                                type FnToVirtual = unsafe extern "C" fn(
+                                    *mut hl_type,
+                                    *mut hl::vdynamic,
+                                ) -> *mut hl::vvirtual;
+                                let to_virtual: FnToVirtual =
+                                    std::mem::transmute(self.fn_to_virtual);
+                                let view = if !header.is_null()
+                                    && (*header).kind == hl::hl_type_kind_HVIRTUAL
+                                {
+                                    obj_ptr as *mut hl::vvirtual
+                                } else {
+                                    to_virtual(
+                                        virt_type,
+                                        dispatch_obj as *mut hl::vdynamic,
+                                    )
+                                };
+                                if view.is_null() {
+                                    true
+                                } else {
+                                    let fields = (view as *const u8)
+                                        .add(std::mem::size_of::<hl::vvirtual>())
+                                        as *const *mut c_void;
+                                    (*fields.add(field)).is_null()
+                                }
+                            } else {
+                                false
+                            };
+                            (found, receiver, hname, needs_boxed_dispatch)
+                        }
                     } else {
-                        None
+                        (None, this_val, 0, false)
                     }
                 } else {
-                    None
+                    (None, this_val, 0, false)
                 }
             };
             if let Some(findex) = findex_opt {
+                let dst_type_idx = func.regs[dst as usize].0;
+                let dst_kind = bytecode.types[dst_type_idx].kind;
+                if needs_boxed_dispatch && dst_kind != hl::hl_type_kind_HVOID {
+                    if self.fn_vcall_dyn.is_null() {
+                        return Err(anyhow!("hlp_vcall_dyn is unavailable"));
+                    }
+                    let packed = self.pack_varargs_array(func, &args[1..], &arg_vals[1..])?;
+                    type FnVCallDyn = unsafe extern "C" fn(
+                        *mut hl::vdynamic,
+                        i32,
+                        *mut hl::varray,
+                    ) -> *mut hl::vdynamic;
+                    let vcall: FnVCallDyn = unsafe { std::mem::transmute(self.fn_vcall_dyn) };
+                    let result = unsafe {
+                        vcall(
+                            receiver.as_ptr() as *mut hl::vdynamic,
+                            hfield,
+                            packed.as_ptr() as *mut hl::varray,
+                        )
+                    };
+                    let value = if result.is_null() {
+                        Self::coerce_value_for_static_kind(NanBoxedValue::null(), dst_kind)
+                    } else if Self::is_unboxable_primitive_kind(dst_kind) {
+                        self.dynamic_to_value_for_kind(result, dst_kind)
+                    } else if matches!(
+                        dst_kind,
+                        hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL
+                    ) || self.fn_dyn_castp.is_null()
+                    {
+                        NanBoxedValue::from_ptr(result as usize)
+                    } else {
+                        type FnDynCastP = unsafe extern "C" fn(
+                            *mut c_void,
+                            *mut c_void,
+                            *mut c_void,
+                        ) -> *mut c_void;
+                        let cast: FnDynCastP = unsafe { std::mem::transmute(self.fn_dyn_castp) };
+                        let mut slot = result;
+                        let target = self.c_type_factory.get(dst_type_idx) as *mut c_void;
+                        let casted = unsafe {
+                            cast(
+                                &mut slot as *mut *mut hl::vdynamic as *mut c_void,
+                                (*result).t as *mut c_void,
+                                target,
+                            )
+                        };
+                        if casted.is_null() {
+                            NanBoxedValue::null()
+                        } else {
+                            NanBoxedValue::from_ptr(casted as usize)
+                        }
+                    };
+                    self.stack.last_mut().unwrap().registers.set(dst, value);
+                    return Ok(StepResult::Continue);
+                }
+                let mut call_args = arg_vals;
+                call_args[0] = receiver;
                 return Ok(StepResult::Call {
                     findex,
-                    args: arg_vals,
+                    args: call_args,
                     dst,
                 });
             }
@@ -8459,10 +8840,9 @@ impl HLInterpreter {
                             set!(dst, NanBoxedValue::from_i32(i));
                         }
                     }
-                    // ToVirtual is a no-op here for the same reason it is in the
-                    // opcode dispatcher: virtual dispatch resolves off the raw
-                    // object at the call site.
                     K::UnsafeCast | K::ToVirtual => {
+                        // AIR V2 keeps the raw object representation here;
+                        // structural consumers resolve a view at the use site.
                         let v = get!(src);
                         set!(dst, v);
                     }
@@ -9512,6 +9892,33 @@ impl HLInterpreter {
         }
         let ka = (*ta).kind;
         let kb = (*tb).kind;
+        match (ka, kb) {
+            (ka, kb)
+                if matches!(ka, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ)
+                    && kb == hl::hl_type_kind_HVIRTUAL =>
+            {
+                let value = (*(b as *mut hl::vvirtual)).value;
+                return !value.is_null() && self.dynamic_eq(a, value);
+            }
+            (ka, kb)
+                if ka == hl::hl_type_kind_HVIRTUAL
+                    && matches!(kb, hl::hl_type_kind_HOBJ | hl::hl_type_kind_HDYNOBJ) =>
+            {
+                let value = (*(a as *mut hl::vvirtual)).value;
+                return !value.is_null() && self.dynamic_eq(value, b);
+            }
+            (ka, kb)
+                if ka == hl::hl_type_kind_HVIRTUAL && kb == hl::hl_type_kind_HVIRTUAL =>
+            {
+                let av = (*(a as *mut hl::vvirtual)).value;
+                let bv = (*(b as *mut hl::vvirtual)).value;
+                // HashLink reports an invalid comparison for two distinct
+                // self-backed virtual records. For equality that means false,
+                // not "compare their null value slots as equal".
+                return !av.is_null() && !bv.is_null() && self.dynamic_eq(av, bv);
+            }
+            _ => {}
+        }
         if ka == kb {
             return match ka {
                 k if k == hl::hl_type_kind_HI32 => (*a).v.i == (*b).v.i,
@@ -11149,6 +11556,14 @@ impl HLInterpreter {
                     let f: unsafe extern "C" fn(f64, f64, f64, f64) -> i64 =
                         std::mem::transmute(func_ptr);
                     f(gf(0), gf(1), gf(2), gf(3))
+                }
+                // --- 6 args ---
+                (6, false, 0b100000) => {
+                    // (i64, i64, i64, i64, i64, f64) -> i64
+                    // e.g. socket_select(read, write, other, tmp, size, timeout)
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, f64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gi(2), gi(3), gi(4), gf(5))
                 }
                 _ => {
                     return Err(anyhow!(

@@ -170,6 +170,29 @@ unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const u
     g(this)
 }
 
+/// Invoke a zero-argument closure-valued `__string` field. Dynamic-object
+/// values store a pointer to the closure in their pointer-slot array; the
+/// closure's function can be either native code or an interpreter sentinel.
+unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
+    if c.is_null() || (*c).fun.is_null() {
+        return ptr::null();
+    }
+    let addr = (*c).fun as usize;
+    if addr < 0x100000 {
+        let Some(runner) = crate::fiber::closure_runner() else {
+            return ptr::null();
+        };
+        return runner(c, ptr::null_mut(), 0) as *const uchar;
+    }
+    if (*c).hasValue != 0 {
+        let f: unsafe extern "C" fn(*mut c_void) -> *const uchar =
+            std::mem::transmute((*c).fun);
+        f((*c).value)
+    } else {
+        let f: unsafe extern "C" fn() -> *const uchar = std::mem::transmute((*c).fun);
+        f()
+    }
+}
 
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
     // Get the global GC instance
@@ -697,20 +720,12 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
                 && (*(*(*f).t).__bindgen_anon_1.fun.as_ref().unwrap().ret).kind
                     == hl_type_kind_HBYTES
             {
-                let v = (*o)
+                let slot = (*o)
                     .values
-                    .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize)
-                    as *mut vclosure;
-                if !v.is_null() {
-                    if (*v).hasValue != 0 {
-                        let fun: unsafe extern "C" fn(*mut c_void) -> *mut uchar =
-                            std::mem::transmute((*v).fun);
-                        hlp_buffer_str(b, fun((*v).value));
-                    } else {
-                        let fun: unsafe extern "C" fn() -> *mut uchar =
-                            std::mem::transmute((*v).fun);
-                        hlp_buffer_str(b, fun());
-                    }
+                    .add((*f).field_index as usize & HL_DYNOBJ_INDEX_MASK as usize);
+                let closure = *slot as *mut vclosure;
+                if !closure.is_null() {
+                    hlp_buffer_str(b, call_closure_tostring_or_stub(closure));
                     return;
                 }
             }

@@ -530,30 +530,17 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                 }
                 // No wrapper generator is registered in interpreter mode
                 // (hlc_get_wrapper is a JIT service), so a signature-bending
-                // cast used to die in invalid_cast even when no trampoline
-                // is needed. When arity matches and every arg and the
-                // return agree in machine class (both pointers, or the
-                // exact same primitive kind), the closure IS callable under
-                // the target type as it stands — the dynamic call paths
-                // re-marshal per the callee's own type on every invocation,
-                // which is where upstream's wrapper would have done its
-                // coercion anyway (Issue5082: (String,dynamic)->Content
-                // cast to (String,dynamic)->virtual<...>).
+                // cast used to die in invalid_cast even though the interpreter
+                // does not call this pointer through either C signature. Its
+                // closure dispatcher marshals arguments against the callee's
+                // own bytecode type and coerces the result into the caller's
+                // destination type. Matching arity is therefore sufficient;
+                // this also covers a void method fetched dynamically as
+                // `Dynamic()->Dynamic` (Issue6294).
                 let cf = (*(*c).t).__bindgen_anon_1.fun.as_ref();
                 let tf = (*to).__bindgen_anon_1.fun.as_ref();
                 if let (Some(cf), Some(tf)) = (cf, tf) {
-                    let abi_compat = |a: *mut hl_type, b: *mut hl_type| -> bool {
-                        let (ka, kb) = ((*a).kind, (*b).kind);
-                        if ka == kb {
-                            return true;
-                        }
-                        ka >= hl_type_kind_HBYTES && kb >= hl_type_kind_HBYTES
-                    };
-                    if cf.nargs == tf.nargs
-                        && abi_compat(cf.ret, tf.ret)
-                        && (0..cf.nargs as usize)
-                            .all(|i| abi_compat(*cf.args.add(i), *tf.args.add(i)))
-                    {
+                    if cf.nargs == tf.nargs {
                         return c as *mut c_void;
                     }
                 }
@@ -730,6 +717,31 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
             Ordering::Greater => 1,
         }
     };
+
+    match (ka, kb) {
+        (ka, kb)
+            if matches!(ka, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ)
+                && kb == hl_type_kind_HVIRTUAL =>
+        {
+            return hlp_dyn_compare(a, (*(b as *mut vvirtual)).value);
+        }
+        (ka, kb)
+            if ka == hl_type_kind_HVIRTUAL
+                && matches!(kb, hl_type_kind_HOBJ | hl_type_kind_HDYNOBJ) =>
+        {
+            return hlp_dyn_compare((*(a as *mut vvirtual)).value, b);
+        }
+        (ka, kb) if ka == hl_type_kind_HVIRTUAL && kb == hl_type_kind_HVIRTUAL => {
+            let av = (*(a as *mut vvirtual)).value;
+            let bv = (*(b as *mut vvirtual)).value;
+            return if !av.is_null() && !bv.is_null() {
+                hlp_dyn_compare(av, bv)
+            } else {
+                hl::hl_invalid_comparison as i32
+            };
+        }
+        _ => {}
+    }
 
     if ka == kb {
         return match ka {

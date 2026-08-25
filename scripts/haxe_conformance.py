@@ -33,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 # Suites that compile to HashLink bytecode and are meaningful for a VM.
@@ -106,7 +107,16 @@ def ensure_checkout(root: pathlib.Path, tag: str) -> pathlib.Path:
     are not.
     """
     src = root / f"haxe-tests-{tag}"
-    if (src / "tests").is_dir():
+    # A historical cache format kept only built bytecode under tests/. That
+    # is enough for unit and threads, but sys reads fixtures and compiles its
+    # helper programs at runtime. Treat such a cache as incomplete instead of
+    # publishing the resulting missing-file errors as Ash failures.
+    checkout_markers = (
+        src / ".git",
+        src / "tests" / "sys" / "gen_test_res.py",
+        src / "tests" / "sys" / "src" / "ExitCode.c",
+    )
+    if all(marker.exists() for marker in checkout_markers):
         return src
     src.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(src, ignore_errors=True)
@@ -634,6 +644,28 @@ def main(argv=None) -> int:
         "results": [],
     }
 
+    # The sys suite launches helper .hl programs through the conventional
+    # `hl` command. Point that name at the engine currently being measured;
+    # otherwise a missing system HashLink fails valid Ash runs, while an
+    # installed one quietly measures two different VMs in the same row.
+    vm_shim_temp = tempfile.TemporaryDirectory(prefix="ash-haxe-vm-")
+    vm_shims = {}
+
+    def env_for_vm(base_env, vm):
+        shim = vm_shims.get(vm)
+        if shim is None:
+            shim = pathlib.Path(vm_shim_temp.name) / str(len(vm_shims))
+            shim.mkdir()
+            launcher = shim / ("hl.exe" if os.name == "nt" else "hl")
+            try:
+                launcher.symlink_to(vm)
+            except OSError:
+                shutil.copy2(vm, launcher)
+            vm_shims[vm] = shim
+        env = base_env.copy()
+        env["PATH"] = str(shim) + os.pathsep + env.get("PATH", "")
+        return env
+
     for name in wanted:
         spec = SUITES[name]
         sdir = src / spec["dir"]
@@ -657,8 +689,25 @@ def main(argv=None) -> int:
 
         if not args.skip_build:
             print(f"   building {spec['hxml']} ...", flush=True)
-            r = run([args.haxe, spec["hxml"], *spec.get("args", [])],
-                    cwd=str(sdir), timeout=args.timeout)
+            # Upstream deliberately ships tests/sys/compile-fs.hxml with its
+            # invalid-Unicode filesystem probe enabled and tells APFS users to
+            # comment that define out. Do exactly that for the duration of a
+            # Darwin build, then restore the checkout byte-for-byte. This is
+            # upstream's platform switch, not a locally altered test case.
+            fs_hxml = sdir / "compile-fs.hxml"
+            fs_hxml_original = None
+            if name == "sys" and sys.platform == "darwin" and fs_hxml.is_file():
+                fs_hxml_original = fs_hxml.read_text()
+                fs_hxml.write_text(fs_hxml_original.replace(
+                    "-D TEST_INVALID_UNICODE_FS",
+                    "# -D TEST_INVALID_UNICODE_FS (disabled on APFS)",
+                ))
+            try:
+                r = run([args.haxe, spec["hxml"], *spec.get("args", [])],
+                        cwd=str(sdir), timeout=args.timeout)
+            finally:
+                if fs_hxml_original is not None:
+                    fs_hxml.write_text(fs_hxml_original)
             if r.returncode != 0:
                 err = (r.stdout + r.stderr).strip().splitlines()
                 detail = next((l for l in err if "ERROR" in l or "Error" in l), err[-1] if err else "")
@@ -735,6 +784,10 @@ def main(argv=None) -> int:
                 t0 = time.perf_counter()
                 timed_out = False
                 suite_env = os.environ.copy()
+                suite_env = env_for_vm(
+                    suite_env,
+                    ash if label.startswith("ash:") else args.reference,
+                )
                 if name == "sys":
                     # Upstream's TestSys explicitly requires the runner to
                     # provide this fixture. It is inherited by subprocesses,
@@ -778,7 +831,8 @@ def main(argv=None) -> int:
 
     ash_rows = [r for r in report["results"]
                 if r["engine"].startswith("ash:") and r["status"] != "SKIP"]
-    passes = sum(1 for r in ash_rows if r["status"] == "PASS")
+    successful = {"PASS", "OK"}
+    passes = sum(1 for r in ash_rows if r["status"] in successful)
     total = len(ash_rows)
     # Unit isolation has one utest process per case, so its aggregate tally
     # lives directly on the result row. Whole-suite sys/threads rows carry the
@@ -909,8 +963,8 @@ def main(argv=None) -> int:
                for r in base.get("results", [])}
         regressed = [
             r for r in report["results"]
-            if was.get((r["suite"], r.get("program", ""), r["engine"])) == "PASS"
-            and r["status"] != "PASS"
+            if was.get((r["suite"], r.get("program", ""), r["engine"])) in successful
+            and r["status"] not in successful
         ]
         if regressed:
             print("\nREGRESSED against the baseline:")

@@ -618,6 +618,37 @@ minimum (base alone came out 136.4, 141.0, 143.7 and 151ms), not a mode
 mixture. Either way a sub-10% delta on method_call means nothing without
 several sweeps, and this is the first thing to check when it moves in CI.
 
+## The scoreboard moved: HL/C and the JVM are the targets now
+
+Latest CI medians, ash against each engine (within-row, so machine-independent):
+
+    bench          ash      HL/C     hl2      hxjvm    vs HL/C       vs JVM
+    fib            23.8     169      467      348      7.10x faster  14.63x
+    binary_trees   560.5    3452     3554     210      6.16x faster  2.67x SLOWER
+    nbody          641.1    964      1315     984      1.50x faster  1.53x faster
+    mandelbrot     390.6    -        42749    788      -             2.02x faster
+    method_call    121.0    117      199      151      1.03x slower  1.25x faster
+    closure_call   136.9    134      248      154      1.02x slower  1.13x faster
+    free_call      119.1    96       200      146      1.24x slower  1.22x faster
+    inlined_call   119.6    96       203      150      1.25x slower  1.25x faster
+    deltablue      84.2     14       23       87       5.84x SLOWER  1.03x faster
+
+ash now leads the JVM on 8 of 9 (binary_trees is the exception) and has passed
+hl2 everywhere. Against HL/C it trails on five rows, but four are within 1.25x
+and one is not: deltablue carries essentially the whole remaining gap.
+
+**deltablue is not a "JITs cannot win short programs" problem.** hl2-ir is also
+a JIT, on the same bytecode, and finishes in 23ms; ash is 3.66x that. The JVM
+is slow here too (87ms), which is interesting but is not an excuse -- HL/C and
+hl2 both demonstrate the workload is winnable. Local recon (54.5ms here
+against CI's 84.2): `air prepare` on the MUTATOR is 12.27ms over 55 calls
+(22.5% of wall), the interpreter is ~26% of samples (execute_opcode 13.0%,
+execute_hl_function 7.4%, op_field_set 5.6%), and only 1.9% of samples land in
+compiled code at all despite 38 Cranelift and 5 LLVM compiles, with tier-0
+still firing 16-18ms into the run. Sized separately: dropping the
+per-native-call `sigprocmask` (sigsetjmp savemask 1 -> 0) is worth -3.9% here
+and ~0 elsewhere, and needs the signal unblocked on the recovery path first.
+
 ## binary_trees: the JVM's 2.84x, measured rather than assumed
 
 ash ~597ms against Haxe/JVM's ~210ms in CI, a ratio that holds across three

@@ -4622,6 +4622,47 @@ fn inline_merges_the_callee_native_declarations() {
 }
 
 #[test]
+fn inline_retains_frames_that_transitively_capture_a_stack() {
+    let (ops, tys) = fix_caller_call1();
+    let wrapper = (
+        vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(8),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    );
+    let capture = (
+        vec![
+            Opcode::Call1 {
+                dst: Reg(1),
+                fun: RefFun(3),
+                arg0: Reg(0),
+            },
+            Opcode::Ret { ret: Reg(1) },
+        ],
+        vec![t(0); 2],
+    );
+    let mut nt = NativeTable::new();
+    nt.declare(NativeImport::new(
+        3,
+        "std",
+        "call_stack_raw",
+        vec![t(0)],
+        t(0),
+    ))
+    .unwrap();
+    let info = bodies(&[(7, wrapper), (8, capture)]).with_natives(nt);
+    let mut f = lower(&ops, &tys).expect("lower");
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats.inlined, 0, "{}", f.dump());
+    assert_eq!(any_call(&f), 1, "stack-sensitive call must remain\n{}", f.dump());
+}
+
+#[test]
 fn inline_preserves_semantics() {
     let cases: Vec<(
         &str,

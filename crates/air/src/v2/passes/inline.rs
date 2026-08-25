@@ -6,7 +6,7 @@ use crate::v2::module::ModuleInfo;
 use crate::v2::verify::verify;
 use anyhow::Result;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Replaces a direct `Call` with the callee's body.
 ///
@@ -43,6 +43,11 @@ use std::collections::HashMap;
 ///   continuation unreachable;
 /// * **types must line up** — every returned value and every argument must
 ///   have the type the caller's call expects;
+/// * **stack capture keeps physical frames** — callees that transitively reach
+///   HashLink's call/exception-stack natives are not inlined. Haxe exception
+///   constructors adjust a logical skip count for their physical constructor
+///   frames; copying the adjustment while removing the frame skips one of the
+///   caller's frames instead;
 /// * **recursion is a policy, not an accident.** A DIRECT self-call may be
 ///   expanded — it replaces two calls with the work of three smaller ones, so
 ///   the recurrence base drops (naive fib: 1.618 → 1.380; GCC's recursive
@@ -68,6 +73,9 @@ pub struct Inlining<'m> {
     /// Lowered callee bodies, so a callee inlined at several sites is lowered
     /// once. `None` records "asked, not inlinable".
     cache: RefCell<HashMap<usize, Option<Function>>>,
+    /// Whether a callee transitively reaches a stack-capture native. These
+    /// functions must retain their physical frame; see the module guarantee.
+    stack_sensitive: RefCell<HashMap<usize, bool>>,
     /// The function's instruction count before the first inline, recorded on
     /// the first `run`. One `Inlining` serves one function's pipeline, so this
     /// is the baseline [`GROWTH_LIMIT`] measures against — unlike the per-run
@@ -82,6 +90,7 @@ impl<'m> Inlining<'m> {
         Inlining {
             info,
             cache: RefCell::new(HashMap::new()),
+            stack_sensitive: RefCell::new(HashMap::new()),
             original_size: Cell::new(None),
             self_expanded: Cell::new(0),
         }
@@ -100,6 +109,42 @@ impl<'m> Inlining<'m> {
             .filter(|g| verify(g).is_ok() && !g.blocks.is_empty());
         self.cache.borrow_mut().insert(findex, lowered.clone());
         lowered
+    }
+
+    fn is_stack_sensitive(&self, findex: usize) -> bool {
+        self.is_stack_sensitive_inner(findex, &mut HashSet::new())
+    }
+
+    fn is_stack_sensitive_inner(&self, findex: usize, visiting: &mut HashSet<usize>) -> bool {
+        if let Some(&sensitive) = self.stack_sensitive.borrow().get(&findex) {
+            return sensitive;
+        }
+        if !visiting.insert(findex) {
+            return false;
+        }
+        let sensitive = self.body(findex).is_some_and(|body| {
+            body.blocks
+                .iter()
+                .flat_map(|block| block.instrs.iter())
+                .filter_map(|ins| match ins {
+                    Instr::Call { fun, .. } => Some(*fun),
+                    _ => None,
+                })
+                .any(|target| {
+                    self.info.native(target).is_some_and(|native| {
+                        matches!(
+                            native.name.as_str(),
+                            "call_stack_raw"
+                                | "exception_stack_raw"
+                                | "call_stack"
+                                | "exception_stack"
+                        )
+                    }) || self.is_stack_sensitive_inner(target, visiting)
+                })
+        });
+        visiting.remove(&findex);
+        self.stack_sensitive.borrow_mut().insert(findex, sensitive);
+        sensitive
     }
 }
 
@@ -200,6 +245,9 @@ impl Inlining<'_> {
                     continue;
                 }
                 let Some(g) = self.body(*fun) else { continue };
+                if self.is_stack_sensitive(*fun) {
+                    continue;
+                }
                 // Direct mutual recursion: a callee that calls back into this
                 // function re-opens on every round, and no per-site budget
                 // bounds that. Never inlined.

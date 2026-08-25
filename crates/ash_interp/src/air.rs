@@ -30,8 +30,9 @@
 //! per-module: one function `lower` cannot handle must not cost the rest of
 //! the program its optimization.
 
-use std::sync::OnceLock;
+use std::{collections::HashMap, sync::OnceLock};
 
+use air::opcodes::Opcode;
 use ash_core::air_pipeline::{optimized, AshModule};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
@@ -80,6 +81,162 @@ fn dump_findex() -> Option<i32> {
     *CELL.get_or_init(|| std::env::var("ASH_AIR_DUMP").ok().and_then(|v| v.trim().parse().ok()))
 }
 
+/// Opcodes whose source location can become part of a Haxe stack trace.
+///
+/// AIR does not yet carry general debug metadata through every pass. These
+/// events are nevertheless stable enough to align as a sequence: calls park
+/// caller frames, while Throw/NullCheck/Assert originate exception frames.
+/// LCS alignment tolerates dead calls disappearing and inlined calls appearing
+/// without shifting every later source position as a simple zip would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum StackEvent {
+    DirectCall(usize),
+    MethodCall(usize),
+    ClosureCall,
+    IndirectCall,
+    Throw,
+    Rethrow,
+    NullCheck,
+    Assert,
+}
+
+fn stack_event(op: &Opcode) -> Option<StackEvent> {
+    match op {
+        Opcode::Call0 { fun, .. }
+        | Opcode::Call1 { fun, .. }
+        | Opcode::Call2 { fun, .. }
+        | Opcode::Call3 { fun, .. }
+        | Opcode::Call4 { fun, .. }
+        | Opcode::CallN { fun, .. } => Some(StackEvent::DirectCall(fun.0)),
+        Opcode::CallMethod { field, .. } | Opcode::CallThis { field, .. } => {
+            Some(StackEvent::MethodCall(field.0))
+        }
+        Opcode::CallClosure { .. } => Some(StackEvent::ClosureCall),
+        Opcode::IndirectCall { .. } => Some(StackEvent::IndirectCall),
+        Opcode::Throw { .. } => Some(StackEvent::Throw),
+        Opcode::Rethrow { .. } => Some(StackEvent::Rethrow),
+        Opcode::NullCheck { .. } => Some(StackEvent::NullCheck),
+        Opcode::Assert => Some(StackEvent::Assert),
+        _ => None,
+    }
+}
+
+fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
+    let before: Vec<(usize, StackEvent)> = raw
+        .ops
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| stack_event(op).map(|event| (pc, event)))
+        .collect();
+    let after: Vec<(usize, StackEvent)> = ops
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| stack_event(op).map(|event| (pc, event)))
+        .collect();
+    let cols = after.len() + 1;
+    let mut lcs = vec![0usize; (before.len() + 1) * cols];
+    for i in (0..before.len()).rev() {
+        for j in (0..after.len()).rev() {
+            lcs[i * cols + j] = if before[i].1 == after[j].1 {
+                1 + lcs[(i + 1) * cols + j + 1]
+            } else {
+                lcs[(i + 1) * cols + j].max(lcs[i * cols + j + 1])
+            };
+        }
+    }
+
+    let mut debug = vec![0i32; ops.len() * 2];
+    for pc in 0..ops.len() {
+        debug[pc * 2] = -1;
+    }
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < before.len() && j < after.len() {
+        if before[i].1 == after[j].1 {
+            let (raw_pc, opt_pc) = (before[i].0, after[j].0);
+            if raw_pc * 2 + 1 < raw.debug.len() {
+                debug[opt_pc * 2] = raw.debug[raw_pc * 2];
+                debug[opt_pc * 2 + 1] = raw.debug[raw_pc * 2 + 1];
+            }
+            i += 1;
+            j += 1;
+        } else if lcs[(i + 1) * cols + j] >= lcs[i * cols + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+
+    // Block layout may move a whole region across another one. A global LCS
+    // then has to sacrifice some otherwise exact matches to preserve order.
+    // When an event class has the same cardinality before and after, no event
+    // was inserted or deleted, so its occurrence order is a stronger mapping.
+    let mut before_by_event: HashMap<StackEvent, Vec<usize>> = HashMap::new();
+    let mut after_by_event: HashMap<StackEvent, Vec<usize>> = HashMap::new();
+    for &(pc, event) in &before {
+        before_by_event.entry(event).or_default().push(pc);
+    }
+    for &(pc, event) in &after {
+        after_by_event.entry(event).or_default().push(pc);
+    }
+    for (event, raw_pcs) in before_by_event {
+        let Some(opt_pcs) = after_by_event.get(&event) else {
+            continue;
+        };
+        if raw_pcs.len() != opt_pcs.len() {
+            continue;
+        }
+        for (&raw_pc, &opt_pc) in raw_pcs.iter().zip(opt_pcs) {
+            if raw_pc * 2 + 1 < raw.debug.len() {
+                debug[opt_pc * 2] = raw.debug[raw_pc * 2];
+                debug[opt_pc * 2 + 1] = raw.debug[raw_pc * 2 + 1];
+            }
+        }
+    }
+    debug
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use air::opcodes::{RefFun, Reg};
+
+    #[test]
+    fn stack_event_debug_survives_block_reordering() {
+        let raw = HLFunction {
+            ops: vec![
+                Opcode::Call0 {
+                    dst: Reg(0),
+                    fun: RefFun(10),
+                },
+                Opcode::Throw { exc: Reg(0) },
+                Opcode::Throw { exc: Reg(0) },
+                Opcode::Call0 {
+                    dst: Reg(0),
+                    fun: RefFun(11),
+                },
+            ],
+            debug: vec![1, 10, 1, 20, 1, 21, 1, 30],
+            ..HLFunction::default()
+        };
+        let optimized = vec![
+            Opcode::Throw { exc: Reg(0) },
+            Opcode::Throw { exc: Reg(0) },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(10),
+            },
+            Opcode::Call0 {
+                dst: Reg(0),
+                fun: RefFun(11),
+            },
+        ];
+
+        assert_eq!(
+            optimized_debug(&raw, &optimized),
+            vec![1, 20, 1, 21, 1, 10, 1, 30]
+        );
+    }
+}
 
 /// What a function executes, decided once on its first call.
 #[derive(Clone, Copy)]
@@ -170,10 +327,7 @@ impl Cache {
                     .iter()
                     .map(|t| TypeRef(t.0 as usize))
                     .collect();
-                // `debug` is indexed by opcode, and the pipeline renumbers
-                // opcodes. The interpreter never reads it, so drop it rather
-                // than carry a table whose indices no longer line up.
-                opt.debug = Vec::new();
+                opt.debug = optimized_debug(raw, &opt.ops);
                 if logging() {
                     eprintln!(
                         "[air] findex={} {} ops {} -> {} regs {} -> {}",
@@ -192,7 +346,9 @@ impl Cache {
                     }
                     eprintln!("[air] === findex={} {} optimized ===", raw.findex, raw.name());
                     for (i, op) in opt.ops.iter().enumerate() {
-                        eprintln!("[air] opt {i:4}  {op:?}");
+                        let file = opt.debug.get(i * 2).copied().unwrap_or(-1);
+                        let line = opt.debug.get(i * 2 + 1).copied().unwrap_or(0);
+                        eprintln!("[air] opt {i:4}  debug={file}:{line}  {op:?}");
                     }
                 }
                 self.optimized += 1;

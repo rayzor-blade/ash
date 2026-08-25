@@ -1675,6 +1675,7 @@ pub struct HLInterpreter {
     prim_t_i32: *mut c_void,
     prim_t_f64: *mut c_void,
     prim_t_bool: *mut c_void,
+    prim_t_bytes: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_scan_roots_done
     fn_gc_scan_roots_done: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_stack_top
@@ -1691,6 +1692,14 @@ pub struct HLInterpreter {
     field_hash_cache: HashMap<usize, i32>,
     /// Fallback storage for HVIRTUAL fields when runtime virtual indexes are unavailable.
     virtual_fields: HashMap<(usize, usize), NanBoxedValue>,
+    /// VM-lifetime storage backing every opaque `hl_symbol` token handed to Haxe.
+    /// Exception objects resolve these lazily, long after a newer exception may
+    /// have replaced the current stack snapshot.
+    stack_symbol_arena: Vec<Box<[u16]>>,
+    /// Opaque `hl_symbol` tokens backing the most recent call-stack query.
+    call_stack_symbols: Vec<usize>,
+    /// Stack captured at the most recent non-rethrow exception origin.
+    exception_stack_symbols: Vec<usize>,
     /// Optional tiered runtime (hybrid mode).
     tiered_runtime: Option<TieredRuntime>,
 }
@@ -1745,6 +1754,7 @@ impl HLInterpreter {
         let prim_t_i32 = find_prim(&mut c_type_factory, hl::hl_type_kind_HI32);
         let prim_t_f64 = find_prim(&mut c_type_factory, hl::hl_type_kind_HF64);
         let prim_t_bool = find_prim(&mut c_type_factory, hl::hl_type_kind_HBOOL);
+        let prim_t_bytes = find_prim(&mut c_type_factory, hl::hl_type_kind_HBYTES);
 
         // Resolve internal stdlib function pointers for object operations
         let fn_alloc_obj = native_resolver
@@ -1896,6 +1906,7 @@ impl HLInterpreter {
             prim_t_i32: prim_t_i32 as *mut c_void,
             prim_t_f64: prim_t_f64 as *mut c_void,
             prim_t_bool: prim_t_bool as *mut c_void,
+            prim_t_bytes: prim_t_bytes as *mut c_void,
             fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
@@ -1903,6 +1914,9 @@ impl HLInterpreter {
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
+            stack_symbol_arena: Vec::new(),
+            call_stack_symbols: Vec::new(),
+            exception_stack_symbols: Vec::new(),
             tiered_runtime: None,
         }
     }
@@ -2981,6 +2995,33 @@ impl HLInterpreter {
         // frame, which would otherwise strand the lock held forever.
         drop(guard);
         buf.as_ptr()
+    }
+
+    /// Mint the `vdynamic(HBYTES)` value HashLink's `hl_error` would throw.
+    ///
+    /// Interpreter-only failures cannot call `hl_error` because it longjmps
+    /// across Rust frames. They still need a real non-null Haxe value: catch
+    /// wrapping uses it to distinguish a native exception (whose saved stack
+    /// comes from `exception_stack_raw`) from an ordinary Exception constructor
+    /// (whose stack starts inside `ValueException.new`).
+    fn internal_exception_value(&self, message: &str) -> NanBoxedValue {
+        if self.fn_make_dyn.is_null() || self.prim_t_bytes.is_null() {
+            return NanBoxedValue::null();
+        }
+        let mut bytes = Self::interned_utf16_message(message) as *mut c_void;
+        let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            unsafe { std::mem::transmute(self.fn_make_dyn) };
+        let value = unsafe {
+            make_dyn(
+                &mut bytes as *mut *mut c_void as *mut c_void,
+                self.prim_t_bytes,
+            )
+        };
+        if value.is_null() {
+            NanBoxedValue::null()
+        } else {
+            NanBoxedValue::from_ptr(value as usize)
+        }
     }
 
     /// Allocate a bound closure (`InstanceClosure` / `VirtualClosure`) whose
@@ -4786,6 +4827,9 @@ impl HLInterpreter {
             // copy was a heap allocation per dispatch on exactly those. The
             // sampler charged 2% of a whole nbody run to `Opcode::clone`.
             let op = &func.ops[pc];
+            if matches!(op, Opcode::Throw { .. }) {
+                self.capture_exception_stack(bytecode);
+            }
             if env_flag!("ASH_TRACE_ASSERT") {
                 eprintln!(
                     "[TRACE] f{} {} pc={} op={:?}",
@@ -4807,6 +4851,9 @@ impl HLInterpreter {
                         .downcast_ref::<HLExceptionPropagation>()
                         .map(|exception| exception.value);
                     if let Some(exc) = exc {
+                        if matches!(op, Opcode::NullCheck { .. }) {
+                            self.capture_exception_stack(bytecode);
+                        }
                         let frame = self.stack.last_mut().unwrap();
                         if let Some((target_pc, exc_reg)) = frame.trap_stack.pop() {
                             frame.registers.set(exc_reg, exc);
@@ -5696,7 +5743,7 @@ impl HLInterpreter {
                 // deliberately. A hard interpreter error killed the whole
                 // suite at the first assert-testing case (Issue3702).
                 return Err(anyhow::Error::new(HLExceptionPropagation {
-                    value: NanBoxedValue::null(),
+                    value: self.internal_exception_value("assert"),
                     message: Some("assert".to_string()),
                 }));
             }
@@ -6167,7 +6214,7 @@ impl HLInterpreter {
                         );
                     }
                     return Err(anyhow::Error::new(HLExceptionPropagation {
-                        value: NanBoxedValue::null(),
+                        value: self.internal_exception_value("Null access"),
                         message: Some("Null access".to_string()),
                     }));
                 }
@@ -7825,6 +7872,9 @@ impl HLInterpreter {
                             .downcast_ref::<HLExceptionPropagation>()
                             .map(|exception| exception.value);
                         if let Some(exc) = exc {
+                            if matches!(ins, air::v2::Instr::NullCheck { .. }) {
+                                self.capture_exception_stack(bc);
+                            }
                             let frame = self.stack.last_mut().unwrap();
                             if let Some((handler, cell_slot)) = frame.trap_stack.pop() {
                                 frame.registers.set(cell_slot, exc);
@@ -7877,7 +7927,20 @@ impl HLInterpreter {
                         default.idx()
                     };
                 }
-                air::v2::Terminator::Throw { exc } | air::v2::Terminator::Rethrow { exc } => {
+                air::v2::Terminator::Throw { exc } => {
+                    self.capture_exception_stack(bc);
+                    let val = get(self, *exc);
+                    let frame = self.stack.last_mut().unwrap();
+                    match frame.trap_stack.pop() {
+                        Some((handler, cell_slot)) => {
+                            frame.registers.set(cell_slot, val);
+                            prev_block = Some(block as u32);
+                            block = handler;
+                        }
+                        None => return Err(anyhow::Error::new(self.format_hl_exception(val))),
+                    }
+                }
+                air::v2::Terminator::Rethrow { exc } => {
                     let val = get(self, *exc);
                     let frame = self.stack.last_mut().unwrap();
                     match frame.trap_stack.pop() {
@@ -8354,7 +8417,7 @@ impl HLInterpreter {
                         eprintln!("[nullacc/ssa] {} v{}", func.name(), value.0);
                     }
                     return Err(anyhow::Error::new(HLExceptionPropagation {
-                        value: NanBoxedValue::null(),
+                        value: self.internal_exception_value("Null access"),
                         message: Some("Null access".to_string()),
                     }));
                 }
@@ -8718,7 +8781,7 @@ impl HLInterpreter {
                 // Catchable, like upstream hl_assert() — see the classic
                 // dispatcher's Opcode::Assert.
                 return Err(anyhow::Error::new(HLExceptionPropagation {
-                    value: NanBoxedValue::null(),
+                    value: self.internal_exception_value("assert"),
                     message: Some("assert".to_string()),
                 }));
             }
@@ -9667,6 +9730,85 @@ impl HLInterpreter {
         }
     }
 
+    /// Render the live interpreter frames as HashLink `hl_symbol` tokens.
+    ///
+    /// The public ABI treats a symbol as opaque until `resolve_symbol`; using
+    /// a stable UTF-16 buffer address as the token lets that second call return
+    /// the already-rendered value without exposing Rust frame storage to Haxe.
+    fn stack_symbols(&self, bytecode: &DecodedBytecode) -> Vec<Box<[u16]>> {
+        self.stack
+            .iter()
+            .rev()
+            .filter_map(|frame| {
+                if frame.function_index >= bytecode.functions.len() {
+                    return None;
+                }
+                let func = self.air.body(bytecode, frame.function_index);
+                let debug_pc = frame.pc.min(func.ops.len().saturating_sub(1));
+                let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
+                let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
+                let file = usize::try_from(file_idx)
+                    .ok()
+                    .and_then(|idx| bytecode.debug_files.get(idx))
+                    .map(String::as_str)
+                    .unwrap_or("unknown");
+                let mut symbol: Vec<u16> =
+                    format!("fun${}({file}:{line})", func.findex).encode_utf16().collect();
+                symbol.push(0);
+                Some(symbol.into_boxed_slice())
+            })
+            .collect()
+    }
+
+    fn capture_exception_stack(&mut self, bytecode: &DecodedBytecode) {
+        let symbols = self.stack_symbols(bytecode);
+        self.exception_stack_symbols = symbols
+            .iter()
+            .map(|symbol| symbol.as_ptr() as usize)
+            .collect();
+        self.stack_symbol_arena.extend(symbols);
+    }
+
+    fn stack_raw_native(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        args: &[NanBoxedValue],
+        exception: bool,
+    ) -> Result<NanBoxedValue> {
+        if exception {
+            if self.exception_stack_symbols.is_empty() {
+                self.capture_exception_stack(bytecode);
+            }
+        } else {
+            let symbols = self.stack_symbols(bytecode);
+            self.call_stack_symbols = symbols
+                .iter()
+                .map(|symbol| symbol.as_ptr() as usize)
+                .collect();
+            self.stack_symbol_arena.extend(symbols);
+        }
+
+        let symbols = if exception {
+            &self.exception_stack_symbols
+        } else {
+            &self.call_stack_symbols
+        };
+        if let Some(arr) = args.first().filter(|v| !v.is_null() && !v.is_void()) {
+            let arr = arr.as_ptr() as *mut hl::varray;
+            if !arr.is_null() {
+                let capacity = unsafe { (*arr).size.max(0) as usize };
+                let data = unsafe {
+                    (arr as *mut u8).add(std::mem::size_of::<hl::varray>())
+                        as *mut *const u16
+                };
+                for (i, symbol) in symbols.iter().take(capacity).enumerate() {
+                    unsafe { *data.add(i) = *symbol as *const u16 };
+                }
+            }
+        }
+        Ok(NanBoxedValue::from_i32(symbols.len() as i32))
+    }
+
     /// Call a native function via FFI.
     fn call_native(
         &mut self,
@@ -9757,6 +9899,16 @@ impl HLInterpreter {
         // Intercept sort natives: they call back into bytecode closures via C function pointers,
         // which doesn't work in interpreter mode. Implement sorting here instead.
         match native.name.as_str() {
+            "call_stack_raw" => return self.stack_raw_native(bytecode, args, false),
+            "exception_stack_raw" => return self.stack_raw_native(bytecode, args, true),
+            "resolve_symbol" => {
+                let symbol = args.first().copied().unwrap_or_else(NanBoxedValue::null);
+                return Ok(if symbol.is_null() || symbol.is_void() {
+                    NanBoxedValue::null()
+                } else {
+                    NanBoxedValue::from_bytes_ptr(symbol.as_ptr())
+                });
+            }
             "bsort_i32" => return self.sort_bytes_i32(bytecode, native_resolver, args),
             "bsort_f64" => return self.sort_bytes_f64(bytecode, native_resolver, args),
             "bsort_i64" => return self.sort_bytes_i64(bytecode, native_resolver, args),

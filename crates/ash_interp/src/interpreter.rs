@@ -6136,7 +6136,13 @@ impl HLInterpreter {
             // ===== Misc =====
             Opcode::RefData { dst, src } => {
                 let val = frame.registers.get(src.0);
-                frame.registers.set(dst.0, val);
+                // ORefData is not an identity operation: HashLink defines it
+                // as a pointer to the first element after the varray header.
+                // Returning the array itself made atomic operations read and
+                // overwrite `varray::t`; pointer atomics then treated an
+                // hl_type* as the stored object and crashed.
+                let data = val.as_ptr() + std::mem::size_of::<hl::varray>();
+                frame.registers.set(dst.0, NanBoxedValue::from_ptr(data));
             }
             Opcode::RefOffset { dst, reg, offset } => {
                 let base = frame.registers.get(reg.0);
@@ -8357,7 +8363,8 @@ impl HLInterpreter {
             }
             I::RefData { dst, src } => {
                 let v = get!(src);
-                set!(dst, v);
+                let data = v.as_ptr() + std::mem::size_of::<hl::varray>();
+                set!(dst, NanBoxedValue::from_ptr(data));
             }
             I::RefOffset { dst, base, offset } => {
                 let r =
@@ -9231,6 +9238,17 @@ impl HLInterpreter {
                         // Strings are the content-equality exception handled
                         // above; every other object uses identity, matching
                         // hlp_dyn_compare's HOBJ fallback.
+                        return false;
+                    }
+                    if ka == hl::hl_type_kind_HENUM {
+                        // Enum values are heap objects whose first word is
+                        // their hl_type*.  They are not vdynamic boxes, so
+                        // reading `v.ptr` observes the constructor index at
+                        // offset 8.  That made any two zero-argument enum
+                        // values with the same constructor index compare
+                        // equal, even when they belonged to different enum
+                        // types.  HashLink's HENUM/HENUM comparison is pointer
+                        // identity; the equal-pointer case was handled above.
                         return false;
                     }
                     (*a).v.ptr == (*b).v.ptr
@@ -10236,6 +10254,14 @@ impl HLInterpreter {
             }
             call_args.push(v);
         }
+
+        // Reflect.callMethod sizes its NativeArray to the arguments it needs
+        // to materialize; trailing optional parameters are omitted.  The
+        // interpreter register file starts as Void, whereas HashLink presents
+        // an omitted optional (HREF) parameter as null so the callee's default
+        // prologue runs.  Pad to the declared signature before dispatch.
+        let explicit_params = arg_kinds.len().saturating_sub(arg_shift);
+        call_args.resize(explicit_params, NanBoxedValue::null());
 
         let ret = self.call_closure_val(bytecode, native_resolver, closure_val, call_args)?;
         if dbg {

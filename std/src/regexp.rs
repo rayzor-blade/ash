@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::hl::vbyte;
+use crate::{error::hlp_error, hl::vbyte, strings::str_to_uchar_ptr};
 
 struct RegexpState {
     regex: Regex,
@@ -30,6 +30,17 @@ fn utf8_byte_to_utf16_units(s: &str, byte_idx: usize) -> i32 {
         units += ch.len_utf16() as i32;
     }
     units
+}
+
+fn utf16_units_to_utf8_byte(s: &str, unit_idx: usize) -> usize {
+    let mut units = 0usize;
+    for (byte, ch) in s.char_indices() {
+        if units >= unit_idx {
+            return byte;
+        }
+        units += ch.len_utf16();
+    }
+    s.len()
 }
 
 fn build_regex(pattern: &str, options: &str) -> Option<Regex> {
@@ -90,17 +101,22 @@ pub unsafe extern "C" fn hlp_regexp_match(
     } else {
         size.min(avail).max(0)
     } as usize;
-    let segment_units = &full_units[start..start + run_len];
-    let segment = String::from_utf16_lossy(segment_units);
+    let subject = String::from_utf16_lossy(&full_units);
+    let start_byte = utf16_units_to_utf8_byte(&subject, start);
+    let end_byte = utf16_units_to_utf8_byte(&subject, start + run_len);
+    let visible_subject = &subject[..end_byte];
 
-    if let Some(caps) = state.regex.captures(&segment) {
-        let base = start as i32;
+    // Search the original subject at an offset instead of slicing it at
+    // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
+    // spuriously match after every zero-width global match, because each new
+    // offset appeared to be the start of a fresh string.
+    if let Some(caps) = state.regex.captures_at(visible_subject, start_byte) {
         let mut groups = Vec::with_capacity(caps.len());
         for i in 0..caps.len() {
             if let Some(m) = caps.get(i) {
-                let s = utf8_byte_to_utf16_units(&segment, m.start());
-                let e = utf8_byte_to_utf16_units(&segment, m.end());
-                groups.push(Some((base + s, e - s)));
+                let s = utf8_byte_to_utf16_units(&subject, m.start());
+                let e = utf8_byte_to_utf16_units(&subject, m.end());
+                groups.push(Some((s, e - s)));
             } else {
                 groups.push(None);
             }
@@ -126,12 +142,18 @@ pub unsafe extern "C" fn hlp_regexp_matched_pos(r: *mut c_void, n: i32, size: *m
         if !size.is_null() {
             *size = 0;
         }
+        hlp_error(str_to_uchar_ptr(
+            "Calling regexp_matched_pos() on an unmatched regexp",
+        ));
         return -1;
     };
     let Some(group) = groups.get(n as usize) else {
         if !size.is_null() {
             *size = 0;
         }
+        hlp_error(str_to_uchar_ptr(&format!(
+            "Matched index {n} outside bounds"
+        )));
         return -1;
     };
     let Some((pos, len)) = group else {

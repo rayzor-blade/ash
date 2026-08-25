@@ -69,6 +69,24 @@ pub fn hlt_f64() -> *mut hl_type {
     *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HF64) as usize) as *mut hl_type
 }
 
+/// Persistent type singleton for HF32.
+pub fn hlt_f32() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HF32) as usize) as *mut hl_type
+}
+
+/// Persistent type singleton for HI64.
+pub fn hlt_i64() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HI64) as usize) as *mut hl_type
+}
+
+/// Persistent type singleton for HBOOL.
+pub fn hlt_bool() -> *mut hl_type {
+    static CELL: OnceLock<usize> = OnceLock::new();
+    *CELL.get_or_init(|| persistent_type(hl::hl_type_kind_HBOOL) as usize) as *mut hl_type
+}
+
 /// Persistent type singleton for HVOID (upstream &hlt_void).
 pub fn hlt_void() -> *mut hl_type {
     static CELL: OnceLock<usize> = OnceLock::new();

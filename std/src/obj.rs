@@ -176,15 +176,7 @@ pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
 }
 
 pub unsafe extern "C" fn hlp_alloc_dynbool(b: bool) -> *mut vdynamic {
-    let _hlt_bool: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HBOOL,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-    let v = hlp_alloc_dynamic(_hlt_bool);
+    let v = hlp_alloc_dynamic(crate::types::hlt_bool());
     (*v).v.b = b;
     v
 }
@@ -196,44 +188,37 @@ pub unsafe extern "C" fn hlp_write_dyn(
     v: *mut vdynamic,
     is_tmp: bool,
 ) {
-    // hl_track_call(HL_TRACK_CAST, on_cast(if !v.is_null() { (*v).t } else { _hlt_dyn }, t));
+    // hl_track_call(HL_TRACK_CAST, on_cast(if !v.is_null() { (*v).t } else { hlt_dyn }, t));
 
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     match (*t).kind {
         hl_type_kind_HUI8 => {
-            *(data as *mut u8) = hlp_dyn_casti(&v as *const _ as *mut c_void, _hlt_dyn, t) as u8;
+            *(data as *mut u8) = hlp_dyn_casti(&v as *const _ as *mut c_void, dyn_type, t) as u8;
         }
         hl_type_kind_HBOOL => {
-            *(data as *mut bool) = hlp_dyn_casti(&v as *const _ as *mut c_void, _hlt_dyn, t) != 0;
+            *(data as *mut bool) = hlp_dyn_casti(&v as *const _ as *mut c_void, dyn_type, t) != 0;
         }
         hl_type_kind_HUI16 => {
-            *(data as *mut u16) = hlp_dyn_casti(&v as *const _ as *mut c_void, _hlt_dyn, t) as u16;
+            *(data as *mut u16) = hlp_dyn_casti(&v as *const _ as *mut c_void, dyn_type, t) as u16;
         }
         hl_type_kind_HI32 => {
-            *(data as *mut i32) = hlp_dyn_casti(&v as *const _ as *mut c_void, _hlt_dyn, t);
+            *(data as *mut i32) = hlp_dyn_casti(&v as *const _ as *mut c_void, dyn_type, t);
         }
         hl_type_kind_HI64 => {
-            *(data as *mut i64) = hlp_dyn_casti64(&v as *const _ as *mut c_void, _hlt_dyn);
+            *(data as *mut i64) = hlp_dyn_casti64(&v as *const _ as *mut c_void, dyn_type);
         }
         hl_type_kind_HF32 => {
-            *(data as *mut f32) = hlp_dyn_castf(&v as *const _ as *mut c_void, _hlt_dyn);
+            *(data as *mut f32) = hlp_dyn_castf(&v as *const _ as *mut c_void, dyn_type);
         }
         hl_type_kind_HF64 => {
-            *(data as *mut f64) = hlp_dyn_castd(&v as *const _ as *mut c_void, _hlt_dyn);
+            *(data as *mut f64) = hlp_dyn_castd(&v as *const _ as *mut c_void, dyn_type);
         }
         _ => {
             let mut ret = if !v.is_null() && hlp_same_type(t, (*v).t) {
                 v as *mut c_void
             } else {
-                hlp_dyn_castp(&v as *const _ as *mut c_void, _hlt_dyn, t)
+                hlp_dyn_castp(&v as *const _ as *mut c_void, dyn_type, t)
             };
 
             if is_tmp && ret == v as *mut c_void {
@@ -1724,14 +1709,7 @@ pub unsafe extern "C" fn hlp_dyn_getp(
     // Assuming hl_track_call and on_dynfield are defined elsewhere
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
 
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     let addr = hlp_obj_lookup(d, hfield, &mut ft);
 
@@ -1740,7 +1718,7 @@ pub unsafe extern "C" fn hlp_dyn_getp(
         if d.is_null() {
             return ptr::null_mut();
         } else {
-            return hlp_dyn_castp(&d as *const _ as *mut std::ffi::c_void, _hlt_dyn, t);
+            return hlp_dyn_castp(&d as *const _ as *mut std::ffi::c_void, dyn_type, t);
         }
     }
 
@@ -2546,21 +2524,14 @@ pub unsafe extern "C" fn hlp_dyn_setp(
 pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64) {
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
-    let mut HLT_F64: hl_type = hl_type {
-        kind: hl_type_kind_HF64,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-    let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_F64, &mut t);
+    let f64_type = crate::types::hlt_f64();
+    let addr = hlp_obj_lookup_set(d, hfield, f64_type, &mut t);
 
     if (*t).kind == hl_type_kind_HF64 {
         *(addr as *mut f64) = value;
     } else {
         let mut tmp = vdynamic {
-            t: &mut HLT_F64,
+            t: f64_type,
             v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { d: value }),
         };
         hlp_write_dyn(addr, t, &mut tmp, true);
@@ -2571,21 +2542,14 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
 pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32) {
     let mut t: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
-    let mut HLT_F32: hl_type = hl_type {
-        kind: hl_type_kind_HF32,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-    let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_F32, &mut t);
+    let f32_type = crate::types::hlt_f32();
+    let addr = hlp_obj_lookup_set(d, hfield, f32_type, &mut t);
 
     if (*t).kind == hl_type_kind_HF32 {
         *(addr as *mut f32) = value;
     } else {
         let mut tmp = vdynamic {
-            t: &mut HLT_F32,
+            t: f32_type,
             v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { f: value }),
         };
         hlp_write_dyn(addr, t, &mut tmp, true);
@@ -2596,15 +2560,8 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
 pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64) {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
-    let mut HLT_I64: hl_type = hl_type {
-        kind: hl_type_kind_HI64,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
-    let addr = hlp_obj_lookup_set(d, hfield, &mut HLT_I64, &mut ft);
+    let i64_type = crate::types::hlt_i64();
+    let addr = hlp_obj_lookup_set(d, hfield, i64_type, &mut ft);
 
     match (*ft).kind {
         hl_type_kind_HUI8 => *(addr as *mut u8) = value as u8,
@@ -2616,7 +2573,7 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
             let mut tmp = vdynamic {
-                t: &mut HLT_I64,
+                t: i64_type,
                 v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i64_: value }),
             };
             hlp_write_dyn(addr, ft, &mut tmp, true);
@@ -2661,14 +2618,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
 pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
     let addr = hlp_obj_lookup(d, hfield, &mut ft);
 
     if addr.is_null() {
@@ -2676,7 +2626,7 @@ pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
         if d.is_null() {
             return 0.0;
         } else {
-            return hlp_dyn_castf(&d as *const _ as *mut c_void, _hlt_dyn);
+            return hlp_dyn_castf(&d as *const _ as *mut c_void, dyn_type);
         }
     }
 
@@ -2691,14 +2641,7 @@ pub unsafe extern "C" fn hlp_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
 pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
     let mut ft: *mut hl_type = ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
     let addr = hlp_obj_lookup(d, hfield, &mut ft);
 
     if addr.is_null() {
@@ -2706,7 +2649,7 @@ pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
         if d.is_null() {
             return 0.0;
         } else {
-            return hlp_dyn_castd(&d as *const _ as *mut c_void, _hlt_dyn);
+            return hlp_dyn_castd(&d as *const _ as *mut c_void, dyn_type);
         }
     }
 
@@ -2719,14 +2662,7 @@ pub unsafe extern "C" fn hlp_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_type) -> i32 {
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     let mut ft: *mut hl_type = std::ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2745,7 +2681,7 @@ pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_
         return if d.is_null() {
             0
         } else {
-            hlp_dyn_casti(&d as *const _ as *mut _, _hlt_dyn, t)
+            hlp_dyn_casti(&d as *const _ as *mut _, dyn_type, t)
         };
     }
     match (*ft).kind {
@@ -2762,14 +2698,7 @@ pub unsafe extern "C" fn hlp_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     let mut ft: *mut hl_type = std::ptr::null_mut();
     // hl_track_call(HL_TRACK_DYNFIELD, on_dynfield(d, hfield));
@@ -2779,7 +2708,7 @@ pub unsafe extern "C" fn hlp_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
         return if d.is_null() {
             0
         } else {
-            hlp_dyn_casti64(&d as *const _ as *mut _, _hlt_dyn)
+            hlp_dyn_casti64(&d as *const _ as *mut _, dyn_type)
         };
     }
     match (*ft).kind {
@@ -2836,20 +2765,13 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
         );
     }
 
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     
 
     match (*(*obj).t).kind {
         hl_type_kind_HOBJ | hl_type_kind_HVIRTUAL | hl_type_kind_HDYNOBJ | hl_type_kind_HSTRUCT => {
-            hlp_dyn_getp(obj, hfield, _hlt_dyn) as *mut vdynamic
+            hlp_dyn_getp(obj, hfield, dyn_type) as *mut vdynamic
         }
         _ => ptr::null_mut(),
     }
@@ -2868,17 +2790,10 @@ pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *
         );
     }
 
-    let _hlt_dyn: *mut hl_type = &mut hl_type {
-        kind: hl_type_kind_HDYN,
-        __bindgen_anon_1: hl_type__bindgen_ty_1 {
-            obj: ptr::null_mut(),
-        },
-        vobj_proto: ptr::null_mut(),
-        mark_bits: ptr::null_mut(),
-    };
+    let dyn_type = crate::types::hlt_dyn();
 
     if v.is_null() {
-        hlp_dyn_setp(obj, hfield, _hlt_dyn, ptr::null_mut());
+        hlp_dyn_setp(obj, hfield, dyn_type, ptr::null_mut());
         return;
     }
 

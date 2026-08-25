@@ -11208,7 +11208,13 @@ impl HLInterpreter {
             HI64 => NanBoxedValue::from_i64(raw),
             HF32 | HF64 => NanBoxedValue::from_f64(f64::from_bits(raw as u64)),
             HBOOL => NanBoxedValue::from_bool((raw as u8) != 0),
-            HBYTES => NanBoxedValue::from_bytes_ptr(raw as usize),
+            HBYTES => {
+                if raw == 0 {
+                    NanBoxedValue::null()
+                } else {
+                    NanBoxedValue::from_bytes_ptr(raw as usize)
+                }
+            }
             _ => {
                 // All other types are pointer-like (HOBJ, HDYN, HFUN, HARRAY, etc.)
                 if raw == 0 {

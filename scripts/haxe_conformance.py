@@ -589,6 +589,13 @@ def main(argv=None) -> int:
     elif "/debug/" in ash:
         profile = "debug"
 
+    # Suite programs intentionally run from their upstream suite roots, so
+    # command paths supplied relative to the repository must be made stable
+    # before any cwd switch.
+    ash = str(pathlib.Path(ash).resolve())
+    if args.reference:
+        args.reference = str(pathlib.Path(args.reference).expanduser().resolve())
+
     ver = haxe_version(args.haxe)
     if ver is None:
         if not args.skip_build:
@@ -727,8 +734,24 @@ def main(argv=None) -> int:
             for label, argv0 in engines:
                 t0 = time.perf_counter()
                 timed_out = False
+                suite_env = os.environ.copy()
+                if name == "sys":
+                    # Upstream's TestSys explicitly requires the runner to
+                    # provide this fixture. It is inherited by subprocesses,
+                    # which is part of what that suite verifies.
+                    suite_env.setdefault("EXISTS", "1")
                 try:
-                    res = run(argv0 + [str(p)], cwd=str(p.parent), timeout=args.timeout)
+                    # Programs are invoked by upstream from their suite root.
+                    # In particular, sys addresses gen_test_res.py,
+                    # src/ExitCode.c, compile-each.hxml and test-res/ relative
+                    # to tests/sys. Running from bin/hl manufactured failures
+                    # in both Ash and the reference VM.
+                    res = run(
+                        argv0 + [str(p)],
+                        cwd=str(sdir),
+                        timeout=args.timeout,
+                        env=suite_env,
+                    )
                 except subprocess.TimeoutExpired as e:
                     timed_out = True
                     res = subprocess.CompletedProcess(

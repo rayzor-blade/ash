@@ -238,7 +238,7 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
         }
         return tlab_refill_then_alloc(aligned);
     }
-    gc_locked().allocate(size)
+    gc_locked_init().allocate(size)
 }
 
 /// Region exhausted (or never opened): take the lock, run the ordinary

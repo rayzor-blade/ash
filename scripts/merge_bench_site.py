@@ -16,6 +16,8 @@ Output is one compact `results.json`:
         { engine: "hashlink-jit"|"hashlink-hl2"|"hashlink-c"|"hxjvm",
           label, status, median_ms, min_ms, max_ms, runs },
         { engine: "ash", label, mode, status, median_ms, compile_ms,
+          gc: {collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
+               live_blocks} when the sweep ran with --gc-stats,
           min_ms, max_ms, runs, tiers: {cranelift, llvm}, checksum } ] } ] }
 
 The page treats the HashLink JIT row as the 1.00 baseline when present and
@@ -102,6 +104,30 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
     }
     if checksum:
         row["checksum"] = checksum
+    # Collector behaviour, when the sweep asked for it (`--gc-stats`).
+    #
+    # These come from `run_instrumented`'s separate extra run, never from the
+    # timed ones -- the whole point of that run existing is to keep stderr
+    # writes out of the number being compared. The consequence is that the
+    # pause here is NOT a clean run's pause: that run also carries --jit-log,
+    # whose writes shift allocation timing (measured on bench_binary_trees,
+    # 75ms instrumented against 49ms clean, 18 collections against 19). Every
+    # commit's run carries the same instrumentation, so these are comparable
+    # to EACH OTHER across sweeps, which is what makes a collector change
+    # visible; they are not comparable to a clean run's numbers.
+    #
+    # Without this, a GC change is invisible in CI: a 21% local win on
+    # bench_binary_trees landed as 7% there with no way to see whether the
+    # pause had moved at all.
+    gc = pick.get("gc") or {}
+    if gc:
+        row["gc"] = {
+            "collections": gc.get("collections"),
+            "pause_total_ms": gc.get("pause_total_ms"),
+            "pause_max_ms": gc.get("pause_max_ms"),
+            "bytes_allocated_mb": gc.get("bytes_allocated_mb"),
+            "live_blocks": gc.get("live_blocks"),
+        }
     row.update(wall_fields(pick.get("wall_ms")))
     return row
 

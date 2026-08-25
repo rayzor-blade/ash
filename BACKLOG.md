@@ -673,6 +673,14 @@ perspective: with `ASH_OSR=0` method_call is 127x slower and closure_call
 103x, while binary_trees is 10% FASTER -- OSR is load-bearing everywhere
 except a loop whose body is entirely calls into already-promoted functions.
 
+**CI now publishes collector numbers.** `bench.yml` passes `--gc-stats`, the
+merge carries `{collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
+live_blocks}` onto the ash row, and the site shows them in each number's
+tooltip. They ride `run_instrumented`'s separate run, so the timed numbers are
+untouched -- but that run also carries `--jit-log`, so its pause reads higher
+than a clean one (75ms vs 49ms on binary_trees). Compare them across sweeps,
+not against a local clean run.
+
 **Still open, in order of measured value:** the pause is 83% transitive
 tracing (per cycle: rootscan 0.03ms, trace 5.06ms, sweep 0.90ms), so tracing
 is where any further collector work belongs; `sweep()` calls

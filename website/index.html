@@ -400,6 +400,11 @@ HashLink Bytecode Runtime
         }
         num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
         (r.aot_build_ms ? ' · AOT build excluded' : '') +
+        (r.gc && r.gc.collections != null
+          ? ' · GC ' + r.gc.collections + ' collections, ' +
+            fmtMs(r.gc.pause_total_ms) + ' paused (max ' + fmtMs(r.gc.pause_max_ms) + ')' +
+            (r.gc.bytes_allocated_mb != null ? ', ' + Math.round(r.gc.bytes_allocated_mb) + 'MB allocated' : '')
+          : '') +
         (b.system && b.system.cpu_model ? ' · ' + b.system.cpu_model : '');
         line.appendChild(num);
         bars.appendChild(line);

@@ -277,6 +277,7 @@ jobs:
             --include-slow \
             --timeout-scale 3 \
             --ignore-load \
+            --gc-stats \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
       - name: Bench HashLink (JIT, hl2-ir, HL/C) and Haxe JVM (${{ matrix.bench }})

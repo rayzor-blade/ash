@@ -47,18 +47,14 @@ jobs:
           cargo build -p ash_std
           cargo clippy --workspace --all-targets -- -D warnings
 
-  # ash_std against REAL Windows headers, on every push — not the macOS
-  # cross-check, which borrows darwin headers and therefore type-checks a
-  # different set of bindings than Windows ever sees. That gap shipped two
-  # whole classes of error to the release workflow's dispatch-only Windows
-  # job: `hl::_longjmp` (MSVC declares only `longjmp`) and every explicit
-  # `u32` written where `hl_type_kind` was meant (MSVC enums are i32).
-  # `cargo check` rather than build: it stops before linking, so the job
-  # needs nothing beyond what the runner image already has — bindgen finds
-  # the image's own libclang.
+  # Compile and link the full CLI against real Windows headers on every push.
+  # Checking ash_std alone missed ash_interp's MSVC enum width and Unix API
+  # regressions; cargo check would also miss unavailable CRT symbols at link
+  # time. Use the same LLVM SDK as the release job so this is the release
+  # build's Windows gate rather than a weaker approximation of it.
   windows-check:
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +66,36 @@ jobs:
         with:
           shared-key: windows-check
 
-      - name: cargo check -p ash_std (real Windows headers)
+      - name: Cache LLVM 21
+        id: llvm-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm21
+          key: llvm-21.1.2-x86_64-pc-windows-msvc
+
+      - name: Install LLVM 21
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
         shell: bash
-        run: cargo check -p ash_std
+        run: |
+          curl -sSfL -o /tmp/llvm.tar.xz \
+            https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.2/clang+llvm-21.1.2-x86_64-pc-windows-msvc.tar.xz
+          mkdir -p /c/llvm21
+          tar -xf /tmp/llvm.tar.xz -C /c/llvm21 --strip-components=1
+          /c/llvm21/bin/llvm-config.exe --version
+
+      - name: Export LLVM environment
+        shell: bash
+        run: |
+          echo 'LLVM_SYS_211_PREFIX=C:\llvm21' >> "$GITHUB_ENV"
+          echo 'LIBCLANG_PATH=C:\llvm21\bin' >> "$GITHUB_ENV"
+          echo 'C:\llvm21\bin' >> "$GITHUB_PATH"
+
+      - name: Build ash (release, real Windows headers)
+        shell: bash
+        run: |
+          cargo build --release -p ash_std
+          cargo build --release -p ash
+
+      - name: Smoke test interpreter
+        shell: bash
+        run: ./target/release/ash.exe --mode interp crates/ash/test/tests/test_basic.hl

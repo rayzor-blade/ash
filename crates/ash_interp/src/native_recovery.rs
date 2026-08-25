@@ -15,7 +15,9 @@
 //! Two slots exist: SLOT_INTERP for the interpreter's native calls (main
 //! thread) and SLOT_TIERED for the beadie broker's compile jobs.
 
+#[cfg(unix)]
 use std::cell::UnsafeCell;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 /// Backing store for a `sigjmp_buf`.
@@ -38,10 +40,13 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 /// alias is only 4-byte aligned and left correct alignment to chance — it
 /// happened to work on Darwin because neighbouring atomics pushed the field
 /// to an 8-byte offset.
+#[cfg(unix)]
 pub type SigJmpBuf = [u64; 64];
 
+#[cfg(unix)]
 const SIGJMP_BUF_ZERO: SigJmpBuf = [0; 64];
 
+#[cfg(unix)]
 extern "C" {
     /// glibc does **not** export a `sigsetjmp` symbol: `<setjmp.h>` defines it
     /// as a macro over `__sigsetjmp`, so an `extern "C" { fn sigsetjmp }`
@@ -56,6 +61,7 @@ extern "C" {
 }
 
 /// One recovery point: a jump buffer plus the pthread that armed it.
+#[cfg(unix)]
 struct RecoverySlot {
     active: AtomicBool,
     /// pthread_t of the arming thread (0 = never armed).
@@ -68,8 +74,10 @@ struct RecoverySlot {
 // The buf is only written by the owning thread (arm) and only read by the
 // signal handler running ON that same thread (the handler checks `owner`
 // against pthread_self before touching it).
+#[cfg(unix)]
 unsafe impl Sync for RecoverySlot {}
 
+#[cfg(unix)]
 impl RecoverySlot {
     const fn new() -> Self {
         RecoverySlot {
@@ -83,12 +91,16 @@ impl RecoverySlot {
 }
 
 /// Interpreter native-call recovery (main thread).
+#[cfg(unix)]
 pub const SLOT_INTERP: usize = 0;
 /// Tiered-JIT broker compile recovery (beadie broker thread).
+#[cfg(unix)]
 pub const SLOT_TIERED: usize = 1;
 
+#[cfg(unix)]
 static SLOTS: [RecoverySlot; 2] = [RecoverySlot::new(), RecoverySlot::new()];
 
+#[cfg(unix)]
 #[inline]
 fn current_thread_id() -> usize {
     // pthread_self is async-signal-safe on the platforms we target.
@@ -101,6 +113,7 @@ fn current_thread_id() -> usize {
 ///
 /// # Safety
 /// Must only be called from a signal handler context.
+#[cfg(unix)]
 pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
     let me = current_thread_id();
     for slot in SLOTS.iter() {
@@ -116,6 +129,7 @@ pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
 }
 
 #[inline(always)]
+#[cfg(unix)]
 unsafe fn arm_slot(index: usize) -> i32 {
     let slot = &SLOTS[index];
     let result = sigsetjmp(slot.buf.get() as *mut u64, 1);
@@ -127,6 +141,7 @@ unsafe fn arm_slot(index: usize) -> i32 {
 }
 
 #[inline]
+#[cfg(unix)]
 fn disarm_slot(index: usize) {
     SLOTS[index].active.store(false, Ordering::Relaxed);
 }
@@ -138,21 +153,25 @@ fn disarm_slot(index: usize) {
 /// The recovery point is only valid for the duration of the current stack
 /// frame.
 #[inline(always)]
+#[cfg(unix)]
 pub unsafe fn arm_native_recovery() -> i32 {
     arm_slot(SLOT_INTERP)
 }
 
 /// Disarm the interpreter recovery point after a successful native call.
+#[cfg(unix)]
 pub fn disarm_native_recovery() {
     disarm_slot(SLOT_INTERP)
 }
 
 /// Get the signal number from the last interpreter recovery.
+#[cfg(unix)]
 pub fn last_recovery_signal() -> i32 {
     SLOTS[SLOT_INTERP].signal.load(Ordering::Relaxed)
 }
 
 /// Get the fault address from the last interpreter recovery.
+#[cfg(unix)]
 pub fn last_recovery_fault_addr() -> usize {
     SLOTS[SLOT_INTERP].fault_addr.load(Ordering::Relaxed)
 }
@@ -163,21 +182,71 @@ pub fn last_recovery_fault_addr() -> usize {
 /// # Safety
 /// Must be called on the broker thread; valid for the current stack frame.
 #[inline(always)]
+#[cfg(unix)]
 pub unsafe fn arm_tiered_recovery() -> i32 {
     arm_slot(SLOT_TIERED)
 }
 
 /// Disarm the tiered-broker recovery point after a successful compile.
+#[cfg(unix)]
 pub fn disarm_tiered_recovery() {
     disarm_slot(SLOT_TIERED)
 }
 
 /// Get the signal number from the last tiered-broker recovery.
+#[cfg(unix)]
 pub fn last_tiered_recovery_signal() -> i32 {
     SLOTS[SLOT_TIERED].signal.load(Ordering::Relaxed)
 }
 
 /// Get the fault address from the last tiered-broker recovery.
+#[cfg(unix)]
 pub fn last_tiered_recovery_fault_addr() -> usize {
     SLOTS[SLOT_TIERED].fault_addr.load(Ordering::Relaxed)
+}
+
+// Native-call recovery is Unix signal machinery. Windows must not attempt to
+// longjmp through JIT frames: Win64 longjmp performs an SEH unwind and those
+// frames do not carry the required unwind metadata. Keep the call-site API
+// intact while allowing access violations to follow the normal Windows
+// unhandled-exception path until a CONTEXT-based recovery mechanism exists.
+#[cfg(not(unix))]
+pub unsafe fn try_recover_from_signal(_sig: i32, _fault_addr: usize) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+pub unsafe fn arm_native_recovery() -> i32 {
+    0
+}
+
+#[cfg(not(unix))]
+pub fn disarm_native_recovery() {}
+
+#[cfg(not(unix))]
+pub fn last_recovery_signal() -> i32 {
+    0
+}
+
+#[cfg(not(unix))]
+pub fn last_recovery_fault_addr() -> usize {
+    0
+}
+
+#[cfg(not(unix))]
+pub unsafe fn arm_tiered_recovery() -> i32 {
+    0
+}
+
+#[cfg(not(unix))]
+pub fn disarm_tiered_recovery() {}
+
+#[cfg(not(unix))]
+pub fn last_tiered_recovery_signal() -> i32 {
+    0
+}
+
+#[cfg(not(unix))]
+pub fn last_tiered_recovery_fault_addr() -> usize {
+    0
 }

@@ -9569,10 +9569,10 @@ impl HLInterpreter {
         func: &HLFunction,
         a_idx: usize,
         va: NanBoxedValue,
-        ak: u32,
+        ak: hl::hl_type_kind,
         b_idx: usize,
         vb: NanBoxedValue,
-        bk: u32,
+        bk: hl::hl_type_kind,
         op: CmpOp,
     ) -> Option<bool> {
         if ak != hl::hl_type_kind_HNULL && bk != hl::hl_type_kind_HNULL {
@@ -9663,9 +9663,9 @@ impl HLInterpreter {
 
     fn compare_numeric_values(
         av: NanBoxedValue,
-        ak: u32,
+        ak: hl::hl_type_kind,
         bv: NanBoxedValue,
-        bk: u32,
+        bk: hl::hl_type_kind,
         op: CmpOp,
     ) -> Option<bool> {
         if !Self::is_numeric_or_bool_kind(ak) || !Self::is_numeric_or_bool_kind(bk) {
@@ -11211,6 +11211,7 @@ impl HLInterpreter {
     /// Returns false if SDL_QUIT was received (app should exit).
     // Kept for the in-flight Heaps/EventLoop work: the call site returns when
     // the fiber-based sys.thread pump lands (see heaps_rendering_status).
+    #[cfg(unix)]
     #[allow(dead_code)]
     fn pump_events_and_swap(&mut self) -> bool {
         let mut alive = true;

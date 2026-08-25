@@ -673,6 +673,26 @@ perspective: with `ASH_OSR=0` method_call is 127x slower and closure_call
 103x, while binary_trees is 10% FASTER -- OSR is load-bearing everywhere
 except a loop whose body is entirely calls into already-promoted functions.
 
+**The macOS win did not transfer, and the reason generalises.** Local
+(M1 Pro) said -21.7%; CI (Linux, EPYC 7763, same CPU model both sweeps) said
+-7.0%. Decomposed on real Linux (NUC i5-1250P, ABBA-interleaved n=18, both
+binaries built there):
+
+    neither fix        451.3ms min
+    GC Vec fix only    439.4ms   -2.6%   (macOS: -12.7%)
+    both fixes         413.4ms   -8.4%   (macOS: -21.7%)
+
+CI's -7.0% agrees with Linux's -8.4%. The Vec churn was ~5x more expensive on
+macOS than on Linux: `_xzm_xzone_malloc_tiny` charges far more for a tiny
+alloc/free pair than glibc's tcache does. GC pause still halves on Linux
+(72.7 -> 52.8ms), so the fix is real there -- it is the SIZE that did not
+transfer, because the thing being removed was an allocator cost and the two
+allocators are not comparable.
+
+**Rule this establishes: never predict CI from a macOS measurement of an
+allocator- or syscall-bound change.** Measure it on the NUC first
+(`~/ash_ab`, build script `~/gc_ab.sh`). Compute-bound changes still transfer.
+
 **CI now publishes collector numbers.** `bench.yml` passes `--gc-stats`, the
 merge carries `{collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
 live_blocks}` onto the ash row, and the site shows them in each number's

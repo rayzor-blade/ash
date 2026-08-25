@@ -618,6 +618,61 @@ minimum (base alone came out 136.4, 141.0, 143.7 and 151ms), not a mode
 mixture. Either way a sub-10% delta on method_call means nothing without
 several sweeps, and this is the first thing to check when it moves in CI.
 
+## binary_trees: the JVM's 2.84x, measured rather than assumed
+
+ash ~597ms against Haxe/JVM's ~210ms in CI, a ratio that holds across three
+sweeps on three CPUs (and ash beats every HashLink variant on it by 5.6x, so
+this is an ash-vs-JVM gap specifically). The benchmark allocates 902MB in
+short-lived trees against a 12-18MB live set -- 97% of every trigger is
+garbage.
+
+**Fixed: the marker allocated a Vec per marked line.**
+`mark_allocation_at_line` returned `Vec<(usize, usize)>` and every caller
+immediately `extend`ed it away -- 1.97M malloc/free pairs per run for a median
+of ONE element each. Threading the caller's accumulator through the five call
+sites: GC pause 106.4 -> 48.9ms, max pause 7.45 -> 3.68ms, wall -12.7%
+(436.5 -> 381.1ms). Collections, blocks reclaimed and live set are identical
+run to run across both binaries (19 / 28143 / 586), so marking behaviour is
+provably unchanged. No other benchmark moves.
+
+**Measured dead ends, so nobody spends a week on them:**
+
+  - *Escape analysis / scalar replacement: worth exactly zero here.* The trees
+    genuinely escape; the JVM gains nothing from it on this benchmark either.
+  - *Tier latency: ~0ms.* Every hot function reaches LLVM inside the first
+    29ms of a 442ms run; nothing is stuck in the interpreter or on Cranelift.
+  - *Mutator codegen quality: at most 10-15ms.* ash's LLVM tier is already
+    good enough here; this is not a codegen problem.
+  - *Inlining the TLAB bump into JIT-emitted code the way C2 does.* Two
+    independent lenses put this between 0 and 13ms, not the 31% the profile's
+    allocation bucket suggests: ~87% of what the sampler charges to
+    `gc_alloc`/`hlp_alloc_obj` is work that survives inlining and merely moves
+    into the mutator. The allocation path is not instruction-throughput-bound.
+  - *Per-object zeroing instead of the TLAB's bulk `__bzero`: COSTS 28-39ms.*
+    The refill-time zero is already the cheapest form and is not deferrable
+    without a write barrier.
+
+**The growth-factor knob was mostly an artifact of the Vec bug.** The earlier
+sensitivity (x4 -> x32 taking pause 109 -> 23ms) was largely measuring malloc
+churn proportional to marking work. Re-measured after the fix, min wall / GC
+pause: x4 379.0ms / 48.8ms, x8 368.0 / 30.6, x16 371.6 / 24.2, x32 377.0 /
+13.4. So pause keeps falling all the way to x32 while WALL TIME turns around
+after x8 -- the pause it removes is replaced by page-reclaim cost. x8 is worth
+about 3% here and costs heap headroom; x16 and beyond are a loss. Whatever is
+chosen, choose it on wall time and RSS, never on the pause number alone.
+
+**Still open, in order of measured value:** the pause is 83% transitive
+tracing (per cycle: rootscan 0.03ms, trace 5.06ms, sweep 0.90ms), so tracing
+is where any further collector work belongs; `sweep()` calls
+`std::env::var("ASH_GC_SWEEP_AUDIT")` once per freed block, ~1,550 getenv
+calls per cycle each taking the macOS process-wide environ lock (~7ms);
+roughly 10 of the 59 instructions per allocation re-decide facts that are
+constant for the whole run and are removable in Rust alone; and ash's objects
+are 33% larger than the JVM's, a bandwidth tax on both allocation and zeroing.
+A young-only collector fits the 99.7%-young-death shape but is unsound in ash
+today (conservative roots, no write barrier) and is worth less once the Vec
+churn is gone.
+
 ## Dispatch: the JVM leads closure_call and method_call, and inlining is why
 
 Haxe's own JVM target is a benchmark lane as of `fc5c0bd`, and it beats ash

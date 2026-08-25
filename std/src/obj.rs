@@ -2720,10 +2720,14 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
     if obj.is_null() {
         return ptr::null_mut();
     }
+    let obj_type = (*obj).t;
+    if obj_type.is_null() {
+        return ptr::null_mut();
+    }
     if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[obj-get] obj={:#x} kind={} hfield={hfield}",
-            obj as usize, (*(*obj).t).kind
+            obj as usize, (*obj_type).kind
         );
     }
 
@@ -2731,7 +2735,7 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
 
     
 
-    match (*(*obj).t).kind {
+    match (*obj_type).kind {
         hl_type_kind_HOBJ | hl_type_kind_HVIRTUAL | hl_type_kind_HDYNOBJ | hl_type_kind_HSTRUCT => {
             hlp_dyn_getp(obj, hfield, dyn_type) as *mut vdynamic
         }

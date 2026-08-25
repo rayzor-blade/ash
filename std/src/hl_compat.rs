@@ -287,10 +287,12 @@ pub unsafe extern "C" fn hl_alloc_bytes(size: i32) -> *mut u8 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_copy_bytes(dst: *mut u8, src: *const u8, size: i32) {
-    if !dst.is_null() && !src.is_null() && size > 0 {
+pub unsafe extern "C" fn hl_copy_bytes(src: *const u8, size: i32) -> *mut u8 {
+    let dst = hl_alloc_bytes(size);
+    if size > 0 {
         std::ptr::copy_nonoverlapping(src, dst, size as usize);
     }
+    dst
 }
 
 #[no_mangle]

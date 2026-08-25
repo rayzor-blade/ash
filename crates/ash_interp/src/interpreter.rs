@@ -3085,8 +3085,22 @@ impl HLInterpreter {
             None
         } else {
             let dyn_ptr = val.as_ptr() as *mut hl::vdynamic;
+            // Primitive exceptions such as the HBYTES value produced by
+            // `hl_error` have no fields. Record that before string conversion,
+            // which may allocate and retire this short-lived native exception.
+            let has_fields = unsafe {
+                let t = (*dyn_ptr).t;
+                !t.is_null()
+                    && matches!(
+                        (*t).kind,
+                        hl::hl_type_kind_HOBJ
+                            | hl::hl_type_kind_HVIRTUAL
+                            | hl::hl_type_kind_HDYNOBJ
+                            | hl::hl_type_kind_HSTRUCT
+                    )
+            };
             let base = self.value_to_string(dyn_ptr);
-            if !self.fn_obj_get_field.is_null() {
+            if has_fields && !self.fn_obj_get_field.is_null() {
                 let get_field: FnObjGetField =
                     unsafe { std::mem::transmute(self.fn_obj_get_field) };
                 let mut extracted: Option<String> = None;
@@ -4116,15 +4130,21 @@ impl HLInterpreter {
                         let exc_ptr =
                             unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
                         if !exc_ptr.is_null() {
+                            // Preserve the runtime's pending-exception state while
+                            // formatting. Clearing it first made the formatter's
+                            // follow-up probe race the short-lived native exception
+                            // on Darwin and hid the original SQLite error behind a
+                            // misleading SIGSEGV.
+                            let exception = self.format_hl_exception(
+                                NanBoxedValue::from_ptr(exc_ptr as usize),
+                            );
                             if !fn_clear_exc.is_null() {
                                 type FnClearExc = unsafe extern "C" fn();
                                 unsafe {
                                     (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(
-                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
-                            ));
+                            return Err(anyhow::Error::new(exception));
                         }
                     }
                     return Err(anyhow!(
@@ -4601,15 +4621,18 @@ impl HLInterpreter {
                         let exc_ptr =
                             unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
                         if !exc_ptr.is_null() {
+                            // Preserve the pending exception until formatting has
+                            // finished, matching the other native trap boundaries.
+                            let exception = self.format_hl_exception(
+                                NanBoxedValue::from_ptr(exc_ptr as usize),
+                            );
                             if !fn_clear_exc.is_null() {
                                 type FnClearExc = unsafe extern "C" fn();
                                 unsafe {
                                     (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(
-                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
-                            ));
+                            return Err(anyhow::Error::new(exception));
                         }
                     }
                     return Err(anyhow!(
@@ -10086,15 +10109,19 @@ impl HLInterpreter {
                         let exc_ptr =
                             unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
                         if !exc_ptr.is_null() {
+                            // `value_to_string` can allocate. Preserve the runtime's
+                            // pending-exception state until its Rust representation is
+                            // complete.
+                            let exception = self.format_hl_exception(
+                                NanBoxedValue::from_ptr(exc_ptr as usize),
+                            );
                             if !fn_clear_exc.is_null() {
                                 type FnClearExc = unsafe extern "C" fn();
                                 unsafe {
                                     (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
                                 };
                             }
-                            return Err(anyhow::Error::new(
-                                self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize)),
-                            ));
+                            return Err(anyhow::Error::new(exception));
                         }
                     }
                     return Err(anyhow!(

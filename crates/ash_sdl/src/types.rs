@@ -107,7 +107,7 @@ extern "C" {
     pub fn hl_alloc_dynamic(t: *mut c_void) -> *mut vdynamic;
     pub fn hl_to_utf8(s: *const u16) -> *const u8;
     pub fn hl_to_utf16(s: *const u8) -> *const u16;
-    pub fn hl_copy_bytes(dst: *mut u8, src: *const u8, size: i32);
+    pub fn hl_copy_bytes(src: *const u8, size: i32) -> *mut u8;
     pub fn hl_alloc_bytes(size: i32) -> *mut u8;
     pub fn hl_gc_alloc_gen(t: *mut c_void, size: i32, flags: i32) -> *mut c_void;
     pub fn hl_blocking(enter: bool);

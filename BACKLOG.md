@@ -661,6 +661,18 @@ after x8 -- the pause it removes is replaced by page-reclaim cost. x8 is worth
 about 3% here and costs heap headroom; x16 and beyond are a loss. Whatever is
 chosen, choose it on wall time and RSS, never on the pause number alone.
 
+**Fixed: an LLVM OSR entry for a late header stalled the mutator.**
+`late_osr_entry` compiled a promote-sized LLVM entry synchronously on the main
+thread -- the profiler charged one call 42ms of a 442ms run. It is an UPGRADE,
+not a rescue: the Cranelift door (~1ms) has already taken the frame out of the
+interpreter, and since entries for headers probed before the promote are built
+ahead of it, nothing on the corpus depends on the late LLVM one. Dropping it
+is worth 10.3% on binary_trees with every other benchmark inside 0.7%.
+`ASH_LATE_LLVM_OSR=1` restores it. Measured bound on OSR overall, for
+perspective: with `ASH_OSR=0` method_call is 127x slower and closure_call
+103x, while binary_trees is 10% FASTER -- OSR is load-bearing everywhere
+except a loop whose body is entirely calls into already-promoted functions.
+
 **Still open, in order of measured value:** the pause is 83% transitive
 tracing (per cycle: rootscan 0.03ms, trace 5.06ms, sweep 0.90ms), so tracing
 is where any further collector work belongs; `sweep()` calls

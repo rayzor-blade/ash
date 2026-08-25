@@ -1498,6 +1498,16 @@ fn osr_transfer_enabled() -> bool {
 }
 
 /// Whether to report OSR decisions (`ASH_OSR_LOG`).
+/// Whether a header that turns hot AFTER its function's promote may stall the
+/// mutator for an LLVM entry (`ASH_LATE_LLVM_OSR=1`). Off by default: see the
+/// use site for the measurement.
+fn late_llvm_osr_enabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        matches!(std::env::var("ASH_LATE_LLVM_OSR").as_deref(), Ok("1") | Ok("on"))
+    })
+}
+
 fn osr_logging() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| std::env::var("ASH_OSR_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
@@ -3758,6 +3768,17 @@ impl HLInterpreter {
                     return;
                 }
             }
+        } else if !late_llvm_osr_enabled() {
+            // The LLVM entry for a late header is an UPGRADE, not a rescue:
+            // the Cranelift door above already took the frame out of the
+            // interpreter, and entries for headers probed before the promote
+            // are built ahead of it now. Paying a promote-sized compile on the
+            // mutator to upgrade a frame that is already in compiled code cost
+            // bench_binary_trees 42ms of a 442ms run -- and buying it back is
+            // worth 10.3% there, with every other benchmark inside 0.7%.
+            // `ASH_LATE_LLVM_OSR=1` restores it for a program that turns a
+            // header hot long after its promote and runs there for a while.
+            return;
         } else {
             let body = self.air.body(bytecode, func_idx);
             let Ok(mut guard) = ctx.llvm.try_lock() else {

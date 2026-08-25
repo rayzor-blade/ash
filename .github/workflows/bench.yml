@@ -455,7 +455,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RID=$(gh run list --workflow=benchmarks --status=success \
+          # workflow_run republishes do not build or upload benchmark-results,
+          # so selecting the newest success without an event filter can pick
+          # a deploy-only run whose artifact cannot exist.
+          RID=$(gh run list --workflow=benchmarks --event=push --status=success \
                   --limit 1 --json databaseId --jq '.[0].databaseId')
           if [ -z "$RID" ]; then
             echo "::error::no successful benchmarks run to reuse"; exit 1

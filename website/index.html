@@ -495,50 +495,30 @@ HashLink Bytecode Runtime
       return (r.engine || '').indexOf('ash:') === 0 && r.status !== 'SKIP';
     });
 
-    // Tests reached, not assertions passed. utest prints its assertion tally
-    // once, at the very end, so a VM that dies partway through reports
-    // exactly as much as one that dies immediately — useless as a measure of
-    // progress. It names each test as it starts, though, and that output
-    // survives a crash, so this number moves as soon as ash gets one test
-    // further. Assertions are shown once a suite actually completes.
+    // Aggregate every Ash suite. Isolation currently applies only to unit, so
+    // its case count is a useful unit diagnostic but cannot be the site-wide
+    // score: doing that made a fully passing threads suite invisible here.
     var assertEl = document.getElementById('conf-assert-value');
     var assertLbl = document.getElementById('conf-assert-label');
-    // Per-case isolation first when the run has it. Its denominator is the
-    // case list, so a crashing case counts against the number instead of
-    // erasing it — which is the only reason a real percentage can be shown
-    // at all. Every whole-suite figure below can report nothing but zero
-    // while any single case still crashes.
-    // CASES, not tests. The comment above is the reason, and the tests_*
-    // figures do not have the property it describes: tests_accepted counts
-    // only tests a case lived long enough to report, so a case that starts
-    // CRASHING removes its tests from the denominator instead of counting
-    // them as failures. That reads as progress. Removing two bad rules from
-    // hlp_safe_cast fixed 45 cases and moved 7 tests from failing to passing,
-    // yet the tests_* pair would have announced "126 tests still failing" ->
-    // "64" -- an 8x overstatement, 55 of the 62 being tests that merely
-    // stopped being counted. cases_total is the case list and does not move,
-    // so this number can only change for a real reason.
-    // The denominator is the cases that HAVE a test to run on this target.
-    // A class whose every test method sits behind `#if js` / `#if jvm` / a
-    // `#if hl` empty stub compiles to nothing here, and utest reports that as
-    // "No tests executed" -- one failed assertion per run, which under
-    // per-case isolation means one failed CASE. 126 of the suite's 1195 are
-    // like that, so counting them dragged the published figure from 93.7% to
-    // 83.5% for a reason ash can never fix. They are excluded here and named
-    // in the tooltip. `cases_attemptable` is absent from older results.json,
-    // hence the fallback.
     var attemptable = sum.cases_attemptable || sum.cases_total;
-    if (typeof sum.cases_ok === 'number' && attemptable) {
-      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(attemptable);
-      assertLbl.textContent = 'cases passed';
-      if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
-        assertEl.title = fmtInt(sum.tests_passed) + ' of ' +
-          fmtInt(sum.tests_accepted) + ' individual tests passed in the cases ' +
-          'that ran to completion (a crashing case reports fewer, which is why ' +
-          'the headline counts cases)' +
-          (sum.cases_empty ? '; ' + fmtInt(sum.cases_empty) +
-            ' further classes define no test for this target and are excluded' : '');
+    if (typeof sum.assertions_passed === 'number' && sum.assertions_total) {
+      assertEl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
+        fmtInt(sum.assertions_total);
+      assertLbl.textContent = 'assertions passed across all suites';
+      assertEl.title = 'Aggregates reported assertions from unit, sys, and threads';
+      if (typeof sum.cases_ok === 'number' && attemptable) {
+        assertEl.title += '. Unit isolation: ' + fmtInt(sum.cases_ok) + ' of ' +
+          fmtInt(attemptable) + ' runnable cases passed';
       }
+    } else if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
+      assertEl.textContent = fmtInt(sum.tests_passed) + ' / ' +
+        fmtInt(sum.tests_accepted);
+      assertLbl.textContent = 'tests passed across all suites';
+      assertEl.title = 'Aggregates every published Ash suite row';
+    } else if (typeof sum.cases_ok === 'number' && attemptable) {
+      // Compatibility with artifacts produced before all-suite totals existed.
+      assertEl.textContent = fmtInt(sum.cases_ok) + ' / ' + fmtInt(attemptable);
+      assertLbl.textContent = 'unit cases passed';
     } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
       assertEl.textContent = sum.assertion_pct + '%';
       assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total + ' assertions';
@@ -557,23 +537,9 @@ HashLink Bytecode Runtime
 
     var suiteEl = document.getElementById('conf-suite-value');
     var suiteLbl = document.getElementById('conf-suite-label');
-    if (typeof sum.cases_ok === 'number' && attemptable) {
-      // Failed AND crashed: a crash is a worse outcome than a wrong answer,
-      // so it must never be the cheaper one to report.
-      var failing = attemptable - sum.cases_ok;
-      suiteEl.textContent = fmtInt(failing);
-      if (!failing) suiteEl.style.color = '#a8703c';
-      if (suiteLbl) {
-        suiteLbl.textContent = 'cases still failing';
-        if (typeof sum.cases_crashed === 'number' && sum.cases_crashed) {
-          suiteEl.title = fmtInt(sum.cases_failed || 0) + ' fail, ' +
-            fmtInt(sum.cases_crashed) + ' crash';
-        }
-      }
-    } else {
-      suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
-      if (!sum.suites_passed) suiteEl.style.color = '#8a807a';
-    }
+    suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
+    if (!sum.suites_passed) suiteEl.style.color = '#8a807a';
+    if (suiteLbl) suiteLbl.textContent = 'suites fully passing';
 
     var natEl = document.getElementById('conf-natives-value');
     var nat = (data.missing_natives || []).length;
@@ -627,7 +593,10 @@ HashLink Bytecode Runtime
       var detail = el('div', null,
         "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;flex:1 1 200px;text-align:right");
       var prog = r.progress || {};
-      if (r.utest && r.status === 'PASS') {
+      if (r.isolated && typeof r.cases_ok === 'number') {
+        detail.textContent = r.cases_ok + ' / ' +
+          (r.cases_attemptable || r.cases_total) + ' runnable cases';
+      } else if (r.utest) {
         detail.textContent = r.utest.passed + ' / ' + r.utest.assertions + ' assertions';
       } else if (prog.tests_reached) {
         detail.textContent = prog.tests_reached + ' tests reached';

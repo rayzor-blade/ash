@@ -757,13 +757,33 @@ def main(argv=None) -> int:
                 if r["engine"].startswith("ash:") and r["status"] != "SKIP"]
     passes = sum(1 for r in ash_rows if r["status"] == "PASS")
     total = len(ash_rows)
-    a_pass = sum(r["utest"]["passed"] for r in ash_rows if r.get("utest"))
-    a_total = sum(r["utest"]["assertions"] for r in ash_rows if r.get("utest"))
+    # Unit isolation has one utest process per case, so its aggregate tally
+    # lives directly on the result row. Whole-suite sys/threads rows carry the
+    # ordinary terminal utest block. Fold both shapes into one site-wide
+    # assertion measure instead of silently reporting only one category.
+    a_pass = sum(
+        r.get("assertions_passed", 0)
+        if r.get("isolated")
+        else (r.get("utest") or {}).get("passed", 0)
+        for r in ash_rows
+    )
+    a_total = sum(
+        r.get("assertions_of_completed", 0)
+        if r.get("isolated")
+        else (r.get("utest") or {}).get("assertions", 0)
+        for r in ash_rows
+    )
     # How far ash got, and how far the reference VM gets on the same
     # bytecode. The reference is the only honest denominator available: the
     # suite does not publish its own test count, and a total taken from a run
     # that crashed would shrink as ash got worse.
     t_reached = sum((r.get("progress") or {}).get("tests_reached", 0) for r in ash_rows)
+    tests_accepted = sum(
+        (r.get("progress") or {}).get("tests_accepted", 0) for r in ash_rows
+    )
+    tests_passed = sum(
+        (r.get("progress") or {}).get("tests_passed", 0) for r in ash_rows
+    )
     ref_rows = [r for r in report["results"] if r["engine"] == "hashlink"]
     t_total = sum((r.get("progress") or {}).get("tests_reached", 0) for r in ref_rows)
     report["summary"] = {
@@ -771,6 +791,10 @@ def main(argv=None) -> int:
         "suites_passed": passes,
         "tests_reached": t_reached,
         "tests_total": t_total or None,
+        # Site-wide totals. Isolation is unit-only, but sys and threads still
+        # publish per-test progress and must move the public score.
+        "tests_accepted": tests_accepted,
+        "tests_passed": tests_passed,
         # The headline. Unlike the assertion tally, this moves the moment ash
         # gets one test further, because utest prints each test as it starts
         # and that output survives a crash.
@@ -806,19 +830,25 @@ def main(argv=None) -> int:
             "cases_timeout": sum(r.get("cases_timeout", 0) for r in iso),
             "case_pct": round(100.0 * c_ok / c_attempt, 1) if c_attempt else None,
             "case_pct_of_all": round(100.0 * c_ok / c_total, 1) if c_total else None,
-            # What the site shows, in the plainest unit there is: tests ash
-            # took on, and tests it got right.
-            "tests_accepted": sum(r.get("progress", {}).get("tests_accepted", 0) for r in iso),
-            "tests_passed": sum(r.get("progress", {}).get("tests_passed", 0) for r in iso),
+            # These are unit-only diagnostics. Do not overwrite the global
+            # all-suite totals above.
+            "isolated_tests_accepted": sum(
+                r.get("progress", {}).get("tests_accepted", 0) for r in iso
+            ),
+            "isolated_tests_passed": sum(
+                r.get("progress", {}).get("tests_passed", 0) for r in iso
+            ),
         })
     if report["summary"].get("isolated"):
         sm = report["summary"]
-        print(f"\n{sm['tests_passed']}/{sm['tests_accepted']} tests passed")
-        print(f"{sm['cases_ok']}/{sm['cases_attemptable']} cases passed "
+        print(f"\n{sm['isolated_tests_passed']}/{sm['isolated_tests_accepted']} "
+              "unit tests passed under isolation")
+        print(f"{sm['cases_ok']}/{sm['cases_attemptable']} unit cases passed "
               f"({sm['case_pct']}%)  [{sm['cases_failed']} failed, "
               f"{sm['cases_crashed']} crashed, "
               f"{sm['cases_empty']} empty on this target]")
-    print(f"\n{passes}/{total} suites passed")
+    print(f"\n{tests_passed}/{tests_accepted} tests passed across all suites")
+    print(f"{passes}/{total} suites passed")
     if t_total:
         print(f"{t_reached}/{t_total} tests reached "
               f"({report['summary']['test_pct']}%, denominator from the reference VM)")

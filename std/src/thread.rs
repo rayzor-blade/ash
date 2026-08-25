@@ -246,6 +246,37 @@ struct HlSemaphore {
     value: i32,
 }
 
+unsafe fn semaphore_take(s: *mut HlSemaphore) -> bool {
+    sys::mutex_lock(&mut (*s).mutex);
+    let acquired = (*s).value > 0;
+    if acquired {
+        (*s).value -= 1;
+    }
+    sys::mutex_unlock(&mut (*s).mutex);
+    acquired
+}
+
+unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant> {
+    if timeout.is_null() {
+        return None;
+    }
+    let kind = if !(*timeout).t.is_null() {
+        (*(*timeout).t).kind
+    } else {
+        0
+    };
+    let secs = if kind == 6 {
+        (*timeout).v.d
+    } else if kind == 5 {
+        (*timeout).v.f as f64
+    } else {
+        0.0
+    };
+    (secs > 0.0).then(|| {
+        std::time::Instant::now() + std::time::Duration::from_secs_f64(secs)
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
     let layout = std::alloc::Layout::new::<HlSemaphore>();
@@ -264,32 +295,42 @@ pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
     if sem.is_null() {
         return;
     }
-    // HashLink !HL_THREADS: semaphore_acquire is a NO-OP (thread.c:219-220).
-    // Blocking here is fatal in a single-threaded VM — nothing can release.
     let s = sem as *mut HlSemaphore;
-    sys::mutex_lock(&mut (*s).mutex);
-    if (*s).value > 0 {
-        (*s).value -= 1;
+    while !semaphore_take(s) {
+        // Preserve HashLink's !HL_THREADS escape hatch only when no Haxe
+        // worker can possibly release the semaphore. With fibers active this
+        // is a real blocking acquire and must yield cooperatively.
+        if !crate::fiber::fibers_active() {
+            return;
+        }
+        crate::fiber::block_yield();
     }
-    sys::mutex_unlock(&mut (*s).mutex);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     sem: *mut c_void,
-    _timeout: *mut vdynamic,
+    timeout: *mut vdynamic,
 ) -> bool {
     if sem.is_null() {
         return false;
     }
-    // HashLink !HL_THREADS: try_acquire ALWAYS returns true (thread.c:238-240).
     let s = sem as *mut HlSemaphore;
-    sys::mutex_lock(&mut (*s).mutex);
-    if (*s).value > 0 {
-        (*s).value -= 1;
+    if semaphore_take(s) {
+        return true;
     }
-    sys::mutex_unlock(&mut (*s).mutex);
-    true
+    let Some(deadline) = timeout_deadline(timeout) else {
+        return false;
+    };
+    loop {
+        crate::fiber::block_yield();
+        if semaphore_take(s) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+    }
 }
 
 #[no_mangle]
@@ -638,6 +679,9 @@ pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
+    if let Some(handle) = crate::fiber::current_handle() {
+        return handle;
+    }
     #[cfg(unix)]
     {
         libc::pthread_self() as usize as *mut c_void
@@ -709,7 +753,16 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange32(
         Ordering::SeqCst,
         Ordering::SeqCst,
     ) {
-        Ok(v) | Err(v) => v,
+        Ok(v) => v,
+        Err(v) => {
+            // A failed CAS is the polling primitive used by Haxe's atomic
+            // spin loops. Cooperative threads cannot make progress unless
+            // the losing fiber gives the owner a turn.
+            if crate::fiber::fibers_active() {
+                crate::fiber::block_yield();
+            }
+            v
+        }
     }
 }
 
@@ -726,7 +779,13 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange_ptr(
         Ordering::SeqCst,
         Ordering::SeqCst,
     ) {
-        Ok(v) | Err(v) => v,
+        Ok(v) => v,
+        Err(v) => {
+            if crate::fiber::fibers_active() {
+                crate::fiber::block_yield();
+            }
+            v
+        }
     }
 }
 

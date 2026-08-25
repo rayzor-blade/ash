@@ -13,11 +13,9 @@
 //! Exception state (trap chain head + exception value) is per-fiber,
 //! swapped into the GC singleton's cells around every resume.
 //!
-//! KNOWN SPIKE LIMIT: the interpreter's scan-root protocol (clear-then-add)
-//! is not yet per-fiber — heavy allocation while a fiber's interpreter
-//! frames are suspended can under-root them. Heaps workers are wait-loops,
-//! so this is acceptable for bring-up; the hardening fix is per-fiber
-//! scan_ranges.
+//! The host is notified around every fiber switch so it can swap logical VM
+//! state (notably interpreted AIR v2 frames). The interpreter publishes both
+//! its active and suspended register files as GC roots.
 
 // `static mut` + raw-pointer access is this module's deliberate story (the
 // VM's single-threaded invariant): `static_mut_refs` demands the
@@ -31,14 +29,23 @@ use std::ffi::c_void;
 
 pub type ClosureRunner =
     unsafe extern "C" fn(*mut vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic;
+pub type FiberSwitchHook = unsafe extern "C" fn(u32, u32);
 
 static mut CLOSURE_RUNNER: Option<ClosureRunner> = None;
+static mut FIBER_SWITCH_HOOK: Option<FiberSwitchHook> = None;
 
 /// Registered by the host (interpreter) so native code can run a Haxe
 /// closure whose `fun` is an interpreter stub pointer (findex+1).
 #[no_mangle]
 pub unsafe extern "C" fn hlp_set_closure_runner(f: ClosureRunner) {
     CLOSURE_RUNNER = Some(f);
+}
+
+/// Registered by the host so logical VM state follows krio's stack switch.
+/// Fiber id 0 denotes the scheduler/main context.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_set_fiber_switch_hook(hook: FiberSwitchHook) {
+    FIBER_SWITCH_HOOK = Some(hook);
 }
 
 /// The registered interpreter re-entry runner, if any. Used by native code
@@ -70,6 +77,18 @@ const FIBER_STACK_SIZE: usize = 256 * 1024;
 
 pub(crate) unsafe fn fibers_active() -> bool {
     !(*(&raw const FIBERS)).is_empty()
+}
+
+/// The opaque handle used by `thread_create` for the currently running Haxe
+/// fiber. The main context continues to use its native OS-thread identity.
+pub(crate) unsafe fn current_handle() -> Option<*mut c_void> {
+    (*(&raw const CURRENT)).map(|id| ((id as usize) << 4 | 1) as *mut c_void)
+}
+
+unsafe fn notify_switch(from: u32, to: u32) {
+    if let Some(hook) = FIBER_SWITCH_HOOK {
+        hook(from, to);
+    }
 }
 
 unsafe fn run_closure(c: *mut vclosure) {
@@ -166,10 +185,13 @@ pub(crate) unsafe fn schedule_step() -> bool {
         crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
         MAIN_TRAP = trap;
         MAIN_EXC = exc;
-        CURRENT = Some((*(&raw const FIBERS))[i].id);
+        let id = (*(&raw const FIBERS))[i].id;
+        CURRENT = Some(id);
+        notify_switch(0, id);
 
         (*(&raw mut FIBERS))[i].fiber.resume();
 
+        notify_switch(id, 0);
         CURRENT = None;
         let (mut trap, mut exc) = (MAIN_TRAP, MAIN_EXC);
         crate::gc::gc_swap_exc_state(&mut trap, &mut exc);

@@ -1542,6 +1542,10 @@ pub struct HLInterpreter {
     pub globals: Vec<NanBoxedValue>,
     /// Call stack
     stack: Vec<InterpreterFrame>,
+    /// Suspended logical call stacks, keyed by krio fiber id. AIR v2 frames
+    /// must follow the fiber that owns their register files rather than the
+    /// single OS thread all cooperative Haxe threads share.
+    fiber_stacks: HashMap<u32, Vec<InterpreterFrame>>,
     /// Maximum call stack depth
     max_stack_depth: usize,
     /// Findexes whose tier-1 compile this interpreter has force-proposed at
@@ -1859,6 +1863,7 @@ impl HLInterpreter {
         HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
+            fiber_stacks: HashMap::new(),
             max_stack_depth: 1000,
             osr_forced: std::collections::HashSet::new(),
             demand_local: Vec::new(),
@@ -2345,7 +2350,11 @@ impl HLInterpreter {
             let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
             let mut buf = std::mem::take(&mut self.scan_range_buf);
             buf.clear();
-            for frame in &self.stack {
+            for frame in self
+                .stack
+                .iter()
+                .chain(self.fiber_stacks.values().flatten())
+            {
                 let regs = frame.registers.as_slice();
                 if !regs.is_empty() {
                     buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
@@ -2367,7 +2376,11 @@ impl HLInterpreter {
         // (see conservative_scan_range), so scanning them directly is
         // sound, always-current, and cheaper than rebuilding a Vec per
         // sync.
-        for frame in &self.stack {
+        for frame in self
+            .stack
+            .iter()
+            .chain(self.fiber_stacks.values().flatten())
+        {
             let regs = frame.registers.as_slice();
             if !regs.is_empty() {
                 let ptr = regs.as_ptr() as *const c_void;
@@ -3250,6 +3263,19 @@ impl HLInterpreter {
                 }
             }
         }
+        unsafe extern "C" fn fiber_switch_runner(from: u32, to: u32) {
+            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                return;
+            };
+            let interp = &mut *ctx.interp;
+            let outgoing = std::mem::take(&mut interp.stack);
+            if !outgoing.is_empty() {
+                let replaced = interp.fiber_stacks.insert(from, outgoing);
+                debug_assert!(replaced.is_none(), "fiber {from} already had a suspended stack");
+            }
+            interp.stack = interp.fiber_stacks.remove(&to).unwrap_or_default();
+            interp.sync_gc_scan_roots();
+        }
         unsafe {
             CLOSURE_RUN_CTX = Some(ClosureRunCtx {
                 interp: self as *mut _,
@@ -3265,6 +3291,14 @@ impl HLInterpreter {
                 );
                 let f: SetRunner = std::mem::transmute(set);
                 f(fiber_closure_runner);
+            }
+            let set_switch = native_resolver
+                .resolve_function("std", "hlp_set_fiber_switch_hook")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_switch.is_null() {
+                type SetSwitch = unsafe extern "C" fn(unsafe extern "C" fn(u32, u32));
+                let f: SetSwitch = std::mem::transmute(set_switch);
+                f(fiber_switch_runner);
             }
         }
 

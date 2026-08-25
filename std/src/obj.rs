@@ -7,7 +7,6 @@ use std::alloc::alloc;
 use std::sync::RwLock;
 use std::{
     alloc::Layout,
-    cmp::Ordering,
     ffi::{c_int, c_void, CStr},
     mem, ptr,
     sync::{LazyLock, Mutex},
@@ -376,59 +375,22 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
     // println!("Computed hash: {}", h);
 
     if cache_name {
-        // println!("Attempting to cache the name");
-
-        // First, try to read from the cache
-        if let Ok(cache) = (*(&raw const HL_CACHE)).read() {
-            // print_cache_state(&cache, "Read lock acquired");
-
-            if !cache.data.is_null() {
-                let mut low = 0;
-                let mut high = cache.size;
-
-                while low < high {
-                    let mid = low + (high - low) / 2;
-                    // println!("Binary search - low: {}, high: {}, mid: {}", low, high, mid);
-
-                    if mid >= cache.capacity {
-                        // println!(
-                        //     "Error: mid ({}) is out of bounds. Cache capacity: {}",
-                        //     mid, cache.capacity
-                        // );
-                        return h;
-                    }
-
-                    let lookup = &*cache.data.add(mid);
-                    // println!("Comparing hash {} with {}", lookup.hashed_name, h);
-
-                    let cmp = lookup.hashed_name.cmp(&h).then_with(|| {
-                        let cmp_result = ucmp(lookup.t as *const uchar, oname);
-                        // println!("String comparison result: {}", cmp_result);
-                        if cmp_result < 0 {
-                            Ordering::Less
-                        } else if cmp_result > 0 {
-                            Ordering::Greater
-                        } else {
-                            Ordering::Equal
-                        }
-                    });
-
-                    match cmp {
-                        Ordering::Equal => {
-                            // println!("Found exact match, returning hash");
-                            return h;
-                        }
-                        Ordering::Less => low = mid + 1,
-                        Ordering::Greater => high = mid,
-                    }
-                }
-            }
-        } else {
-            // println!("Failed to acquire read lock");
-        }
-
-        // If we're here, we need to write to the cache (sorted insertion)
+        // HashLink resolves a real hash collision by probing consecutive
+        // hashes. Dynamic objects store only the integer, so keeping two
+        // different names under the same value makes the second field alias
+        // the first and also loses its name in Reflect.fields (haxe#5572).
         if let Ok(mut cache) = (*(&raw const HL_CACHE)).write() {
+            loop {
+                let lookup = hlp_lookup_find(cache.data, cache.size as i32, h);
+                if lookup.is_null() {
+                    break;
+                }
+                if ucmp((*lookup).t as *const uchar, oname) == 0 {
+                    return h;
+                }
+                h = h.wrapping_add(1);
+            }
+
             if (cache.data.is_null() || cache.size >= cache.capacity)
                 && !grow_cache(&mut cache) {
                     return h;

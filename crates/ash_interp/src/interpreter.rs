@@ -4795,7 +4795,28 @@ impl HLInterpreter {
                     op
                 );
             }
-            let result = self.execute_opcode(bytecode, op, func_idx)?;
+            let result = match self.execute_opcode(bytecode, op, func_idx) {
+                Ok(result) => result,
+                Err(err) => {
+                    // Opcode helpers (NullCheck, Assert, checked casts, and
+                    // similar runtime operations) report Haxe exceptions as
+                    // HLExceptionPropagation.  They must enter a Trap in this
+                    // very frame; using `?` here skipped the local handler and
+                    // only gave callers a chance to catch the value.
+                    let exc = err
+                        .downcast_ref::<HLExceptionPropagation>()
+                        .map(|exception| exception.value);
+                    if let Some(exc) = exc {
+                        let frame = self.stack.last_mut().unwrap();
+                        if let Some((target_pc, exc_reg)) = frame.trap_stack.pop() {
+                            frame.registers.set(exc_reg, exc);
+                            frame.pc = target_pc;
+                            continue;
+                        }
+                    }
+                    return Err(err);
+                }
+            };
 
             match result {
                 StepResult::Continue => {
@@ -6494,6 +6515,26 @@ impl HLInterpreter {
         Ok(StepResult::Continue)
     }
 
+    /// Raise a failed checked cast through the current Haxe trap, if any.
+    ///
+    /// SafeCast runs as an interpreter opcode rather than a native call, so
+    /// calling `hlp_dyn_cast*` for its failure path would longjmp without the
+    /// native-call setjmp boundary.  Represent the same catchable failure in
+    /// the interpreter's trap stack instead.  A null exception value is also
+    /// what the existing Assert/NullCheck opcode failures use.
+    fn invalid_cast_step(frame: &mut InterpreterFrame) -> Result<StepResult> {
+        let value = NanBoxedValue::null();
+        if let Some((target, exc_reg)) = frame.trap_stack.pop() {
+            frame.registers.set(exc_reg, value);
+            Ok(StepResult::JumpAbs(target))
+        } else {
+            Err(anyhow::Error::new(HLExceptionPropagation {
+                value,
+                message: Some("Invalid cast".to_string()),
+            }))
+        }
+    }
+
     /// Checked cast, unboxing nullables and validating object hierarchies.
     ///
     /// Extracted from `execute_opcode` so the SSA dispatcher in
@@ -6513,6 +6554,8 @@ impl HLInterpreter {
         let val = frame.registers.get(src);
         let dst_type_idx = func.regs[dst as usize].0;
         let dst_kind = bytecode.types[dst_type_idx].kind;
+        let src_type_idx = func.regs[src as usize].0;
+        let src_kind = bytecode.types[src_type_idx].kind;
 
         let result = if val.is_null() || val.is_void() {
             match dst_kind {
@@ -6527,14 +6570,45 @@ impl HLInterpreter {
         } else if val.is_ptr() && val.as_ptr() != 0 {
             if Self::is_unboxable_primitive_kind(dst_kind) {
                 // Primitive destination: unbox from vdynamic
-                unsafe {
+                match unsafe {
                     Self::unbox_dynamic_to_kind(val.as_ptr() as *mut hl::vdynamic, dst_kind)
-                        .unwrap_or(val)
+                } {
+                    Some(value) => value,
+                    None => {
+                        // Calls through erased Dynamic signatures can return a
+                        // scalar in the machine word. The generic result slot
+                        // records that word as a pointer-shaped NanBox value;
+                        // tiny values therefore are immediate payloads, not a
+                        // vdynamic to dereference. Preserve that representation
+                        // boundary while still rejecting real object-to-number
+                        // casts below.
+                        if matches!(
+                            src_kind,
+                            hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL
+                        ) && val.as_ptr() < 0x10000
+                        {
+                            let raw = val.as_ptr() as i64;
+                            match dst_kind {
+                                hl::hl_type_kind_HI32 => NanBoxedValue::from_i32(raw as i32),
+                                hl::hl_type_kind_HUI8 => {
+                                    NanBoxedValue::from_i32(raw as u8 as i32)
+                                }
+                                hl::hl_type_kind_HUI16 => {
+                                    NanBoxedValue::from_i32(raw as u16 as i32)
+                                }
+                                hl::hl_type_kind_HI64 => NanBoxedValue::from_i64(raw),
+                                hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64 => {
+                                    NanBoxedValue::from_f64(raw as f64)
+                                }
+                                hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(raw != 0),
+                                _ => return Self::invalid_cast_step(frame),
+                            }
+                        } else {
+                            return Self::invalid_cast_step(frame);
+                        }
+                    }
                 }
             } else {
-                let src_type_idx = func.regs[src as usize].0;
-                let src_kind = bytecode.types[src_type_idx].kind;
-
                 // Closure destination: pass the closure through unchanged.
                 // Upstream adapts signatures with hl_make_fun_wrapper (a
                 // marshalling trampoline); the interpreter needs none — its
@@ -6653,7 +6727,7 @@ impl HLInterpreter {
                             // Look up __cast proto findex from the object's runtime type
                             let obj_ptr = val.as_ptr() as *const hl::vdynamic;
                             let header_t = unsafe { (*obj_ptr).t };
-                            let cast_findex = if !header_t.is_null()
+                            let (cast_findex, upcast) = if !header_t.is_null()
                                 && (header_t as usize) >= 0x10000
                                 && unsafe { (*header_t).kind } == hl::hl_type_kind_HOBJ
                             {
@@ -6713,13 +6787,17 @@ impl HLInterpreter {
                                             curo = (*sup).__bindgen_anon_1.obj;
                                             depth += 1;
                                         }
-                                        if upcast { None } else { found }
+                                        if upcast {
+                                            (None, true)
+                                        } else {
+                                            (found, false)
+                                        }
                                     } else {
-                                        None
+                                        (None, false)
                                     }
                                 }
                             } else {
-                                None
+                                (None, false)
                             };
 
                             if let Some(findex) = cast_findex {
@@ -6733,8 +6811,10 @@ impl HLInterpreter {
                                     args: vec![val, type_val],
                                     dst,
                                 });
+                            } else if upcast {
+                                val
                             } else {
-                                val // no __cast, just copy
+                                return Self::invalid_cast_step(frame);
                             }
                         } else {
                             val // non-HOBJ cast, just copy
@@ -6843,6 +6923,8 @@ impl HLInterpreter {
         src: u32,
     ) -> Result<StepResult> {
         let fn_hash_gen = self.fn_hash_gen;
+        let (mk_dyn, pt_i32, pt_f64, pt_bool) =
+            (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
         let frame = self.stack.last_mut().unwrap();
         let obj_val = frame.registers.get(obj);
         if obj_val.is_null() || obj_val.is_void() {
@@ -6856,9 +6938,20 @@ impl HLInterpreter {
                 &mut self.field_hash_cache,
             )?;
             let obj_ptr = obj_val.as_ptr() as *mut c_void;
-            let src_val = frame.registers.get(src);
             let src_type_idx = func.regs[src as usize].0;
             let src_kind = bytecode.types[src_type_idx].kind;
+            // Dynamic values may be unboxed while they live in registers,
+            // but a named field with dynamic type stores a vdynamic*. In
+            // particular, the raw bits of 0.0 are a null pointer if written
+            // without this boundary box.
+            let src_val = Self::box_for_dynamic_slot(
+                mk_dyn,
+                pt_i32,
+                pt_f64,
+                pt_bool,
+                src_kind,
+                frame.registers.get(src),
+            );
             if env_flag!("ASH_DBG_DYN") {
                 let fname = bytecode
                     .strings
@@ -7704,14 +7797,31 @@ impl HLInterpreter {
             }
 
             for ins in &blk.instrs {
-                match self.ssa_step(bc, native_resolver, func_idx, prep, args, ins)? {
-                    None => {}
-                    // A call raised and this frame's innermost trap caught it.
-                    Some(handler) => {
-                        prev_block = Some(block as u32);
-                        block = handler;
-                        continue 'blocks;
+                let next = match self.ssa_step(bc, native_resolver, func_idx, prep, args, ins) {
+                    Ok(next) => next,
+                    Err(err) => {
+                        let exc = err
+                            .downcast_ref::<HLExceptionPropagation>()
+                            .map(|exception| exception.value);
+                        if let Some(exc) = exc {
+                            let frame = self.stack.last_mut().unwrap();
+                            if let Some((handler, cell_slot)) = frame.trap_stack.pop() {
+                                frame.registers.set(cell_slot, exc);
+                                Some(handler)
+                            } else {
+                                return Err(err);
+                            }
+                        } else {
+                            return Err(err);
+                        }
                     }
+                };
+                if let Some(handler) = next {
+                    // A call or opcode raised and this frame's innermost trap
+                    // caught it.
+                    prev_block = Some(block as u32);
+                    block = handler;
+                    continue 'blocks;
                 }
             }
 
@@ -8138,8 +8248,16 @@ impl HLInterpreter {
                         // an integer. Dispatch it the way CallMethod and
                         // CallClosure dispatch theirs.
                         let staged = self.op_safe_cast(bc, func, func_idx, dst.0, src.0)?;
-                        if matches!(staged, StepResult::Call { .. }) {
-                            return self.ssa_staged_call(bc, native_resolver, func, staged);
+                        match staged {
+                            StepResult::Call { .. } => {
+                                return self.ssa_staged_call(bc, native_resolver, func, staged);
+                            }
+                            // SSA trap entries store handler block IDs in the
+                            // same tuple where the opcode interpreter stores
+                            // absolute PCs. invalid_cast_step has already put
+                            // the exception value in the trap cell.
+                            StepResult::JumpAbs(handler) => return Ok(Some(handler)),
+                            _ => {}
                         }
                     }
                     K::ToSFloat => {
@@ -9358,7 +9476,7 @@ impl HLInterpreter {
         if !Self::is_derefable_dynamic(d) {
             return None;
         }
-        if d.is_null() || (*d).t.is_null() {
+        if d.is_null() || !Self::is_derefable_dynamic((*d).t.cast()) {
             return None;
         }
         let sk = (*(*d).t).kind;
@@ -10194,6 +10312,9 @@ impl HLInterpreter {
         };
 
         let mut call_args = Vec::with_capacity(argc);
+        // Storage backing HREF arguments for the duration of the synchronous
+        // call below. Box keeps each cell stable if this Vec grows.
+        let mut ref_cells: Vec<Box<u64>> = Vec::new();
         for i in 0..argc {
             let dyn_arg = unsafe { *data_ptr.add(i) };
             let expected_kind = arg_kinds
@@ -10205,37 +10326,30 @@ impl HLInterpreter {
             // box's payload gave the callee an "address" of 0x2 for
             // Type.createInstance(ClassWithCtorDefaultValues, [2, "bar"]).
             // Null stays null: that is the callee's use-the-default signal.
-            let v = if expected_kind == hl::hl_type_kind_HREF
-                && !dyn_arg.is_null()
-                && !self.fn_dyn_castp.is_null()
-            {
-                let to_t = self.c_type_factory.get(arg_type_idxs[i + arg_shift]);
-                let dyn_t = bytecode
-                    .types
-                    .iter()
-                    .position(|t| t.kind == hl::hl_type_kind_HDYN)
-                    .map(|ti| self.c_type_factory.get(ti));
-                match dyn_t {
-                    Some(dyn_t) if !to_t.is_null() && !dyn_t.is_null() => unsafe {
-                        let castp: unsafe extern "C" fn(
-                            *mut c_void,
-                            *mut c_void,
-                            *mut c_void,
-                        ) -> *mut c_void = std::mem::transmute(self.fn_dyn_castp);
-                        let mut slot = dyn_arg;
-                        let cell = castp(
-                            &mut slot as *mut _ as *mut c_void,
-                            dyn_t as *mut c_void,
-                            to_t as *mut c_void,
-                        );
-                        if cell.is_null() {
-                            NanBoxedValue::null()
-                        } else {
-                            NanBoxedValue::from_ptr(cell as usize)
-                        }
-                    },
-                    _ => self.dynamic_to_value_for_kind(dyn_arg, expected_kind),
-                }
+            let v = if expected_kind == hl::hl_type_kind_HNULL && !dyn_arg.is_null() {
+                // A provided nullable argument remains boxed. Extracting its
+                // primitive payload turns `2 : Null<Int>` into pointer 0x2;
+                // the callee expects the vdynamic* so its nullable prologue
+                // can distinguish it from an omitted/null argument.
+                NanBoxedValue::from_ptr(dyn_arg as usize)
+            } else if expected_kind == hl::hl_type_kind_HREF && !dyn_arg.is_null() {
+                let href_type = &bytecode.types[arg_type_idxs[i + arg_shift]];
+                let inner_kind = href_type
+                    .tparam
+                    .as_ref()
+                    .and_then(|t| bytecode.types.get(t.0))
+                    .map(|t| t.kind)
+                    .unwrap_or(hl::hl_type_kind_HDYN);
+                let inner = self.dynamic_to_value_for_kind(dyn_arg, inner_kind);
+                let mut cell = Box::new(0u64);
+                Self::write_value_to_ptr(
+                    (&mut *cell as *mut u64).cast::<u8>(),
+                    inner,
+                    inner_kind,
+                );
+                let cell_ptr = (&mut *cell as *mut u64) as usize;
+                ref_cells.push(cell);
+                NanBoxedValue::from_ptr(cell_ptr)
             } else {
                 self.dynamic_to_value_for_kind(dyn_arg, expected_kind)
             };

@@ -44,6 +44,15 @@ done
 if [[ -n "$STD_SRC" ]]; then
   cp "$STD_SRC" "$DIST/$STD_LIB"
   chmod u+w "$DIST/$STD_LIB"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    # Mach-O HDLLs carry a two-level import of @rpath/libhl.dylib. Keep a
+    # compatibility-named copy beside ash; the runtime deliberately selects
+    # this same image whenever the bytecode directory contains an HDLL, so
+    # native extensions and std@ calls share one GC.
+    cp "$STD_SRC" "$DIST/libhl.dylib"
+    chmod u+w "$DIST/libhl.dylib"
+    install_name_tool -id "@executable_path/libhl.dylib" "$DIST/libhl.dylib"
+  fi
   echo "bundled runtime: $STD_SRC"
 else
   # Not fatal — the binary still has the embedded copy and will fall back to
@@ -57,7 +66,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # walked too: it is a separate Mach-O with its own dependency list, and
   # rewriting only the executable's would leave it pointing at Homebrew paths
   # that exist on no user's machine.
-  for macho in "$DIST/ash" ${STD_SRC:+"$DIST/$STD_LIB"}; do
+  for macho in "$DIST/ash" ${STD_SRC:+"$DIST/$STD_LIB"} ${STD_SRC:+"$DIST/libhl.dylib"}; do
   otool -L "$macho" | awk 'NR>1 {print $1}' | while read -r dep; do
     case "$dep" in
       /usr/lib/*|/System/*|@*) continue ;;
@@ -82,7 +91,10 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # Signing comes last: rewriting load commands invalidates any signature, and
   # an unsigned dylib makes dlopen register a fresh signature in the kernel on
   # first open, which is the stall this whole path exists to avoid.
-  if [[ -n "$STD_SRC" ]]; then codesign --force -s - "$DIST/$STD_LIB"; fi
+  if [[ -n "$STD_SRC" ]]; then
+    codesign --force -s - "$DIST/$STD_LIB"
+    codesign --force -s - "$DIST/libhl.dylib"
+  fi
   codesign --force -s - "$DIST/ash"
   echo "bundled dylibs:"
   otool -L "$DIST/ash" | sed -n '2,20p'

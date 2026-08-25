@@ -160,7 +160,14 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32) -> *mut c_void {
-    let mut gc = crate::gc::gc_locked();
+    // A Mach-O HDLL binds these `hl_*` imports to its `libhl.dylib`
+    // dependency by install-name ordinal, even when ash exports the same ABI
+    // from the main executable. That compatibility image can therefore see
+    // its first allocation before ash's ordinary stdlib initializer reaches
+    // it. HashLink treats allocation as an initialization boundary; do the
+    // same here instead of aborting an otherwise valid fmt/ssl call with
+    // "GC not initialized".
+    let mut gc = crate::gc::gc_locked_init();
     if let Some(ptr) = gc.allocate(size as usize) {
         let p = ptr.as_ptr() as *mut vdynamic;
         (*p).t = t;
@@ -172,13 +179,13 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
-    let mut gc = crate::gc::gc_locked();
+    let mut gc = crate::gc::gc_locked_init();
     gc.register_persistent(ptr as *mut vdynamic);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
-    let mut gc = crate::gc::gc_locked();
+    let mut gc = crate::gc::gc_locked_init();
     gc.unregister_persistent(ptr as *mut vdynamic);
 }
 

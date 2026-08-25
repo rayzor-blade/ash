@@ -25,6 +25,7 @@ a baseline it always exits 0: a first run is a measurement, not a verdict.
 import argparse
 import collections
 import concurrent.futures as cf
+import filecmp
 import json
 import os
 import pathlib
@@ -225,6 +226,27 @@ def stage_hdlls(dest: pathlib.Path, srcs: list[pathlib.Path]) -> int:
     for s in srcs:
         shutil.copy2(s, dest / s.name)
     return len(srcs)
+
+
+def stage_macos_libhl(ash: str) -> None:
+    """Give Mach-O HDLLs the current ash runtime under their import name."""
+    if sys.platform != "darwin":
+        return
+    exe_dir = pathlib.Path(ash).resolve().parent
+    runtime = exe_dir / "libash_std.dylib"
+    compat = exe_dir / "libhl.dylib"
+    if not runtime.is_file():
+        if not compat.is_file():
+            print("WARNING: no libhl.dylib beside ash; Mach-O HDLLs may bind a "
+                  "stale system HashLink runtime")
+        return
+    if compat.is_file() and filecmp.cmp(runtime, compat, shallow=False):
+        return
+    try:
+        shutil.copy2(runtime, compat)
+        print(f"libhl: current ash runtime staged at {compat}")
+    except OSError as exc:
+        sys.exit(f"could not stage the macOS libhl compatibility image: {exc}")
 
 
 def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
@@ -584,6 +606,7 @@ def main(argv=None) -> int:
 
     hdlls = hdll_sources(root, args.hdll_dir)
     if hdlls:
+        stage_macos_libhl(ash)
         print(f"hdll:  {len(hdlls)} from {hdlls[0].parent}")
     elif sys.platform != "darwin":
         print("hdll:  none (pass --hdll-dir); suites needing ssl/fmt will not load")

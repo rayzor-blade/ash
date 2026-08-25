@@ -53,26 +53,35 @@ pub fn std_is_static() -> bool {
 
 /// Decide how ash_std will be reached, before anything touches it.
 ///
-/// Always the linked-in copy. An earlier version of this kept the dylib for
-/// programs that load HDLLs, on the theory that an .hdll resolves its `hl_*`
-/// imports through the dynamic linker and so needs a real library to bind to.
-/// That reasoning was wrong in a way that only shows up at runtime: once
-/// ash_std is linked into the executable, the executable exports those symbols
-/// and *precedes* any dlopened library in the global search order, so the
-/// .hdll binds the executable's copy regardless. Keeping the dylib therefore
-/// did not give HDLLs a second copy to use — it gave the process two copies of
-/// the GC, initialized the wrong one, and a Heaps game died on
-/// "GC not initialized" the moment SDL allocated.
+/// ELF uses the linked-in copy: executable exports preempt the same symbols in
+/// an HDLL's `libhl.so` dependency, so both callers reach one GC. Mach-O's
+/// two-level namespace instead pins each HDLL import to `libhl.dylib`; when an
+/// HDLL is beside the bytecode, ash selects that compatibility-named copy for
+/// its own std@ resolution as well. The platform mechanisms differ, but the
+/// invariant is the same: exactly one active stdlib state.
 ///
-/// Linking unconditionally is both simpler and the only arrangement in which
-/// exactly one GC exists. Verified against the Heaps sample: all four HDLLs
-/// load and the program reaches Main.init().
-///
-/// `ASH_STD_LINKAGE=dynamic` restores the dlopen for A/B diagnosis. It is not
-/// a supported configuration — with any HDLL loaded it reproduces the split
-/// described above.
-pub fn choose_std_linkage(_program: &Path) -> bool {
-    let static_ok = std::env::var("ASH_STD_LINKAGE").as_deref() != Ok("dynamic");
+/// `ASH_STD_LINKAGE=dynamic` remains available for A/B diagnosis on programs
+/// without HDLLs.
+pub fn choose_std_linkage(program: &Path) -> bool {
+    let forced_dynamic = std::env::var("ASH_STD_LINKAGE").as_deref() == Ok("dynamic");
+    // Mach-O keeps the dylib ordinal on every undefined symbol. An HDLL that
+    // imports `hl_gc_alloc_gen` from `libhl.dylib` therefore does not use the
+    // identically named export in the main executable (ELF/Linux does). When
+    // native extensions are present, route ash's own std@ calls through that
+    // same compatibility image so there is exactly one GC and one set of HL
+    // type singletons in active use.
+    #[cfg(target_os = "macos")]
+    let has_hdll = program.parent().is_some_and(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.filter_map(Result::ok).any(|entry| {
+                entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll")
+            })
+        })
+    });
+    #[cfg(not(target_os = "macos"))]
+    let has_hdll = false;
+
+    let static_ok = !forced_dynamic && !has_hdll;
     STATIC_STD.store(static_ok, std::sync::atomic::Ordering::Relaxed);
     static_ok
 }
@@ -180,7 +189,23 @@ pub fn init_std_library() -> Result<()> {
             // The system-libhl preference (and its staleness probe) is a unix
             // concern; see usable_system_libhl for the reasoning and the
             // ASH_LIBHL override. On Windows it always answers None.
-            let lib_path = if let Some(system_libhl) = usable_system_libhl(ext) {
+            #[cfg(target_os = "macos")]
+            let sibling_libhl = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("libhl.dylib")))
+                .filter(|path| path.exists());
+            #[cfg(not(target_os = "macos"))]
+            let sibling_libhl: Option<std::path::PathBuf> = None;
+
+            let lib_path = if let Some(sibling) = sibling_libhl {
+                if !quiet() {
+                    eprintln!(
+                        "[ash] Loading HDLL-compatible ash_std at {}",
+                        sibling.display()
+                    );
+                }
+                sibling
+            } else if let Some(system_libhl) = usable_system_libhl(ext) {
                 eprintln!("[ash] Using system libhl at {}", system_libhl.display());
                 system_libhl
             } else {
@@ -195,6 +220,12 @@ pub fn init_std_library() -> Result<()> {
                 let mut candidates: Vec<std::path::PathBuf> = Vec::new();
                 if let Ok(exe) = std::env::current_exe() {
                     if let Some(exe_dir) = exe.parent() {
+                        // macOS HDLL imports name libhl.dylib explicitly. The
+                        // release bundle and conformance runner stage the
+                        // current ash_std under that compatibility name; load
+                        // that exact image first so both sides share state.
+                        #[cfg(target_os = "macos")]
+                        candidates.push(exe_dir.join("libhl.dylib"));
                         // Sibling next to the executable
                         candidates.push(exe_dir.join(&lib_name));
                         // exe in target/debug/ -> dylib in target/<triple>/debug/

@@ -225,7 +225,7 @@ HashLink Bytecode Runtime
 <section id="benchmarks" style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
 <div style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">Benchmarks</div>
 <h2 style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">Faster than HashLink's JIT</h2>
-<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — same bytecode, same machine, every run checksum-verified. Numbers land fresh from CI with each push to <code>main</code>.</p>
+<p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — same bytecode, every engine in a row timed on the same runner, every run checksum-verified. Numbers land fresh from CI with each push to <code>main</code>.</p>
 
 <div style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
 <div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
@@ -244,7 +244,7 @@ HashLink Bytecode Runtime
 <noscript><div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">The benchmark table needs JavaScript; the raw numbers live in <a href="bench/results.json">bench/results.json</a>.</div></noscript>
 </div>
 </div>
-<div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the pure wall time of one run. HashLink/C's ahead-of-time build is excluded; every row is verified against the benchmark's accepted checksums before it is published.</div>
+<div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the pure wall time of one run. HashLink/C's ahead-of-time build is excluded; every row is verified against the benchmark's accepted checksums before it is published. Each benchmark is measured in its own CI job, so the engines within a row share a machine but different rows may not — compare engines within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.</div>
 </div>
 
 <p id="bench-provenance" style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
@@ -399,7 +399,8 @@ HashLink Bytecode Runtime
           num.appendChild(ratio);
         }
         num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
-        (r.aot_build_ms ? ' · AOT build excluded' : '');
+        (r.aot_build_ms ? ' · AOT build excluded' : '') +
+        (b.system && b.system.cpu_model ? ' · ' + b.system.cpu_model : '');
         line.appendChild(num);
         bars.appendChild(line);
       });
@@ -425,7 +426,16 @@ HashLink Bytecode Runtime
     var prov = document.getElementById('bench-provenance');
     var sys = data.system || {};
     var bits = [];
-    if (sys.cpu_model) bits.push(sys.cpu_model);
+    if (sys.cpu_model) {
+      bits.push(sys.cpu_model);
+    } else if (sys.runners && sys.runners.length > 1) {
+      // Every benchmark is its own CI job on its own runner, so a sweep
+      // routinely spans several machines. Naming one of them for the whole
+      // table would attribute each number to hardware that did not produce
+      // it; the per-row machine is in each cell's tooltip.
+      bits.push((sys.runner_count || sys.runners.length) + ' runners · ' +
+                sys.runners.length + ' CPU models');
+    }
     if (sys.os && sys.arch) bits.push(sys.os + '/' + sys.arch);
     if (data.hl_version) bits.push('HashLink ' + data.hl_version);
     if (data.hl2_version) bits.push('hl2-ir ' + data.hl2_version);

@@ -8,7 +8,10 @@ files come from `hl_bench.py` and carry both HashLink lanes (JIT and HL/C).
 Output is one compact `results.json`:
 
   { schema_version, generated_iso, source, commit, branch, hl_version, java_version,
-    system: {os, arch, cpu_model, cpu_count},
+    system: {os, arch, cpu_model, cpu_count, runners, runner_count},
+      -- cpu_model is null unless every leg ran on the same one; `runners`
+      -- lists the distinct models the sweep actually used. Per-benchmark
+      -- machines live on each entry's own `system`.
     benchmarks: [ { name, title, group, rows: [
         { engine: "hashlink-jit"|"hashlink-hl2"|"hashlink-c"|"hxjvm",
           label, status, median_ms, min_ms, max_ms, runs },
@@ -208,13 +211,52 @@ def main() -> int:
             ),
             "misc",
         )
+        # The machine THIS benchmark ran on. Every benchmark is its own
+        # matrix job on its own runner, so there is no such thing as "the
+        # machine of a sweep": measured over the run history, a sweep spans
+        # 3.4 distinct CPU models on average. Carrying the identity onto the
+        # row it belongs to is what makes a number traceable to the hardware
+        # that produced it.
+        leg = next(
+            (
+                d
+                for d in ash_docs
+                if any(r.get("benchmark") == name for r in d.get("results", []))
+            ),
+            None,
+        )
+        leg_sys = (leg or {}).get("system") or {}
         benchmarks.append(
-            {"name": name, "title": TITLES.get(name, name), "group": group, "rows": rows}
+            {
+                "name": name,
+                "title": TITLES.get(name, name),
+                "group": group,
+                "rows": rows,
+                "system": {
+                    "cpu_model": leg_sys.get("cpu_model"),
+                    "cpu_count": leg_sys.get("cpu_count"),
+                },
+            }
         )
 
     first = ash_docs[0]
     git = first.get("git") or {}
     system = first.get("system") or {}
+    # A sweep-wide CPU is only publishable when every leg agrees on one.
+    # Before this, the field was `ash_docs[0]`'s -- the alphabetically first
+    # partial, i.e. always binary_trees' runner -- and it was stamped on all
+    # nine rows: measured over 63 sweeps, the benchmark actually ran on the
+    # advertised CPU in 26-41% of cases depending on the row. A reader
+    # comparing two sweeps' numbers was being told a machine that produced
+    # neither.
+    runners = sorted(
+        {
+            (d.get("system") or {}).get("cpu_model")
+            for d in ash_docs
+            if (d.get("system") or {}).get("cpu_model")
+        }
+    )
+    homogeneous = len(runners) <= 1
     hl_version = next((d.get("hl_version") for d in hl_docs if d.get("hl_version")), None)
     hl2_version = next((d.get("hl2_version") for d in hl_docs if d.get("hl2_version")), None)
     java_version = next((d.get("java_version") for d in hl_docs if d.get("java_version")), None)
@@ -231,8 +273,10 @@ def main() -> int:
         "system": {
             "os": system.get("os"),
             "arch": system.get("arch"),
-            "cpu_model": system.get("cpu_model"),
+            "cpu_model": system.get("cpu_model") if homogeneous else None,
             "cpu_count": system.get("cpu_count"),
+            "runners": runners,
+            "runner_count": len(ash_docs),
         },
         "benchmarks": benchmarks,
     }

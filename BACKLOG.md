@@ -516,6 +516,44 @@ to 412ms, because each promotion drags an AIR prepare onto the mutator. So the
 gate returns early when `ssa::enabled()`, leaving v2 exactly as it was. Give v2
 back-edges before giving it the gate.
 
+### CI cannot compare milliseconds across sweeps, and said otherwise
+
+Every benchmark is its own matrix job on its own runner (`bench.yml:186-205`),
+so a sweep is nine machines, not one -- measured across 91 push sweeps, a mean
+of 3.4 distinct CPU models each, drawn from six models in the pool. The merge
+then published ONE cpu_model for the whole page: `merge_bench_site.py` took
+`ash_docs[0]`, and the sorted glob plus `merge-multiple: true` makes that
+always `ash-binary_trees.json`. Over 63 sweeps, a given row actually ran on the
+advertised CPU 26-41% of the time; 322 of 448 non-binary_trees legs did not.
+
+What that cost: closure_call read 263 -> 144 -> 162ms over three commits and
+looked like a win then a regression. Per-leg, those ran on an EPYC 7763, a
+Xeon 8573C and an EPYC 9V74; hashlink-c, whose code never changed, read
+158 -> 121 -> 178ms on the same three legs. Against it: 1.67 -> 1.18 -> 0.91,
+monotonic, and ash is now faster than AOT C on that benchmark.
+
+**No ratio rescues cross-sweep comparison in general.** Take a ratio where BOTH
+engines are frozen (hashlink-hl2 / hashlink-c): it still moves up to 2.03x
+across runs, because the JIT engines and the AOT build respond to a host by
+different factors (that ratio is 1.03 on an EPYC 9V45 and 1.90 on a Xeon
+8573C). Best denominator measured is geo(jit, hl2, c) at 1.066 mean spread and
+1.171 worst; raw ms across sweeps is meaningless below ~45%, and 54% of the
+5%+ movements it reports have the wrong sign. WITHIN a row the ratios are
+sound -- ash and all four reference engines are timed in the same job on the
+same VM -- which is why the ash/hashlink-c column is the one to read.
+
+Fixed: the merge carries each leg's machine onto its own benchmark entry, the
+sweep-level `cpu_model` is published only when every leg agrees (otherwise
+`runners` lists the models), the site labels each number with the CPU that
+produced it, and the copy no longer claims "same machine" across rows.
+
+**Still open, and the thing that would actually answer "did this commit
+help?":** an in-sweep A/B -- build HEAD^ (or a named ref) alongside HEAD in the
+existing build job, ship it as `ash-base` in the toolchain artifact, and time
+both interleaved in the same leg on the same VM. Roughly +2 minutes of sweep
+wall time, no new jobs. Until that exists, a local interleaved A/B is the only
+trustworthy verdict on a performance change.
+
 ### closure_call's 19.7% SD is the same coin, and the private-module cure is measured worse
 
 CI: median 316.9 / min 196.4. Reproduced under 9-way local load: llvm=2 runs

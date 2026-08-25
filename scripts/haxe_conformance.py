@@ -476,8 +476,13 @@ def run_isolated(ash: str, program: pathlib.Path, mode: str, timeout: int,
 
     results.sort(key=lambda r: r["case"])
     counts = collections.Counter(r["status"] for r in results)
-    assertions = sum(r["assertions"] for r in results)
-    passed = sum(r["assertions_passed"] for r in results)
+    # EMPTY is utest's synthetic one-assertion failure for a class with no
+    # runnable methods on this target. It is not a Haxe assertion and the
+    # reference whole-suite run does not count it, so exclude it from both
+    # sides of the assertion score just as we do from the case denominator.
+    scored_results = [r for r in results if r["status"] != "EMPTY"]
+    assertions = sum(r["assertions"] for r in scored_results)
+    passed = sum(r["assertions_passed"] for r in scored_results)
     # Classes with no tests on this target are not a score ash can move, so
     # they are named and excluded from the denominator rather than counted as
     # failures. They stay in `cases_total` so nothing is hidden.
@@ -774,7 +779,7 @@ def main(argv=None) -> int:
                     print(f"     assertions {iso['assertions_passed']}/"
                           f"{iso['assertions_of_completed']} "
                           f"({iso['assertion_pct_of_completed']}%) "
-                          f"among cases that ran to completion")
+                          f"among non-empty cases that ran to completion")
                 if args.reference:
                     engines = [e for e in engines if e[0] == "hashlink"]
                 else:

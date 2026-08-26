@@ -148,9 +148,10 @@ jobs:
           curl.exe -fsSL -o micromamba.tar.bz2 `
             https://micro.mamba.pm/api/micromamba/win-64/latest
           
-          Write-Host "Extracting Micromamba..."
-          mkdir mm | Out-Null
-          tar -xf micromamba.tar.bz2 -C mm
+          Write-Host "Extracting Micromamba using 7-Zip..."
+          # 7z extracts the .bz2 to a .tar, then un-tars it into the 'mm' directory
+          7z x micromamba.tar.bz2 -y | Out-Null
+          7z x micromamba.tar -omm -y | Out-Null
           
           $mm = Join-Path (Resolve-Path mm).Path 'Library\bin\micromamba.exe'
           Write-Host "Found micromamba at $mm"

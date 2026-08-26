@@ -246,13 +246,31 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/ash.exe dist/
+          
+          # Copy the Conda/LLVM runtime DLLs bundled in the previous step
           cp target/release/*.dll dist/
           
-          # Compress inside the dist directory to avoid wrapping files in a top-level folder
+          # Bundle the diagnostic / HashLink runtime
+          if [ -f "target/release/ash_std.dll" ]; then
+            echo "Bundling ash_std.dll and creating libhl aliases..."
+            # *.dll above already copied ash_std.dll, but we need the HashLink names:
+            
+            # Keep a compatibility-named copy beside ash for native extensions
+            cp target/release/ash_std.dll dist/libhl.dll
+            
+            # HashLink 1.x CMake builds import libhl.1.dll. 
+            # We copy instead of symlink because Windows symlinks can require 
+            # Admin rights/Developer Mode and break user extraction.
+            cp target/release/ash_std.dll dist/libhl.1.dll
+          else
+            echo "::warning::ash_std.dll not found; installed ash will extract its runtime on every run"
+          fi
+          
+          # Compress inside the dist directory
           cd dist
           tar -czf ash-windows-x86_64.tar.gz ash.exe *.dll
           
-          # Generate SHA256 using standard bash tooling
+          # Generate SHA256
           sha256sum ash-windows-x86_64.tar.gz > ash-windows-x86_64.tar.gz.sha256
           cd ..
 
@@ -266,12 +284,14 @@ jobs:
 
   publish:
     name: Publish release
-    needs: build
-    # `needs` alone withholds the release when any leg fails or is skipped,
-    # so one dead runner image took every platform's binary down with it.
-    # Publish what built; the missing platform simply has no asset until its
-    # leg is fixed, and install.sh already reports that per platform.
-    if: ${{ always() && needs.build.result != 'cancelled' }}
+    # Now it waits for both the Unix matrix and the Windows job to finish (or skip)
+    needs: [build, windows-experimental]
+    
+    # `always()` ensures it still publishes if a job fails (as your comment notes),
+    # but we check both jobs to ensure we don't publish if you manually cancel the run.
+    # If the Windows job is skipped (because `try_windows` is false), its result is 
+    # 'skipped', which safely passes this check.
+    if: ${{ always() && needs.build.result != 'cancelled' && needs.windows-experimental.result != 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

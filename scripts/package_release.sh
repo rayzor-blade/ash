@@ -52,6 +52,10 @@ if [[ -n "$STD_SRC" ]]; then
     cp "$STD_SRC" "$DIST/libhl.dylib"
     chmod u+w "$DIST/libhl.dylib"
     install_name_tool -id "@executable_path/libhl.dylib" "$DIST/libhl.dylib"
+    # HashLink 1.x CMake builds import @rpath/libhl.1.dylib. Keep that name as
+    # a symlink to the exact same Ash runtime so old and new HDLLs cannot make
+    # dyld load two independent GC states.
+    ln -s libhl.dylib "$DIST/libhl.1.dylib"
   fi
   echo "bundled runtime: $STD_SRC"
 else

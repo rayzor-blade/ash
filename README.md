@@ -279,11 +279,13 @@ ASH discovers `.hdll` files in the same directory as the `.hl` file.
 
 ## Heaps.io
 
-`examples/heaps_base2d/` runs a [Heaps](https://heaps.io/) Base2D application — window creation, GL context, shader compilation, the render loop and input events — through `ash_sdl` in place of the C `sdl.hdll`:
+`examples/heaps_base2d/` runs a [Heaps](https://heaps.io/) Base2D application — window creation, GL context, shader compilation, the render loop and input events — through a relocatable macOS arm64 build of HashLink's SDL3 `sdl.hdll`:
 
 ```bash
 cargo run -p ash_cli -- --mode hybrid examples/heaps_base2d/bin/game.hl
 ```
+
+See the [Heaps on Ash guide](https://rayzor-blade.github.io/ash/heaps.html) for matching haxelib versions, HDLL placement, Apple Silicon setup, and troubleshooting.
 
 ## Status
 

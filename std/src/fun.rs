@@ -255,8 +255,21 @@ pub static mut hlc_call_flags: i32 = 0;
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_setup_callbacks2(c: *mut c_void, w: *mut c_void, flags: i32) {
-    hlc_get_wrapper = mem::transmute::<*mut c_void, HlcFunWrapperType>(w);
-    hlc_static_call = mem::transmute::<*mut c_void, HlcStaticCallType>(c);
+    // Ash supplies its static-call bridge but has no HashLink wrapper-code
+    // generator. Keep the null-returning defaults for callbacks it omits;
+    // transmuting a null pointer into a function pointer makes the next
+    // HFUN-to-HFUN SafeCast jump to address zero (notably when an SDL window
+    // is restored and Heaps rebuilds its event callbacks).
+    hlc_get_wrapper = if w.is_null() {
+        empty_fun_wrapper
+    } else {
+        mem::transmute::<*mut c_void, HlcFunWrapperType>(w)
+    };
+    hlc_static_call = if c.is_null() {
+        empty_static_call
+    } else {
+        mem::transmute::<*mut c_void, HlcStaticCallType>(c)
+    };
     hlc_call_flags = flags;
 }
 

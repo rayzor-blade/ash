@@ -51,6 +51,14 @@ pub fn std_is_static() -> bool {
     STATIC_STD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[cfg(target_os = "macos")]
+fn program_directory(program: &Path) -> &Path {
+    program
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 /// Decide how ash_std will be reached, before anything touches it.
 ///
 /// ELF uses the linked-in copy: executable exports preempt the same symbols in
@@ -70,12 +78,15 @@ pub fn choose_std_linkage(program: &Path) -> bool {
     // native extensions are present, route ash's own std@ calls through that
     // same compatibility image so there is exactly one GC and one set of HL
     // type singletons in active use.
+    // A bare filename such as `game.hl` has `Path::new("")` as its parent.
+    // `read_dir("")` fails even though later HDLL discovery correctly treats
+    // `"".join("sdl.hdll")` as a file in the cwd. Make both decisions use the
+    // same directory, or macOS commits to the static runtime and then loads
+    // HDLLs bound to a second GC.
     #[cfg(target_os = "macos")]
-    let has_hdll = program.parent().is_some_and(|dir| {
-        std::fs::read_dir(dir).is_ok_and(|entries| {
-            entries.filter_map(Result::ok).any(|entry| {
-                entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll")
-            })
+    let has_hdll = std::fs::read_dir(program_directory(program)).is_ok_and(|entries| {
+        entries.filter_map(Result::ok).any(|entry| {
+            entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll")
         })
     });
     #[cfg(not(target_os = "macos"))]
@@ -599,5 +610,19 @@ impl NativeFunctionResolver {
             let actual_fn = resolver(&mut sign);
             Ok(actual_fn)
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_program_filename_uses_current_directory() {
+        assert_eq!(program_directory(Path::new("game.hl")), Path::new("."));
+        assert_eq!(
+            program_directory(Path::new("games/marblegame.hl")),
+            Path::new("games")
+        );
     }
 }

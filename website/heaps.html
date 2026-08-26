@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Heaps on Ash — Apple Silicon Guide</title>
+<meta name="description" content="Compile and run Heaps games on Ash with SDL3 hlsdl on Apple Silicon.">
+<meta name="theme-color" content="#f5f1ea">
+<link rel="canonical" href="https://rayzor-blade.github.io/ash/heaps.html">
+<link rel="icon" type="image/png" href="ash-mark-tight.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:#f5f1ea;color:#221d1a;-webkit-font-smoothing:antialiased;font-family:'IBM Plex Sans',sans-serif}
+a{color:#a8703c;text-decoration:none}a:hover{color:#7f5228}
+code,pre{font-family:'IBM Plex Mono',monospace}
+.shell{background:#221d1a;color:#eae6e1;border-radius:8px;padding:16px 18px;font-size:13px;line-height:1.8;overflow-x:auto;white-space:pre}
+.card{background:#fff;border:1px solid rgba(34,29,26,.12);border-radius:12px;padding:clamp(20px,4vw,30px)}
+.eyebrow{font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:#a8703c}
+.step{font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:700;color:#a8703c;margin-bottom:10px}
+.note{border-left:3px solid #a8703c;background:rgba(168,112,60,.08);padding:14px 17px;border-radius:0 8px 8px 0;color:#5c5450;line-height:1.65}
+@media(max-width:700px){nav{display:none!important}}
+</style>
+</head>
+<body>
+<header style="position:sticky;top:0;z-index:20;background:rgba(245,241,234,.9);backdrop-filter:blur(10px);border-bottom:1px solid rgba(34,29,26,.1)">
+<div style="display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px clamp(24px,6vw,64px);max-width:1080px;margin:0 auto">
+<a href="index.html" style="display:flex;align-items:center;gap:9px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700"><img src="ash-mark-tight.png" alt="Ash" style="height:36px;width:auto"><span style="padding-top:9px">ash</span></a>
+<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="#install">Install</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#troubleshoot">Troubleshoot</a><a href="https://github.com/rayzor-blade/ash">GitHub</a></nav>
+</div>
+</header>
+
+<main style="max-width:1080px;margin:0 auto;padding:clamp(54px,8vw,90px) clamp(24px,6vw,64px) 80px">
+<div class="eyebrow">Heaps.io · macOS arm64</div>
+<h1 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(36px,6vw,62px);line-height:1.08;letter-spacing:-.025em;margin:20px 0 18px">Run Heaps games<br>on Apple Silicon.</h1>
+<p style="font-size:clamp(16px,2vw,19px);line-height:1.65;color:#5c5450;max-width:720px;margin:0">Ash runs Heaps HashLink bytecode natively on Apple Silicon. Use matching Heaps and hlsdl sources, place the HDLLs beside your <code>.hl</code> file, and let Ash provide the single compatible HashLink runtime.</p>
+
+<div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:32px">
+<a href="https://github.com/rayzor-blade/ash/raw/refs/heads/main/examples/heaps_base2d/bin/sdl.hdll" style="background:#221d1a;color:#f5f1ea;padding:13px 22px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600">Download sdl.hdll →</a>
+<a href="https://github.com/HaxeFoundation/hashlink/pull/974" style="border:1px solid rgba(34,29,26,.2);color:#221d1a;padding:13px 22px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:13px">Upstream patch #974</a>
+</div>
+
+<div class="note" style="margin-top:24px;max-width:820px"><strong>Artifact:</strong> macOS arm64 · hlsdl 1.17 · SDL 3.4.10 · SHA-256 <code style="font-size:12px">b58e23e4f631f3edcc0041fd4c8ecb89df43afe5db6f0f4846d5b544ce33cdca</code>. It uses <code>LC_RPATH @loader_path</code>, preventing a copied HDLL from reaching back into the machine that built it and loading a second HashLink runtime.</div>
+
+<section id="install" style="scroll-margin-top:90px;margin-top:70px">
+<div class="eyebrow">01 · Install matching libraries</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Keep Haxe and native sides in sync</h2>
+<p style="line-height:1.7;color:#5c5450;max-width:760px">The Haxe externs determine which native symbols appear in <code>game.hl</code>. Pair current Heaps with HashLink's hlsdl source; mixing an older hlsdl checkout with a newer <code>sdl.hdll</code> produces unresolved or mismatched symbols.</p>
+<pre class="shell"><span style="color:#caa06f">$</span> haxelib git heaps https://github.com/HeapsIO/heaps.git
+<span style="color:#caa06f">$</span> haxelib git hlsdl https://github.com/HaxeFoundation/hashlink.git master libs/sdl
+<span style="color:#caa06f">$</span> haxelib path heaps
+<span style="color:#caa06f">$</span> haxelib path hlsdl</pre>
+</section>
+
+<section id="compile" style="scroll-margin-top:90px;margin-top:64px">
+<div class="eyebrow">02 · Compile</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Build ordinary HashLink bytecode</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px">
+<div class="card"><div class="step">compile.hxml</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto">-lib heaps
+-lib hlsdl
+-main Main
+-hl bin/game.hl</pre></div>
+<div class="card"><div class="step">Build</div><pre style="font-size:13px;line-height:1.75;margin:0;overflow-x:auto"><span style="color:#a8703c">$</span> haxe compile.hxml
+<span style="color:#a8703c">$</span> cp /path/to/sdl.hdll bin/</pre></div>
+</div>
+<p style="line-height:1.7;color:#5c5450;margin-top:18px">Keep every native library used by the program—commonly <code>sdl.hdll</code>, <code>fmt.hdll</code>, <code>ui.hdll</code>, and <code>uv.hdll</code>—in the same directory as <code>game.hl</code>.</p>
+</section>
+
+<section id="run" style="scroll-margin-top:90px;margin-top:64px">
+<div class="eyebrow">03 · Run</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Start with the hybrid runtime</h2>
+<pre class="shell"><span style="color:#caa06f">$</span> ash --mode hybrid bin/game.hl
+
+[ash] Loading HDLL-compatible ash_std at .../libhl.dylib
+[ash] Loading HDLL: sdl from "bin/sdl.hdll"</pre>
+<p style="line-height:1.7;color:#5c5450;max-width:780px">That first compatibility-runtime line matters: it confirms Ash and the C HDLLs share one GC and one set of HashLink type globals. No <code>DYLD_LIBRARY_PATH</code> is required. Ash's macOS release places both <code>libhl.dylib</code> and its <code>libhl.1.dylib</code> alias beside the executable.</p>
+<div class="note" style="margin-top:20px"><strong>Heaps lifecycle:</strong> <code>Main.main()</code> runs as soon as bytecode and HDLL loading complete. <code>hxd.App.init()</code> runs later, after Heaps creates its window, event loop, engine, and graphics context. In the Base2D example the measured gap was about 1.39 seconds. Do not add sleeps, pause the sentinel, or manually drive <code>hxd.System.mainLoop()</code>; those workarounds create an artificial delay.</div>
+</section>
+
+<section id="troubleshoot" style="scroll-margin-top:90px;margin-top:64px">
+<div class="eyebrow">04 · Troubleshoot</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Read the first failure, not the cascade</h2>
+<div style="display:flex;flex-direction:column;gap:12px">
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Shader calls crash after startup</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Confirm <code>glCreateShader</code> is not merely the first visible symptom. A second <code>libhl</code> can create the shader successfully and then crash while hlsdl boxes its numeric ID. Use this relocatable HDLL and verify the compatibility-runtime line appears before any HDLL line.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Unresolved sdl@hlp_* symbol</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Your Haxe hlsdl externs and native <code>sdl.hdll</code> are from different revisions. Recompile <code>game.hl</code> after selecting hlsdl 1.17.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No compatibility-runtime line</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Update Ash. Older macOS builds mishandled a bare bytecode filename such as <code>ash game.hl</code> and selected the static runtime before discovering HDLLs in the current directory.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Minimize/restore crash in hybrid mode</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Use a current Ash build. Its HashLink callback compatibility layer preserves safe defaults when hlsdl supplies null wrapper callbacks; the Base2D example is tested through repeated minimize/restore cycles.</p></div>
+</div>
+</section>
+
+<section style="margin-top:70px;padding-top:30px;border-top:1px solid rgba(34,29,26,.1);display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center">
+<p style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#8a807a;margin:0">Working example: <a href="https://github.com/rayzor-blade/ash/tree/main/examples/heaps_base2d">examples/heaps_base2d</a></p>
+<a href="index.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px">← Back to Ash</a>
+</section>
+</main>
+</body>
+</html>

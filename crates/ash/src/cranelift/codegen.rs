@@ -1754,6 +1754,18 @@ impl AirCodegen<'_, '_> {
                 let sp = self.ctx.type_ptr(src_ty.0 as usize)?;
                 let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
                 let srcv = self.coerce(v, types::I64)?;
+                // `hlp_dyn_castp` takes `void *data`, where `data` points to
+                // a slot containing the reference. Passing the reference
+                // itself makes the helper interpret the object's hl_type*
+                // header as the value being cast. LLVM passes its register
+                // alloca here; materialize the equivalent Cranelift slot.
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                ));
+                self.b.ins().stack_store(types::I64, srcv, slot, 0);
+                let data = self.b.ins().stack_addr(types::I64, slot, 0);
                 let stv = self.b.ins().iconst(types::I64, sp as i64);
                 let dtv = self.b.ins().iconst(types::I64, dp as i64);
                 let callee = self
@@ -1767,7 +1779,7 @@ impl AirCodegen<'_, '_> {
                 let call = self
                     .b
                     .ins()
-                    .call_indirect(sig, callee, &[srcv, stv, dtv]);
+                    .call_indirect(sig, callee, &[data, stv, dtv]);
                 self.b.inst_results(call)[0]
             }
             CastKind::ToVirtual => {

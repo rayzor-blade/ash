@@ -4229,7 +4229,9 @@ impl<'ctx> JITModule<'ctx> {
                     let devirt = if self.hot_reload {
                         None
                     } else {
-                        crate::callsite_profile::method_receiver(f.findex as u32, i as u32)
+                        let caller = f.findex as u32;
+                        crate::callsite_profile::method_receiver(caller, i as u32)
+                            .or_else(|| crate::callsite_profile::uniform_method_receiver(caller))
                             .and_then(|(type_ptr_c, target)| {
                                 match self.get_or_create_function_value(target as usize) {
                                     Ok((callee, ph)) => {
@@ -4963,7 +4965,10 @@ impl<'ctx> JITModule<'ctx> {
                 let devirt = if self.hot_reload {
                     None
                 } else {
-                    crate::callsite_profile::closure_target(f.findex as u32, i as u32).and_then(
+                    let caller = f.findex as u32;
+                    crate::callsite_profile::closure_target(caller, i as u32)
+                        .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
+                        .and_then(
                         |(target, exp_hv)| {
                             let expected_ty = if exp_hv {
                                 extended_fn_type

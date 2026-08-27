@@ -9,10 +9,11 @@
 //! for; this module is where it accumulates, and the LLVM tier's lowering is
 //! where it turns into a guarded direct call the inliner can take.
 //!
-//! Keys are `(caller findex, opcode index)` into the AIR-optimized ops array
-//! — the interpreter executes that same array (`air::Cache::body`) and the
-//! promote path lowers it from the same shared cache, so the indices agree
-//! by construction.
+//! Keys are `(caller findex, opcode index)` into the serialized AIR V2 body
+//! executed by the flat interpreter. Backends that still have that index use
+//! the exact observation. Direct AIR V2 backends do not flatten their SSA CFG,
+//! so they may use a caller-wide observation only when every recorded site in
+//! that caller agrees on one monomorphic shape.
 //!
 //! A site is either monomorphic (one target ever observed) or poisoned. The
 //! record is advisory: the emitted guard re-checks the target at runtime and
@@ -65,6 +66,34 @@ fn lookup(map: &Mutex<HashMap<u64, Obs>>, caller: u32, pc: u32) -> Option<(u64, 
     }
 }
 
+/// Return a caller-wide observation only when every recorded site in that
+/// caller has the same monomorphic shape.
+///
+/// AIR V2 owns its SSA CFG and does not retain the flat serializer's opcode
+/// index. A backend consuming AIR V2 therefore cannot use that index as a
+/// stable site identity. The conservative caller-wide fallback recovers the
+/// common one-dispatch-site case without guessing: disagreement or a single
+/// polymorphic site disables the optimization. The generated fast arm still
+/// carries its ordinary runtime guard.
+fn lookup_uniform_caller(map: &Mutex<HashMap<u64, Obs>>, caller: u32) -> Option<(u64, u32)> {
+    let m = map.lock().expect("callsite profile mutex poisoned");
+    let mut uniform = None;
+    for (&site, &observation) in m.iter() {
+        if (site >> 32) as u32 != caller {
+            continue;
+        }
+        let Obs::Mono(a, b) = observation else {
+            return None;
+        };
+        match uniform {
+            None => uniform = Some((a, b)),
+            Some(previous) if previous == (a, b) => {}
+            Some(_) => return None,
+        }
+    }
+    uniform
+}
+
 /// The interpreter saw `caller`'s CallClosure at `pc` invoke bytecode
 /// function `target`, with (`has_value`) or without a bound value.
 pub fn record_closure(caller: u32, pc: u32, target: u32, has_value: bool) {
@@ -77,6 +106,11 @@ pub fn closure_target(caller: u32, pc: u32) -> Option<(u32, bool)> {
     lookup(closure_sites(), caller, pc).map(|(t, hv)| (t as u32, hv != 0))
 }
 
+/// The uniform closure target observed across all sites in `caller`.
+pub fn uniform_closure_target(caller: u32) -> Option<(u32, bool)> {
+    lookup_uniform_caller(closure_sites(), caller).map(|(t, hv)| (t as u32, hv != 0))
+}
+
 /// The interpreter saw `caller`'s CallMethod/CallThis at `pc` dispatch on a
 /// receiver whose runtime type header is `type_ptr`, resolving to `target`.
 pub fn record_method(caller: u32, pc: u32, type_ptr: u64, target: u32) {
@@ -87,4 +121,34 @@ pub fn record_method(caller: u32, pc: u32, type_ptr: u64, target: u32) {
 /// dispatched on, or `None` when the site is unseen or polymorphic.
 pub fn method_receiver(caller: u32, pc: u32) -> Option<(u64, u32)> {
     lookup(method_sites(), caller, pc)
+}
+
+/// The uniform method receiver and target observed across all sites in
+/// `caller`.
+pub fn uniform_method_receiver(caller: u32) -> Option<(u64, u32)> {
+    lookup_uniform_caller(method_sites(), caller)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caller_fallback_requires_one_uniform_monomorphic_shape() {
+        let map = Mutex::new(HashMap::from([
+            (key(41, 3), Obs::Mono(7, 9)),
+            (key(41, 12), Obs::Mono(7, 9)),
+            (key(42, 1), Obs::Mono(8, 10)),
+        ]));
+        assert_eq!(lookup_uniform_caller(&map, 41), Some((7, 9)));
+
+        map.lock()
+            .expect("test profile mutex poisoned")
+            .insert(key(41, 20), Obs::Mono(7, 11));
+        assert_eq!(lookup_uniform_caller(&map, 41), None);
+
+        let polymorphic = Mutex::new(HashMap::from([(key(43, 0), Obs::Poly)]));
+        assert_eq!(lookup_uniform_caller(&polymorphic, 43), None);
+        assert_eq!(lookup_uniform_caller(&polymorphic, 44), None);
+    }
 }

@@ -2622,6 +2622,10 @@ impl AirCodegen<'_, '_> {
             .load(types::I64, MemFlagsData::trusted(), closure, 0);
         let expected_type = self.ctx.type_ptr(self.f.value_ty(fun).0 as usize)?;
         let expected_type = self.b.ins().iconst(types::I64, expected_type as i64);
+        let pointer_exact = self
+            .b
+            .ins()
+            .icmp(IntCC::Equal, runtime_type, expected_type);
         // A bound method carries the closure type embedded in its full
         // function type, while AIR's register can refer to an independently
         // interned but structurally identical HFUN. Pointer identity sent
@@ -2629,17 +2633,7 @@ impl AirCodegen<'_, '_> {
         // exposed the generic marshaller to I64 arguments unnecessarily.
         // HashLink type equality is structural for function signatures, so
         // use the runtime's own predicate to choose the direct ABI path.
-        let same_type = self
-            .b
-            .ins()
-            .iconst(types::I64, self.ctx.same_type_addr()? as i64);
-        let same_type_sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I8));
-        let same_type_call =
-            self.b
-                .ins()
-                .call_indirect(same_type_sig, same_type, &[runtime_type, expected_type]);
-        let exact = self.b.inst_results(same_type_call)[0];
-
+        let structural_bb = self.b.create_block();
         let direct_bb = self.b.create_block();
         let dynamic_bb = self.b.create_block();
         let merge_bb = self.b.create_block();
@@ -2651,7 +2645,27 @@ impl AirCodegen<'_, '_> {
         if let Some(ty) = result_ty {
             self.b.append_block_param(merge_bb, ty);
         }
-        self.b.ins().brif(exact, direct_bb, &[], dynamic_bb, &[]);
+        self.b
+            .ins()
+            .brif(pointer_exact, direct_bb, &[], structural_bb, &[]);
+
+        // Pointer identity is overwhelmingly the ordinary case and costs one
+        // compare. Only independently interned but structurally equivalent
+        // signatures need the runtime equality helper.
+        self.b.switch_to_block(structural_bb);
+        let same_type = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.same_type_addr()? as i64);
+        let same_type_sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I8));
+        let same_type_call =
+            self.b
+                .ins()
+                .call_indirect(same_type_sig, same_type, &[runtime_type, expected_type]);
+        let structurally_exact = self.b.inst_results(same_type_call)[0];
+        self.b
+            .ins()
+            .brif(structurally_exact, direct_bb, &[], dynamic_bb, &[]);
 
         self.b.switch_to_block(direct_bb);
         let direct = self.emit_direct_call_closure(closure, dst, args)?;

@@ -36,6 +36,11 @@ use crate::{
 };
 use anyhow::{anyhow, Result};
 
+/// AIR V2 loop-header visits between cooperative scheduler polls in compiled
+/// LLVM code. This matches the Cranelift tier so moving between tiers does not
+/// change logical-thread fairness by orders of magnitude.
+const FIBER_POLL_INTERVAL: u64 = 16 * 1024;
+
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics
 /// (errors when called, not when compiled) and the interpreter's lazy
@@ -1330,13 +1335,105 @@ impl<'ctx> JITModule<'ctx> {
             }
             blocks[bi] = seq;
         }
-        let first = blocks
+
+        // Compiled fibers need safe points even in CPU-only loops. Derive
+        // those points from AIR V2's natural-loop analysis and put a
+        // rate-limited poll block in front of each selected header. All CFG
+        // edges target `entries`, so phi copies still happen on the original
+        // predecessor edge before the safe point.
+        let cfg = air::v2::CfgInfo::build(air);
+        let loops = air::v2::LoopForest::analyze(air, &cfg);
+        let mut poll_headers = vec![false; air.blocks.len()];
+        for lp in &loops.loops {
+            if included.get(lp.header.idx()).copied().unwrap_or(false) {
+                poll_headers[lp.header.idx()] = true;
+            }
+        }
+        let has_polls = poll_headers.iter().any(|poll| *poll);
+        let mut entries = vec![None; air.blocks.len()];
+        for bi in 0..air.blocks.len() {
+            if blocks[bi].is_empty() {
+                continue;
+            }
+            entries[bi] = if poll_headers[bi] {
+                Some(
+                    self.context
+                        .append_basic_block(function, &format!("air_b{bi}_fiber_poll")),
+                )
+            } else {
+                blocks[bi].first().copied()
+            };
+        }
+
+        let fiber_poll = has_polls.then(|| self.declare_native("hlp_fiber_poll", &[], None));
+        self.builder.position_at_end(entry);
+        let poll_counter = if has_polls {
+            let counter = self
+                .builder
+                .build_alloca(self.context.i32_type(), "air_fiber_poll_counter")?;
+            self.builder.build_store(
+                counter,
+                self.context
+                    .i32_type()
+                    .const_int(FIBER_POLL_INTERVAL, false),
+            )?;
+            Some(counter)
+        } else {
+            None
+        };
+
+        let first = entries
             .get(entry_target.idx())
-            .and_then(|b| b.first())
             .copied()
+            .flatten()
             .ok_or_else(|| anyhow!("AIR entry block b{} is not selected", entry_target.0))?;
         self.builder.position_at_end(entry);
         self.builder.build_unconditional_branch(first)?;
+
+        for bi in 0..air.blocks.len() {
+            let Some(poll_entry) = entries[bi].filter(|_| poll_headers[bi]) else {
+                continue;
+            };
+            let counter = poll_counter.expect("poll headers have a counter");
+            let poll_call = self
+                .context
+                .append_basic_block(function, &format!("air_b{bi}_fiber_poll_call"));
+            let body = blocks[bi][0];
+
+            self.builder.position_at_end(poll_entry);
+            let remaining = self
+                .builder
+                .build_load(self.context.i32_type(), counter, "air_fiber_poll_remaining")?
+                .into_int_value();
+            let next = self.builder.build_int_sub(
+                remaining,
+                self.context.i32_type().const_int(1, false),
+                "air_fiber_poll_next",
+            )?;
+            self.builder.build_store(counter, next)?;
+            let due = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                next,
+                self.context.i32_type().const_zero(),
+                "air_fiber_poll_due",
+            )?;
+            self.builder
+                .build_conditional_branch(due, poll_call, body)?;
+
+            self.builder.position_at_end(poll_call);
+            self.builder.build_call(
+                fiber_poll.expect("poll headers have a helper"),
+                &[],
+                "air_fiber_poll",
+            )?;
+            self.builder.build_store(
+                counter,
+                self.context
+                    .i32_type()
+                    .const_int(FIBER_POLL_INTERVAL, false),
+            )?;
+            self.builder.build_unconditional_branch(body)?;
+        }
 
         for (bi, block) in air.blocks.iter().enumerate() {
             if !included.get(bi).copied().unwrap_or(false) {
@@ -1446,7 +1543,7 @@ impl<'ctx> JITModule<'ctx> {
                 air,
                 AirBlockId(bi as u32),
                 &block.term,
-                &blocks,
+                &entries,
                 lowering,
                 registers,
                 reg_types,
@@ -2020,17 +2117,17 @@ impl<'ctx> JITModule<'ctx> {
         air: &AirFunction,
         bid: AirBlockId,
         term: &AirTerminator,
-        blocks: &[Vec<BasicBlock<'ctx>>],
+        entries: &[Option<BasicBlock<'ctx>>],
         lowering: &HLFunction,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
         cell_base: usize,
     ) -> Result<()> {
         let block = |id: AirBlockId| -> Result<BasicBlock<'ctx>> {
-            blocks
+            entries
                 .get(id.idx())
-                .and_then(|v| v.first())
                 .copied()
+                .flatten()
                 .ok_or_else(|| anyhow!("AIR branch to missing block b{}", id.0))
         };
         match term {
@@ -4951,6 +5048,217 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap();
                 let call_done_bb = self.context.append_basic_block(function, "call_done");
 
+                // The register's HFUN is only the call-site contract. A
+                // signature-adapted closure can carry a different runtime
+                // HFUN and a wrapper body with that runtime ABI. Calling it
+                // through `base_fn_type` turns scalar arguments into tiny
+                // pointers (Issue2889 passed Int(1) as vdynamic* 0x1). Match
+                // Cranelift's AIR V2 lowering: retain the typed fast path for
+                // equal signatures, otherwise let the runtime marshal using
+                // the closure's own type.
+                let runtime_type = unsafe {
+                    let gep = self.builder.build_gep(
+                        i8_type,
+                        raw_closure_ptr,
+                        &[self.context.i64_type().const_zero()],
+                        "closure_runtime_type_gep",
+                    )?;
+                    self.builder
+                        .build_load(ptr_type, gep, "closure_runtime_type")?
+                        .into_pointer_value()
+                };
+                let expected_type = self
+                    .get_initialized_type(fun_type_idx)?
+                    .into_pointer_value();
+                let pointer_exact = self.builder.build_int_compare(
+                    IntPredicate::EQ,
+                    runtime_type,
+                    expected_type,
+                    "closure_type_pointer_exact",
+                )?;
+                let structural_bb = self
+                    .context
+                    .append_basic_block(function, "closure_type_structural");
+                let typed_bb = self
+                    .context
+                    .append_basic_block(function, "closure_type_typed");
+                let dynamic_bb = self
+                    .context
+                    .append_basic_block(function, "closure_type_dynamic");
+                self.builder
+                    .build_conditional_branch(pointer_exact, typed_bb, structural_bb)?;
+
+                self.builder.position_at_end(structural_bb);
+                let same_type = self.declare_native(
+                    "hlp_same_type",
+                    &[ptr_type.into(), ptr_type.into()],
+                    Some(self.context.bool_type().into()),
+                );
+                let structurally_exact = self
+                    .builder
+                    .build_call(
+                        same_type,
+                        &[runtime_type.into(), expected_type.into()],
+                        "closure_same_type",
+                    )?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_same_type returned void"))?
+                    .into_int_value();
+                self.builder
+                    .build_conditional_branch(structurally_exact, typed_bb, dynamic_bb)?;
+
+                self.builder.position_at_end(dynamic_bb);
+                let nargs = args.len();
+                let argv = self.builder.build_array_alloca(
+                    ptr_type,
+                    i32_type.const_int(nargs.max(1) as u64, false),
+                    "closure_dyn_argv",
+                )?;
+                let make_dyn = self.declare_native(
+                    "hlp_make_dyn",
+                    &[ptr_type.into(), ptr_type.into()],
+                    Some(ptr_type.into()),
+                );
+                for (index, arg) in args.iter().enumerate() {
+                    let type_index = f.regs[arg.0 as usize].0;
+                    let kind = self.types_[type_index].kind;
+                    let loaded = self.builder.build_load(
+                        reg_types[arg.0 as usize],
+                        registers[arg.0 as usize],
+                        "closure_dyn_arg",
+                    )?;
+                    let self_describing = matches!(
+                        kind,
+                        hl_type_kind_HDYN
+                            | hl_type_kind_HFUN
+                            | hl_type_kind_HOBJ
+                            | crate::hl::hl_type_kind_HARRAY
+                            | hl_type_kind_HVIRTUAL
+                            | hl_type_kind_HDYNOBJ
+                            | crate::hl::hl_type_kind_HENUM
+                            | hl_type_kind_HNULL
+                    );
+                    let boxed = if self_describing {
+                        loaded
+                    } else {
+                        let slot = self
+                            .builder
+                            .build_alloca(loaded.get_type(), "closure_dyn_box_slot")?;
+                        self.builder.build_store(slot, loaded)?;
+                        let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
+                        self.builder
+                            .build_call(
+                                make_dyn,
+                                &[slot.into(), type_ptr.into()],
+                                "closure_dyn_box",
+                            )?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| anyhow!("hlp_make_dyn returned void"))?
+                    };
+                    let boxed = if boxed.get_type() == ptr_type.as_basic_type_enum() {
+                        boxed
+                    } else {
+                        self.cast_for_call(boxed, ptr_type.into())?
+                    };
+                    let argv_slot = unsafe {
+                        self.builder.build_gep(
+                            ptr_type,
+                            argv,
+                            &[i32_type.const_int(index as u64, false)],
+                            "closure_dyn_argv_slot",
+                        )?
+                    };
+                    self.builder.build_store(argv_slot, boxed)?;
+                }
+                let dyn_call = self.declare_native(
+                    "hlp_dyn_call",
+                    &[ptr_type.into(), ptr_type.into(), i32_type.into()],
+                    Some(ptr_type.into()),
+                );
+                let dyn_result = self
+                    .builder
+                    .build_call(
+                        dyn_call,
+                        &[
+                            raw_closure_ptr.into(),
+                            argv.into(),
+                            i32_type.const_int(nargs as u64, false).into(),
+                        ],
+                        "closure_dyn_call",
+                    )?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_dyn_call returned void"))?
+                    .into_pointer_value();
+                let dst_type_index = f.regs[dst.0 as usize].0;
+                let dst_kind = self.types_[dst_type_index].kind;
+                if dst_kind != hl_type_kind_HVOID {
+                    let dst_type = reg_types[dst.0 as usize];
+                    let value: BasicValueEnum = if dst_kind == hl_type_kind_HDYN {
+                        dyn_result.into()
+                    } else if dst_type.is_pointer_type() {
+                        let dyn_type_index = self
+                            .types_
+                            .iter()
+                            .position(|ty| ty.kind == hl_type_kind_HDYN)
+                            .ok_or_else(|| anyhow!("module has no HDYN runtime type"))?;
+                        let dyn_type = self
+                            .get_initialized_type(dyn_type_index)?
+                            .into_pointer_value();
+                        let dst_runtime_type = self
+                            .get_initialized_type(dst_type_index)?
+                            .into_pointer_value();
+                        let result_slot = self
+                            .builder
+                            .build_alloca(ptr_type, "closure_dyn_result_slot")?;
+                        self.builder.build_store(result_slot, dyn_result)?;
+                        let castp = self.declare_native(
+                            "hlp_dyn_castp",
+                            &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                            Some(ptr_type.into()),
+                        );
+                        self.builder
+                            .build_call(
+                                castp,
+                                &[result_slot.into(), dyn_type.into(), dst_runtime_type.into()],
+                                "closure_dyn_result_cast",
+                            )?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| anyhow!("hlp_dyn_castp returned void"))?
+                    } else {
+                        let (helper, helper_ret): (&str, BasicTypeEnum) =
+                            if dst_kind == hl_type_kind_HF64 {
+                                ("hlp_dyn_todouble", self.context.f64_type().into())
+                            } else if dst_kind == hl_type_kind_HF32 {
+                                ("hlp_dyn_tofloat", self.context.f32_type().into())
+                            } else if dst_kind == hl_type_kind_HI64 {
+                                ("hlp_dyn_toi64", self.context.i64_type().into())
+                            } else {
+                                ("hlp_dyn_toint", i32_type.into())
+                            };
+                        let unbox =
+                            self.declare_native(helper, &[ptr_type.into()], Some(helper_ret));
+                        let raw = self
+                            .builder
+                            .build_call(unbox, &[dyn_result.into()], "closure_dyn_unbox")?
+                            .try_as_basic_value()
+                            .basic()
+                            .ok_or_else(|| anyhow!("dynamic unbox helper returned void"))?;
+                        if raw.get_type() == dst_type {
+                            raw
+                        } else {
+                            self.cast_for_call(raw, dst_type)?
+                        }
+                    };
+                    self.builder.build_store(registers[dst.0 as usize], value)?;
+                }
+                self.builder.build_unconditional_branch(call_done_bb)?;
+
+                self.builder.position_at_end(typed_bb);
+
                 // Guarded devirtualisation. The interpreter ran this site
                 // thousands of times before this compile; when it only ever
                 // saw one target, speculate on it. The fun field of a
@@ -4968,8 +5276,7 @@ impl<'ctx> JITModule<'ctx> {
                     let caller = f.findex as u32;
                     crate::callsite_profile::closure_target(caller, i as u32)
                         .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
-                        .and_then(
-                        |(target, exp_hv)| {
+                        .and_then(|(target, exp_hv)| {
                             let expected_ty = if exp_hv {
                                 extended_fn_type
                             } else {
@@ -4989,8 +5296,7 @@ impl<'ctx> JITModule<'ctx> {
                                 }
                                 Err(_) => None,
                             }
-                        },
-                    )
+                        })
                 };
 
                 if let Some((callee, target, exp_hv)) = devirt {
@@ -6810,6 +7116,12 @@ impl<'ctx> JITModule<'ctx> {
         let bridge_bb = self
             .context
             .append_basic_block(function, &format!("{}_bridge", name));
+        let resolved_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_resolved", name));
+        let interpreter_bb = self
+            .context
+            .append_basic_block(function, &format!("{}_interp", name));
         let merge_bb = self
             .context
             .append_basic_block(function, &format!("{}_merge", name));
@@ -6918,8 +7230,54 @@ impl<'ctx> JITModule<'ctx> {
             }
         };
 
-        // --- Bridge path: spill args as raw i64 words, re-enter interpreter ---
+        // --- Lazy compiled-only path: resolve one AIR V2 body and call it
+        // using the exact typed signature already present at this site. ---
         self.builder.position_at_end(bridge_bb);
+        let resolver_type = i64_type.fn_type(&[i64_type.into()], false);
+        let resolver_ptr = i64_type
+            .const_int(
+                crate::jit::stub_bridge::ash_jit_resolve_stub as usize as u64,
+                false,
+            )
+            .const_to_pointer(ptr_type);
+        let resolved_addr = self
+            .builder
+            .build_indirect_call(
+                resolver_type,
+                resolver_ptr,
+                &[addr.into()],
+                &format!("{}_resolve", name),
+            )?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let resolved_real = self.builder.build_int_compare(
+            IntPredicate::UGE,
+            resolved_addr,
+            i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+            &format!("{}_resolved_real", name),
+        )?;
+        self.builder
+            .build_conditional_branch(resolved_real, resolved_bb, interpreter_bb)?;
+
+        self.builder.position_at_end(resolved_bb);
+        let resolved_ptr = self.builder.build_int_to_ptr(
+            resolved_addr,
+            ptr_type,
+            &format!("{}_resolved_ptr", name),
+        )?;
+        let resolved_call = self.builder.build_indirect_call(
+            fn_type,
+            resolved_ptr,
+            args,
+            &format!("{}_resolved_call", name),
+        )?;
+        let resolved_val = resolved_call.try_as_basic_value().basic();
+        self.builder.build_unconditional_branch(merge_bb)?;
+
+        // --- Hybrid fallback: spill raw words and re-enter the interpreter. ---
+        self.builder.position_at_end(interpreter_bb);
         let nargs = args.len() as u32;
         // Hoist the spill buffer to the entry block so a guarded call inside
         // a hot loop does not grow the stack per iteration.
@@ -7055,12 +7413,12 @@ impl<'ctx> JITModule<'ctx> {
 
         // --- Merge ---
         self.builder.position_at_end(merge_bb);
-        match (direct_val, stub_val) {
-            (Some(d), Some(s)) => {
+        match (direct_val, resolved_val, stub_val) {
+            (Some(d), Some(r), Some(s)) => {
                 let phi = self
                     .builder
                     .build_phi(d.get_type(), &format!("{}_result", name))?;
-                phi.add_incoming(&[(&d, direct_bb), (&s, bridge_bb)]);
+                phi.add_incoming(&[(&d, direct_bb), (&r, resolved_bb), (&s, interpreter_bb)]);
                 if let Some(h) = healed {
                     phi.add_incoming(&[(&h, heal_bb)]);
                 }

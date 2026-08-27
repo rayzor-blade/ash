@@ -3,183 +3,28 @@
 //! Implements the HashLink `std/thread.c` API surface needed by Heaps.io
 //! and other non-trivial Haxe programs.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 
+use crate::fiber::Waiter;
 use crate::hl::vdynamic;
 
-// ============================================================================
-// SDL event pump for single-threaded mode
-// ============================================================================
-// When Heaps' event thread isn't running (thread_create is stubbed),
-// we pump SDL events during lock_wait so the window stays responsive.
-
-static mut SDL_POLL_EVENT_FN: Option<unsafe extern "C" fn(*mut u8) -> i32> = None;
-static SDL_POLL_INIT: std::sync::Once = std::sync::Once::new();
-
-#[cfg(unix)]
-unsafe fn resolve_sdl_poll_event() -> *mut c_void {
-    // SDL2 is already loaded via sdl.hdll with RTLD_GLOBAL,
-    // so SDL_PollEvent should be resolvable via RTLD_DEFAULT.
-    libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr())
-}
-
-#[cfg(windows)]
-unsafe fn resolve_sdl_poll_event() -> *mut c_void {
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-    // Win32 has no RTLD_DEFAULT — a symbol is only reachable through the module
-    // that exports it — so the SDL runtime sdl.hdll pulled in is probed by name.
-    for dll in [c"SDL2.dll", c"SDL3.dll"] {
-        let module = GetModuleHandleA(dll.as_ptr() as *const u8);
-        if module.is_null() {
-            continue;
-        }
-        if let Some(sym) = GetProcAddress(module, c"SDL_PollEvent".as_ptr() as *const u8) {
-            return sym as usize as *mut c_void;
+fn wake_one(waiters: &mut VecDeque<Waiter>) -> bool {
+    while let Some(waiter) = waiters.pop_front() {
+        if unsafe { crate::fiber::wake(waiter) } {
+            return true;
         }
     }
-    ptr::null_mut()
+    false
 }
 
-unsafe fn get_sdl_poll_event() -> Option<unsafe extern "C" fn(*mut u8) -> i32> {
-    SDL_POLL_INIT.call_once(|| {
-        let sym = resolve_sdl_poll_event();
-        if !sym.is_null() {
-            eprintln!("[ash] SDL_PollEvent resolved at {:p}", sym);
-            SDL_POLL_EVENT_FN = Some(std::mem::transmute::<
-                *mut c_void,
-                unsafe extern "C" fn(*mut u8) -> i32,
-            >(sym));
-        } else {
-            eprintln!("[ash] WARNING: SDL_PollEvent not found");
-        }
-    });
-    SDL_POLL_EVENT_FN
-}
-
-/// Pump all pending SDL events (non-blocking).
-/// This makes the window visible and responsive on macOS,
-/// which requires event processing on the main thread.
-pub(crate) unsafe fn pump_sdl_events() {
-    if let Some(poll) = get_sdl_poll_event() {
-        let mut event = [0u8; 128]; // SDL_Event is 56 bytes, 128 is plenty
-        while poll(event.as_mut_ptr()) != 0 {
-            // Check for SDL_QUIT (type field is first u32 = 0x100)
-            let event_type = u32::from_ne_bytes([event[0], event[1], event[2], event[3]]);
-            if event_type == 0x100 {
-                std::process::exit(0);
-            }
-        }
+fn remove_waiter(waiters: &mut VecDeque<Waiter>, waiter: Waiter) {
+    if let Some(index) = waiters.iter().position(|candidate| *candidate == waiter) {
+        waiters.remove(index);
     }
-}
-
-// ============================================================================
-// Raw OS synchronisation primitives
-// ============================================================================
-// hl hands mutexes/conditions to Haxe as opaque pointers and splits every
-// acquire/release across two separate C calls, so std's guard-based Mutex
-// cannot express them — the OS primitives are driven directly instead.
-
-#[cfg(unix)]
-mod sys {
-    pub type RawMutex = libc::pthread_mutex_t;
-    pub type RawCond = libc::pthread_cond_t;
-
-    pub unsafe fn mutex_init(m: *mut RawMutex, recursive: bool) {
-        if !recursive {
-            libc::pthread_mutex_init(m, std::ptr::null());
-            return;
-        }
-        let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
-        libc::pthread_mutexattr_init(&mut attr);
-        libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
-        libc::pthread_mutex_init(m, &attr);
-        libc::pthread_mutexattr_destroy(&mut attr);
-    }
-
-    pub unsafe fn mutex_lock(m: *mut RawMutex) {
-        libc::pthread_mutex_lock(m);
-    }
-
-    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> bool {
-        libc::pthread_mutex_trylock(m) == 0
-    }
-
-    pub unsafe fn mutex_unlock(m: *mut RawMutex) {
-        libc::pthread_mutex_unlock(m);
-    }
-
-    pub unsafe fn mutex_destroy(m: *mut RawMutex) {
-        libc::pthread_mutex_destroy(m);
-    }
-
-    pub unsafe fn cond_init(c: *mut RawCond) {
-        libc::pthread_cond_init(c, std::ptr::null());
-    }
-
-    pub unsafe fn cond_signal(c: *mut RawCond) {
-        libc::pthread_cond_signal(c);
-    }
-
-    pub unsafe fn cond_broadcast(c: *mut RawCond) {
-        libc::pthread_cond_broadcast(c);
-    }
-
-    pub unsafe fn cond_destroy(c: *mut RawCond) {
-        libc::pthread_cond_destroy(c);
-    }
-}
-
-#[cfg(windows)]
-mod sys {
-    use windows_sys::Win32::System::Threading::{
-        DeleteCriticalSection, EnterCriticalSection, InitializeConditionVariable,
-        InitializeCriticalSection, LeaveCriticalSection, TryEnterCriticalSection,
-        WakeAllConditionVariable, WakeConditionVariable, CONDITION_VARIABLE, CRITICAL_SECTION,
-    };
-
-    pub type RawMutex = CRITICAL_SECTION;
-    pub type RawCond = CONDITION_VARIABLE;
-
-    // A CRITICAL_SECTION is re-entrant for its owning thread and offers no way
-    // to opt out, so `recursive` is unenforceable here. The one caller that
-    // asks for a plain lock (the semaphore) only ever takes it in balanced
-    // pairs, so the extra re-entrancy is unobservable.
-    pub unsafe fn mutex_init(m: *mut RawMutex, _recursive: bool) {
-        InitializeCriticalSection(m);
-    }
-
-    pub unsafe fn mutex_lock(m: *mut RawMutex) {
-        EnterCriticalSection(m);
-    }
-
-    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> bool {
-        TryEnterCriticalSection(m) != 0
-    }
-
-    pub unsafe fn mutex_unlock(m: *mut RawMutex) {
-        LeaveCriticalSection(m);
-    }
-
-    pub unsafe fn mutex_destroy(m: *mut RawMutex) {
-        DeleteCriticalSection(m);
-    }
-
-    pub unsafe fn cond_init(c: *mut RawCond) {
-        InitializeConditionVariable(c);
-    }
-
-    pub unsafe fn cond_signal(c: *mut RawCond) {
-        WakeConditionVariable(c);
-    }
-
-    pub unsafe fn cond_broadcast(c: *mut RawCond) {
-        WakeAllConditionVariable(c);
-    }
-
-    // Win32 condition variables own no resources and have no destructor.
-    pub unsafe fn cond_destroy(_c: *mut RawCond) {}
 }
 
 // ============================================================================
@@ -188,27 +33,92 @@ mod sys {
 
 #[repr(C)]
 struct HlMutex {
-    inner: sys::RawMutex,
+    state: std::sync::Mutex<MutexState>,
+}
+
+struct MutexState {
+    owner: Option<u32>,
+    depth: u32,
+    waiters: VecDeque<Waiter>,
+}
+
+unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
+    let current = crate::fiber::current_id();
+    let mut state = (*mutex).state.lock().unwrap();
+    match state.owner {
+        None => {
+            state.owner = Some(current);
+            state.depth = 1;
+            true
+        }
+        Some(owner) if owner == current => {
+            state.depth = state.depth.saturating_add(1);
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
+    loop {
+        let waiter = {
+            let current = crate::fiber::current_id();
+            let mut state = (*mutex).state.lock().unwrap();
+            match state.owner {
+                None => {
+                    state.owner = Some(current);
+                    state.depth = 1;
+                    return;
+                }
+                Some(owner) if owner == current => {
+                    state.depth = state.depth.saturating_add(1);
+                    return;
+                }
+                Some(_) => {
+                    let waiter = crate::fiber::new_waiter();
+                    state.waiters.push_back(waiter);
+                    waiter
+                }
+            }
+        };
+        let _ = crate::fiber::park(waiter, None);
+        let mut state = (*mutex).state.lock().unwrap();
+        remove_waiter(&mut state.waiters, waiter);
+        if state.owner.is_none() {
+            state.owner = Some(crate::fiber::current_id());
+            state.depth = 1;
+            return;
+        }
+    }
+}
+
+unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
+    let mut state = (*mutex).state.lock().unwrap();
+    if state.owner != Some(crate::fiber::current_id()) || state.depth == 0 {
+        return;
+    }
+    state.depth -= 1;
+    if state.depth == 0 {
+        state.owner = None;
+        wake_one(&mut state.waiters);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
-    let layout = std::alloc::Layout::new::<HlMutex>();
-    let ptr = std::alloc::alloc_zeroed(layout) as *mut HlMutex;
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    // HashLink mutexes are RECURSIVE (thread.c uses PTHREAD_MUTEX_RECURSIVE);
-    // sys.thread.EventLoop re-acquires from the same thread — a default
-    // (non-recursive) mutex deadlocks progress().
-    sys::mutex_init(&mut (*ptr).inner, true);
-    ptr as *mut c_void
+    Box::into_raw(Box::new(HlMutex {
+        state: std::sync::Mutex::new(MutexState {
+            owner: None,
+            depth: 0,
+            waiters: VecDeque::new(),
+        }),
+    })) as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_acquire(m: *mut c_void) {
     if !m.is_null() {
-        sys::mutex_lock(&mut (*(m as *mut HlMutex)).inner);
+        mutex_acquire_inner(m as *mut HlMutex);
     }
 }
 
@@ -217,21 +127,20 @@ pub unsafe extern "C" fn hlp_mutex_try_acquire(m: *mut c_void) -> bool {
     if m.is_null() {
         return false;
     }
-    sys::mutex_try_lock(&mut (*(m as *mut HlMutex)).inner)
+    mutex_try_acquire_inner(m as *mut HlMutex)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_release(m: *mut c_void) {
     if !m.is_null() {
-        sys::mutex_unlock(&mut (*(m as *mut HlMutex)).inner);
+        mutex_release_inner(m as *mut HlMutex);
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
     if !m.is_null() {
-        sys::mutex_destroy(&mut (*(m as *mut HlMutex)).inner);
-        std::alloc::dealloc(m as *mut u8, std::alloc::Layout::new::<HlMutex>());
+        drop(Box::from_raw(m as *mut HlMutex));
     }
 }
 
@@ -269,18 +178,20 @@ pub unsafe extern "C" fn hl_mutex_free(m: *mut c_void) {
 
 #[repr(C)]
 struct HlSemaphore {
-    mutex: sys::RawMutex,
-    cond: sys::RawCond,
+    state: std::sync::Mutex<SemaphoreState>,
+}
+
+struct SemaphoreState {
     value: i32,
+    waiters: VecDeque<Waiter>,
 }
 
 unsafe fn semaphore_take(s: *mut HlSemaphore) -> bool {
-    sys::mutex_lock(&mut (*s).mutex);
-    let acquired = (*s).value > 0;
+    let mut state = (*s).state.lock().unwrap();
+    let acquired = state.value > 0;
     if acquired {
-        (*s).value -= 1;
+        state.value -= 1;
     }
-    sys::mutex_unlock(&mut (*s).mutex);
     acquired
 }
 
@@ -305,15 +216,33 @@ unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant>
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
-    let layout = std::alloc::Layout::new::<HlSemaphore>();
-    let ptr = std::alloc::alloc_zeroed(layout) as *mut HlSemaphore;
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    sys::mutex_init(&mut (*ptr).mutex, false);
-    sys::cond_init(&mut (*ptr).cond);
-    (*ptr).value = value;
-    ptr as *mut c_void
+    Box::into_raw(Box::new(HlSemaphore {
+        state: std::sync::Mutex::new(SemaphoreState {
+            value,
+            waiters: VecDeque::new(),
+        }),
+    })) as *mut c_void
+}
+
+unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool {
+    let waiter = {
+        let mut state = (*s).state.lock().unwrap();
+        if state.value > 0 {
+            state.value -= 1;
+            return true;
+        }
+        if deadline.is_some_and(|limit| Instant::now() >= limit)
+            || !crate::fiber::fibers_active()
+        {
+            return false;
+        }
+        let waiter = crate::fiber::new_waiter();
+        state.waiters.push_back(waiter);
+        waiter
+    };
+    let notified = crate::fiber::park(waiter, deadline);
+    remove_waiter(&mut (*s).state.lock().unwrap().waiters, waiter);
+    notified
 }
 
 #[no_mangle]
@@ -322,15 +251,7 @@ pub unsafe extern "C" fn hlp_semaphore_acquire(sem: *mut c_void) {
         return;
     }
     let s = sem as *mut HlSemaphore;
-    while !semaphore_take(s) {
-        // Preserve HashLink's !HL_THREADS escape hatch only when no Haxe
-        // worker can possibly release the semaphore. With fibers active this
-        // is a real blocking acquire and must yield cooperatively.
-        if !crate::fiber::fibers_active() {
-            return;
-        }
-        crate::fiber::block_yield();
-    }
+    let _ = semaphore_wait(s, None);
 }
 
 #[no_mangle]
@@ -348,15 +269,7 @@ pub unsafe extern "C" fn hlp_semaphore_try_acquire(
     let Some(deadline) = timeout_deadline(timeout) else {
         return false;
     };
-    loop {
-        crate::fiber::block_yield();
-        if semaphore_take(s) {
-            return true;
-        }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-    }
+    semaphore_wait(s, Some(deadline))
 }
 
 #[no_mangle]
@@ -365,19 +278,16 @@ pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
         return;
     }
     let s = sem as *mut HlSemaphore;
-    sys::mutex_lock(&mut (*s).mutex);
-    (*s).value += 1;
-    sys::cond_signal(&mut (*s).cond);
-    sys::mutex_unlock(&mut (*s).mutex);
+    let mut state = (*s).state.lock().unwrap();
+    if !wake_one(&mut state.waiters) {
+        state.value = state.value.saturating_add(1);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
     if !sem.is_null() {
-        let s = sem as *mut HlSemaphore;
-        sys::mutex_destroy(&mut (*s).mutex);
-        sys::cond_destroy(&mut (*s).cond);
-        std::alloc::dealloc(sem as *mut u8, std::alloc::Layout::new::<HlSemaphore>());
+        drop(Box::from_raw(sem as *mut HlSemaphore));
     }
 }
 
@@ -415,27 +325,89 @@ pub unsafe extern "C" fn hl_semaphore_free(sem: *mut c_void) {
 
 #[repr(C)]
 struct HlCondition {
-    mutex: sys::RawMutex,
-    cond: sys::RawCond,
+    state: std::sync::Mutex<ConditionState>,
+}
+
+struct ConditionState {
+    owner: Option<u32>,
+    depth: u32,
+    mutex_waiters: VecDeque<Waiter>,
+    waiters: VecDeque<Waiter>,
+}
+
+unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
+    loop {
+        let waiter = {
+            let current = crate::fiber::current_id();
+            let mut state = (*c).state.lock().unwrap();
+            match state.owner {
+                None => {
+                    state.owner = Some(current);
+                    state.depth = 1;
+                    return;
+                }
+                Some(owner) if owner == current => {
+                    state.depth = state.depth.saturating_add(1);
+                    return;
+                }
+                Some(_) => {
+                    let waiter = crate::fiber::new_waiter();
+                    state.mutex_waiters.push_back(waiter);
+                    waiter
+                }
+            }
+        };
+        let _ = crate::fiber::park(waiter, None);
+        let mut state = (*c).state.lock().unwrap();
+        remove_waiter(&mut state.mutex_waiters, waiter);
+    }
+}
+
+unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
+    let current = crate::fiber::current_id();
+    let mut state = (*c).state.lock().unwrap();
+    match state.owner {
+        None => {
+            state.owner = Some(current);
+            state.depth = 1;
+            true
+        }
+        Some(owner) if owner == current => {
+            state.depth = state.depth.saturating_add(1);
+            true
+        }
+        Some(_) => false,
+    }
+}
+
+unsafe fn condition_mutex_release(c: *mut HlCondition) {
+    let mut state = (*c).state.lock().unwrap();
+    if state.owner != Some(crate::fiber::current_id()) || state.depth == 0 {
+        return;
+    }
+    state.depth -= 1;
+    if state.depth == 0 {
+        state.owner = None;
+        wake_one(&mut state.mutex_waiters);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
-    let layout = std::alloc::Layout::new::<HlCondition>();
-    let ptr = std::alloc::alloc_zeroed(layout) as *mut HlCondition;
-    if ptr.is_null() {
-        return ptr::null_mut();
-    }
-    // Recursive, matching HashLink's condition mutex (thread.c:340-344).
-    sys::mutex_init(&mut (*ptr).mutex, true);
-    sys::cond_init(&mut (*ptr).cond);
-    ptr as *mut c_void
+    Box::into_raw(Box::new(HlCondition {
+        state: std::sync::Mutex::new(ConditionState {
+            owner: None,
+            depth: 0,
+            mutex_waiters: VecDeque::new(),
+            waiters: VecDeque::new(),
+        }),
+    })) as *mut c_void
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_acquire(c: *mut c_void) {
     if !c.is_null() {
-        sys::mutex_lock(&mut (*(c as *mut HlCondition)).mutex);
+        condition_mutex_acquire(c as *mut HlCondition);
     }
 }
 
@@ -444,50 +416,122 @@ pub unsafe extern "C" fn hlp_condition_try_acquire(c: *mut c_void) -> bool {
     if c.is_null() {
         return false;
     }
-    sys::mutex_try_lock(&mut (*(c as *mut HlCondition)).mutex)
+    condition_mutex_try_acquire(c as *mut HlCondition)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
     if !c.is_null() {
-        sys::mutex_unlock(&mut (*(c as *mut HlCondition)).mutex);
+        condition_mutex_release(c as *mut HlCondition);
+    }
+}
+
+unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -> bool {
+    if !crate::fiber::fibers_active() {
+        return true;
+    }
+    let (waiter, depth) = {
+        let current = crate::fiber::current_id();
+        let mut state = (*c).state.lock().unwrap();
+        if state.owner != Some(current) {
+            return false;
+        }
+        let waiter = crate::fiber::new_waiter();
+        state.waiters.push_back(waiter);
+        let depth = state.depth;
+        state.owner = None;
+        state.depth = 0;
+        wake_one(&mut state.mutex_waiters);
+        (waiter, depth)
+    };
+    let notified = crate::fiber::park(waiter, deadline);
+    remove_waiter(&mut (*c).state.lock().unwrap().waiters, waiter);
+    condition_mutex_acquire(c);
+    (*c).state.lock().unwrap().depth = depth;
+    notified
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_condition_wait(c: *mut c_void) {
+    if !c.is_null() {
+        let _ = condition_wait_inner(c as *mut HlCondition, None);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_condition_wait(_c: *mut c_void) {
-    // HashLink !HL_THREADS: condition_wait returns immediately (thread.c:380).
-    // Blocking here is fatal in a single-threaded VM — no other thread can signal.
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn hlp_condition_timed_wait(_c: *mut c_void, _timeout: f64) -> bool {
-    // HashLink !HL_THREADS: timed_wait returns true immediately (thread.c:393-394).
-    true
+pub unsafe extern "C" fn hlp_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
+    if c.is_null() {
+        return false;
+    }
+    let deadline = Instant::now() + Duration::from_secs_f64(timeout.max(0.0));
+    condition_wait_inner(c as *mut HlCondition, Some(deadline))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_signal(c: *mut c_void) {
     if !c.is_null() {
-        sys::cond_signal(&mut (*(c as *mut HlCondition)).cond);
+        wake_one(&mut (*(c as *mut HlCondition)).state.lock().unwrap().waiters);
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
     if !c.is_null() {
-        sys::cond_broadcast(&mut (*(c as *mut HlCondition)).cond);
+        let mut state = (*(c as *mut HlCondition)).state.lock().unwrap();
+        while wake_one(&mut state.waiters) {}
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
     if !c.is_null() {
-        let cv = c as *mut HlCondition;
-        sys::mutex_destroy(&mut (*cv).mutex);
-        sys::cond_destroy(&mut (*cv).cond);
-        std::alloc::dealloc(c as *mut u8, std::alloc::Layout::new::<HlCondition>());
+        drop(Box::from_raw(c as *mut HlCondition));
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_alloc() -> *mut c_void {
+    hlp_condition_alloc()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_acquire(c: *mut c_void) {
+    hlp_condition_acquire(c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_try_acquire(c: *mut c_void) -> bool {
+    hlp_condition_try_acquire(c)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_release(c: *mut c_void) {
+    hlp_condition_release(c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_wait(c: *mut c_void) {
+    hlp_condition_wait(c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_timed_wait(c: *mut c_void, timeout: f64) -> bool {
+    hlp_condition_timed_wait(c, timeout)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_signal(c: *mut c_void) {
+    hlp_condition_signal(c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_broadcast(c: *mut c_void) {
+    hlp_condition_broadcast(c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_condition_free(c: *mut c_void) {
+    hlp_condition_free(c);
 }
 
 // ============================================================================
@@ -505,13 +549,12 @@ pub unsafe extern "C" fn hlp_lock_release(lock: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynamic) -> bool {
+pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic) -> bool {
     if lock.is_null() {
         return false;
     }
     let s = lock as *mut HlSemaphore;
-    if (*s).value > 0 {
-        (*s).value -= 1;
+    if semaphore_take(s) {
         return true;
     }
     // No fibers: exact HashLink !HL_THREADS semantics — never block.
@@ -520,10 +563,10 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynami
     }
     // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
     // Timeout arrives as a boxed Null<Float> (seconds); null = wait forever.
-    let deadline = if _timeout.is_null() {
+    let deadline = if timeout.is_null() {
         None
     } else {
-        let t = _timeout as *const vdynamic;
+        let t = timeout as *const vdynamic;
         let kind = if !(*t).t.is_null() { (*(*t).t).kind } else { 0 };
         let secs = if kind == 6 {
             (*t).v.d
@@ -537,24 +580,14 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, _timeout: *mut vdynami
         }
         Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
     };
-    loop {
-        crate::fiber::block_yield();
-        if (*s).value > 0 {
-            (*s).value -= 1;
-            return true;
-        }
-        if let Some(d) = deadline {
-            if std::time::Instant::now() >= d {
-                return false;
-            }
-        }
-    }
+    semaphore_wait(s, deadline)
 }
 
-// Separate SDL pump function called from the main loop, not from lock_wait
+// Compatibility primitive retained for bytecode that references it. Event
+// ownership belongs to the loaded UI/SDL library, so this only provides frame
+// pacing and never consumes native events itself.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
-    pump_sdl_events();
     std::thread::sleep(std::time::Duration::from_millis(16));
 }
 
@@ -564,15 +597,26 @@ pub unsafe extern "C" fn hlp_lock_free(lock: *mut c_void) {
 }
 
 // ============================================================================
-// Deque (simple thread-safe deque stub)
+// Deque
 // ============================================================================
+
+struct DequeState {
+    queue: VecDeque<*mut c_void>,
+    waiters: VecDeque<Waiter>,
+}
+
+struct HlDeque {
+    state: std::sync::Mutex<DequeState>,
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
-    // Stub: allocate an empty deque (Vec behind a mutex)
-    let deque: Box<std::sync::Mutex<Vec<*mut c_void>>> =
-        Box::new(std::sync::Mutex::new(Vec::new()));
-    Box::into_raw(deque) as *mut c_void
+    Box::into_raw(Box::new(HlDeque {
+        state: std::sync::Mutex::new(DequeState {
+            queue: VecDeque::new(),
+            waiters: VecDeque::new(),
+        }),
+    })) as *mut c_void
 }
 
 /// A queued message is a GC object whose only reference is the Vec above,
@@ -598,9 +642,10 @@ pub unsafe extern "C" fn hlp_deque_add(d: *mut c_void, msg: *mut vdynamic) {
         return;
     }
     deque_root(msg);
-    let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
-    if let Ok(mut v) = deque.lock() {
-        v.push(msg as *mut c_void);
+    let deque = &*(d as *const HlDeque);
+    if let Ok(mut state) = deque.state.lock() {
+        state.queue.push_back(msg as *mut c_void);
+        wake_one(&mut state.waiters);
     }
 }
 
@@ -610,9 +655,10 @@ pub unsafe extern "C" fn hlp_deque_push(d: *mut c_void, msg: *mut vdynamic) {
         return;
     }
     deque_root(msg);
-    let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
-    if let Ok(mut v) = deque.lock() {
-        v.insert(0, msg as *mut c_void);
+    let deque = &*(d as *const HlDeque);
+    if let Ok(mut state) = deque.state.lock() {
+        state.queue.push_front(msg as *mut c_void);
+        wake_one(&mut state.waiters);
     }
 }
 
@@ -621,15 +667,15 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
     if d.is_null() {
         return ptr::null_mut();
     }
-    let deque = &*(d as *const std::sync::Mutex<Vec<*mut c_void>>);
+    let deque = &*(d as *const HlDeque);
     loop {
         let popped;
-        if let Ok(mut v) = deque.lock() {
-            popped = if v.is_empty() {
+        if let Ok(mut state) = deque.state.lock() {
+            popped = if state.queue.is_empty() {
                 None
             } else {
-                let m = v.remove(0) as *mut vdynamic;
-                Some((m, v.contains(&(m as *mut c_void))))
+                let m = state.queue.pop_front().unwrap() as *mut vdynamic;
+                Some((m, state.queue.contains(&(m as *mut c_void))))
             };
         } else {
             return ptr::null_mut();
@@ -648,7 +694,16 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
         if !block || !crate::fiber::fibers_active() {
             return ptr::null_mut();
         }
-        crate::fiber::block_yield();
+        let waiter = crate::fiber::new_waiter();
+        if let Ok(mut state) = deque.state.lock() {
+            state.waiters.push_back(waiter);
+        } else {
+            return ptr::null_mut();
+        }
+        let _ = crate::fiber::park(waiter, None);
+        if let Ok(mut state) = deque.state.lock() {
+            remove_waiter(&mut state.waiters, waiter);
+        }
     }
 }
 
@@ -656,75 +711,97 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
 // Thread-local storage
 // ============================================================================
 
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn hlp_tls_alloc() -> *mut c_void {
-    let mut key: libc::pthread_key_t = 0;
-    if libc::pthread_key_create(&mut key, None) == 0 {
-        key as usize as *mut c_void
-    } else {
-        ptr::null_mut()
-    }
+struct HlTls {
+    gc_value: bool,
+    values: std::sync::Mutex<HashMap<u32, *mut c_void>>,
 }
 
-#[cfg(unix)]
 #[no_mangle]
-pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
-    libc::pthread_setspecific(tls as usize as libc::pthread_key_t, value);
+pub unsafe extern "C" fn hlp_tls_alloc(gc_value: bool) -> *mut c_void {
+    Box::into_raw(Box::new(HlTls {
+        gc_value,
+        values: std::sync::Mutex::new(HashMap::new()),
+    })) as *mut c_void
 }
 
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
-    libc::pthread_getspecific(tls as usize as libc::pthread_key_t)
-}
-
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
-    libc::pthread_key_delete(tls as usize as libc::pthread_key_t);
-}
-
-// The Win32 slot index is biased by one on the way out: index 0 is perfectly
-// valid but would travel back as a null handle, which every caller reads as
-// "allocation failed".
-#[cfg(windows)]
-#[no_mangle]
-pub unsafe extern "C" fn hlp_tls_alloc() -> *mut c_void {
-    use windows_sys::Win32::System::Threading::{TlsAlloc, TLS_OUT_OF_INDEXES};
-    let index = TlsAlloc();
-    if index == TLS_OUT_OF_INDEXES {
-        ptr::null_mut()
-    } else {
-        (index as usize + 1) as *mut c_void
-    }
-}
-
-#[cfg(windows)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
     if tls.is_null() {
         return;
     }
-    windows_sys::Win32::System::Threading::TlsSetValue(tls as usize as u32 - 1, value);
+    let tls = tls as *mut HlTls;
+    let id = crate::fiber::current_id();
+    if (*tls).gc_value && !value.is_null() {
+        crate::gc::gc_add_persistent(value as *mut vdynamic);
+    }
+    let mut values = (*tls).values.lock().unwrap();
+    let old = if value.is_null() {
+        values.remove(&id)
+    } else {
+        values.insert(id, value)
+    };
+    if (*tls).gc_value {
+        if let Some(old) = old {
+            if !old.is_null() && !values.values().any(|candidate| *candidate == old) {
+                crate::gc::gc_remove_persistent(old as *mut vdynamic);
+            }
+        }
+    }
 }
 
-#[cfg(windows)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
     if tls.is_null() {
         return ptr::null_mut();
     }
-    windows_sys::Win32::System::Threading::TlsGetValue(tls as usize as u32 - 1)
+    let tls = tls as *mut HlTls;
+    (*tls)
+        .values
+        .lock()
+        .unwrap()
+        .get(&crate::fiber::current_id())
+        .copied()
+        .unwrap_or(ptr::null_mut())
 }
 
-#[cfg(windows)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
     if tls.is_null() {
         return;
     }
-    windows_sys::Win32::System::Threading::TlsFree(tls as usize as u32 - 1);
+    let tls = Box::from_raw(tls as *mut HlTls);
+    if tls.gc_value {
+        let values = tls.values.lock().unwrap();
+        let unique: HashSet<usize> = values
+            .values()
+            .filter(|value| !value.is_null())
+            .map(|value| *value as usize)
+            .collect();
+        for value in unique {
+            crate::gc::gc_remove_persistent(value as *mut vdynamic);
+        }
+        drop(values);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_tls_alloc(gc_value: bool) -> *mut c_void {
+    hlp_tls_alloc(gc_value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_tls_set(tls: *mut c_void, value: *mut c_void) {
+    hlp_tls_set(tls, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_tls_get(tls: *mut c_void) -> *mut c_void {
+    hlp_tls_get(tls)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
+    hlp_tls_free(tls);
 }
 
 // ============================================================================
@@ -750,8 +827,9 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void {
-    // Haxe threads run as cooperative stackful fibers on the main OS thread
-    // (krio) — blocking primitives yield to the scheduler. Upstream prim is
+    // Haxe threads run as cooperative stackful fibers (krio). Compiled AIR V2
+    // bodies are distributed over worker OS threads; interpreter/hybrid
+    // bodies remain on the main scheduler. Upstream prim is
     // _FUN(_VOID,_NO_ARG): callback is a vclosure*.
     crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
 }
@@ -764,6 +842,20 @@ pub unsafe extern "C" fn hlp_thread_set_name(_thread: *mut c_void, _name: *const
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_get_name(_thread: *mut c_void) -> *const u8 {
     ptr::null()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
+    hlp_thread_current()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_thread_yield() {
+    if crate::fiber::fibers_active() {
+        crate::fiber::hlp_fiber_poll();
+    } else {
+        std::thread::yield_now();
+    }
 }
 
 // ============================================================================
@@ -888,34 +980,24 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
 // GC blocking sections
 // ============================================================================
 
-thread_local! {
-    /// Nesting depth of `Gc.blocking(true)` on this OS thread.
-    static GC_BLOCKING_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-}
-
 /// Upstream hl_blocking (gc.c): enter or leave a section during which the
 /// collector must not wait for this thread.
 ///
-/// There is nothing here for it to wait on. ash's collector never stops the
-/// world — it runs on whichever thread allocated, under the GC lock — and
-/// Haxe threads are krio fibers sharing the mutator's OS thread, so a fiber
-/// parked in a blocking section is simply not on the stack the conservative
-/// scanner walks. The depth is therefore bookkeeping: it records the state a
-/// stop-the-world protocol would need, and suspends nothing.
-///
-/// Upstream raises "Unblocked thread" on an unmatched `blocking(false)`. Not
-/// here: interleaved fibers share this one counter, so a correctly paired
-/// program could still see another fiber's decrement and die on the error.
-/// The depth saturates at zero instead.
+/// The logical nesting depth remains fiber-owned so one Haxe thread cannot
+/// consume another's `Gc.blocking(false)`. The GC also publishes the current
+/// OS mutator's stack/register context: once marked blocking, an HDLL promises
+/// not to execute HL code until the matching leave, so collection need not
+/// wait for an AIR V2 poll from that worker.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_blocking(b: bool) {
-    GC_BLOCKING_DEPTH.with(|d| {
-        d.set(if b {
-            d.get().saturating_add(1)
-        } else {
-            d.get().saturating_sub(1)
-        });
-    });
+    if crate::fiber::update_gc_blocking_depth(b) {
+        let _ = crate::gc::gc_set_blocking(b);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_is_blocking() -> bool {
+    crate::fiber::is_gc_blocking()
 }
 
 // ============================================================================

@@ -38,7 +38,7 @@ use super::{
     abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode, AbiClass,
 };
 use crate::hl_bindings as hl;
-use crate::jit::stub_bridge::{ash_jit_call_stub, STUB_SENTINEL_LIMIT};
+use crate::jit::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 use crate::opcodes::{Opcode, Reg};
 use crate::types::{HLFunction, HLTypeFun, TypeRef};
 
@@ -105,18 +105,10 @@ pub fn signature_reject_reason(
     if tf.args.len() > 8 {
         return Some("arg_count_over_8".to_string());
     }
-    // The interpreter marshals float arguments and results as f64
-    // (`dispatch_float_native` passes `NanBoxedValue::as_f64()`), so an entry
-    // point declaring f32 would read the wrong half of the register.
-    for a in &tf.args {
-        let kind = bytecode.types[a.0].kind;
-        if kind == hl::hl_type_kind_HF32 {
-            return Some("f32_in_signature".to_string());
-        }
-    }
-    if bytecode.types[tf.ret.0].kind == hl::hl_type_kind_HF32 {
-        return Some("f32_in_signature".to_string());
-    }
+    // AIR V2 Cranelift uses the declared f32 ABI directly. The interpreter's
+    // typed boundary also narrows f32 arguments and widens f32 results into
+    // its NanBox f64 representation, so rejecting these signatures here was
+    // a stale limitation from the old generic-i64 dispatcher.
     None
 }
 
@@ -1616,8 +1608,41 @@ impl Lowerer<'_, '_> {
         };
         self.b.ins().jump(merge_bb, &direct_vals);
 
-        // Stub: spill args as raw i64 words and re-enter the interpreter.
+        // Stub: compiled-only mode resolves one AIR V2 body lazily and calls
+        // it with this site's exact ABI. Hybrid mode gets null and retains the
+        // interpreter bridge below.
         self.b.switch_to_block(stub_bb);
+        let resolved_bb = self.b.create_block();
+        let interpreter_bb = self.b.create_block();
+        let resolve_sig = self.helper_sigref(&[types::I64], Some(types::I64));
+        let resolve_addr = self
+            .b
+            .ins()
+            .iconst(types::I64, ash_jit_resolve_stub as usize as i64);
+        let resolve_call =
+            self.b
+                .ins()
+                .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
+        let resolved = self.b.inst_results(resolve_call)[0];
+        let resolved_real = self.b.ins().icmp_imm_s(
+            IntCC::UnsignedGreaterThanOrEqual,
+            resolved,
+            STUB_SENTINEL_LIMIT as i64,
+        );
+        self.b
+            .ins()
+            .brif(resolved_real, resolved_bb, &[], interpreter_bb, &[]);
+
+        self.b.switch_to_block(resolved_bb);
+        let resolved_call = self.b.ins().call_indirect(sigref, resolved, args);
+        let resolved_vals: Vec<BlockArg> = if ret_ty.is_some() {
+            vec![BlockArg::Value(self.b.inst_results(resolved_call)[0])]
+        } else {
+            vec![]
+        };
+        self.b.ins().jump(merge_bb, &resolved_vals);
+
+        self.b.switch_to_block(interpreter_bb);
         let nargs = args.len();
         let slot = self.b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,

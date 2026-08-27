@@ -307,6 +307,10 @@ pub struct CraneliftTierContext {
     get_exc_value: usize,
     clear_exc_value: usize,
     get_obj_proto: usize,
+    /// Cooperative scheduler safe point used by compiled AIR V2 loop
+    /// headers. Keeping the address in the tier context avoids native symbol
+    /// lookup in every per-function compile.
+    fiber_poll: usize,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -417,6 +421,7 @@ impl CraneliftTierContext {
         let get_exc_value = helper("hlp_get_exc_value");
         let clear_exc_value = helper("hlp_clear_exc_value");
         let get_obj_proto = helper("hl_get_obj_proto");
+        let fiber_poll = helper("hlp_fiber_poll");
 
         Ok(Self {
             bytecode: bytecode as *const _,
@@ -473,6 +478,7 @@ impl CraneliftTierContext {
             get_exc_value,
             clear_exc_value,
             get_obj_proto,
+            fiber_poll,
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
@@ -727,6 +733,16 @@ impl CraneliftTierContext {
             bail!("throw helper unavailable");
         }
         Ok(a)
+    }
+
+    /// Yield to Ash's single-threaded cooperative scheduler. Compiled AIR V2
+    /// calls this from rate-limited loop-header safe points so CPU-bound Haxe
+    /// code cannot starve sibling logical threads.
+    pub fn fiber_poll_helper(&self) -> Result<usize> {
+        if self.fiber_poll == 0 {
+            bail!("hlp_fiber_poll unavailable");
+        }
+        Ok(self.fiber_poll)
     }
 
     /// `hlp_make_dyn`, for `Cast::ToDyn`.

@@ -34,12 +34,40 @@ pub const STUB_SENTINEL_LIMIT: u64 = 0x100000;
 pub type StubCallBridge =
     unsafe extern "C" fn(findex: i32, caller: i32, args: *const i64, nargs: i32) -> i64;
 
+/// Compiled-only lazy resolver. It returns a real typed entry address for a
+/// sentinel findex, or null when the function cannot be compiled without the
+/// interpreter. Generated code calls the returned address using the original
+/// call-site signature; no generic ABI marshalling is involved.
+pub type StubResolver = unsafe extern "C" fn(findex: i32) -> *mut ();
+
 static STUB_CALL_BRIDGE: AtomicUsize = AtomicUsize::new(0);
+static STUB_RESOLVER: AtomicUsize = AtomicUsize::new(0);
 
 /// Register the interpreter's re-entry bridge. Called once at startup by the
 /// hybrid host (ash_interp) before any tiered code can run.
 pub fn set_stub_call_bridge(f: StubCallBridge) {
     STUB_CALL_BRIDGE.store(f as usize, Ordering::Release);
+}
+
+pub fn set_stub_resolver(f: StubResolver) {
+    STUB_RESOLVER.store(f as usize, Ordering::Release);
+}
+
+/// Try to turn an interpreter sentinel into native code. This is deliberately
+/// separate from [`ash_jit_call_stub`]: the generated caller still owns the
+/// exact HL ABI and can invoke the returned pointer without erasing f32/f64,
+/// sub-word integer, or aggregate calling-convention details.
+#[no_mangle]
+pub unsafe extern "C" fn ash_jit_resolve_stub(sentinel: i64) -> i64 {
+    if sentinel <= 0 || sentinel >= STUB_SENTINEL_LIMIT as i64 {
+        return 0;
+    }
+    let resolver = STUB_RESOLVER.load(Ordering::Acquire);
+    if resolver == 0 {
+        return 0;
+    }
+    let f: StubResolver = std::mem::transmute(resolver as *const ());
+    f((sentinel - 1) as i32) as i64
 }
 
 /// Called by JIT-compiled code when an indirect call target turned out to be

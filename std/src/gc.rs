@@ -7,12 +7,12 @@ use crate::error::{HLException, TrapContext, VDynamicException};
 use crate::hl::{self, hl_type, hl_type_obj, vclosure, vdynamic, HL_WSIZE};
 use crate::types::hlp_type_size;
 use anyhow::Result;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, mem};
 #[cfg(windows)]
@@ -131,8 +131,12 @@ use std::sync::atomic::AtomicUsize;
 pub static ASH_TLAB_CUR: AtomicUsize = AtomicUsize::new(0);
 #[no_mangle]
 pub static ASH_TLAB_LIMIT: AtomicUsize = AtomicUsize::new(0);
-/// pthread of the mutator, recorded when it registers its stack top.
-static MUTATOR_THREAD: AtomicU64 = AtomicU64::new(0);
+/// The one mutator allowed to use the exported process-global TLAB cursor.
+///
+/// Additional registered mutators deliberately take the locked allocation
+/// path until the JIT ABI grows a per-worker TLAB. Sharing `ASH_TLAB_CUR`
+/// between OS threads would make two allocations return overlapping memory.
+static TLAB_OWNER_THREAD: AtomicU64 = AtomicU64::new(0);
 
 /// Largest object the bump region serves. At one line, nothing in the
 /// region ever needs an `alloc_sizes` span entry.
@@ -201,9 +205,340 @@ fn thread_self_fast() -> u64 {
     }
 }
 
+// ── Registered mutators and stop-the-world rendezvous ──────────────────────
+//
+// The heap lock protects allocator metadata; it cannot also be the rendezvous
+// lock. A collector owns that lock while waiting, and another mutator may
+// already be asleep trying to acquire it. The registry therefore has its own
+// mutex/condition variable and AIR V2 polls publish machine-stack state here.
+
+#[derive(Clone)]
+struct MutatorSnapshot {
+    thread: u64,
+    stack_top: usize,
+    stack_sp: usize,
+    saved_regs: [usize; CALLEE_SAVED_WORDS],
+    scan_ranges: Vec<(usize, usize)>,
+}
+
+struct MutatorRecord {
+    thread: u64,
+    stack_top: usize,
+    stopped_sp: usize,
+    saved_regs: [usize; CALLEE_SAVED_WORDS],
+    blocking_depth: u32,
+    parked: bool,
+    scan_ranges: Vec<(usize, usize)>,
+    staged_scan_ranges: Vec<(usize, usize)>,
+}
+
+#[derive(Default)]
+struct MutatorWorldState {
+    stop_requested: bool,
+    collector: u64,
+    mutators: Vec<MutatorRecord>,
+}
+
+struct MutatorWorld {
+    state: std::sync::Mutex<MutatorWorldState>,
+    changed: std::sync::Condvar,
+}
+
+static MUTATOR_WORLD: LazyLock<MutatorWorld> = LazyLock::new(|| MutatorWorld {
+    state: std::sync::Mutex::new(MutatorWorldState::default()),
+    changed: std::sync::Condvar::new(),
+});
+static GC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static MUTATOR_REGISTERED: Cell<bool> = const { Cell::new(false) };
+}
+
+fn register_current_mutator(stack_top: usize) {
+    if stack_top == 0 {
+        return;
+    }
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    while world.stop_requested && world.collector != thread {
+        world = MUTATOR_WORLD.changed.wait(world).unwrap();
+    }
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.stack_top = stack_top;
+    } else {
+        world.mutators.push(MutatorRecord {
+            thread,
+            stack_top,
+            stopped_sp: 0,
+            saved_regs: [0; CALLEE_SAVED_WORDS],
+            blocking_depth: 0,
+            parked: false,
+            scan_ranges: Vec::new(),
+            staged_scan_ranges: Vec::new(),
+        });
+    }
+    MUTATOR_REGISTERED.with(|registered| registered.set(true));
+    let _ = TLAB_OWNER_THREAD.compare_exchange(0, thread, Ordering::Relaxed, Ordering::Relaxed);
+}
+
+/// Register the current OS worker using the platform's real stack boundary.
+/// A guessed `sp + N` can cross an unmapped guard page and make conservative
+/// scanning fault, especially with custom thread stack sizes.
+pub(crate) fn gc_register_current_os_thread() {
+    #[cfg(target_os = "macos")]
+    let stack_top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize };
+
+    #[cfg(target_os = "linux")]
+    let stack_top = unsafe {
+        let mut attr: libc::pthread_attr_t = mem::zeroed();
+        let mut top = 0usize;
+        if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
+            let mut base: *mut c_void = ptr::null_mut();
+            let mut size: libc::size_t = 0;
+            if libc::pthread_attr_getstack(&attr, &mut base, &mut size) == 0 && !base.is_null() {
+                top = base as usize + size;
+            }
+            libc::pthread_attr_destroy(&mut attr);
+        }
+        top
+    };
+
+    #[cfg(windows)]
+    let stack_top = unsafe {
+        let mut low = 0usize;
+        let mut high = 0usize;
+        windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(
+            &mut low,
+            &mut high,
+        );
+        high
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    let stack_top = {
+        let anchor = 0usize;
+        (&anchor as *const usize as usize) + 1024 * 1024
+    };
+
+    if stack_top != 0 {
+        register_current_mutator(stack_top);
+    }
+}
+
+pub(crate) fn gc_unregister_current_os_thread() {
+    unregister_current_mutator();
+}
+
+fn unregister_current_mutator() {
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    world.mutators.retain(|m| m.thread != thread);
+    MUTATOR_REGISTERED.with(|registered| registered.set(false));
+    MUTATOR_WORLD.changed.notify_all();
+    drop(world);
+
+    if TLAB_OWNER_THREAD
+        .compare_exchange(thread, 0, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        ASH_TLAB_CUR.store(0, Ordering::Relaxed);
+        ASH_TLAB_LIMIT.store(0, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn current_mutator_registered() -> bool {
+    MUTATOR_REGISTERED.with(Cell::get)
+}
+
+/// Park a registered mutator at an AIR V2 or allocation safepoint.
+///
+/// The spill buffer remains in this frame for the whole condition-variable
+/// wait, so `stopped_sp` describes live memory until the collector releases
+/// the world. Its copied words also cover architectures whose compiler keeps
+/// the only reference in a callee-saved register.
+#[inline(never)]
+pub(crate) fn gc_safepoint() {
+    if !GC_STOP_REQUESTED.load(Ordering::Acquire) || !current_mutator_registered() {
+        return;
+    }
+    let thread = thread_self_fast();
+    let mut saved_regs = [0usize; CALLEE_SAVED_WORDS];
+    spill_callee_saved(&mut saved_regs);
+    let sp = ImmixAllocator::current_stack_addr().min(saved_regs.as_ptr() as usize);
+
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if !world.stop_requested || world.collector == thread {
+        return;
+    }
+    let Some(index) = world.mutators.iter().position(|m| m.thread == thread) else {
+        return;
+    };
+    {
+        let record = &mut world.mutators[index];
+        record.stopped_sp = sp;
+        record.saved_regs = saved_regs;
+        record.parked = true;
+    }
+    MUTATOR_WORLD.changed.notify_all();
+    while world.stop_requested {
+        world = MUTATOR_WORLD.changed.wait(world).unwrap();
+    }
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.parked = false;
+        record.stopped_sp = 0;
+    }
+}
+
+/// Publish or retire the saved context used while an HDLL/native call blocks
+/// its OS worker. Execution of HL code while marked blocking violates the
+/// HashLink contract: the collector is allowed to scan this saved context
+/// without waiting for another AIR V2 poll.
+pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
+    if !current_mutator_registered() {
+        return false;
+    }
+    if blocking {
+        gc_safepoint();
+    }
+    let thread = thread_self_fast();
+    let mut saved_regs = [0usize; CALLEE_SAVED_WORDS];
+    spill_callee_saved(&mut saved_regs);
+    let sp = ImmixAllocator::current_stack_addr().min(saved_regs.as_ptr() as usize);
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    let Some(index) = world.mutators.iter().position(|m| m.thread == thread) else {
+        return false;
+    };
+
+    if blocking {
+        let record = &mut world.mutators[index];
+        record.blocking_depth = record.blocking_depth.saturating_add(1);
+        record.stopped_sp = sp;
+        record.saved_regs = saved_regs;
+        MUTATOR_WORLD.changed.notify_all();
+        return true;
+    }
+    if world.mutators[index].blocking_depth == 0 {
+        return false;
+    }
+    world.mutators[index].blocking_depth -= 1;
+    if world.mutators[index].blocking_depth != 0 {
+        return true;
+    }
+
+    // A thread leaving its native blocking section while collection is in
+    // progress joins the parked mutators before it may execute HL again.
+    if world.stop_requested && world.collector != thread {
+        world.mutators[index].stopped_sp = sp;
+        world.mutators[index].saved_regs = saved_regs;
+        world.mutators[index].parked = true;
+        MUTATOR_WORLD.changed.notify_all();
+        while world.stop_requested {
+            world = MUTATOR_WORLD.changed.wait(world).unwrap();
+        }
+        if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+            record.parked = false;
+            record.stopped_sp = 0;
+        }
+    } else {
+        world.mutators[index].stopped_sp = 0;
+    }
+    true
+}
+
+struct StoppedWorld {
+    snapshots: Vec<MutatorSnapshot>,
+    requested: bool,
+}
+
+impl Drop for StoppedWorld {
+    fn drop(&mut self) {
+        if !self.requested {
+            return;
+        }
+        let mut world = MUTATOR_WORLD.state.lock().unwrap();
+        world.stop_requested = false;
+        world.collector = 0;
+        GC_STOP_REQUESTED.store(false, Ordering::Release);
+        MUTATOR_WORLD.changed.notify_all();
+    }
+}
+
+fn stop_mutator_world() -> StoppedWorld {
+    let collector = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    let needs_stop = world.mutators.iter().any(|m| m.thread != collector);
+    if needs_stop {
+        world.stop_requested = true;
+        world.collector = collector;
+        GC_STOP_REQUESTED.store(true, Ordering::Release);
+        // A mutator may already be sleeping in the GC-lock slow path. Wake it
+        // so it can observe the stop request and publish its stack.
+        GC_LOCK.wake_for_world_stop();
+        while world.mutators.iter().any(|m| {
+            m.thread != collector && !m.parked && m.blocking_depth == 0
+        }) {
+            world = MUTATOR_WORLD.changed.wait(world).unwrap();
+        }
+    }
+    let snapshots = world
+        .mutators
+        .iter()
+        .map(|m| MutatorSnapshot {
+            thread: m.thread,
+            stack_top: m.stack_top,
+            stack_sp: m.stopped_sp,
+            saved_regs: m.saved_regs,
+            scan_ranges: m.scan_ranges.clone(),
+        })
+        .collect();
+    StoppedWorld {
+        snapshots,
+        requested: needs_stop,
+    }
+}
+
+fn mutator_scan_range_count() -> usize {
+    MUTATOR_WORLD
+        .state
+        .lock()
+        .unwrap()
+        .mutators
+        .iter()
+        .map(|m| m.scan_ranges.len())
+        .sum()
+}
+
+fn clear_current_scan_ranges() {
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.staged_scan_ranges.clear();
+    }
+}
+
+fn add_current_scan_range(start: usize, size: usize) {
+    if start == 0 || size == 0 {
+        return;
+    }
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.staged_scan_ranges.push((start, size));
+    }
+}
+
+fn publish_current_scan_ranges() {
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.scan_ranges = mem::take(&mut record.staged_scan_ranges);
+    }
+}
+
 #[inline]
 fn on_mutator() -> bool {
-    MUTATOR_THREAD.load(Ordering::Relaxed) == thread_self_fast()
+    TLAB_OWNER_THREAD.load(Ordering::Relaxed) == thread_self_fast()
 }
 
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.
@@ -865,6 +1200,9 @@ impl ReentrantGcLock {
             self.depth.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        // A collector can own this lock while it waits for our stack. Park
+        // before attempting the CAS; otherwise both sides wait forever.
+        gc_safepoint();
         // Uncontended path: one CAS, no mutex.
         if self
             .owner
@@ -883,7 +1221,13 @@ impl ReentrantGcLock {
             .compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            g = self.cond.wait(g).unwrap();
+            if GC_STOP_REQUESTED.load(Ordering::Acquire) {
+                drop(g);
+                gc_safepoint();
+                g = self.inner.lock().unwrap();
+            } else {
+                g = self.cond.wait(g).unwrap();
+            }
         }
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         self.depth.store(1, Ordering::Relaxed);
@@ -953,6 +1297,11 @@ impl ReentrantGcLock {
             drop(g);
             self.cond.notify_all();
         }
+    }
+
+    fn wake_for_world_stop(&self) {
+        let _guard = self.inner.lock().unwrap();
+        self.cond.notify_all();
     }
 }
 
@@ -1093,7 +1442,6 @@ struct RootSet {
     globals: Vec<*mut hl::vdynamic>,
     stack_roots: Vec<*mut hl::vdynamic>,
     persistent_roots: HashSet<*mut hl::vdynamic>,
-    scan_ranges: Vec<(usize, usize)>,
 }
 
 pub struct ImmixAllocator {
@@ -1103,17 +1451,16 @@ pub struct ImmixAllocator {
     pub(crate) current_exception: Option<Box<HLException>>,
     pub(crate) exception_handler:
         Option<Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>>,
-
-
-    stack_top: usize,
     globals_range: Option<(*const *mut c_void, usize)>,
-    /// Registered fiber stacks for conservative scanning. id 0 is the main
-    /// stack descriptor (base/size 0 — scanned as [saved_sp, stack_top)).
+    /// Registered fiber stacks for conservative scanning. Each OS-thread
+    /// mutator owns one id-0 main-stack descriptor; nonzero fiber ids are
+    /// process-unique.
     fiber_stacks: Vec<FiberStackInfo>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct FiberStackInfo {
+    pub thread: u64,
     pub id: u32,
     pub base: usize,
     pub size: usize,
@@ -1189,14 +1536,12 @@ impl ImmixAllocator {
                 globals: Vec::new(),
                 stack_roots: Vec::new(),
                 persistent_roots: HashSet::new(),
-                scan_ranges: Vec::new(),
             })),
             current_exception: None,
             exception_handler: None,
 
 
             fiber_stacks: Vec::new(),
-            stack_top: 0,
             globals_range: None,
         }
     }
@@ -1215,7 +1560,7 @@ impl ImmixAllocator {
     /// trigger collects immediately instead of deferring to the next
     /// interpreter snapshot.
     pub(crate) fn maybe_collect_at_safepoint(&mut self) {
-        if self.stack_top == 0 {
+        if !current_mutator_registered() {
             return;
         }
         let stress = gc_stress_every();
@@ -1243,7 +1588,7 @@ impl ImmixAllocator {
         // descriptor init) both engines hold GC pointers in host-side Rust
         // structures the conservative scanner cannot see. Bootstrap
         // allocation is finite; the exhaustion backstop still applies.
-        if self.stack_top == 0 {
+        if !current_mutator_registered() {
             return;
         }
         let stress = gc_stress_every();
@@ -1732,6 +2077,7 @@ impl ImmixAllocator {
 
     pub fn collect_garbage(&mut self) {
         let t0 = Instant::now();
+        let stopped_world = stop_mutator_world();
         if trace_freed() || std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin =
@@ -1740,12 +2086,16 @@ impl ImmixAllocator {
             eprintln!(
                 "[gc-collect] #{seq} origin={origin} heap={base:#x}..{:#x} ranges={} pending={}",
                 base + self.heap.memory.len,
-                self.roots.borrow().scan_ranges.len(),
+                stopped_world
+                    .snapshots
+                    .iter()
+                    .map(|m| m.scan_ranges.len())
+                    .sum::<usize>(),
                 self.heap.collect_pending,
             );
         }
-        self.mark_roots();
-        let freed_blocks = self.sweep();
+        self.mark_roots(&stopped_world.snapshots);
+        let freed_blocks = self.sweep(&stopped_world.snapshots);
         let pause = t0.elapsed();
 
         let live_blocks = self.heap.used_blocks.len();
@@ -1809,7 +2159,7 @@ impl ImmixAllocator {
         }
     }
 
-    pub fn mark_roots(&mut self) {
+    fn mark_roots(&mut self, mutators: &[MutatorSnapshot]) {
         let roots = self.roots.clone();
         let root_set = roots.borrow();
 
@@ -1840,7 +2190,6 @@ impl ImmixAllocator {
                 self.mark_allocation_at_line(line, &mut all_newly_marked);
             }
         }
-        let scan_ranges = root_set.scan_ranges.clone();
         drop(root_set);
 
         // Conservative scan of globals_data
@@ -1856,20 +2205,22 @@ impl ImmixAllocator {
         }
 
         // Conservative scan of interpreter-provided ranges
-        for &(start, size) in &scan_ranges {
-            if size == 0 {
-                continue;
-            }
-            let end = start.saturating_add(size);
-            if end > start {
-                let newly_marked = self.conservative_scan_range(start, end);
-                if dbg {
-                    eprintln!(
-                        "[gc-roots]   range {start:#x}+{size} marked {} lines",
-                        newly_marked.len()
-                    );
+        for mutator in mutators {
+            for &(start, size) in &mutator.scan_ranges {
+                if size == 0 {
+                    continue;
                 }
-                all_newly_marked.extend(newly_marked);
+                let end = start.saturating_add(size);
+                if end > start {
+                    let newly_marked = self.conservative_scan_range(start, end);
+                    if dbg {
+                        eprintln!(
+                            "[gc-roots]   range {start:#x}+{size} marked {} lines",
+                            newly_marked.len()
+                        );
+                    }
+                    all_newly_marked.extend(newly_marked);
+                }
             }
         }
 
@@ -1890,50 +2241,80 @@ impl ImmixAllocator {
         // address puts the spilled words inside the scanned range.
         let mut buf = [0usize; CALLEE_SAVED_WORDS];
         spill_callee_saved(&mut buf);
-        let probe = Self::current_stack_addr().min(buf.as_ptr() as usize);
-        // (8-align the probe: conservative_scan_range walks 8-byte words.)
-        let sp = (probe + 7) & !7;
+        let collector = thread_self_fast();
+        let collector_probe = Self::current_stack_addr().min(buf.as_ptr() as usize);
         let fiber_stacks = self.fiber_stacks.clone();
-        let running_fiber = fiber_stacks
-            .iter()
-            .find(|f| f.size > 0 && sp >= f.base && sp < f.base + f.size)
-            .map(|f| (f.id, f.base + f.size));
-        if std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
-            eprintln!(
-                "[gc-roots] sp={sp:#x} stack_top={:#x} span={}KB ranges={} globals={:?}",
-                self.stack_top,
-                (self.stack_top.saturating_sub(sp)) / 1024,
-                scan_ranges.len(),
-                self.globals_range.map(|(_, c)| c)
-            );
-        }
-        match running_fiber {
-            Some((_, top)) => {
-                all_newly_marked.extend(self.conservative_scan_range(sp, top));
-            }
-            None => {
-                if self.stack_top > 0 && sp < self.stack_top {
-                    all_newly_marked.extend(self.conservative_scan_range(sp, self.stack_top));
-                }
-            }
-        }
-        // All OTHER registered stacks scan from their saved switch-out SP.
-        for f in &fiber_stacks {
-            if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
+        for mutator in mutators {
+            let raw_sp = if mutator.thread == collector {
+                collector_probe
+            } else {
+                mutator.stack_sp
+            };
+            if raw_sp == 0 {
                 continue;
             }
-            let start = (f.saved_sp + 7) & !7;
-            let top = if f.size > 0 {
-                f.base + f.size
-            } else {
-                // Main-stack descriptor: only meaningful while a fiber runs.
-                if running_fiber.is_none() {
+            // 8-align the probe: conservative_scan_range walks 8-byte words.
+            let sp = (raw_sp + 7) & !7;
+            let running_fiber = fiber_stacks
+                .iter()
+                .find(|f| {
+                    f.thread == mutator.thread
+                        && f.size > 0
+                        && sp >= f.base
+                        && sp < f.base + f.size
+                })
+                .map(|f| (f.id, f.base + f.size));
+            if dbg {
+                let top = running_fiber
+                    .map(|(_, top)| top)
+                    .unwrap_or(mutator.stack_top);
+                eprintln!(
+                    "[gc-roots] thread={:#x} sp={sp:#x} stack_top={top:#x} span={}KB ranges={} globals={:?}",
+                    mutator.thread,
+                    top.saturating_sub(sp) / 1024,
+                    mutator.scan_ranges.len(),
+                    self.globals_range.map(|(_, c)| c)
+                );
+            }
+            match running_fiber {
+                Some((_, top)) => {
+                    all_newly_marked.extend(self.conservative_scan_range(sp, top));
+                }
+                None => {
+                    if mutator.stack_top > 0 && sp < mutator.stack_top {
+                        all_newly_marked
+                            .extend(self.conservative_scan_range(sp, mutator.stack_top));
+                    }
+                }
+            }
+
+            // All OTHER stacks owned by this mutator scan from their saved
+            // switch-out SP. The id-0 descriptor is its suspended main stack.
+            for f in fiber_stacks.iter().filter(|f| f.thread == mutator.thread) {
+                if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
                     continue;
                 }
-                self.stack_top
-            };
-            if start < top {
-                all_newly_marked.extend(self.conservative_scan_range(start, top));
+                let start = (f.saved_sp + 7) & !7;
+                let top = if f.size > 0 {
+                    f.base + f.size
+                } else {
+                    if running_fiber.is_none() {
+                        continue;
+                    }
+                    mutator.stack_top
+                };
+                if start < top {
+                    all_newly_marked.extend(self.conservative_scan_range(start, top));
+                }
+            }
+
+            // Parked/blocked mutators copied their callee-saved registers
+            // into registry-owned storage. The collector's registers are in
+            // `buf`, which its live-stack scan already includes.
+            if mutator.thread != collector {
+                let start = mutator.saved_regs.as_ptr() as usize;
+                let end = start + std::mem::size_of_val(&mutator.saved_regs);
+                all_newly_marked.extend(self.conservative_scan_range(start, end));
             }
         }
 
@@ -2134,7 +2515,7 @@ impl ImmixAllocator {
     /// Freed blocks' pages are returned to the OS via madvise (batched per
     /// contiguous run) so RSS actually falls after a collection instead of
     /// plateauing at high-water. Returns the number of blocks reclaimed.
-    pub fn sweep(&mut self) -> usize {
+    fn sweep(&mut self, mutators: &[MutatorSnapshot]) -> usize {
         // Last cycle's spans die with last cycle's marks. Carrying them over
         // would hand out lines in a block this sweep is about to free, and
         // they are rebuilt below anyway.
@@ -2239,15 +2620,54 @@ impl ImmixAllocator {
                     if let Some((gp, count)) = self.globals_range {
                         audit("globals", gp as usize, gp as usize + count * 8);
                     }
-                    let ranges = self.roots.borrow().scan_ranges.clone();
-                    for (rs, sz) in ranges {
-                        audit("range", rs, rs + sz);
+                    for mutator in mutators {
+                        for &(rs, sz) in &mutator.scan_ranges {
+                            audit("range", rs, rs + sz);
+                        }
                     }
-                    // The machine stack too — the mark phase scanned it, so
-                    // a hit here while the block frees means marking lost it.
-                    let sp = (Self::current_stack_addr() + 7) & !7;
-                    if self.stack_top > sp {
-                        audit("stack", sp, self.stack_top);
+                    // Every stopped machine/fiber stack too — the mark phase
+                    // scanned the same ownership-qualified ranges.
+                    let collector = thread_self_fast();
+                    for mutator in mutators {
+                        let raw_sp = if mutator.thread == collector {
+                            Self::current_stack_addr()
+                        } else {
+                            mutator.stack_sp
+                        };
+                        if raw_sp == 0 {
+                            continue;
+                        }
+                        let sp = (raw_sp + 7) & !7;
+                        let running = self.fiber_stacks.iter().find(|f| {
+                            f.thread == mutator.thread
+                                && f.size > 0
+                                && sp >= f.base
+                                && sp < f.base + f.size
+                        });
+                        let top = running
+                            .map(|f| f.base + f.size)
+                            .unwrap_or(mutator.stack_top);
+                        if sp < top {
+                            audit("stack", sp, top);
+                        }
+                        for fiber in self
+                            .fiber_stacks
+                            .iter()
+                            .filter(|f| f.thread == mutator.thread && f.saved_sp != 0)
+                        {
+                            if running.is_some_and(|active| active.id == fiber.id) {
+                                continue;
+                            }
+                            let saved_sp = (fiber.saved_sp + 7) & !7;
+                            let saved_top = if fiber.size > 0 {
+                                fiber.base + fiber.size
+                            } else {
+                                mutator.stack_top
+                            };
+                            if saved_sp < saved_top {
+                                audit("suspended-stack", saved_sp, saved_top);
+                            }
+                        }
                     }
                 }
                 if poison_freed() || quarantine_freed() {
@@ -2418,7 +2838,7 @@ impl ImmixAllocator {
 
     pub fn clear_scan_ranges(&mut self) {
         self.heap.safepoint_mode = true;
-        self.roots.borrow_mut().scan_ranges.clear();
+        clear_current_scan_ranges();
     }
 
     /// Register an interpreter root snapshot. This is the interpreter's
@@ -2427,10 +2847,7 @@ impl ImmixAllocator {
     pub fn add_scan_range(&mut self, ptr: *const c_void, size: usize) {
         self.heap.safepoint_mode = true;
         if !ptr.is_null() && size != 0 {
-            self.roots
-                .borrow_mut()
-                .scan_ranges
-                .push((ptr as usize, size));
+            add_current_scan_range(ptr as usize, size);
         }
         // Deliberately no pending-collection consumption here: a snapshot
         // now spans SEVERAL add calls (one per interpreter frame), and a
@@ -2441,6 +2858,7 @@ impl ImmixAllocator {
 
     /// The snapshot is complete: a deferred collection is honored now.
     pub fn scan_roots_done(&mut self) {
+        publish_current_scan_ranges();
         if self.heap.collect_pending {
             set_collect_origin(1);
             self.collect_garbage();
@@ -2580,11 +2998,23 @@ pub unsafe extern "C" fn hlp_gc_init() {
 /// Called once at JIT entry before running user code.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
-    // The thread announcing its stack top IS the mutator — record it so the
-    // TLAB fast path can tell itself apart from broker threads.
-    MUTATOR_THREAD.store(thread_self_fast(), Ordering::Relaxed);
-    let mut gc = gc_locked();
-    gc.stack_top = top;
+    register_current_mutator(top);
+}
+
+/// HashLink-compatible OS-mutator registration used by HDLL-created worker
+/// threads. `hlp_gc_set_stack_top` is the idempotent host-runtime spelling;
+/// both feed the same per-thread registry.
+#[no_mangle]
+pub unsafe extern "C" fn hl_register_thread(stack_top: *mut c_void) {
+    register_current_mutator(stack_top as usize);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_unregister_thread() {
+    let thread = thread_self_fast();
+    unregister_current_mutator();
+    let mut gc = gc_locked_init();
+    gc.fiber_stacks.retain(|fiber| fiber.thread != thread);
 }
 
 /// Register the globals_data array for conservative scanning.
@@ -2714,13 +3144,14 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     let mut out = std::io::BufWriter::new(file);
 
     let mut gc = gc_locked_init();
+    let stopped_world = stop_mutator_world();
 
     // Before the mutator has entered user code there is no stack to scan
     // conservatively, and marking from a partial root set would report
     // live data as garbage.
-    let marked = gc.stack_top != 0;
+    let marked = !stopped_world.snapshots.is_empty();
     if marked {
-        gc.mark_roots();
+        gc.mark_roots(&stopped_world.snapshots);
     }
 
     let heap_base = gc.heap.memory.as_ptr() as usize;
@@ -2780,7 +3211,7 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     w(format!("roots-globals {}", roots.globals.len()));
     w(format!("roots-stack {}", roots.stack_roots.len()));
     w(format!("roots-persistent {}", roots.persistent_roots.len()));
-    w(format!("scan-ranges {}", roots.scan_ranges.len()));
+    w(format!("scan-ranges {}", mutator_scan_range_count()));
     w(format!("marked {marked}"));
 
     // One line per retained block: address, live lines, live bytes at line
@@ -2810,11 +3241,17 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
 // ── Fiber-stack registry (crate-internal, used by fiber.rs) ─────────────────
 
 pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) {
+    let thread = thread_self_fast();
     let mut gc = gc_locked();
     // Lazily register the main-stack descriptor the first time a fiber
     // appears, so mark_roots can scan the suspended main stack.
-    if !gc.fiber_stacks.iter().any(|f| f.id == 0) {
+    if !gc
+        .fiber_stacks
+        .iter()
+        .any(|f| f.thread == thread && f.id == 0)
+    {
         gc.fiber_stacks.push(FiberStackInfo {
+            thread,
             id: 0,
             base: 0,
             size: 0,
@@ -2822,6 +3259,7 @@ pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) 
         });
     }
     gc.fiber_stacks.push(FiberStackInfo {
+        thread,
         id,
         base,
         size,
@@ -2830,16 +3268,23 @@ pub(crate) unsafe fn gc_register_fiber_stack(id: u32, base: usize, size: usize) 
 }
 
 pub(crate) unsafe fn gc_update_fiber_sp(id: u32, sp: usize) {
+    let thread = thread_self_fast();
     let mut gc = gc_locked();
-    if let Some(f) = gc.fiber_stacks.iter_mut().find(|f| f.id == id) {
+    if let Some(f) = gc
+        .fiber_stacks
+        .iter_mut()
+        .find(|f| f.id == id && (id != 0 || f.thread == thread))
+    {
         f.saved_sp = sp;
     }
 }
 
 /// Must be called BEFORE the fiber's stack memory is freed.
 pub(crate) unsafe fn gc_unregister_fiber_stack(id: u32) {
+    let thread = thread_self_fast();
     let mut gc = gc_locked();
-    gc.fiber_stacks.retain(|f| f.id != id);
+    gc.fiber_stacks
+        .retain(|f| f.id != id || (id == 0 && f.thread != thread));
 }
 
 pub(crate) unsafe fn gc_add_persistent(ptr: *mut hl::vdynamic) {
@@ -2901,4 +3346,54 @@ pub(crate) unsafe fn gc_swap_exc_state(
         std::mem::swap(&mut st.current_trap, trap);
         std::mem::swap(&mut st.exc_value, exc);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn collector_rendezvous_with_registered_os_mutator() {
+        unsafe { hlp_gc_init() };
+        let main_stack_anchor = 0usize;
+        unsafe {
+            hlp_gc_set_stack_top(
+                (&main_stack_anchor as *const usize as usize) + mem::size_of::<usize>(),
+            )
+        };
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let finish = Arc::new(AtomicBool::new(false));
+        let worker_ready = Arc::clone(&ready);
+        let worker_finish = Arc::clone(&finish);
+        let worker = std::thread::spawn(move || {
+            let stack_anchor = 0usize;
+            unsafe {
+                hl_register_thread(
+                    ((&stack_anchor as *const usize as usize) + mem::size_of::<usize>())
+                        as *mut c_void,
+                )
+            };
+            worker_ready.store(true, Ordering::Release);
+            while !worker_finish.load(Ordering::Acquire) {
+                gc_safepoint();
+                std::hint::spin_loop();
+            }
+            unsafe { hl_unregister_thread() };
+        });
+
+        while !ready.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        {
+            let mut gc = gc_locked();
+            set_collect_origin(6);
+            gc.collect_garbage();
+        }
+        finish.store(true, Ordering::Release);
+        worker.join().unwrap();
+        unsafe { hl_unregister_thread() };
+    }
 }

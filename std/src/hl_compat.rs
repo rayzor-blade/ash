@@ -425,7 +425,9 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_blocking(_enter: bool) {}
+pub unsafe extern "C" fn hl_blocking(enter: bool) {
+    crate::thread::hlp_blocking(enter);
+}
 
 // ============================================================================
 // UTF-16 string utilities (exported by libhl.dylib)

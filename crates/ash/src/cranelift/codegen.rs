@@ -48,7 +48,12 @@ use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
 use super::{abi_class, argument_abi_class, entry_return_class, AbiClass};
 use crate::hl_bindings as hl;
-use crate::jit::stub_bridge::{ash_jit_call_stub, STUB_SENTINEL_LIMIT};
+use crate::jit::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
+
+/// Number of AIR V2 loop-header visits between cooperative scheduler polls.
+/// The counter is per compiled activation, so it adds no shared-state access
+/// to the hot path and still bounds starvation in CPU-only loops.
+const FIBER_POLL_INTERVAL: i64 = 16 * 1024;
 
 // Cranelift has no floating remainder instruction. Keeping these helpers in
 // Rust avoids depending on a platform-specific libm symbol name while still
@@ -263,6 +268,7 @@ pub fn lower_air_function(
             ret_class: entry_return_class(ret_kind),
             osr_exits,
             osr_buf,
+            fiber_poll_slot: None,
         };
         cg.run()?;
         cg.finish();
@@ -365,6 +371,7 @@ pub fn compile_osr_entry(
             ret_class: entry_return_class(ret_kind),
             osr_exits: &osr_exits,
             osr_buf,
+            fiber_poll_slot: None,
         };
         cg.run_osr(header)?;
         cg.finish();
@@ -453,6 +460,8 @@ struct AirCodegen<'a, 'b> {
     /// See [`lower_air_function`]: loop-header re-tier exits.
     osr_exits: &'a HashMap<u32, u64>,
     osr_buf: u64,
+    /// Per-activation countdown used by compiled cooperative safe points.
+    fiber_poll_slot: Option<StackSlot>,
 }
 
 impl AirCodegen<'_, '_> {
@@ -491,6 +500,11 @@ impl AirCodegen<'_, '_> {
 
         self.bind_entry()?;
 
+        let poll_headers = self.fiber_poll_headers();
+        if poll_headers.iter().any(|poll| *poll) {
+            self.init_fiber_poll_counter()?;
+        }
+
         // Re-tier exits: each participating loop header gets a body block the
         // poll falls through to, and a cold exit block that hands the frame
         // to the LLVM OSR entry. The register image a header must spill is
@@ -508,6 +522,9 @@ impl AirCodegen<'_, '_> {
             }
             if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
                 self.emit_retier_poll(bid, slot, cfg)?;
+            }
+            if poll_headers[bid.idx()] {
+                self.emit_fiber_poll()?;
             }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
@@ -669,6 +686,11 @@ impl AirCodegen<'_, '_> {
         self.b.switch_to_block(entry);
         let buf = self.b.block_params(entry)[0];
 
+        let poll_headers = self.fiber_poll_headers();
+        if poll_headers.iter().any(|poll| *poll) {
+            self.init_fiber_poll_counter()?;
+        }
+
         // Cells are registers too; their current values are in the buffer.
         for ci in 0..self.f.cells.len() {
             let cell = self.f.cells[ci].clone();
@@ -780,6 +802,9 @@ impl AirCodegen<'_, '_> {
             if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
                 self.emit_retier_poll(bid, slot, cfg)?;
             }
+            if poll_headers[bid.idx()] {
+                self.emit_fiber_poll()?;
+            }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
                 self.emit(&instr)?;
@@ -788,6 +813,68 @@ impl AirCodegen<'_, '_> {
             self.emit_term(bid, &term)?;
         }
         self.b.seal_all_blocks();
+        Ok(())
+    }
+
+    /// Mark every natural AIR V2 loop header. Polling all headers, rather
+    /// than only loops that contain calls, is required for a tight numeric
+    /// loop to make progress alongside timers and sibling Haxe threads.
+    fn fiber_poll_headers(&self) -> Vec<bool> {
+        let cfg = air::v2::CfgInfo::build(self.f);
+        let loops = air::v2::LoopForest::analyze(self.f, &cfg);
+        let mut headers = vec![false; self.f.blocks.len()];
+        for lp in &loops.loops {
+            headers[lp.header.idx()] = true;
+        }
+        headers
+    }
+
+    fn init_fiber_poll_counter(&mut self) -> Result<()> {
+        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            4,
+            2,
+        ));
+        let initial = self.b.ins().iconst(types::I32, FIBER_POLL_INTERVAL);
+        self.b.ins().stack_store(types::I64, initial, slot, 0);
+        self.fiber_poll_slot = Some(slot);
+        Ok(())
+    }
+
+    /// Rate-limited cooperative safe point inserted directly into the AIR V2
+    /// CFG. The scheduler call lives on a cold edge; ordinary iterations pay
+    /// only a stack countdown and branch.
+    fn emit_fiber_poll(&mut self) -> Result<()> {
+        let slot = self
+            .fiber_poll_slot
+            .ok_or_else(|| anyhow!("fiber poll counter was not initialized"))?;
+        let poll = self.b.create_block();
+        let body = self.b.create_block();
+        self.b.set_cold_block(poll);
+
+        let remaining = self
+            .b
+            .ins()
+            .stack_load(types::I64, types::I32, slot, 0);
+        let next = self.b.ins().iadd_imm(remaining, -1);
+        self.b.ins().stack_store(types::I64, next, slot, 0);
+        let due = self.b.ins().icmp_imm(IntCC::Equal, next, 0);
+        self.b.ins().brif(due, poll, &[], body, &[]);
+
+        self.b.switch_to_block(poll);
+        let sig_ref = self
+            .b
+            .import_signature(Signature::new(self.ctx.call_conv()));
+        let target = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.fiber_poll_helper()? as i64);
+        self.b.ins().call_indirect(sig_ref, target, &[]);
+        let reset = self.b.ins().iconst(types::I32, FIBER_POLL_INTERVAL);
+        self.b.ins().stack_store(types::I64, reset, slot, 0);
+        self.b.ins().jump(body, &[]);
+
+        self.b.switch_to_block(body);
         Ok(())
     }
 
@@ -3052,6 +3139,42 @@ impl AirCodegen<'_, '_> {
 
             self.b.switch_to_block(bridge_bb);
         }
+
+        // Compiled-only workers must never re-enter the single main-thread
+        // interpreter. Ask the shared AIR V2 compiler for this one findex,
+        // then invoke the resolved pointer with this call site's exact ABI.
+        // Hybrid mode returns null and continues to the interpreter bridge.
+        let resolved_bb = self.b.create_block();
+        let interpreter_bb = self.b.create_block();
+        let resolve_sig = self.helper_sigref(&[types::I64], Some(types::I64));
+        let resolve_addr = self
+            .b
+            .ins()
+            .iconst(types::I64, ash_jit_resolve_stub as usize as i64);
+        let resolve_call =
+            self.b
+                .ins()
+                .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
+        let resolved = self.b.inst_results(resolve_call)[0];
+        let resolved_real = self.b.ins().icmp_imm_s(
+            IntCC::UnsignedGreaterThanOrEqual,
+            resolved,
+            STUB_SENTINEL_LIMIT as i64,
+        );
+        self.b
+            .ins()
+            .brif(resolved_real, resolved_bb, &[], interpreter_bb, &[]);
+
+        self.b.switch_to_block(resolved_bb);
+        let resolved_call = self.b.ins().call_indirect(sigref, resolved, args);
+        let resolved_vals: Vec<BlockArg> = if ret_ty.is_some() {
+            vec![BlockArg::Value(self.b.inst_results(resolved_call)[0])]
+        } else {
+            vec![]
+        };
+        self.b.ins().jump(merge_bb, &resolved_vals);
+
+        self.b.switch_to_block(interpreter_bb);
         let nargs = args.len();
         let slot = self.b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,

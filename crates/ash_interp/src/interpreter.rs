@@ -208,6 +208,13 @@ const POOL_CAP: usize = 64;
 const HOT_LOOP_BACKEDGES: u32 = 64;
 const _: () = assert!(HOT_LOOP_BACKEDGES.is_power_of_two());
 
+/// AIR V2 work between cooperative fiber scheduling turns. This is high
+/// enough to stay below profiler noise on compute-only programs, while an
+/// interpreted game loop still gives blocked worker fibers several turns per
+/// frame. SSA dispatch charges a whole block at once; serialized AIR charges
+/// one optimized opcode.
+const FIBER_POLL_WORK: u32 = 16 * 1024;
+
 /// Demand bits in `HLInterpreter::demand_local`.
 const DEMAND_LIVE_FRAME: u8 = 1;
 const DEMAND_UNDER_LOOP: u8 = 2;
@@ -673,6 +680,10 @@ struct TieredSharedCtx {
     /// for a single-invocation hot loop that observation comes from the
     /// back-edge ticks, at most 64 iterations later.
     pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
+    /// Per-findex beads for compiled-only lazy sentinel resolution. The lock
+    /// spans a cold compile so two workers cannot define/install the same
+    /// function concurrently; Cranelift's module is serialized regardless.
+    worker_beads: Mutex<HashMap<usize, Arc<Bead>>>,
     attempted: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     cranelift_promotions: std::sync::atomic::AtomicU64,
@@ -1011,6 +1022,54 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
             eprintln!("[tier] cranelift lowering panicked for findex={findex}");
             std::ptr::null_mut()
         }
+    }
+}
+
+/// Resolve one cold compiled-only call without touching `HLInterpreter`.
+/// Generated code retains the typed call ABI and invokes the returned pointer
+/// directly, so this path only needs the immutable/shared tier context.
+fn resolve_compiled_only_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
+    if !ctx.compiled_only || findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
+        return std::ptr::null_mut();
+    }
+    let Some(bytecode) = ctx.bytecode_ptr() else {
+        return std::ptr::null_mut();
+    };
+    if !bytecode
+        .functions
+        .iter()
+        .any(|function| function.findex as usize == findex)
+    {
+        return std::ptr::null_mut();
+    }
+
+    let mut beads = ctx
+        .worker_beads
+        .lock()
+        .expect("worker beads mutex poisoned");
+    if ctx.arrays.functions_ptrs != 0 {
+        let current =
+            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) } as usize;
+        if current >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            return current as *mut ();
+        }
+    }
+    let bead = Arc::clone(
+        beads
+            .entry(findex)
+            .or_insert_with(|| Bead::new(findex as beadie::CoreHandle, None)),
+    );
+    if let Some(code) = bead.compiled() {
+        return code;
+    }
+    let code = compile_with_cranelift(ctx, findex, &bead);
+    if code.is_null() {
+        return code;
+    }
+    if bead.eager_install(code) || bead.compiled().is_some() {
+        bead.compiled().unwrap_or(code)
+    } else {
+        std::ptr::null_mut()
     }
 }
 
@@ -1690,6 +1749,12 @@ pub struct HLInterpreter {
     fn_gc_set_stack_top: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_set_globals
     fn_gc_set_globals: *mut c_void,
+    /// Cooperative fiber scheduler safe point. Long-running Haxe event loops
+    /// do not necessarily call a blocking primitive, so their worker fibers
+    /// need bounded turns from the AIR V2 dispatcher itself.
+    fn_fiber_poll: *mut c_void,
+    /// AIR V2 work units remaining before the next fiber scheduling turn.
+    fiber_poll_budget: u32,
     /// Whether GC globals/stack top were initialized for this interpreter.
     gc_runtime_initialized: bool,
     /// Scratch space for decoded raw pointer roots (from NaN-boxed registers).
@@ -1877,6 +1942,9 @@ impl HLInterpreter {
         let fn_gc_set_globals = native_resolver
             .resolve_function("std", "hlp_gc_set_globals")
             .unwrap_or(std::ptr::null_mut());
+        let fn_fiber_poll = native_resolver
+            .resolve_function("std", "hlp_fiber_poll")
+            .unwrap_or(std::ptr::null_mut());
         HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
@@ -1939,6 +2007,8 @@ impl HLInterpreter {
             fn_gc_scan_roots_done,
             fn_gc_set_stack_top,
             fn_gc_set_globals,
+            fn_fiber_poll,
+            fiber_poll_budget: FIBER_POLL_WORK,
             gc_runtime_initialized: false,
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
@@ -2202,6 +2272,7 @@ impl HLInterpreter {
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
+            worker_beads: Mutex::new(HashMap::new()),
             attempted: std::sync::atomic::AtomicU64::new(0),
             failed: std::sync::atomic::AtomicU64::new(0),
             cranelift_promotions: std::sync::atomic::AtomicU64::new(0),
@@ -3209,7 +3280,9 @@ impl HLInterpreter {
             bytecode: *const DecodedBytecode,
             resolver: *const NativeFunctionResolver,
             fiber_is_root_closure: *mut c_void,
+            fiber_is_worker_lane: *mut c_void,
             jit_closure_runner: *mut c_void,
+            compiled_stub_ctx: Option<Arc<TieredSharedCtx>>,
         }
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
         unsafe extern "C" fn fiber_closure_runner(
@@ -3487,6 +3560,20 @@ impl HLInterpreter {
             let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
                 return 0;
             };
+            // `prepare_call_stack` owns scratch Vecs on the one
+            // `HLInterpreter`. Compiled AIR V2 workers have native frames and
+            // may throw concurrently, so touching that main-lane scratch
+            // storage here races both the interpreter and other workers.
+            // Returning an empty interpreted stack is correct for this lane;
+            // the native trap/JIT frames remain available to the ordinary
+            // exception machinery.
+            if !ctx.fiber_is_worker_lane.is_null() {
+                let is_worker: unsafe extern "C" fn() -> bool =
+                    std::mem::transmute(ctx.fiber_is_worker_lane);
+                if is_worker() {
+                    return 0;
+                }
+            }
             let interp = &mut *ctx.interp;
             if output.is_null() {
                 let frame_hint = (&*ctx.resolver)
@@ -3504,8 +3591,15 @@ impl HLInterpreter {
             }
         }
         unsafe {
+            let compiled_only = self
+                .tiered_runtime
+                .as_ref()
+                .is_some_and(|tiered| tiered.config.compiled_only);
             let fiber_is_root_closure = native_resolver
                 .resolve_function("std", "hlp_fiber_is_root_closure")
+                .unwrap_or(std::ptr::null_mut());
+            let fiber_is_worker_lane = native_resolver
+                .resolve_function("std", "hlp_fiber_is_worker_lane")
                 .unwrap_or(std::ptr::null_mut());
             let jit_closure_runner = native_resolver
                 .resolve_function("std", "hlp_jit_closure_runner")
@@ -3515,7 +3609,13 @@ impl HLInterpreter {
                 bytecode: bytecode as *const _,
                 resolver: native_resolver as *const _,
                 fiber_is_root_closure,
+                fiber_is_worker_lane,
                 jit_closure_runner,
+                compiled_stub_ctx: self
+                    .tiered_runtime
+                    .as_ref()
+                    .filter(|tiered| tiered.config.compiled_only)
+                    .map(|tiered| Arc::clone(&tiered.shared_ctx)),
             });
             let set = native_resolver
                 .resolve_function("std", "hlp_set_closure_runner")
@@ -3534,6 +3634,21 @@ impl HLInterpreter {
                 type SetSwitch = unsafe extern "C" fn(unsafe extern "C" fn(u32, u32));
                 let f: SetSwitch = std::mem::transmute(set_switch);
                 f(fiber_switch_runner);
+            }
+            let set_worker_mode = native_resolver
+                .resolve_function("std", "hlp_set_compiled_worker_mode")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_worker_mode.is_null() {
+                let set_mode: unsafe extern "C" fn(bool) = std::mem::transmute(set_worker_mode);
+                set_mode(compiled_only);
+            }
+            let set_stub_resolver = native_resolver
+                .resolve_function("std", "hlp_set_stub_resolver")
+                .unwrap_or(std::ptr::null_mut());
+            if !set_stub_resolver.is_null() {
+                let set_resolver: unsafe extern "C" fn(unsafe extern "C" fn(i32) -> *mut ()) =
+                    std::mem::transmute(set_stub_resolver);
+                set_resolver(jit_stub_resolver);
             }
             let setup_exception = native_resolver
                 .resolve_function("std", "hlp_setup_exception")
@@ -3557,6 +3672,19 @@ impl HLInterpreter {
         // Same raw-pointer-context justification as the closure runner above:
         // JIT code only runs within execute_entrypoint's dynamic extent, on
         // this OS thread.
+        unsafe extern "C" fn jit_stub_resolver(findex: i32) -> *mut () {
+            if findex < 0 {
+                return std::ptr::null_mut();
+            }
+            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                return std::ptr::null_mut();
+            };
+            let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
+                return std::ptr::null_mut();
+            };
+            resolve_compiled_only_stub(shared, findex as usize)
+        }
+
         unsafe extern "C" fn jit_stub_call_bridge(
             findex: i32,
             caller_findex: i32,
@@ -3575,6 +3703,20 @@ impl HLInterpreter {
                 );
                 std::process::abort();
             };
+            if !ctx.fiber_is_worker_lane.is_null() {
+                let is_worker: unsafe extern "C" fn() -> bool =
+                    std::mem::transmute(ctx.fiber_is_worker_lane);
+                if is_worker() {
+                    HLInterpreter::raise_stub_bridge_failure(
+                        &*ctx.resolver,
+                        findex.max(0) as usize,
+                        anyhow!(
+                            "compiled worker reached unprepared JIT sentinel for findex {}",
+                            findex
+                        ),
+                    );
+                }
+            }
             let interp = &mut *ctx.interp;
             let bytecode = &*ctx.bytecode;
             let resolver = &*ctx.resolver;
@@ -3636,6 +3778,7 @@ impl HLInterpreter {
                 Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
             }
         }
+        ash_core::jit::stub_bridge::set_stub_resolver(jit_stub_resolver);
         ash_core::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
 
         let entry_findex = bytecode.entrypoint as usize;
@@ -4567,6 +4710,24 @@ impl HLInterpreter {
         }
     }
 
+    /// Give cooperative Haxe worker fibers bounded execution time even when
+    /// the main Haxe thread is a non-returning event loop.
+    #[inline(always)]
+    fn fiber_safe_point(&mut self, work: u32) {
+        if self.fiber_poll_budget > work {
+            self.fiber_poll_budget -= work;
+            return;
+        }
+        self.fiber_poll_budget = FIBER_POLL_WORK;
+        if self.fn_fiber_poll.is_null() {
+            return;
+        }
+        type FnPoll = unsafe extern "C" fn();
+        unsafe {
+            (std::mem::transmute::<*mut c_void, FnPoll>(self.fn_fiber_poll))();
+        }
+    }
+
     /// beadie `TieredAdapter::on_invoke` semantics for one bytecode-function
     /// call: tick the bead, let the adapter submit tier-0 and tier-1 compile
     /// jobs when their policies fire, and return the currently installed code.
@@ -5318,6 +5479,7 @@ impl HLInterpreter {
         func_idx: usize,
     ) -> Result<NanBoxedValue> {
         loop {
+            self.fiber_safe_point(1);
             let func = self.air.body(bytecode, func_idx);
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
@@ -8687,6 +8849,8 @@ impl HLInterpreter {
                 .blocks
                 .get(block)
                 .ok_or_else(|| anyhow!("SSA block {} out of range in {}", block, func.name()))?;
+            let work = (blk.instrs.len() + 1).min(u32::MAX as usize) as u32;
+            self.fiber_safe_point(work);
             // Published for the same reason the opcode loop publishes `pc`:
             // it is the only record of where a frame is when something below
             // it fails.
@@ -10614,6 +10778,27 @@ impl HLInterpreter {
         Some(symbol.into_boxed_slice())
     }
 
+    /// Return true when the loader owns `pc` as part of the executable or a
+    /// shared library. JIT code lives in anonymous executable mappings, so a
+    /// loader-owned address must never be fed to the nearest-JIT-entry
+    /// fallback: doing so made ASLR occasionally report an unrelated Haxe
+    /// function for one of Ash's own native stack frames.
+    #[cfg(unix)]
+    fn native_image_owns_pc(pc: usize) -> bool {
+        if pc == 0 {
+            return false;
+        }
+        unsafe {
+            let mut info: libc::Dl_info = std::mem::zeroed();
+            libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_fbase.is_null()
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn native_image_owns_pc(_pc: usize) -> bool {
+        false
+    }
+
     /// Capture return addresses from the native stack. Generated code ranges
     /// are registered by both AIR V2 backends, so this works for Cranelift,
     /// LLVM promotion, and a stack containing frames from both tiers.
@@ -10648,11 +10833,16 @@ impl HLInterpreter {
                         let words = frame as *const usize;
                         let caller = *words;
                         let return_pc = *words.add(1);
-                        if let Some((findex, _, _)) = ash_core::profile::describe_jit_pc(return_pc)
-                        {
-                            if let Some(function_index) = func_of(&self.targets, findex as usize) {
-                                if functions.last().copied() != Some(function_index) {
-                                    functions.push(function_index);
+                        if !Self::native_image_owns_pc(return_pc) {
+                            if let Some((findex, _, _)) =
+                                ash_core::profile::describe_jit_pc(return_pc)
+                            {
+                                if let Some(function_index) =
+                                    func_of(&self.targets, findex as usize)
+                                {
+                                    if functions.last().copied() != Some(function_index) {
+                                        functions.push(function_index);
+                                    }
                                 }
                             }
                         }
@@ -10692,6 +10882,9 @@ impl HLInterpreter {
         let count = 0;
 
         for pc in pcs.iter().take(count) {
+            if Self::native_image_owns_pc(*pc as usize) {
+                continue;
+            }
             let Some((findex, _, _)) = ash_core::profile::describe_jit_pc(*pc as usize) else {
                 continue;
             };
@@ -11742,70 +11935,6 @@ impl HLInterpreter {
             eprintln!("[CALL_METHOD] out={:?}", out);
         }
         Ok(Some(out))
-    }
-
-    /// Cooperative SDL event pump: resolve SDL_PollEvent, poll all pending events,
-    /// and call the Heaps event callback for each via the interpreter.
-    /// Cooperative SDL event pump + buffer swap.
-    /// Pumps SDL events (so the window stays responsive and close works)
-    /// and swaps the GL buffer (so rendered content is presented).
-    /// Returns false if SDL_QUIT was received (app should exit).
-    // Kept for the in-flight Heaps/EventLoop work: the call site returns when
-    // the fiber-based sys.thread pump lands (see heaps_rendering_status).
-    #[cfg(unix)]
-    #[allow(dead_code)]
-    fn pump_events_and_swap(&mut self) -> bool {
-        let mut alive = true;
-        unsafe {
-            let poll = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr());
-            let swap = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_GL_SwapWindow".as_ptr());
-            let get_win = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_GL_GetCurrentWindow".as_ptr());
-
-            if !poll.is_null() {
-                let poll_fn: unsafe extern "C" fn(*mut u8) -> i32 = std::mem::transmute(poll);
-                let mut event_buf = [0u8; 128]; // SDL_Event union
-                while poll_fn(event_buf.as_mut_ptr()) != 0 {
-                    let event_type = u32::from_ne_bytes([
-                        event_buf[0],
-                        event_buf[1],
-                        event_buf[2],
-                        event_buf[3],
-                    ]);
-                    // Log first few event types for debugging
-                    static EVT_LOG_COUNT: std::sync::atomic::AtomicU32 =
-                        std::sync::atomic::AtomicU32::new(0);
-                    let c = EVT_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if c < 20 || event_type == 0x100 {
-                        eprintln!("[ash] SDL event type={:#x} ({})", event_type, event_type);
-                    }
-                    if event_type == 0x100 {
-                        // SDL_QUIT
-                        eprintln!("[ash] SDL_QUIT received, exiting");
-                        alive = false;
-                    }
-                }
-            }
-
-            // Swap GL buffers
-            if !swap.is_null() && !get_win.is_null() {
-                let get_win_fn: unsafe extern "C" fn() -> *mut c_void =
-                    std::mem::transmute(get_win);
-                let swap_fn: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(swap);
-                let window = get_win_fn();
-                static SWAP_LOGGED: std::sync::atomic::AtomicBool =
-                    std::sync::atomic::AtomicBool::new(false);
-                if !SWAP_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!(
-                        "[ash] SDL_GL_SwapWindow: window={:p} swap_fn={:p}",
-                        window, swap as *const ()
-                    );
-                }
-                if !window.is_null() {
-                    swap_fn(window);
-                }
-            }
-        }
-        alive
     }
 
     /// Interpreter-side implementation of bsort_i32 that uses the interpreter's

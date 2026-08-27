@@ -361,17 +361,14 @@ fn filetime_ticks(ft: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
-    // With fibers alive, sleeping is a scheduling window: let workers run
-    // until the deadline instead of stalling the whole VM.
+    let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
+    // With fibers alive, park the logical thread on a scheduler timer instead
+    // of repeatedly making every sleeping fiber runnable.
     if crate::fiber::fibers_active() {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds.max(0.0));
-        while std::time::Instant::now() < deadline {
-            crate::fiber::block_yield();
-        }
+        crate::fiber::sleep_until(std::time::Instant::now() + duration);
         return;
     }
-    std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    std::thread::sleep(duration);
 }
 
 /// Upstream installs an LC_TIME locale for `strftime`. ash's date formatting

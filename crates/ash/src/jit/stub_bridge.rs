@@ -27,8 +27,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// std/src/fiber.rs and the interpreter's closure runner.
 pub const STUB_SENTINEL_LIMIT: u64 = 0x100000;
 
-/// Bridge signature: (findex, raw arg words, arg count) -> raw result word.
-pub type StubCallBridge = unsafe extern "C" fn(findex: i32, args: *const i64, nargs: i32) -> i64;
+/// Bridge signature: (callee findex, caller findex, raw arg words, arg count)
+/// -> raw result word. The caller travels explicitly because a cold stub call
+/// crosses Rust frames that native stack unwinders cannot associate with the
+/// generated-code caller.
+pub type StubCallBridge =
+    unsafe extern "C" fn(findex: i32, caller: i32, args: *const i64, nargs: i32) -> i64;
 
 static STUB_CALL_BRIDGE: AtomicUsize = AtomicUsize::new(0);
 
@@ -46,7 +50,12 @@ pub fn set_stub_call_bridge(f: StubCallBridge) {
 /// # Safety
 /// `args` must point to `nargs` i64 words encoded per the module contract.
 #[no_mangle]
-pub unsafe extern "C" fn ash_jit_call_stub(sentinel: i64, args: *const i64, nargs: i32) -> i64 {
+pub unsafe extern "C" fn ash_jit_call_stub(
+    sentinel: i64,
+    caller: i32,
+    args: *const i64,
+    nargs: i32,
+) -> i64 {
     let bridge = STUB_CALL_BRIDGE.load(Ordering::Acquire);
     if bridge == 0 {
         // Pure-JIT mode never stores sentinels in function tables; reaching
@@ -61,5 +70,5 @@ pub unsafe extern "C" fn ash_jit_call_stub(sentinel: i64, args: *const i64, narg
         std::process::abort();
     }
     let f: StubCallBridge = std::mem::transmute(bridge as *const ());
-    f((sentinel - 1) as i32, args, nargs)
+    f((sentinel - 1) as i32, caller, args, nargs)
 }

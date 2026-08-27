@@ -1532,6 +1532,10 @@ pub struct HLInterpreter {
     /// must follow the fiber that owns their register files rather than the
     /// single OS thread all cooperative Haxe threads share.
     fiber_stacks: HashMap<u32, Vec<InterpreterFrame>>,
+    /// Generated-code callers currently suspended inside the lazy JIT stub
+    /// bridge. Native unwinding stops at that Rust boundary, so retain the
+    /// logical AIR V2 call chain explicitly for HashLink stack APIs.
+    jit_bridge_callers: Vec<usize>,
     /// Maximum call stack depth
     max_stack_depth: usize,
     /// Findexes whose tier-1 compile this interpreter has force-proposed at
@@ -1877,6 +1881,7 @@ impl HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
             fiber_stacks: HashMap::new(),
+            jit_bridge_callers: Vec::new(),
             max_stack_depth: 1000,
             osr_forced: std::collections::HashSet::new(),
             demand_local: Vec::new(),
@@ -3554,6 +3559,7 @@ impl HLInterpreter {
         // this OS thread.
         unsafe extern "C" fn jit_stub_call_bridge(
             findex: i32,
+            caller_findex: i32,
             args: *const i64,
             nargs: i32,
         ) -> i64 {
@@ -3611,7 +3617,18 @@ impl HLInterpreter {
             }
             let ret_kind = bytecode.types[fun.ret.0].kind;
 
-            match interp.call_function(bytecode, resolver, findex, &vals) {
+            let caller = usize::try_from(caller_findex)
+                .ok()
+                .and_then(|caller| func_of(&interp.targets, caller));
+            if let Some(caller) = caller {
+                interp.jit_bridge_callers.push(caller);
+            }
+            let result = interp.call_function(bytecode, resolver, findex, &vals);
+            if caller.is_some() {
+                interp.jit_bridge_callers.pop();
+            }
+
+            match result {
                 Ok(v) => interp.value_to_i64(v, ret_kind),
                 // Every failure leaves through the native trap chain — see
                 // `raise_stub_bridge_failure`. Returning a value here would
@@ -10631,8 +10648,7 @@ impl HLInterpreter {
                         let words = frame as *const usize;
                         let caller = *words;
                         let return_pc = *words.add(1);
-                        if let Some((findex, _, _)) =
-                            ash_core::profile::describe_jit_pc(return_pc)
+                        if let Some((findex, _, _)) = ash_core::profile::describe_jit_pc(return_pc)
                         {
                             if let Some(function_index) = func_of(&self.targets, findex as usize) {
                                 if functions.last().copied() != Some(function_index) {
@@ -10654,11 +10670,6 @@ impl HLInterpreter {
         }
 
         if !functions.is_empty() {
-            if std::env::var_os("ASH_DBG_STACK").is_some() {
-                eprintln!(
-                    "[stack] frame-hint={_frame_hint:p} frame-pointer functions={functions:?}"
-                );
-            }
             return functions;
         }
 
@@ -10691,11 +10702,6 @@ impl HLInterpreter {
                 functions.push(function_index);
             }
         }
-        if std::env::var_os("ASH_DBG_STACK").is_some() {
-            eprintln!(
-                "[stack] frame-hint={_frame_hint:p} backtrace-pcs={count} functions={functions:?}"
-            );
-        }
         functions
     }
 
@@ -10711,14 +10717,6 @@ impl HLInterpreter {
         frame_hint: *const usize,
     ) -> Vec<Box<[u16]>> {
         let compiled = self.compiled_stack_functions(frame_hint);
-        if std::env::var_os("ASH_DBG_STACK").is_some() && !frame_hint.is_null() {
-            let labels: Vec<_> = compiled
-                .iter()
-                .filter_map(|&index| bytecode.functions.get(index))
-                .map(|function| (function.findex, function.name()))
-                .collect();
-            eprintln!("[stack] generated labels={labels:?}");
-        }
         let mut symbols: Vec<Box<[u16]>> = compiled
             .iter()
             // Cranelift does not currently expose per-instruction native PC
@@ -10728,6 +10726,15 @@ impl HLInterpreter {
             .filter_map(|&function_index| Self::stack_symbol(bytecode, function_index, 0))
             .collect();
         let mut last = compiled.last().copied();
+        for &function_index in self.jit_bridge_callers.iter().rev() {
+            if last == Some(function_index) {
+                continue;
+            }
+            if let Some(symbol) = Self::stack_symbol(bytecode, function_index, 0) {
+                symbols.push(symbol);
+                last = Some(function_index);
+            }
+        }
         for frame in self.stack.iter().rev() {
             if last == Some(frame.function_index) {
                 continue;
@@ -10756,13 +10763,6 @@ impl HLInterpreter {
         frame_hint: *const usize,
     ) -> usize {
         let symbols = self.stack_symbols(bytecode, frame_hint);
-        if std::env::var_os("ASH_DBG_STACK").is_some() {
-            eprintln!(
-                "[stack] prepare hint={frame_hint:p} interpreter={} symbols={}",
-                self.stack.len(),
-                symbols.len()
-            );
-        }
         self.call_stack_symbols = symbols
             .iter()
             .map(|symbol| symbol.as_ptr() as usize)

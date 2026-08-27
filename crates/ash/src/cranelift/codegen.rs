@@ -3061,16 +3061,20 @@ impl AirCodegen<'_, '_> {
                 .stack_store(types::I64, word, slot, (idx * 8) as i32);
         }
         let buf = self.b.ins().stack_addr(types::I64, slot, 0);
-        let stub_sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));
+        let stub_sig = self.helper_sigref(
+            &[types::I64, types::I32, types::I64, types::I32],
+            Some(types::I64),
+        );
         let stub_addr = self
             .b
             .ins()
             .iconst(types::I64, ash_jit_call_stub as usize as i64);
         let nargs_val = self.b.ins().iconst(types::I32, nargs as i64);
-        let stub_call = self
-            .b
-            .ins()
-            .call_indirect(stub_sig, stub_addr, &[fn_addr, buf, nargs_val]);
+        let caller = self.b.ins().iconst(types::I32, self.findex as i64);
+        let stub_call =
+            self.b
+                .ins()
+                .call_indirect(stub_sig, stub_addr, &[fn_addr, caller, buf, nargs_val]);
         let stub_vals: Vec<BlockArg> = match ret_ty {
             None => vec![],
             Some(t) => {

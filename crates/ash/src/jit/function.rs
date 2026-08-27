@@ -1227,6 +1227,7 @@ impl<'ctx> JITModule<'ctx> {
         air: &AirFunction,
         function: FunctionValue<'ctx>,
     ) -> Result<()> {
+        self.current_findex = source.findex as usize;
         let mut lowering = source.clone();
         lowering.regs = air
             .values
@@ -6977,8 +6978,15 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.build_store(slot, word)?;
         }
 
-        let stub_fn_type =
-            i64_type.fn_type(&[i64_type.into(), ptr_type.into(), i32_type.into()], false);
+        let stub_fn_type = i64_type.fn_type(
+            &[
+                i64_type.into(),
+                i32_type.into(),
+                ptr_type.into(),
+                i32_type.into(),
+            ],
+            false,
+        );
         let stub_fn_ptr = i64_type
             .const_int(
                 crate::jit::stub_bridge::ash_jit_call_stub as usize as u64,
@@ -6992,6 +7000,7 @@ impl<'ctx> JITModule<'ctx> {
                 stub_fn_ptr,
                 &[
                     addr.into(),
+                    i32_type.const_int(self.current_findex as u64, false).into(),
                     buf.into(),
                     i32_type.const_int(nargs as u64, false).into(),
                 ],

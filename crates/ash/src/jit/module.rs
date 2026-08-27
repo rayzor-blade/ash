@@ -103,6 +103,9 @@ pub struct JITModule<'ctx> {
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
     /// MCJIT modules cannot accept new function bodies after finalization.
     pub(crate) lazy_compilation: bool,
+    /// Findex currently being lowered. Stub calls carry this across the Rust
+    /// lazy-compilation bridge so logical Haxe stack traces remain intact.
+    pub(crate) current_findex: usize,
 }
 
 /// Per-phase init timing: printed inline when ASH_TIERED_TIMING=1, and always
@@ -245,6 +248,7 @@ impl<'ctx> JITModule<'ctx> {
             shared_runtime: None,
             hot_reload: false,
             lazy_compilation: false,
+            current_findex: usize::MAX,
         };
 
         module.create_constant_pool_globals();
@@ -547,6 +551,7 @@ impl<'ctx> JITModule<'ctx> {
             shared_runtime: Some(shared.clone()),
             hot_reload: false,
             lazy_compilation: false,
+            current_findex: usize::MAX,
         };
 
         module.create_constant_pool_globals();

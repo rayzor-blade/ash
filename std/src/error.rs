@@ -375,7 +375,6 @@ pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
     call_stack_raw(arr)
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_call_stack_raw_from_frame(
     arr: *mut varray,

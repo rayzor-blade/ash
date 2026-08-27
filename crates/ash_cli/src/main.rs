@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 #[derive(Parser)]
-#[command(name = "ash", about = "ASH - HashLink bytecode runtime (interp | hybrid | jit)")]
+#[command(
+    name = "ash",
+    about = "ASH - HashLink bytecode runtime (interp | hybrid | jit)"
+)]
 struct Cli {
     /// Path to a HashLink bytecode (.hl) file
     file: Option<PathBuf>,
@@ -26,7 +29,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Mode::Interp)]
     mode: Mode,
 
-    /// Hot-call threshold for JIT promotion in hybrid mode
+    /// Hot-call threshold for Cranelift promotion in hybrid mode
     #[arg(long, default_value_t = 100)]
     jit_threshold: u64,
 
@@ -37,7 +40,7 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     preset: Option<String>,
 
-    /// Invocations before promoting to the optimising tier.
+    /// Invocations before promoting to the optimising tier in hybrid mode.
     ///
     /// Reached by INTERPRETED calls only, so a value far above
     /// --jit-threshold is unreachable once a function's callers compile.
@@ -72,11 +75,11 @@ struct Cli {
     jit_tier: Option<String>,
 }
 
-#[derive(Clone, ValueEnum)]
+#[derive(Clone, Copy, ValueEnum)]
 enum Mode {
     /// Run using the bytecode interpreter
     Interp,
-    /// Run using the JIT compiler
+    /// Compile reached functions with Cranelift, then promote them to LLVM
     Jit,
     /// Hybrid mode (interpreter with JIT tier promotion)
     Hybrid,
@@ -89,7 +92,6 @@ enum Mode {
 /// capture itself (see [`crash_handler_siginfo`]).
 #[cfg(unix)]
 static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
-
 
 // See Cargo.toml: glibc frees lazily; jemalloc is the wren_lift-proven fix.
 #[cfg(target_os = "linux")]
@@ -468,9 +470,7 @@ unsafe extern "C" fn crash_handler_siginfo(
             push_dec(&mut b, &mut l, frame as u64);
             push_bytes(&mut b, &mut l, b" 0x");
             push_hex(&mut b, &mut l, pc);
-            if let Some((findex, tier, off)) =
-                ash_core::profile::describe_jit_pc(pc as usize)
-            {
+            if let Some((findex, tier, off)) = ash_core::profile::describe_jit_pc(pc as usize) {
                 push_bytes(&mut b, &mut l, b" jit findex=");
                 push_dec(&mut b, &mut l, findex as u64);
                 push_bytes(&mut b, &mut l, b" (");
@@ -503,7 +503,10 @@ unsafe extern "C" fn crash_handler_siginfo(
                         }
                         if let Ok(sym) = name.to_str() {
                             let _ = std::fmt::write(
-                                &mut Sink { buf: &mut b, len: &mut l },
+                                &mut Sink {
+                                    buf: &mut b,
+                                    len: &mut l,
+                                },
                                 format_args!("{:#}", rustc_demangle::demangle(sym)),
                             );
                         } else {
@@ -607,14 +610,6 @@ fn run() -> Result<()> {
         // hlp_sys_init copies everything out, so the temporaries may drop.
     }
 
-    // The whole-module JIT is its own world: it decodes, initializes the
-    // stdlib and compiles inside `run_whole_module`, exactly as the old
-    // standalone `ash` binary did — so it branches off before the
-    // interpreter-oriented prep below.
-    if matches!(cli.mode, Mode::Jit) {
-        return ash_core::jit::run_whole_module(&hl_path);
-    }
-
     {
         let _p = ash_core::profile::scope("init stdlib");
         // Before decode: the decoder calls into ash_std itself.
@@ -652,79 +647,6 @@ fn run() -> Result<()> {
     {
         let _p = ash_core::profile::scope("load hdlls");
         native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
-    }
-
-    // Debug: dump type info for Heaps investigation
-    if std::env::var("ASH_DUMP_TYPES").is_ok() {
-        eprintln!(
-            "=== Bytecode: {} types, {} globals, {} functions, {} natives ===",
-            bytecode.types.len(),
-            bytecode.globals.len(),
-            bytecode.functions.len(),
-            bytecode.natives.len()
-        );
-        for (i, t) in bytecode.types.iter().enumerate() {
-            if i < 50 || i == 39 || i == 203 {
-                let name = t.obj.as_ref().map(|o| o.name.as_str()).unwrap_or("");
-                let super_idx = t.obj.as_ref().and_then(|o| o.super_.as_ref()).map(|s| s.0);
-                let field_names: Vec<_> = t
-                    .obj
-                    .as_ref()
-                    .map(|o| {
-                        o.fields
-                            .iter()
-                            .map(|f| format!("{}(k={})", f.name, bytecode.types[f.type_.0].kind))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let vname = t
-                    .virt
-                    .as_ref()
-                    .map(|v| format!("virt({} fields)", v.fields.len()))
-                    .unwrap_or_default();
-                eprintln!(
-                    "  type[{}] kind={} nfields={} super={:?} name={} fields={:?} {}",
-                    i,
-                    t.kind,
-                    t.obj.as_ref().map(|o| o.fields.len()).unwrap_or(0),
-                    super_idx,
-                    name,
-                    field_names,
-                    vname
-                );
-            }
-        }
-        if bytecode.globals.len() > 58 {
-            eprintln!("  global[58] type_idx={}", bytecode.globals[58].0);
-        }
-        // Find Fun_5483 and Fun_2360
-        for f in &bytecode.functions {
-            if f.name() == "Fun_5483"
-                || f.findex == 5483
-                || f.name() == "Fun_2360"
-                || f.findex == 2360
-            {
-                eprintln!(
-                    "  Fun_5483: findex={} type_idx={} nregs={}",
-                    f.findex,
-                    f.type_.0,
-                    f.regs.len()
-                );
-                for (ri, reg) in f.regs.iter().enumerate().take(16) {
-                    eprintln!(
-                        "    r{}: type_idx={} kind={}",
-                        ri, reg.0, bytecode.types[reg.0].kind
-                    );
-                }
-            }
-        }
-        // Dump natives around findex 2250
-        for n in &bytecode.natives {
-            if n.findex >= 2245 && n.findex <= 2260 {
-                eprintln!("  native findex={} lib={} name={}", n.findex, n.lib, n.name);
-            }
-        }
-        std::process::exit(0);
     }
 
     // Cross-check the compile-time field-offset oracle against the runtime
@@ -766,7 +688,6 @@ fn run() -> Result<()> {
             }
         }
     }
-
     // `ASH_VERIFY_AIR=only` pushes every function through the AIR v2 pipeline
     // and reports what round-trips; `ASH_VERIFY_AIR=dump:<findex>` prints one
     // function's IR before and after optimization, which is how a pass that
@@ -897,7 +818,8 @@ fn run() -> Result<()> {
                 eprintln!("Interpreter returned: {:?}", result);
             }
         }
-        Mode::Hybrid => {
+        mode @ (Mode::Hybrid | Mode::Jit) => {
+            let compiled_only = matches!(mode, Mode::Jit);
             // --jit-tier wins; ASH_TIER is the env fallback.
             let tier_spec = cli
                 .jit_tier
@@ -913,6 +835,9 @@ fn run() -> Result<()> {
                 },
                 None => TierMode::default(),
             };
+            if compiled_only && tier_mode == TierMode::Off {
+                anyhow::bail!("--mode jit cannot be combined with --jit-tier=off");
+            }
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             // A preset supplies the thresholds; a flag the operator actually
             // typed still wins over it.
@@ -934,6 +859,7 @@ fn run() -> Result<()> {
             };
             let cfg = TieredConfig {
                 enabled: true,
+                compiled_only,
                 jit_threshold: match &preset_cfg {
                     Some(p) if !arg_given("--jit-threshold") => p.jit_threshold,
                     _ => cli.jit_threshold,
@@ -994,7 +920,11 @@ fn run() -> Result<()> {
                 }
             }
             if !cli.quiet {
-                eprintln!("Interpreter returned: {:?}", result);
+                match mode {
+                    Mode::Jit => eprintln!("JIT returned: {:?}", result),
+                    Mode::Hybrid => eprintln!("Interpreter returned: {:?}", result),
+                    Mode::Interp => unreachable!(),
+                }
             }
             // The interpreter still hands the brokers raw handles for the
             // globals and functions_ptrs arrays (SharedArrayHandles), so it
@@ -1004,7 +934,6 @@ fn run() -> Result<()> {
             // remaining half of this cleanup.
             std::mem::forget(interpreter);
         }
-        Mode::Jit => unreachable!("handled before the interpreter prep"),
     }
 
     Ok(())

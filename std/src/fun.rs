@@ -295,6 +295,26 @@ static mut HLT_VAR_ARGS_TYPE: hl_type = hl_type {
     mark_bits: ptr::null_mut(),
 };
 
+// HashLink represents the variadic sentinel as an HFUN whose arity is -1.
+// Keeping a real descriptor is essential: generic cast code is allowed to
+// inspect `closure.t->fun` before it notices the `fun_var_args` entry point.
+static mut HLT_VAR_FUN: hl::hl_type_fun = hl::hl_type_fun {
+    args: ptr::null_mut(),
+    ret: ptr::null_mut(),
+    nargs: -1,
+    parent: &raw mut HLT_VAR_ARGS_TYPE,
+    closure_type: hl::hl_type_fun__bindgen_ty_1 {
+        kind: hl_type_kind_HFUN,
+        p: ptr::null_mut(),
+    },
+    closure: hl::hl_type_fun__bindgen_ty_2 {
+        args: ptr::null_mut(),
+        ret: ptr::null_mut(),
+        nargs: -1,
+        parent: &raw mut HLT_VAR_ARGS_TYPE,
+    },
+};
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type) -> *mut vclosure {
     let wrap = hlc_get_wrapper(to);
@@ -375,6 +395,24 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
         hlp_error(str_to_uchar_ptr("Too many arguments"));
     }
 
+    // Runtime metadata can retain a closure created before its target was
+    // tier-compiled. Ash represents that target as the small `findex + 1`
+    // sentinel; calling it through `hlc_static_call` jumps to an address such
+    // as 0x12e. Bound closures already take the registered runner below.
+    // Give unbound sentinel closures the same bridge so reflection and
+    // dynamic calls can re-enter AIR V2 (or observe the now-compiled slot)
+    // safely.
+    if (*cl).hasValue == 0 && ((*cl).fun as usize) < 0x100000 {
+        if let Some(runner) = crate::fiber::closure_runner() {
+            let runner_args = if (*args).size == 0 {
+                ptr::null_mut()
+            } else {
+                vargs
+            };
+            return runner(cl, runner_args, (*args).size);
+        }
+    }
+
     if (*cl).hasValue != 0 {
         if (*cl).fun == fun_var_args as *mut libc::c_void {
             let cl = (*cl).value as *mut vclosure;
@@ -387,6 +425,17 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
                     mem::transmute((*cl).fun);
                 func(args)
             };
+        }
+        let runner_args = if (*args).size == 0 {
+            ptr::null_mut()
+        } else {
+            hl_aptr::<*mut vdynamic>(args)
+        };
+        if let Some(runner) = crate::fiber::closure_runner() {
+            return runner(cl, runner_args, (*args).size);
+        }
+        if (*cl).fun as usize >= 0x100000 {
+            return crate::fiber::hlp_jit_closure_runner(cl, runner_args, (*args).size);
         }
         hlp_error(str_to_uchar_ptr("Can't call closure with value"));
     }
@@ -746,6 +795,11 @@ pub unsafe extern "C" fn hlp_fun_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_make_var_args(c: *mut vclosure) -> *mut vdynamic {
+    HLT_VAR_FUN.ret = crate::types::hlt_void();
+    HLT_VAR_FUN.closure.ret = crate::types::hlt_void();
+    HLT_VAR_FUN.closure_type.p = &raw mut HLT_VAR_FUN as *mut c_void;
+    HLT_VAR_ARGS_TYPE.__bindgen_anon_1.fun = &raw mut HLT_VAR_FUN;
+
     // Allocate and initialize the closure
     let closure = hlp_alloc_closure_ptr(
         &raw mut HLT_VAR_ARGS_TYPE,
@@ -781,8 +835,20 @@ pub unsafe extern "C" fn hlp_dyn_call(
     let mut ctmp: vclosure = mem::zeroed();
     let mut c_ptr = c;
 
-    if (*c).hasValue != 0 && (*(*c).t).__bindgen_anon_1.fun.as_ref().unwrap().nargs >= 0 {
-        ctmp.t = (*(*c).t).__bindgen_anon_1.fun.as_ref().unwrap().parent;
+    // A varargs closure deliberately uses a sentinel HFUN type without an
+    // `hl_type_fun`; `hlp_call_method` recognizes its function pointer and
+    // packs the incoming arguments for the wrapped closure. Do not try to
+    // synthesize a full bound-method signature from that sentinel here.
+    if (*c).hasValue != 0 && (*c).fun != fun_var_args as *mut libc::c_void {
+        let Some(closure_fun) = (*(*c).t).__bindgen_anon_1.fun.as_ref() else {
+            hlp_error(str_to_uchar_ptr("Closure has no function type"));
+            return ptr::null_mut();
+        };
+        ctmp.t = closure_fun.parent;
+        if ctmp.t.is_null() {
+            hlp_error(str_to_uchar_ptr("Bound closure has no parent type"));
+            return ptr::null_mut();
+        }
         ctmp.hasValue = 0;
         ctmp.fun = (*c).fun;
         tmp.args[0] = hlp_make_dyn(

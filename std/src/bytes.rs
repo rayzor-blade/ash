@@ -18,7 +18,11 @@ pub unsafe extern "C" fn hlp_bytes_blit(
     if len <= 0 || dst.is_null() || src.is_null() {
         return;
     }
-    std::ptr::copy_nonoverlapping(
+    // HashLink implements this with `memmove`: `Bytes.blit` and the typed
+    // vector helpers are allowed to copy overlapping ranges within the same
+    // allocation. `copy_nonoverlapping` made those valid calls undefined
+    // behaviour (and an immediate abort under Rust's debug UB checks).
+    std::ptr::copy(
         src.add(spos as usize) as *const u8,
         dst.add(dpos as usize) as *mut u8,
         len as usize,

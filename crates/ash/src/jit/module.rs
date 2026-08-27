@@ -81,10 +81,10 @@ pub struct JITModule<'ctx> {
     /// `park_optimized_functions`.
     pub(crate) optimized_fns: std::collections::HashSet<FunctionValue<'ctx>>,
     pub(crate) native_function_resolver: NativeFunctionResolver,
-    pub(crate) int_globals: Vec<GlobalValue<'ctx>>,
-    pub(crate) float_globals: Vec<GlobalValue<'ctx>>,
-    pub(crate) string_globals: Vec<GlobalValue<'ctx>>,
-    pub(crate) bytes_globals: Vec<GlobalValue<'ctx>>,
+    pub(crate) int_globals: Vec<Option<GlobalValue<'ctx>>>,
+    pub(crate) float_globals: Vec<Option<GlobalValue<'ctx>>>,
+    pub(crate) string_globals: Vec<Option<GlobalValue<'ctx>>>,
+    pub(crate) bytes_globals: Vec<Option<GlobalValue<'ctx>>>,
     /// C-side globals: inttoptr constants pointing into globals_data.
     /// Both JIT code and native stdlib access the same memory.
     pub(crate) globals: HashMap<usize, PointerValue<'ctx>>,
@@ -99,6 +99,10 @@ pub struct JITModule<'ctx> {
     /// When true, the IndirectCallRewritePass converts direct calls to bytecode
     /// functions into indirect dispatch through functions_ptrs, enabling hot-reload.
     pub(crate) hot_reload: bool,
+    /// Compile reached functions into independent modules and dispatch calls
+    /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
+    /// MCJIT modules cannot accept new function bodies after finalization.
+    pub(crate) lazy_compilation: bool,
 }
 
 /// Per-phase init timing: printed inline when ASH_TIERED_TIMING=1, and always
@@ -240,6 +244,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: None,
             hot_reload: false,
+            lazy_compilation: false,
         };
 
         module.create_constant_pool_globals();
@@ -275,6 +280,12 @@ impl<'ctx> JITModule<'ctx> {
         t = std::time::Instant::now();
 
         module
+            .compile_entrypoint()
+            .expect("Failed to compile entrypoint");
+        phase_timer!(timing, "compile entrypoint (AIR v2 -> LLVM)", t);
+        t = std::time::Instant::now();
+
+        module
             .init_constants()
             .expect("Failed to initialize constants");
         phase_timer!(timing, "init_constants", t);
@@ -307,12 +318,64 @@ impl<'ctx> JITModule<'ctx> {
     /// (strings, ints, floats, bytes). Compiled code references these
     /// directly via Opcode::String/Int/Float/Bytes.
     pub(crate) fn create_constant_pool_globals(&mut self) {
+        self.create_constant_pool_globals_selected(None);
+    }
+
+    /// Materialize only the constants referenced by one raw bytecode body.
+    /// Lazy LLVM modules withhold callee bodies from AIR V2, so optimization
+    /// can remove these references but cannot introduce an index from a
+    /// different function. Keeping holes in the index-aligned vectors avoids
+    /// cloning a game's entire constant pool into every reached function.
+    pub(crate) fn create_constant_pool_globals_for(&mut self, findex: usize) {
+        let mut ints = std::collections::HashSet::new();
+        let mut floats = std::collections::HashSet::new();
+        let mut strings = std::collections::HashSet::new();
+        let mut bytes = std::collections::HashSet::new();
+        if let Some(function) = self
+            .bytecode
+            .functions
+            .iter()
+            .find(|function| function.findex as usize == findex)
+        {
+            for op in &function.ops {
+                match op {
+                    Opcode::Int { ptr, .. } => {
+                        ints.insert(ptr.0);
+                    }
+                    Opcode::Float { ptr, .. } => {
+                        floats.insert(ptr.0);
+                    }
+                    Opcode::String { ptr, .. } => {
+                        strings.insert(ptr.0);
+                    }
+                    Opcode::Bytes { ptr, .. } => {
+                        bytes.insert(ptr.0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.create_constant_pool_globals_selected(Some((&ints, &floats, &strings, &bytes)));
+    }
+
+    fn create_constant_pool_globals_selected(
+        &mut self,
+        selected: Option<(
+            &std::collections::HashSet<usize>,
+            &std::collections::HashSet<usize>,
+            &std::collections::HashSet<usize>,
+            &std::collections::HashSet<usize>,
+        )>,
+    ) {
         self.string_globals = self
             .bytecode
             .strings
             .iter()
             .enumerate()
             .map(|(i, s)| {
+                if selected.is_some_and(|(_, _, strings, _)| !strings.contains(&i)) {
+                    return None;
+                }
                 // Convert UTF-8 string to UTF-16 (HashLink uses UTF-16 internally)
                 let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect(); // null-terminated
                 let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
@@ -326,7 +389,7 @@ impl<'ctx> JITModule<'ctx> {
                 global.set_constant(true);
                 // Ensure 2-byte alignment for UTF-16
                 global.set_alignment(2);
-                global
+                Some(global)
             })
             .collect();
 
@@ -336,13 +399,16 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, v)| {
+                if selected.is_some_and(|(ints, _, _, _)| !ints.contains(&i)) {
+                    return None;
+                }
                 let int_val = self.context.i32_type().const_int(*v as u64, false);
                 let global =
                     self.module
                         .add_global(self.context.i32_type(), None, &format!("Int_{}", i));
                 global.set_initializer(&int_val);
                 global.set_constant(true);
-                global
+                Some(global)
             })
             .collect();
 
@@ -352,13 +418,16 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, v)| {
+                if selected.is_some_and(|(_, floats, _, _)| !floats.contains(&i)) {
+                    return None;
+                }
                 let float_val = self.context.f64_type().const_float(*v);
                 let global =
                     self.module
                         .add_global(self.context.f64_type(), None, &format!("Float_{}", i));
                 global.set_initializer(&float_val);
                 global.set_constant(true);
-                global
+                Some(global)
             })
             .collect();
 
@@ -368,6 +437,9 @@ impl<'ctx> JITModule<'ctx> {
             .iter()
             .enumerate()
             .map(|(i, &pos)| {
+                if selected.is_some_and(|(_, _, _, bytes)| !bytes.contains(&i)) {
+                    return None;
+                }
                 let end = self
                     .bytecode
                     .bytes_pos
@@ -383,13 +455,17 @@ impl<'ctx> JITModule<'ctx> {
                 );
                 global.set_initializer(&val);
                 global.set_constant(true);
-                global
+                Some(global)
             })
             .collect();
     }
 
     pub fn set_hot_reload(&mut self, enabled: bool) {
         self.hot_reload = enabled;
+    }
+
+    pub fn set_lazy_compilation(&mut self, enabled: bool) {
+        self.lazy_compilation = enabled;
     }
 
     pub fn new_with_shared_runtime(
@@ -470,6 +546,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: Some(shared.clone()),
             hot_reload: false,
+            lazy_compilation: false,
         };
 
         module.create_constant_pool_globals();
@@ -682,6 +759,28 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
         }
+
+        // Native event-loop and thread code enters Haxe closures through this
+        // runner. The interpreter installs its own runner; standalone JIT
+        // execution must install the typed native bridge instead.
+        if let (Ok(set_runner_ptr), Ok(jit_runner_ptr)) = (
+            self.native_function_resolver
+                .resolve_function("std", "hlp_set_closure_runner"),
+            self.native_function_resolver
+                .resolve_function("std", "hlp_jit_closure_runner"),
+        ) {
+            type FnSetClosureRunner = unsafe extern "C" fn(
+                unsafe extern "C" fn(*mut vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic,
+            );
+            let set_runner: FnSetClosureRunner = unsafe { std::mem::transmute(set_runner_ptr) };
+            let runner = unsafe {
+                std::mem::transmute::<
+                    *mut c_void,
+                    unsafe extern "C" fn(*mut vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic,
+                >(jit_runner_ptr)
+            };
+            unsafe { set_runner(runner) };
+        }
     }
 
     fn init_natives(&mut self) -> Result<()> {
@@ -726,7 +825,10 @@ impl<'ctx> JITModule<'ctx> {
             let fi = native_f.findex as usize;
             if !needed.contains(&fi) {
                 if std::env::var("ASH_JIT_NATIVE_LOG").is_ok() {
-                    eprintln!("[jit-native] SHAKEN findex={} {}@{}", fi, native_f.lib, native_f.name);
+                    eprintln!(
+                        "[jit-native] SHAKEN findex={} {}@{}",
+                        fi, native_f.lib, native_f.name
+                    );
                 }
                 skipped += 1;
                 continue; // Tree-shaken: not referenced by any bytecode function
@@ -778,7 +880,10 @@ impl<'ctx> JITModule<'ctx> {
             // deep clones; perf put HLType/HLTypeObj/HLTypeFun::clone and the
             // malloc+memmove churn behind them at the top of the profile.
             let tindex = funs[i].type_.clone();
-            let type_fun = self.types_[tindex.0].fun.clone().expect("Expected function type");
+            let type_fun = self.types_[tindex.0]
+                .fun
+                .clone()
+                .expect("Expected function type");
             let type_fun = &type_fun;
             self.func_types[findex] = unsafe {
                 Box::into_raw(Box::new(hl_type {
@@ -823,7 +928,10 @@ impl<'ctx> JITModule<'ctx> {
                 .insert(findex, FuncPtr::Native(natives[i].clone()));
             // Same as the funs loop above: one HLTypeFun, not the table.
             let tindex = natives[i].type_.clone();
-            let type_fun = self.types_[tindex.0].fun.clone().expect("Expected function type");
+            let type_fun = self.types_[tindex.0]
+                .fun
+                .clone()
+                .expect("Expected function type");
             let type_fun = &type_fun;
             self.func_types[findex] = unsafe {
                 Box::into_raw(Box::new(hl_type {
@@ -981,6 +1089,15 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Compile the entrypoint after runtime type indexes have been prepared.
+    ///
+    /// This used to live inside `init_indexes`, which made that timing bucket
+    /// include AIR V2 lowering and LLVM IR construction for the whole entry
+    /// function while appearing to measure only table setup.
+    fn compile_entrypoint(&mut self) -> Result<()> {
         let mut main_obj = HLTypeObj::default();
         if let FuncPtr::Fun(entry_function) = self
             .findexes
@@ -995,11 +1112,9 @@ impl<'ctx> JITModule<'ctx> {
             let index = self.bytecode.entrypoint as usize;
             let (_, is_pending) = self.get_or_create_function_value(index)?;
             if is_pending {
-                // Compile main function
                 self.compile_function(index)?;
             }
         }
-
         Ok(())
     }
 
@@ -1768,19 +1883,19 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub fn get_int_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
-        self.int_globals.get(index).cloned()
+        self.int_globals.get(index).copied().flatten()
     }
 
     pub fn get_float_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
-        self.float_globals.get(index).cloned()
+        self.float_globals.get(index).copied().flatten()
     }
 
     pub fn get_string_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
-        self.string_globals.get(index).cloned()
+        self.string_globals.get(index).copied().flatten()
     }
 
     pub fn get_bytes_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
-        self.bytes_globals.get(index).cloned()
+        self.bytes_globals.get(index).copied().flatten()
     }
 
     pub fn struct_value_to_pointer(

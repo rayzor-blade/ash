@@ -47,7 +47,13 @@ pub fn array_blit<T: Copy>(dst: &mut [T], dpos: usize, src: &[T], spos: usize, l
 }
 
 #[no_mangle]
-pub unsafe fn hlp_array_blit(dst: *mut varray, dpos: i32, src: *const varray, spos: i32, len: i32) {
+pub unsafe extern "C" fn hlp_array_blit(
+    dst: *mut varray,
+    dpos: i32,
+    src: *const varray,
+    spos: i32,
+    len: i32,
+) {
     if dst.is_null() || src.is_null() || len <= 0 {
         return;
     }
@@ -57,14 +63,18 @@ pub unsafe fn hlp_array_blit(dst: *mut varray, dpos: i32, src: *const varray, sp
         return;
     }
     // Guard against misaligned or invalid type pointers
-    if (dst_at as usize) < 0x10000 || !(dst_at as usize).is_multiple_of(std::mem::align_of::<usize>()) {
+    if (dst_at as usize) < 0x10000
+        || !(dst_at as usize).is_multiple_of(std::mem::align_of::<usize>())
+    {
         eprintln!(
             "[WARN] array_blit: invalid dst.at={:#x} dst={:p}",
             dst_at as usize, dst
         );
         return;
     }
-    if (src_at as usize) < 0x10000 || !(src_at as usize).is_multiple_of(std::mem::align_of::<usize>()) {
+    if (src_at as usize) < 0x10000
+        || !(src_at as usize).is_multiple_of(std::mem::align_of::<usize>())
+    {
         eprintln!(
             "[WARN] array_blit: invalid src.at={:#x} src={:p}",
             src_at as usize, src

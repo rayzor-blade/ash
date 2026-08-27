@@ -235,6 +235,34 @@ pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
     }
 }
 
+// HDLLs call HashLink's public C API names directly, while Haxe bytecode
+// resolves the `hlp_` primitive names above. Export both spellings so native
+// extensions and bytecode share the same synchronization objects.
+#[no_mangle]
+pub unsafe extern "C" fn hl_mutex_alloc(gc_thread: bool) -> *mut c_void {
+    hlp_mutex_alloc(gc_thread)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_mutex_acquire(m: *mut c_void) {
+    hlp_mutex_acquire(m);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_mutex_try_acquire(m: *mut c_void) -> bool {
+    hlp_mutex_try_acquire(m)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_mutex_release(m: *mut c_void) {
+    hlp_mutex_release(m);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_mutex_free(m: *mut c_void) {
+    hlp_mutex_free(m);
+}
+
 // ============================================================================
 // Semaphore (used by Lock)
 // ============================================================================
@@ -272,9 +300,7 @@ unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant>
     } else {
         0.0
     };
-    (secs > 0.0).then(|| {
-        std::time::Instant::now() + std::time::Duration::from_secs_f64(secs)
-    })
+    (secs > 0.0).then(|| std::time::Instant::now() + std::time::Duration::from_secs_f64(secs))
 }
 
 #[no_mangle]
@@ -353,6 +379,34 @@ pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
         sys::cond_destroy(&mut (*s).cond);
         std::alloc::dealloc(sem as *mut u8, std::alloc::Layout::new::<HlSemaphore>());
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_semaphore_alloc(value: i32) -> *mut c_void {
+    hlp_semaphore_alloc(value)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_semaphore_acquire(sem: *mut c_void) {
+    hlp_semaphore_acquire(sem);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_semaphore_try_acquire(
+    sem: *mut c_void,
+    timeout: *mut vdynamic,
+) -> bool {
+    hlp_semaphore_try_acquire(sem, timeout)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_semaphore_release(sem: *mut c_void) {
+    hlp_semaphore_release(sem);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_semaphore_free(sem: *mut c_void) {
+    hlp_semaphore_free(sem);
 }
 
 // ============================================================================

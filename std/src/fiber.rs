@@ -26,6 +26,7 @@ use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
 use krio_fiber::{Fiber, FiberState};
 use std::ffi::c_void;
+use std::ptr;
 
 pub type ClosureRunner =
     unsafe extern "C" fn(*mut vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic;
@@ -110,14 +111,13 @@ unsafe fn notify_switch(from: u32, to: u32) {
 
 unsafe fn run_closure(c: *mut vclosure) {
     let fun = (*c).fun as usize;
-    eprintln!("[ash] fiber: thread body starting (fun={:#x})", fun);
     if let Some(runner) = CLOSURE_RUNNER {
         runner(c, std::ptr::null_mut(), 0);
-        eprintln!("[ash] fiber: thread body returned (fun={:#x})", fun);
-    } else if fun >= 0x100000 && (*c).hasValue == 0 {
-        // JIT mode, plain function pointer, zero args.
-        let f: extern "C" fn() = std::mem::transmute(fun);
-        f();
+    } else if fun >= 0x100000 {
+        // Invoke a compiled thread body through the same typed ABI bridge used
+        // by dynamic native calls. We are already on the thread fiber's stack;
+        // creating another fiber here would change Thread.current() identity.
+        hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
     } else {
         eprintln!(
             "[ash] fiber: cannot run closure (fun={:#x}, hasValue={}) — no closure runner set",
@@ -127,15 +127,87 @@ unsafe fn run_closure(c: *mut vclosure) {
     }
 }
 
+/// Run a compiled closure through the same dynamic argument marshaller used
+/// by `hlp_call_method`. Native event-loop code supplies `vdynamic**` args to
+/// the registered closure runner, so standalone JIT fibers must register this
+/// bridge instead of relying on the interpreter's runner.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_jit_closure_runner(
+    c: *mut vclosure,
+    args: *mut *mut vdynamic,
+    nargs: i32,
+) -> *mut vdynamic {
+    if c.is_null() || nargs < 0 {
+        return ptr::null_mut();
+    }
+
+    let mut closure = c;
+    if (*closure).hasValue == 2 {
+        let wrapper = closure as *mut crate::hl::vclosure_wrapper;
+        closure = (*wrapper).wrappedFun;
+        if closure.is_null() {
+            eprintln!("[ash] fiber: closure wrapper has no wrapped function");
+            return ptr::null_mut();
+        }
+    }
+
+    let closure_type = (*closure).t;
+    if closure_type.is_null() {
+        eprintln!("[ash] fiber: compiled closure has no function type");
+        return ptr::null_mut();
+    }
+
+    // Bound closures store the stripped closure type; its parent is the full
+    // method type whose first argument is the bound receiver.
+    let call_type = if (*closure).hasValue != 0 {
+        let parent = (*closure_type)
+            .__bindgen_anon_1
+            .fun
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |fun| fun.parent);
+        if parent.is_null() {
+            closure_type
+        } else {
+            parent
+        }
+    } else {
+        closure_type
+    };
+
+    let total = nargs as usize + usize::from((*closure).hasValue != 0);
+    let array = crate::obj::hlp_alloc_dyn_array(total as i32);
+    if array.is_null() {
+        return ptr::null_mut();
+    }
+    let values = crate::types::hl_aptr::<*mut vdynamic>(array);
+    if (*closure).hasValue != 0 {
+        *values = (*closure).value as *mut vdynamic;
+    }
+    for i in 0..nargs as usize {
+        *values.add(i + usize::from((*closure).hasValue != 0)) = if args.is_null() {
+            ptr::null_mut()
+        } else {
+            *args.add(i)
+        };
+    }
+
+    // hlp_call_method expects a closure without an already-bound value and
+    // receives the receiver as the first dynamic argument instead.
+    let call_closure = vclosure {
+        t: call_type,
+        fun: (*closure).fun,
+        hasValue: 0,
+        stackCount: 0,
+        value: ptr::null_mut(),
+    };
+    crate::fun::hlp_call_method(&call_closure as *const vclosure as *mut vdynamic, array)
+}
+
 /// Spawn a Haxe thread as a fiber. Returns an opaque non-null handle.
 pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     if c.is_null() {
         return std::ptr::null_mut();
     }
-    eprintln!(
-        "[ash] fiber: thread_create (closure fun={:#x})",
-        (*c).fun as usize
-    );
     let id = NEXT_ID;
     NEXT_ID += 1;
 

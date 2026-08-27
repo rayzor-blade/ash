@@ -34,7 +34,9 @@ use cranelift_codegen::ir::{
 use cranelift_frontend::{FunctionBuilder, Variable};
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext};
-use super::{abi_class, entry_return_class, first_unsupported_opcode, AbiClass};
+use super::{
+    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode, AbiClass,
+};
 use crate::hl_bindings as hl;
 use crate::jit::stub_bridge::{ash_jit_call_stub, STUB_SENTINEL_LIMIT};
 use crate::opcodes::{Opcode, Reg};
@@ -110,9 +112,6 @@ pub fn signature_reject_reason(
         let kind = bytecode.types[a.0].kind;
         if kind == hl::hl_type_kind_HF32 {
             return Some("f32_in_signature".to_string());
-        }
-        if kind == hl::hl_type_kind_HVOID {
-            return Some("void_argument".to_string());
         }
     }
     if bytecode.types[tf.ret.0].kind == hl::hl_type_kind_HF32 {
@@ -192,7 +191,7 @@ fn call_signature(
 ) -> Result<Signature> {
     let mut sig = backend.make_signature();
     for a in &tf.args {
-        let class = abi_class(ctx.type_kind(a.0)?);
+        let class = argument_abi_class(ctx.type_kind(a.0)?);
         let ty = class
             .clif_type()
             .ok_or_else(|| anyhow!("void argument in call signature"))?;
@@ -217,7 +216,7 @@ fn entry_signature(
 ) -> Result<Signature> {
     let mut sig = backend.make_signature();
     for a in &tf.args {
-        let class = abi_class(ctx.type_kind(a.0)?);
+        let class = argument_abi_class(ctx.type_kind(a.0)?);
         let ty = class
             .clif_type()
             .ok_or_else(|| anyhow!("void argument in entry signature"))?;
@@ -618,7 +617,10 @@ impl Lowerer<'_, '_> {
     fn lower_field_load(&mut self, dst: Reg, obj: Reg, field_index: usize) -> Result<()> {
         let (off, field_ty) = self.static_field_offset(obj, field_index)?;
         let base = self.reg_val(obj);
-        let raw = self.b.ins().load(field_ty, MemFlagsData::trusted(), base, off);
+        let raw = self
+            .b
+            .ins()
+            .load(field_ty, MemFlagsData::trusted(), base, off);
         let want = self.ty_of(dst);
         let v = if field_ty == want {
             raw
@@ -730,7 +732,11 @@ impl Lowerer<'_, '_> {
             crate::layout::VARRAY_DATA_OFFSET,
         );
         let want = self.ty_of(dst);
-        let v = if ty == want { raw } else { self.coerce(raw, want)? };
+        let v = if ty == want {
+            raw
+        } else {
+            self.coerce(raw, want)?
+        };
         self.set_reg(dst, v)
     }
 
@@ -974,7 +980,10 @@ impl Lowerer<'_, '_> {
                 }
                 let addr = self.ctx.global_slot_addr(global.0)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
-                let v = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, 0);
+                let v = self
+                    .b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), base, 0);
                 self.set_reg(*dst, v)?;
             }
             Opcode::SetGlobal { global, src } => {
@@ -1246,7 +1255,10 @@ impl Lowerer<'_, '_> {
         let zero_div = self.b.ins().icmp_imm_s(IntCC::Equal, vb, 0);
         let bad = if signed {
             let min = 1i64 << (ty.bits() - 1);
-            let a_is_min = self.b.ins().icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
+            let a_is_min = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
             let b_is_neg1 = self.b.ins().icmp_imm_s(IntCC::Equal, vb, -1);
             let overflow = self.b.ins().band(a_is_min, b_is_neg1);
             self.b.ins().bor(zero_div, overflow)
@@ -1622,7 +1634,9 @@ impl Lowerer<'_, '_> {
             } else {
                 *v
             };
-            self.b.ins().stack_store(types::I64, word, slot, (idx * 8) as i32);
+            self.b
+                .ins()
+                .stack_store(types::I64, word, slot, (idx * 8) as i32);
         }
         let buf = self.b.ins().stack_addr(types::I64, slot, 0);
         let stub_sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));

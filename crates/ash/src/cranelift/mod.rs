@@ -2,10 +2,10 @@
 //!
 //! The interpreter runs everything at tier 0. Once a function crosses the
 //! hotness threshold, beadie's broker asks this module for native code:
-//! Cranelift at `opt_level=speed` compiles a small, mechanical subset of the
-//! HashLink opcode set in ~0.04 ms per function (two orders of magnitude
-//! cheaper than the LLVM tier's per-function budget). Functions outside the
-//! subset are left to the LLVM tier.
+//! Cranelift at `opt_level=speed` lowers optimized AIR V2 directly to native
+//! code, one function at a time. It is the fast baseline under LLVM: a
+//! function it cannot compile is handed to the next tier, never serialized
+//! back into HashLink opcodes.
 //!
 //! Layout:
 //! - [`abi`] (this file): the ONE `hl_type` kind → [`AbiClass`] mapping shared
@@ -13,14 +13,14 @@
 //!   `arg_kinds`/`float_mask` marshaling contract.
 //! - [`backend`]: `CraneliftBackend` construction (production flag set,
 //!   bulk symbol registration) and the compile entry point.
-//! - [`air`]: the `ASH_AIR` gate deciding whether a compile lowers the
-//!   bytecode as decoded or AIR v2's optimized serialization of it.
-//! - [`lower`]: HL bytecode → CLIF lowering for the v1 opcode subset.
+//! - [`air`]: shared AIR V2 preparation and Cranelift → LLVM re-tier state.
+//! - [`lower`]: the classic opcode emitter retained only for its ABI helpers
+//!   and focused regression tests; production dispatch never calls it.
 //! - [`codegen`]: AIR v2 IR → CLIF codegen, composed from the typed
 //!   block-structured form instead of a flat opcode array.
 
 pub mod air;
-pub use air::{publish_retier_target, retier_enabled};
+pub use air::{publish_retier_target, retier_enabled, retier_sites};
 pub mod backend;
 pub mod codegen;
 pub mod lower;
@@ -128,6 +128,18 @@ pub fn abi_class(kind: hl::hl_type_kind) -> AbiClass {
         // HBYTES, HDYN, HFUN, HOBJ, HARRAY, HTYPE, HREF, HVIRTUAL, HDYNOBJ,
         // HABSTRACT, HENUM, HNULL, HMETHOD, HSTRUCT, HPACKED — all pointers.
         _ => AbiClass::Ptr,
+    }
+}
+
+/// Machine class for a function parameter. HashLink permits HVOID in a
+/// function's argument list and still assigns it an ordinary integer calling
+/// convention slot (the value is the canonical zero word). HVOID remains
+/// representation-less everywhere else, especially as a return type.
+pub fn argument_abi_class(kind: hl::hl_type_kind) -> AbiClass {
+    if kind == hl::hl_type_kind_HVOID {
+        AbiClass::Ptr
+    } else {
+        abi_class(kind)
     }
 }
 
@@ -473,7 +485,10 @@ mod tests {
             index: r,
             src: r
         }));
-        assert!(is_cranelift_lowerable(&Opcode::ArraySize { dst: r, array: r }));
+        assert!(is_cranelift_lowerable(&Opcode::ArraySize {
+            dst: r,
+            array: r
+        }));
         assert!(is_cranelift_lowerable(&Opcode::GetMem {
             dst: r,
             bytes: r,

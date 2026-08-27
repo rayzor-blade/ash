@@ -1,5 +1,10 @@
 use std::ffi::c_void;
 
+use air::v2::ir::{
+    BinOp as AirBinOp, BlockId as AirBlockId, CastKind as AirCastKind, CondKind as AirCondKind,
+    Function as AirFunction, Instr as AirInstr, MemAccess as AirMemAccess,
+    Terminator as AirTerminator, UnOp as AirUnOp, ValueId,
+};
 use ash_macro::to_llvm;
 use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::types::{
@@ -16,12 +21,15 @@ use super::module::{CompiledFunctionMeta, JITModule};
 use crate::hl::{
     hl_obj_field, hl_runtime_obj, hl_type, hl_type_kind_HABSTRACT, hl_type_kind_HBOOL,
     hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32,
-    hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL,
-    hl_type_kind_HOBJ, hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16,
-    hl_type_kind_HUI8, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
+    hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
+    hl_type_kind_HSTRUCT, hl_type_kind_HTYPE, hl_type_kind_HUI16, hl_type_kind_HUI8,
+    hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
 };
-use crate::opcodes::Opcode;
-use crate::types::{HLNative, HLTypeFun, Str};
+use crate::opcodes::{
+    Opcode, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun, RefGlobal, RefInt, RefString,
+    RefType, Reg,
+};
+use crate::types::{HLNative, HLTypeFun, Str, TypeRef};
 use crate::{
     hl::{hl_type_kind_HFUN, hl_type_kind_HMETHOD},
     types::HLFunction,
@@ -337,7 +345,7 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     pub(crate) fn compile_function(&mut self, index: usize) -> Result<()> {
-        let _phase = crate::profile::scope("llvm lower");
+        let _phase = crate::profile::scope("AIR v2 -> LLVM");
         // Skip if already compiled (has entry block with instructions)
         if let Some(func) = self.func_cache.get(&index) {
             if func.count_basic_blocks() > 0
@@ -355,14 +363,18 @@ impl<'ctx> JITModule<'ctx> {
             .ok_or_else(|| anyhow!("Function not found at index {}", index))?
             .clone();
 
-        if let FuncPtr::Fun(mut f) = fun_ptr {
-            // Bytecode optimization before LLVM emission, plus the hot-reload
-            // rewrite that turns direct calls to bytecode functions into
-            // IndirectCall dispatch through functions_ptrs[findex]. Which
-            // pipeline runs, and where the rewrite sits relative to it, is
-            // decided in jit::air.
-            let natives = self.hot_reload.then(|| self.native_findexes());
-            crate::jit::air::optimize(&self.bytecode, &mut f, natives.as_ref());
+        if let FuncPtr::Fun(f) = fun_ptr {
+            // LLVM consumes AIR v2 directly. Serializing the verified SSA
+            // function back into HashLink opcodes here made the old bytecode
+            // translator the real backend and discarded AIR's phis, cells,
+            // resolved fields and effects before code generation.
+            let air = crate::jit::air::prepare_llvm(
+                &self.bytecode,
+                &f,
+                self.hot_reload,
+                self.lazy_compilation,
+            )
+            .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
 
             // Create declaration if not in cache yet
             let function = if let Some(func) = self.func_cache.get(&index) {
@@ -376,10 +388,7 @@ impl<'ctx> JITModule<'ctx> {
             let basic_block = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(basic_block);
 
-            let (registers, reg_types) = self.allocate_registers(&f)?;
-            self.load_function_arguments(&f, &function, &registers)?;
-
-            self.translate_opcodes(&f, &registers, &reg_types)?;
+            self.translate_air_v2(&f, &air, function)?;
 
             if self
                 .builder
@@ -427,6 +436,9 @@ impl<'ctx> JITModule<'ctx> {
 
     /// Whether `findex` compiles into a module of its own.
     fn promote_uses_own_module(&self, findex: usize) -> bool {
+        if self.lazy_compilation {
+            return true;
+        }
         if let Some(forced) = Self::promote_module_override() {
             return forced;
         }
@@ -458,7 +470,11 @@ impl<'ctx> JITModule<'ctx> {
         let host_strings = std::mem::take(&mut self.string_globals);
         let host_bytes = std::mem::take(&mut self.bytes_globals);
         let host_types = std::mem::take(&mut self.type_info_globals);
-        self.create_constant_pool_globals();
+        if self.lazy_compilation {
+            self.create_constant_pool_globals_for(findex);
+        } else {
+            self.create_constant_pool_globals();
+        }
 
         let built = self.init_required_natives().and_then(|()| {
             self.compile_function(findex)?;
@@ -481,7 +497,8 @@ impl<'ctx> JITModule<'ctx> {
         self.type_info_globals = host_types;
         built?;
 
-        let target = target.ok_or_else(|| anyhow!("promote module {modname}: no function built"))?;
+        let target =
+            target.ok_or_else(|| anyhow!("promote module {modname}: no function built"))?;
         let name = target
             .get_name()
             .to_str()
@@ -507,29 +524,7 @@ impl<'ctx> JITModule<'ctx> {
             return Err(anyhow!("promote module {modname} failed verification: {e}"));
         }
 
-        let mut unresolved: Vec<String> = Vec::new();
-        for f in promo_module.get_functions() {
-            if f.count_basic_blocks() != 0 {
-                continue;
-            }
-            let Ok(sym) = f.get_name().to_str() else {
-                continue;
-            };
-            if sym.starts_with("llvm.") {
-                continue;
-            }
-            match self.execution_engine.get_function_address(sym) {
-                Ok(a) if a != 0 => self.execution_engine.add_global_mapping(&f, a as usize),
-                _ => unresolved.push(sym.to_string()),
-            }
-        }
-        if !unresolved.is_empty() {
-            return Err(anyhow!(
-                "promote module {modname} has {} unresolved symbol(s): {}",
-                unresolved.len(),
-                unresolved.join(", ")
-            ));
-        }
+        self.bind_module_declarations(&promo_module, &format!("promote module {modname}"))?;
 
         self.execution_engine
             .add_module(&promo_module)
@@ -729,19 +724,20 @@ impl<'ctx> JITModule<'ctx> {
 
         match fun_ptr {
             FuncPtr::Fun(f) => {
-                let mut f = f.clone();
-
-                // Same optimize-then-emit sequence as compile_function.
-                let natives = self.hot_reload.then(|| self.native_findexes());
-                crate::jit::air::optimize(&self.bytecode, &mut f, natives.as_ref());
+                let f = f.clone();
+                let air = crate::jit::air::prepare_llvm(
+                    &self.bytecode,
+                    &f,
+                    self.hot_reload,
+                    self.lazy_compilation,
+                )
+                .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
 
                 let function = self.create_function_declaration(&f)?;
                 let basic_block = self.context.append_basic_block(function, "entry");
                 self.builder.position_at_end(basic_block);
 
-                let (registers, reg_types) = self.allocate_registers(&f)?;
-                self.load_function_arguments(&f, &function, &registers)?;
-                self.translate_opcodes(&f, &registers, &reg_types)?;
+                self.translate_air_v2(&f, &air, function)?;
 
                 if self
                     .builder
@@ -798,12 +794,24 @@ impl<'ctx> JITModule<'ctx> {
         &mut self,
         findex: usize,
         header_pc: usize,
-        body: &HLFunction,
+        optimized: &crate::air_pipeline::Optimized,
     ) -> Result<u64> {
         let _phase = crate::profile::scope("llvm osr entry");
-        if header_pc >= body.ops.len() {
-            return Err(anyhow!("osr header {header_pc} past end of findex {findex}"));
-        }
+        let header = optimized
+            .ser
+            .block_pcs
+            .iter()
+            .position(|&pc| pc == header_pc)
+            .ok_or_else(|| {
+                anyhow!("osr header pc {header_pc} is not an AIR block in findex {findex}")
+            })?;
+        let source = self
+            .bytecode
+            .functions
+            .iter()
+            .find(|f| f.findex as usize == findex)
+            .cloned()
+            .ok_or_else(|| anyhow!("osr findex {findex} is not a bytecode function"))?;
         let name = format!("osr_{findex}_{header_pc}");
         if let Ok(addr) = self.execution_engine.get_function_address(&name) {
             if addr != 0 {
@@ -838,13 +846,28 @@ impl<'ctx> JITModule<'ctx> {
         let host_strings = std::mem::take(&mut self.string_globals);
         let host_bytes = std::mem::take(&mut self.bytes_globals);
         let host_types = std::mem::take(&mut self.type_info_globals);
-        self.create_constant_pool_globals();
+        if self.lazy_compilation {
+            self.create_constant_pool_globals_for(findex);
+        } else {
+            self.create_constant_pool_globals();
+        }
         // `Opcode::New` fetches a pre-created native caller out of `func_cache`
         // by generated name, so emptying the cache is not enough on its own --
         // the new module needs its own copy of those declarations.
         let natives_ready = self.init_required_natives();
 
-        let built = natives_ready.and_then(|()| self.build_osr_body(findex, header_pc, body, &name));
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!("[osr] LLVM AIR build begin findex={findex} pc={header_pc}");
+        }
+        let built = natives_ready.and_then(|()| {
+            self.build_air_osr_body(
+                &source,
+                &optimized.ir,
+                AirBlockId(header as u32),
+                header_pc,
+                &name,
+            )
+        });
 
         self.builder.clear_insertion_position();
         let osr_module = std::mem::replace(&mut self.module, host_module);
@@ -855,6 +878,9 @@ impl<'ctx> JITModule<'ctx> {
         self.bytes_globals = host_bytes;
         self.type_info_globals = host_types;
         built?;
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!("[osr] LLVM AIR build done findex={findex} pc={header_pc}");
+        }
 
         // The verifier catches a reference to a value left behind in the host
         // module, which is the failure this swap could produce.
@@ -879,33 +905,14 @@ impl<'ctx> JITModule<'ctx> {
         // a bytecode function that was never compiled has no definition, and
         // the call lands on a null pointer. Resolving them explicitly is what
         // rayzor does with its runtime symbols.
-        let mut unresolved: Vec<String> = Vec::new();
-        for f in osr_module.get_functions() {
-            if f.count_basic_blocks() != 0 {
-                continue; // defined here
-            }
-            let Ok(sym) = f.get_name().to_str() else {
-                continue;
-            };
-            if sym.starts_with("llvm.") {
-                continue; // intrinsic, lowered by the backend
-            }
-            match self.execution_engine.get_function_address(sym) {
-                Ok(a) if a != 0 => self.execution_engine.add_global_mapping(&f, a as usize),
-                _ => unresolved.push(sym.to_string()),
-            }
-        }
-        if !unresolved.is_empty() {
-            return Err(anyhow!(
-                "osr module {name} has {} unresolved symbol(s): {}",
-                unresolved.len(),
-                unresolved.join(", ")
-            ));
-        }
+        self.bind_module_declarations(&osr_module, &format!("osr module {name}"))?;
 
         self.execution_engine
             .add_module(&osr_module)
             .map_err(|()| anyhow!("osr module {name} rejected by the engine"))?;
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!("[osr] LLVM module attached findex={findex} pc={header_pc}");
+        }
         let addr = self
             .execution_engine
             .get_function_address(&name)
@@ -940,28 +947,30 @@ impl<'ctx> JITModule<'ctx> {
         // address range and reports the time as `unknown` -- which on nbody was
         // 59.5% of the run, i.e. all of the work OSR had just moved into
         // compiled code.
-        crate::profile::register_jit_code(
-            findex as u32,
-            crate::profile::Tier::Llvm,
-            addr as usize,
-        );
+        crate::profile::register_jit_code(findex as u32, crate::profile::Tier::Llvm, addr as usize);
         return Ok(addr as u64);
     }
 
-    /// Emit the OSR entry function itself, into whatever module is current.
-    fn build_osr_body(
+    /// Emit an AIR V2 OSR entry into whatever module is current.
+    ///
+    /// Cranelift spills the de-SSA register image described by the shared
+    /// optimized AIR cache. Restoring that image directly into AIR values and
+    /// cells keeps the transition in the typed IR; serializing it back into
+    /// HashLink opcodes here would make the legacy bytecode translator the
+    /// real LLVM OSR backend again.
+    fn build_air_osr_body(
         &mut self,
-        findex: usize,
+        source: &HLFunction,
+        air: &AirFunction,
+        header: AirBlockId,
         header_pc: usize,
-        body: &HLFunction,
         name: &str,
     ) -> Result<()> {
-
         // `(ptr) -> ret`, where ret is the function's own return type.
-        let type_fun = self.bytecode.types[body.type_.0]
+        let type_fun = self.bytecode.types[source.type_.0]
             .fun
             .clone()
-            .ok_or_else(|| anyhow!("findex {findex} has no function type"))?;
+            .ok_or_else(|| anyhow!("findex {} has no function type", source.findex))?;
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
         let ret_any = self.get_or_create_any_type(type_fun.ret.0)?;
         let fn_ty = match ret_any {
@@ -976,66 +985,65 @@ impl<'ctx> JITModule<'ctx> {
 
         let entry = self.context.append_basic_block(function, "osr_entry");
         self.builder.position_at_end(entry);
-        let (registers, reg_types) = self.allocate_registers(body)?;
+        let mut lowering = source.clone();
+        lowering.regs = air
+            .values
+            .iter()
+            .map(|v| TypeRef(v.ty.0 as usize))
+            .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+            .collect();
+        lowering.ops.clear();
+        let (registers, reg_types) = self.allocate_registers(&lowering)?;
+        let cell_base = air.values.len();
 
-        // Reconstruct the register file from the transferred buffer. Every
-        // register is restored, not just the ones the analysis calls live: a
-        // slot the loop never reads costs one load, and deciding wrongly which
-        // those are costs correctness.
+        // Reconstruct every AIR value and pinned cell from the de-SSA
+        // register image. Definitions inside the selected region overwrite
+        // their seed before use; live-ins and header phis retain the value
+        // Cranelift spilled for their original HashLink register.
         let buf = function
             .get_nth_param(0)
             .ok_or_else(|| anyhow!("osr entry has no buffer parameter"))?
             .into_pointer_value();
-        let i64_ty = self.context.i64_type();
-        for (i, slot_ty) in reg_types.iter().enumerate() {
-            let slot = unsafe {
-                self.builder.build_gep(
-                    i64_ty,
-                    buf,
-                    &[i64_ty.const_int(i as u64, false)],
-                    "osr_slot",
-                )?
-            };
-            let raw = self
-                .builder
-                .build_load(i64_ty, slot, "osr_raw")?
-                .into_int_value();
-            let v: BasicValueEnum<'ctx> = match *slot_ty {
-                BasicTypeEnum::IntType(t) => {
-                    if t.get_bit_width() >= 64 {
-                        raw.into()
-                    } else {
-                        self.builder
-                            .build_int_truncate(raw, t, "osr_trunc")?
-                            .into()
-                    }
-                }
-                BasicTypeEnum::FloatType(t) => {
-                    if t == self.context.f64_type() {
-                        self.builder.build_bit_cast(raw, t, "osr_f64")?
-                    } else {
-                        let n = self.builder.build_int_truncate(
-                            raw,
-                            self.context.i32_type(),
-                            "osr_f32bits",
-                        )?;
-                        self.builder.build_bit_cast(n, t, "osr_f32")?
-                    }
-                }
-                BasicTypeEnum::PointerType(t) => {
-                    self.builder.build_int_to_ptr(raw, t, "osr_ptr")?.into()
-                }
-                _ => continue,
-            };
-            self.builder.build_store(registers[i], v)?;
+        for (i, value) in air.values.iter().enumerate() {
+            let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i])?;
+            self.builder.build_store(registers[i], restored)?;
+        }
+        for (ci, cell) in air.cells.iter().enumerate() {
+            let slot = cell_base + ci;
+            let restored = self.load_air_osr_slot(buf, cell.reg, reg_types[slot])?;
+            self.builder.build_store(registers[slot], restored)?;
         }
 
-        self.translate_opcodes_from(body, &registers, &reg_types, header_pc)?;
+        let mut included = vec![false; air.blocks.len()];
+        let mut stack = vec![header];
+        while let Some(block) = stack.pop() {
+            if included[block.idx()] {
+                continue;
+            }
+            included[block.idx()] = true;
+            stack.extend(air.blocks[block.idx()].term.successors());
+        }
 
-        // The fall-through exit block is left unterminated by lowering; the
-        // ordinary path closes it the same way. Without this the function
-        // fails verification for a block with no terminator, which is what an
-        // OSR entry hit first.
+        self.emit_air_v2_cfg(
+            source,
+            air,
+            function,
+            &mut lowering,
+            &registers,
+            &reg_types,
+            cell_base,
+            &included,
+            header,
+        )?;
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!(
+                "[osr] LLVM AIR CFG emitted findex={} pc={header_pc}",
+                source.findex
+            );
+        }
+
+        // `emit_air_v2_cfg` leaves the builder in an unreachable convenience
+        // block, matching ordinary AIR lowering. Close it for verification.
         if self
             .builder
             .get_insert_block()
@@ -1056,7 +1064,8 @@ impl<'ctx> JITModule<'ctx> {
         if !function.verify(true) {
             unsafe { function.delete() };
             return Err(anyhow!(
-                "osr entry for findex {findex} pc {header_pc} failed verification"
+                "AIR OSR entry for findex {} pc {header_pc} failed verification",
+                source.findex
             ));
         }
 
@@ -1066,7 +1075,22 @@ impl<'ctx> JITModule<'ctx> {
         // left `Fun_16`, `Fun_20` and `Fun_23` undefined and jumped through a
         // null pointer. Compiling them here duplicates their code into this
         // module, which is the price of the module being self-contained.
-        self.compile_pending_functions()?;
+        if self.lazy_compilation {
+            // Every bytecode call in a lazy module dispatches through the
+            // live runtime table. Closure construction may still have created
+            // a declaration while asking for its ABI; compiling that queued
+            // body would rebuild a transitive mini-module and, on a declined
+            // callee, leave invalid half-emitted IR behind.
+            self.clear_pending_compilations();
+        } else {
+            self.compile_pending_functions()?;
+        }
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!(
+                "[osr] LLVM AIR callees ready findex={} pc={header_pc}",
+                source.findex
+            );
+        }
 
         // Unscoped, unlike the promote path: `compile_osr_entry` swapped in a
         // module of its own, so everything here is new and needs the one run
@@ -1087,7 +1111,57 @@ impl<'ctx> JITModule<'ctx> {
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             super::module::run_middle_end(&self.module)?;
         }
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            eprintln!(
+                "[osr] LLVM AIR middle-end done findex={} pc={header_pc}",
+                source.findex
+            );
+        }
         Ok(())
+    }
+
+    /// Load one typed AIR value from Cranelift's 64-bit de-SSA transfer slot.
+    fn load_air_osr_slot(
+        &self,
+        buf: PointerValue<'ctx>,
+        reg: u32,
+        ty: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let i64_ty = self.context.i64_type();
+        let slot = unsafe {
+            self.builder.build_gep(
+                i64_ty,
+                buf,
+                &[i64_ty.const_int(u64::from(reg), false)],
+                "air_osr_slot",
+            )?
+        };
+        let raw = self
+            .builder
+            .build_load(i64_ty, slot, "air_osr_raw")?
+            .into_int_value();
+        Ok(match ty {
+            BasicTypeEnum::IntType(t) if t.get_bit_width() < 64 => self
+                .builder
+                .build_int_truncate(raw, t, "air_osr_int")?
+                .into(),
+            BasicTypeEnum::IntType(_) => raw.into(),
+            BasicTypeEnum::FloatType(t) if t == self.context.f64_type() => {
+                self.builder.build_bit_cast(raw, t, "air_osr_f64")?
+            }
+            BasicTypeEnum::FloatType(t) => {
+                let bits = self.builder.build_int_truncate(
+                    raw,
+                    self.context.i32_type(),
+                    "air_osr_f32_bits",
+                )?;
+                self.builder.build_bit_cast(bits, t, "air_osr_f32")?
+            }
+            BasicTypeEnum::PointerType(t) => {
+                self.builder.build_int_to_ptr(raw, t, "air_osr_ptr")?.into()
+            }
+            _ => return Err(anyhow!("unsupported AIR OSR slot type")),
+        })
     }
 
     fn create_function_declaration(&mut self, f: &HLFunction) -> Result<FunctionValue<'ctx>> {
@@ -1138,6 +1212,1027 @@ impl<'ctx> JITModule<'ctx> {
             ptrs.push(self.builder.build_alloca(reg_type, &format!("reg_{}", i))?);
         }
         Ok((ptrs, types))
+    }
+
+    /// Lower a verified AIR v2 function directly to LLVM.
+    ///
+    /// Values and pinned cells get distinct stack slots. LLVM's mem2reg pass
+    /// promotes the SSA value slots; cells deliberately remain addressable.
+    /// AIR blocks, phi edges and terminators drive the CFG. The small opcode
+    /// emitter below is reused for individual machine operations only -- it
+    /// never sees or walks a serialized HashLink opcode array.
+    fn translate_air_v2(
+        &mut self,
+        source: &HLFunction,
+        air: &AirFunction,
+        function: FunctionValue<'ctx>,
+    ) -> Result<()> {
+        let mut lowering = source.clone();
+        lowering.regs = air
+            .values
+            .iter()
+            .map(|v| TypeRef(v.ty.0 as usize))
+            .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+            .collect();
+        lowering.ops.clear();
+
+        let (registers, reg_types) = self.allocate_registers(&lowering)?;
+        let cell_base = air.values.len();
+        let nargs = self.bytecode.types[source.type_.0]
+            .fun
+            .as_ref()
+            .ok_or_else(|| anyhow!("findex {} has no function type", source.findex))?
+            .args
+            .len();
+
+        // AIR does not emit Param values for pinned registers. Seed argument
+        // cells here and give local cells HashLink's zero initialization.
+        for (ci, cell) in air.cells.iter().enumerate() {
+            let slot = cell_base + ci;
+            let init = if (cell.reg as usize) < nargs {
+                let param = function
+                    .get_nth_param(cell.reg)
+                    .ok_or_else(|| anyhow!("missing argument r{}", cell.reg))?;
+                self.cast_for_call(param, reg_types[slot])?
+            } else {
+                reg_types[slot].const_zero()
+            };
+            self.builder.build_store(registers[slot], init)?;
+        }
+
+        let included = vec![true; air.blocks.len()];
+        self.emit_air_v2_cfg(
+            source,
+            air,
+            function,
+            &mut lowering,
+            &registers,
+            &reg_types,
+            cell_base,
+            &included,
+            AirBlockId(0),
+        )
+    }
+
+    /// Emit the selected AIR CFG region, starting at `entry_target`.
+    ///
+    /// Ordinary functions select every block and start at b0. OSR entries
+    /// select only blocks reachable from a loop header, after their entry
+    /// block has restored the de-SSA register image.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_air_v2_cfg(
+        &mut self,
+        source: &HLFunction,
+        air: &AirFunction,
+        function: FunctionValue<'ctx>,
+        lowering: &mut HLFunction,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        cell_base: usize,
+        included: &[bool],
+        entry_target: AirBlockId,
+    ) -> Result<()> {
+        let entry = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| anyhow!("AIR LLVM lowering has no entry block"))?;
+        let nargs = self.bytecode.types[source.type_.0]
+            .fun
+            .as_ref()
+            .ok_or_else(|| anyhow!("findex {} has no function type", source.findex))?
+            .args
+            .len();
+
+        // One continuation block per selected AIR instruction plus its
+        // terminator. NullCheck and Trap need an explicit continuation, and
+        // keeping that shape for every instruction makes primitive-emitter
+        // reuse exact.
+        let mut blocks: Vec<Vec<BasicBlock<'ctx>>> =
+            (0..air.blocks.len()).map(|_| Vec::new()).collect();
+        for (bi, block) in air.blocks.iter().enumerate() {
+            if !included.get(bi).copied().unwrap_or(false) {
+                continue;
+            }
+            let mut seq = Vec::with_capacity(block.instrs.len() + 1);
+            for ii in 0..=block.instrs.len() {
+                seq.push(self.context.append_basic_block(
+                    function,
+                    &format!(
+                        "air_b{bi}_{}",
+                        if ii == block.instrs.len() {
+                            "term".into()
+                        } else {
+                            ii.to_string()
+                        }
+                    ),
+                ));
+            }
+            blocks[bi] = seq;
+        }
+        let first = blocks
+            .get(entry_target.idx())
+            .and_then(|b| b.first())
+            .copied()
+            .ok_or_else(|| anyhow!("AIR entry block b{} is not selected", entry_target.0))?;
+        self.builder.position_at_end(entry);
+        self.builder.build_unconditional_branch(first)?;
+
+        for (bi, block) in air.blocks.iter().enumerate() {
+            if !included.get(bi).copied().unwrap_or(false) {
+                continue;
+            }
+            for (ii, instr) in block.instrs.iter().enumerate() {
+                let current = blocks[bi][ii];
+                let next = blocks[bi][ii + 1];
+                self.builder.position_at_end(current);
+
+                match instr {
+                    AirInstr::Param { dst, reg } => {
+                        let dst = dst.idx();
+                        let value = if (*reg as usize) < nargs {
+                            let param = function
+                                .get_nth_param(*reg)
+                                .ok_or_else(|| anyhow!("missing argument r{reg}"))?;
+                            self.cast_for_call(param, reg_types[dst])?
+                        } else {
+                            reg_types[dst].const_zero()
+                        };
+                        self.builder.build_store(registers[dst], value)?;
+                    }
+                    AirInstr::UnOp { op, dst, src }
+                        if matches!(op, AirUnOp::Incr | AirUnOp::Decr) =>
+                    {
+                        // AIR models Incr/Decr as an SSA definition from the
+                        // old value. The legacy opcode mutates its destination
+                        // in place, so adapting it directly would read an
+                        // uninitialized destination alloca.
+                        let value = self.builder.build_load(
+                            reg_types[src.idx()],
+                            registers[src.idx()],
+                            "air_step_src",
+                        )?;
+                        let value = value.into_int_value();
+                        let one = value.get_type().const_int(1, false);
+                        let result = if matches!(op, AirUnOp::Incr) {
+                            self.builder.build_int_add(value, one, "air_incr")?
+                        } else {
+                            self.builder.build_int_sub(value, one, "air_decr")?
+                        };
+                        self.builder.build_store(registers[dst.idx()], result)?;
+                    }
+                    AirInstr::Fma { dst, a, b, c } => {
+                        self.emit_air_fma(*dst, *a, *b, *c, &registers, &reg_types)?;
+                    }
+                    AirInstr::FieldGet { obj, obj_ty, .. }
+                    | AirInstr::FieldSet { obj, obj_ty, .. } => {
+                        // AIR resolved the field's declaring object type once.
+                        // Let the reused field primitive see that answer rather
+                        // than re-deriving it from the value's declared type.
+                        let ri = obj.idx();
+                        let saved = lowering.regs[ri].clone();
+                        lowering.regs[ri] = TypeRef(obj_ty.0 as usize);
+                        let op = self
+                            .air_instr_opcode(instr, cell_base)?
+                            .ok_or_else(|| anyhow!("AIR field instruction produced no opcode"))?;
+                        let dummy = [current, next];
+                        self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
+                        lowering.regs[ri] = saved;
+                    }
+                    AirInstr::SetEnumField {
+                        value,
+                        construct,
+                        field,
+                        src,
+                    } => {
+                        // The legacy primitive historically discovered the
+                        // construct by scanning preceding opcodes. AIR carries
+                        // it explicitly, so provide only that local fact.
+                        let alloc = Opcode::EnumAlloc {
+                            dst: Reg(value.0),
+                            construct: RefEnumConstruct(*construct),
+                        };
+                        let set = Opcode::SetEnumField {
+                            value: Reg(value.0),
+                            field: RefField(*field),
+                            src: Reg(src.0),
+                        };
+                        lowering.ops = vec![alloc, set.clone()];
+                        let dummy = [current, current, next];
+                        self.translate_opcode(lowering, &set, registers, reg_types, 1, &dummy)?;
+                        lowering.ops.clear();
+                    }
+                    _ => {
+                        if let Some(op) = self.air_instr_opcode(instr, cell_base)? {
+                            let dummy = [current, next];
+                            self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
+                        }
+                    }
+                }
+
+                if self
+                    .builder
+                    .get_insert_block()
+                    .is_some_and(|b| b.get_terminator().is_none())
+                {
+                    self.builder.build_unconditional_branch(next)?;
+                }
+            }
+
+            let term_block = blocks[bi][block.instrs.len()];
+            self.builder.position_at_end(term_block);
+            self.emit_air_terminator(
+                source,
+                air,
+                AirBlockId(bi as u32),
+                &block.term,
+                &blocks,
+                lowering,
+                registers,
+                reg_types,
+                cell_base,
+            )?;
+        }
+
+        // Leave the caller in a valid insertion block. It is unreachable;
+        // every verified AIR block already has a terminator.
+        let exit = self.context.append_basic_block(function, "air_exit");
+        self.builder.position_at_end(exit);
+        Ok(())
+    }
+
+    fn emit_air_fma(
+        &self,
+        dst: ValueId,
+        a: ValueId,
+        b: ValueId,
+        c: ValueId,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+    ) -> Result<()> {
+        use inkwell::intrinsics::Intrinsic;
+        let ty = reg_types[dst.idx()];
+        let BasicTypeEnum::FloatType(float_ty) = ty else {
+            return Err(anyhow!("AIR Fma destination is not a float"));
+        };
+        let load = |v: ValueId, name: &str| {
+            self.builder
+                .build_load(reg_types[v.idx()], registers[v.idx()], name)
+                .map(|v| v.into_float_value())
+        };
+        let av = load(a, "fma_a")?;
+        let bv = load(b, "fma_b")?;
+        let cv = load(c, "fma_c")?;
+        let intr = Intrinsic::find("llvm.fma").ok_or_else(|| anyhow!("LLVM fma unavailable"))?;
+        let decl = intr
+            .get_declaration(&self.module, &[float_ty.into()])
+            .ok_or_else(|| anyhow!("no LLVM fma declaration"))?;
+        let value = self
+            .builder
+            .build_call(decl, &[av.into(), bv.into(), cv.into()], "air_fma")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("LLVM fma returned void"))?;
+        self.builder.build_store(registers[dst.idx()], value)?;
+        Ok(())
+    }
+
+    /// Adapt one non-terminating AIR instruction to the existing primitive
+    /// emitter. The adapter only supplies operands; AIR still owns the CFG,
+    /// SSA joins, and resolved type information.
+    fn air_instr_opcode(&self, instr: &AirInstr, cell_base: usize) -> Result<Option<Opcode>> {
+        let reg = |v: ValueId| Reg(v.0);
+        let cell = |c: air::v2::ir::CellId| Reg((cell_base + c.idx()) as u32);
+        let call = |dst: ValueId, fun: usize, args: &[ValueId]| -> Result<Opcode> {
+            let dst = reg(dst);
+            let fun = RefFun(fun);
+            let args: Vec<Reg> = args.iter().copied().map(reg).collect();
+            Ok(match args.as_slice() {
+                [] => Opcode::Call0 { dst, fun },
+                [arg0] => Opcode::Call1 {
+                    dst,
+                    fun,
+                    arg0: *arg0,
+                },
+                [arg0, arg1] => Opcode::Call2 {
+                    dst,
+                    fun,
+                    arg0: *arg0,
+                    arg1: *arg1,
+                },
+                [arg0, arg1, arg2] => Opcode::Call3 {
+                    dst,
+                    fun,
+                    arg0: *arg0,
+                    arg1: *arg1,
+                    arg2: *arg2,
+                },
+                [arg0, arg1, arg2, arg3] => Opcode::Call4 {
+                    dst,
+                    fun,
+                    arg0: *arg0,
+                    arg1: *arg1,
+                    arg2: *arg2,
+                    arg3: *arg3,
+                },
+                _ => Opcode::CallN { dst, fun, args },
+            })
+        };
+
+        let opcode = match instr {
+            AirInstr::Param { .. } | AirInstr::Fma { .. } => return Ok(None),
+            AirInstr::Copy { dst, src } => Opcode::Mov {
+                dst: reg(*dst),
+                src: reg(*src),
+            },
+            AirInstr::Int { dst, idx } => Opcode::Int {
+                dst: reg(*dst),
+                ptr: RefInt(*idx),
+            },
+            AirInstr::Float { dst, idx } => Opcode::Float {
+                dst: reg(*dst),
+                ptr: RefFloat(*idx),
+            },
+            AirInstr::Bool { dst, value } => Opcode::Bool {
+                dst: reg(*dst),
+                value: *value,
+            },
+            AirInstr::Bytes { dst, idx } => Opcode::Bytes {
+                dst: reg(*dst),
+                ptr: RefBytes(*idx),
+            },
+            AirInstr::String { dst, idx } => Opcode::String {
+                dst: reg(*dst),
+                ptr: RefString(*idx),
+            },
+            AirInstr::Null { dst } => Opcode::Null { dst: reg(*dst) },
+            AirInstr::BinOp { op, dst, a, b } => {
+                let dst = reg(*dst);
+                let a = reg(*a);
+                let b = reg(*b);
+                match op {
+                    AirBinOp::Add => Opcode::Add { dst, a, b },
+                    AirBinOp::Sub => Opcode::Sub { dst, a, b },
+                    AirBinOp::Mul => Opcode::Mul { dst, a, b },
+                    AirBinOp::SDiv => Opcode::SDiv { dst, a, b },
+                    AirBinOp::UDiv => Opcode::UDiv { dst, a, b },
+                    AirBinOp::SMod => Opcode::SMod { dst, a, b },
+                    AirBinOp::UMod => Opcode::UMod { dst, a, b },
+                    AirBinOp::Shl => Opcode::Shl { dst, a, b },
+                    AirBinOp::SShr => Opcode::SShr { dst, a, b },
+                    AirBinOp::UShr => Opcode::UShr { dst, a, b },
+                    AirBinOp::And => Opcode::And { dst, a, b },
+                    AirBinOp::Or => Opcode::Or { dst, a, b },
+                    AirBinOp::Xor => Opcode::Xor { dst, a, b },
+                }
+            }
+            AirInstr::UnOp { op, dst, src } => {
+                let dst = reg(*dst);
+                let src = reg(*src);
+                match op {
+                    AirUnOp::Neg => Opcode::Neg { dst, src },
+                    AirUnOp::Not => Opcode::Not { dst, src },
+                    AirUnOp::Incr => Opcode::Incr { dst },
+                    AirUnOp::Decr => Opcode::Decr { dst },
+                }
+            }
+            AirInstr::Intrinsic { fun, dst, args, .. } => return Ok(Some(call(*dst, *fun, args)?)),
+            AirInstr::Call { dst, fun, args } => {
+                if self.lazy_compilation && matches!(self.findexes.get(fun), Some(FuncPtr::Fun(_)))
+                {
+                    Opcode::IndirectCall {
+                        dst: reg(*dst),
+                        fun: RefFun(*fun),
+                        args: args.iter().copied().map(reg).collect(),
+                    }
+                } else {
+                    return Ok(Some(call(*dst, *fun, args)?));
+                }
+            }
+            AirInstr::CallMethod { dst, field, args } => Opcode::CallMethod {
+                dst: reg(*dst),
+                field: RefField(*field),
+                args: args.iter().copied().map(reg).collect(),
+            },
+            AirInstr::CallClosure { dst, fun, args } => Opcode::CallClosure {
+                dst: reg(*dst),
+                fun: reg(*fun),
+                args: args.iter().copied().map(reg).collect(),
+            },
+            AirInstr::StaticClosure { dst, fun } => Opcode::StaticClosure {
+                dst: reg(*dst),
+                fun: RefFun(*fun),
+            },
+            AirInstr::InstanceClosure { dst, fun, obj } => Opcode::InstanceClosure {
+                dst: reg(*dst),
+                fun: RefFun(*fun),
+                obj: reg(*obj),
+            },
+            AirInstr::VirtualClosure { dst, obj, field } => Opcode::VirtualClosure {
+                dst: reg(*dst),
+                obj: reg(*obj),
+                field: Reg(*field as u32),
+            },
+            AirInstr::GetGlobal { dst, global } => Opcode::GetGlobal {
+                dst: reg(*dst),
+                global: RefGlobal(*global),
+            },
+            AirInstr::SetGlobal { global, src } => Opcode::SetGlobal {
+                global: RefGlobal(*global),
+                src: reg(*src),
+            },
+            AirInstr::FieldGet {
+                dst, obj, field, ..
+            } => Opcode::Field {
+                dst: reg(*dst),
+                obj: reg(*obj),
+                field: RefField(*field),
+            },
+            AirInstr::FieldSet {
+                obj, field, src, ..
+            } => Opcode::SetField {
+                obj: reg(*obj),
+                field: RefField(*field),
+                src: reg(*src),
+            },
+            AirInstr::DynGet { dst, obj, field } => Opcode::DynGet {
+                dst: reg(*dst),
+                obj: reg(*obj),
+                field: RefString(*field),
+            },
+            AirInstr::DynSet { obj, field, src } => Opcode::DynSet {
+                obj: reg(*obj),
+                field: RefString(*field),
+                src: reg(*src),
+            },
+            AirInstr::Cast { kind, dst, src } => {
+                let dst = reg(*dst);
+                let src = reg(*src);
+                match kind {
+                    AirCastKind::ToDyn => Opcode::ToDyn { dst, src },
+                    AirCastKind::ToSFloat => Opcode::ToSFloat { dst, src },
+                    AirCastKind::ToUFloat => Opcode::ToUFloat { dst, src },
+                    AirCastKind::ToInt => Opcode::ToInt { dst, src },
+                    AirCastKind::SafeCast => Opcode::SafeCast { dst, src },
+                    AirCastKind::UnsafeCast => Opcode::UnsafeCast { dst, src },
+                    AirCastKind::ToVirtual => Opcode::ToVirtual { dst, src },
+                }
+            }
+            AirInstr::NullCheck { value } => Opcode::NullCheck { reg: reg(*value) },
+            AirInstr::EndTrap { flag, .. } => Opcode::EndTrap {
+                // OEndTrap's operand is a boolean flag, not the exception cell.
+                exc: Reg(*flag as u32),
+            },
+            AirInstr::MemGet {
+                kind,
+                dst,
+                base,
+                index,
+            } => {
+                let dst = reg(*dst);
+                let base = reg(*base);
+                let index = reg(*index);
+                match kind {
+                    AirMemAccess::I8 => Opcode::GetI8 {
+                        dst,
+                        bytes: base,
+                        index,
+                    },
+                    AirMemAccess::I16 => Opcode::GetI16 {
+                        dst,
+                        bytes: base,
+                        index,
+                    },
+                    AirMemAccess::Mem => Opcode::GetMem {
+                        dst,
+                        bytes: base,
+                        index,
+                    },
+                    AirMemAccess::Array => Opcode::GetArray {
+                        dst,
+                        array: base,
+                        index,
+                    },
+                }
+            }
+            AirInstr::MemSet {
+                kind,
+                base,
+                index,
+                src,
+            } => {
+                let base = reg(*base);
+                let index = reg(*index);
+                let src = reg(*src);
+                match kind {
+                    AirMemAccess::I8 => Opcode::SetI8 {
+                        bytes: base,
+                        index,
+                        src,
+                    },
+                    AirMemAccess::I16 => Opcode::SetI16 {
+                        bytes: base,
+                        index,
+                        src,
+                    },
+                    AirMemAccess::Mem => Opcode::SetMem {
+                        bytes: base,
+                        index,
+                        src,
+                    },
+                    AirMemAccess::Array => Opcode::SetArray {
+                        array: base,
+                        index,
+                        src,
+                    },
+                }
+            }
+            AirInstr::New { dst } => Opcode::New { dst: reg(*dst) },
+            AirInstr::ArraySize { dst, array } => Opcode::ArraySize {
+                dst: reg(*dst),
+                array: reg(*array),
+            },
+            AirInstr::TypeConst { dst, ty } => Opcode::Type {
+                dst: reg(*dst),
+                ty: RefType(ty.0 as usize),
+            },
+            AirInstr::GetType { dst, src } => Opcode::GetType {
+                dst: reg(*dst),
+                src: reg(*src),
+            },
+            AirInstr::GetTID { dst, src } => Opcode::GetTID {
+                dst: reg(*dst),
+                src: reg(*src),
+            },
+            AirInstr::Unref { dst, src } => Opcode::Unref {
+                dst: reg(*dst),
+                src: reg(*src),
+            },
+            AirInstr::SetRef { r, value } => Opcode::Setref {
+                dst: reg(*r),
+                value: reg(*value),
+            },
+            AirInstr::RefData { dst, src } => Opcode::RefData {
+                dst: reg(*dst),
+                src: reg(*src),
+            },
+            AirInstr::RefOffset { dst, base, offset } => Opcode::RefOffset {
+                dst: reg(*dst),
+                reg: reg(*base),
+                offset: reg(*offset),
+            },
+            AirInstr::MakeEnum {
+                dst,
+                construct,
+                args,
+            } => Opcode::MakeEnum {
+                dst: reg(*dst),
+                construct: RefEnumConstruct(*construct),
+                args: args.iter().copied().map(reg).collect(),
+            },
+            AirInstr::EnumAlloc { dst, construct } => Opcode::EnumAlloc {
+                dst: reg(*dst),
+                construct: RefEnumConstruct(*construct),
+            },
+            AirInstr::EnumIndex { dst, value } => Opcode::EnumIndex {
+                dst: reg(*dst),
+                value: reg(*value),
+            },
+            AirInstr::EnumField {
+                dst,
+                value,
+                construct,
+                field,
+            } => Opcode::EnumField {
+                dst: reg(*dst),
+                value: reg(*value),
+                construct: RefEnumConstruct(*construct),
+                field: RefField(*field),
+            },
+            AirInstr::SetEnumField {
+                value, field, src, ..
+            } => Opcode::SetEnumField {
+                value: reg(*value),
+                field: RefField(*field),
+                src: reg(*src),
+            },
+            AirInstr::CellGet { dst, cell: c } => Opcode::Mov {
+                dst: reg(*dst),
+                src: cell(*c),
+            },
+            AirInstr::CellSet { cell: c, src } => Opcode::Mov {
+                dst: cell(*c),
+                src: reg(*src),
+            },
+            AirInstr::CellIncr { cell: c } => Opcode::Incr { dst: cell(*c) },
+            AirInstr::CellDecr { cell: c } => Opcode::Decr { dst: cell(*c) },
+            AirInstr::CellRef { dst, cell: c } => Opcode::Ref {
+                dst: reg(*dst),
+                src: cell(*c),
+            },
+            AirInstr::Assert => Opcode::Assert,
+            AirInstr::Prefetch { value, field, mode } => Opcode::Prefetch {
+                value: reg(*value),
+                field: RefField(*field),
+                mode: *mode,
+            },
+            AirInstr::Asm {
+                mode,
+                value,
+                reg: r,
+            } => Opcode::Asm {
+                mode: *mode,
+                value: *value,
+                reg: Reg(*r),
+            },
+        };
+        Ok(Some(opcode))
+    }
+
+    /// Emit copies for one ordinary CFG edge's phi nodes.
+    fn emit_air_phi_edge(
+        &mut self,
+        air: &AirFunction,
+        from: AirBlockId,
+        to: AirBlockId,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+    ) -> Result<()> {
+        for phi in &air.blocks[to.idx()].phis {
+            let src = phi
+                .incoming
+                .iter()
+                .find(|(pred, _)| *pred == from)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "AIR phi in b{} has no incoming value from b{}",
+                        to.0,
+                        from.0
+                    )
+                })?;
+            let loaded = self.builder.build_load(
+                reg_types[src.idx()],
+                registers[src.idx()],
+                "air_phi_src",
+            )?;
+            let value = if loaded.get_type() == reg_types[phi.dst.idx()] {
+                loaded
+            } else {
+                self.cast_for_call(loaded, reg_types[phi.dst.idx()])?
+            };
+            self.builder.build_store(registers[phi.dst.idx()], value)?;
+        }
+        Ok(())
+    }
+
+    /// Emit an AIR V2 conditional as an LLVM branch condition.
+    fn emit_air_condition(
+        &mut self,
+        lowering: &HLFunction,
+        cond: AirCondKind,
+        a: ValueId,
+        b: Option<ValueId>,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+    ) -> Result<inkwell::values::IntValue<'ctx>> {
+        let av = self
+            .builder
+            .build_load(reg_types[a.idx()], registers[a.idx()], "air_cond_a")?;
+        if cond.is_unary() {
+            return match cond {
+                AirCondKind::True => Ok(av.into_int_value()),
+                AirCondKind::False => {
+                    let value = av.into_int_value();
+                    Ok(self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        value,
+                        value.get_type().const_zero(),
+                        "air_cond_false",
+                    )?)
+                }
+                AirCondKind::Null | AirCondKind::NotNull => {
+                    if av.is_pointer_value() {
+                        let is_null = self
+                            .builder
+                            .build_is_null(av.into_pointer_value(), "air_cond_null")?;
+                        Ok(if cond == AirCondKind::Null {
+                            is_null
+                        } else {
+                            self.builder.build_not(is_null, "air_cond_not_null")?
+                        })
+                    } else {
+                        Ok(self
+                            .context
+                            .bool_type()
+                            .const_int((cond == AirCondKind::NotNull) as u64, false))
+                    }
+                }
+                _ => unreachable!("CondKind::is_unary only admits unary conditions"),
+            };
+        }
+
+        let b = b.ok_or_else(|| anyhow!("binary AIR condition has no rhs"))?;
+        let bv = self
+            .builder
+            .build_load(reg_types[b.idx()], registers[b.idx()], "air_cond_b")?;
+        let bv = if av.get_type() == bv.get_type() {
+            bv
+        } else {
+            self.cast_for_call(bv, av.get_type())?
+        };
+        let a_kind = self.types_[lowering.regs[a.idx()].0].kind;
+        let (int_pred, float_pred) = match cond {
+            AirCondKind::SLt => (IntPredicate::SLT, FloatPredicate::OLT),
+            AirCondKind::SGte => (IntPredicate::SGE, FloatPredicate::OGE),
+            AirCondKind::SGt => (IntPredicate::SGT, FloatPredicate::OGT),
+            AirCondKind::SLte => (IntPredicate::SLE, FloatPredicate::OLE),
+            AirCondKind::ULt => (IntPredicate::ULT, FloatPredicate::OLT),
+            AirCondKind::UGte => (IntPredicate::UGE, FloatPredicate::OGE),
+            AirCondKind::NotLt => (IntPredicate::SGE, FloatPredicate::OGE),
+            AirCondKind::NotGte => (IntPredicate::SLT, FloatPredicate::OLT),
+            AirCondKind::Eq => (IntPredicate::EQ, FloatPredicate::OEQ),
+            AirCondKind::NotEq => (IntPredicate::NE, FloatPredicate::ONE),
+            _ => unreachable!("unary conditions returned above"),
+        };
+
+        Ok(match av.get_type().as_any_type_enum() {
+            AnyTypeEnum::IntType(_) => self.builder.build_int_compare(
+                int_pred,
+                av.into_int_value(),
+                bv.into_int_value(),
+                "air_cond_int",
+            )?,
+            AnyTypeEnum::FloatType(_) => self.builder.build_float_compare(
+                float_pred,
+                av.into_float_value(),
+                bv.into_float_value(),
+                "air_cond_float",
+            )?,
+            AnyTypeEnum::PointerType(_) => {
+                if a_kind == hl_type_kind_HDYN
+                    || a_kind == hl_type_kind_HNULL
+                    || a_kind == hl_type_kind_HOBJ
+                {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let compare = self.declare_native(
+                        "hlp_dyn_compare",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(self.context.i32_type().into()),
+                    );
+                    let result = self
+                        .builder
+                        .build_call(compare, &[av.into(), bv.into()], "air_dyn_compare")?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| anyhow!("hlp_dyn_compare returned void"))?
+                        .into_int_value();
+                    self.builder.build_int_compare(
+                        int_pred,
+                        result,
+                        self.context.i32_type().const_zero(),
+                        "air_dyn_condition",
+                    )?
+                } else {
+                    let ai = self.builder.build_ptr_to_int(
+                        av.into_pointer_value(),
+                        self.context.i64_type(),
+                        "air_ptr_a",
+                    )?;
+                    let bi = self.builder.build_ptr_to_int(
+                        bv.into_pointer_value(),
+                        self.context.i64_type(),
+                        "air_ptr_b",
+                    )?;
+                    self.builder
+                        .build_int_compare(int_pred, ai, bi, "air_ptr_condition")?
+                }
+            }
+            _ => return Err(anyhow!("unsupported AIR condition operand type")),
+        })
+    }
+
+    /// Emit one AIR V2 terminator and its CFG edges.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_air_terminator(
+        &mut self,
+        _source: &HLFunction,
+        air: &AirFunction,
+        bid: AirBlockId,
+        term: &AirTerminator,
+        blocks: &[Vec<BasicBlock<'ctx>>],
+        lowering: &HLFunction,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        cell_base: usize,
+    ) -> Result<()> {
+        let block = |id: AirBlockId| -> Result<BasicBlock<'ctx>> {
+            blocks
+                .get(id.idx())
+                .and_then(|v| v.first())
+                .copied()
+                .ok_or_else(|| anyhow!("AIR branch to missing block b{}", id.0))
+        };
+        match term {
+            AirTerminator::Ret { value } => {
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_parent())
+                    .ok_or_else(|| anyhow!("AIR terminator has no parent function"))?;
+                match function.get_type().get_return_type() {
+                    None => {
+                        self.builder.build_return(None)?;
+                    }
+                    Some(ret_type) => {
+                        let loaded = self.builder.build_load(
+                            reg_types[value.idx()],
+                            registers[value.idx()],
+                            "air_ret",
+                        )?;
+                        let value = if loaded.get_type() == ret_type {
+                            loaded
+                        } else {
+                            self.cast_for_call(loaded, ret_type)?
+                        };
+                        self.builder.build_return(Some(&value))?;
+                    }
+                }
+            }
+            AirTerminator::Jump { target } => {
+                self.emit_air_phi_edge(air, bid, *target, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*target)?)?;
+            }
+            AirTerminator::CondJump {
+                cond,
+                a,
+                b,
+                if_true,
+                if_false,
+            } => {
+                let condition =
+                    self.emit_air_condition(lowering, *cond, *a, *b, registers, reg_types)?;
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_parent())
+                    .ok_or_else(|| anyhow!("AIR terminator has no parent function"))?;
+                let true_edge = self.context.append_basic_block(function, "air_true_edge");
+                let false_edge = self.context.append_basic_block(function, "air_false_edge");
+                self.builder
+                    .build_conditional_branch(condition, true_edge, false_edge)?;
+
+                self.builder.position_at_end(true_edge);
+                self.emit_air_phi_edge(air, bid, *if_true, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*if_true)?)?;
+
+                self.builder.position_at_end(false_edge);
+                self.emit_air_phi_edge(air, bid, *if_false, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*if_false)?)?;
+            }
+            AirTerminator::Switch {
+                value,
+                targets,
+                default,
+            } => {
+                let raw = self.builder.build_load(
+                    reg_types[value.idx()],
+                    registers[value.idx()],
+                    "air_switch",
+                )?;
+                let value = raw.into_int_value();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_parent())
+                    .ok_or_else(|| anyhow!("AIR terminator has no parent function"))?;
+                let default_edge = self
+                    .context
+                    .append_basic_block(function, "air_switch_default");
+                let mut case_edges = Vec::with_capacity(targets.len());
+                for target in targets {
+                    case_edges.push((
+                        self.context.append_basic_block(function, "air_switch_case"),
+                        *target,
+                    ));
+                }
+                let cases: Vec<_> = case_edges
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (edge, _))| {
+                        (value.get_type().const_int(index as u64, false), *edge)
+                    })
+                    .collect();
+                self.builder.build_switch(value, default_edge, &cases)?;
+
+                for (edge, target) in case_edges {
+                    self.builder.position_at_end(edge);
+                    self.emit_air_phi_edge(air, bid, target, registers, reg_types)?;
+                    self.builder.build_unconditional_branch(block(target)?)?;
+                }
+                self.builder.position_at_end(default_edge);
+                self.emit_air_phi_edge(air, bid, *default, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*default)?)?;
+            }
+            AirTerminator::Throw { exc } | AirTerminator::Rethrow { exc } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let value = self.builder.build_load(
+                    reg_types[exc.idx()],
+                    registers[exc.idx()],
+                    "air_throw",
+                )?;
+                let value = if value.get_type() == ptr_type.as_basic_type_enum() {
+                    value.into_pointer_value()
+                } else {
+                    self.cast_for_call(value, ptr_type.into())?
+                        .into_pointer_value()
+                };
+                let throw = self.declare_native("hlp_throw", &[ptr_type.into()], None);
+                self.builder
+                    .build_call(throw, &[value.into()], "air_throw_call")?;
+                self.builder.build_unreachable()?;
+            }
+            AirTerminator::Trap {
+                exc_cell,
+                handler,
+                normal,
+            } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i32_type = self.context.i32_type();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_parent())
+                    .ok_or_else(|| anyhow!("AIR terminator has no parent function"))?;
+                let normal_edge = self.context.append_basic_block(function, "air_trap_normal");
+                let handler_entry = self
+                    .context
+                    .append_basic_block(function, "air_trap_handler");
+
+                let setup = self.declare_native("hlp_setup_trap_jit", &[], Some(ptr_type.into()));
+                let buf = self
+                    .builder
+                    .build_call(setup, &[], "air_trap_buf")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_setup_trap_jit returned void"))?
+                    .into_pointer_value();
+                let setjmp_ptr = self
+                    .context
+                    .i64_type()
+                    .const_int(crate::hl::_setjmp as usize as u64, false)
+                    .const_to_pointer(ptr_type);
+                let setjmp = self.builder.build_indirect_call(
+                    i32_type.fn_type(&[ptr_type.into()], false),
+                    setjmp_ptr,
+                    &[buf.into()],
+                    "air_setjmp",
+                )?;
+                let returns_twice = self.context.create_enum_attribute(
+                    inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+                    0,
+                );
+                setjmp.add_attribute(inkwell::attributes::AttributeLoc::Function, returns_twice);
+                let jumped = setjmp
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("_setjmp returned void"))?
+                    .into_int_value();
+                let is_exception = self.builder.build_int_compare(
+                    IntPredicate::NE,
+                    jumped,
+                    i32_type.const_zero(),
+                    "air_trap_exception",
+                )?;
+                self.builder
+                    .build_conditional_branch(is_exception, handler_entry, normal_edge)?;
+
+                self.builder.position_at_end(normal_edge);
+                self.emit_air_phi_edge(air, bid, *normal, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*normal)?)?;
+
+                self.builder.position_at_end(handler_entry);
+                let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
+                let exc = self
+                    .builder
+                    .build_call(get_exc, &[], "air_exception")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_get_exc_value returned void"))?;
+                let exc_reg = Reg((cell_base + exc_cell.idx()) as u32);
+                let exc_index = exc_reg.0 as usize;
+                let exc = if exc.get_type() == reg_types[exc_index] {
+                    exc
+                } else {
+                    self.cast_for_call(exc, reg_types[exc_index])?
+                };
+                self.builder.build_store(registers[exc_index], exc)?;
+                let clear = self.declare_native("hlp_clear_exc_value", &[], None);
+                self.builder.build_call(clear, &[], "air_clear_exception")?;
+                self.emit_air_phi_edge(air, bid, *handler, registers, reg_types)?;
+                self.builder.build_unconditional_branch(block(*handler)?)?;
+            }
+        }
+        Ok(())
     }
 
     fn get_register_type(&mut self, type_index: usize) -> Result<BasicTypeEnum<'ctx>> {
@@ -1249,6 +2344,46 @@ impl<'ctx> JITModule<'ctx> {
         }
         let kind = self.types_[type_index].clone().kind;
 
+        // Function, nullable, reference, and packed descriptors contain a
+        // type-specific pointer in their union. Reusing the descriptor built
+        // by the C-type graph is essential: fabricating only the kind leaves
+        // `hlp_safe_cast` with a null `fun`/`tparam` pointer.
+        if let Some(c_type_ptr) = self
+            .c_ptr_to_type_index
+            .iter()
+            .find_map(|(&ptr, &index)| (index == type_index).then_some(ptr as *mut hl_type))
+        {
+            let ptr_type = self.context.ptr_type(AddressSpace::default());
+            let value = self
+                .context
+                .i64_type()
+                .const_int(c_type_ptr as u64, false)
+                .const_to_pointer(ptr_type);
+            self.initialized_type_cache.insert(type_index, value.into());
+            return Ok(value.into());
+        }
+
+        if matches!(
+            kind,
+            hl_type_kind_HFUN
+                | hl_type_kind_HMETHOD
+                | crate::hl::hl_type_kind_HPACKED
+                | hl_type_kind_HNULL
+                | crate::hl::hl_type_kind_HREF
+        ) {
+            let cache = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+            let c_type_ptr =
+                self.convert_type_ref_to_c_cached(&crate::types::TypeRef(type_index), cache)?;
+            let ptr_type = self.context.ptr_type(AddressSpace::default());
+            let value = self
+                .context
+                .i64_type()
+                .const_int(c_type_ptr as u64, false)
+                .const_to_pointer(ptr_type);
+            self.initialized_type_cache.insert(type_index, value.into());
+            return Ok(value.into());
+        }
+
         // For primitive types (kind <= HDYN), create a real C-side hl_type and store its pointer
         // This matches what HOBJ/HSTRUCT/HENUM/HVIRTUAL already do in init_indexes
         let c_type_ptr = unsafe {
@@ -1270,72 +2405,11 @@ impl<'ctx> JITModule<'ctx> {
         Ok(ptr_to_type.into())
     }
 
-    fn translate_opcodes(
-        &mut self,
-        f: &HLFunction,
-        registers: &[PointerValue<'ctx>],
-        reg_types: &[BasicTypeEnum<'ctx>],
-    ) -> Result<()> {
-        self.translate_opcodes_from(f, registers, reg_types, 0)
-    }
-
-    /// Lower `f`, entering at opcode `entry_pc` rather than at the top.
+    /// Emit one primitive operation selected by AIR V2.
     ///
-    /// Every block is still emitted, so a jump backwards from inside the loop
-    /// to code above `entry_pc` lands somewhere real; only the branch out of
-    /// the entry block changes. That is what makes an OSR entry a normal
-    /// compile with one edge moved, rather than a second lowering path that
-    /// could disagree with the first.
-    fn translate_opcodes_from(
-        &mut self,
-        f: &HLFunction,
-        registers: &[PointerValue<'ctx>],
-        reg_types: &[BasicTypeEnum<'ctx>],
-        entry_pc: usize,
-    ) -> Result<()> {
-        let function = self
-            .builder
-            .get_insert_block()
-            .unwrap()
-            .get_parent()
-            .unwrap();
-        let num_ops = f.ops.len();
-
-        // Pre-create all basic blocks (two-pass approach for jump resolution)
-        let mut opcode_blocks: Vec<BasicBlock<'ctx>> = Vec::with_capacity(num_ops + 1);
-        for i in 0..num_ops {
-            opcode_blocks.push(
-                self.context
-                    .append_basic_block(function, &format!("op_{}", i)),
-            );
-        }
-        // Exit block (fallthrough after last opcode)
-        opcode_blocks.push(self.context.append_basic_block(function, "exit"));
-
-        // Branch from the entry block to wherever this compilation starts.
-        self.builder
-            .build_unconditional_branch(opcode_blocks[entry_pc.min(num_ops)])?;
-
-        // Emit IR for each opcode
-        for (i, op) in f.ops.iter().enumerate() {
-            self.builder.position_at_end(opcode_blocks[i]);
-
-            self.translate_opcode(f, op, registers, reg_types, i, &opcode_blocks)?;
-
-            // If the current block has no terminator, add fallthrough to next block
-            let current = self.builder.get_insert_block().unwrap();
-            if current.get_terminator().is_none() {
-                self.builder
-                    .build_unconditional_branch(opcode_blocks[i + 1])?;
-            }
-        }
-
-        // Position builder at exit block for caller to add default return if needed
-        self.builder.position_at_end(opcode_blocks[num_ops]);
-
-        Ok(())
-    }
-
+    /// This is an instruction emitter, not a bytecode-function lowering
+    /// route: AIR owns the CFG, phi edges, values, cells and terminators, and
+    /// there is intentionally no method that walks an `HLFunction::ops` body.
     fn translate_opcode(
         &mut self,
         f: &HLFunction,
@@ -2639,13 +3713,25 @@ impl<'ctx> JITModule<'ctx> {
             Opcode::IndirectCall { dst, fun, args } => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
 
-                // Ensure the callee is declared so we have its LLVM function type
-                let (function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
-                let fn_type = function.get_type();
+                // Build the ABI type directly from bytecode. Creating an LLVM
+                // declaration here makes an isolated lazy module report an
+                // unresolved Fun_* symbol even though the call itself goes
+                // exclusively through functions_ptrs.
+                let callee = self
+                    .bytecode
+                    .functions
+                    .iter()
+                    .find(|f| f.findex as usize == fun.0)
+                    .ok_or_else(|| anyhow!("IndirectCall target {} is not bytecode", fun.0))?;
+                let type_fun = self.bytecode.types[callee.type_.0]
+                    .fun
+                    .clone()
+                    .ok_or_else(|| anyhow!("IndirectCall target {} has no function type", fun.0))?;
+                let fn_type = self.create_function_type(&type_fun)?;
 
                 // Load callee address from functions_ptrs[findex] at runtime
                 let findex = fun.0;
-                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_slot = self.function_slot_address(findex)?;
                 let fun_addr_ptr = self
                     .context
                     .i64_type()
@@ -2678,9 +3764,6 @@ impl<'ctx> JITModule<'ctx> {
                 {
                     self.builder
                         .build_store(registers[dst.0 as usize], ret_val)?;
-                }
-                if is_placeholder {
-                    self.add_pending_compilation(fun.0);
                 }
             }
 
@@ -2998,10 +4081,7 @@ impl<'ctx> JITModule<'ctx> {
                                 self.builder.build_gep(
                                     self.context.i8_type(),
                                     arr,
-                                    &[self
-                                        .context
-                                        .i64_type()
-                                        .const_int(24 + i as u64 * 8, false)],
+                                    &[self.context.i64_type().const_int(24 + i as u64 * 8, false)],
                                     "vcall_arg_gep",
                                 )?
                             };
@@ -3046,11 +4126,8 @@ impl<'ctx> JITModule<'ctx> {
                                 } else {
                                     ("hlp_dyn_toint", i32_type.into())
                                 };
-                            let unbox = self.declare_native(
-                                helper,
-                                &[ptr_type.into()],
-                                Some(helper_ret),
-                            );
+                            let unbox =
+                                self.declare_native(helper, &[ptr_type.into()], Some(helper_ret));
                             let raw = self
                                 .builder
                                 .build_call(unbox, &[ret_dyn.into()], "vcall_unbox")?
@@ -3188,10 +4265,12 @@ impl<'ctx> JITModule<'ctx> {
                                 self.context.get_kind_id("invariant.load"),
                             );
                         }
-                        let hit_bb =
-                            self.context.append_basic_block(cm_function, "cm_devirt_hit");
-                        let miss_bb =
-                            self.context.append_basic_block(cm_function, "cm_devirt_miss");
+                        let hit_bb = self
+                            .context
+                            .append_basic_block(cm_function, "cm_devirt_hit");
+                        let miss_bb = self
+                            .context
+                            .append_basic_block(cm_function, "cm_devirt_miss");
                         let type_int = self.builder.build_ptr_to_int(
                             type_ptr,
                             self.context.i64_type(),
@@ -3203,7 +4282,8 @@ impl<'ctx> JITModule<'ctx> {
                             self.context.i64_type().const_int(type_ptr_c, false),
                             "cm_devirt_guard",
                         )?;
-                        self.builder.build_conditional_branch(guard, hit_bb, miss_bb)?;
+                        self.builder
+                            .build_conditional_branch(guard, hit_bb, miss_bb)?;
 
                         self.builder.position_at_end(hit_bb);
                         let ret = self
@@ -3219,6 +4299,13 @@ impl<'ctx> JITModule<'ctx> {
                     }
 
                     // Load vobj_proto from hl_type (offset 16)
+                    let get_obj_proto = self.declare_native(
+                        "hl_get_obj_proto",
+                        &[ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    self.builder
+                        .build_call(get_obj_proto, &[type_ptr.into()], "init_obj_proto")?;
                     let vobj_proto_gep = unsafe {
                         self.builder.build_gep(
                             self.context.i8_type(),
@@ -3414,6 +4501,13 @@ impl<'ctx> JITModule<'ctx> {
                     .into_pointer_value();
 
                 // Load vobj_proto from hl_type (offset 16)
+                let get_obj_proto = self.declare_native(
+                    "hl_get_obj_proto",
+                    &[ptr_type.into()],
+                    Some(ptr_type.into()),
+                );
+                self.builder
+                    .build_call(get_obj_proto, &[type_ptr.into()], "init_this_proto")?;
                 let vobj_proto_gep = unsafe {
                     self.builder.build_gep(
                         self.context.i8_type(),
@@ -3641,16 +4735,18 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- StaticClosure: allocate a vclosure wrapping the function ---
             Opcode::StaticClosure { dst, fun } => {
-                let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
-                if is_placeholder {
-                    self.add_pending_compilation(fun.0);
+                if !self.lazy_compilation {
+                    let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
+                    if is_placeholder {
+                        self.add_pending_compilation(fun.0);
+                    }
                 }
 
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
 
                 // Load function address from functions_ptrs[findex] at runtime
                 let findex = fun.0 as usize;
-                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_slot = self.function_slot_address(findex)?;
                 let fun_addr_ptr = self
                     .context
                     .i64_type()
@@ -3691,7 +4787,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- CallClosure ---
             Opcode::CallClosure { dst, fun, args } => {
-                let closure_ptr = self
+                let raw_closure_ptr = self
                     .builder
                     .build_load(
                         reg_types[fun.0 as usize],
@@ -3703,6 +4799,51 @@ impl<'ctx> JITModule<'ctx> {
                 let i8_type = self.context.i8_type();
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let i32_type = self.context.i32_type();
+
+                // HashLink represents a signature-adapted bound closure as a
+                // vclosure_wrapper: its public vclosure has hasValue == 2 and
+                // the original closure lives after it at offset 32. Hybrid's
+                // interpreter runner unwraps this object; LLVM must do the
+                // same before reading the callable fields.
+                let raw_has_value_gep = unsafe {
+                    self.builder.build_gep(
+                        i8_type,
+                        raw_closure_ptr,
+                        &[self.context.i64_type().const_int(16, false)],
+                        "closure_raw_hasvalue_gep",
+                    )?
+                };
+                let raw_has_value = self
+                    .builder
+                    .build_load(i32_type, raw_has_value_gep, "closure_raw_hasvalue")?
+                    .into_int_value();
+                let is_wrapper = self.builder.build_int_compare(
+                    IntPredicate::EQ,
+                    raw_has_value,
+                    i32_type.const_int(2, false),
+                    "closure_is_wrapper",
+                )?;
+                let wrapped_fun_gep = unsafe {
+                    self.builder.build_gep(
+                        i8_type,
+                        raw_closure_ptr,
+                        &[self.context.i64_type().const_int(32, false)],
+                        "closure_wrapped_fun_gep",
+                    )?
+                };
+                let wrapped_fun = self
+                    .builder
+                    .build_load(ptr_type, wrapped_fun_gep, "closure_wrapped_fun")?
+                    .into_pointer_value();
+                let closure_ptr = self
+                    .builder
+                    .build_select(
+                        is_wrapper,
+                        wrapped_fun,
+                        raw_closure_ptr,
+                        "closure_unwrapped",
+                    )?
+                    .into_pointer_value();
 
                 // vclosure.fun at offset 8
                 let fun_field_gep = unsafe {
@@ -3823,8 +4964,11 @@ impl<'ctx> JITModule<'ctx> {
                 } else {
                     crate::callsite_profile::closure_target(f.findex as u32, i as u32).and_then(
                         |(target, exp_hv)| {
-                            let expected_ty =
-                                if exp_hv { extended_fn_type } else { base_fn_type };
+                            let expected_ty = if exp_hv {
+                                extended_fn_type
+                            } else {
+                                base_fn_type
+                            };
                             match self.get_or_create_function_value(target as usize) {
                                 Ok((callee, is_placeholder)) => {
                                     if is_placeholder {
@@ -3879,7 +5023,11 @@ impl<'ctx> JITModule<'ctx> {
                         "devirt_is_target",
                     )?;
                     let hv_matches = self.builder.build_int_compare(
-                        if exp_hv { IntPredicate::NE } else { IntPredicate::EQ },
+                        if exp_hv {
+                            IntPredicate::NE
+                        } else {
+                            IntPredicate::EQ
+                        },
                         has_value,
                         i32_type.const_zero(),
                         "devirt_hv",
@@ -4082,8 +5230,7 @@ impl<'ctx> JITModule<'ctx> {
                     )?;
                 } else if src_type_idx != dst_type_idx
                     && ((src_kind == hl_type_kind_HOBJ && dst_kind == hl_type_kind_HOBJ)
-                        || (src_kind == hl_type_kind_HSTRUCT
-                            && dst_kind == hl_type_kind_HSTRUCT))
+                        || (src_kind == hl_type_kind_HSTRUCT && dst_kind == hl_type_kind_HSTRUCT))
                 {
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let src_type_ptr = self
@@ -4318,16 +5465,18 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- InstanceClosure: allocate closure binding obj as first arg ---
             Opcode::InstanceClosure { dst, fun, obj } => {
-                let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
-                if is_placeholder {
-                    self.add_pending_compilation(fun.0);
+                if !self.lazy_compilation {
+                    let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
+                    if is_placeholder {
+                        self.add_pending_compilation(fun.0);
+                    }
                 }
 
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let findex = fun.0 as usize;
 
                 // Load function address from functions_ptrs[findex]
-                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_slot = self.function_slot_address(findex)?;
                 let fun_addr_ptr = self
                     .context
                     .i64_type()
@@ -4385,6 +5534,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- VirtualClosure: resolve proto method, create bound closure ---
             Opcode::VirtualClosure { dst, obj, field } => {
+                let i8_type = self.context.i8_type();
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let obj_type_idx = f.regs[obj.0 as usize].0;
                 let obj_type_info = self.types_[obj_type_idx].clone();
@@ -4398,9 +5548,11 @@ impl<'ctx> JITModule<'ctx> {
                     ));
                 };
 
-                let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
-                if is_placeholder {
-                    self.add_pending_compilation(findex);
+                if !self.lazy_compilation {
+                    let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
+                    if is_placeholder {
+                        self.add_pending_compilation(findex);
+                    }
                 }
 
                 // Load obj pointer
@@ -4409,7 +5561,7 @@ impl<'ctx> JITModule<'ctx> {
                         .build_load(ptr_type, registers[obj.0 as usize], "vclos_obj")?;
 
                 // Load function address from functions_ptrs[findex]
-                let fun_addr_slot = unsafe { self.functions_ptrs.as_ptr().add(findex) } as u64;
+                let fun_addr_slot = self.function_slot_address(findex)?;
                 let fun_addr_ptr = self
                     .context
                     .i64_type()
@@ -4418,6 +5570,64 @@ impl<'ctx> JITModule<'ctx> {
                 let fun_addr = self
                     .builder
                     .build_load(ptr_type, fun_addr_ptr, "vclos_fun")?
+                    .into_pointer_value();
+
+                // Virtual closures dispatch through the concrete object's
+                // runtime proto. The static proto entry may name a base
+                // implementation even when the object overrides it.
+                let obj_ptr = obj_val.into_pointer_value();
+                let obj_type_ptr = self
+                    .builder
+                    .build_load(ptr_type, obj_ptr, "vclos_obj_type")?
+                    .into_pointer_value();
+                // hl_get_obj_proto initializes the concrete type's cached
+                // proto table. Its vobj_proto field is indexed by pindex and
+                // contains the selected function address.
+                let get_obj_proto = self.declare_native(
+                    "hl_get_obj_proto",
+                    &[ptr_type.into()],
+                    Some(ptr_type.into()),
+                );
+                let _runtime_obj = self.builder.build_call(
+                    get_obj_proto,
+                    &[obj_type_ptr.into()],
+                    "vclos_runtime_obj",
+                )?;
+                let vobj_proto_ptr = unsafe {
+                    self.builder.build_gep(
+                        i8_type,
+                        obj_type_ptr,
+                        &[self.context.i64_type().const_int(16, false)],
+                        "vclos_proto_gep",
+                    )?
+                };
+                let vobj_proto = self
+                    .builder
+                    .build_load(ptr_type, vobj_proto_ptr, "vclos_proto")?
+                    .into_pointer_value();
+                let runtime_fun_ptr = unsafe {
+                    self.builder.build_gep(
+                        ptr_type,
+                        vobj_proto,
+                        &[self.context.i32_type().const_int(field.0 as u64, false)],
+                        "vclos_runtime_fun_gep",
+                    )?
+                };
+                let runtime_fun = self
+                    .builder
+                    .build_load(ptr_type, runtime_fun_ptr, "vclos_runtime_fun")?
+                    .into_pointer_value();
+                let runtime_fun_present = self
+                    .builder
+                    .build_is_not_null(runtime_fun, "vclos_has_runtime_fun")?;
+                let fun_addr = self
+                    .builder
+                    .build_select(
+                        runtime_fun_present,
+                        runtime_fun,
+                        fun_addr,
+                        "vclos_selected_fun",
+                    )?
                     .into_pointer_value();
 
                 // Get closure type via hlp_get_closure_type(func_type)
@@ -4449,7 +5659,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_call(
                         alloc,
-                        &[closure_type.into(), fun_addr.into(), obj_val.into()],
+                        &[closure_type.into(), fun_addr.into(), obj_ptr.into()],
                         "vclos",
                     )?
                     .try_as_basic_value()
@@ -5846,6 +7056,87 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
+    /// Address of the live runtime function-pointer slot for `findex`.
+    ///
+    /// Per-function modules must not bake the address of their private
+    /// snapshot vector: Cranelift and later LLVM installs update the shared
+    /// `hl_module_context`. Loading this slot lets compiled callers and
+    /// closures observe tier changes without being rebuilt.
+    fn function_slot_address(&self, findex: usize) -> Result<u64> {
+        if let Some(shared) = self.shared_runtime.as_ref() {
+            if !shared.module_ctx.is_null() {
+                let base = unsafe { (*shared.module_ctx).functions_ptrs };
+                if !base.is_null() {
+                    return Ok(unsafe { base.add(findex) } as u64);
+                }
+            }
+        }
+        self.functions_ptrs
+            .get(findex)
+            .map(|slot| slot as *const *mut c_void as u64)
+            .ok_or_else(|| anyhow!("function slot {findex} is out of range"))
+    }
+
+    fn live_function_address(&self, findex: usize) -> Option<usize> {
+        let addr = if let Some(shared) = self.shared_runtime.as_ref() {
+            if shared.module_ctx.is_null() {
+                std::ptr::null_mut()
+            } else {
+                let base = unsafe { (*shared.module_ctx).functions_ptrs };
+                if base.is_null() {
+                    std::ptr::null_mut()
+                } else {
+                    unsafe { *base.add(findex) }
+                }
+            }
+        } else {
+            self.functions_ptrs.get(findex).copied()?
+        };
+        let addr = addr as usize;
+        (addr >= crate::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize).then_some(addr)
+    }
+
+    /// Bind declarations in an isolated MCJIT module to code already
+    /// installed by either tier.
+    fn bind_module_declarations(
+        &self,
+        module: &inkwell::module::Module<'ctx>,
+        label: &str,
+    ) -> Result<()> {
+        let mut unresolved = Vec::new();
+        for declaration in module.get_functions() {
+            if declaration.count_basic_blocks() != 0 {
+                continue;
+            }
+            let Ok(symbol) = declaration.get_name().to_str() else {
+                continue;
+            };
+            if symbol.starts_with("llvm.") {
+                continue;
+            }
+            let engine_addr = self.execution_engine.get_function_address(symbol).ok();
+            let tier_addr = self
+                .bytecode
+                .functions
+                .iter()
+                .find(|f| f.name() == symbol)
+                .and_then(|f| self.live_function_address(f.findex as usize));
+            match engine_addr.filter(|&addr| addr != 0).or(tier_addr) {
+                Some(addr) => self.execution_engine.add_global_mapping(&declaration, addr),
+                None => unresolved.push(symbol.to_string()),
+            }
+        }
+        if unresolved.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "{label} has {} unresolved symbol(s): {}",
+                unresolved.len(),
+                unresolved.join(", ")
+            ))
+        }
+    }
+
     /// Address of `field_index` inside `obj_ptr`, whose static type is
     /// `obj_type_index`.
     ///
@@ -6438,6 +7729,115 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
+    /// Wrap the bytecode entrypoint in the same outer exception boundary that
+    /// HashLink's `hl_dyn_call_safe` provides.
+    ///
+    /// The setjmp must live in generated code: placing it in Rust and then
+    /// longjmping across `ExecutionEngine::run_function` would skip Rust/C++
+    /// frames.  The wrapper returns 1 after printing an uncaught exception and
+    /// 0 after a normal return.
+    fn build_safe_entry_wrapper(
+        &self,
+        entrypoint: FunctionValue<'ctx>,
+    ) -> Result<FunctionValue<'ctx>> {
+        if entrypoint.count_params() != 0 {
+            return Err(anyhow!("HashLink entrypoint unexpectedly takes arguments"));
+        }
+
+        let saved_block = self.builder.get_insert_block();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let i64_type = self.context.i64_type();
+        let wrapper =
+            self.module
+                .add_function("__ash_safe_entrypoint", i64_type.fn_type(&[], false), None);
+        self.stamp_host_cpu(wrapper);
+
+        // setjmp locals must remain in memory across the second return.
+        let noinline = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
+            0,
+        );
+        let optnone = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("optnone"),
+            0,
+        );
+        wrapper.add_attribute(inkwell::attributes::AttributeLoc::Function, noinline);
+        wrapper.add_attribute(inkwell::attributes::AttributeLoc::Function, optnone);
+
+        let start = self.context.append_basic_block(wrapper, "start");
+        let normal = self.context.append_basic_block(wrapper, "normal");
+        let exception = self.context.append_basic_block(wrapper, "exception");
+        self.builder.position_at_end(start);
+
+        let setup = self.declare_native("hlp_setup_trap_jit", &[], Some(ptr_type.into()));
+        let buf = self
+            .builder
+            .build_call(setup, &[], "outer_trap_buf")?
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_pointer_value();
+        let setjmp_ptr = self
+            .context
+            .i64_type()
+            .const_int(crate::hl::_setjmp as usize as u64, false)
+            .const_to_pointer(ptr_type);
+        let setjmp_call = self.builder.build_indirect_call(
+            i32_type.fn_type(&[ptr_type.into()], false),
+            setjmp_ptr,
+            &[buf.into()],
+            "outer_setjmp",
+        )?;
+        let returns_twice = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+            0,
+        );
+        setjmp_call.add_attribute(inkwell::attributes::AttributeLoc::Function, returns_twice);
+        let jumped = setjmp_call
+            .try_as_basic_value()
+            .basic()
+            .unwrap()
+            .into_int_value();
+        let is_exception = self.builder.build_int_compare(
+            IntPredicate::NE,
+            jumped,
+            i32_type.const_zero(),
+            "outer_is_exception",
+        )?;
+        self.builder
+            .build_conditional_branch(is_exception, exception, normal)?;
+
+        self.builder.position_at_end(normal);
+        self.builder.build_call(entrypoint, &[], "")?;
+        let remove = self.declare_native("hlp_remove_trap_jit", &[], None);
+        self.builder.build_call(remove, &[], "")?;
+        self.builder.build_return(Some(&i64_type.const_zero()))?;
+
+        self.builder.position_at_end(exception);
+        let get_exc = self.declare_native("hlp_get_exc_value", &[], Some(ptr_type.into()));
+        let exc = self
+            .builder
+            .build_call(get_exc, &[], "uncaught_exception")?
+            .try_as_basic_value()
+            .basic()
+            .unwrap();
+        let print = self.declare_native("hlp_print_uncaught_exception", &[ptr_type.into()], None);
+        self.builder.build_call(print, &[exc.into()], "")?;
+        let clear = self.declare_native("hlp_clear_exc_value", &[], None);
+        self.builder.build_call(clear, &[], "")?;
+        self.builder
+            .build_return(Some(&i64_type.const_int(1, false)))?;
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        if !wrapper.verify(true) {
+            return Err(anyhow!("invalid LLVM safe-entrypoint wrapper"));
+        }
+        Ok(wrapper)
+    }
+
     pub fn execute_main(&mut self) -> Result<()> {
         // Everything up to `execute` is compilation, grouped so the report
         // gives one number for it rather than four the reader has to add up --
@@ -6461,6 +7861,7 @@ impl<'ctx> JITModule<'ctx> {
             .func_cache
             .get(&index)
             .ok_or_else(|| anyhow!("Entrypoint function not found in cache"))?;
+        let safe_entrypoint = self.build_safe_entry_wrapper(function)?;
 
         // Optimize before anything asks for an address: requesting one forces
         // codegen, and a pass run afterwards would be too late.
@@ -6494,7 +7895,11 @@ impl<'ctx> JITModule<'ctx> {
         if let Ok(spec) = std::env::var("ASH_DUMP_IR") {
             if !spec.is_empty() && spec != "0" {
                 let _phase = crate::profile::scope("dump ir");
-                let path = if spec == "1" { "/tmp/ash_jit.ll" } else { &spec };
+                let path = if spec == "1" {
+                    "/tmp/ash_jit.ll"
+                } else {
+                    &spec
+                };
                 match self.module.print_to_file(path) {
                     Ok(()) => eprintln!("[ash] LLVM IR written to {path}"),
                     Err(e) => eprintln!("[ash] could not write {path}: {e}"),
@@ -6570,9 +7975,16 @@ impl<'ctx> JITModule<'ctx> {
 
         {
             let _phase = crate::profile::scope("execute");
-            unsafe {
-                self.execution_engine.run_function(function, &[]);
+            let status = unsafe {
+                self.execution_engine
+                    .run_function(safe_entrypoint, &[])
+                    .as_int(false)
             };
+            if status != 0 {
+                return Err(anyhow!(
+                    "HashLink program terminated with an uncaught exception"
+                ));
+            }
         }
 
         Ok(())

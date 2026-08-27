@@ -151,8 +151,10 @@ dependencies = [
  "anyhow",
  "ash_core",
  "beadie",
+ "cc",
  "inkwell",
  "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -177,6 +179,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bindgen",
+ "cc",
  "chrono",
  "fancy-regex",
  "flexstr",

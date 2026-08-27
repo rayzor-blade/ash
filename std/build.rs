@@ -68,6 +68,17 @@ pub fn assert_bindings_usable(bindings: &str) {
 fn main() {
     pin_libclang();
 
+    let target = env::var("TARGET").unwrap_or_default();
+    if target.starts_with("x86_64") && target.contains("linux") {
+        cc::Build::new()
+            .file("src/stack_boundary.c")
+            .flag_if_supported("-fno-omit-frame-pointer")
+            .flag_if_supported("-fno-optimize-sibling-calls")
+            .warnings(true)
+            .compile("ash_std_stack_boundary");
+        println!("cargo:rerun-if-changed=src/stack_boundary.c");
+    }
+
     // // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/path/to/lib");
 

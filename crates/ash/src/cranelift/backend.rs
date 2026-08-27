@@ -120,11 +120,7 @@ impl AshCraneliftBackend {
     /// Compile an already-lowered definition and return its code pointer.
     /// The OSR-entry path uses this: it builds its own `def` (different
     /// signature, different prologue) and needs only the address back.
-    pub fn compile_def(
-        &self,
-        bead: &Arc<Bead>,
-        def: CraneliftFunctionDef,
-    ) -> Result<*mut ()> {
+    pub fn compile_def(&self, bead: &Arc<Bead>, def: CraneliftFunctionDef) -> Result<*mut ()> {
         let code = self
             .inner
             .compile(bead, def)
@@ -163,6 +159,7 @@ impl AshCraneliftBackend {
             let _phase = crate::profile::scope("clif codegen");
             self.inner.compile(bead, def).map_err(|e| {
                 let msg = e.to_string();
+                let detail = format!("{e:?}");
                 // A verifier or regalloc-checker error is not a decline — it
                 // means the lowering emitted invalid CLIF, and the LLVM
                 // fallback would otherwise mask the bug entirely. Report it
@@ -171,7 +168,7 @@ impl AshCraneliftBackend {
                 // errors"; the detail rides in the source chain.)
                 if msg.contains("Verifier") || msg.contains("Regalloc") {
                     eprintln!(
-                        "[cranelift] INVALID CLIF for findex={findex}: {msg} — \
+                        "[cranelift] INVALID CLIF for findex={findex}: {detail} — \
                          this is an ash lowering bug, not an unsupported function"
                     );
                 }
@@ -234,7 +231,14 @@ pub struct CraneliftTierContext {
     bytes: Mutex<HashMap<usize, usize>>,
     /// Interned UTF-16 messages for runtime error calls.
     messages: Mutex<HashMap<String, usize>>,
+    /// Bytecode string index -> collision-resolved HashLink field hash.
+    /// `hlp_hash_gen(..., true)` also records the reverse name mapping used
+    /// by Reflect.fields, so this cannot be replaced by the arithmetic hash
+    /// alone.
+    field_hashes: Mutex<HashMap<usize, i32>>,
     dyn_compare: usize,
+    same_type: usize,
+    hash_gen: usize,
     hl_error: usize,
     /// Runtime `hl_type*` per bytecode type index, copied from the
     /// interpreter's `CTypeFactory`. These are the identities compiled code
@@ -258,6 +262,10 @@ pub struct CraneliftTierContext {
     rethrow: usize,
     make_dyn: usize,
     dyn_castp: usize,
+    dyn_castd: usize,
+    dyn_castf: usize,
+    dyn_casti64: usize,
+    dyn_casti: usize,
     to_virtual: usize,
     /// `hlp_alloc_enum(type, construct) -> venum`. It sizes the allocation
     /// from the construct it is handed, so the type has to be the initialized
@@ -278,6 +286,27 @@ pub struct CraneliftTierContext {
     dyn_seti64: usize,
     dyn_seti: usize,
     dyn_setp: usize,
+    /// Boxed numeric coercions used by `SafeCast` from `Dynamic`/nullable to
+    /// a primitive. These accept the `vdynamic*` directly and return zero for
+    /// null, matching the LLVM tier's unboxing path.
+    dyn_todouble: usize,
+    dyn_tofloat: usize,
+    dyn_toi64: usize,
+    dyn_toint: usize,
+    /// Boxing-aware closure dispatch for a `CallClosure` whose operand is
+    /// statically `Dynamic`/nullable. Unlike a direct call, this derives the
+    /// concrete argument and return ABI from the closure's runtime `hl_type`.
+    dyn_call: usize,
+    /// Helpers used by HVIRTUAL method calls. Arguments cross the dynamic
+    /// boundary boxed in a `varray`; the result comes back as `vdynamic*` and
+    /// is unboxed by the same `dyn_to*` family above.
+    alloc_dyn_array: usize,
+    vcall_dyn: usize,
+    setup_trap_jit: usize,
+    remove_trap_jit: usize,
+    get_exc_value: usize,
+    clear_exc_value: usize,
+    get_obj_proto: usize,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -333,6 +362,14 @@ impl CraneliftTierContext {
             .resolve_function("std", "hlp_dyn_compare")
             .map(|p| p as usize)
             .unwrap_or(0);
+        let same_type = resolver
+            .resolve_function("std", "hlp_same_type")
+            .map(|p| p as usize)
+            .unwrap_or(0);
+        let hash_gen = resolver
+            .resolve_function("std", "hlp_hash_gen")
+            .map(|p| p as usize)
+            .unwrap_or(0);
         let hl_error = resolver
             .resolve_function("std", "hlp_error")
             .map(|p| p as usize)
@@ -352,6 +389,10 @@ impl CraneliftTierContext {
         let rethrow = helper("hlp_rethrow");
         let make_dyn = helper("hlp_make_dyn");
         let dyn_castp = helper("hlp_dyn_castp");
+        let dyn_castd = helper("hlp_dyn_castd");
+        let dyn_castf = helper("hlp_dyn_castf");
+        let dyn_casti64 = helper("hlp_dyn_casti64");
+        let dyn_casti = helper("hlp_dyn_casti");
         let to_virtual = helper("hl_to_virtual");
         let alloc_enum = helper("hlp_alloc_enum");
         let dyn_getd = helper("hlp_dyn_getd");
@@ -364,6 +405,18 @@ impl CraneliftTierContext {
         let dyn_seti64 = helper("hlp_dyn_seti64");
         let dyn_seti = helper("hlp_dyn_seti");
         let dyn_setp = helper("hlp_dyn_setp");
+        let dyn_todouble = helper("hlp_dyn_todouble");
+        let dyn_tofloat = helper("hlp_dyn_tofloat");
+        let dyn_toi64 = helper("hlp_dyn_toi64");
+        let dyn_toint = helper("hlp_dyn_toint");
+        let dyn_call = helper("hlp_dyn_call");
+        let alloc_dyn_array = helper("hlp_alloc_dyn_array");
+        let vcall_dyn = helper("hlp_vcall_dyn");
+        let setup_trap_jit = helper("hlp_setup_trap_jit");
+        let remove_trap_jit = helper("hlp_remove_trap_jit");
+        let get_exc_value = helper("hlp_get_exc_value");
+        let clear_exc_value = helper("hlp_clear_exc_value");
+        let get_obj_proto = helper("hl_get_obj_proto");
 
         Ok(Self {
             bytecode: bytecode as *const _,
@@ -377,7 +430,10 @@ impl CraneliftTierContext {
             strings: Mutex::new(HashMap::new()),
             bytes: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
+            field_hashes: Mutex::new(HashMap::new()),
             dyn_compare,
+            same_type,
+            hash_gen,
             hl_error,
             c_types: c_types.to_vec(),
             alloc_obj,
@@ -389,6 +445,10 @@ impl CraneliftTierContext {
             rethrow,
             make_dyn,
             dyn_castp,
+            dyn_castd,
+            dyn_castf,
+            dyn_casti64,
+            dyn_casti,
             to_virtual,
             alloc_enum,
             dyn_getd,
@@ -401,6 +461,18 @@ impl CraneliftTierContext {
             dyn_seti64,
             dyn_seti,
             dyn_setp,
+            dyn_todouble,
+            dyn_tofloat,
+            dyn_toi64,
+            dyn_toint,
+            dyn_call,
+            alloc_dyn_array,
+            vcall_dyn,
+            setup_trap_jit,
+            remove_trap_jit,
+            get_exc_value,
+            clear_exc_value,
+            get_obj_proto,
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
@@ -443,6 +515,66 @@ impl CraneliftTierContext {
             .get(type_idx)
             .map(|t| t.kind)
             .ok_or_else(|| anyhow!("type index {type_idx} out of range"))
+    }
+
+    /// Collision-resolved field hash, with its UTF-16 name registered in the
+    /// runtime's reverse lookup table for reflection and serialization.
+    pub fn field_name_hash(&self, string_idx: usize) -> Result<i32> {
+        if let Some(&hash) = self
+            .field_hashes
+            .lock()
+            .expect("Cranelift field hash cache poisoned")
+            .get(&string_idx)
+        {
+            return Ok(hash);
+        }
+        let name = self
+            .bytecode()
+            .strings
+            .get(string_idx)
+            .ok_or_else(|| anyhow!("dynamic field name {string_idx} out of range"))?;
+        let hash = if self.hash_gen == 0 {
+            crate::layout::field_name_hash(name)
+        } else {
+            let utf16: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            type HashGen = unsafe extern "C" fn(*const u16, bool) -> i32;
+            let hash_gen: HashGen = unsafe { std::mem::transmute(self.hash_gen) };
+            unsafe { hash_gen(utf16.as_ptr(), true) }
+        };
+        self.field_hashes
+            .lock()
+            .expect("Cranelift field hash cache poisoned")
+            .insert(string_idx, hash);
+        Ok(hash)
+    }
+
+    /// Compile-time hash of one field in an `HVIRTUAL` declaration.
+    ///
+    /// A virtual field opcode carries the field's slot, not its name. When
+    /// the wrapper has no resolved `vfields[slot]` pointer, HashLink falls
+    /// back to a dynamic lookup on the wrapped value using this hash. Keep
+    /// the lookup on the decoded type here so both Cranelift reads and writes
+    /// use exactly the hash the loader computed.
+    pub fn virtual_field_hash(&self, type_idx: usize, field: usize) -> Result<i32> {
+        self.bytecode()
+            .types
+            .get(type_idx)
+            .and_then(|t| t.virt.as_ref())
+            .and_then(|v| v.fields.get(field))
+            .map(|f| f.hashed_name)
+            .ok_or_else(|| anyhow!("virtual type {type_idx} has no field {field}"))
+    }
+
+    pub fn virtual_field_kind(&self, type_idx: usize, field: usize) -> Result<hl::hl_type_kind> {
+        let field_ty = self
+            .bytecode()
+            .types
+            .get(type_idx)
+            .and_then(|t| t.virt.as_ref())
+            .and_then(|v| v.fields.get(field))
+            .map(|f| f.type_.0)
+            .ok_or_else(|| anyhow!("virtual type {type_idx} has no field {field}"))?;
+        self.type_kind(field_ty)
     }
 
     /// Kind of the register at `reg` in a register-type table. The table is
@@ -563,6 +695,13 @@ impl CraneliftTierContext {
         Ok(self.dyn_compare)
     }
 
+    pub fn same_type_addr(&self) -> Result<usize> {
+        if self.same_type == 0 {
+            bail!("hlp_same_type unavailable");
+        }
+        Ok(self.same_type)
+    }
+
     pub fn hl_error_addr(&self) -> Result<usize> {
         if self.hl_error == 0 {
             bail!("hlp_error unavailable");
@@ -608,6 +747,33 @@ impl CraneliftTierContext {
         Ok(self.dyn_castp)
     }
 
+    /// HashLink's checked scalar cast helper and its return shape.
+    ///
+    /// Unlike the `hlp_dyn_to*` convenience wrappers, these accept a slot in
+    /// the source's native representation together with its static
+    /// `hl_type*`. That distinction matters for a checked cast such as
+    /// `String -> Int`: treating the String object as a boxed Dynamic would
+    /// happen to find its header, but raw pointer families have no such
+    /// header. The typed helpers reject every impossible source uniformly.
+    /// The boolean says whether the helper also takes the destination type
+    /// (`hlp_dyn_casti` does; the type-specific helpers do not).
+    pub fn scalar_cast_helper(&self, kind: hl::hl_type_kind) -> Result<(usize, DynShape, bool)> {
+        let (addr, shape, takes_dst_type) = match kind {
+            hl::hl_type_kind_HF64 => (self.dyn_castd, DynShape::F64, false),
+            hl::hl_type_kind_HF32 => (self.dyn_castf, DynShape::F32, false),
+            hl::hl_type_kind_HI64 => (self.dyn_casti64, DynShape::I64, false),
+            hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16 => (self.dyn_casti, DynShape::Int, true),
+            _ => bail!("type kind {kind} is not a SafeCast primitive"),
+        };
+        if addr == 0 {
+            bail!("checked scalar cast helper for kind {kind} unavailable");
+        }
+        Ok((addr, shape, takes_dst_type))
+    }
+
     /// `hl_to_virtual`, for `Cast::ToVirtual`.
     pub fn to_virtual_helper(&self) -> Result<usize> {
         if self.to_virtual == 0 {
@@ -639,15 +805,20 @@ impl CraneliftTierContext {
         Ok(self.alloc_enum)
     }
 
-    /// The runtime type pointer for a bytecode function, which a closure
-    /// carries so `hl_dyn_call` and friends can read its signature.
+    /// The runtime type pointer for a callable findex, which a closure carries
+    /// so `hl_dyn_call` and friends can read its signature. StaticClosure can
+    /// legally target either bytecode or a native (for example
+    /// `std@dyn_compare`), and both live in `functions_ptrs`/the findex space.
     pub fn func_type_ptr(&self, findex: usize) -> Result<usize> {
         let bc = self.bytecode();
-        let f = self
-            .func_index(findex)
-            .map(|i| &bc.functions[i])
-            .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
-        self.type_ptr(f.type_.0)
+        let type_idx = if let Some(i) = self.func_index(findex) {
+            bc.functions[i].type_.0
+        } else if let Some(i) = self.native_index(findex) {
+            bc.natives[i].type_.0
+        } else {
+            bail!("findex {findex} is not a callable function")
+        };
+        self.type_ptr(type_idx)
     }
 
     /// The `hlp_dyn_get*` accessor a value of `kind` is read through, and the
@@ -682,6 +853,83 @@ impl CraneliftTierContext {
             bail!("dynamic field setter for kind {kind} unavailable");
         }
         Ok((addr, shape))
+    }
+
+    /// Primitive unboxer for a `SafeCast` whose source is `HDYN`/`HNULL`.
+    pub fn dyn_unbox_helper(&self, kind: hl::hl_type_kind) -> Result<(usize, DynShape)> {
+        let (addr, shape) = match kind {
+            hl::hl_type_kind_HF64 => (self.dyn_todouble, DynShape::F64),
+            hl::hl_type_kind_HF32 => (self.dyn_tofloat, DynShape::F32),
+            hl::hl_type_kind_HI64 => (self.dyn_toi64, DynShape::I64),
+            hl::hl_type_kind_HI32
+            | hl::hl_type_kind_HBOOL
+            | hl::hl_type_kind_HUI8
+            | hl::hl_type_kind_HUI16 => (self.dyn_toint, DynShape::Int),
+            _ => bail!("type kind {kind} is not a SafeCast primitive"),
+        };
+        if addr == 0 {
+            bail!("dynamic unboxer for kind {kind} unavailable");
+        }
+        Ok((addr, shape))
+    }
+
+    /// Boxing-aware dynamic closure dispatch.
+    pub fn dyn_call_helper(&self) -> Result<usize> {
+        if self.dyn_call == 0 {
+            bail!("hlp_dyn_call unavailable");
+        }
+        Ok(self.dyn_call)
+    }
+
+    /// Allocate a dynamic argument array for an HVIRTUAL call.
+    pub fn alloc_dyn_array_helper(&self) -> Result<usize> {
+        if self.alloc_dyn_array == 0 {
+            bail!("hlp_alloc_dyn_array unavailable");
+        }
+        Ok(self.alloc_dyn_array)
+    }
+
+    /// Runtime HVIRTUAL dispatch using the method's concrete ABI.
+    pub fn vcall_dyn_helper(&self) -> Result<usize> {
+        if self.vcall_dyn == 0 {
+            bail!("hlp_vcall_dyn unavailable");
+        }
+        Ok(self.vcall_dyn)
+    }
+
+    pub fn setup_trap_helper(&self) -> Result<usize> {
+        if self.setup_trap_jit == 0 {
+            bail!("hlp_setup_trap_jit unavailable");
+        }
+        Ok(self.setup_trap_jit)
+    }
+
+    pub fn remove_trap_helper(&self) -> Result<usize> {
+        if self.remove_trap_jit == 0 {
+            bail!("hlp_remove_trap_jit unavailable");
+        }
+        Ok(self.remove_trap_jit)
+    }
+
+    pub fn get_exc_helper(&self) -> Result<usize> {
+        if self.get_exc_value == 0 {
+            bail!("hlp_get_exc_value unavailable");
+        }
+        Ok(self.get_exc_value)
+    }
+
+    pub fn clear_exc_helper(&self) -> Result<usize> {
+        if self.clear_exc_value == 0 {
+            bail!("hlp_clear_exc_value unavailable");
+        }
+        Ok(self.clear_exc_value)
+    }
+
+    pub fn get_obj_proto_helper(&self) -> Result<usize> {
+        if self.get_obj_proto == 0 {
+            bail!("hl_get_obj_proto unavailable");
+        }
+        Ok(self.get_obj_proto)
     }
 
     /// `hlp_alloc_obj`, `hlp_alloc_dynobj` and `hlp_alloc_virtual` — the three

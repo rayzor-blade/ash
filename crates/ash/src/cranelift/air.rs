@@ -36,8 +36,8 @@
 //! through a temporary, so the arithmetic that reaches CLIF is the unfused
 //! arithmetic the bytecode had.
 
-use std::collections::HashMap;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::air_pipeline::{self, AirOptLevel, AirPassOptions, AshModule};
@@ -280,10 +280,7 @@ fn retier_alloc(
 /// The already-allocated re-tier state for `findex`, mapped onto `block_pcs`
 /// (for the OSR-entry compile, which runs after the main compile allocated
 /// the slots). Empty when the function has none.
-pub(super) fn retier_state_for(
-    findex: usize,
-    block_pcs: &[usize],
-) -> (HashMap<u32, u64>, u64) {
+pub(super) fn retier_state_for(findex: usize, block_pcs: &[usize]) -> (HashMap<u32, u64>, u64) {
     let guard = RETIER.lock().expect("retier mutex poisoned");
     let Some(st) = guard.as_ref().and_then(|m| m.get(&findex)) else {
         return (HashMap::new(), 0);
@@ -388,6 +385,21 @@ pub fn publish_retier_target(findex: usize, pc: usize, code: u64) -> bool {
     true
 }
 
+/// Serialized AIR V2 loop-header sites carrying Cranelift re-tier polls.
+///
+/// Hybrid execution normally discovers these sites from interpreted
+/// back-edges. Compiled-only JIT has no interpreted frames, so its LLVM
+/// promotion path asks the baseline directly which OSR entries can be
+/// published back into the running Cranelift body.
+pub fn retier_sites(findex: usize) -> Vec<usize> {
+    let guard = RETIER.lock().expect("retier mutex poisoned");
+    guard
+        .as_ref()
+        .and_then(|m| m.get(&findex))
+        .map(|state| state.slots.keys().copied().collect())
+        .unwrap_or_default()
+}
+
 pub fn codegen_from_air() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| {
@@ -421,12 +433,12 @@ fn pinned_out(findex: usize) -> Option<&'static str> {
     None
 }
 
-/// Lower `findex` by whichever path can take it.
+/// Lower `findex` directly from optimized AIR V2.
 ///
-/// The AIR codegen is tried first and the opcode lowerer is the fallback, per
-/// function. Both produce the same `LoweredFunction`, so a function either
-/// path declines still reaches the LLVM tier exactly as before — the set of
-/// functions this tier compiles can only grow.
+/// There is deliberately no fallback to the classic opcode emitter. A
+/// Cranelift decline is returned to the tier ladder, whose next backend is
+/// LLVM; converting AIR V2 back into HashLink opcodes here would silently
+/// restore the legacy architecture this path replaced.
 pub fn lower_best(
     backend: &super::backend::AshCraneliftBackend,
     ctx: &CraneliftTierContext,
@@ -438,48 +450,35 @@ pub fn lower_best(
     if let Some(reason) = pinned_out(findex) {
         anyhow::bail!("{reason}");
     }
-    if codegen_from_air() {
-        if let Some(l) = try_air_codegen(backend, ctx, findex) {
-            crate::profile::count("cranelift air-codegen", 1);
-            return Ok(l);
-        }
-    }
-    crate::profile::count("cranelift opcode-lower", 1);
-    super::lower::lower_function(backend, ctx, findex)
+    crate::profile::count("cranelift air-codegen", 1);
+    lower_air_codegen(backend, ctx, findex)
 }
 
-/// The AIR codegen attempt, or `None` with the reason logged.
-///
-/// Every failure here is a decline, never an error the caller sees: the
-/// opcode lowerer is behind it, and behind that the LLVM tier.
-fn try_air_codegen(
+/// One AIR V2 codegen attempt. Returning the full error is important: forced
+/// Cranelift mode reports the exact unsupported shape, while auto mode can
+/// hand the function to LLVM without losing the reason.
+fn lower_air_codegen(
     backend: &super::backend::AshCraneliftBackend,
     ctx: &CraneliftTierContext,
     findex: usize,
-) -> Option<super::lower::LoweredFunction> {
+) -> anyhow::Result<super::lower::LoweredFunction> {
     let cfg = config();
     let bytecode = ctx.bytecode();
-    let func = ctx.func_index(findex).map(|i| &bytecode.functions[i])?;
-
-    let decline = |reason: String| -> Option<super::lower::LoweredFunction> {
-        if cfg.log {
-            eprintln!("[air] findex={findex} codegen declined: {reason}");
-        }
-        None
-    };
+    let func_idx = ctx
+        .func_index(findex)
+        .ok_or_else(|| anyhow::anyhow!("findex {findex} is not a bytecode function"))?;
+    let func = &bytecode.functions[func_idx];
 
     // Signature checks only. The opcode gate is not the right screen here:
     // this path never compiles the serialized array, so refusing a function
     // for an opcode that only exists in a serialization it does not read
     // would decline work it can actually do.
     if let Some(r) = super::lower::signature_reject_reason(bytecode, func) {
-        return decline(r);
+        anyhow::bail!("{r}");
     }
 
-    let opt = match air_pipeline::optimized(ctx.air_module(), func) {
-        Ok(o) => o,
-        Err(e) => return decline(format!("{} failed: {}", e.stage, e.brief())),
-    };
+    let opt = air_pipeline::optimized(ctx.air_module(), func)
+        .map_err(|e| anyhow::anyhow!("{} failed: {}", e.stage, e.brief()))?;
 
     // Re-tier exits: one polled slot per OSR-eligible loop header, gated on
     // the same eligibility the LLVM entry builder uses — a slot nothing can
@@ -511,11 +510,14 @@ fn try_air_codegen(
         (HashMap::new(), 0)
     };
 
-    match super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits, osr_buf)
-    {
-        Ok(l) => Some(l),
-        Err(e) => decline(format!("{e:#}")),
+    let result =
+        super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits, osr_buf);
+    if let Err(error) = &result {
+        if cfg.log {
+            eprintln!("[air] findex={findex} codegen declined: {error:#}");
+        }
     }
+    result
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

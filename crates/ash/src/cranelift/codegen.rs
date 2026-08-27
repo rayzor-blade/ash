@@ -24,21 +24,11 @@
 //!   the object type AIR resolved at lowering time, so the offset does not
 //!   depend on the destination register's declared type being accurate.
 //!
-//! ## What is not here yet
-//!
-//! Exceptions. `Trap` is a terminator with a normal and a handler successor,
-//! which is the shape a backend wants — but HL's runtime side is setjmp /
-//! longjmp, and a longjmp back into a Cranelift frame needs the same
-//! treatment the LLVM tier spells `returns_twice` plus `optnone`. Until that
-//! is designed, [`reject_reason`] declines any function containing `Trap`,
-//! `EndTrap`, `Throw` or `Rethrow`, exactly as the opcode gate does.
-//!
-//! The object model beyond fields and arrays — `New`, closures, the
-//! dynamic accessors — needs runtime `hl_type*` pointers and allocation
-//! helpers that [`CraneliftTierContext`] does not carry. Declined for now, and
-//! named individually by [`reject_reason`] so the report says which.
+//! The emitter is exhaustive over AIR V2's instruction and terminator enums.
+//! [`reject_reason`] remains as a compile-time tripwire: adding a new AIR V2
+//! instruction requires classifying it before this backend will build.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
@@ -56,9 +46,20 @@ use air::v2::ir::{
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
-use super::{abi_class, entry_return_class, AbiClass};
+use super::{abi_class, argument_abi_class, entry_return_class, AbiClass};
 use crate::hl_bindings as hl;
 use crate::jit::stub_bridge::{ash_jit_call_stub, STUB_SENTINEL_LIMIT};
+
+// Cranelift has no floating remainder instruction. Keeping these helpers in
+// Rust avoids depending on a platform-specific libm symbol name while still
+// giving generated code the exact IEEE remainder operation Rust/LLVM use.
+extern "C" fn ash_fmod_f32(a: f32, b: f32) -> f32 {
+    a % b
+}
+
+extern "C" fn ash_fmod_f64(a: f64, b: f64) -> f64 {
+    a % b
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pre-flight gate
@@ -76,20 +77,6 @@ pub fn reject_reason(f: &AirFunction) -> Option<String> {
             if let Some(why) = instr_reject(i) {
                 return Some(format!("air_instr {why}"));
             }
-        }
-        let why = match &b.term {
-            Terminator::Ret { .. }
-            | Terminator::Jump { .. }
-            | Terminator::CondJump { .. }
-            | Terminator::Switch { .. } => None,
-            // Throw and Rethrow lower to a helper that longjmps; only the
-            // trap REGION (`Trap`/`EndTrap`) still needs machinery this tier
-            // does not have.
-            Terminator::Throw { .. } | Terminator::Rethrow { .. } => None,
-            Terminator::Trap { .. } => Some("Trap"),
-        };
-        if let Some(why) = why {
-            return Some(format!("air_term {why}"));
         }
     }
     None
@@ -170,38 +157,29 @@ fn instr_reject(i: &Instr) -> Option<&'static str> {
             CastKind::ToDyn | CastKind::SafeCast | CastKind::ToVirtual => None,
         },
 
-        // The closure family lowers here; see `emit_static_closure` and
-        // `emit_call_closure`. `VirtualClosure` still needs the runtime
-        // field lookup the object model does, so it stays out.
-        Instr::VirtualClosure { .. } => Some("VirtualClosure"),
-        Instr::EndTrap { .. } => Some("EndTrap"),
-        // Out until ash decides what `RefData` means. The LLVM tier reads a
-        // pointer out of the source at offset 8 (`jit/function.rs`), both
-        // interpreters copy the source through unchanged, and AIR itself
-        // classifies it `Effect::ReadMem` / `AliasClass::Any` — three
-        // answers, two of which have to be wrong. Emitting either one here
-        // would make this tier disagree with a tier it is checked against,
-        // and a silent pointer-shaped disagreement is the worst kind.
-        Instr::RefData { .. } => Some("RefData"),
-        Instr::Asm { .. } => Some("Asm"),
+        Instr::VirtualClosure { .. }
+        | Instr::EndTrap { .. }
+        | Instr::RefData { .. }
+        | Instr::Asm { .. } => None,
     }
 }
 
-/// Kinds whose allocations begin with the `hl_type*` the runtime reads back
-/// out of them. Everything else — bytes, closures, arrays, type pointers
-/// themselves — either has no such word or has one the decoded table already
-/// names, which is why `GetType` answers those from the register's declared
-/// type instead of from memory.
+/// Kinds whose run-time values begin with the `hl_type*` read by OGetType.
+/// Raw pointer families such as bytes, refs, abstracts, and type pointers do
+/// not have that header. Closures and arrays do; omitting them made valid AIR
+/// V2 functions decline even though their layout is unambiguous.
 fn header_typed(kind: hl::hl_type_kind) -> bool {
     matches!(
         kind,
         hl::hl_type_kind_HDYN
+            | hl::hl_type_kind_HFUN
             | hl::hl_type_kind_HOBJ
-            | hl::hl_type_kind_HSTRUCT
+            | hl::hl_type_kind_HARRAY
             | hl::hl_type_kind_HVIRTUAL
             | hl::hl_type_kind_HENUM
             | hl::hl_type_kind_HDYNOBJ
             | hl::hl_type_kind_HNULL
+            | hl::hl_type_kind_HMETHOD
     )
 }
 
@@ -246,7 +224,7 @@ pub fn lower_air_function(
 
     let mut sig = backend.make_signature();
     for a in &tf.args {
-        let ty = abi_class(ctx.type_kind(a.0)?)
+        let ty = argument_abi_class(ctx.type_kind(a.0)?)
             .clif_type()
             .ok_or_else(|| anyhow!("void argument in entry signature"))?;
         sig.params.push(AbiParam::new(ty));
@@ -273,9 +251,11 @@ pub fn lower_air_function(
         let mut cg = AirCodegen {
             ctx,
             f: air,
+            findex,
             b: def.builder(),
             fcfg,
             vals: vec![None; air.values.len()],
+            use_counts: air.use_counts(),
             cells: Vec::new(),
             blocks: vec![None; air.blocks.len()],
             native_refs,
@@ -373,9 +353,11 @@ pub fn compile_osr_entry(
         let mut cg = AirCodegen {
             ctx,
             f: air,
+            findex,
             b: def.builder(),
             fcfg,
             vals: vec![None; air.values.len()],
+            use_counts: air.use_counts(),
             cells: Vec::new(),
             blocks: vec![None; air.blocks.len()],
             native_refs,
@@ -420,7 +402,7 @@ fn import_natives(
         };
         let mut sig = backend.make_signature();
         for a in &imp.args {
-            let ty = abi_class(ctx.type_kind(a.0 as usize)?)
+            let ty = argument_abi_class(ctx.type_kind(a.0 as usize)?)
                 .clif_type()
                 .ok_or_else(|| anyhow!("void argument to native {}", imp.symbol()))?;
             sig.params.push(AbiParam::new(ty));
@@ -446,13 +428,19 @@ fn import_natives(
 struct AirCodegen<'a, 'b> {
     ctx: &'a CraneliftTierContext,
     f: &'a AirFunction,
+    findex: usize,
     b: FunctionBuilder<'b>,
     /// Captured from the def before `builder()` borrows it; `finalize` needs
     /// it to size pointer-width operations.
     fcfg: cranelift_codegen::isa::TargetFrontendConfig,
-    /// One CLIF value per AIR value. `None` for values of void type, which
-    /// have no machine representation and are never legally used.
+    /// One CLIF value per AIR value. Most values use their declared machine
+    /// representation. An HVOID value that survives de-SSA bookkeeping uses
+    /// a zero I64 word; see `has_machine_value`.
     vals: Vec<Option<Value>>,
+    /// HVOID normally has no machine representation, but de-SSA cell writes
+    /// can still read the destination of a void call. Those bookkeeping uses
+    /// receive a zero word so AIR storage remains defined.
+    use_counts: Vec<usize>,
     /// One stack slot per AIR cell.
     cells: Vec<StackSlot>,
     /// CLIF block per *reachable* AIR block. Unreachable AIR blocks get none;
@@ -488,7 +476,7 @@ impl AirCodegen<'_, '_> {
                 // declining the kernel for it closed the Cranelift OSR door,
                 // and the loop interpreted while a promote-sized LLVM
                 // compile ran.
-                if self.is_void(dst) {
+                if !self.has_machine_value(dst) {
                     continue;
                 }
                 let ty = self.value_clif_ty(dst)?;
@@ -518,17 +506,17 @@ impl AirCodegen<'_, '_> {
             if bid.0 != 0 {
                 self.b.switch_to_block(blk);
             }
-            if let (Some(&slot), Some(cfg)) =
-                (self.osr_exits.get(&bid.0), dom_cfg.as_ref())
-            {
+            if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
                 self.emit_retier_poll(bid, slot, cfg)?;
             }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
-                self.emit(&instr)?;
+                self.emit(&instr)
+                    .with_context(|| format!("AIR b{} instruction {}: {instr:?}", bid.0, ii))?;
             }
             let term = self.f.blocks[bid.idx()].term.clone();
-            self.emit_term(bid, &term)?;
+            self.emit_term(bid, &term)
+                .with_context(|| format!("AIR b{} terminator: {term:?}", bid.0))?;
         }
         self.b.seal_all_blocks();
         Ok(())
@@ -577,7 +565,7 @@ impl AirCodegen<'_, '_> {
 
         let mut image: HashMap<u32, ValueId> = HashMap::new();
         for phi in &self.f.blocks[header.idx()].phis {
-            if !self.is_void(phi.dst) {
+            if self.has_machine_value(phi.dst) {
                 image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
             }
         }
@@ -586,13 +574,13 @@ impl AirCodegen<'_, '_> {
             b = cfg.dom.idom[b];
             for ins in self.f.blocks[b].instrs.iter().rev() {
                 if let Some(d) = ins.dst() {
-                    if !self.is_void(d) && self.vals[d.idx()].is_some() {
+                    if self.has_machine_value(d) && self.vals[d.idx()].is_some() {
                         image.entry(self.f.value_reg(d)).or_insert(d);
                     }
                 }
             }
             for phi in &self.f.blocks[b].phis {
-                if !self.is_void(phi.dst) {
+                if self.has_machine_value(phi.dst) {
                     image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
                 }
             }
@@ -667,7 +655,7 @@ impl AirCodegen<'_, '_> {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             for pi in 0..self.f.blocks[bid.idx()].phis.len() {
                 let dst = self.f.blocks[bid.idx()].phis[pi].dst;
-                if self.is_void(dst) {
+                if !self.has_machine_value(dst) {
                     continue; // no machine representation — see run()
                 }
                 let ty = self.value_clif_ty(dst)?;
@@ -684,7 +672,7 @@ impl AirCodegen<'_, '_> {
         // Cells are registers too; their current values are in the buffer.
         for ci in 0..self.f.cells.len() {
             let cell = self.f.cells[ci].clone();
-            let ty = self.clif_ty(cell.ty)?;
+            let ty = self.cell_clif_ty(cell.ty)?;
             let slot = self.b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 8,
@@ -743,7 +731,7 @@ impl AirCodegen<'_, '_> {
         for v in 0..self.f.values.len() {
             if live_in[v] {
                 let vid = ValueId(v as u32);
-                if self.is_void(vid) {
+                if !self.has_machine_value(vid) {
                     continue;
                 }
                 // Used before its in-region definition in emission order:
@@ -770,12 +758,10 @@ impl AirCodegen<'_, '_> {
         // Into the header, phi args from the buffer.
         let mut args: Vec<BlockArg> = Vec::new();
         for phi in &self.f.blocks[header].phis {
-            if self.is_void(phi.dst) {
+            if !self.has_machine_value(phi.dst) {
                 continue; // void phis have no block parameter
             }
-            let ty = abi_class(self.ctx.type_kind(self.f.value_ty(phi.dst).0 as usize)?)
-                .clif_type()
-                .ok_or_else(|| anyhow!("void phi"))?;
+            let ty = self.value_clif_ty(phi.dst)?;
             let reg = self.f.value_reg(phi.dst);
             let v = self.load_osr_slot(buf, reg, ty)?;
             args.push(BlockArg::Value(v));
@@ -791,9 +777,7 @@ impl AirCodegen<'_, '_> {
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             self.b.switch_to_block(blk);
-            if let (Some(&slot), Some(cfg)) =
-                (self.osr_exits.get(&bid.0), dom_cfg.as_ref())
-            {
+            if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
                 self.emit_retier_poll(bid, slot, cfg)?;
             }
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
@@ -814,12 +798,18 @@ impl AirCodegen<'_, '_> {
     fn load_osr_slot(&mut self, buf: Value, reg: u32, ty: Type) -> Result<Value> {
         let off = (reg as i32) * 8;
         if ty == types::F64 {
-            return Ok(self.b.ins().load(types::F64, MemFlagsData::trusted(), buf, off));
+            return Ok(self
+                .b
+                .ins()
+                .load(types::F64, MemFlagsData::trusted(), buf, off));
         }
         if ty == types::F32 {
             bail!("f32 register in an OSR frame");
         }
-        let wide = self.b.ins().load(types::I64, MemFlagsData::trusted(), buf, off);
+        let wide = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), buf, off);
         self.coerce(wide, ty)
     }
 
@@ -872,7 +862,7 @@ impl AirCodegen<'_, '_> {
         let params: Vec<Value> = self.b.block_params(entry).to_vec();
 
         for (ci, cell) in self.f.cells.iter().enumerate() {
-            let ty = self.clif_ty(cell.ty)?;
+            let ty = self.cell_clif_ty(cell.ty)?;
             let slot = self.b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 8,
@@ -901,8 +891,22 @@ impl AirCodegen<'_, '_> {
             .ok_or_else(|| anyhow!("type {} has no machine type", tr.0))
     }
 
+    /// Trap exception registers are typed HVOID in some bytecode even though
+    /// the trap edge writes a `vdynamic*` into them before the handler reads
+    /// the cell. Values of HVOID still have no representation; only pinned
+    /// storage needs this word-shaped escape hatch.
+    fn cell_clif_ty(&self, tr: AirTypeRef) -> Result<Type> {
+        Ok(abi_class(self.ctx.type_kind(tr.0 as usize)?)
+            .clif_type()
+            .unwrap_or(types::I64))
+    }
+
     fn value_clif_ty(&self, v: ValueId) -> Result<Type> {
-        self.clif_ty(self.f.value_ty(v))
+        if self.is_void(v) && self.use_counts[v.idx()] != 0 {
+            Ok(types::I64)
+        } else {
+            self.clif_ty(self.f.value_ty(v))
+        }
     }
 
     fn class_of(&self, v: ValueId) -> Result<AbiClass> {
@@ -918,14 +922,39 @@ impl AirCodegen<'_, '_> {
             .unwrap_or(false)
     }
 
-    fn get(&self, v: ValueId) -> Result<Value> {
-        self.vals[v.idx()].ok_or_else(|| anyhow!("use of undefined AIR value v{}", v.0))
+    /// HVOID is normally representation-less. AIR V2 can nevertheless keep
+    /// a void call result alive long enough to write its de-SSA cell (notably
+    /// around trap regions). Give only those actually-used values a raw zero
+    /// word so every AIR use has a definition without changing the function
+    /// ABI or the semantics of a void result.
+    fn has_machine_value(&self, v: ValueId) -> bool {
+        !self.is_void(v) || self.use_counts[v.idx()] != 0
     }
 
-    /// Define `dst`, coercing to its declared machine type. Void destinations
-    /// are dropped: they have no representation and no legal use.
+    fn define_void_word_if_used(&mut self, dst: ValueId) {
+        if self.is_void(dst) && self.use_counts[dst.idx()] != 0 {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.vals[dst.idx()] = Some(zero);
+        }
+    }
+
+    fn get(&self, v: ValueId) -> Result<Value> {
+        self.vals[v.idx()].ok_or_else(|| {
+            anyhow!(
+                "use of undefined AIR value v{} (type {}, reg {}, uses {})",
+                v.0,
+                self.f.value_ty(v).0,
+                self.f.value_reg(v),
+                self.use_counts[v.idx()]
+            )
+        })
+    }
+
+    /// Define `dst`, coercing to its declared machine type. Used HVOID
+    /// bookkeeping destinations receive their canonical zero word.
     fn def(&mut self, dst: ValueId, v: Value) -> Result<()> {
         if self.is_void(dst) {
+            self.define_void_word_if_used(dst);
             return Ok(());
         }
         let want = self.value_clif_ty(dst)?;
@@ -964,7 +993,7 @@ impl AirCodegen<'_, '_> {
             // Bound in `bind_entry` for arguments; locals start at zero, the
             // same as the interpreter's register file.
             Instr::Param { dst, reg } => {
-                if self.is_void(*dst) {
+                if !self.has_machine_value(*dst) {
                     return Ok(());
                 }
                 let ty = self.value_clif_ty(*dst)?;
@@ -1023,6 +1052,15 @@ impl AirCodegen<'_, '_> {
                 self.def(*dst, v)?;
             }
             Instr::Null { dst } => {
+                // Haxe constructors commonly carry an unused HVOID Null, but
+                // trap handlers also use an HVOID-typed null as the raw zero
+                // argument of an untyped call. Materialize that latter shape
+                // as one word; dropping every HVOID Null left its handler use
+                // undefined (Base2D findex 4422).
+                if self.is_void(*dst) {
+                    self.define_void_word_if_used(*dst);
+                    return Ok(());
+                }
                 let ty = self.value_clif_ty(*dst)?;
                 if ty.is_float() {
                     bail!("Null into a float value");
@@ -1088,7 +1126,9 @@ impl AirCodegen<'_, '_> {
             // A stdlib operation the IR knows outright — one machine
             // sequence, no FFI, and `Effect::Pure` upstream means LICM was
             // free to move it (and the loads around it).
-            Instr::Intrinsic { kind, dst, args, .. } => {
+            Instr::Intrinsic {
+                kind, dst, args, ..
+            } => {
                 if *kind == air::v2::ir::IntrinsicKind::PtrCompare {
                     // Three-way identity compare, ash_std's hlp_ptr_compare
                     // verbatim: (a > b) as i32 - (a < b) as i32, unsigned —
@@ -1102,8 +1142,7 @@ impl AirCodegen<'_, '_> {
                     let v = self.b.ins().isub(gt32, lt32);
                     self.def(*dst, v)?;
                 } else {
-                    let x =
-                        self.get(*args.first().ok_or_else(|| anyhow!("intrinsic arity"))?)?;
+                    let x = self.get(*args.first().ok_or_else(|| anyhow!("intrinsic arity"))?)?;
                     let v = self.emit_native_intrinsic(intrinsic_to_native(*kind), x);
                     self.def(*dst, v)?;
                 }
@@ -1115,7 +1154,10 @@ impl AirCodegen<'_, '_> {
                 }
                 let addr = self.ctx.global_slot_addr(*global)?;
                 let base = self.b.ins().iconst(types::I64, addr as i64);
-                let v = self.b.ins().load(types::I64, MemFlagsData::trusted(), base, 0);
+                let v = self
+                    .b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), base, 0);
                 self.def(*dst, v)?;
             }
             Instr::SetGlobal { global, src } => {
@@ -1136,10 +1178,7 @@ impl AirCodegen<'_, '_> {
                 obj_ty,
                 field,
             } => {
-                let (off, fty) = self.field_offset(*obj_ty, *field)?;
-                let base = self.get(*obj)?;
-                let raw = self.b.ins().load(fty, MemFlagsData::trusted(), base, off);
-                self.def(*dst, raw)?;
+                self.emit_field_get(*dst, *obj, *obj_ty, *field)?;
             }
             Instr::FieldSet {
                 obj,
@@ -1147,13 +1186,7 @@ impl AirCodegen<'_, '_> {
                 field,
                 src,
             } => {
-                let (off, fty) = self.field_offset(*obj_ty, *field)?;
-                let base = self.get(*obj)?;
-                let raw = self.get(*src)?;
-                // Narrow to the field's own width first, so the store cannot
-                // spill into whatever is laid out next to it.
-                let v = self.coerce(raw, fty)?;
-                self.b.ins().store(MemFlagsData::trusted(), v, base, off);
+                self.emit_field_set(*obj, *obj_ty, *field, *src)?;
             }
 
             Instr::MemGet {
@@ -1188,24 +1221,26 @@ impl AirCodegen<'_, '_> {
                 self.def(*dst, v)?;
             }
 
-            // The type a value carries at run time, which only the boxed
-            // kinds carry at all — word 0 of an `hl.Bytes` is its first
-            // eight data bytes, not a type pointer. Kinds without a header
-            // answer with the register's declared type, which is what both
-            // interpreters do; the LLVM tier instead loads word 0 from every
-            // pointer, so the kinds where the two part company decline here
-            // rather than have this tier pick one of them.
+            // The type a value carries at run time. Header-bearing values
+            // yield word zero, raw pointer/scalar families yield their static
+            // type, and a null header-bearing value is HashLink's HVOID type.
             Instr::GetType { dst, src } => {
                 let src_ty = self.f.value_ty(*src).0 as usize;
                 let kind = self.ctx.type_kind(src_ty)?;
-                if !header_typed(kind) && abi_class(kind) == AbiClass::Ptr {
-                    bail!("GetType on type kind {kind}: reference tiers disagree");
-                }
                 let stat = self.ctx.type_ptr(src_ty)?;
                 let stat = self.b.ins().iconst(types::I64, stat as i64);
                 let v = if header_typed(kind) {
                     let p = self.get(*src)?;
-                    self.guarded_header_load(p, types::I64, stat)?
+                    let void_ty = self
+                        .ctx
+                        .bytecode()
+                        .types
+                        .iter()
+                        .position(|t| t.kind == hl::hl_type_kind_HVOID)
+                        .ok_or_else(|| anyhow!("bytecode has no HVOID type"))?;
+                    let void_ty = self.ctx.type_ptr(void_ty)?;
+                    let void_ty = self.b.ins().iconst(types::I64, void_ty as i64);
+                    self.guarded_header_load(p, types::I64, void_ty)?
                 } else {
                     stat
                 };
@@ -1254,26 +1289,19 @@ impl AirCodegen<'_, '_> {
                 self.def(*dst, v)?;
             }
 
-            Instr::CallMethod { dst, field, args } => {
-                self.emit_call_method(*dst, *field, args)?
-            }
+            Instr::CallMethod { dst, field, args } => self.emit_call_method(*dst, *field, args)?,
 
-            Instr::StaticClosure { dst, fun } => {
-                self.emit_static_closure(*dst, *fun, None)?
-            }
+            Instr::StaticClosure { dst, fun } => self.emit_static_closure(*dst, *fun, None)?,
             Instr::InstanceClosure { dst, fun, obj } => {
                 self.emit_static_closure(*dst, *fun, Some(*obj))?
             }
-            Instr::CallClosure { dst, fun, args } => {
-                self.emit_call_closure(*dst, *fun, args)?
+            Instr::VirtualClosure { dst, obj, field } => {
+                self.emit_virtual_closure(*dst, *obj, *field)?
             }
+            Instr::CallClosure { dst, fun, args } => self.emit_call_closure(*dst, *fun, args)?,
 
-            Instr::DynGet { dst, obj, field } => {
-                self.emit_dyn_get(*dst, *obj, *field)?
-            }
-            Instr::DynSet { obj, field, src } => {
-                self.emit_dyn_set(*obj, *field, *src)?
-            }
+            Instr::DynGet { dst, obj, field } => self.emit_dyn_get(*dst, *obj, *field)?,
+            Instr::DynSet { obj, field, src } => self.emit_dyn_set(*obj, *field, *src)?,
 
             // venum: `t` at 0, `index` at 8, then the live construct's
             // parameters. `MakeEnum` is the allocation plus one store per
@@ -1350,19 +1378,31 @@ impl AirCodegen<'_, '_> {
             }
             Instr::CellGet { dst, cell } => {
                 let slot = self.cell_slot(*cell)?;
-                let ty = self.clif_ty(self.f.cells[cell.idx()].ty)?;
+                let ty = self.cell_clif_ty(self.f.cells[cell.idx()].ty)?;
                 let v = self.b.ins().stack_load(types::I64, ty, slot, 0);
                 self.def(*dst, v)?;
             }
             Instr::CellSet { cell, src } => {
                 let slot = self.cell_slot(*cell)?;
-                let ty = self.clif_ty(self.f.cells[cell.idx()].ty)?;
+                let ty = self.cell_clif_ty(self.f.cells[cell.idx()].ty)?;
                 let raw = self.get(*src)?;
                 let v = self.coerce(raw, ty)?;
                 self.b.ins().stack_store(types::I64, v, slot, 0);
             }
             Instr::CellIncr { cell } => self.emit_cell_step(*cell, 1)?,
             Instr::CellDecr { cell } => self.emit_cell_step(*cell, -1)?,
+
+            // The trap terminator arms the runtime context. Reaching EndTrap
+            // on the normal path pops it; the exception path was already
+            // popped by `hlp_throw` before its longjmp.
+            Instr::EndTrap { .. } => {
+                let helper = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.remove_trap_helper()? as i64);
+                let sig = self.helper_sigref(&[], None);
+                self.b.ins().call_indirect(sig, helper, &[]);
+            }
 
             Instr::Unref { dst, src } => {
                 let ty = self.value_clif_ty(*dst)?;
@@ -1376,17 +1416,48 @@ impl AirCodegen<'_, '_> {
                 self.b.ins().store(MemFlagsData::trusted(), v, p, 0);
             }
 
-            // A byte displacement, not an element one: the LLVM tier indexes
-            // an `i8` GEP and the interpreter adds the raw integer. The
-            // offset is a signed 32-bit HL int, so it is sign-extended —
-            // a negative displacement walks backwards rather than to the top
-            // of the address space.
+            // HashLink defines ORefOffset in elements of the destination
+            // HREF's parameter type (`hl_type_size(dst->t->tparam)`), not in
+            // bytes. This distinction was hidden while every Ash engine made
+            // the same raw-byte mistake; pointer and i64 refs happened to be
+            // the only common cases where a factor of eight exposed it.
             Instr::RefOffset { dst, base, offset } => {
                 let raw = self.get(*base)?;
                 let p = self.coerce(raw, types::I64)?;
-                let off = self.index_as_addr(*offset)?;
+                let index = self.index_as_addr(*offset)?;
+                let dst_ty = self.f.value_ty(*dst).0 as usize;
+                let href =
+                    self.ctx.bytecode().types.get(dst_ty).ok_or_else(|| {
+                        anyhow!("RefOffset destination type {dst_ty} out of range")
+                    })?;
+                if href.kind != hl::hl_type_kind_HREF {
+                    bail!("RefOffset destination type kind {} is not HREF", href.kind);
+                }
+                let inner = href
+                    .tparam
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("RefOffset HREF type {dst_ty} has no parameter"))?;
+                let inner_kind = self.ctx.type_kind(inner.0)?;
+                let stride = crate::layout::array_elem_size(inner_kind) as i64;
+                let off = if stride == 1 {
+                    index
+                } else {
+                    self.b.ins().imul_imm(index, stride)
+                };
                 let v = self.b.ins().iadd(p, off);
                 self.def(*dst, v)?;
+            }
+
+            // ORefData points at the first element after the varray header.
+            // It does not dereference offset 8 (the former LLVM behavior),
+            // which is part of the header and corrupted pointer atomics.
+            Instr::RefData { dst, src } => {
+                let base = self.coerce(self.get(*src)?, types::I64)?;
+                let data = self
+                    .b
+                    .ins()
+                    .iadd_imm(base, std::mem::size_of::<hl::varray>() as i64);
+                self.def(*dst, data)?;
             }
 
             // Upstream OAssert is hl_assert(): hl_error("assert"), a
@@ -1411,6 +1482,14 @@ impl AirCodegen<'_, '_> {
             // can see. The interpreter drops it too.
             Instr::Prefetch { .. } => {}
 
+            // Haxe uses the non-zero OAsm modes as backend register hints;
+            // neither interpreter observes them. Cranelift owns its register
+            // allocation, so those hints are intentionally inert here. Mode
+            // zero embeds target-specific instruction bytes in HashLink's x86
+            // JIT and has no portable AIR meaning; treating it as inert is the
+            // only architecture-independent behavior and matches interp.
+            Instr::Asm { .. } => {}
+
             other => bail!("unhandled AIR instruction {:?}", instr_reject(other)),
         }
         Ok(())
@@ -1418,7 +1497,7 @@ impl AirCodegen<'_, '_> {
 
     fn emit_cell_step(&mut self, cell: CellId, delta: i64) -> Result<()> {
         let slot = self.cell_slot(cell)?;
-        let ty = self.clif_ty(self.f.cells[cell.idx()].ty)?;
+        let ty = self.cell_clif_ty(self.f.cells[cell.idx()].ty)?;
         if ty.is_float() {
             bail!("Incr/Decr on a float cell");
         }
@@ -1435,11 +1514,148 @@ impl AirCodegen<'_, '_> {
             .ok_or_else(|| anyhow!("cell {} out of range", cell.0))
     }
 
-    /// Compile-time byte offset and machine type of a field.
-    ///
-    /// Declines rather than falling back to a runtime lookup: the kinds that
-    /// need one (`HVIRTUAL`, `HDYNOBJ`, packed layouts) are exactly what the
-    /// LLVM tier is there for.
+    /// Emit an AIR field read. Ordinary objects use their compile-time
+    /// layout; virtuals use their resolved field pointer and fall back to a
+    /// name-hash lookup on the wrapped value, matching HashLink's vvirtual
+    /// representation and the LLVM tier.
+    fn emit_field_get(
+        &mut self,
+        dst: ValueId,
+        obj: ValueId,
+        obj_ty: AirTypeRef,
+        field: usize,
+    ) -> Result<()> {
+        let type_index = obj_ty.0 as usize;
+        match self.ctx.type_kind(type_index)? {
+            hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
+                let (off, fty) = self.field_offset(obj_ty, field)?;
+                let base = self.get(obj)?;
+                let raw = self.b.ins().load(fty, MemFlagsData::trusted(), base, off);
+                self.def(dst, raw)
+            }
+            hl::hl_type_kind_HVIRTUAL => {
+                let base = self.get(obj)?;
+                let field_ptr = self.b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    base,
+                    (24 + field * std::mem::size_of::<usize>()) as i32,
+                );
+                let direct_bb = self.b.create_block();
+                let fallback_bb = self.b.create_block();
+                let join_bb = self.b.create_block();
+                let result_ty = self.value_clif_ty(dst)?;
+                let result = self.b.append_block_param(join_bb, result_ty);
+                let field_kind = self.ctx.virtual_field_kind(type_index, field)?;
+                let function_field =
+                    matches!(field_kind, hl::hl_type_kind_HFUN | hl::hl_type_kind_HMETHOD);
+                if function_field {
+                    // A view over an object stores a raw method entry here,
+                    // not an address to an HFUN slot. In Ash it can also be a
+                    // lazy findex sentinel. Dynamic lookup materializes the
+                    // bound vclosure in both cases. A self-backed virtual has
+                    // `value == null` and its vfield really is a data address.
+                    let wrapped = self
+                        .b
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), base, 8);
+                    self.b.ins().brif(wrapped, fallback_bb, &[], direct_bb, &[]);
+                } else {
+                    self.b
+                        .ins()
+                        .brif(field_ptr, direct_bb, &[], fallback_bb, &[]);
+                }
+
+                self.b.switch_to_block(direct_bb);
+                let direct = self
+                    .b
+                    .ins()
+                    .load(result_ty, MemFlagsData::trusted(), field_ptr, 0);
+                self.b.ins().jump(join_bb, &[BlockArg::Value(direct)]);
+
+                self.b.switch_to_block(fallback_bb);
+                let wrapped = self
+                    .b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), base, 8);
+                let hash = self.ctx.virtual_field_hash(type_index, field)?;
+                let hash = self.b.ins().iconst(types::I32, hash as i64);
+                // The dynamic integer getter returns i32 for UI8/UI16/Bool,
+                // while the AIR value and the direct field load retain their
+                // declared narrow width. Block parameters require exact CLIF
+                // types, so narrow before joining the two paths.
+                let fallback = self.emit_dyn_get_value(dst, wrapped, hash)?;
+                let fallback = self.coerce(fallback, result_ty)?;
+                self.b.ins().jump(join_bb, &[BlockArg::Value(fallback)]);
+
+                self.b.switch_to_block(join_bb);
+                self.def(dst, result)
+            }
+            kind => bail!("field access needs a runtime lookup for type kind {kind}"),
+        }
+    }
+
+    /// Emit the write half of [`Self::emit_field_get`].
+    fn emit_field_set(
+        &mut self,
+        obj: ValueId,
+        obj_ty: AirTypeRef,
+        field: usize,
+        src: ValueId,
+    ) -> Result<()> {
+        let type_index = obj_ty.0 as usize;
+        match self.ctx.type_kind(type_index)? {
+            hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
+                let (off, fty) = self.field_offset(obj_ty, field)?;
+                let base = self.get(obj)?;
+                let raw = self.get(src)?;
+                // Narrow to the field's own width first, so the store cannot
+                // spill into whatever is laid out next to it.
+                let v = self.coerce(raw, fty)?;
+                self.b.ins().store(MemFlagsData::trusted(), v, base, off);
+                Ok(())
+            }
+            hl::hl_type_kind_HVIRTUAL => {
+                let base = self.get(obj)?;
+                let field_ptr = self.b.ins().load(
+                    types::I64,
+                    MemFlagsData::trusted(),
+                    base,
+                    (24 + field * std::mem::size_of::<usize>()) as i32,
+                );
+                let direct_bb = self.b.create_block();
+                let fallback_bb = self.b.create_block();
+                let join_bb = self.b.create_block();
+                self.b
+                    .ins()
+                    .brif(field_ptr, direct_bb, &[], fallback_bb, &[]);
+
+                self.b.switch_to_block(direct_bb);
+                let value = self.get(src)?;
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), value, field_ptr, 0);
+                self.b.ins().jump(join_bb, &[]);
+
+                self.b.switch_to_block(fallback_bb);
+                let wrapped = self
+                    .b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), base, 8);
+                let hash = self.ctx.virtual_field_hash(type_index, field)?;
+                let hash = self.b.ins().iconst(types::I32, hash as i64);
+                self.emit_dyn_set_value(src, wrapped, hash)?;
+                self.b.ins().jump(join_bb, &[]);
+
+                self.b.switch_to_block(join_bb);
+                Ok(())
+            }
+            kind => bail!("field access needs a runtime lookup for type kind {kind}"),
+        }
+    }
+
+    /// Compile-time byte offset and machine type of a statically laid-out
+    /// object field.
     fn field_offset(&self, obj_ty: AirTypeRef, field: usize) -> Result<(i32, Type)> {
         let type_index = obj_ty.0 as usize;
         let bytecode = self.ctx.bytecode();
@@ -1492,9 +1708,9 @@ impl AirCodegen<'_, '_> {
             }
             MemAccess::Array => {
                 let hl_kind = self.ctx.type_kind(self.f.value_ty(dst).0 as usize)?;
-                let ty = abi_class(hl_kind)
-                    .clif_type()
-                    .ok_or_else(|| anyhow!("array element of kind {hl_kind} has no machine type"))?;
+                let ty = abi_class(hl_kind).clif_type().ok_or_else(|| {
+                    anyhow!("array element of kind {hl_kind} has no machine type")
+                })?;
                 let stride = crate::layout::array_elem_size(hl_kind) as i64;
                 let byte_off = self.b.ins().imul_imm(idx, stride);
                 let addr = self.b.ins().iadd(vbase, byte_off);
@@ -1546,9 +1762,9 @@ impl AirCodegen<'_, '_> {
             }
             MemAccess::Array => {
                 let hl_kind = self.ctx.type_kind(self.f.value_ty(src).0 as usize)?;
-                let ty = abi_class(hl_kind)
-                    .clif_type()
-                    .ok_or_else(|| anyhow!("array element of kind {hl_kind} has no machine type"))?;
+                let ty = abi_class(hl_kind).clif_type().ok_or_else(|| {
+                    anyhow!("array element of kind {hl_kind} has no machine type")
+                })?;
                 let stride = crate::layout::array_elem_size(hl_kind) as i64;
                 let byte_off = self.b.ins().imul_imm(idx, stride);
                 let addr = self.b.ins().iadd(vbase, byte_off);
@@ -1594,6 +1810,15 @@ impl AirCodegen<'_, '_> {
         let obj_val = self.dyn_obj(obj)?;
         let hash = self.field_hash(field)?;
 
+        let v = self.emit_dyn_get_value(dst, obj_val, hash)?;
+        // A void destination still runs the call: the lookup can fall through
+        // to a user `__get_field`, which is a side effect.
+        self.def(dst, v)
+    }
+
+    /// Dynamic getter once the object and field hash have already been
+    /// resolved. Virtual field fallback uses the same accessor family.
+    fn emit_dyn_get_value(&mut self, dst: ValueId, obj_val: Value, hash: Value) -> Result<Value> {
         let ty = self.f.value_ty(dst);
         let kind = self.ctx.type_kind(ty.0 as usize)?;
         let (addr, shape) = self.ctx.dyn_get_helper(kind)?;
@@ -1609,10 +1834,7 @@ impl AirCodegen<'_, '_> {
         let sig = self.helper_sigref(&params, Some(dyn_value_ty(shape)));
         let callee = self.b.ins().iconst(types::I64, addr as i64);
         let call = self.b.ins().call_indirect(sig, callee, &args);
-        let v = self.b.inst_results(call)[0];
-        // A void destination still runs the call: the lookup can fall through
-        // to a user `__get_field`, which is a side effect.
-        self.def(dst, v)
+        Ok(self.b.inst_results(call)[0])
     }
 
     /// `DynSet`: write a field of a dynamic value, resolved by name hash.
@@ -1622,6 +1844,12 @@ impl AirCodegen<'_, '_> {
         let obj_val = self.dyn_obj(obj)?;
         let hash = self.field_hash(field)?;
 
+        self.emit_dyn_set_value(src, obj_val, hash)
+    }
+
+    /// Dynamic setter once the object and field hash have already been
+    /// resolved. Virtual field fallback uses the same accessor family.
+    fn emit_dyn_set_value(&mut self, src: ValueId, obj_val: Value, hash: Value) -> Result<()> {
         let ty = self.f.value_ty(src);
         let kind = self.ctx.type_kind(ty.0 as usize)?;
         let (addr, shape) = self.ctx.dyn_set_helper(kind)?;
@@ -1668,19 +1896,96 @@ impl AirCodegen<'_, '_> {
         self.get(obj)
     }
 
-    /// The field-name hash as an immediate. It is a bytecode string constant,
-    /// so this is the same number the interpreter asks `hlp_hash_gen` for and
-    /// the same one the LLVM tier bakes in.
+    /// Turn one statically typed AIR value into the `vdynamic*` representation
+    /// native dynamic helpers consume. Heap values already carry an
+    /// `hl_type*` header and are their own box; every non-dynamic kind needs
+    /// `hlp_make_dyn` over an addressable copy. Pointer-shaped does not imply
+    /// dynamically self-describing: HREF, HBYTES, HTYPE, HABSTRACT, HMETHOD,
+    /// HSTRUCT, and HPACKED all carry raw pointers without a `vdynamic`
+    /// header. Passing one of those through unchanged makes `hlp_dyn_castp`
+    /// interpret the pointed-to payload as an `hl_type*`.
+    fn box_dynamic(&mut self, value: ValueId) -> Result<Value> {
+        let raw = self.get(value)?;
+        let ty = self.f.value_ty(value);
+        let kind = self.ctx.type_kind(ty.0 as usize)?;
+        if is_dynamically_self_describing(kind) {
+            return self.coerce(raw, types::I64);
+        }
+
+        let slot =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        self.b.ins().stack_store(types::I64, raw, slot, 0);
+        let data = self.b.ins().stack_addr(types::I64, slot, 0);
+        let type_ptr = self.ctx.type_ptr(ty.0 as usize)?;
+        let type_val = self.b.ins().iconst(types::I64, type_ptr as i64);
+        let helper = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.make_dyn_helper()? as i64);
+        let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I64));
+        let call = self.b.ins().call_indirect(sig, helper, &[data, type_val]);
+        Ok(self.b.inst_results(call)[0])
+    }
+
+    /// Convert the boxed result of a dynamic call to the destination's
+    /// declared machine representation.
+    ///
+    /// `hlp_dyn_call` and `hlp_vcall_dyn` always return `vdynamic*`. Heap
+    /// values may be their own dynamic box, but that does not make the box
+    /// pointer interchangeable with every pointer-shaped destination. In
+    /// particular, a generic method can return an HOBJ wrapped in an HDYN;
+    /// using the wrapper as the object makes its payload look like object
+    /// fields. Route reference results through the ordinary checked dynamic
+    /// cast so exact object/array types and virtual wrappers are recovered.
+    fn unbox_dynamic_result(&mut self, dst: ValueId, boxed: Value) -> Result<Value> {
+        let dst_ty = self.f.value_ty(dst);
+        let dst_kind = self.ctx.type_kind(dst_ty.0 as usize)?;
+        if abi_class(dst_kind) != AbiClass::Ptr {
+            let (addr, shape) = self.ctx.dyn_unbox_helper(dst_kind)?;
+            let callee = self.b.ins().iconst(types::I64, addr as i64);
+            let sig = self.helper_sigref(&[types::I64], Some(dyn_value_ty(shape)));
+            let call = self.b.ins().call_indirect(sig, callee, &[boxed]);
+            return Ok(self.b.inst_results(call)[0]);
+        }
+
+        if dst_kind == hl::hl_type_kind_HDYN {
+            return Ok(boxed);
+        }
+
+        let dyn_type_index = self
+            .ctx
+            .bytecode()
+            .types
+            .iter()
+            .position(|ty| ty.kind == hl::hl_type_kind_HDYN)
+            .ok_or_else(|| anyhow!("module has no HDYN runtime type"))?;
+        let src_type = self.ctx.type_ptr(dyn_type_index)?;
+        let dst_type = self.ctx.type_ptr(dst_ty.0 as usize)?;
+        let slot =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        self.b.ins().stack_store(types::I64, boxed, slot, 0);
+        let data = self.b.ins().stack_addr(types::I64, slot, 0);
+        let src_type = self.b.ins().iconst(types::I64, src_type as i64);
+        let dst_type = self.b.ins().iconst(types::I64, dst_type as i64);
+        let helper = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.dyn_castp_helper()? as i64);
+        let sig = self.helper_sigref(&[types::I64, types::I64, types::I64], Some(types::I64));
+        let call = self
+            .b
+            .ins()
+            .call_indirect(sig, helper, &[data, src_type, dst_type]);
+        Ok(self.b.inst_results(call)[0])
+    }
+
+    /// The collision-resolved field-name hash as an immediate. Resolving it
+    /// also caches the UTF-16 spelling in ash_std, which Reflect.fields needs
+    /// to map dynamic-object hashes back to names.
     fn field_hash(&mut self, field: usize) -> Result<Value> {
-        let h = {
-            let name = self
-                .ctx
-                .bytecode()
-                .strings
-                .get(field)
-                .ok_or_else(|| anyhow!("dynamic field name {field} out of range"))?;
-            crate::layout::field_name_hash(name)
-        };
+        let h = self.ctx.field_name_hash(field)?;
         Ok(self.b.ins().iconst(types::I32, h as i64))
     }
 
@@ -1717,70 +2022,80 @@ impl AirCodegen<'_, '_> {
             // choice of helper; the argument each one wants is the reason
             // they are not one shared shape.
             CastKind::ToDyn => {
-                // `hlp_make_dyn(data, t)` reads the value THROUGH a pointer,
-                // so a primitive has to be given an address first. A frame
-                // slot is that address; it dies with the call.
-                let src_ty = self.f.value_ty(src);
-                let kindv = self.ctx.type_kind(src_ty.0 as usize)?;
-                let tp = self.ctx.type_ptr(src_ty.0 as usize)?;
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    8,
-                    3,
-                ));
-                self.b.ins().stack_store(types::I64, v, slot, 0);
-                let data = self.b.ins().stack_addr(types::I64, slot, 0);
-                let tyv = self.b.ins().iconst(types::I64, tp as i64);
-                let callee = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, self.ctx.make_dyn_helper()? as i64);
-                let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I64));
-                let call = self.b.ins().call_indirect(sig, callee, &[data, tyv]);
-                let _ = kindv;
-                self.b.inst_results(call)[0]
+                // Pointer-shaped heap values are already dynamic values;
+                // primitives and abstracts are boxed by the shared helper.
+                self.box_dynamic(src)?
             }
             CastKind::SafeCast => {
-                // Reference-to-reference only. The unboxing form — HNULL or
-                // HDYN into a primitive — needs the null-test-and-load shape
-                // the LLVM tier builds, and getting that subtly wrong reads
-                // eight bytes into a four-byte register; it stays declined
-                // until it is written deliberately.
                 let dst_kind = self.ctx.type_kind(self.f.value_ty(dst).0 as usize)?;
-                if abi_class(dst_kind) != AbiClass::Ptr {
-                    bail!("SafeCast unboxing into a primitive");
-                }
                 let src_ty = self.f.value_ty(src);
-                let sp = self.ctx.type_ptr(src_ty.0 as usize)?;
-                let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
-                let srcv = self.coerce(v, types::I64)?;
-                // `hlp_dyn_castp` takes `void *data`, where `data` points to
-                // a slot containing the reference. Passing the reference
-                // itself makes the helper interpret the object's hl_type*
-                // header as the value being cast. LLVM passes its register
-                // alloca here; materialize the equivalent Cranelift slot.
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    8,
-                    3,
-                ));
-                self.b.ins().stack_store(types::I64, srcv, slot, 0);
-                let data = self.b.ins().stack_addr(types::I64, slot, 0);
-                let stv = self.b.ins().iconst(types::I64, sp as i64);
-                let dtv = self.b.ins().iconst(types::I64, dp as i64);
-                let callee = self
-                    .b
-                    .ins()
-                    .iconst(types::I64, self.ctx.dyn_castp_helper()? as i64);
-                let sig = self.helper_sigref(
-                    &[types::I64, types::I64, types::I64],
-                    Some(types::I64),
-                );
-                let call = self
-                    .b
-                    .ins()
-                    .call_indirect(sig, callee, &[data, stv, dtv]);
-                self.b.inst_results(call)[0]
+                let src_kind = self.ctx.type_kind(src_ty.0 as usize)?;
+                if abi_class(dst_kind) != AbiClass::Ptr {
+                    // SafeCast is checked even when the source's static type
+                    // is not Dynamic. Returning `v` here used to turn
+                    // `cast("foo", Int)` into the low 32 bits of the String
+                    // object's address instead of raising. Materialize the
+                    // source exactly as HashLink's helpers expect and let
+                    // them either coerce a numeric/null value or throw.
+                    let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        8,
+                        3,
+                    ));
+                    self.b.ins().stack_store(t, v, slot, 0);
+                    let data = self.b.ins().stack_addr(types::I64, slot, 0);
+                    let src_type = self.ctx.type_ptr(src_ty.0 as usize)?;
+                    let dst_type = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
+                    let src_type = self.b.ins().iconst(types::I64, src_type as i64);
+                    let dst_type = self.b.ins().iconst(types::I64, dst_type as i64);
+                    let (addr, shape, takes_dst_type) = self.ctx.scalar_cast_helper(dst_kind)?;
+                    let callee = self.b.ins().iconst(types::I64, addr as i64);
+                    let (sig, call) = if takes_dst_type {
+                        let sig = self.helper_sigref(
+                            &[types::I64, types::I64, types::I64],
+                            Some(dyn_value_ty(shape)),
+                        );
+                        let call =
+                            self.b
+                                .ins()
+                                .call_indirect(sig, callee, &[data, src_type, dst_type]);
+                        (sig, call)
+                    } else {
+                        let sig = self
+                            .helper_sigref(&[types::I64, types::I64], Some(dyn_value_ty(shape)));
+                        let call = self.b.ins().call_indirect(sig, callee, &[data, src_type]);
+                        (sig, call)
+                    };
+                    let _ = sig;
+                    self.b.inst_results(call)[0]
+                } else {
+                    let sp = self.ctx.type_ptr(src_ty.0 as usize)?;
+                    let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
+                    // `hlp_dyn_castp` takes `void *data`, where `data` points
+                    // to the source value in its native representation.
+                    // Passing a pointer value itself makes the helper read an
+                    // object header as the slot; coercing a float to i64 is
+                    // not a legal representation conversion. LLVM passes its
+                    // register alloca here, so materialize the equivalent
+                    // Cranelift slot for every source class.
+                    let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        8,
+                        3,
+                    ));
+                    self.b.ins().stack_store(types::I64, v, slot, 0);
+                    let data = self.b.ins().stack_addr(types::I64, slot, 0);
+                    let stv = self.b.ins().iconst(types::I64, sp as i64);
+                    let dtv = self.b.ins().iconst(types::I64, dp as i64);
+                    let callee = self
+                        .b
+                        .ins()
+                        .iconst(types::I64, self.ctx.dyn_castp_helper()? as i64);
+                    let sig =
+                        self.helper_sigref(&[types::I64, types::I64, types::I64], Some(types::I64));
+                    let call = self.b.ins().call_indirect(sig, callee, &[data, stv, dtv]);
+                    self.b.inst_results(call)[0]
+                }
             }
             CastKind::ToVirtual => {
                 let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
@@ -1866,9 +2181,17 @@ impl AirCodegen<'_, '_> {
                 BinOp::Sub => self.b.ins().fsub(va, vb),
                 BinOp::Mul => self.b.ins().fmul(va, vb),
                 BinOp::SDiv | BinOp::UDiv => self.b.ins().fdiv(va, vb),
-                // No CLIF `frem`; declining beats emitting a libcall whose
-                // ABI is not verified here.
-                BinOp::SMod | BinOp::UMod => bail!("float modulo"),
+                BinOp::SMod | BinOp::UMod => {
+                    let addr = if ta == types::F32 {
+                        ash_fmod_f32 as usize
+                    } else {
+                        ash_fmod_f64 as usize
+                    };
+                    let callee = self.b.ins().iconst(types::I64, addr as i64);
+                    let sig = self.helper_sigref(&[ta, ta], Some(ta));
+                    let call = self.b.ins().call_indirect(sig, callee, &[va, vb]);
+                    self.b.inst_results(call)[0]
+                }
                 _ => bail!("bitwise op on floats"),
             }
         } else {
@@ -1943,12 +2266,18 @@ impl AirCodegen<'_, '_> {
             }
             // 2^k - 1, e.g. 31 => (x << 5) - x
             _ if c > 0 && pow2(c + 1) && fits((c + 1).trailing_zeros()) => {
-                let sh = self.b.ins().ishl_imm(va, i64::from((c + 1).trailing_zeros()));
+                let sh = self
+                    .b
+                    .ins()
+                    .ishl_imm(va, i64::from((c + 1).trailing_zeros()));
                 self.b.ins().isub(sh, va)
             }
             // 2^k + 1, e.g. 33 => (x << 5) + x
             _ if c > 1 && pow2(c - 1) && fits((c - 1).trailing_zeros()) => {
-                let sh = self.b.ins().ishl_imm(va, i64::from((c - 1).trailing_zeros()));
+                let sh = self
+                    .b
+                    .ins()
+                    .ishl_imm(va, i64::from((c - 1).trailing_zeros()));
                 self.b.ins().iadd(sh, va)
             }
             _ => {
@@ -2040,7 +2369,10 @@ impl AirCodegen<'_, '_> {
         let zero_div = self.b.ins().icmp_imm_s(IntCC::Equal, vb, 0);
         let bad = if signed {
             let min = 1i64 << (ty.bits() - 1);
-            let a_is_min = self.b.ins().icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
+            let a_is_min = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, va, min.wrapping_neg());
             let b_is_neg1 = self.b.ins().icmp_imm_s(IntCC::Equal, vb, -1);
             let overflow = self.b.ins().band(a_is_min, b_is_neg1);
             self.b.ins().bor(zero_div, overflow)
@@ -2178,7 +2510,10 @@ impl AirCodegen<'_, '_> {
     ) -> Result<()> {
         let slot_addr = self.ctx.function_slot_addr(fun)?;
         let slot = self.b.ins().iconst(types::I64, slot_addr as i64);
-        let fn_addr = self.b.ins().load(types::I64, MemFlagsData::trusted(), slot, 0);
+        let fn_addr = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), slot, 0);
 
         let type_ptr = self.ctx.func_type_ptr(fun)?;
         let ty = self.b.ins().iconst(types::I64, type_ptr as i64);
@@ -2199,6 +2534,73 @@ impl AirCodegen<'_, '_> {
         self.def(dst, out)
     }
 
+    /// `VirtualClosure`: bind the receiver to the implementation currently
+    /// installed in its runtime vtable. `field` is the vtable `pindex`, not a
+    /// position in the static proto array; inherited methods therefore require
+    /// the same super-chain search as `CallMethod`.
+    fn emit_virtual_closure(&mut self, dst: ValueId, obj: ValueId, field: usize) -> Result<()> {
+        let obj_type_idx = self.f.value_ty(obj).0 as usize;
+        let bytecode = self.ctx.bytecode();
+        let kind = self.ctx.type_kind(obj_type_idx)?;
+        if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
+            bail!("VirtualClosure on type kind {kind}");
+        }
+
+        let findex = {
+            let mut current = bytecode.types[obj_type_idx].obj.as_ref();
+            let mut found = None;
+            while let Some(info) = current {
+                if let Some(proto) = info.proto.iter().find(|p| p.pindex as usize == field) {
+                    found = Some(proto.findex as usize);
+                    break;
+                }
+                current = info
+                    .super_
+                    .as_ref()
+                    .and_then(|s| bytecode.types[s.0].obj.as_ref());
+            }
+            found.ok_or_else(|| {
+                anyhow!("VirtualClosure: no proto pindex {field} on type {obj_type_idx}")
+            })?
+        };
+
+        let receiver = self.coerce(self.get(obj)?, types::I64)?;
+        let runtime_type = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), receiver, 0);
+        let init = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.get_obj_proto_helper()? as i64);
+        let init_sig = self.helper_sigref(&[types::I64], Some(types::I64));
+        self.b.ins().call_indirect(init_sig, init, &[runtime_type]);
+        let vtable = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), runtime_type, 16);
+        let method = self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            vtable,
+            (field * std::mem::size_of::<usize>()) as i32,
+        );
+
+        let full_type = self.ctx.func_type_ptr(findex)?;
+        let type_value = self.b.ins().iconst(types::I64, full_type as i64);
+        let alloc = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.closure_helper(true)? as i64);
+        let alloc_sig = self.helper_sigref(&[types::I64, types::I64, types::I64], Some(types::I64));
+        let call = self
+            .b
+            .ins()
+            .call_indirect(alloc_sig, alloc, &[type_value, method, receiver]);
+        let closure = self.b.inst_results(call)[0];
+        self.def(dst, closure)
+    }
+
     /// `CallClosure`: call through a `vclosure`, prepending its bound value
     /// when it has one.
     ///
@@ -2207,15 +2609,76 @@ impl AirCodegen<'_, '_> {
     /// `hasValue` is a runtime property of the closure, not of the call
     /// site, so both shapes are emitted and selected at run time — a bound
     /// closure takes the receiver as its first argument.
-    fn emit_call_closure(
-        &mut self,
-        dst: ValueId,
-        fun: ValueId,
-        args: &[ValueId],
-    ) -> Result<()> {
-        let closure = self.get(fun)?;
-        let closure = self.coerce(closure, types::I64)?;
+    fn emit_call_closure(&mut self, dst: ValueId, fun: ValueId, args: &[ValueId]) -> Result<()> {
+        let fun_kind = self.ctx.type_kind(self.f.value_ty(fun).0 as usize)?;
+        if !matches!(fun_kind, hl::hl_type_kind_HFUN | hl::hl_type_kind_HMETHOD) {
+            return self.emit_dynamic_call_closure(dst, fun, args);
+        }
 
+        let closure = self.coerce(self.get(fun)?, types::I64)?;
+        let runtime_type = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), closure, 0);
+        let expected_type = self.ctx.type_ptr(self.f.value_ty(fun).0 as usize)?;
+        let expected_type = self.b.ins().iconst(types::I64, expected_type as i64);
+        // A bound method carries the closure type embedded in its full
+        // function type, while AIR's register can refer to an independently
+        // interned but structurally identical HFUN. Pointer identity sent
+        // those ordinary calls through `hlp_dyn_call`; on AArch64 that also
+        // exposed the generic marshaller to I64 arguments unnecessarily.
+        // HashLink type equality is structural for function signatures, so
+        // use the runtime's own predicate to choose the direct ABI path.
+        let same_type = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.same_type_addr()? as i64);
+        let same_type_sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I8));
+        let same_type_call =
+            self.b
+                .ins()
+                .call_indirect(same_type_sig, same_type, &[runtime_type, expected_type]);
+        let exact = self.b.inst_results(same_type_call)[0];
+
+        let direct_bb = self.b.create_block();
+        let dynamic_bb = self.b.create_block();
+        let merge_bb = self.b.create_block();
+        let result_ty = if self.is_void(dst) {
+            None
+        } else {
+            Some(self.value_clif_ty(dst)?)
+        };
+        if let Some(ty) = result_ty {
+            self.b.append_block_param(merge_bb, ty);
+        }
+        self.b.ins().brif(exact, direct_bb, &[], dynamic_bb, &[]);
+
+        self.b.switch_to_block(direct_bb);
+        let direct = self.emit_direct_call_closure(closure, dst, args)?;
+        let direct_args: Vec<BlockArg> = direct.into_iter().map(BlockArg::Value).collect();
+        self.b.ins().jump(merge_bb, &direct_args);
+
+        self.b.switch_to_block(dynamic_bb);
+        let dynamic = self.emit_dynamic_call_closure_value(dst, closure, args)?;
+        let dynamic_args: Vec<BlockArg> = dynamic.into_iter().map(BlockArg::Value).collect();
+        self.b.ins().jump(merge_bb, &dynamic_args);
+
+        self.b.switch_to_block(merge_bb);
+        if result_ty.is_some() {
+            self.def(dst, self.b.block_params(merge_bb)[0])?;
+        } else {
+            self.define_void_word_if_used(dst);
+        }
+        Ok(())
+    }
+
+    /// Fast closure call for an exact runtime/static function-type match.
+    fn emit_direct_call_closure(
+        &mut self,
+        closure: Value,
+        dst: ValueId,
+        args: &[ValueId],
+    ) -> Result<Option<Value>> {
         let fn_addr = self
             .b
             .ins()
@@ -2235,7 +2698,7 @@ impl AirCodegen<'_, '_> {
         let mut arg_vals = Vec::with_capacity(args.len() + 1);
         let mut classes = Vec::with_capacity(args.len() + 1);
         for a in args {
-            let c = self.class_of(*a)?;
+            let c = argument_abi_class(self.ctx.type_kind(self.f.value_ty(*a).0 as usize)?);
             let want = c
                 .clif_type()
                 .ok_or_else(|| anyhow!("void argument to closure call"))?;
@@ -2273,11 +2736,73 @@ impl AirCodegen<'_, '_> {
         self.b.ins().jump(merge_bb, &plain_out);
 
         self.b.switch_to_block(merge_bb);
-        if ret_class.clif_type().is_some() {
-            let v = self.b.block_params(merge_bb)[0];
-            self.def(dst, v)?;
+        Ok(ret_class
+            .clif_type()
+            .map(|_| self.b.block_params(merge_bb)[0]))
+    }
+
+    /// Call a closure whose AIR type does not carry its concrete function
+    /// signature. A direct indirect-call cannot be correct here: a getter
+    /// fetched through `Reflect.getProperty`, for example, is `Dynamic` at
+    /// the call site but may return an unboxed `Int`. Treating that machine
+    /// result as the site's `vdynamic*` gives pointers such as `0x5`.
+    ///
+    /// The runtime helper reads the closure's actual `hl_type`, boxes each
+    /// argument according to that signature, and always returns a boxed
+    /// value. We only pay for this path at an explicitly dynamic boundary;
+    /// ordinary `HFUN`/`HMETHOD` calls retain the direct fast path above.
+    fn emit_dynamic_call_closure(
+        &mut self,
+        dst: ValueId,
+        fun: ValueId,
+        args: &[ValueId],
+    ) -> Result<()> {
+        let closure = self.coerce(self.get(fun)?, types::I64)?;
+        let value = self.emit_dynamic_call_closure_value(dst, closure, args)?;
+        if let Some(value) = value {
+            self.def(dst, value)
+        } else {
+            self.define_void_word_if_used(dst);
+            Ok(())
         }
-        Ok(())
+    }
+
+    fn emit_dynamic_call_closure_value(
+        &mut self,
+        dst: ValueId,
+        closure: Value,
+        args: &[ValueId],
+    ) -> Result<Option<Value>> {
+        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (args.len().max(1) * std::mem::size_of::<usize>()) as u32,
+            3,
+        ));
+        for (index, arg) in args.iter().copied().enumerate() {
+            let boxed = self.box_dynamic(arg)?;
+            self.b
+                .ins()
+                .stack_store(types::I64, boxed, slot, (index * 8) as i32);
+        }
+        let argv = self.b.ins().stack_addr(types::I64, slot, 0);
+        let nargs = self.b.ins().iconst(types::I32, args.len() as i64);
+        let helper = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.dyn_call_helper()? as i64);
+        let sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));
+        let call = self
+            .b
+            .ins()
+            .call_indirect(sig, helper, &[closure, argv, nargs]);
+        let boxed = self.b.inst_results(call)[0];
+
+        if self.is_void(dst) {
+            return Ok(None);
+        }
+
+        let value = self.unbox_dynamic_result(dst, boxed)?;
+        Ok(Some(self.coerce(value, self.value_clif_ty(dst)?)?))
     }
 
     fn emit_call(&mut self, dst: ValueId, target: usize, args: &[ValueId]) -> Result<()> {
@@ -2311,7 +2836,7 @@ impl AirCodegen<'_, '_> {
         let param_classes: Vec<AbiClass> = tf
             .args
             .iter()
-            .map(|a| abi_class(bytecode.types[a.0].kind))
+            .map(|a| argument_abi_class(bytecode.types[a.0].kind))
             .collect();
         let ret_class = abi_class(bytecode.types[tf.ret.0].kind);
         let ret_ty = ret_class.clif_type();
@@ -2359,6 +2884,8 @@ impl AirCodegen<'_, '_> {
                 v
             };
             self.def(dst, v)?;
+        } else {
+            self.define_void_word_if_used(dst);
         }
         Ok(())
     }
@@ -2479,7 +3006,10 @@ impl AirCodegen<'_, '_> {
             let off = self.b.ins().imul_imm(findex, 8);
             let base = self.b.ins().iconst(types::I64, ptrs_base as i64);
             let slot = self.b.ins().iadd(base, off);
-            let real = self.b.ins().load(types::I64, MemFlagsData::trusted(), slot, 0);
+            let real = self
+                .b
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), slot, 0);
             let healed = self.b.ins().icmp_imm_s(
                 IntCC::UnsignedGreaterThanOrEqual,
                 real,
@@ -2526,7 +3056,9 @@ impl AirCodegen<'_, '_> {
             } else {
                 *v
             };
-            self.b.ins().stack_store(types::I64, word, slot, (idx * 8) as i32);
+            self.b
+                .ins()
+                .stack_store(types::I64, word, slot, (idx * 8) as i32);
         }
         let buf = self.b.ins().stack_addr(types::I64, slot, 0);
         let stub_sig = self.helper_sigref(&[types::I64, types::I64, types::I32], Some(types::I64));
@@ -2562,6 +3094,65 @@ impl AirCodegen<'_, '_> {
         Ok(ret_ty.map(|_| self.b.block_params(merge_bb)[0]))
     }
 
+    /// HVIRTUAL dispatch through the runtime helper that owns the concrete
+    /// method ABI. The interface signature can differ from the implementation
+    /// signature after generic specialization, so calling a resolved pointer
+    /// with AIR's declared types would be an ABI pun. Boxed dispatch is the
+    /// same fallback the LLVM tier uses for this case.
+    fn emit_virtual_call(
+        &mut self,
+        dst: ValueId,
+        obj_type_idx: usize,
+        field: usize,
+        args: &[ValueId],
+    ) -> Result<()> {
+        let receiver = self.dyn_obj(args[0])?;
+        let hash = self.ctx.virtual_field_hash(obj_type_idx, field)?;
+        let hash = self.b.ins().iconst(types::I32, i64::from(hash));
+        let tail = &args[1..];
+
+        let array = if tail.is_empty() {
+            self.b.ins().iconst(types::I64, 0)
+        } else {
+            let helper = self
+                .b
+                .ins()
+                .iconst(types::I64, self.ctx.alloc_dyn_array_helper()? as i64);
+            let count = self.b.ins().iconst(types::I32, tail.len() as i64);
+            let sig = self.helper_sigref(&[types::I32], Some(types::I64));
+            let call = self.b.ins().call_indirect(sig, helper, &[count]);
+            self.b.inst_results(call)[0]
+        };
+
+        for (idx, arg) in tail.iter().copied().enumerate() {
+            let boxed = self.box_dynamic(arg)?;
+            let offset = std::mem::size_of::<hl::varray>() + idx * std::mem::size_of::<usize>();
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), boxed, array, offset as i32);
+        }
+
+        let helper = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.vcall_dyn_helper()? as i64);
+        let sig = self.helper_sigref(&[types::I64, types::I32, types::I64], Some(types::I64));
+        let call = self
+            .b
+            .ins()
+            .call_indirect(sig, helper, &[receiver, hash, array]);
+        let boxed = self.b.inst_results(call)[0];
+        if self.is_void(dst) {
+            self.define_void_word_if_used(dst);
+            return Ok(());
+        }
+
+        let value = self.unbox_dynamic_result(dst, boxed)?;
+        let want = self.value_clif_ty(dst)?;
+        let value = self.coerce(value, want)?;
+        self.def(dst, value)
+    }
+
     /// Virtual dispatch through the receiver's vtable slot.
     ///
     /// `field` is the `vobj_proto` slot index directly — not an index into the
@@ -2579,9 +3170,10 @@ impl AirCodegen<'_, '_> {
         let obj_type_idx = self.f.value_ty(recv).0 as usize;
         let bytecode = self.ctx.bytecode();
         let kind = self.ctx.type_kind(obj_type_idx)?;
+        if kind == hl::hl_type_kind_HVIRTUAL {
+            return self.emit_virtual_call(dst, obj_type_idx, field, args);
+        }
         if kind != hl::hl_type_kind_HOBJ && kind != hl::hl_type_kind_HSTRUCT {
-            // HVIRTUAL dispatch needs the hash-based resolver and a runtime
-            // kind check; that is what the LLVM tier is for.
             bail!("CallMethod on type kind {kind}");
         }
 
@@ -2619,7 +3211,7 @@ impl AirCodegen<'_, '_> {
         let param_classes: Vec<AbiClass> = tf
             .args
             .iter()
-            .map(|a| abi_class(bytecode.types[a.0].kind))
+            .map(|a| argument_abi_class(bytecode.types[a.0].kind))
             .collect();
         let ret_class = abi_class(bytecode.types[tf.ret.0].kind);
 
@@ -2633,7 +3225,10 @@ impl AirCodegen<'_, '_> {
         }
 
         let obj = self.get(recv)?;
-        let type_ptr = self.b.ins().load(types::I64, MemFlagsData::trusted(), obj, 0);
+        let type_ptr = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), obj, 0);
         let proto = self
             .b
             .ins()
@@ -2655,6 +3250,8 @@ impl AirCodegen<'_, '_> {
                 v
             };
             self.def(dst, v)?;
+        } else {
+            self.define_void_word_if_used(dst);
         }
         Ok(())
     }
@@ -2669,7 +3266,7 @@ impl AirCodegen<'_, '_> {
         for pi in 0..n {
             let phi = &self.f.blocks[to.idx()].phis[pi];
             let dst = phi.dst;
-            if self.is_void(dst) {
+            if !self.has_machine_value(dst) {
                 continue; // void phis have no block parameter
             }
             let src = phi
@@ -2712,10 +3309,10 @@ impl AirCodegen<'_, '_> {
                 let is_rethrow = matches!(term, Terminator::Rethrow { .. });
                 let v = self.get(*exc)?;
                 let v = self.coerce(v, types::I64)?;
-                let callee = self.b.ins().iconst(
-                    types::I64,
-                    self.ctx.throw_helper(is_rethrow)? as i64,
-                );
+                let callee = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.throw_helper(is_rethrow)? as i64);
                 let sig = self.helper_sigref(&[types::I64], None);
                 self.b.ins().call_indirect(sig, callee, &[v]);
                 self.b
@@ -2766,8 +3363,62 @@ impl AirCodegen<'_, '_> {
                 default,
             } => self.emit_switch(bid, *value, targets, *default),
 
-            Terminator::Throw { .. } | Terminator::Rethrow { .. } | Terminator::Trap { .. } => {
-                bail!("exception terminator reached the emitter")
+            Terminator::Trap {
+                exc_cell,
+                handler,
+                normal,
+            } => {
+                // Arm ash_std's thread-local trap chain, then establish the
+                // jmp_buf in this generated frame. `hlp_throw` pops that trap
+                // before longjmp returns here with a non-zero result.
+                let setup = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.setup_trap_helper()? as i64);
+                let setup_sig = self.helper_sigref(&[], Some(types::I64));
+                let setup_call = self.b.ins().call_indirect(setup_sig, setup, &[]);
+                let buf = self.b.inst_results(setup_call)[0];
+
+                let setjmp = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, crate::hl::_setjmp as usize as i64);
+                let setjmp_sig = self.helper_sigref(&[types::I64], Some(types::I32));
+                let setjmp_call = self.b.ins().call_indirect(setjmp_sig, setjmp, &[buf]);
+                let jumped = self.b.inst_results(setjmp_call)[0];
+                let caught = self.b.ins().icmp_imm(IntCC::NotEqual, jumped, 0);
+
+                let caught_bb = self.b.create_block();
+                let normal_bb = self.b.create_block();
+                self.b.ins().brif(caught, caught_bb, &[], normal_bb, &[]);
+
+                self.b.switch_to_block(normal_bb);
+                let normal_args = self.phi_args(bid, *normal)?;
+                let normal_target = self.clif_block(*normal)?;
+                self.b.ins().jump(normal_target, &normal_args);
+
+                self.b.switch_to_block(caught_bb);
+                let get = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.get_exc_helper()? as i64);
+                let get_sig = self.helper_sigref(&[], Some(types::I64));
+                let get_call = self.b.ins().call_indirect(get_sig, get, &[]);
+                let exception = self.b.inst_results(get_call)[0];
+                let cell = self.cell_slot(*exc_cell)?;
+                self.b.ins().stack_store(types::I64, exception, cell, 0);
+
+                let clear = self
+                    .b
+                    .ins()
+                    .iconst(types::I64, self.ctx.clear_exc_helper()? as i64);
+                let clear_sig = self.helper_sigref(&[], None);
+                self.b.ins().call_indirect(clear_sig, clear, &[]);
+
+                let handler_args = self.phi_args(bid, *handler)?;
+                let handler_target = self.clif_block(*handler)?;
+                self.b.ins().jump(handler_target, &handler_args);
+                Ok(())
             }
         }
     }
@@ -2888,18 +3539,12 @@ impl AirCodegen<'_, '_> {
             bail!("mismatched comparison operands {ta}/{tb}");
         }
 
-        // `NotLt` / `NotGte` are rewritten to `>=` / `<` — which is what the
-        // interpreter and the LLVM tier both do, so all three agree. It is
-        // NOT what HashLink means by them: `!(a < b)` is true when either
-        // operand is NaN, and `a >= b` is false. Fixing it in one engine
-        // alone would break cross-tier parity, so it is recorded in
-        // BACKLOG.md as a single change to all three.
+        // HashLink's NotLt/NotGte are logical negations, not ordered >=/<
+        // aliases. Their float forms therefore include unordered (NaN), while
+        // their integer forms remain the ordinary complementary predicates.
         let (icc, fcc) = match kind {
             CondKind::SLt => (IntCC::SignedLessThan, FloatCC::LessThan),
-            CondKind::SGte => (
-                IntCC::SignedGreaterThanOrEqual,
-                FloatCC::GreaterThanOrEqual,
-            ),
+            CondKind::SGte => (IntCC::SignedGreaterThanOrEqual, FloatCC::GreaterThanOrEqual),
             CondKind::SGt => (IntCC::SignedGreaterThan, FloatCC::GreaterThan),
             CondKind::SLte => (IntCC::SignedLessThanOrEqual, FloatCC::LessThanOrEqual),
             CondKind::ULt => (IntCC::UnsignedLessThan, FloatCC::LessThan),
@@ -2909,9 +3554,9 @@ impl AirCodegen<'_, '_> {
             ),
             CondKind::NotLt => (
                 IntCC::SignedGreaterThanOrEqual,
-                FloatCC::GreaterThanOrEqual,
+                FloatCC::UnorderedOrGreaterThanOrEqual,
             ),
-            CondKind::NotGte => (IntCC::SignedLessThan, FloatCC::LessThan),
+            CondKind::NotGte => (IntCC::SignedLessThan, FloatCC::UnorderedOrLessThan),
             CondKind::Eq => (IntCC::Equal, FloatCC::Equal),
             CondKind::NotEq => (IntCC::NotEqual, FloatCC::NotEqual),
             _ => unreachable!("unary conditions returned above"),
@@ -2936,6 +3581,7 @@ impl AirCodegen<'_, '_> {
             if hl_kind == hl::hl_type_kind_HDYN
                 || hl_kind == hl::hl_type_kind_HNULL
                 || hl_kind == hl::hl_type_kind_HOBJ
+                || hl_kind == hl::hl_type_kind_HVIRTUAL
             {
                 let addr = self.ctx.dyn_compare_addr()?;
                 let sig = self.helper_sigref(&[types::I64, types::I64], Some(types::I32));
@@ -2965,9 +3611,26 @@ fn dyn_value_ty(shape: DynShape) -> Type {
     }
 }
 
+/// Mirror HashLink's `hl_is_dynamic`: these values carry an `hl_type*` in
+/// their first machine word and can therefore be passed as `vdynamic*`
+/// without allocating a wrapper.
+fn is_dynamically_self_describing(kind: hl::hl_type_kind) -> bool {
+    matches!(
+        kind,
+        hl::hl_type_kind_HDYN
+            | hl::hl_type_kind_HFUN
+            | hl::hl_type_kind_HOBJ
+            | hl::hl_type_kind_HARRAY
+            | hl::hl_type_kind_HVIRTUAL
+            | hl::hl_type_kind_HDYNOBJ
+            | hl::hl_type_kind_HENUM
+            | hl::hl_type_kind_HNULL
+    )
+}
+
 fn intrinsic_to_native(k: air::v2::ir::IntrinsicKind) -> crate::intrinsics::NativeIntrinsic {
-    use air::v2::ir::IntrinsicKind as K;
     use crate::intrinsics::NativeIntrinsic as NI;
+    use air::v2::ir::IntrinsicKind as K;
     match k {
         K::Sqrt => NI::Sqrt,
         K::Abs => NI::Abs,

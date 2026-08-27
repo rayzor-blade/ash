@@ -434,7 +434,9 @@ pub unsafe extern "C" fn hlp_dyn_castp(
                     break;
                 }
                 let sup = (*t1).super_;
-                if (sup as usize) < 0x10000 || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>()) {
+                if (sup as usize) < 0x10000
+                    || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>())
+                {
                     break;
                 }
                 if (*sup).kind != hl_type_kind_HOBJ {
@@ -472,8 +474,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             } else {
                 // castFun could not be stored because __cast is an
                 // interpreter stub; run it through the bridge instead.
-                let v = crate::obj::cast_via_stub_castfun(
-                    t, *(data as *mut *mut vdynamic), to);
+                let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
@@ -514,8 +515,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             } else {
                 // castFun could not be stored because __cast is an
                 // interpreter stub; run it through the bridge instead.
-                let v = crate::obj::cast_via_stub_castfun(
-                    t, *(data as *mut *mut vdynamic), to);
+                let v = crate::obj::cast_via_stub_castfun(t, *(data as *mut *mut vdynamic), to);
                 if !v.is_null() {
                     return v as *mut c_void;
                 }
@@ -524,6 +524,13 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         (hl_type_kind_HFUN, hl_type_kind_HFUN) => {
             let c = *(data as *mut *mut vclosure);
             if !c.is_null() {
+                if (*c).fun == crate::fun::fun_var_args as *mut c_void {
+                    // Its -1 arity is intentionally compatible with every
+                    // typed function. With no external JIT wrapper generator
+                    // installed, Ash calls it through the dynamic closure
+                    // path, which packs the actual arguments at run time.
+                    return c as *mut c_void;
+                }
                 let w = hlp_make_fun_wrapper(c, to);
                 if !w.is_null() {
                     return w as *mut c_void;
@@ -559,7 +566,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
             let v = *(data as *mut *mut vvirtual);
             if !(*v).value.is_null() {
                 return hlp_dyn_castp(
-                    &mut (*(*v).value).v as *mut _ as *mut c_void,
+                    &mut (*v).value as *mut _ as *mut c_void,
                     (*(*v).value).t,
                     to,
                 );
@@ -764,10 +771,31 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                         if let Some(compare_fn) = (*rt).compareFun {
                             return compare_fn(a, b);
                         }
-                        // String-like objects (first field is HBYTES): compare content
-                        if (*obj).nfields >= 1
+                        // Ash represents Haxe String values as String objects
+                        // in Dynamic slots. Compare their UTF-16 payload, but
+                        // only after proving both objects have the exact same
+                        // runtime type. The old "first field is HBYTES" test
+                        // also matched ArrayBytes and then used its field
+                        // offset on an unrelated HOBJ, turning a Bool field
+                        // into the pointer 0x1.
+                        let name = (*obj).name;
+                        let is_string = ka == hl_type_kind_HOBJ
+                            && (*a).t == (*b).t
+                            && !name.is_null()
+                            && *name == b'S' as uchar
+                            && *name.add(1) == b't' as uchar
+                            && *name.add(2) == b'r' as uchar
+                            && *name.add(3) == b'i' as uchar
+                            && *name.add(4) == b'n' as uchar
+                            && *name.add(5) == b'g' as uchar
+                            && *name.add(6) == 0;
+                        if is_string
+                            && (*obj).nfields >= 1
                             && !(*obj).fields.is_null()
+                            && !(*(*obj).fields).t.is_null()
                             && (*(*(*obj).fields).t).kind == hl_type_kind_HBYTES
+                            && (*rt).nfields >= (*obj).nfields
+                            && !(*rt).fields_indexes.is_null()
                         {
                             let parent_fields = (*rt).nfields as usize - (*obj).nfields as usize;
                             let offset = *(*rt).fields_indexes.add(parent_fields) as usize;
@@ -779,8 +807,14 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
                         }
                     }
                 }
+                // Other object content comparison is opt-in through
+                // compareFun; the fallback is identity ordering.
                 hlp_ptr_compare(a, b)
             }
+            // Enum values are heap objects whose first word is their type.
+            // Reading v.ptr observes the constructor index at offset 8, so
+            // two unrelated zero-argument enums otherwise compare equal.
+            hl::hl_type_kind_HENUM => hlp_ptr_compare(a, b),
             _ => hlp_ptr_compare((*a).v.ptr as *const vdynamic, (*b).v.ptr as *const vdynamic),
         };
     }
@@ -821,11 +855,7 @@ pub unsafe extern "C" fn hlp_dyn_compare(a: *mut vdynamic, b: *mut vdynamic) -> 
 /// exactly matters more than it looks — Haxe code that adds two Dynamics and
 /// then checks `Std.isOfType(v, Int)` observes the difference.
 #[no_mangle]
-pub unsafe extern "C" fn hlp_dyn_op(
-    op: i32,
-    a: *mut vdynamic,
-    b: *mut vdynamic,
-) -> *mut vdynamic {
+pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic) -> *mut vdynamic {
     const OP_ADD: i32 = 0;
     const OP_SUB: i32 = 1;
     const OP_MUL: i32 = 2;

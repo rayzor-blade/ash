@@ -391,10 +391,9 @@ pub unsafe extern "C" fn hlp_hash_gen(name: *const uchar, cache_name: bool) -> i
                 h = h.wrapping_add(1);
             }
 
-            if (cache.data.is_null() || cache.size >= cache.capacity)
-                && !grow_cache(&mut cache) {
-                    return h;
-                }
+            if (cache.data.is_null() || cache.size >= cache.capacity) && !grow_cache(&mut cache) {
+                return h;
+            }
 
             let new_name = ustrdup(oname);
             if !new_name.is_null() {
@@ -585,7 +584,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             .as_ptr() as *mut *mut std::os::raw::c_void;
         (*ot).vobj_proto = fptr;
 
-        if !p.is_null() {
+        if !p.is_null() && (*p).nproto > 0 {
             ptr::copy_nonoverlapping(
                 (*(*p).t).vobj_proto as *const *mut std::os::raw::c_void,
                 fptr,
@@ -623,7 +622,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         .expect("Failed to allocate memory")
         .as_ptr() as *mut *mut std::os::raw::c_void;
 
-    if !p.is_null() {
+    if !p.is_null() && (*p).nmethods > 0 {
         ptr::copy_nonoverlapping((*p).methods, (*t).methods, (*p).nmethods as usize);
     }
 
@@ -677,11 +676,13 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     }
 
     // Bindings
-    let mut nbindings = if !p.is_null() {
-        ptr::copy_nonoverlapping((*p).bindings, (*t).bindings, (*p).nbindings as usize);
-        (*p).nbindings
-    } else {
+    let mut nbindings = if p.is_null() {
         0
+    } else {
+        if (*p).nbindings > 0 {
+            ptr::copy_nonoverlapping((*p).bindings, (*t).bindings, (*p).nbindings as usize);
+        }
+        (*p).nbindings
     };
 
     // Bindings require module metadata (m) for function pointers/types.
@@ -860,7 +861,7 @@ pub unsafe extern "C" fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj {
     let _kind = (*ot).kind;
-    
+
     let o = (*ot).__bindgen_anon_1.obj;
     let m = (*o).m;
 
@@ -971,7 +972,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
         size as u8
     };
 
-    if !p.is_null() {
+    if !p.is_null() && (*p).nfields > 0 {
         start = (*p).nfields;
         ptr::copy_nonoverlapping(
             (*p).fields_indexes,
@@ -1378,16 +1379,16 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     let index: i32;
     let address_offset: isize;
 
-
     // expand data
     if hl_is_ptr(t) {
         index = (*o).nvalues;
         if index > HL_DYNOBJ_INDEX_MASK as i32 {
             hlp_error(str_to_uchar_ptr("Too many dynobj values\0"));
         }
-        let nvalues = crate::gc::gc_alloc(((*o).nvalues as usize + 1) * mem::size_of::<*mut c_void>())
-            .expect("Failed to allocate memory")
-            .as_ptr() as *mut *mut c_void;
+        let nvalues =
+            crate::gc::gc_alloc(((*o).nvalues as usize + 1) * mem::size_of::<*mut c_void>())
+                .expect("Failed to allocate memory")
+                .as_ptr() as *mut *mut c_void;
         ptr::copy_nonoverlapping((*o).values, nvalues, (*o).nvalues as usize);
         *nvalues.add(index as usize) = ptr::null_mut();
         address_offset = (nvalues as *mut i8).offset_from((*o).values as *mut i8);
@@ -1449,9 +1450,10 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     }
 
     // update field table
-    let new_lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * ((*o).nfields as usize + 1))
-        .expect("Failed to allocate memory")
-        .as_ptr() as *mut hl_field_lookup;
+    let new_lookup =
+        crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * ((*o).nfields as usize + 1))
+            .expect("Failed to allocate memory")
+            .as_ptr() as *mut hl_field_lookup;
     let field_pos = hlp_lookup_find_index((*o).lookup, (*o).nfields, hfield);
     ptr::copy_nonoverlapping((*o).lookup, new_lookup, field_pos as usize);
     let f = new_lookup.add(field_pos as usize);
@@ -1551,7 +1553,6 @@ pub fn hlp_pad_size(size: i32, t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
-
     // Allocate memory for the vdynobj structure
     let obj = crate::gc::gc_alloc(mem::size_of::<vdynobj>())
         .expect("Failed to allocate memory for vdynobj")
@@ -1580,9 +1581,10 @@ pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
 
     // Allocate initial memory for values (we'll start with a small size)
     let initial_values_size = 4; // Starting with space for 4 values
-    (*obj).values = crate::gc::gc_alloc(mem::size_of::<*mut std::ffi::c_void>() * initial_values_size)
-        .expect("Failed to allocate memory for values")
-        .as_ptr() as *mut *mut std::ffi::c_void;
+    (*obj).values =
+        crate::gc::gc_alloc(mem::size_of::<*mut std::ffi::c_void>() * initial_values_size)
+            .expect("Failed to allocate memory for values")
+            .as_ptr() as *mut *mut std::ffi::c_void;
 
     // We don't allocate raw_data yet, as its size depends on the fields that will be added
 
@@ -1715,7 +1717,6 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
         }
     }
 
-
     match (*obj).t.as_ref().unwrap().kind {
         hl::hl_type_kind_HOBJ => {
             let mut v: *mut vvirtual;
@@ -1748,12 +1749,12 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
             }
 
             v = crate::gc::gc_alloc(
-                    mem::size_of::<vvirtual>()
-                        + mem::size_of::<*mut std::ffi::c_void>()
-                            * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,
-                )
-                .expect("Memory allocation failed")
-                .as_ptr() as *mut vvirtual;
+                mem::size_of::<vvirtual>()
+                    + mem::size_of::<*mut std::ffi::c_void>()
+                        * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,
+            )
+            .expect("Memory allocation failed")
+            .as_ptr() as *mut vvirtual;
             (*v).t = vt;
             (*v).value = obj as *mut _;
             (*v).next = ptr::null_mut();
@@ -1857,12 +1858,12 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
             let mut need_recast: i64 = 0;
             v = crate::gc::gc_alloc(
-                    mem::size_of::<vvirtual>()
-                        + mem::size_of::<*mut std::ffi::c_void>()
-                            * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,
-                )
-                .unwrap()
-                .as_ptr() as *mut vvirtual;
+                mem::size_of::<vvirtual>()
+                    + mem::size_of::<*mut std::ffi::c_void>()
+                        * (*vt).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize,
+            )
+            .unwrap()
+            .as_ptr() as *mut vvirtual;
             (*v).t = vt;
             (*v).value = obj as *mut _;
 
@@ -1961,20 +1962,15 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_virtual_value(v: *mut vdynamic) -> *mut vdynamic {
-    // Reached from Reflect with whatever a Dynamic slot held, which is not
-    // always a virtual (nor always a box). Two dereferences deep with no
-    // check aborted the VM on TestJson and TestReflect.
+    // HashLink declares this native as `_DYN -> _DYN`, but the incoming word
+    // is the `vvirtual*` itself. Treating it as a boxed `vdynamic` and reading
+    // `v.ptr` shifts the address by one word, returning either null or an
+    // arbitrary virtual-field pointer. The bytecode only calls this after a
+    // runtime HVIRTUAL kind check, matching upstream's direct cast.
     if v.is_null() {
         return ptr::null_mut();
     }
-    let inner = (*v).v.ptr as *mut vvirtual;
-    if inner.is_null()
-        || (inner as usize) < 0x10000
-        || !(inner as usize).is_multiple_of(std::mem::align_of::<usize>())
-    {
-        return ptr::null_mut();
-    }
-    (*inner).value
+    (*(v as *mut vvirtual)).value
 }
 
 /// Invoke a resolved method pointer with `this` as the only argument.
@@ -2214,7 +2210,22 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
             };
             let f = obj_resolve_field(tobj, hfield);
             if f.is_null() || (*f).field_index >= 0 {
-                return ptr::null_mut();
+                // Class values expose static functions as closure-valued
+                // object fields, not instance protos. Structural calls such
+                // as `var t:{ function f(Int):String } = MyClass; t.f(1)`
+                // therefore legitimately miss the proto table. Resolve the
+                // field dynamically and call the closure with its own ABI,
+                // exactly as the HDYNOBJ arm below does.
+                let cl = hlp_dyn_getp(cur, hfield, crate::types::hlt_dyn()) as *mut vclosure;
+                if cl.is_null() {
+                    return ptr::null_mut();
+                }
+                let aptr = if nargs == 0 {
+                    ptr::null_mut()
+                } else {
+                    crate::types::hl_aptr::<*mut vdynamic>(args)
+                };
+                return crate::fun::hlp_dyn_call(cl, aptr, nargs);
             }
             let mut rt = tobj.rt;
             if rt.is_null() || (*rt).methods.is_null() {
@@ -2427,7 +2438,7 @@ pub unsafe extern "C" fn hlp_vcall_virtual_0(virt: *mut vvirtual, field: i32) ->
     // The method signature is fn(this: *obj) -> result
     let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
         std::mem::transmute(method_ptr);
-    
+
     method_fn(obj)
 }
 
@@ -2727,13 +2738,12 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
     if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[obj-get] obj={:#x} kind={} hfield={hfield}",
-            obj as usize, (*obj_type).kind
+            obj as usize,
+            (*obj_type).kind
         );
     }
 
     let dyn_type = crate::types::hlt_dyn();
-
-    
 
     match (*obj_type).kind {
         hl_type_kind_HOBJ | hl_type_kind_HVIRTUAL | hl_type_kind_HDYNOBJ | hl_type_kind_HSTRUCT => {
@@ -2752,7 +2762,9 @@ pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *
     if env_flag!("ASH_DYN_TRACE") {
         eprintln!(
             "[obj-set] obj={:#x} kind={} hfield={hfield} v={:#x}",
-            obj as usize, (*(*obj).t).kind, v as usize
+            obj as usize,
+            (*(*obj).t).kind,
+            v as usize
         );
     }
 

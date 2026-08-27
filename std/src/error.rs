@@ -9,6 +9,31 @@ use std::ffi::c_void;
 use std::fmt::{self, Formatter};
 use std::mem;
 use std::panic;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+type ResolveSymbol = unsafe extern "C" fn(*mut c_void, *mut u8, *mut i32) -> *mut u8;
+type CaptureStack = unsafe extern "C" fn(*mut *mut c_void, i32) -> i32;
+
+static RESOLVE_SYMBOL: AtomicUsize = AtomicUsize::new(0);
+static CAPTURE_STACK: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static EXCEPTION_STACK: std::cell::RefCell<Vec<usize>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+    static CALL_STACK_FRAME: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+extern "C" {
+    fn hlp_call_stack_raw(arr: *mut varray) -> i32;
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[used]
+static KEEP_CALL_STACK_BOUNDARY: unsafe extern "C" fn(*mut varray) -> i32 = hlp_call_stack_raw;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -124,14 +149,25 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
     format!("kind={kind} ptr={v:p}")
 }
 
+/// Print an exception caught by a VM-level safe-call boundary.
+///
+/// HashLink runs its bytecode entrypoint through `hl_dyn_call_safe`; Ash's
+/// whole-module JIT uses an equivalent generated wrapper and calls back here
+/// once the longjmp has landed. Keeping the defensive value decoding beside
+/// `hlp_throw` also prevents the JIT runner from dereferencing GC objects.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
+    eprintln!("[ash] uncaught exception: {}", describe_exception(v));
+}
+
 pub struct TrapContext {
     pub buf: hl::jmp_buf,
     pub has_jmpbuf: bool,
     pub prev: *mut TrapContext,
     pub exception_value: Option<VDynamicException>,
     pub caught: bool,
-    
-/// GC-lock depth held by this thread at the setjmp site. hlp_throw
+
+    /// GC-lock depth held by this thread at the setjmp site. hlp_throw
     /// restores the lock to this depth before longjmp, releasing guards
     /// held by the frames being jumped over (their Drop never runs).
     pub saved_lock_depth: usize,
@@ -259,11 +295,10 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 
         // Fill the array with stack frame information
         for (i, frame) in stack_trace.frames.iter().enumerate() {
-            *(hl_aptr::<*const vbyte>(varray_ptr).add(i)) =
-                str_to_uchar_ptr(&format!(
-                    "{}:{} {}",
-                    frame.file_name, frame.line_number, frame.function_name
-                )) as *const vbyte;
+            *(hl_aptr::<*const vbyte>(varray_ptr).add(i)) = str_to_uchar_ptr(&format!(
+                "{}:{} {}",
+                frame.file_name, frame.line_number, frame.function_name
+            )) as *const vbyte;
         }
 
         varray_ptr
@@ -272,16 +307,110 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
     }
 }
 
+/// Install the platform/JIT symbolizer and stack unwinder used by HashLink's
+/// public NativeStackTrace API. This is the same callback contract as
+/// `hl_setup_exception` in upstream HashLink; Ash's host installs callbacks
+/// after loading bytecode so generated PCs can be mapped back to findices.
 #[no_mangle]
-pub unsafe extern "C" fn hlp_exception_stack_raw(_arr: *mut varray) -> i32 {
-    // Stub: return 0 entries (no stack trace available)
-    0
+pub unsafe extern "C" fn hlp_setup_exception(
+    resolve_symbol: Option<ResolveSymbol>,
+    capture_stack: Option<CaptureStack>,
+) {
+    RESOLVE_SYMBOL.store(
+        resolve_symbol.map_or(0, |callback| callback as usize),
+        Ordering::Release,
+    );
+    CAPTURE_STACK.store(
+        capture_stack.map_or(0, |callback| callback as usize),
+        Ordering::Release,
+    );
+}
+
+/// Resolve an opaque `hl_symbol` returned by the raw stack APIs.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_resolve_symbol(
+    symbol: *mut c_void,
+    buffer: *mut u8,
+    buffer_len: *mut i32,
+) -> *mut u8 {
+    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
+    if callback == 0 {
+        return std::ptr::null_mut();
+    }
+    let callback: ResolveSymbol = std::mem::transmute(callback);
+    callback(symbol, buffer, buffer_len)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn hlp_call_stack_raw(_arr: *mut varray) -> i32 {
-    // Stub: return 0 entries (no call stack available)
-    0
+pub unsafe extern "C" fn hlp_exception_stack_raw(arr: *mut varray) -> i32 {
+    EXCEPTION_STACK.with(|saved| {
+        let saved = saved.borrow();
+        if !arr.is_null() {
+            let capacity = (*arr).size.max(0) as usize;
+            let output = hl_aptr::<*mut c_void>(arr);
+            for (index, symbol) in saved.iter().take(capacity).enumerate() {
+                *output.add(index) = *symbol as *mut c_void;
+            }
+        }
+        saved.len() as i32
+    })
+}
+
+unsafe fn call_stack_raw(arr: *mut varray) -> i32 {
+    let callback = CAPTURE_STACK.load(Ordering::Acquire);
+    if callback == 0 {
+        return 0;
+    }
+    let callback: CaptureStack = std::mem::transmute(callback);
+    if arr.is_null() {
+        callback(std::ptr::null_mut(), 0)
+    } else {
+        callback(hl_aptr::<*mut c_void>(arr), (*arr).size)
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
+    call_stack_raw(arr)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_call_stack_raw_from_frame(
+    arr: *mut varray,
+    frame: *mut *mut c_void,
+) -> i32 {
+    CALL_STACK_FRAME.with(|saved| {
+        let previous = saved.replace(frame as usize);
+        let result = call_stack_raw(arr);
+        saved.set(previous);
+        result
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn hlp_call_stack_frame() -> *const usize {
+    CALL_STACK_FRAME.with(|frame| frame.get() as *const usize)
+}
+
+unsafe fn capture_exception_stack() {
+    let callback = CAPTURE_STACK.load(Ordering::Acquire);
+    if callback == 0 {
+        return;
+    }
+    let callback: CaptureStack = std::mem::transmute(callback);
+    let count = callback(std::ptr::null_mut(), 0).max(0) as usize;
+    let mut frames = vec![std::ptr::null_mut(); count];
+    let written = if count == 0 {
+        0
+    } else {
+        callback(frames.as_mut_ptr(), count as i32).clamp(0, count as i32) as usize
+    };
+    frames.truncate(written);
+    EXCEPTION_STACK.with(|saved| {
+        *saved.borrow_mut() = frames.into_iter().map(|frame| frame as usize).collect();
+    });
 }
 
 /// `ASH_TRACE_THROW=1`: log every hlp_throw. Read once, gc.rs-style.
@@ -290,8 +419,10 @@ fn throw_trace_enabled() -> bool {
     *V.get_or_init(|| std::env::var("ASH_TRACE_THROW").is_ok())
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
+unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
+    if capture_stack {
+        capture_exception_stack();
+    }
     // Trace throws only on request: an unconditional line here differs
     // between engines (the interpreter throws through its own machinery)
     // and broke every jit-vs-interp output diff that exercised exceptions.
@@ -309,6 +440,14 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     // state, and a longjmp cannot leave the thread that set it up.
     let saved_lock_depth = crate::gc::with_exc(|st| {
         let current = st.current_trap;
+        if throw_trace_enabled() {
+            let prev = if current.is_null() {
+                std::ptr::null_mut()
+            } else {
+                (*current).prev
+            };
+            eprintln!("[ash] hlp_throw chain: current={current:p} prev={prev:p} value={v:p}");
+        }
         if !current.is_null() && (*current).has_jmpbuf {
             // JIT path: store exception, pop trap, longjmp back to setjmp site
             st.exc_value = v;
@@ -349,6 +488,20 @@ pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
     hl::_longjmp(buf_copy.as_mut_ptr(), 1);
     #[cfg(windows)]
     hl::longjmp(buf_copy.as_mut_ptr(), 1);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_throw(v: *mut vdynamic) {
+    throw_impl(v, true)
+}
+
+/// Rethrow the current exception without changing its value. HashLink keeps a
+/// distinct entry point so stack-trace capture can distinguish the original
+/// throw site; ash's stack metadata is already retained separately, while
+/// trap unwinding is identical for both operations.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_rethrow(v: *mut vdynamic) {
+    throw_impl(v, false)
 }
 
 /// Arm a trap on this thread, reusing a retired context when one is available.
@@ -427,12 +580,28 @@ pub unsafe extern "C" fn hlp_remove_trap_jit() {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_exc_value() -> *mut vdynamic {
-    crate::gc::with_exc(|st| st.exc_value)
+    crate::gc::with_exc(|st| {
+        if throw_trace_enabled() {
+            eprintln!(
+                "[ash] get_exc: current={:p} value={:p}",
+                st.current_trap, st.exc_value
+            );
+        }
+        st.exc_value
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_clear_exc_value() {
-    crate::gc::with_exc(|st| st.exc_value = std::ptr::null_mut());
+    crate::gc::with_exc(|st| {
+        if throw_trace_enabled() {
+            eprintln!(
+                "[ash] clear_exc: current={:p} value={:p}",
+                st.current_trap, st.exc_value
+            );
+        }
+        st.exc_value = std::ptr::null_mut();
+    });
 }
 
 #[no_mangle]

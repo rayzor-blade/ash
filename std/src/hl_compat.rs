@@ -5,7 +5,7 @@
 //! exports `hlp_` prefixed symbols. This module re-exports ash functions
 //! under their `hl_` names so HDLLs can link against ash_std directly.
 
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::ptr;
 
 // ============================================================================
@@ -106,6 +106,11 @@ pub unsafe extern "C" fn hl_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mut
 #[no_mangle]
 pub unsafe extern "C" fn hl_throw(v: *mut vdynamic) {
     crate::error::hlp_throw(v);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_rethrow(v: *mut vdynamic) {
+    crate::error::hlp_rethrow(v);
 }
 
 #[no_mangle]
@@ -249,17 +254,124 @@ pub unsafe extern "C" fn hl_from_utf8(str: *const u8, len: i32) -> *const hl::uc
     crate::strings::str_to_uchar_ptr(&s)
 }
 
+/// Format an HDLL `hl_error(...)` message and box it as HashLink `bytes`.
+///
+/// This is HashLink's public C ABI, not a raw UTF-16 allocator.  In
+/// particular, hlsdl expands `hl_error("... %s", value)` to
+/// `hl_throw(hl_alloc_strbytes(...))`, so changing either the arguments or
+/// return type turns an ordinary catchable exception into memory corruption.
 #[no_mangle]
-pub unsafe extern "C" fn hl_alloc_strbytes(len: i32) -> *mut hl::uchar {
-    let mut gc = crate::gc::gc_locked();
-    let size = (len as usize + 1) * 2; // u16 per char + null
-    if let Some(ptr) = gc.allocate(size) {
-        let p = ptr.as_ptr() as *mut hl::uchar;
-        std::ptr::write_bytes(p, 0, len as usize + 1);
-        p
-    } else {
-        ptr::null_mut()
+pub unsafe extern "C" fn hl_alloc_strbytes(fmt: *const hl::uchar, mut args: ...) -> *mut vdynamic {
+    if fmt.is_null() {
+        return ptr::null_mut();
     }
+
+    let mut units = Vec::<u16>::new();
+    let mut pos = 0usize;
+    while *fmt.add(pos) != 0 {
+        let ch = *fmt.add(pos);
+        pos += 1;
+        if ch != b'%' as u16 {
+            units.push(ch);
+            continue;
+        }
+
+        let mut cfmt = String::from("%");
+        let conversion = loop {
+            let spec = *fmt.add(pos);
+            pos += 1;
+            if spec == 0 {
+                break '\0';
+            }
+            let spec = char::from_u32(spec as u32).unwrap_or('\0');
+            cfmt.push(spec);
+            if matches!(spec, 'd' | 'f' | 'g' | 'x' | 'X' | 's' | '%') {
+                break spec;
+            }
+        };
+
+        if conversion == 's' {
+            let value = args.next_arg::<*const hl::uchar>();
+            if value.is_null() {
+                units.extend("null".encode_utf16());
+            } else {
+                let mut i = 0usize;
+                while *value.add(i) != 0 {
+                    units.push(*value.add(i));
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if conversion == '%' {
+            units.push(b'%' as u16);
+            continue;
+        }
+        if conversion == '\0' {
+            break;
+        }
+
+        let cfmt = CString::new(cfmt).expect("printf format contains NUL");
+        let mut rendered = [0i8; 128];
+        let written = match conversion {
+            'd' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<i64>(),
+            ),
+            'd' => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<i32>(),
+            ),
+            'f' | 'g' => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<f64>(),
+            ),
+            'x' | 'X' if cfmt.as_bytes().contains(&b'I') => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<usize>(),
+            ),
+            'x' | 'X' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<*const c_void>(),
+            ),
+            'x' | 'X' => libc::snprintf(
+                rendered.as_mut_ptr(),
+                rendered.len(),
+                cfmt.as_ptr(),
+                args.next_arg::<i32>(),
+            ),
+            _ => 0,
+        };
+        let count = written.max(0) as usize;
+        units.extend(
+            rendered[..count.min(rendered.len().saturating_sub(1))]
+                .iter()
+                .map(|&byte| byte as u8 as u16),
+        );
+    }
+
+    units.push(0);
+    let d = crate::obj::hlp_alloc_dynamic(crate::types::hlt_bytes());
+    if d.is_null() {
+        return ptr::null_mut();
+    }
+    let bytes = crate::bytes::hlp_alloc_bytes((units.len() * 2) as i32);
+    if bytes.is_null() {
+        return ptr::null_mut();
+    }
+    std::ptr::copy_nonoverlapping(units.as_ptr().cast::<u8>(), bytes, units.len() * 2);
+    (*d).v.ptr = bytes.cast();
+    d
 }
 
 #[no_mangle]

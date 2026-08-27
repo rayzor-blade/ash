@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as _, Result};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -87,11 +87,61 @@ fn hash_field_name(
     Ok(h)
 }
 
-#[inline]
-unsafe fn call_setjmp_opaque(jmp_buf: *mut c_void) -> i32 {
-    type SetJmpOpaque = unsafe extern "C" fn(*mut c_void) -> i32;
-    let setjmp_fn: SetJmpOpaque = std::mem::transmute(hl::_setjmp as *const () as usize);
-    setjmp_fn(jmp_buf)
+type FnTrapSetup = unsafe extern "C" fn() -> *mut c_void;
+type FnTrapRemove = unsafe extern "C" fn();
+type FnTrapCallback = unsafe extern "C" fn(*mut c_void);
+
+extern "C" {
+    fn ash_interp_run_with_hl_trap(
+        setup: Option<FnTrapSetup>,
+        remove: Option<FnTrapRemove>,
+        callback: Option<FnTrapCallback>,
+        context: *mut c_void,
+    ) -> i32;
+}
+
+struct TrapCallbackContext<F> {
+    callback: *mut F,
+}
+
+unsafe extern "C" fn invoke_trap_callback<F>(context: *mut c_void)
+where
+    F: FnMut(),
+{
+    let context = &mut *context.cast::<TrapCallbackContext<F>>();
+    (&mut *context.callback)();
+}
+
+/// Invoke a callback while the C frame containing setjmp remains active.
+///
+/// HashLink exceptions longjmp out of generated code and native libraries.
+/// Keeping setjmp in this boundary is essential: a Rust helper that merely
+/// returns its setjmp result leaves the runtime holding a dead stack frame.
+fn run_with_hl_trap<F>(setup: *mut c_void, remove: *mut c_void, mut callback: F) -> i32
+where
+    F: FnMut(),
+{
+    let setup = if setup.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<*mut c_void, FnTrapSetup>(setup) })
+    };
+    let remove = if remove.is_null() {
+        None
+    } else {
+        Some(unsafe { std::mem::transmute::<*mut c_void, FnTrapRemove>(remove) })
+    };
+    let mut context = TrapCallbackContext {
+        callback: &mut callback,
+    };
+    unsafe {
+        ash_interp_run_with_hl_trap(
+            setup,
+            remove,
+            Some(invoke_trap_callback::<F>),
+            (&mut context as *mut TrapCallbackContext<F>).cast(),
+        )
+    }
 }
 
 /// Result of executing a single opcode.
@@ -248,6 +298,11 @@ impl TierMode {
 #[derive(Debug, Clone)]
 pub struct TieredConfig {
     pub enabled: bool,
+    /// Compile every reached bytecode function synchronously before its first
+    /// invocation. This is the execution policy for `--mode jit`: the
+    /// interpreter remains the runtime host and native/stub bridge, but Haxe
+    /// bytecode is never executed by it.
+    pub compiled_only: bool,
     /// Invocations before a function is promoted to the Cranelift tier.
     pub jit_threshold: u64,
     /// Invocations before a function is promoted from the baseline JIT to
@@ -280,6 +335,7 @@ impl Default for TieredConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            compiled_only: false,
             jit_threshold: 100,
             opt_threshold: 250,
             max_jit_args: 8,
@@ -520,6 +576,10 @@ struct TieredSharedCtx {
     /// naming the findex and the tier that produced it.
     tier_log: bool,
     mode: TierMode,
+    /// Whether this run prohibits interpreted Haxe frames. In this mode the
+    /// Cranelift baseline is installed synchronously and its statically known
+    /// re-tier sites drive LLVM OSR entry generation.
+    compiled_only: bool,
     /// The LLVM top tier. Pre-warmed on the MAIN thread by `enable_tiered`,
     /// before any bytecode runs, because module init GC-allocates (constants,
     /// obj runtimes, enum marks) and a broker-side collection would scan the
@@ -777,7 +837,7 @@ fn tiered_compile_tier(
             // that view starved deltablue of the two promotions it makes at
             // 8ms and 15ms and took the run from 94ms to 400ms. A signal that
             // cannot be read must not be treated as a signal that is absent.
-            if crate::ssa::enabled() {
+            if ctx.compiled_only || crate::ssa::enabled() {
                 return compile_with_llvm(ctx, 1, findex);
             }
             // Refusing leaves the bead on Cranelift and is a postponement,
@@ -889,7 +949,11 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
     match result {
         Ok(Ok((addr, meta))) => {
             ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
-            ash_core::profile::register_jit_code(findex as u32, ash_core::profile::Tier::Cranelift, addr);
+            ash_core::profile::register_jit_code(
+                findex as u32,
+                ash_core::profile::Tier::Cranelift,
+                addr,
+            );
             if ctx.tier_log {
                 eprintln!(
                     "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
@@ -911,10 +975,26 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
                 }
             }
             patch_vtable_slots(ctx, findex, addr as *mut c_void);
+            // The ordinary hybrid path learns OSR sites from interpreted
+            // back-edges. Compiled-only JIT never has those frames, so use
+            // the re-tier polls the AIR V2 Cranelift lowering placed in this
+            // function. LLVM will compile matching entries and publish them
+            // into these slots while the baseline keeps running.
+            if ctx.compiled_only {
+                let sites = ash_core::cranelift::retier_sites(findex);
+                if !sites.is_empty() {
+                    ctx.hot_loop_pcs
+                        .lock()
+                        .expect("hot_loop_pcs mutex poisoned")
+                        .insert(findex, sites);
+                }
+            }
             // The re-tier exits a running frame climbs out through. The
             // ladder produces the LLVM code they point at; this only carves
             // the doors.
-            let _staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
+            if !ctx.compiled_only {
+                let _staged = produce_cranelift_osr_entries(ctx, &tier, bead, findex);
+            }
             addr as *mut ()
         }
         Ok(Err(e)) => {
@@ -965,8 +1045,7 @@ fn patch_vtable_slots(ctx: &TieredSharedCtx, findex: usize, addr: *mut c_void) {
             // overriding call to it, and the solver's total came out ~0.4%
             // low with a different wrong value each run, depending on which
             // functions happened to promote.
-            let mut claimed: std::collections::HashSet<usize> =
-                std::collections::HashSet::new();
+            let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
             let mut cur = t.obj.as_ref();
             while let Some(o) = cur {
                 for p in &o.proto {
@@ -1086,9 +1165,7 @@ fn produce_cranelift_osr_entries(
             }
             Err(e) => {
                 if osr_logging() {
-                    eprintln!(
-                        "[osr] cranelift entry declined findex={findex} pc={pc}: {e:#}"
-                    );
+                    eprintln!("[osr] cranelift entry declined findex={findex} pc={pc}: {e:#}");
                 }
             }
         }
@@ -1126,11 +1203,14 @@ fn produce_cranelift_osr_entries(
 /// the function, or the pipeline declined it. `ASH_OSR=0` disables the
 /// production as well as the transfer.
 /// The OSR work a promotion of `findex` should carry: the probed hot-loop
-/// header pcs that are eligible entry sites, and the body those pcs index --
-/// the shared optimized cache's copy, the same array the interpreter runs.
+/// header pcs that are eligible entry sites, and the shared optimized AIR V2
+/// graph whose de-SSA map those pcs and transfer slots describe.
 /// `None` when nothing was probed, nothing is eligible, or OSR is off.
-fn osr_plan_for(ctx: &TieredSharedCtx, findex: usize) -> Option<(Vec<usize>, HLFunction)> {
-    if !osr_transfer_enabled() {
+fn osr_plan_for(
+    ctx: &TieredSharedCtx,
+    findex: usize,
+) -> Option<(Vec<usize>, Arc<ash_core::air_pipeline::Optimized>)> {
+    if !osr_transfer_enabled() || !ash_core::air_pipeline::air_enabled() {
         return None;
     }
     let pcs: Vec<usize> = match ctx
@@ -1148,136 +1228,24 @@ fn osr_plan_for(ctx: &TieredSharedCtx, findex: usize) -> Option<(Vec<usize>, HLF
         .iter()
         .find(|f| f.findex as usize == findex)?;
     let m = ash_core::air_pipeline::AshModule::new(bytecode);
-    let (plan, body, sites): (_, HLFunction, Vec<usize>) =
-        if ash_core::air_pipeline::air_enabled() {
-            let opt = ash_core::air_pipeline::optimized(&m, raw).ok()?;
-            let mut b = raw.clone();
-            b.ops = opt.ser.ops.clone();
-            b.regs = opt
-                .ser
-                .reg_types
-                .iter()
-                .map(|t| ash_core::types::TypeRef(t.0 as usize))
-                .collect();
-            b.debug = Vec::new();
-            let plan = ash_core::osr::analyze(&opt.ir);
-            let eligible: std::collections::HashSet<usize> = plan
-                .entry_headers
-                .iter()
-                .filter_map(|&h| opt.ser.block_pcs.get(h as usize).copied())
-                .collect();
-            let sites = pcs
-                .iter()
-                .copied()
-                .filter(|pc| eligible.contains(pc))
-                .collect();
-            (plan, b, sites)
-        } else {
-            let opts = ash_core::air_pipeline::AirPassOptions::default();
-            let (f, _) = ash_core::air_pipeline::prepare_ir(
-                &m,
-                raw,
-                ash_core::air_pipeline::AirOptLevel::O0,
-                &opts,
-            )
-            .ok()?;
-            (ash_core::osr::analyze(&f), raw.clone(), pcs)
-        };
+    let optimized = ash_core::air_pipeline::optimized(&m, raw).ok()?;
+    let plan = ash_core::osr::analyze(&optimized.ir);
+    let eligible: std::collections::HashSet<usize> = plan
+        .entry_headers
+        .iter()
+        .filter_map(|&h| optimized.ser.block_pcs.get(h as usize).copied())
+        .collect();
+    let sites: Vec<usize> = pcs.into_iter().filter(|pc| eligible.contains(pc)).collect();
     if !plan.eligible() || sites.is_empty() {
         return None;
     }
-    Some((sites, body))
+    Some((sites, optimized))
 }
 
 fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
-    if !osr_transfer_enabled() {
-        return;
-    }
-    // The gate: only functions something actually probed hot get entries.
-    // (Also the sites themselves in the raw-opcode arm below.)
-    let pcs: Vec<usize> = match ctx
-        .hot_loop_pcs
-        .lock()
-        .expect("hot_loop_pcs mutex poisoned")
-        .get(&findex)
-    {
-        Some(v) if !v.is_empty() => v.clone(),
-        _ => return,
-    };
-    let Some(bytecode) = ctx.bytecode_ptr() else {
+    let Some((sites, optimized)) = osr_plan_for(ctx, findex) else {
         return;
     };
-    let Some(raw) = bytecode
-        .functions
-        .iter()
-        .find(|f| f.findex as usize == findex)
-    else {
-        return;
-    };
-
-    // Eligibility and body must come from the same place the interpreter
-    // reads: the shared `optimized` cache when AIR is on, the raw opcodes
-    // when it is off. The serializer's `block_pcs` maps the plan's headers
-    // to pcs, which is what lets a probed pc be validated as an eligible
-    // header rather than gating on the whole function.
-    let m = ash_core::air_pipeline::AshModule::new(bytecode);
-    let (plan, body, sites): (_, std::borrow::Cow<HLFunction>, Vec<usize>) =
-        if ash_core::air_pipeline::air_enabled() {
-            match ash_core::air_pipeline::optimized(&m, raw) {
-                Ok(opt) => {
-                    let mut b = raw.clone();
-                    b.ops = opt.ser.ops.clone();
-                    b.regs = opt
-                        .ser
-                        .reg_types
-                        .iter()
-                        .map(|t| ash_core::types::TypeRef(t.0 as usize))
-                        .collect();
-                    // The pipeline renumbers opcodes; `debug` indices no
-                    // longer line up (mirrors `air::Cache::prepare`).
-                    b.debug = Vec::new();
-                    let plan = ash_core::osr::analyze(&opt.ir);
-                    // Only headers that have actually been probed hot. An
-                    // entry duplicates the rest of the function, so building
-                    // one per statically eligible header compiled ~20 bodies
-                    // for nbody and the interpreter ran most of the loop
-                    // before the attach landed. Headers that turn hot later
-                    // get single entries on demand (`late_osr_entry`).
-                    let eligible: std::collections::HashSet<usize> = plan
-                        .entry_headers
-                        .iter()
-                        .filter_map(|&h| opt.ser.block_pcs.get(h as usize).copied())
-                        .collect();
-                    let sites = pcs
-                        .iter()
-                        .copied()
-                        .filter(|pc| eligible.contains(pc))
-                        .collect();
-                    (plan, std::borrow::Cow::Owned(b), sites)
-                }
-                Err(_) => return,
-            }
-        } else {
-            // Raw opcodes: the probe's pcs are already in the right
-            // namespace, so use those. Headers probed after the promote are
-            // missed in this mode; it is the diagnostic configuration, not
-            // the shipping one.
-            let opts = ash_core::air_pipeline::AirPassOptions::default();
-            match ash_core::air_pipeline::prepare_ir(&m, raw, ash_core::air_pipeline::AirOptLevel::O0, &opts)
-            {
-                Ok((f, _)) => (ash_core::osr::analyze(&f), std::borrow::Cow::Borrowed(raw), pcs),
-                Err(_) => return,
-            }
-        };
-    if !plan.eligible() {
-        if osr_logging() {
-            eprintln!(
-                "[osr] findex={findex} not entered: {:?}",
-                plan.refusals
-            );
-        }
-        return;
-    }
 
     let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
     let LlvmState::Ready(module) = &mut *guard else {
@@ -1285,7 +1253,7 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     };
     let mut entries: Vec<OsrEntry> = Vec::with_capacity(sites.len());
     for pc in sites {
-        match module.0.compile_osr_entry(findex, pc, &body) {
+        match module.0.compile_osr_entry(findex, pc, &optimized) {
             Ok(addr) if addr != 0 => entries.push(OsrEntry {
                 site: pc as u64,
                 code: addr as *mut (),
@@ -1309,10 +1277,7 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
         if ash_core::cranelift::publish_retier_target(findex, e.site as usize, e.code as u64)
             && osr_logging()
         {
-            eprintln!(
-                "[osr] re-tier slot filled findex={findex} pc={}",
-                e.site
-            );
+            eprintln!("[osr] re-tier slot filled findex={findex} pc={}", e.site);
         }
     }
     if osr_logging() {
@@ -1363,7 +1328,11 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
     // The OSR work this promotion should carry, computed before the compile
     // so its entries ride the promotion's own module -- one middle-end run,
     // one object emission -- instead of paying for a second module after.
-    let osr_plan = if tier <= 1 { osr_plan_for(ctx, findex) } else { None };
+    let osr_plan = if tier <= 1 {
+        osr_plan_for(ctx, findex)
+    } else {
+        None
+    };
     if let LlvmState::Pending(_) = &*guard {
         let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
             unreachable!()
@@ -1409,26 +1378,38 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
         // the frame waited 43ms for the whole promote when the entry alone
         // was ready at ~15ms, and it ran the middle tier for every one of
         // those iterations.
-        if let Some((sites, body)) = osr_plan.as_ref() {
+        if let Some((sites, optimized)) = osr_plan.as_ref() {
             let mut entries: Vec<OsrEntry> = Vec::new();
             for &pc in sites.iter() {
-                if let Ok(addr) = module.compile_osr_entry(findex, pc, body) {
-                    if addr != 0 {
-                        entries.push(OsrEntry {
-                            site: pc as u64,
-                            code: addr as *mut (),
-                        });
+                match module.compile_osr_entry(findex, pc, optimized) {
+                    Ok(addr) if addr != 0 => entries.push(OsrEntry {
+                        site: pc as u64,
+                        code: addr as *mut (),
+                    }),
+                    Ok(_) => {}
+                    Err(e) => {
+                        if osr_logging() {
+                            eprintln!(
+                                "[osr] LLVM AIR entry declined findex={findex} pc={pc}: {e:#}"
+                            );
+                        }
                     }
                 }
             }
             for e in &entries {
-                if ash_core::cranelift::publish_retier_target(findex, e.site as usize, e.code as u64)
-                    && osr_logging()
+                if ash_core::cranelift::publish_retier_target(
+                    findex,
+                    e.site as usize,
+                    e.code as u64,
+                ) && osr_logging()
                 {
-                    eprintln!("[osr] re-tier slot filled early findex={findex} pc={}", e.site);
+                    eprintln!(
+                        "[osr] re-tier slot filled early findex={findex} pc={}",
+                        e.site
+                    );
                 }
             }
-            if !entries.is_empty() {
+            if !entries.is_empty() && !ctx.compiled_only {
                 if osr_logging() {
                     eprintln!(
                         "[osr] staged {} entr{} for findex={findex} ahead of its promote",
@@ -1465,7 +1446,9 @@ fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut 
             patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
             // Headers probed only after the early build, or one that
             // declined: the standalone producer covers whatever is left.
-            produce_osr_entries(ctx, findex);
+            if !ctx.compiled_only {
+                produce_osr_entries(ctx, findex);
+            }
             // (LLVM code registers itself with the profiler in
             // install_function_address, which every promotion passes through.)
             if ctx.tier_log {
@@ -1513,7 +1496,10 @@ fn osr_transfer_enabled() -> bool {
 fn late_llvm_osr_enabled() -> bool {
     static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CELL.get_or_init(|| {
-        matches!(std::env::var("ASH_LATE_LLVM_OSR").as_deref(), Ok("1") | Ok("on"))
+        matches!(
+            std::env::var("ASH_LATE_LLVM_OSR").as_deref(),
+            Ok("1") | Ok("on")
+        )
     })
 }
 
@@ -1566,6 +1552,11 @@ pub struct HLInterpreter {
     osr_attached: std::collections::HashMap<usize, Vec<OsrEntry>>,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
+    /// Compiled-only functions whose AIR V2 closure dependencies have been
+    /// installed. A closure can escape immediately into a native (sorting is
+    /// the canonical case), where a stub sentinel is not a callable address;
+    /// this set also breaks recursive closure-dependency cycles.
+    compiled_only_deps_ready: std::collections::HashSet<usize>,
 
     /// Argument buffers, recycled the same way as [`Self::reg_pool`].
     ///
@@ -1894,6 +1885,7 @@ impl HLInterpreter {
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
+            compiled_only_deps_ready: std::collections::HashSet::new(),
             reloaded_bytecode: None,
             air: AirCache::default(),
             ssa: SsaCache::default(),
@@ -2080,6 +2072,7 @@ impl HLInterpreter {
             let context: &'static Context = Box::leak(Box::new(Context::create()));
             let mut jit = JITModule::new_with_shared_runtime(context, &hl_path, shared.clone());
             jit.set_hot_reload(hot_reload);
+            jit.set_lazy_compilation(config.compiled_only);
             Box::into_raw(Box::new(ManuallyDrop::new(jit)))
         })) {
             Ok(ptr) => {
@@ -2102,7 +2095,14 @@ impl HLInterpreter {
         // threshold so code is ready by the time the function is truly hot;
         // the LLVM tier fires two orders of magnitude later, once a function
         // has proven worth the heavier compile.
-        let threshold = u32::try_from(config.jit_threshold).unwrap_or(u32::MAX);
+        // Compiled-only mode installs tier 0 synchronously on first reach.
+        // Keeping the primary broker's threshold unreachable prevents a
+        // duplicate asynchronous baseline compile racing that install.
+        let threshold = if config.compiled_only {
+            u32::MAX
+        } else {
+            u32::try_from(config.jit_threshold).unwrap_or(u32::MAX)
+        };
         let queue_ahead = (threshold / 5).max(1);
         // The LLVM rung was `threshold * 100`, which made the two rungs
         // impossible to tune apart: lowering the LLVM threshold to see whether
@@ -2135,13 +2135,13 @@ impl HLInterpreter {
         let adapter = TieredAdapter::new(policies);
         if config.log_promotions {
             eprintln!(
-            "[tiered] ladder: mode={} tier0={} {}",
-            config.tier_mode.name(),
-            threshold,
-            match config.tier_mode {
-                TierMode::Auto => format!("tier1={} (llvm)", tier1),
-                _ => "single tier".to_string(),
-            }
+                "[tiered] ladder: mode={} tier0={} {}",
+                config.tier_mode.name(),
+                threshold,
+                match config.tier_mode {
+                    TierMode::Auto => format!("tier1={} (llvm)", tier1),
+                    _ => "single tier".to_string(),
+                }
             );
         }
 
@@ -2166,6 +2166,7 @@ impl HLInterpreter {
             log_promotions,
             tier_log: log_promotions || std::env::var("ASH_TIER_LOG").is_ok(),
             mode: config.tier_mode,
+            compiled_only: config.compiled_only,
             llvm: Mutex::new(match prewarmed {
                 Some(pw) => LlvmState::Pending(pw),
                 None => LlvmState::Unavailable,
@@ -2314,10 +2315,10 @@ impl HLInterpreter {
                 if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0 {
                     let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
                     let mut stack_size: libc::size_t = 0;
-                    let ok =
-                        libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size) == 0
-                            && !stack_addr.is_null()
-                            && stack_size != 0;
+                    let ok = libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size)
+                        == 0
+                        && !stack_addr.is_null()
+                        && stack_size != 0;
                     libc::pthread_attr_destroy(&mut attr);
                     if ok {
                         // getstack returns the LOWEST address; the top is
@@ -3203,6 +3204,7 @@ impl HLInterpreter {
             bytecode: *const DecodedBytecode,
             resolver: *const NativeFunctionResolver,
             fiber_is_root_closure: *mut c_void,
+            jit_closure_runner: *mut c_void,
         }
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
         unsafe extern "C" fn fiber_closure_runner(
@@ -3218,9 +3220,19 @@ impl HLInterpreter {
                 return std::ptr::null_mut();
             }
             let fun = (*cl).fun as usize;
-            if fun == 0 || fun >= 0x100000 {
-                eprintln!("[ash] fiber runner: unsupported closure fun={:#x}", fun);
+            if fun == 0 {
+                eprintln!("[ash] fiber runner: null closure function");
                 return std::ptr::null_mut();
+            }
+            if fun >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+                if ctx.jit_closure_runner.is_null() {
+                    eprintln!("[ash] fiber runner: compiled closure bridge unavailable");
+                    return std::ptr::null_mut();
+                }
+                type JitClosureRunner =
+                    unsafe extern "C" fn(*mut c_void, *mut *mut c_void, i32) -> *mut c_void;
+                let run: JitClosureRunner = std::mem::transmute(ctx.jit_closure_runner);
+                return run(c, args, nargs);
             }
             let findex = fun.wrapping_sub(1);
             let is_fiber_root = if ctx.fiber_is_root_closure.is_null() {
@@ -3249,49 +3261,160 @@ impl HLInterpreter {
             // converted against the callee's declared parameter kind — the
             // same rule try_handle_call_method_native applies.
             let n = nargs.max(0) as usize;
+            // Stable backing for HREF arguments. The compiled/interpreted call
+            // is synchronous, so keeping these boxes alive through
+            // `call_function` gives the callee a real addressable cell.
+            let mut ref_cells: Vec<Box<u64>> = Vec::new();
             if n > 0 && !args.is_null() {
-                let declared: Vec<hl::hl_type_kind> = func_of(&interp.targets, findex)
+                let declared: Vec<usize> = func_of(&interp.targets, findex)
                     .and_then(|fi| {
                         bytecode.types[bytecode.functions[fi].type_.0]
                             .fun
                             .as_ref()
-                            .map(|f| f.args.iter().map(|a| bytecode.types[a.0].kind).collect())
+                            .map(|f| f.args.iter().map(|a| a.0).collect())
                     })
                     .unwrap_or_default();
+                if env_flag!("ASH_DBG_FIBER") {
+                    let kinds: Vec<_> =
+                        declared.iter().map(|&ty| bytecode.types[ty].kind).collect();
+                    eprintln!(
+                        "[fiber-runner] findex={findex} has_value={} nargs={n} declared={kinds:?}",
+                        (*cl).hasValue
+                    );
+                }
                 // `this` already occupies slot 0 when the closure carries a
                 // value, so the caller's first argument is declared arg 1.
                 let shift = args_v.len();
                 for i in 0..n {
                     let raw = *(args as *mut *mut hl::vdynamic).add(i);
-                    let kind = declared
-                        .get(i + shift)
-                        .copied()
+                    let expected_type_idx = declared.get(i + shift).copied();
+                    let kind = expected_type_idx
+                        .map(|ty| bytecode.types[ty].kind)
                         .unwrap_or(hl::hl_type_kind_HDYN);
-                    args_v.push(interp.dynamic_to_value_for_kind(raw, kind));
+                    if env_flag!("ASH_DBG_FIBER") {
+                        let raw_kind = if raw.is_null() || (*raw).t.is_null() {
+                            None
+                        } else {
+                            Some((*(*raw).t).kind)
+                        };
+                        eprintln!(
+                            "[fiber-runner] arg={i} raw={raw:p} raw_kind={raw_kind:?} expected={kind}"
+                        );
+                    }
+                    let value = if kind == hl::hl_type_kind_HNULL && !raw.is_null() {
+                        // Nullable parameters consume the vdynamic box itself;
+                        // its nullness is the default-argument discriminator.
+                        NanBoxedValue::from_ptr(raw as usize)
+                    } else if kind == hl::hl_type_kind_HREF && !raw.is_null() {
+                        if !(*raw).t.is_null() && (*(*raw).t).kind == hl::hl_type_kind_HREF {
+                            let cell = (*raw).v.ptr as usize;
+                            if cell == 0 {
+                                NanBoxedValue::null()
+                            } else {
+                                NanBoxedValue::from_ptr(cell)
+                            }
+                        } else {
+                            let inner_kind = expected_type_idx
+                                .and_then(|ty| bytecode.types[ty].tparam.as_ref())
+                                .map(|ty| bytecode.types[ty.0].kind)
+                                .unwrap_or(hl::hl_type_kind_HDYN);
+                            let inner = interp.dynamic_to_value_for_kind(raw, inner_kind);
+                            let mut cell = Box::new(0u64);
+                            HLInterpreter::write_value_to_ptr(
+                                (&mut *cell as *mut u64).cast::<u8>(),
+                                inner,
+                                inner_kind,
+                            );
+                            let cell_ptr = (&mut *cell as *mut u64) as usize;
+                            ref_cells.push(cell);
+                            NanBoxedValue::from_ptr(cell_ptr)
+                        }
+                    } else if kind == hl::hl_type_kind_HOBJ
+                        && !raw.is_null()
+                        && !interp.fn_dyn_castp.is_null()
+                    {
+                        // Native dynamic dispatch supplies a vdynamic*, but
+                        // an HOBJ parameter needs an exact object-type cast,
+                        // not merely a kind match. In particular,
+                        // Reflect.callMethod can pass ArrayDyn to a method
+                        // specialized for ArrayBytes<Int>; its __cast builds
+                        // the representation whose field layout the callee
+                        // uses. The ordinary interpreter CallMethod path does
+                        // this already; the native closure runner must honor
+                        // the same contract before entering compiled AIR V2.
+                        let target_type = expected_type_idx
+                            .map(|ty| interp.c_type_factory.get(ty))
+                            .unwrap_or(std::ptr::null_mut());
+                        let source_type = (*raw).t;
+                        if source_type == target_type
+                            || source_type.is_null()
+                            || target_type.is_null()
+                        {
+                            NanBoxedValue::from_ptr(raw as usize)
+                        } else if (*source_type).kind != hl::hl_type_kind_HOBJ {
+                            interp.dynamic_to_value_for_kind(raw, kind)
+                        } else {
+                            type FnCastp = unsafe extern "C" fn(
+                                *mut c_void,
+                                *mut c_void,
+                                *mut c_void,
+                            )
+                                -> *mut c_void;
+                            let castp: FnCastp = std::mem::transmute(interp.fn_dyn_castp);
+                            let mut data = raw as *mut c_void;
+                            let casted = castp(
+                                &mut data as *mut _ as *mut c_void,
+                                source_type.cast(),
+                                target_type.cast(),
+                            );
+                            if casted.is_null() {
+                                NanBoxedValue::null()
+                            } else {
+                                NanBoxedValue::from_ptr(casted as usize)
+                            }
+                        }
+                    } else {
+                        interp.dynamic_to_value_for_kind(raw, kind)
+                    };
+                    args_v.push(value);
                 }
             }
             match interp.call_function(bytecode, &*ctx.resolver, findex, &args_v) {
                 Ok(v) => {
+                    let ret_idx = func_of(&interp.targets, findex)
+                        .and_then(|fi| {
+                            bytecode.types[bytecode.functions[fi].type_.0]
+                                .fun
+                                .as_ref()
+                                .map(|f| f.ret.0)
+                        })
+                        .unwrap_or(0);
+                    let kind = bytecode.types[ret_idx].kind;
+                    let scalar = matches!(
+                        kind,
+                        hl::hl_type_kind_HI32
+                            | hl::hl_type_kind_HUI8
+                            | hl::hl_type_kind_HUI16
+                            | hl::hl_type_kind_HI64
+                            | hl::hl_type_kind_HF32
+                            | hl::hl_type_kind_HF64
+                            | hl::hl_type_kind_HBOOL
+                    );
                     // Box the result as a vdynamic* for the native caller.
                     // Thread bodies ignore it, but the virtual-dispatch
                     // fallback (hlp_vcall_virtual_hashed) needs real values —
                     // silently returning null turned hasNext() into false.
+                    // Pointer-shaped return types remain raw: notably HBYTES
+                    // is carried by NanBox's distinct bytes tag, so testing
+                    // `is_ptr()` alone boxed an `__string` result and made the
+                    // buffer interpret the vdynamic header as UTF-16.
                     if v.is_void() || v.is_null() {
                         std::ptr::null_mut()
-                    } else if v.is_ptr() {
+                    } else if !scalar {
                         v.as_ptr() as *mut c_void
                     } else {
                         // Primitive: box via hlp_make_dyn with the callee's
                         // declared return type.
-                        let ret_idx = func_of(&interp.targets, findex)
-                            .and_then(|fi| {
-                                bytecode.types[bytecode.functions[fi].type_.0]
-                                    .fun
-                                    .as_ref()
-                                    .map(|f| f.ret.0)
-                            })
-                            .unwrap_or(0);
-                        let kind = bytecode.types[ret_idx].kind;
                         let mut raw = interp.value_to_i64(v, kind);
                         let c_t = interp.c_type_factory.get(ret_idx) as *mut c_void;
                         if interp.fn_make_dyn.is_null() || c_t.is_null() {
@@ -3316,11 +3439,7 @@ impl HLInterpreter {
                         // has an HL trap armed, so preserve normal Haxe
                         // exception semantics instead of silently converting
                         // the exception to null.
-                        HLInterpreter::raise_stub_bridge_failure(
-                            &*ctx.resolver,
-                            findex,
-                            e,
-                        )
+                        HLInterpreter::raise_stub_bridge_failure(&*ctx.resolver, findex, e)
                     }
                 }
             }
@@ -3333,20 +3452,65 @@ impl HLInterpreter {
             let outgoing = std::mem::take(&mut interp.stack);
             if !outgoing.is_empty() {
                 let replaced = interp.fiber_stacks.insert(from, outgoing);
-                debug_assert!(replaced.is_none(), "fiber {from} already had a suspended stack");
+                debug_assert!(
+                    replaced.is_none(),
+                    "fiber {from} already had a suspended stack"
+                );
             }
             interp.stack = interp.fiber_stacks.remove(&to).unwrap_or_default();
             interp.sync_gc_scan_roots();
         }
+        unsafe extern "C" fn resolve_stack_symbol(
+            symbol: *mut c_void,
+            _buffer: *mut u8,
+            buffer_len: *mut i32,
+        ) -> *mut u8 {
+            if symbol.is_null() {
+                return std::ptr::null_mut();
+            }
+            let symbol = symbol.cast::<u16>();
+            let mut len = 0usize;
+            while *symbol.add(len) != 0 {
+                len += 1;
+            }
+            if !buffer_len.is_null() {
+                *buffer_len = len.min(i32::MAX as usize) as i32;
+            }
+            symbol.cast::<u8>()
+        }
+        unsafe extern "C" fn capture_stack_runner(output: *mut *mut c_void, capacity: i32) -> i32 {
+            let Some(ctx) = (&raw const CLOSURE_RUN_CTX).as_ref().unwrap().as_ref() else {
+                return 0;
+            };
+            let interp = &mut *ctx.interp;
+            if output.is_null() {
+                let frame_hint = (&*ctx.resolver)
+                    .resolve_function("std", "hlp_call_stack_frame")
+                    .ok()
+                    .filter(|address| !address.is_null())
+                    .map_or(std::ptr::null(), |address| {
+                        let get_frame: unsafe extern "C" fn() -> *const usize =
+                            std::mem::transmute(address);
+                        get_frame()
+                    });
+                interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32
+            } else {
+                interp.write_call_stack(output, capacity)
+            }
+        }
         unsafe {
             let fiber_is_root_closure = native_resolver
                 .resolve_function("std", "hlp_fiber_is_root_closure")
+                .unwrap_or(std::ptr::null_mut());
+            let jit_closure_runner = native_resolver
+                .resolve_function("std", "hlp_jit_closure_runner")
                 .unwrap_or(std::ptr::null_mut());
             CLOSURE_RUN_CTX = Some(ClosureRunCtx {
                 interp: self as *mut _,
                 bytecode: bytecode as *const _,
                 resolver: native_resolver as *const _,
                 fiber_is_root_closure,
+                jit_closure_runner,
             });
             let set = native_resolver
                 .resolve_function("std", "hlp_set_closure_runner")
@@ -3365,6 +3529,17 @@ impl HLInterpreter {
                 type SetSwitch = unsafe extern "C" fn(unsafe extern "C" fn(u32, u32));
                 let f: SetSwitch = std::mem::transmute(set_switch);
                 f(fiber_switch_runner);
+            }
+            let setup_exception = native_resolver
+                .resolve_function("std", "hlp_setup_exception")
+                .unwrap_or(std::ptr::null_mut());
+            if !setup_exception.is_null() {
+                type SetupException = unsafe extern "C" fn(
+                    unsafe extern "C" fn(*mut c_void, *mut u8, *mut i32) -> *mut u8,
+                    unsafe extern "C" fn(*mut *mut c_void, i32) -> i32,
+                );
+                let setup: SetupException = std::mem::transmute(setup_exception);
+                setup(resolve_stack_symbol, capture_stack_runner);
             }
         }
 
@@ -3493,8 +3668,7 @@ impl HLInterpreter {
                     // The callee has copied the arguments into its own
                     // registers by the time this returns, so the buffer can go
                     // back before the result is even examined.
-                    let call_result =
-                        self.call_function(bytecode, native_resolver, findex, &args);
+                    let call_result = self.call_function(bytecode, native_resolver, findex, &args);
                     if self.arg_pool.len() < POOL_CAP {
                         args.clear();
                         self.arg_pool.push(args);
@@ -3795,10 +3969,7 @@ impl HLInterpreter {
                 }
             }
             for (i, slot) in self.globals.iter().enumerate().take(n) {
-                if unsafe { *gd.add(i) }.is_null()
-                    && !slot.is_null()
-                    && !slot.is_void()
-                {
+                if unsafe { *gd.add(i) }.is_null() && !slot.is_null() && !slot.is_void() {
                     unsafe { *gd.add(i) = slot.as_ptr() as *mut c_void };
                 }
             }
@@ -3978,7 +4149,6 @@ impl HLInterpreter {
             // header hot long after its promote and runs there for a while.
             return;
         } else {
-            let body = self.air.body(bytecode, func_idx);
             let Ok(mut guard) = ctx.llvm.try_lock() else {
                 // A broker is compiling; blocking the interpreter behind it
                 // was 11.5% of nbody's execute. The header stays in
@@ -3990,7 +4160,7 @@ impl HLInterpreter {
             let LlvmState::Ready(module) = &mut *guard else {
                 return;
             };
-            match module.0.compile_osr_entry(findex, header_pc, body) {
+            match module.0.compile_osr_entry(findex, header_pc, &opt) {
                 Ok(a) if a != 0 => a,
                 Ok(_) => return,
                 Err(e) => {
@@ -4091,7 +4261,9 @@ impl HLInterpreter {
         let site = header_pc as u64;
         let addr = {
             let tiered = self.tiered_runtime.as_ref();
-            let Some(bound) = tiered.and_then(|t| t.beads.get(findex)).and_then(|b| b.as_ref())
+            let Some(bound) = tiered
+                .and_then(|t| t.beads.get(findex))
+                .and_then(|b| b.as_ref())
             else {
                 return Ok(None);
             };
@@ -4158,73 +4330,58 @@ impl HLInterpreter {
 
         // Armed exactly as the ordinary call boundary arms one: the compiled
         // code can call something that throws, and a throw crossing this frame
-        // needs a jmp_buf here.
+        // needs a live setjmp landing point here.
         let stack_depth = self.stack.len();
         let fn_setup_trap = self.fn_setup_trap_jit;
         let fn_remove_trap = self.fn_remove_trap_jit;
-        let mut trap_installed = false;
-        if !fn_setup_trap.is_null() {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
-            let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
-            let jmp_buf = unsafe { setup() };
-            if !jmp_buf.is_null() {
-                trap_installed = true;
-                if unsafe { call_setjmp_opaque(jmp_buf) } != 0 {
-                    for f in self.stack.drain(stack_depth..) {
-                        if self.reg_pool.len() < POOL_CAP {
-                            self.reg_pool.push(f.into_buffer());
-                        }
-                    }
-                    let fn_get_exc = self.fn_get_exc_value;
-                    let fn_clear_exc = self.fn_clear_exc_value;
-                    if !fn_get_exc.is_null() {
-                        type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
-                        let exc_ptr =
-                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
-                        if !exc_ptr.is_null() {
-                            // Preserve the runtime's pending-exception state while
-                            // formatting. Clearing it first made the formatter's
-                            // follow-up probe race the short-lived native exception
-                            // on Darwin and hid the original SQLite error behind a
-                            // misleading SIGSEGV.
-                            let exception = self.format_hl_exception(
-                                NanBoxedValue::from_ptr(exc_ptr as usize),
-                            );
-                            if !fn_clear_exc.is_null() {
-                                type FnClearExc = unsafe extern "C" fn();
-                                unsafe {
-                                    (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
-                                };
-                            }
-                            return Err(anyhow::Error::new(exception));
-                        }
-                    }
-                    return Err(anyhow!(
-                        "osr transfer longjmp without exception: findex {findex}"
-                    ));
+        let mut raw = None;
+        let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
+            raw = Some(unsafe {
+                if matches!(ret_kind, hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64) {
+                    type FnF64 = unsafe extern "C" fn(*mut u64) -> f64;
+                    let f: FnF64 = std::mem::transmute(addr as usize);
+                    f(buf.as_mut_ptr()).to_bits() as i64
+                } else {
+                    type FnI64 = unsafe extern "C" fn(*mut u64) -> i64;
+                    let f: FnI64 = std::mem::transmute(addr as usize);
+                    f(buf.as_mut_ptr())
+                }
+            });
+        });
+        if jumped != 0 {
+            for f in self.stack.drain(stack_depth..) {
+                if self.reg_pool.len() < POOL_CAP {
+                    self.reg_pool.push(f.into_buffer());
                 }
             }
-        }
-
-        let raw = unsafe {
-            if matches!(ret_kind, hl::hl_type_kind_HF32 | hl::hl_type_kind_HF64) {
-                type FnF64 = unsafe extern "C" fn(*mut u64) -> f64;
-                let f: FnF64 = std::mem::transmute(addr as usize);
-                f(buf.as_mut_ptr()).to_bits() as i64
-            } else {
-                type FnI64 = unsafe extern "C" fn(*mut u64) -> i64;
-                let f: FnI64 = std::mem::transmute(addr as usize);
-                f(buf.as_mut_ptr())
+            let fn_get_exc = self.fn_get_exc_value;
+            let fn_clear_exc = self.fn_clear_exc_value;
+            if !fn_get_exc.is_null() {
+                type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
+                let exc_ptr =
+                    unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
+                if !exc_ptr.is_null() {
+                    // Preserve the runtime's pending-exception state while
+                    // formatting. Clearing it first made the formatter's
+                    // follow-up probe race the short-lived native exception
+                    // on Darwin and hid the original SQLite error behind a
+                    // misleading SIGSEGV.
+                    let exception =
+                        self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                    if !fn_clear_exc.is_null() {
+                        type FnClearExc = unsafe extern "C" fn();
+                        unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };
+                    }
+                    return Err(anyhow::Error::new(exception));
+                }
             }
-        };
-
-        if trap_installed && !fn_remove_trap.is_null() {
-            type FnRemoveTrap = unsafe extern "C" fn();
-            let remove: FnRemoveTrap = unsafe { std::mem::transmute(fn_remove_trap) };
-            unsafe { remove() };
+            return Err(anyhow!(
+                "osr transfer longjmp without exception: findex {findex}"
+            ));
         }
 
         ash_core::profile::count("osr transfers", 1);
+        let raw = raw.ok_or_else(|| anyhow!("osr trap boundary did not run findex {findex}"))?;
         Ok(Some(self.wrap_native_result(raw, ret_kind)))
     }
 
@@ -4264,6 +4421,24 @@ impl HLInterpreter {
 
         // Check if it's a bytecode function or native
         if let Some(func_idx) = func_of(&self.targets, findex) {
+            let compiled_only = self
+                .tiered_runtime
+                .as_ref()
+                .is_some_and(|tiered| tiered.config.compiled_only);
+            if compiled_only {
+                let entry = self.compiled_only_entry(bytecode, findex, func_idx)?;
+                let result = self.call_compiled_function(findex, &entry, args);
+                if result.is_ok() {
+                    if let Some(tiered) = self.tiered_runtime.as_mut() {
+                        tiered.stats.compiled_calls += 1;
+                    }
+                }
+                // There is deliberately no execute_hl_function fallback in
+                // this mode. A lowering or invocation failure is a JIT error
+                // (or a propagated Haxe exception), not permission to execute
+                // a different engine.
+                return result;
+            }
             // Hybrid tiered call path: tick the bead and dispatch to compiled
             // code once beadie's broker has installed it.
             if self.tiered_runtime.is_some() {
@@ -4359,7 +4534,11 @@ impl HLInterpreter {
         };
         for (bit, shape, set) in [
             (DEMAND_LIVE_FRAME, "live-frame", &t.shared_ctx.live_frame),
-            (DEMAND_UNDER_LOOP, "caller-loop", &t.shared_ctx.called_from_loop),
+            (
+                DEMAND_UNDER_LOOP,
+                "caller-loop",
+                &t.shared_ctx.called_from_loop,
+            ),
         ] {
             if bits & bit == 0 {
                 continue;
@@ -4502,6 +4681,173 @@ impl HLInterpreter {
         Some(entry)
     }
 
+    /// Return native code for a reached Haxe function without ever executing
+    /// its bytecode in the interpreter.
+    ///
+    /// Tier 0 is compiled synchronously so the caller has a body to enter.
+    /// In auto mode, a baseline with a real re-tier site is then submitted to
+    /// the existing LLVM promotion broker; Cranelift keeps running while LLVM
+    /// compiles and its AIR V2 OSR entries are published into those slots.
+    fn compiled_only_entry(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        findex: usize,
+        func_idx: usize,
+    ) -> Result<CompiledFunctionEntry> {
+        let config = self
+            .tiered_runtime
+            .as_ref()
+            .ok_or_else(|| anyhow!("compiled-only runtime is not enabled"))?
+            .config
+            .clone();
+        Self::tierable_reason(bytecode, func_idx, &config).map_err(|reason| {
+            anyhow!(
+                "JIT cannot compile findex {} ({}): {}",
+                findex,
+                bytecode.functions[func_idx].name(),
+                reason
+            )
+        })?;
+
+        // `tiered_on_invoke` owns the one-time bead registration and cached
+        // ABI metadata. Its primary threshold is unreachable in this mode,
+        // so this first call can only register and tick.
+        let _ = self.tiered_on_invoke(bytecode, findex, func_idx);
+
+        let (ctx, bead) = {
+            let tiered = self
+                .tiered_runtime
+                .as_ref()
+                .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
+            let bound = tiered
+                .beads
+                .get(findex)
+                .and_then(|bound| bound.as_ref())
+                .ok_or_else(|| anyhow!("JIT did not register findex {}", findex))?;
+            (Arc::clone(&tiered.shared_ctx), Arc::clone(bound.bead()))
+        };
+
+        if bead.compiled().is_none() {
+            let code = tiered_compile_tier(&ctx, 0, findex, &bead);
+            if code.is_null() {
+                return Err(anyhow!(
+                    "JIT tier 0 failed to compile findex {} ({})",
+                    findex,
+                    bytecode.functions[func_idx].name()
+                ));
+            }
+            if !bead.eager_install(code) && bead.compiled().is_none() {
+                return Err(anyhow!(
+                    "JIT tier 0 could not install findex {} ({})",
+                    findex,
+                    bytecode.functions[func_idx].name()
+                ));
+            }
+        }
+
+        // Observe the eager install through the ordinary cache path. This
+        // builds the typed call entry and keeps all pointer-change handling in
+        // one place.
+        let entry = self
+            .tiered_on_invoke(bytecode, findex, func_idx)
+            .ok_or_else(|| anyhow!("JIT installed no callable entry for findex {}", findex))?;
+
+        // A direct or closure call made by compiled code can use the guarded
+        // stub bridge and trigger compilation at the call boundary. A closure
+        // handed to native code cannot: HashLink's native ABI calls
+        // `vclosure.fun` directly, and an uncompiled findex sentinel (for
+        // example 0x11b in Array.sort) is an instruction-address crash.
+        //
+        // Compile only closure bodies materialized by THIS optimized AIR V2
+        // function. This preserves lazy per-function compilation while making
+        // every closure that can escape from the body natively callable before
+        // the body starts. Reading the IR directly is important: O3 may inline
+        // the closure-producing callee, and serializing AIR back into HL
+        // opcodes here would recreate the legacy architecture we removed.
+        if self.compiled_only_deps_ready.insert(findex) {
+            let closure_targets = {
+                let tiered = self
+                    .tiered_runtime
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
+                let tier = tiered
+                    .shared_ctx
+                    .cranelift
+                    .lock()
+                    .expect("cranelift mutex poisoned")
+                    .as_ref()
+                    .and_then(|tier| tier.as_ref())
+                    .cloned();
+                let Some(tier) = tier else {
+                    return Err(anyhow!("JIT lost its Cranelift baseline"));
+                };
+                let raw = &bytecode.functions[func_idx];
+                let optimized = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw)
+                    .map_err(|e| anyhow!("AIR V2 closure scan failed: {}", e.brief()))?;
+                let mut targets = Vec::new();
+                for block in &optimized.ir.blocks {
+                    for instr in &block.instrs {
+                        let target = match instr {
+                            air::v2::Instr::StaticClosure { fun, .. }
+                            | air::v2::Instr::InstanceClosure { fun, .. } => Some(*fun),
+                            _ => None,
+                        };
+                        if let Some(target) = target {
+                            if !targets.contains(&target) {
+                                targets.push(target);
+                            }
+                        }
+                    }
+                }
+                targets
+            };
+            for target in closure_targets {
+                let Some(target_idx) = func_of(&self.targets, target) else {
+                    continue; // native closures already carry native pointers
+                };
+                self.compiled_only_entry(bytecode, target, target_idx)
+                    .with_context(|| {
+                        format!("JIT closure dependency {target} reached from findex {findex}")
+                    })?;
+            }
+        }
+
+        let baseline_is_llvm = ctx
+            .llvm_done
+            .lock()
+            .expect("llvm_done mutex poisoned")
+            .contains(&findex);
+        let has_retier_site = ctx
+            .hot_loop_pcs
+            .lock()
+            .expect("hot_loop_pcs mutex poisoned")
+            .contains_key(&findex);
+        if config.tier_mode == TierMode::Auto
+            && bead.generation() == 0
+            && !baseline_is_llvm
+            && has_retier_site
+        {
+            let queued = {
+                let tiered = self
+                    .tiered_runtime
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("compiled-only runtime disappeared"))?;
+                let bound = tiered.beads[findex]
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("JIT lost bead for findex {}", findex))?;
+                let promote_ctx = Arc::clone(&tiered.shared_ctx);
+                tiered.adapter.force_promote(bound, 1, move |promote_bead| {
+                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead)
+                })
+            };
+            if !queued && config.log_promotions {
+                eprintln!("[tiered] LLVM queue busy for findex={findex}; keeping Cranelift");
+            }
+        }
+
+        Ok(entry)
+    }
+
     /// One-time tierability gate, run at bead registration (not per call).
     fn tierable_reason(
         bytecode: &DecodedBytecode,
@@ -4550,27 +4896,29 @@ impl HLInterpreter {
             return Err("arg_count_over_limit".to_string());
         }
         let func_name = func.name();
-        if func_name == "init"
-            || func_name == "main"
-            || func_name == "__constructor__"
-            || func_name.starts_with("__")
+        if !config.compiled_only
+            && (func_name == "init"
+                || func_name == "main"
+                || func_name == "__constructor__"
+                || func_name.starts_with("__"))
         {
             return Err("name_blacklisted".to_string());
         }
         if config.min_ops_for_promotion > 0 && func.ops.len() < config.min_ops_for_promotion {
             return Err("op_count_below_min".to_string());
         }
-        if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
-            return Err(format!("unsupported_opcode op={:?}", bad));
-        }
-        // Cranelift-only mode has no LLVM fallback, so a function the middle
-        // tier cannot lower must not register a bead at all — a null tier-0
-        // result would blacklist it instead of leaving it interpreted.
-        if config.tier_mode == TierMode::Cranelift {
-            if let Some(reason) = ash_core::cranelift::lowering_reject_reason(bytecode, func) {
-                return Err(format!("cranelift_{reason}"));
+        if !config.compiled_only {
+            if let Some(bad) = func.ops.iter().find(|op| !Self::is_v1_tierable_opcode(op)) {
+                return Err(format!("unsupported_opcode op={:?}", bad));
             }
         }
+        // Do not run the classic opcode lowerer's gate here, even in
+        // Cranelift-only mode. The mandatory AIR V2 path accepts operations
+        // (Type and StaticClosure are common examples) that the legacy flat
+        // opcode emitter rejects. `tiered_compile_tier` asks AIR V2 first and
+        // reports a null result if both Cranelift lowering paths genuinely
+        // decline; pre-screening on HashLink opcodes would reject valid AIR
+        // before the compiler sees it.
         Ok(())
     }
 
@@ -4598,6 +4946,37 @@ impl HLInterpreter {
                 eprintln!("[tiered] fallback findex={} reason={}", findex, reason);
             }
         }
+    }
+
+    /// Restore interpreter-owned state after an HL longjmp and turn the
+    /// runtime's pending value into the Rust error used by the call paths.
+    fn longjmp_error(&mut self, stack_depth: usize, fallback: String) -> anyhow::Error {
+        for frame in self.stack.drain(stack_depth..) {
+            if self.reg_pool.len() < POOL_CAP {
+                self.reg_pool.push(frame.into_buffer());
+            }
+        }
+        self.sync_gc_scan_roots();
+
+        if !self.fn_get_exc_value.is_null() {
+            type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
+            let exc_ptr =
+                unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(self.fn_get_exc_value))() };
+            if !exc_ptr.is_null() {
+                // Formatting may allocate, so preserve the pending runtime
+                // exception until its Rust representation is complete.
+                let exception = self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                if !self.fn_clear_exc_value.is_null() {
+                    type FnClearExc = unsafe extern "C" fn();
+                    unsafe {
+                        (std::mem::transmute::<*mut c_void, FnClearExc>(self.fn_clear_exc_value))()
+                    };
+                }
+                return anyhow::Error::new(exception);
+            }
+        }
+
+        anyhow!(fallback)
     }
 
     fn call_compiled_function(
@@ -4653,142 +5032,143 @@ impl HLInterpreter {
         // those abandoned Rust activations pushed are still on `self.stack`
         // and have to be dropped explicitly.
         let stack_depth = self.stack.len();
-        let mut trap_installed = false;
-        if !fn_setup_trap.is_null() {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
-            let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
-            let jmp_buf = unsafe { setup() };
-            if !jmp_buf.is_null() {
-                trap_installed = true;
-                let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
-                if jumped != 0 {
-                    for f in self.stack.drain(stack_depth..) {
-                        if self.reg_pool.len() < POOL_CAP {
-                            self.reg_pool.push(f.into_buffer());
+        let mut dispatch_res = None;
+        let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
+            dispatch_res = Some(if ret_is_float || float_mask != 0 {
+                self.dispatch_float_native(
+                    func_ptr,
+                    args,
+                    arg_kinds,
+                    float_mask,
+                    ret_is_float,
+                    ret_kind == hl::hl_type_kind_HF32,
+                )
+            } else {
+                Ok(unsafe {
+                    match args.len() {
+                        0 => {
+                            let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
+                            f()
                         }
-                    }
-                    self.sync_gc_scan_roots();
-                    if !fn_get_exc.is_null() {
-                        type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
-                        let exc_ptr =
-                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
-                        if !exc_ptr.is_null() {
-                            // Preserve the pending exception until formatting has
-                            // finished, matching the other native trap boundaries.
-                            let exception = self.format_hl_exception(
-                                NanBoxedValue::from_ptr(exc_ptr as usize),
-                            );
-                            if !fn_clear_exc.is_null() {
-                                type FnClearExc = unsafe extern "C" fn();
-                                unsafe {
-                                    (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
-                                };
-                            }
-                            return Err(anyhow::Error::new(exception));
+                        1 => {
+                            let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
+                            f(extract_arg(0))
                         }
+                        2 => {
+                            let f: unsafe extern "C" fn(i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(extract_arg(0), extract_arg(1))
+                        }
+                        3 => {
+                            let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(extract_arg(0), extract_arg(1), extract_arg(2))
+                        }
+                        4 => {
+                            let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(
+                                extract_arg(0),
+                                extract_arg(1),
+                                extract_arg(2),
+                                extract_arg(3),
+                            )
+                        }
+                        5 => {
+                            let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(
+                                extract_arg(0),
+                                extract_arg(1),
+                                extract_arg(2),
+                                extract_arg(3),
+                                extract_arg(4),
+                            )
+                        }
+                        6 => {
+                            let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(
+                                extract_arg(0),
+                                extract_arg(1),
+                                extract_arg(2),
+                                extract_arg(3),
+                                extract_arg(4),
+                                extract_arg(5),
+                            )
+                        }
+                        7 => {
+                            let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                                std::mem::transmute(func_ptr);
+                            f(
+                                extract_arg(0),
+                                extract_arg(1),
+                                extract_arg(2),
+                                extract_arg(3),
+                                extract_arg(4),
+                                extract_arg(5),
+                                extract_arg(6),
+                            )
+                        }
+                        8 => {
+                            let f: unsafe extern "C" fn(
+                                i64,
+                                i64,
+                                i64,
+                                i64,
+                                i64,
+                                i64,
+                                i64,
+                                i64,
+                            ) -> i64 = std::mem::transmute(func_ptr);
+                            f(
+                                extract_arg(0),
+                                extract_arg(1),
+                                extract_arg(2),
+                                extract_arg(3),
+                                extract_arg(4),
+                                extract_arg(5),
+                                extract_arg(6),
+                                extract_arg(7),
+                            )
+                        }
+                        _ => 0i64,
                     }
-                    return Err(anyhow!(
-                        "Compiled call longjmp without exception: findex {}",
-                        findex
-                    ));
+                })
+            });
+        });
+
+        if jumped != 0 {
+            for f in self.stack.drain(stack_depth..) {
+                if self.reg_pool.len() < POOL_CAP {
+                    self.reg_pool.push(f.into_buffer());
                 }
             }
-        }
-
-        let dispatch_res: Result<i64> = if ret_is_float || float_mask != 0 {
-            self.dispatch_float_native(func_ptr, args, arg_kinds, float_mask, ret_is_float)
-        } else {
-            Ok(unsafe {
-                match args.len() {
-                    0 => {
-                        let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
-                        f()
+            self.sync_gc_scan_roots();
+            if !fn_get_exc.is_null() {
+                type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
+                let exc_ptr =
+                    unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
+                if !exc_ptr.is_null() {
+                    // Preserve the pending exception until formatting has
+                    // finished, matching the other native trap boundaries.
+                    let exception =
+                        self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                    if !fn_clear_exc.is_null() {
+                        type FnClearExc = unsafe extern "C" fn();
+                        unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };
                     }
-                    1 => {
-                        let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
-                        f(extract_arg(0))
-                    }
-                    2 => {
-                        let f: unsafe extern "C" fn(i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(extract_arg(0), extract_arg(1))
-                    }
-                    3 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(extract_arg(0), extract_arg(1), extract_arg(2))
-                    }
-                    4 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                        )
-                    }
-                    5 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                        )
-                    }
-                    6 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                        )
-                    }
-                    7 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                        )
-                    }
-                    8 => {
-                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                            std::mem::transmute(func_ptr);
-                        f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
-                        )
-                    }
-                    _ => 0i64,
+                    return Err(anyhow::Error::new(exception));
                 }
-            })
-        };
-
-        if trap_installed && !fn_remove_trap.is_null() {
-            type FnRemoveTrap = unsafe extern "C" fn();
-            unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+            }
+            return Err(anyhow!(
+                "Compiled call longjmp without exception: findex {}",
+                findex
+            ));
         }
 
-        let raw_result = dispatch_res?;
+        let raw_result = dispatch_res
+            .ok_or_else(|| anyhow!("Compiled call boundary did not run findex {findex}"))??;
         Ok(self.wrap_native_result(raw_result, ret_kind))
     }
 
@@ -5011,11 +5391,7 @@ impl HLInterpreter {
                 StepResult::Return(value) => {
                     return Ok(value);
                 }
-                StepResult::Call {
-                    findex,
-                    args,
-                    dst,
-                } => {
+                StepResult::Call { findex, args, dst } => {
                     if env_flag!("ASH_TRACE_NATIVE") {
                         let is_bc = func_of(&self.targets, findex).is_some();
                         let is_nat = native_of(&self.targets, findex).is_some();
@@ -5570,9 +5946,13 @@ impl HLInterpreter {
                     }
                     frame.registers.set(dst.0, val);
                 } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                    if let Some(offset) =
-                        unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field.0) }
-                    {
+                    if let Some(offset) = unsafe {
+                        Self::resolve_virtual_field_offset(
+                            obj_val.as_ptr() as *mut u8,
+                            obj_c_type,
+                            field.0,
+                        )
+                    } {
                         let obj_ptr = obj_val.as_ptr() as *mut u8;
                         let addr = unsafe { obj_ptr.add(offset) };
                         let val = unsafe { Self::read_value_at(addr, dst_kind) };
@@ -5646,8 +6026,12 @@ impl HLInterpreter {
                 let src_type_idx = func.regs[src.0 as usize].0;
                 let src_kind = bytecode.types[src_type_idx].kind;
                 let get_rt = self.fn_get_obj_rt;
-                let (mk_dyn, pt_i32, pt_f64, pt_bool) =
-                    (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
+                let (mk_dyn, pt_i32, pt_f64, pt_bool) = (
+                    self.fn_make_dyn,
+                    self.prim_t_i32,
+                    self.prim_t_f64,
+                    self.prim_t_bool,
+                );
                 let obj_val = frame.registers.get(0); // reg 0 is 'this'
                 if !obj_val.is_null() && !obj_val.is_void() {
                     let src_val = Self::box_for_dynamic_slot(
@@ -5672,9 +6056,13 @@ impl HLInterpreter {
                             );
                         }
                     } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                        if let Some(offset) =
-                            unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field.0) }
-                        {
+                        if let Some(offset) = unsafe {
+                            Self::resolve_virtual_field_offset(
+                                obj_val.as_ptr() as *mut u8,
+                                obj_c_type,
+                                field.0,
+                            )
+                        } {
                             let obj_ptr = obj_val.as_ptr() as *mut u8;
                             let addr = unsafe { obj_ptr.add(offset) };
                             if env_flag!("ASH_DBG_FIELD") {
@@ -6318,12 +6706,7 @@ impl HLInterpreter {
                     // Throw as an HL exception (like HashLink does) so it can
                     // be caught by a Trap in the call stack.
                     if env_flag!("ASH_TRACE_NULLACC") {
-                        eprintln!(
-                            "[nullacc] {} pc={} r{}",
-                            func.name(),
-                            frame.pc,
-                            reg.0
-                        );
+                        eprintln!("[nullacc] {} pc={} r{}", func.name(), frame.pc, reg.0);
                     }
                     return Err(anyhow::Error::new(HLExceptionPropagation {
                         value: self.internal_exception_value("Null access"),
@@ -6788,17 +7171,13 @@ impl HLInterpreter {
                         // vdynamic to dereference. Preserve that representation
                         // boundary while still rejecting real object-to-number
                         // casts below.
-                        if matches!(
-                            src_kind,
-                            hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL
-                        ) && val.as_ptr() < 0x10000
+                        if matches!(src_kind, hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL)
+                            && val.as_ptr() < 0x10000
                         {
                             let raw = val.as_ptr() as i64;
                             match dst_kind {
                                 hl::hl_type_kind_HI32 => NanBoxedValue::from_i32(raw as i32),
-                                hl::hl_type_kind_HUI8 => {
-                                    NanBoxedValue::from_i32(raw as u8 as i32)
-                                }
+                                hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(raw as u8 as i32),
                                 hl::hl_type_kind_HUI16 => {
                                     NanBoxedValue::from_i32(raw as u16 as i32)
                                 }
@@ -6964,7 +7343,10 @@ impl HLInterpreter {
                                         let mut curo = obj_t;
                                         let mut upcast = false;
                                         let mut depth = 0;
-                                        while !curo.is_null() && (curo as usize) >= 0x10000 && depth < 64 {
+                                        while !curo.is_null()
+                                            && (curo as usize) >= 0x10000
+                                            && depth < 64
+                                        {
                                             if !dst_obj0.is_null() && curo == dst_obj0 {
                                                 upcast = true;
                                                 break;
@@ -6972,7 +7354,9 @@ impl HLInterpreter {
                                             if found.is_none() {
                                                 let nproto = (*curo).nproto;
                                                 let proto_ptr = (*curo).proto;
-                                                if !proto_ptr.is_null() && (proto_ptr as usize) >= 0x10000 {
+                                                if !proto_ptr.is_null()
+                                                    && (proto_ptr as usize) >= 0x10000
+                                                {
                                                     for i in 0..nproto as usize {
                                                         let proto = &*proto_ptr.add(i);
                                                         if proto.hashed_name == cast_hash {
@@ -7130,8 +7514,12 @@ impl HLInterpreter {
         src: u32,
     ) -> Result<StepResult> {
         let fn_hash_gen = self.fn_hash_gen;
-        let (mk_dyn, pt_i32, pt_f64, pt_bool) =
-            (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
+        let (mk_dyn, pt_i32, pt_f64, pt_bool) = (
+            self.fn_make_dyn,
+            self.prim_t_i32,
+            self.prim_t_f64,
+            self.prim_t_bool,
+        );
         let frame = self.stack.last_mut().unwrap();
         let obj_val = frame.registers.get(obj);
         if obj_val.is_null() || obj_val.is_void() {
@@ -7271,8 +7659,12 @@ impl HLInterpreter {
         field: usize,
         src: u32,
     ) -> Result<StepResult> {
-        let (mk_dyn, pt_i32, pt_f64, pt_bool) =
-            (self.fn_make_dyn, self.prim_t_i32, self.prim_t_f64, self.prim_t_bool);
+        let (mk_dyn, pt_i32, pt_f64, pt_bool) = (
+            self.fn_make_dyn,
+            self.prim_t_i32,
+            self.prim_t_f64,
+            self.prim_t_bool,
+        );
         let frame = self.stack.last_mut().unwrap();
         let obj_type_idx = func.regs[obj as usize].0;
         let obj_kind = bytecode.types[obj_type_idx].kind;
@@ -7320,9 +7712,13 @@ impl HLInterpreter {
                     );
                 }
             } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-                if let Some(offset) =
-                    unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field) }
-                {
+                if let Some(offset) = unsafe {
+                    Self::resolve_virtual_field_offset(
+                        obj_val.as_ptr() as *mut u8,
+                        obj_c_type,
+                        field,
+                    )
+                } {
                     let obj_ptr = obj_val.as_ptr() as *mut u8;
                     let addr = unsafe { obj_ptr.add(offset) };
                     if env_flag!("ASH_DBG_FIELD") {
@@ -7428,7 +7824,9 @@ impl HLInterpreter {
             }
             frame.registers.set(dst, val);
         } else if obj_kind == hl::hl_type_kind_HVIRTUAL {
-            if let Some(offset) = unsafe { Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field) } {
+            if let Some(offset) = unsafe {
+                Self::resolve_virtual_field_offset(obj_val.as_ptr() as *mut u8, obj_c_type, field)
+            } {
                 let obj_ptr = obj_val.as_ptr() as *mut u8;
                 let addr = unsafe { obj_ptr.add(offset) };
                 let val = unsafe { Self::read_value_at(addr, dst_kind) };
@@ -7767,9 +8165,7 @@ impl HLInterpreter {
                         if func_of(&self.targets, fi).is_none()
                             && native_of(&self.targets, fi).is_none()
                         {
-                            return Err(anyhow!(
-                                "varargs wrapped closure has invalid findex {fi}"
-                            ));
+                            return Err(anyhow!("varargs wrapped closure has invalid findex {fi}"));
                         }
                         arg_vals.clear();
                         if (*wrapped).hasValue != 0 && !(*wrapped).value.is_null() {
@@ -7891,18 +8287,17 @@ impl HLInterpreter {
                         // nothing and made every iterator-style interface call
                         // fail at field zero.
                         let header = *(obj_ptr as *const *mut hl_type);
-                        let dispatch_obj = if !header.is_null()
-                            && (*header).kind == hl::hl_type_kind_HVIRTUAL
-                        {
-                            let value = (*(obj_ptr as *const hl::vvirtual)).value;
-                            if value.is_null() {
-                                std::ptr::null()
+                        let dispatch_obj =
+                            if !header.is_null() && (*header).kind == hl::hl_type_kind_HVIRTUAL {
+                                let value = (*(obj_ptr as *const hl::vvirtual)).value;
+                                if value.is_null() {
+                                    std::ptr::null()
+                                } else {
+                                    value as *const u8
+                                }
                             } else {
-                                value as *const u8
-                            }
-                        } else {
-                            obj_ptr
-                        };
+                                obj_ptr
+                            };
                         if !header.is_null() && (*header).kind == hl::hl_type_kind_HVIRTUAL {
                             let dispatch_type = if dispatch_obj.is_null() {
                                 std::ptr::null_mut()
@@ -7920,8 +8315,7 @@ impl HLInterpreter {
                                 // self-backed virtual uses the same layout with
                                 // `value == null`; invoke that closure and omit
                                 // the structural wrapper from the argument list.
-                                let fields = obj_ptr
-                                    .add(std::mem::size_of::<hl::vvirtual>())
+                                let fields = obj_ptr.add(std::mem::size_of::<hl::vvirtual>())
                                     as *const *mut c_void;
                                 let slot = *fields.add(field);
                                 if !slot.is_null() {
@@ -8022,36 +8416,33 @@ impl HLInterpreter {
                                 }
                             }
                             let receiver = NanBoxedValue::from_ptr(dispatch_obj as usize);
-                            let needs_boxed_dispatch = if found.is_some()
-                                && !self.fn_to_virtual.is_null()
-                            {
-                                type FnToVirtual = unsafe extern "C" fn(
-                                    *mut hl_type,
-                                    *mut hl::vdynamic,
-                                ) -> *mut hl::vvirtual;
-                                let to_virtual: FnToVirtual =
-                                    std::mem::transmute(self.fn_to_virtual);
-                                let view = if !header.is_null()
-                                    && (*header).kind == hl::hl_type_kind_HVIRTUAL
-                                {
-                                    obj_ptr as *mut hl::vvirtual
-                                } else {
-                                    to_virtual(
-                                        virt_type,
-                                        dispatch_obj as *mut hl::vdynamic,
+                            let needs_boxed_dispatch =
+                                if found.is_some() && !self.fn_to_virtual.is_null() {
+                                    type FnToVirtual = unsafe extern "C" fn(
+                                        *mut hl_type,
+                                        *mut hl::vdynamic,
                                     )
-                                };
-                                if view.is_null() {
-                                    true
+                                        -> *mut hl::vvirtual;
+                                    let to_virtual: FnToVirtual =
+                                        std::mem::transmute(self.fn_to_virtual);
+                                    let view = if !header.is_null()
+                                        && (*header).kind == hl::hl_type_kind_HVIRTUAL
+                                    {
+                                        obj_ptr as *mut hl::vvirtual
+                                    } else {
+                                        to_virtual(virt_type, dispatch_obj as *mut hl::vdynamic)
+                                    };
+                                    if view.is_null() {
+                                        true
+                                    } else {
+                                        let fields = (view as *const u8)
+                                            .add(std::mem::size_of::<hl::vvirtual>())
+                                            as *const *mut c_void;
+                                        (*fields.add(field)).is_null()
+                                    }
                                 } else {
-                                    let fields = (view as *const u8)
-                                        .add(std::mem::size_of::<hl::vvirtual>())
-                                        as *const *mut c_void;
-                                    (*fields.add(field)).is_null()
-                                }
-                            } else {
-                                false
-                            };
+                                    false
+                                };
                             (found, receiver, hname, needs_boxed_dispatch)
                         }
                     } else {
@@ -8073,7 +8464,8 @@ impl HLInterpreter {
                         *mut hl::vdynamic,
                         i32,
                         *mut hl::varray,
-                    ) -> *mut hl::vdynamic;
+                    )
+                        -> *mut hl::vdynamic;
                     let vcall: FnVCallDyn = unsafe { std::mem::transmute(self.fn_vcall_dyn) };
                     let result = unsafe {
                         vcall(
@@ -8086,10 +8478,8 @@ impl HLInterpreter {
                         Self::coerce_value_for_static_kind(NanBoxedValue::null(), dst_kind)
                     } else if Self::is_unboxable_primitive_kind(dst_kind) {
                         self.dynamic_to_value_for_kind(result, dst_kind)
-                    } else if matches!(
-                        dst_kind,
-                        hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL
-                    ) || self.fn_dyn_castp.is_null()
+                    } else if matches!(dst_kind, hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL)
+                        || self.fn_dyn_castp.is_null()
                     {
                         NanBoxedValue::from_ptr(result as usize)
                     } else {
@@ -8097,7 +8487,8 @@ impl HLInterpreter {
                             *mut c_void,
                             *mut c_void,
                             *mut c_void,
-                        ) -> *mut c_void;
+                        )
+                            -> *mut c_void;
                         let cast: FnDynCastP = unsafe { std::mem::transmute(self.fn_dyn_castp) };
                         let mut slot = result;
                         let target = self.c_type_factory.get(dst_type_idx) as *mut c_void;
@@ -8643,10 +9034,7 @@ impl HLInterpreter {
 
             // ---- calls -------------------------------------------------
             I::Intrinsic {
-                kind,
-                dst,
-                args: a,
-                ..
+                kind, dst, args: a, ..
             } => {
                 // Inline Rust, no FFI dispatch, no marshal. Semantics are
                 // pinned to the ash_std bodies these replaced — RoundHalfUp
@@ -8672,7 +9060,9 @@ impl HLInterpreter {
                             K::RoundHalfUp => NanBoxedValue::from_f64((x + 0.5).floor()),
                             K::FloorToI32 => NanBoxedValue::from_i32(x.floor() as i32),
                             K::CeilToI32 => NanBoxedValue::from_i32(x.ceil() as i32),
-                            K::RoundHalfUpToI32 => NanBoxedValue::from_i32((x + 0.5).floor() as i32),
+                            K::RoundHalfUpToI32 => {
+                                NanBoxedValue::from_i32((x + 0.5).floor() as i32)
+                            }
                             K::IsNaN => NanBoxedValue::from_bool(x.is_nan()),
                             K::IsFinite => NanBoxedValue::from_bool(x.is_finite()),
                             K::PtrCompare => unreachable!("handled above"),
@@ -9394,10 +9784,7 @@ impl HLInterpreter {
         // is what Array<String>.sort delegates to, there being no native
         // object sort — relies on a consistent comparator, and an always-false
         // one walks its merge off the end of the array and segfaults.
-        if matches!(
-            op,
-            CmpOp::SLt | CmpOp::SGt | CmpOp::SLte | CmpOp::SGte
-        ) {
+        if matches!(op, CmpOp::SLt | CmpOp::SGt | CmpOp::SLte | CmpOp::SGte) {
             let sa = unsafe { self.string_operand_utf16(va, ak) };
             let sb = unsafe { self.string_operand_utf16(vb, bk) };
             if let (Some((ap, al)), Some((bp, bl))) = (sa, sb) {
@@ -9469,9 +9856,7 @@ impl HLInterpreter {
                             vb.as_ptr()
                         );
                     }
-                    if ta_name == tb_name
-                        && matches!(ta_name.as_deref(), Some("String"))
-                    {
+                    if ta_name == tb_name && matches!(ta_name.as_deref(), Some("String")) {
                         let sa = unsafe {
                             self.try_extract_string_object_raw(va.as_ptr() as *mut c_void)
                         };
@@ -9806,12 +10191,7 @@ impl HLInterpreter {
     /// Lexicographic order over UTF-16 code units, shorter-is-less on a
     /// common prefix — the ordering `hl_dyn_compare` gives strings, and the
     /// one Haxe's `<` on String is defined to produce.
-    unsafe fn utf16_cmp(
-        a: *const u16,
-        alen: i32,
-        b: *const u16,
-        blen: i32,
-    ) -> std::cmp::Ordering {
+    unsafe fn utf16_cmp(a: *const u16, alen: i32, b: *const u16, blen: i32) -> std::cmp::Ordering {
         let n = alen.min(blen).max(0) as usize;
         for i in 0..n {
             let (x, y) = (*a.add(i), *b.add(i));
@@ -9907,9 +10287,7 @@ impl HLInterpreter {
                 let value = (*(a as *mut hl::vvirtual)).value;
                 return !value.is_null() && self.dynamic_eq(value, b);
             }
-            (ka, kb)
-                if ka == hl::hl_type_kind_HVIRTUAL && kb == hl::hl_type_kind_HVIRTUAL =>
-            {
+            (ka, kb) if ka == hl::hl_type_kind_HVIRTUAL && kb == hl::hl_type_kind_HVIRTUAL => {
                 let av = (*(a as *mut hl::vvirtual)).value;
                 let bv = (*(b as *mut hl::vvirtual)).value;
                 // HashLink reports an invalid comparison for two distinct
@@ -9935,9 +10313,7 @@ impl HLInterpreter {
                     if ka == hl::hl_type_kind_HOBJ {
                         let ta_name = self.dynamic_type_name(a);
                         let tb_name = self.dynamic_type_name(b);
-                        if ta_name == tb_name
-                            && matches!(ta_name.as_deref(), Some("String"))
-                        {
+                        if ta_name == tb_name && matches!(ta_name.as_deref(), Some("String")) {
                             if let (Some((ab, al)), Some((bb, bl))) = (
                                 self.try_extract_string_object_raw(a.cast()),
                                 self.try_extract_string_object_raw(b.cast()),
@@ -10045,7 +10421,13 @@ impl HLInterpreter {
         let scalar_number = |v| match v {
             DynamicScalar::Int(x) => x as f64,
             DynamicScalar::Float(x) => x,
-            DynamicScalar::Bool(x) => if x { 1.0 } else { 0.0 },
+            DynamicScalar::Bool(x) => {
+                if x {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
         };
         if let (Some(x), Some(y)) = (Self::dynamic_scalar(a), Self::dynamic_scalar(b)) {
             // Match hl_dyn_compare: NaN is neither less nor greater, so it
@@ -10194,43 +10576,218 @@ impl HLInterpreter {
         }
     }
 
-    /// Render the live interpreter frames as HashLink `hl_symbol` tokens.
+    fn stack_symbol(
+        bytecode: &DecodedBytecode,
+        function_index: usize,
+        pc: usize,
+    ) -> Option<Box<[u16]>> {
+        let func = bytecode.functions.get(function_index)?;
+        let debug_pc = pc.min(func.ops.len().saturating_sub(1));
+        let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
+        let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
+        let file = usize::try_from(file_idx)
+            .ok()
+            .and_then(|idx| bytecode.debug_files.get(idx))
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        let mut symbol: Vec<u16> = format!("fun${}({file}:{line})", func.findex)
+            .encode_utf16()
+            .collect();
+        symbol.push(0);
+        Some(symbol.into_boxed_slice())
+    }
+
+    /// Capture return addresses from the native stack. Generated code ranges
+    /// are registered by both AIR V2 backends, so this works for Cranelift,
+    /// LLVM promotion, and a stack containing frames from both tiers.
+    fn compiled_stack_functions(&self, _frame_hint: *const usize) -> Vec<usize> {
+        const MAX_FRAMES: usize = 256;
+        let mut functions = Vec::new();
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        if !_frame_hint.is_null() {
+            unsafe {
+                let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+                let mut stack_base = std::ptr::null_mut::<c_void>();
+                let mut stack_size = 0usize;
+                let have_attr = libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0;
+                let have_bounds = have_attr
+                    && libc::pthread_attr_getstack(&attr, &mut stack_base, &mut stack_size) == 0;
+                if have_attr {
+                    libc::pthread_attr_destroy(&mut attr);
+                }
+
+                if have_bounds {
+                    let stack_low = stack_base as usize;
+                    let stack_high = stack_low.saturating_add(stack_size);
+                    let mut frame = _frame_hint as usize;
+                    for _ in 0..MAX_FRAMES {
+                        if frame < stack_low
+                            || frame > stack_high.saturating_sub(2 * std::mem::size_of::<usize>())
+                            || !frame.is_multiple_of(std::mem::align_of::<usize>())
+                        {
+                            break;
+                        }
+                        let words = frame as *const usize;
+                        let caller = *words;
+                        let return_pc = *words.add(1);
+                        if let Some((findex, _, _)) =
+                            ash_core::profile::describe_jit_pc(return_pc)
+                        {
+                            if let Some(function_index) = func_of(&self.targets, findex as usize) {
+                                if functions.last().copied() != Some(function_index) {
+                                    functions.push(function_index);
+                                }
+                            }
+                        }
+                        if caller <= frame
+                            || caller >= stack_high
+                            || caller - frame > stack_size
+                            || !caller.is_multiple_of(std::mem::align_of::<usize>())
+                        {
+                            break;
+                        }
+                        frame = caller;
+                    }
+                }
+            }
+        }
+
+        if !functions.is_empty() {
+            if std::env::var_os("ASH_DBG_STACK").is_some() {
+                eprintln!(
+                    "[stack] frame-hint={_frame_hint:p} frame-pointer functions={functions:?}"
+                );
+            }
+            return functions;
+        }
+
+        let mut pcs = [std::ptr::null_mut::<c_void>(); MAX_FRAMES];
+
+        #[cfg(unix)]
+        let count = unsafe { libc::backtrace(pcs.as_mut_ptr(), MAX_FRAMES as i32).max(0) as usize };
+
+        #[cfg(windows)]
+        let count = unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace(
+                0,
+                MAX_FRAMES as u32,
+                pcs.as_mut_ptr(),
+                std::ptr::null_mut(),
+            ) as usize
+        };
+
+        #[cfg(not(any(unix, windows)))]
+        let count = 0;
+
+        for pc in pcs.iter().take(count) {
+            let Some((findex, _, _)) = ash_core::profile::describe_jit_pc(*pc as usize) else {
+                continue;
+            };
+            let Some(function_index) = func_of(&self.targets, findex as usize) else {
+                continue;
+            };
+            if functions.last().copied() != Some(function_index) {
+                functions.push(function_index);
+            }
+        }
+        if std::env::var_os("ASH_DBG_STACK").is_some() {
+            eprintln!(
+                "[stack] frame-hint={_frame_hint:p} backtrace-pcs={count} functions={functions:?}"
+            );
+        }
+        functions
+    }
+
+    /// Render the live interpreter and generated-code frames as HashLink
+    /// `hl_symbol` tokens.
     ///
     /// The public ABI treats a symbol as opaque until `resolve_symbol`; using
     /// a stable UTF-16 buffer address as the token lets that second call return
     /// the already-rendered value without exposing Rust frame storage to Haxe.
-    fn stack_symbols(&self, bytecode: &DecodedBytecode) -> Vec<Box<[u16]>> {
-        self.stack
+    fn stack_symbols(
+        &self,
+        bytecode: &DecodedBytecode,
+        frame_hint: *const usize,
+    ) -> Vec<Box<[u16]>> {
+        let compiled = self.compiled_stack_functions(frame_hint);
+        if std::env::var_os("ASH_DBG_STACK").is_some() && !frame_hint.is_null() {
+            let labels: Vec<_> = compiled
+                .iter()
+                .filter_map(|&index| bytecode.functions.get(index))
+                .map(|function| (function.findex, function.name()))
+                .collect();
+            eprintln!("[stack] generated labels={labels:?}");
+        }
+        let mut symbols: Vec<Box<[u16]>> = compiled
             .iter()
-            .rev()
-            .filter_map(|frame| {
-                if frame.function_index >= bytecode.functions.len() {
-                    return None;
-                }
-                let func = self.air.body(bytecode, frame.function_index);
-                let debug_pc = frame.pc.min(func.ops.len().saturating_sub(1));
-                let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
-                let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
-                let file = usize::try_from(file_idx)
-                    .ok()
-                    .and_then(|idx| bytecode.debug_files.get(idx))
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
-                let mut symbol: Vec<u16> =
-                    format!("fun${}({file}:{line})", func.findex).encode_utf16().collect();
-                symbol.push(0);
-                Some(symbol.into_boxed_slice())
-            })
-            .collect()
+            // Cranelift does not currently expose per-instruction native PC
+            // offsets. Use the function's first debug position; the opaque
+            // token remains structurally valid and identifies the exact Haxe
+            // function while source-map plumbing is added independently.
+            .filter_map(|&function_index| Self::stack_symbol(bytecode, function_index, 0))
+            .collect();
+        let mut last = compiled.last().copied();
+        for frame in self.stack.iter().rev() {
+            if last == Some(frame.function_index) {
+                continue;
+            }
+            if let Some(symbol) = Self::stack_symbol(bytecode, frame.function_index, frame.pc) {
+                symbols.push(symbol);
+                last = Some(frame.function_index);
+            }
+        }
+
+        // NativeStackTrace deliberately discards the outermost raw entry.
+        // HashLink's platform unwinders naturally include a C runtime frame;
+        // append an equivalent opaque terminator so the last Haxe frame is
+        // retained even when Ash filters all non-JIT PCs above.
+        if !symbols.is_empty() {
+            let mut terminator: Vec<u16> = "fun$0(unknown:0)".encode_utf16().collect();
+            terminator.push(0);
+            symbols.push(terminator.into_boxed_slice());
+        }
+        symbols
     }
 
-    fn capture_exception_stack(&mut self, bytecode: &DecodedBytecode) {
-        let symbols = self.stack_symbols(bytecode);
-        self.exception_stack_symbols = symbols
+    fn prepare_call_stack(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        frame_hint: *const usize,
+    ) -> usize {
+        let symbols = self.stack_symbols(bytecode, frame_hint);
+        if std::env::var_os("ASH_DBG_STACK").is_some() {
+            eprintln!(
+                "[stack] prepare hint={frame_hint:p} interpreter={} symbols={}",
+                self.stack.len(),
+                symbols.len()
+            );
+        }
+        self.call_stack_symbols = symbols
             .iter()
             .map(|symbol| symbol.as_ptr() as usize)
             .collect();
         self.stack_symbol_arena.extend(symbols);
+        self.call_stack_symbols.len()
+    }
+
+    unsafe fn write_call_stack(&mut self, output: *mut *mut c_void, capacity: i32) -> i32 {
+        if !output.is_null() {
+            for (index, symbol) in self
+                .call_stack_symbols
+                .iter()
+                .take(capacity.max(0) as usize)
+                .enumerate()
+            {
+                *output.add(index) = *symbol as *mut c_void;
+            }
+        }
+        self.call_stack_symbols.len() as i32
+    }
+
+    fn capture_exception_stack(&mut self, bytecode: &DecodedBytecode) {
+        self.prepare_call_stack(bytecode, std::ptr::null());
+        self.exception_stack_symbols = self.call_stack_symbols.clone();
     }
 
     fn stack_raw_native(
@@ -10244,12 +10801,7 @@ impl HLInterpreter {
                 self.capture_exception_stack(bytecode);
             }
         } else {
-            let symbols = self.stack_symbols(bytecode);
-            self.call_stack_symbols = symbols
-                .iter()
-                .map(|symbol| symbol.as_ptr() as usize)
-                .collect();
-            self.stack_symbol_arena.extend(symbols);
+            self.prepare_call_stack(bytecode, std::ptr::null());
         }
 
         let symbols = if exception {
@@ -10262,8 +10814,7 @@ impl HLInterpreter {
             if !arr.is_null() {
                 let capacity = unsafe { (*arr).size.max(0) as usize };
                 let data = unsafe {
-                    (arr as *mut u8).add(std::mem::size_of::<hl::varray>())
-                        as *mut *const u16
+                    (arr as *mut u8).add(std::mem::size_of::<hl::varray>()) as *mut *const u16
                 };
                 for (i, symbol) in symbols.iter().take(capacity).enumerate() {
                     unsafe { *data.add(i) = *symbol as *const u16 };
@@ -10489,65 +11040,41 @@ impl HLInterpreter {
         // This covers BOTH float and integer dispatch paths.
         let fn_setup_trap = self.fn_setup_trap_jit;
         let fn_remove_trap = self.fn_remove_trap_jit;
-        let fn_get_exc = self.fn_get_exc_value;
-        let fn_clear_exc = self.fn_clear_exc_value;
         // Same frame-stack invariant as `call_compiled_function`: a native that
         // re-enters the interpreter (closure runner, dynamic dispatch) and then
         // throws longjmps straight back here, leaving the frames it pushed
         // behind.
         let stack_depth = self.stack.len();
-        let mut trap_installed = false;
-        if !fn_setup_trap.is_null() {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
-            let setup: FnSetupTrap = unsafe { std::mem::transmute(fn_setup_trap) };
-            let jmp_buf = unsafe { setup() };
-            if !jmp_buf.is_null() {
-                trap_installed = true;
-                let jumped = unsafe { call_setjmp_opaque(jmp_buf) };
-                if jumped != 0 {
-                    for f in self.stack.drain(stack_depth..) {
-                        if self.reg_pool.len() < POOL_CAP {
-                            self.reg_pool.push(f.into_buffer());
-                        }
-                    }
-                    self.sync_gc_scan_roots();
-                    if !fn_get_exc.is_null() {
-                        type FnGetExc = unsafe extern "C" fn() -> *mut c_void;
-                        let exc_ptr =
-                            unsafe { (std::mem::transmute::<*mut c_void, FnGetExc>(fn_get_exc))() };
-                        if !exc_ptr.is_null() {
-                            // `value_to_string` can allocate. Preserve the runtime's
-                            // pending-exception state until its Rust representation is
-                            // complete.
-                            let exception = self.format_hl_exception(
-                                NanBoxedValue::from_ptr(exc_ptr as usize),
-                            );
-                            if !fn_clear_exc.is_null() {
-                                type FnClearExc = unsafe extern "C" fn();
-                                unsafe {
-                                    (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))()
-                                };
-                            }
-                            return Err(anyhow::Error::new(exception));
-                        }
-                    }
-                    return Err(anyhow!(
-                        "Native longjmp without exception value: {}",
-                        func_name
-                    ));
-                }
-            }
-        }
 
         if ret_is_float || float_mask != 0 {
-            // Arm recovery for float-dispatch native calls too
-            let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
-            if recovered != 0 {
-                crate::native_recovery::disarm_native_recovery();
-                if trap_installed && !fn_remove_trap.is_null() {
-                    type FnRemoveTrap = unsafe extern "C" fn();
-                    unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+            let mut raw = None;
+            let mut recovered_signal = false;
+            let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
+                // Arm recovery for float-dispatch native calls too.
+                let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
+                if recovered != 0 {
+                    crate::native_recovery::disarm_native_recovery();
+                    recovered_signal = true;
+                    return;
                 }
+                raw = Some(self.dispatch_float_native(
+                    func_ptr,
+                    args,
+                    &arg_kinds,
+                    float_mask,
+                    ret_is_float,
+                    ret_kind == hl::hl_type_kind_HF32,
+                ));
+                crate::native_recovery::disarm_native_recovery();
+            });
+            if jumped != 0 {
+                crate::native_recovery::disarm_native_recovery();
+                return Err(self.longjmp_error(
+                    stack_depth,
+                    format!("Native longjmp without exception value: {func_name}"),
+                ));
+            }
+            if recovered_signal {
                 let sig = crate::native_recovery::last_recovery_signal();
                 let addr = crate::native_recovery::last_recovery_fault_addr();
                 eprintln!(
@@ -10557,13 +11084,8 @@ impl HLInterpreter {
                 return Ok(self.wrap_native_result(0i64, ret_kind));
             }
             let raw =
-                self.dispatch_float_native(func_ptr, args, &arg_kinds, float_mask, ret_is_float);
-            crate::native_recovery::disarm_native_recovery();
-            if trap_installed && !fn_remove_trap.is_null() {
-                type FnRemoveTrap = unsafe extern "C" fn();
-                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
-            }
-            return Ok(self.wrap_native_result(raw?, ret_kind));
+                raw.ok_or_else(|| anyhow!("Native trap boundary did not run: {func_name}"))??;
+            return Ok(self.wrap_native_result(raw, ret_kind));
         }
 
         // Type-aware argument extraction.
@@ -10624,10 +11146,6 @@ impl HLInterpreter {
         };
 
         if args.len() > 12 {
-            if trap_installed && !fn_remove_trap.is_null() {
-                type FnRemoveTrap = unsafe extern "C" fn();
-                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
-            }
             return Err(anyhow!(
                 "Native call with {} args not yet supported",
                 args.len()
@@ -10636,14 +11154,218 @@ impl HLInterpreter {
 
         // Arm the native call recovery point so SIGSEGV/SIGBUS from native code
         // (e.g., macOS GL driver bugs) is caught and turned into a recoverable error.
-        let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
-        if recovered != 0 {
-            // We got here via siglongjmp from the signal handler
-            crate::native_recovery::disarm_native_recovery();
-            if trap_installed && !fn_remove_trap.is_null() {
-                type FnRemoveTrap = unsafe extern "C" fn();
-                unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
+        let mut raw_result = None;
+        let mut recovered_signal = false;
+        let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
+            let recovered = unsafe { crate::native_recovery::arm_native_recovery() };
+            if recovered != 0 {
+                crate::native_recovery::disarm_native_recovery();
+                recovered_signal = true;
+                return;
             }
+
+            // Dispatch based on argument count, using type-aware extraction and wrapping.
+            raw_result = Some(unsafe {
+                match args.len() {
+                    0 => {
+                        let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
+                        f()
+                    }
+                    1 => {
+                        let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
+                        f(extract_arg(0))
+                    }
+                    2 => {
+                        let f: unsafe extern "C" fn(i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(extract_arg(0), extract_arg(1))
+                    }
+                    3 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(extract_arg(0), extract_arg(1), extract_arg(2))
+                    }
+                    4 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                        )
+                    }
+                    5 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                        )
+                    }
+                    6 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                        )
+                    }
+                    7 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                        )
+                    }
+                    8 => {
+                        let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                            std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                        )
+                    }
+                    9 => {
+                        let f: unsafe extern "C" fn(
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                        ) -> i64 = std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                            extract_arg(8),
+                        )
+                    }
+                    10 => {
+                        let f: unsafe extern "C" fn(
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                        ) -> i64 = std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                            extract_arg(8),
+                            extract_arg(9),
+                        )
+                    }
+                    11 => {
+                        let f: unsafe extern "C" fn(
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                        ) -> i64 = std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                            extract_arg(8),
+                            extract_arg(9),
+                            extract_arg(10),
+                        )
+                    }
+                    12 => {
+                        let f: unsafe extern "C" fn(
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                            i64,
+                        ) -> i64 = std::mem::transmute(func_ptr);
+                        f(
+                            extract_arg(0),
+                            extract_arg(1),
+                            extract_arg(2),
+                            extract_arg(3),
+                            extract_arg(4),
+                            extract_arg(5),
+                            extract_arg(6),
+                            extract_arg(7),
+                            extract_arg(8),
+                            extract_arg(9),
+                            extract_arg(10),
+                            extract_arg(11),
+                        )
+                    }
+                    _ => 0i64, // arg count is pre-validated above
+                }
+            });
+            crate::native_recovery::disarm_native_recovery();
+        });
+        if jumped != 0 {
+            crate::native_recovery::disarm_native_recovery();
+            return Err(self.longjmp_error(
+                stack_depth,
+                format!("Native longjmp without exception value: {func_name}"),
+            ));
+        }
+        if recovered_signal {
             let sig = crate::native_recovery::last_recovery_signal();
             let addr = crate::native_recovery::last_recovery_fault_addr();
             let sig_name = match sig {
@@ -10657,206 +11379,8 @@ impl HLInterpreter {
             );
             return Ok(self.wrap_native_result(0i64, ret_kind));
         }
-
-        // Dispatch based on argument count, using type-aware extraction and wrapping.
-        let raw_result: i64 = unsafe {
-            match args.len() {
-                0 => {
-                    let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
-                    f()
-                }
-                1 => {
-                    let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
-                    f(extract_arg(0))
-                }
-                2 => {
-                    let f: unsafe extern "C" fn(i64, i64) -> i64 = std::mem::transmute(func_ptr);
-                    f(extract_arg(0), extract_arg(1))
-                }
-                3 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(extract_arg(0), extract_arg(1), extract_arg(2))
-                }
-                4 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                    )
-                }
-                5 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                    )
-                }
-                6 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                    )
-                }
-                7 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                    )
-                }
-                8 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                        extract_arg(7),
-                    )
-                }
-                9 => {
-                    let f: unsafe extern "C" fn(
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                    ) -> i64 = std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                        extract_arg(7),
-                        extract_arg(8),
-                    )
-                }
-                10 => {
-                    let f: unsafe extern "C" fn(
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                    ) -> i64 = std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                        extract_arg(7),
-                        extract_arg(8),
-                        extract_arg(9),
-                    )
-                }
-                11 => {
-                    let f: unsafe extern "C" fn(
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                    ) -> i64 = std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                        extract_arg(7),
-                        extract_arg(8),
-                        extract_arg(9),
-                        extract_arg(10),
-                    )
-                }
-                12 => {
-                    let f: unsafe extern "C" fn(
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                    ) -> i64 = std::mem::transmute(func_ptr);
-                    f(
-                        extract_arg(0),
-                        extract_arg(1),
-                        extract_arg(2),
-                        extract_arg(3),
-                        extract_arg(4),
-                        extract_arg(5),
-                        extract_arg(6),
-                        extract_arg(7),
-                        extract_arg(8),
-                        extract_arg(9),
-                        extract_arg(10),
-                        extract_arg(11),
-                    )
-                }
-                _ => 0i64, // arg count is pre-validated above
-            }
-        };
-
-        // Disarm recovery after successful call
-        crate::native_recovery::disarm_native_recovery();
-
-        if trap_installed && !fn_remove_trap.is_null() {
-            type FnRemoveTrap = unsafe extern "C" fn();
-            unsafe { (std::mem::transmute::<*mut c_void, FnRemoveTrap>(fn_remove_trap))() };
-        }
+        let raw_result =
+            raw_result.ok_or_else(|| anyhow!("Native trap boundary did not run: {func_name}"))?;
 
         // Wrap return value using the correct NanBoxedValue type
         let wrapped = self.wrap_native_result(raw_result, ret_kind);
@@ -11103,23 +11627,39 @@ impl HLInterpreter {
                 // can distinguish it from an omitted/null argument.
                 NanBoxedValue::from_ptr(dyn_arg as usize)
             } else if expected_kind == hl::hl_type_kind_HREF && !dyn_arg.is_null() {
-                let href_type = &bytecode.types[arg_type_idxs[i + arg_shift]];
-                let inner_kind = href_type
-                    .tparam
-                    .as_ref()
-                    .and_then(|t| bytecode.types.get(t.0))
-                    .map(|t| t.kind)
-                    .unwrap_or(hl::hl_type_kind_HDYN);
-                let inner = self.dynamic_to_value_for_kind(dyn_arg, inner_kind);
-                let mut cell = Box::new(0u64);
-                Self::write_value_to_ptr(
-                    (&mut *cell as *mut u64).cast::<u8>(),
-                    inner,
-                    inner_kind,
-                );
-                let cell_ptr = (&mut *cell as *mut u64) as usize;
-                ref_cells.push(cell);
-                NanBoxedValue::from_ptr(cell_ptr)
+                if unsafe {
+                    !(*dyn_arg).t.is_null() && (*(*dyn_arg).t).kind == hl::hl_type_kind_HREF
+                } {
+                    // `hlp_make_dyn` boxes HREF by preserving its cell
+                    // pointer in `v.ptr`. The wrapper itself is non-null even
+                    // when that pointer is null (an omitted optional
+                    // argument), so testing only `dyn_arg` manufactured a
+                    // non-null cell containing zero and suppressed defaults.
+                    let cell = unsafe { (*dyn_arg).v.ptr } as usize;
+                    if cell == 0 {
+                        NanBoxedValue::null()
+                    } else {
+                        NanBoxedValue::from_ptr(cell)
+                    }
+                } else {
+                    let href_type = &bytecode.types[arg_type_idxs[i + arg_shift]];
+                    let inner_kind = href_type
+                        .tparam
+                        .as_ref()
+                        .and_then(|t| bytecode.types.get(t.0))
+                        .map(|t| t.kind)
+                        .unwrap_or(hl::hl_type_kind_HDYN);
+                    let inner = self.dynamic_to_value_for_kind(dyn_arg, inner_kind);
+                    let mut cell = Box::new(0u64);
+                    Self::write_value_to_ptr(
+                        (&mut *cell as *mut u64).cast::<u8>(),
+                        inner,
+                        inner_kind,
+                    );
+                    let cell_ptr = (&mut *cell as *mut u64) as usize;
+                    ref_cells.push(cell);
+                    NanBoxedValue::from_ptr(cell_ptr)
+                }
             } else if expected_kind == hl::hl_type_kind_HOBJ && !self.fn_dyn_castp.is_null() {
                 // A dynamic HOBJ still needs an exact-type cast. Kind-only
                 // conversion passes ArrayDyn to a method expecting
@@ -11129,7 +11669,8 @@ impl HLInterpreter {
                 if let Some(expected_type_idx) = expected_type_idx {
                     let target_type = self.c_type_factory.get(expected_type_idx);
                     let source_type = unsafe { (*dyn_arg).t };
-                    if source_type == target_type || target_type.is_null() || source_type.is_null() {
+                    if source_type == target_type || target_type.is_null() || source_type.is_null()
+                    {
                         NanBoxedValue::from_ptr(dyn_arg as usize)
                     } else if unsafe { (*source_type).kind } != hl::hl_type_kind_HOBJ {
                         // Default-argument method shims can present their
@@ -11217,14 +11758,8 @@ impl HLInterpreter {
         let mut alive = true;
         unsafe {
             let poll = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_PollEvent".as_ptr());
-            let swap = libc::dlsym(
-                libc::RTLD_DEFAULT,
-                c"SDL_GL_SwapWindow".as_ptr(),
-            );
-            let get_win = libc::dlsym(
-                libc::RTLD_DEFAULT,
-                c"SDL_GL_GetCurrentWindow".as_ptr(),
-            );
+            let swap = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_GL_SwapWindow".as_ptr());
+            let get_win = libc::dlsym(libc::RTLD_DEFAULT, c"SDL_GL_GetCurrentWindow".as_ptr());
 
             if !poll.is_null() {
                 let poll_fn: unsafe extern "C" fn(*mut u8) -> i32 = std::mem::transmute(poll);
@@ -11456,28 +11991,47 @@ impl HLInterpreter {
         arg_kinds: &[hl::hl_type_kind],
         float_mask: u32,
         ret_is_float: bool,
+        ret_is_f32: bool,
     ) -> Result<i64> {
         let gf = |i: usize| -> f64 { args[i].as_f64() };
+        let gf32 = |i: usize| -> f32 { args[i].as_f64() as f32 };
         let gi = |i: usize| -> i64 { self.value_to_i64(args[i], arg_kinds[i]) };
 
         let raw: i64 = unsafe {
             match (args.len(), ret_is_float, float_mask) {
                 // --- 0 args ---
+                (0, true, 0b0) if ret_is_f32 => {
+                    let f: unsafe extern "C" fn() -> f32 = std::mem::transmute(func_ptr);
+                    (f() as f64).to_bits() as i64
+                }
                 (0, true, 0b0) => {
                     // () -> f64
                     let f: unsafe extern "C" fn() -> f64 = std::mem::transmute(func_ptr);
                     f().to_bits() as i64
                 }
                 // --- 1 arg ---
+                (1, true, 0b0) if ret_is_f32 => {
+                    let f: unsafe extern "C" fn(i64) -> f32 = std::mem::transmute(func_ptr);
+                    (f(gi(0)) as f64).to_bits() as i64
+                }
                 (1, true, 0b0) => {
                     // (i64) -> f64  e.g. date_get_time(t:Int)
                     let f: unsafe extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
                     f(gi(0)).to_bits() as i64
                 }
+                (1, true, 0b1) if ret_is_f32 && arg_kinds[0] == hl::hl_type_kind_HF32 => {
+                    let f: unsafe extern "C" fn(f32) -> f32 = std::mem::transmute(func_ptr);
+                    (f(gf32(0)) as f64).to_bits() as i64
+                }
                 (1, true, 0b1) => {
                     // (f64) -> f64  e.g. math_sqrt, math_abs, math_floor, ...
                     let f: unsafe extern "C" fn(f64) -> f64 = std::mem::transmute(func_ptr);
                     f(gf(0)).to_bits() as i64
+                }
+                (1, false, 0b1) if arg_kinds[0] == hl::hl_type_kind_HF32 => {
+                    let f: unsafe extern "C" fn(f32) = std::mem::transmute(func_ptr);
+                    f(gf32(0));
+                    0
                 }
                 (1, false, 0b1) => {
                     // (f64) -> i64  e.g. math_ffloor, math_isnan, math_isfinite
@@ -11495,10 +12049,19 @@ impl HLInterpreter {
                     let f: unsafe extern "C" fn(f64, i64) -> f64 = std::mem::transmute(func_ptr);
                     f(gf(0), gi(1)).to_bits() as i64
                 }
+                (2, false, 0b10) if arg_kinds[1] == hl::hl_type_kind_HF32 => {
+                    let f: unsafe extern "C" fn(i64, f32) = std::mem::transmute(func_ptr);
+                    f(gi(0), gf32(1));
+                    0
+                }
                 (2, false, 0b10) => {
                     // (i64, f64) -> i64
                     let f: unsafe extern "C" fn(i64, f64) -> i64 = std::mem::transmute(func_ptr);
                     f(gi(0), gf(1))
+                }
+                (2, true, 0b10) if ret_is_f32 && arg_kinds[1] == hl::hl_type_kind_HF32 => {
+                    let f: unsafe extern "C" fn(i64, f32) -> f32 = std::mem::transmute(func_ptr);
+                    (f(gi(0), gf32(1)) as f64).to_bits() as i64
                 }
                 (2, true, 0b10) => {
                     // (i64, f64) -> f64
@@ -11509,6 +12072,10 @@ impl HLInterpreter {
                     // (f64, f64) -> f64  e.g. math_pow, math_atan2
                     let f: unsafe extern "C" fn(f64, f64) -> f64 = std::mem::transmute(func_ptr);
                     f(gf(0), gf(1)).to_bits() as i64
+                }
+                (2, true, 0b00) if ret_is_f32 => {
+                    let f: unsafe extern "C" fn(i64, i64) -> f32 = std::mem::transmute(func_ptr);
+                    (f(gi(0), gi(1)) as f64).to_bits() as i64
                 }
                 (2, true, 0b00) => {
                     // (i64, i64) -> f64
@@ -11539,6 +12106,25 @@ impl HLInterpreter {
                         std::mem::transmute(func_ptr);
                     f(gf(0), gi(1), gi(2)).to_bits() as i64
                 }
+                (3, false, 0b011) => {
+                    // Two scalar values followed by comparison context.
+                    let f: unsafe extern "C" fn(f64, f64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gf(0), gf(1), gi(2))
+                }
+                (3, false, 0b100) if arg_kinds[2] == hl::hl_type_kind_HF32 => {
+                    // (i64, i64, f32) -> void, used by hlsdl's
+                    // gl_tex_parameterf(target, parameter, value).
+                    let f: unsafe extern "C" fn(i64, i64, f32) = std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf32(2));
+                    0
+                }
+                (3, false, 0b100) => {
+                    // (i64, i64, f64) -> i64
+                    let f: unsafe extern "C" fn(i64, i64, f64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf(2))
+                }
                 (3, false, 0b111) => {
                     // (f64, f64, f64) -> i64
                     let f: unsafe extern "C" fn(f64, f64, f64) -> i64 =
@@ -11552,11 +12138,79 @@ impl HLInterpreter {
                     f(gf(0), gf(1), gf(2)).to_bits() as i64
                 }
                 // --- 4 args ---
+                (4, false, 0b1110)
+                    if arg_kinds[1..].iter().all(|&k| k == hl::hl_type_kind_HF32) =>
+                {
+                    // OpenAL listener3f(parameter, x, y, z).
+                    let f: unsafe extern "C" fn(i64, f32, f32, f32) = std::mem::transmute(func_ptr);
+                    f(gi(0), gf32(1), gf32(2), gf32(3));
+                    0
+                }
+                (4, false, 0b1110) => {
+                    // Compiled AIR functions and native vector helpers with
+                    // a receiver followed by three doubles.
+                    let f: unsafe extern "C" fn(i64, f64, f64, f64) = std::mem::transmute(func_ptr);
+                    f(gi(0), gf(1), gf(2), gf(3));
+                    0
+                }
+                (4, false, 0b1000) if arg_kinds[3] == hl::hl_type_kind_HF32 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, f32) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gi(2), gf32(3))
+                }
+                (4, false, 0b1000) => {
+                    // AIR functions such as structural equality carry the
+                    // comparison epsilon after three pointer-like operands.
+                    let f: unsafe extern "C" fn(i64, i64, i64, f64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gi(2), gf(3))
+                }
+                (4, false, 0b0110) => {
+                    let f: unsafe extern "C" fn(i64, f64, f64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gf(1), gf(2), gi(3))
+                }
+                (4, true, 0b0000) if ret_is_f32 => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> f32 =
+                        std::mem::transmute(func_ptr);
+                    (f(gi(0), gi(1), gi(2), gi(3)) as f64).to_bits() as i64
+                }
+                (4, true, 0b0000) => {
+                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> f64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gi(2), gi(3)).to_bits() as i64
+                }
                 (4, false, 0b1111) => {
                     // (f64, f64, f64, f64) -> i64  e.g. gl_clear_color(r, g, b, a)
                     let f: unsafe extern "C" fn(f64, f64, f64, f64) -> i64 =
                         std::mem::transmute(func_ptr);
                     f(gf(0), gf(1), gf(2), gf(3))
+                }
+                // --- 5 args ---
+                (5, false, 0b11100)
+                    if arg_kinds[2..].iter().all(|&k| k == hl::hl_type_kind_HF32) =>
+                {
+                    // OpenAL source3f/buffer3f(object, parameter, x, y, z).
+                    let f: unsafe extern "C" fn(i64, i64, f32, f32, f32) =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf32(2), gf32(3), gf32(4));
+                    0
+                }
+                (5, false, 0b11100) => {
+                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64) =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf(2), gf(3), gf(4));
+                    0
+                }
+                (5, false, 0b00011) => {
+                    let f: unsafe extern "C" fn(f64, f64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gf(0), gf(1), gi(2), gi(3), gi(4))
+                }
+                (5, false, 0b11110) => {
+                    let f: unsafe extern "C" fn(i64, f64, f64, f64, f64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gf(1), gf(2), gf(3), gf(4))
                 }
                 // --- 6 args ---
                 (6, false, 0b100000) => {
@@ -11565,6 +12219,15 @@ impl HLInterpreter {
                     let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, f64) -> i64 =
                         std::mem::transmute(func_ptr);
                     f(gi(0), gi(1), gi(2), gi(3), gi(4), gf(5))
+                }
+                // --- 8 args ---
+                (8, false, 0b0011_1100) => {
+                    // Haxe graphics helpers commonly carry an object and
+                    // flags around four scalar coordinates:
+                    // (i64, i64, f64, f64, f64, f64, i64, i64) -> word.
+                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64, f64, i64, i64) -> i64 =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5), gi(6), gi(7))
                 }
                 _ => {
                     return Err(anyhow!(
@@ -11899,8 +12562,7 @@ impl HLInterpreter {
 
 /// Set once the program's entrypoint has returned, so the broker stops
 /// starting promotions whose result nothing can call any more.
-static RETIER_ABANDON: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static RETIER_ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether speculative re-tier work should give up now.
 pub(crate) fn retier_abandoned() -> bool {
@@ -12004,6 +12666,9 @@ mod stub_bridge_tests {
         let setup = resolver
             .resolve_function("std", "hlp_setup_trap_jit")
             .expect("hlp_setup_trap_jit");
+        let remove = resolver
+            .resolve_function("std", "hlp_remove_trap_jit")
+            .expect("hlp_remove_trap_jit");
         let get_exc = resolver
             .resolve_function("std", "hlp_get_exc_value")
             .expect("hlp_get_exc_value");
@@ -12012,12 +12677,7 @@ mod stub_bridge_tests {
             .expect("hlp_clear_exc_value");
 
         unsafe {
-            type FnSetupTrap = unsafe extern "C" fn() -> *mut c_void;
-            let setup: FnSetupTrap = std::mem::transmute(setup);
-            let jmp_buf = setup();
-            assert!(!jmp_buf.is_null(), "trap setup failed");
-
-            if call_setjmp_opaque(jmp_buf) == 0 {
+            let jumped = run_with_hl_trap(setup, remove, || {
                 // No HL value on this error, exactly like a `NullCheck`
                 // failure raised while the bridge re-enters the interpreter.
                 let err = anyhow::Error::new(HLExceptionPropagation {
@@ -12025,7 +12685,8 @@ mod stub_bridge_tests {
                     message: Some("Null access".to_string()),
                 });
                 HLInterpreter::raise_stub_bridge_failure(&resolver, 698, err);
-            }
+            });
+            assert_eq!(jumped, 1, "stub bridge failure did not longjmp");
 
             // Reached only via longjmp out of the raise.
             type FnGetExc = unsafe extern "C" fn() -> *mut hl::vdynamic;

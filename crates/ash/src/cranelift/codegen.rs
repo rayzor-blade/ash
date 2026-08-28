@@ -199,10 +199,10 @@ pub fn lower_air_function(
     // Re-tier exits: AIR block id of an OSR-eligible loop header -> address
     // of a leaked AtomicU64 slot. The header polls the slot; when the broker
     // publishes an LLVM OSR entry address there, the frame spills its
-    // register image into `osr_buf` and tail-calls the entry. Empty map (and
-    // buf 0) compiles the function with no exits.
+    // register image into a stack slot of its own and tail-calls the entry.
+    // Empty map (and 0 registers) compiles the function with no exits.
     osr_exits: &HashMap<u32, u64>,
-    osr_buf: u64,
+    osr_image_regs: usize,
 ) -> Result<LoweredFunction> {
     let bytecode = ctx.bytecode();
     let func_idx = ctx
@@ -262,7 +262,8 @@ pub fn lower_air_function(
             nargs: tf.args.len(),
             ret_class: entry_return_class(ret_kind),
             osr_exits,
-            osr_buf,
+            osr_image_regs,
+            osr_image_slot: None,
             fiber_poll_epoch_slot: None,
         };
         cg.run()?;
@@ -347,7 +348,7 @@ pub fn compile_osr_entry(
     // The frame that enters here is exactly the one a later LLVM promote
     // wants to lift out, so the entry polls the same re-tier slots the
     // function's ordinary compile allocated.
-    let (osr_exits, osr_buf) = super::air::retier_state_for(findex, &opt.ser.block_pcs);
+    let (osr_exits, osr_image_regs) = super::air::retier_state_for(findex, &opt.ser.block_pcs);
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();
     {
@@ -365,7 +366,8 @@ pub fn compile_osr_entry(
             nargs: 0, // parameters are dead in an OSR body; values come from buf
             ret_class: entry_return_class(ret_kind),
             osr_exits: &osr_exits,
-            osr_buf,
+            osr_image_regs,
+            osr_image_slot: None,
             fiber_poll_epoch_slot: None,
         };
         cg.run_osr(header)?;
@@ -454,7 +456,11 @@ struct AirCodegen<'a, 'b> {
     ret_class: AbiClass,
     /// See [`lower_air_function`]: loop-header re-tier exits.
     osr_exits: &'a HashMap<u32, u64>,
-    osr_buf: u64,
+    /// Slots a spilled register image needs. The image itself lives in
+    /// [`Self::osr_image_slot`], per frame — see [`RetierState`].
+    osr_image_regs: usize,
+    /// Lazily created stack slot holding this frame's spilled image.
+    osr_image_slot: Option<StackSlot>,
     /// Last runtime poll generation handled by this compiled activation.
     fiber_poll_epoch_slot: Option<StackSlot>,
 }
@@ -547,6 +553,24 @@ impl AirCodegen<'_, '_> {
     ///
     /// Single-threaded by design, like the interpreter that feeds this tier:
     /// the spill buffer is one leaked allocation per compiled function.
+    /// This frame's register-image spill slot, created on first use.
+    ///
+    /// Sized from the function's register count so `reg * 8` addressing
+    /// matches what the OSR entry loads.
+    fn osr_image_slot(&mut self) -> StackSlot {
+        if let Some(slot) = self.osr_image_slot {
+            return slot;
+        }
+        let bytes = (self.osr_image_regs.max(1) * 8) as u32;
+        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            bytes,
+            3,
+        ));
+        self.osr_image_slot = Some(slot);
+        slot
+    }
+
     fn emit_retier_poll(
         &mut self,
         header: BlockId,
@@ -601,15 +625,19 @@ impl AirCodegen<'_, '_> {
         // Deterministic emission order.
         let mut spill: Vec<(u32, ValueId)> = image.into_iter().collect();
         spill.sort_unstable_by_key(|&(r, _)| r);
+        // The image belongs to THIS frame. It used to be one leaked buffer per
+        // findex, which every activation on every thread spilled into: with
+        // more than one VM worker, two fibers running the same function raced
+        // on the same addresses and one entered the OSR body carrying the
+        // other's live registers.
+        let image = self.osr_image_slot();
         for (reg, vid) in spill {
             let v = self.get(vid)?;
-            let addr = self
-                .b
-                .ins()
-                .iconst(types::I64, (self.osr_buf + u64::from(reg) * 8) as i64);
             // Narrow stores leave the slot's high bytes stale; the entry
             // truncates every load to the register's width, so that is fine.
-            self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
+            self.b
+                .ins()
+                .stack_store(types::I64, v, image, (u32::from(reg) * 8) as i32);
         }
 
         let mut call_sig = Signature::new(self.ctx.call_conv());
@@ -618,7 +646,7 @@ impl AirCodegen<'_, '_> {
             call_sig.returns.push(AbiParam::new(ty));
         }
         let sig_ref = self.b.import_signature(call_sig);
-        let buf_addr = self.b.ins().iconst(types::I64, self.osr_buf as i64);
+        let buf_addr = self.b.ins().stack_addr(types::I64, image, 0);
         let call = self.b.ins().call_indirect(sig_ref, target, &[buf_addr]);
         let results: Vec<Value> = self.b.inst_results(call).to_vec();
         match results.first() {

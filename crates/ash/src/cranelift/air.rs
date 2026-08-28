@@ -233,8 +233,14 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
 struct RetierState {
     /// serialized header pc -> slot address
     slots: std::collections::HashMap<usize, u64>,
-    /// spill buffer address (`reg * 8` slots)
-    buf: u64,
+    /// How many 64-bit slots a register image needs (`reg * 8` addressing).
+    ///
+    /// A COUNT, not a buffer: the image is spilled into a stack slot owned by
+    /// the frame taking the exit. One shared buffer per findex was a data race
+    /// the moment two threads ran the same function — every fiber executing it
+    /// spilled to the same addresses, so one frame entered the OSR body with
+    /// another's live values.
+    nregs: usize,
 }
 
 static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierState>>> =
@@ -257,7 +263,7 @@ fn retier_alloc(
     findex: usize,
     headers: &[(u32, usize)], // (block id, serialized pc)
     nregs: usize,
-) -> (HashMap<u32, u64>, u64) {
+) -> (HashMap<u32, u64>, usize) {
     let mut guard = RETIER.lock().expect("retier mutex poisoned");
     let map = guard.get_or_insert_with(Default::default);
     let st = map.entry(findex).or_insert_with(|| {
@@ -267,20 +273,22 @@ fn retier_alloc(
                 Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
             slots.insert(pc, slot as *const _ as u64);
         }
-        let buf = Box::leak(vec![0u64; nregs.max(1)].into_boxed_slice()).as_mut_ptr() as u64;
-        RetierState { slots, buf }
+        RetierState {
+            slots,
+            nregs: nregs.max(1),
+        }
     });
     let exits = headers
         .iter()
         .filter_map(|&(b, pc)| st.slots.get(&pc).map(|&s| (b, s)))
         .collect();
-    (exits, st.buf)
+    (exits, st.nregs)
 }
 
 /// The already-allocated re-tier state for `findex`, mapped onto `block_pcs`
 /// (for the OSR-entry compile, which runs after the main compile allocated
 /// the slots). Empty when the function has none.
-pub(super) fn retier_state_for(findex: usize, block_pcs: &[usize]) -> (HashMap<u32, u64>, u64) {
+pub(super) fn retier_state_for(findex: usize, block_pcs: &[usize]) -> (HashMap<u32, u64>, usize) {
     let guard = RETIER.lock().expect("retier mutex poisoned");
     let Some(st) = guard.as_ref().and_then(|m| m.get(&findex)) else {
         return (HashMap::new(), 0);
@@ -290,7 +298,7 @@ pub(super) fn retier_state_for(findex: usize, block_pcs: &[usize]) -> (HashMap<u
         .enumerate()
         .filter_map(|(b, pc)| st.slots.get(pc).map(|&s| (b as u32, s)))
         .collect();
-    (exits, st.buf)
+    (exits, st.nregs)
 }
 
 /// Whether a loop header should carry a re-tier poll.

@@ -311,6 +311,9 @@ pub struct CraneliftTierContext {
     /// headers. Keeping the address in the tier context avoids native symbol
     /// lookup in every per-function compile.
     fiber_poll: usize,
+    /// Address of ash_std's monotonically increasing poll epoch. Loop headers
+    /// compare it with the last generation handled by this activation.
+    fiber_poll_epoch: usize,
     call_conv: CallConv,
     /// AIR v2's view of the module, built on first use. Only the `ASH_AIR=v2`
     /// path touches it. Building it is O(functions + natives), so it is held
@@ -422,6 +425,15 @@ impl CraneliftTierContext {
         let clear_exc_value = helper("hlp_clear_exc_value");
         let get_obj_proto = helper("hl_get_obj_proto");
         let fiber_poll = helper("hlp_fiber_poll");
+        let fiber_poll_epoch = {
+            let getter = helper("hlp_fiber_poll_epoch_address");
+            if getter == 0 {
+                0
+            } else {
+                let getter: unsafe extern "C" fn() -> *const u64 = std::mem::transmute(getter);
+                getter() as usize
+            }
+        };
 
         Ok(Self {
             bytecode: bytecode as *const _,
@@ -479,6 +491,7 @@ impl CraneliftTierContext {
             clear_exc_value,
             get_obj_proto,
             fiber_poll,
+            fiber_poll_epoch,
             call_conv: backend.default_call_conv(),
             air_module: OnceLock::new(),
         })
@@ -735,14 +748,21 @@ impl CraneliftTierContext {
         Ok(a)
     }
 
-    /// Yield to Ash's single-threaded cooperative scheduler. Compiled AIR V2
-    /// calls this from rate-limited loop-header safe points so CPU-bound Haxe
-    /// code cannot starve sibling logical threads.
+    /// Yield to Ash's cooperative scheduler. Compiled AIR V2 calls this from
+    /// event-driven loop-header safe points so CPU-bound Haxe code cannot
+    /// starve sibling logical threads.
     pub fn fiber_poll_helper(&self) -> Result<usize> {
         if self.fiber_poll == 0 {
             bail!("hlp_fiber_poll unavailable");
         }
         Ok(self.fiber_poll)
+    }
+
+    pub fn fiber_poll_epoch_address(&self) -> Result<usize> {
+        if self.fiber_poll_epoch == 0 {
+            bail!("hlp_fiber_poll_epoch_address unavailable");
+        }
+        Ok(self.fiber_poll_epoch)
     }
 
     /// `hlp_make_dyn`, for `Cast::ToDyn`.

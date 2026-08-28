@@ -14,7 +14,8 @@ use inkwell::values::{
     AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
 };
 use inkwell::{
-    basic_block::BasicBlock, builder::Builder, AddressSpace, FloatPredicate, IntPredicate,
+    basic_block::BasicBlock, builder::Builder, AddressSpace, AtomicOrdering, FloatPredicate,
+    IntPredicate,
 };
 
 use super::module::{CompiledFunctionMeta, JITModule};
@@ -35,11 +36,6 @@ use crate::{
     types::HLFunction,
 };
 use anyhow::{anyhow, Result};
-
-/// AIR V2 loop-header visits between cooperative scheduler polls in compiled
-/// LLVM code. This matches the Cranelift tier so moving between tiers does not
-/// change logical-thread fairness by orders of magnitude.
-const FIBER_POLL_INTERVAL: u64 = 16 * 1024;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics
@@ -106,6 +102,18 @@ impl<'ctx> JITModule<'ctx> {
         // Portable stack probe: address of a local variable approximates current SP.
         let marker = 0u8;
         (&marker as *const u8) as usize
+    }
+
+    fn fiber_poll_epoch_address(&self) -> Result<usize> {
+        let getter = self
+            .native_function_resolver
+            .resolve_function("std", "hlp_fiber_poll_epoch_address")?;
+        let getter: unsafe extern "C" fn() -> *const u64 = unsafe { std::mem::transmute(getter) };
+        let address = unsafe { getter() } as usize;
+        if address == 0 {
+            return Err(anyhow!("hlp_fiber_poll_epoch_address returned null"));
+        }
+        Ok(address)
     }
 
     /// Declare an external native function and create a caller wrapper.
@@ -1337,10 +1345,11 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         // Compiled fibers need safe points even in CPU-only loops. Derive
-        // those points from AIR V2's natural-loop analysis and put a
-        // rate-limited poll block in front of each selected header. All CFG
-        // edges target `entries`, so phi copies still happen on the original
-        // predecessor edge before the safe point.
+        // those points from AIR V2's natural-loop analysis. Each selected
+        // header compares the runtime poll epoch; only a new scheduling/GC
+        // request enters the cold helper block. All CFG edges target
+        // `entries`, so phi copies still happen on the original predecessor
+        // edge before the safe point.
         let cfg = air::v2::CfgInfo::build(air);
         let loops = air::v2::LoopForest::analyze(air, &cfg);
         let mut poll_headers = vec![false; air.blocks.len()];
@@ -1367,17 +1376,27 @@ impl<'ctx> JITModule<'ctx> {
 
         let fiber_poll = has_polls.then(|| self.declare_native("hlp_fiber_poll", &[], None));
         self.builder.position_at_end(entry);
-        let poll_counter = if has_polls {
-            let counter = self
+        let poll_epoch = if has_polls {
+            let slot = self
                 .builder
-                .build_alloca(self.context.i32_type(), "air_fiber_poll_counter")?;
-            self.builder.build_store(
-                counter,
-                self.context
-                    .i32_type()
-                    .const_int(FIBER_POLL_INTERVAL, false),
+                .build_alloca(self.context.i64_type(), "air_fiber_poll_epoch")?;
+            let address = self.context.i64_type().const_int(
+                self.fiber_poll_epoch_address()? as u64,
+                false,
+            );
+            let pointer = address.const_to_pointer(self.context.ptr_type(AddressSpace::default()));
+            let initial = self.builder.build_load(
+                self.context.i64_type(),
+                pointer,
+                "air_fiber_poll_epoch_initial",
             )?;
-            Some(counter)
+            initial
+                .as_instruction_value()
+                .expect("epoch load is an instruction")
+                .set_atomic_ordering(AtomicOrdering::Monotonic)
+                .map_err(|error| anyhow!("failed to mark epoch load atomic: {error:?}"))?;
+            self.builder.build_store(slot, initial)?;
+            Some((slot, pointer))
         } else {
             None
         };
@@ -1394,43 +1413,47 @@ impl<'ctx> JITModule<'ctx> {
             let Some(poll_entry) = entries[bi].filter(|_| poll_headers[bi]) else {
                 continue;
             };
-            let counter = poll_counter.expect("poll headers have a counter");
+            let (handled_slot, epoch_pointer) = poll_epoch.expect("poll headers have an epoch");
             let poll_call = self
                 .context
                 .append_basic_block(function, &format!("air_b{bi}_fiber_poll_call"));
             let body = blocks[bi][0];
 
             self.builder.position_at_end(poll_entry);
-            let remaining = self
+            let handled = self
                 .builder
-                .build_load(self.context.i32_type(), counter, "air_fiber_poll_remaining")?
+                .build_load(
+                    self.context.i64_type(),
+                    handled_slot,
+                    "air_fiber_poll_handled_epoch",
+                )?
                 .into_int_value();
-            let next = self.builder.build_int_sub(
-                remaining,
-                self.context.i32_type().const_int(1, false),
-                "air_fiber_poll_next",
+            let current = self.builder.build_load(
+                self.context.i64_type(),
+                epoch_pointer,
+                "air_fiber_poll_current_epoch",
             )?;
-            self.builder.build_store(counter, next)?;
+            current
+                .as_instruction_value()
+                .expect("epoch load is an instruction")
+                .set_atomic_ordering(AtomicOrdering::Monotonic)
+                .map_err(|error| anyhow!("failed to mark epoch load atomic: {error:?}"))?;
+            let current = current.into_int_value();
             let due = self.builder.build_int_compare(
-                IntPredicate::EQ,
-                next,
-                self.context.i32_type().const_zero(),
+                IntPredicate::NE,
+                current,
+                handled,
                 "air_fiber_poll_due",
             )?;
             self.builder
                 .build_conditional_branch(due, poll_call, body)?;
 
             self.builder.position_at_end(poll_call);
+            self.builder.build_store(handled_slot, current)?;
             self.builder.build_call(
                 fiber_poll.expect("poll headers have a helper"),
                 &[],
                 "air_fiber_poll",
-            )?;
-            self.builder.build_store(
-                counter,
-                self.context
-                    .i32_type()
-                    .const_int(FIBER_POLL_INTERVAL, false),
             )?;
             self.builder.build_unconditional_branch(body)?;
         }
@@ -5048,6 +5071,111 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap();
                 let call_done_bb = self.context.append_basic_block(function, "call_done");
 
+                // Guarded devirtualisation comes before the generic runtime
+                // signature check. The target's real LLVM signature was
+                // checked while constructing `devirt`, so a guard hit is
+                // already ABI-safe. Signature-adapted closures whose target
+                // does not have this call site's ABI cannot enter this arm;
+                // they continue to the dynamic marshaller below. Keeping the
+                // common monomorphic arm first avoids putting the Issue2889
+                // safety branch inside every iteration of closure_call.
+                let devirt = if self.hot_reload {
+                    None
+                } else {
+                    let caller = f.findex as u32;
+                    crate::callsite_profile::closure_target(caller, i as u32)
+                        .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
+                        .and_then(|(target, exp_hv)| {
+                            let expected_ty = if exp_hv {
+                                extended_fn_type
+                            } else {
+                                base_fn_type
+                            };
+                            match self.get_or_create_function_value(target as usize) {
+                                Ok((callee, is_placeholder)) => {
+                                    if is_placeholder {
+                                        self.add_pending_compilation(target as usize);
+                                    }
+                                    (callee.get_type() == expected_ty)
+                                        .then_some((callee, target, exp_hv))
+                                }
+                                Err(_) => None,
+                            }
+                        })
+                };
+
+                if let Some((callee, target, exp_hv)) = devirt {
+                    crate::profile::count("devirt closure fast-arm", 1);
+                    // Closure header fields are immutable after allocation.
+                    // This lets LICM hoist the target guard when the closure
+                    // value itself is loop invariant.
+                    for lv in [
+                        raw_has_value.as_instruction(),
+                        wrapped_fun.as_instruction(),
+                        fun_ptr.as_instruction(),
+                        has_value.as_instruction(),
+                        closure_value.as_instruction(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        let _ = lv.set_metadata(
+                            self.context.metadata_node(&[]),
+                            self.context.get_kind_id("invariant.load"),
+                        );
+                    }
+
+                    let devirt_bb = self.context.append_basic_block(function, "devirt_hit");
+                    let signature_bb = self
+                        .context
+                        .append_basic_block(function, "devirt_miss_signature");
+                    let fun_int = self.builder.build_ptr_to_int(
+                        fun_ptr,
+                        self.context.i64_type(),
+                        "closure_fun_int",
+                    )?;
+                    let is_target = self.builder.build_int_compare(
+                        IntPredicate::EQ,
+                        fun_int,
+                        self.context.i64_type().const_int(target as u64 + 1, false),
+                        "devirt_is_target",
+                    )?;
+                    let hv_matches = self.builder.build_int_compare(
+                        if exp_hv {
+                            IntPredicate::NE
+                        } else {
+                            IntPredicate::EQ
+                        },
+                        has_value,
+                        i32_type.const_zero(),
+                        "devirt_hv",
+                    )?;
+                    let guard = self
+                        .builder
+                        .build_and(is_target, hv_matches, "devirt_guard")?;
+                    self.builder
+                        .build_conditional_branch(guard, devirt_bb, signature_bb)?;
+
+                    self.builder.position_at_end(devirt_bb);
+                    let direct_args: Vec<BasicMetadataValueEnum> = if exp_hv {
+                        let mut values: Vec<BasicMetadataValueEnum> = vec![closure_value.into()];
+                        values.extend(arg_vals.iter().cloned());
+                        values
+                    } else {
+                        arg_vals.clone()
+                    };
+                    let ret = self
+                        .builder
+                        .build_call(callee, &direct_args, "devirt_call")?
+                        .try_as_basic_value();
+                    if let Some(value) = ret.basic() {
+                        self.builder
+                            .build_store(registers[dst.0 as usize], value)?;
+                    }
+                    self.builder.build_unconditional_branch(call_done_bb)?;
+                    self.builder.position_at_end(signature_bb);
+                }
+
                 // The register's HFUN is only the call-site contract. A
                 // signature-adapted closure can carry a different runtime
                 // HFUN and a wrapper body with that runtime ABI. Calling it
@@ -5258,117 +5386,6 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_unconditional_branch(call_done_bb)?;
 
                 self.builder.position_at_end(typed_bb);
-
-                // Guarded devirtualisation. The interpreter ran this site
-                // thousands of times before this compile; when it only ever
-                // saw one target, speculate on it. The fun field of a
-                // sentinel-form closure holds `target + 1` and is never
-                // patched, so the guard is a compare against a CONSTANT, and
-                // the fast arm is a direct call the inliner can take — which
-                // is the point: the JVM wins closure_call not by dispatching
-                // faster but by not dispatching at all. A miss falls into the
-                // ordinary indirect path below, so a wrong or stale profile
-                // costs one compare. Off under hot reload, where a direct
-                // call would dodge the function-table patch.
-                let devirt = if self.hot_reload {
-                    None
-                } else {
-                    let caller = f.findex as u32;
-                    crate::callsite_profile::closure_target(caller, i as u32)
-                        .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
-                        .and_then(|(target, exp_hv)| {
-                            let expected_ty = if exp_hv {
-                                extended_fn_type
-                            } else {
-                                base_fn_type
-                            };
-                            match self.get_or_create_function_value(target as usize) {
-                                Ok((callee, is_placeholder)) => {
-                                    if is_placeholder {
-                                        self.add_pending_compilation(target as usize);
-                                    }
-                                    // The guard proves the target's identity,
-                                    // not its shape: only call directly when
-                                    // the callee's real signature is the one
-                                    // this site would build.
-                                    (callee.get_type() == expected_ty)
-                                        .then_some((callee, target, exp_hv))
-                                }
-                                Err(_) => None,
-                            }
-                        })
-                };
-
-                if let Some((callee, target, exp_hv)) = devirt {
-                    crate::profile::count("devirt closure fast-arm", 1);
-                    // A vclosure's fun, hasValue and value fields are written
-                    // once, at allocation, and never patched -- the fun field
-                    // holding the sentinel forever is the very fact the guard
-                    // stands on. `!invariant.load` lets LICM hoist the guard
-                    // chain out of a loop, leaving the inlined fast arm
-                    // guard-free on every iteration after the first.
-                    for lv in [
-                        fun_ptr.as_instruction(),
-                        has_value.as_instruction(),
-                        closure_value.as_instruction(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    {
-                        let _ = lv.set_metadata(
-                            self.context.metadata_node(&[]),
-                            self.context.get_kind_id("invariant.load"),
-                        );
-                    }
-                    let devirt_bb = self.context.append_basic_block(function, "devirt_hit");
-                    let generic_bb = self.context.append_basic_block(function, "devirt_miss");
-
-                    let fun_int = self.builder.build_ptr_to_int(
-                        fun_ptr,
-                        self.context.i64_type(),
-                        "closure_fun_int",
-                    )?;
-                    let is_target = self.builder.build_int_compare(
-                        IntPredicate::EQ,
-                        fun_int,
-                        self.context.i64_type().const_int(target as u64 + 1, false),
-                        "devirt_is_target",
-                    )?;
-                    let hv_matches = self.builder.build_int_compare(
-                        if exp_hv {
-                            IntPredicate::NE
-                        } else {
-                            IntPredicate::EQ
-                        },
-                        has_value,
-                        i32_type.const_zero(),
-                        "devirt_hv",
-                    )?;
-                    let guard = self
-                        .builder
-                        .build_and(is_target, hv_matches, "devirt_guard")?;
-                    self.builder
-                        .build_conditional_branch(guard, devirt_bb, generic_bb)?;
-
-                    self.builder.position_at_end(devirt_bb);
-                    let direct_args: Vec<BasicMetadataValueEnum> = if exp_hv {
-                        let mut v: Vec<BasicMetadataValueEnum> = vec![closure_value.into()];
-                        v.extend(arg_vals.iter().cloned());
-                        v
-                    } else {
-                        arg_vals.clone()
-                    };
-                    let ret = self
-                        .builder
-                        .build_call(callee, &direct_args, "devirt_call")?
-                        .try_as_basic_value();
-                    if let Some(rv) = ret.basic() {
-                        self.builder.build_store(registers[dst.0 as usize], rv)?;
-                    }
-                    self.builder.build_unconditional_branch(call_done_bb)?;
-
-                    self.builder.position_at_end(generic_bb);
-                }
 
                 // Branch based on hasValue
                 let has_value_cmp = self.builder.build_int_compare(

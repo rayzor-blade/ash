@@ -472,6 +472,7 @@ fn stop_mutator_world() -> StoppedWorld {
         world.stop_requested = true;
         world.collector = collector;
         GC_STOP_REQUESTED.store(true, Ordering::Release);
+        crate::fiber::request_fiber_poll();
         // A mutator may already be sleeping in the GC-lock slow path. Wake it
         // so it can observe the stop request and publish its stack.
         GC_LOCK.wake_for_world_stop();

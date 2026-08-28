@@ -50,11 +50,6 @@ use super::{abi_class, argument_abi_class, entry_return_class, AbiClass};
 use crate::hl_bindings as hl;
 use crate::jit::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 
-/// Number of AIR V2 loop-header visits between cooperative scheduler polls.
-/// The counter is per compiled activation, so it adds no shared-state access
-/// to the hot path and still bounds starvation in CPU-only loops.
-const FIBER_POLL_INTERVAL: i64 = 16 * 1024;
-
 // Cranelift has no floating remainder instruction. Keeping these helpers in
 // Rust avoids depending on a platform-specific libm symbol name while still
 // giving generated code the exact IEEE remainder operation Rust/LLVM use.
@@ -268,7 +263,7 @@ pub fn lower_air_function(
             ret_class: entry_return_class(ret_kind),
             osr_exits,
             osr_buf,
-            fiber_poll_slot: None,
+            fiber_poll_epoch_slot: None,
         };
         cg.run()?;
         cg.finish();
@@ -371,7 +366,7 @@ pub fn compile_osr_entry(
             ret_class: entry_return_class(ret_kind),
             osr_exits: &osr_exits,
             osr_buf,
-            fiber_poll_slot: None,
+            fiber_poll_epoch_slot: None,
         };
         cg.run_osr(header)?;
         cg.finish();
@@ -460,8 +455,8 @@ struct AirCodegen<'a, 'b> {
     /// See [`lower_air_function`]: loop-header re-tier exits.
     osr_exits: &'a HashMap<u32, u64>,
     osr_buf: u64,
-    /// Per-activation countdown used by compiled cooperative safe points.
-    fiber_poll_slot: Option<StackSlot>,
+    /// Last runtime poll generation handled by this compiled activation.
+    fiber_poll_epoch_slot: Option<StackSlot>,
 }
 
 impl AirCodegen<'_, '_> {
@@ -502,7 +497,7 @@ impl AirCodegen<'_, '_> {
 
         let poll_headers = self.fiber_poll_headers();
         if poll_headers.iter().any(|poll| *poll) {
-            self.init_fiber_poll_counter()?;
+            self.init_fiber_poll_epoch()?;
         }
 
         // Re-tier exits: each participating loop header gets a body block the
@@ -688,7 +683,7 @@ impl AirCodegen<'_, '_> {
 
         let poll_headers = self.fiber_poll_headers();
         if poll_headers.iter().any(|poll| *poll) {
-            self.init_fiber_poll_counter()?;
+            self.init_fiber_poll_epoch()?;
         }
 
         // Cells are registers too; their current values are in the buffer.
@@ -829,39 +824,53 @@ impl AirCodegen<'_, '_> {
         headers
     }
 
-    fn init_fiber_poll_counter(&mut self) -> Result<()> {
+    fn init_fiber_poll_epoch(&mut self) -> Result<()> {
         let slot = self.b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            4,
-            2,
+            8,
+            3,
         ));
-        let initial = self.b.ins().iconst(types::I32, FIBER_POLL_INTERVAL);
+        let epoch_addr = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.fiber_poll_epoch_address()? as i64);
+        let initial = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), epoch_addr, 0);
         self.b.ins().stack_store(types::I64, initial, slot, 0);
-        self.fiber_poll_slot = Some(slot);
+        self.fiber_poll_epoch_slot = Some(slot);
         Ok(())
     }
 
-    /// Rate-limited cooperative safe point inserted directly into the AIR V2
-    /// CFG. The scheduler call lives on a cold edge; ordinary iterations pay
-    /// only a stack countdown and branch.
+    /// Event-driven cooperative safe point inserted directly into the AIR V2
+    /// CFG. Ordinary iterations only compare the runtime's poll generation;
+    /// the cold helper edge runs when work, a timer quantum, or GC asks for it.
     fn emit_fiber_poll(&mut self) -> Result<()> {
         let slot = self
-            .fiber_poll_slot
-            .ok_or_else(|| anyhow!("fiber poll counter was not initialized"))?;
+            .fiber_poll_epoch_slot
+            .ok_or_else(|| anyhow!("fiber poll epoch was not initialized"))?;
         let poll = self.b.create_block();
         let body = self.b.create_block();
         self.b.set_cold_block(poll);
 
-        let remaining = self
+        let handled = self
             .b
             .ins()
-            .stack_load(types::I64, types::I32, slot, 0);
-        let next = self.b.ins().iadd_imm(remaining, -1);
-        self.b.ins().stack_store(types::I64, next, slot, 0);
-        let due = self.b.ins().icmp_imm(IntCC::Equal, next, 0);
+            .stack_load(types::I64, types::I64, slot, 0);
+        let epoch_addr = self
+            .b
+            .ins()
+            .iconst(types::I64, self.ctx.fiber_poll_epoch_address()? as i64);
+        let current = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), epoch_addr, 0);
+        let due = self.b.ins().icmp(IntCC::NotEqual, current, handled);
         self.b.ins().brif(due, poll, &[], body, &[]);
 
         self.b.switch_to_block(poll);
+        self.b.ins().stack_store(types::I64, current, slot, 0);
         let sig_ref = self
             .b
             .import_signature(Signature::new(self.ctx.call_conv()));
@@ -870,8 +879,6 @@ impl AirCodegen<'_, '_> {
             .ins()
             .iconst(types::I64, self.ctx.fiber_poll_helper()? as i64);
         self.b.ins().call_indirect(sig_ref, target, &[]);
-        let reset = self.b.ins().iconst(types::I32, FIBER_POLL_INTERVAL);
-        self.b.ins().stack_store(types::I64, reset, slot, 0);
         self.b.ins().jump(body, &[]);
 
         self.b.switch_to_block(body);

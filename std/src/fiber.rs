@@ -43,7 +43,19 @@ static NEXT_SCHEDULER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_WAIT_TOKEN: AtomicU64 = AtomicU64::new(1);
 static LOGICAL_THREADS: AtomicUsize = AtomicUsize::new(0);
 static COMPILED_WORKERS_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Generation observed by compiled AIR V2 loop safe points.
+///
+/// A generation changes only when the runtime actually needs attention: a
+/// logical-thread scheduling quantum elapsed, work reached a scheduler, or
+/// the GC requested a stop-the-world rendezvous. Generated loops therefore
+/// pay one read/compare instead of maintaining a counter on every backedge.
+static FIBER_POLL_EPOCH: AtomicU64 = AtomicU64::new(1);
+static PREEMPTOR_STARTED: OnceLock<()> = OnceLock::new();
+static PREEMPTOR_WAKE: LazyLock<(Mutex<()>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(()), Condvar::new()));
 const STUB_SENTINEL_LIMIT: usize = 0x100000;
+
+const FIBER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(2);
 
 #[derive(Clone, Copy)]
 enum SchedulerCommand {
@@ -66,8 +78,46 @@ impl SchedulerEndpoint {
 
     fn push(&self, command: SchedulerCommand) {
         self.commands.lock().unwrap().push_back(command);
+        request_fiber_poll();
         self.changed.notify_one();
     }
+}
+
+/// Make every currently-running compiled activation observe a fresh safe
+/// point. The monotonically increasing value means one worker cannot consume
+/// another worker's request.
+pub(crate) fn request_fiber_poll() {
+    FIBER_POLL_EPOCH.fetch_add(1, Ordering::Release);
+}
+
+/// Resolved once by each code generator. LLVM emits a monotonic atomic load;
+/// Cranelift reissues an aligned 64-bit machine load at each natural-loop
+/// header because its atomic-load instruction is sequentially consistent and
+/// made the safe point itself a hot-path bottleneck on Apple Silicon.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
+    FIBER_POLL_EPOCH.as_ptr()
+}
+
+fn ensure_preemption_timer() {
+    PREEMPTOR_STARTED.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("ash-fiber-timer".into())
+            .spawn(|| loop {
+                let (lock, changed) = &*PREEMPTOR_WAKE;
+                let mut guard = lock.lock().unwrap();
+                while LOGICAL_THREADS.load(Ordering::Acquire) == 0 {
+                    guard = changed.wait(guard).unwrap();
+                }
+                drop(guard);
+
+                std::thread::sleep(FIBER_QUANTUM);
+                if LOGICAL_THREADS.load(Ordering::Acquire) != 0 {
+                    request_fiber_poll();
+                }
+            });
+    });
+    PREEMPTOR_WAKE.1.notify_one();
 }
 
 static SCHEDULER_ENDPOINTS: LazyLock<Mutex<HashMap<u64, Weak<SchedulerEndpoint>>>> =
@@ -837,6 +887,8 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     // only from Rust heap memory the GC cannot see.
     crate::gc::gc_add_persistent(c as *mut vdynamic);
     LOGICAL_THREADS.fetch_add(1, Ordering::Release);
+    ensure_preemption_timer();
+    request_fiber_poll();
     worker_trace("create", id as u64, (*c).fun as usize as u64);
     if can_dispatch_to_worker() {
         // A freshly-created closure commonly still carries findex+1. Resolve

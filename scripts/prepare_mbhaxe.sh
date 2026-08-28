@@ -76,8 +76,34 @@ for tool in git haxe haxelib clang pkg-config otool install_name_tool nm strings
         exit 1
     }
 done
-pkg-config --exists sdl2 || {
-    echo "error: SDL2 development files not found (brew install sdl2)" >&2
+HOST_ARCH="$(uname -m)"
+
+# Pick the SDL2 whose library is built for THIS machine.
+#
+# A Mac can carry both Homebrew prefixes at once — /usr/local from the Intel
+# era and /opt/homebrew for arm64 — each with its own pkg-config and its own
+# SDL2. Whichever leads PATH wins, so an unqualified `pkg-config sdl2` on an
+# arm64 host happily reports the x86_64 install, and the build then dies deep
+# inside SDL_cpuinfo.h pulling x86 intrinsics into an arm64 translation unit.
+# Choose by inspecting the library, not by trusting the search order.
+sdl2_pkgconfig=""
+for candidate in pkg-config /opt/homebrew/bin/pkg-config /usr/local/bin/pkg-config; do
+    command -v "${candidate}" >/dev/null || continue
+    "${candidate}" --exists sdl2 2>/dev/null || continue
+    libdir="$("${candidate}" --variable=libdir sdl2 2>/dev/null)"
+    [[ -n "${libdir}" && -e "${libdir}/libSDL2.dylib" ]] || continue
+    if lipo -archs "${libdir}/libSDL2.dylib" 2>/dev/null | tr ' ' '\n' | grep -qx "${HOST_ARCH}"; then
+        sdl2_pkgconfig="${candidate}"
+        break
+    fi
+done
+[[ -n "${sdl2_pkgconfig}" ]] || {
+    echo "error: no SDL2 built for ${HOST_ARCH} found (brew install sdl2)" >&2
+    for candidate in /opt/homebrew/bin/pkg-config /usr/local/bin/pkg-config; do
+        command -v "${candidate}" >/dev/null || continue
+        libdir="$("${candidate}" --variable=libdir sdl2 2>/dev/null)" || continue
+        [[ -e "${libdir}/libSDL2.dylib" ]] && echo "  ${libdir}/libSDL2.dylib is $(lipo -archs "${libdir}/libSDL2.dylib" 2>/dev/null)" >&2
+    done
     exit 1
 }
 
@@ -172,10 +198,11 @@ mkdir -p "${RUN_ROOT}"
         -debug
 )
 
-read -r -a sdl_cflags <<<"$(pkg-config --cflags sdl2)"
-read -r -a sdl_libs <<<"$(pkg-config --libs sdl2)"
+read -r -a sdl_cflags <<<"$("${sdl2_pkgconfig}" --cflags sdl2)"
+read -r -a sdl_libs <<<"$("${sdl2_pkgconfig}" --libs sdl2)"
 
 clang \
+    -arch "${HOST_ARCH}" \
     -dynamiclib -O2 -fPIC -std=c11 \
     -DGL_SILENCE_DEPRECATION \
     -Wno-pointer-sign -Wno-incompatible-pointer-types \
@@ -239,6 +266,22 @@ if otool -L "${RUN_ROOT}/sdl.hdll" | grep -q 'libSDL3'; then
     echo "error: SDL3 library found in the SDL2 MBHaxe fixture" >&2
     exit 1
 fi
+# Every staged binary must be the host's architecture. A mismatch here does
+# not fail at load with a clear message — dyld reports the library as simply
+# "not found", which reads as a missing HDLL and sends you looking in the
+# wrong place entirely.
+for artifact in sdl.hdll libhl.dylib ash; do
+    archs="$(lipo -archs "${RUN_ROOT}/${artifact}" 2>/dev/null)"
+    if ! tr ' ' '\n' <<<"${archs}" | grep -qx "${HOST_ARCH}"; then
+        echo "error: ${artifact} is ${archs:-unreadable}, not ${HOST_ARCH}" >&2
+        exit 1
+    fi
+done
+sdl2_lib="$("${sdl2_pkgconfig}" --variable=libdir sdl2)/libSDL2.dylib"
+if ! lipo -archs "${sdl2_lib}" 2>/dev/null | tr ' ' '\n' | grep -qx "${HOST_ARCH}"; then
+    echo "error: linked ${sdl2_lib} is not ${HOST_ARCH}" >&2
+    exit 1
+fi
 for symbol in hlp_win_create hlp_win_get_pixel_size hlp_gl_create_shader hlp_gl_shader_source; do
     nm -gU "${RUN_ROOT}/sdl.hdll" | grep -q " _${symbol}$" || {
         echo "error: sdl.hdll is missing ${symbol}" >&2
@@ -253,13 +296,36 @@ done
     echo "hxDatachannel ${DATACHANNEL_REF}"
     echo "colyseus-websocket ${COLYSEUS_REF}"
     echo "haxe $(haxe --version)"
-    echo "sdl2 $(pkg-config --modversion sdl2)"
+    echo "sdl2 $("${sdl2_pkgconfig}" --modversion sdl2) ${HOST_ARCH} ($("${sdl2_pkgconfig}" --variable=libdir sdl2))"
+    echo "arch ${HOST_ARCH}"
     shasum -a 256 "${RUN_ROOT}/marblegame.hl" "${RUN_ROOT}/sdl.hdll" "${RUN_ROOT}/libhl.dylib"
 } >"${RUN_ROOT}/PROVENANCE.txt"
 
 echo "prepared isolated MBHaxe fixture: ${RUN_ROOT}"
 echo "validated SDL source: ${HASHLINK_URL}@${HASHLINK_REF}:libs/sdl"
-if [[ -z "${NATIVE_DIR}" ]]; then
-    echo "warning: no non-SDL HDLL directory supplied; launch may report missing libraries" >&2
+
+# Name the HDLLs this bytecode will look for and this fixture does not carry,
+# rather than leaving them to be discovered as a load failure at launch. The
+# build registers hlsdl, datachannel and hlopenal, so those are the libraries
+# whose natives the .hl can reference; sdl is built here, the rest must come
+# from --native-dir. A name scan of the bytecode is heuristic, so this only
+# ever sharpens a warning — it never fails the build.
+# Read the bytecode's strings ONCE into a variable rather than piping into
+# each grep: `grep -q` exits at the first match and closes the pipe, `strings`
+# takes SIGPIPE, and under `set -o pipefail` the pipeline then reports failure
+# — so every match was discarded and this warning could never fire.
+hl_names="$(strings "${RUN_ROOT}/marblegame.hl" || true)"
+missing_hdlls=()
+for lib in openal datachannel; do
+    [[ -e "${RUN_ROOT}/${lib}.hdll" ]] && continue
+    if grep -qx "${lib}" <<<"${hl_names}"; then
+        missing_hdlls+=("${lib}.hdll")
+    fi
+done
+if ((${#missing_hdlls[@]})); then
+    echo "warning: bytecode references ${missing_hdlls[*]}, not staged here;" >&2
+    echo "         supply them with --native-dir DIR (its sdl.hdll is ignored)" >&2
+elif [[ -z "${NATIVE_DIR}" ]]; then
+    echo "note: no --native-dir given, and the bytecode names no HDLL beyond sdl" >&2
 fi
 echo "run: cd '${RUN_ROOT}' && ./ash --mode interp marblegame.hl"

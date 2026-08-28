@@ -10757,12 +10757,11 @@ impl HLInterpreter {
         }
     }
 
-    fn stack_symbol(
+    fn stack_symbol_for_function(
         bytecode: &DecodedBytecode,
-        function_index: usize,
+        func: &HLFunction,
         pc: usize,
-    ) -> Option<Box<[u16]>> {
-        let func = bytecode.functions.get(function_index)?;
+    ) -> Box<[u16]> {
         let debug_pc = pc.min(func.ops.len().saturating_sub(1));
         let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
         let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
@@ -10775,7 +10774,31 @@ impl HLInterpreter {
             .encode_utf16()
             .collect();
         symbol.push(0);
-        Some(symbol.into_boxed_slice())
+        symbol.into_boxed_slice()
+    }
+
+    fn stack_symbol(
+        bytecode: &DecodedBytecode,
+        function_index: usize,
+        pc: usize,
+    ) -> Option<Box<[u16]>> {
+        let func = bytecode.functions.get(function_index)?;
+        Some(Self::stack_symbol_for_function(bytecode, func, pc))
+    }
+
+    fn interpreter_stack_symbol(
+        &self,
+        bytecode: &DecodedBytecode,
+        function_index: usize,
+        pc: usize,
+    ) -> Option<Box<[u16]>> {
+        bytecode.functions.get(function_index)?;
+        // AIR V2's serializer renumbers opcodes. Cache::prepare builds a
+        // matching debug table for that optimized body, so frame.pc must be
+        // resolved against the body the interpreter actually executes rather
+        // than the original bytecode function at the same numeric index.
+        let func = self.air.body(bytecode, function_index);
+        Some(Self::stack_symbol_for_function(bytecode, func, pc))
     }
 
     /// Return true when the loader owns `pc` as part of the executable or a
@@ -10932,7 +10955,9 @@ impl HLInterpreter {
             if last == Some(frame.function_index) {
                 continue;
             }
-            if let Some(symbol) = Self::stack_symbol(bytecode, frame.function_index, frame.pc) {
+            if let Some(symbol) =
+                self.interpreter_stack_symbol(bytecode, frame.function_index, frame.pc)
+            {
                 symbols.push(symbol);
                 last = Some(frame.function_index);
             }

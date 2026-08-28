@@ -231,6 +231,14 @@ cp "${ASH_BIN}" "${RUN_ROOT}/ash"
 cp "${ASH_LIBHL}" "${RUN_ROOT}/libhl.dylib"
 install_name_tool -id @rpath/libhl.dylib "${RUN_ROOT}/libhl.dylib"
 
+# Upstream HDLLs are linked against `@rpath/libhl.1.dylib`, the versioned
+# name HashLink installs. The fixture must not patch them — running the
+# shipped binaries unmodified is what makes this a real test of Ash — so Ash's
+# runtime answers to that name as well. A copy rather than a symlink so the
+# staged tree stays self-contained and hashable.
+cp "${ASH_LIBHL}" "${RUN_ROOT}/libhl.1.dylib"
+install_name_tool -id @rpath/libhl.1.dylib "${RUN_ROOT}/libhl.1.dylib"
+
 if [[ -n "${NATIVE_DIR}" ]]; then
     [[ -d "${NATIVE_DIR}" ]] || {
         echo "error: native HDLL directory not found: ${NATIVE_DIR}" >&2
@@ -241,6 +249,17 @@ if [[ -n "${NATIVE_DIR}" ]]; then
         [[ "$(basename "${hdll}")" == "sdl.hdll" ]] && continue
         cp "${hdll}" "${RUN_ROOT}/"
     done
+    # The HDLLs are taken exactly as the game ships them, so their own
+    # third-party dependencies (libopenal, libpng, libuv, the vorbis family,
+    # ...) have to come along too. Skip any libhl the source directory
+    # carries: supplying Ash's runtime instead of upstream's is the entire
+    # point of the fixture.
+    for dylib in "${NATIVE_DIR}"/*.dylib; do
+        case "$(basename "${dylib}")" in
+            libhl*.dylib) continue ;;
+        esac
+        cp "${dylib}" "${RUN_ROOT}/"
+    done
     shopt -u nullglob
 fi
 
@@ -248,6 +267,11 @@ ln -s "${SOURCE_ROOT}/MBHaxe/data" "${RUN_ROOT}/data"
 
 codesign --force -s - "${RUN_ROOT}/sdl.hdll" >/dev/null
 codesign --force -s - "${RUN_ROOT}/libhl.dylib" >/dev/null
+codesign --force -s - "${RUN_ROOT}/libhl.1.dylib" >/dev/null
+# Only what this script BUILDS is re-signed. The game's own HDLLs and their
+# third-party dylibs are staged byte-for-byte: re-signing rewrites the
+# signature and changes the hash, and "the shipped binaries, unmodified" is
+# the property the fixture exists to demonstrate.
 codesign --force -s - "${RUN_ROOT}/ash" >/dev/null
 
 if strings "${RUN_ROOT}/sdl.hdll" | grep -Eiq 'ash_sdl|crates/ash_sdl|target/(debug|release)/deps/libsdl'; then
@@ -270,13 +294,31 @@ fi
 # not fail at load with a clear message — dyld reports the library as simply
 # "not found", which reads as a missing HDLL and sends you looking in the
 # wrong place entirely.
-for artifact in sdl.hdll libhl.dylib ash; do
-    archs="$(lipo -archs "${RUN_ROOT}/${artifact}" 2>/dev/null)"
+shopt -s nullglob
+for artifact in "${RUN_ROOT}/ash" "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
+    archs="$(lipo -archs "${artifact}" 2>/dev/null)"
     if ! tr ' ' '\n' <<<"${archs}" | grep -qx "${HOST_ARCH}"; then
-        echo "error: ${artifact} is ${archs:-unreadable}, not ${HOST_ARCH}" >&2
+        echo "error: $(basename "${artifact}") is ${archs:-unreadable}, not ${HOST_ARCH}" >&2
         exit 1
     fi
 done
+shopt -u nullglob
+if [[ -n "${NATIVE_DIR}" ]]; then
+    shopt -s nullglob
+    for staged in "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
+        name="$(basename "${staged}")"
+        case "${name}" in sdl.hdll|libhl.dylib|libhl.1.dylib) continue ;; esac
+        source_copy="${NATIVE_DIR}/${name}"
+        [[ -e "${source_copy}" ]] || continue
+        if ! cmp -s "${source_copy}" "${staged}"; then
+            echo "error: ${name} was altered while staging; the fixture must run" >&2
+            echo "       the shipped binaries unmodified" >&2
+            exit 1
+        fi
+    done
+    shopt -u nullglob
+fi
+
 sdl2_lib="$("${sdl2_pkgconfig}" --variable=libdir sdl2)/libSDL2.dylib"
 if ! lipo -archs "${sdl2_lib}" 2>/dev/null | tr ' ' '\n' | grep -qx "${HOST_ARCH}"; then
     echo "error: linked ${sdl2_lib} is not ${HOST_ARCH}" >&2
@@ -298,6 +340,16 @@ done
     echo "haxe $(haxe --version)"
     echo "sdl2 $("${sdl2_pkgconfig}" --modversion sdl2) ${HOST_ARCH} ($("${sdl2_pkgconfig}" --variable=libdir sdl2))"
     echo "arch ${HOST_ARCH}"
+    if [[ -n "${NATIVE_DIR}" ]]; then
+        echo "native-dir ${NATIVE_DIR}"
+        shopt -s nullglob
+        for staged in "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
+            name="$(basename "${staged}")"
+            case "${name}" in sdl.hdll|libhl.dylib|libhl.1.dylib) continue ;; esac
+            echo "vendored ${name} $(lipo -archs "${staged}" 2>/dev/null | tr ' ' '+')"
+        done
+        shopt -u nullglob
+    fi
     shasum -a 256 "${RUN_ROOT}/marblegame.hl" "${RUN_ROOT}/sdl.hdll" "${RUN_ROOT}/libhl.dylib"
 } >"${RUN_ROOT}/PROVENANCE.txt"
 

@@ -48,9 +48,37 @@ else entirely.
 
 The pinned build registers `hlsdl`, `datachannel` and `hlopenal`, so the
 bytecode can reference natives from all three. `sdl.hdll` is always built
-here; `openal.hdll` and `datachannel.hdll` must come from `--native-dir`.
-Without them the script names exactly which are missing rather than leaving
-them to surface as a load failure at launch.
+here; the rest come from `--native-dir`, and without them the script names
+exactly which are missing rather than leaving them to surface as a load
+failure at launch.
+
+Take that directory from a shipped macOS build, not from the component
+repositories. `RandomityGuy/hashlink`'s darwin release is an x86_64 nightly
+from 2022, and the `hxDatachannel` release archive carries a Windows PE DLL —
+neither loads on an arm64 Mac. A release `.dmg` carries universal
+(`x86_64 arm64`) binaries:
+
+```bash
+gh release download 1.3.0-mbu --repo RandomityGuy/MBHaxe --pattern '*Mac.dmg'
+hdiutil attach -nobrowse -readonly MBHaxe-Ultra-Mac.dmg
+cp "/Volumes/Marble Blast Ultra/MarbleBlast Ultra.app/Contents/Frameworks"/* native/
+rm native/sdl.hdll native/libhl.1.dylib     # this fixture supplies both
+```
+
+The HDLLs bring their own third-party dependencies (`libopenal`, `libpng`,
+`libuv`, the vorbis family), so `--native-dir` stages `.dylib` files as well
+as `.hdll` files. Any `libhl` there is skipped: supplying Ash's runtime
+instead of upstream's is the whole point.
+
+Those binaries are staged **byte for byte** and the script verifies it — the
+fixture is only evidence if it runs what the game ships, unmodified. Nothing
+is re-signed except what this script builds, since re-signing rewrites the
+signature and changes the hash.
+
+Upstream links its HDLLs against `@rpath/libhl.1.dylib`, HashLink's versioned
+install name. Rather than patch them, Ash's runtime is staged under that name
+too, so the shipped binaries resolve Ash by their own unmodified load
+commands.
 
 The pinned source revisions live at the top of
 [`scripts/prepare_mbhaxe.sh`](../scripts/prepare_mbhaxe.sh). Update them as one

@@ -367,15 +367,34 @@ struct WorkerPool {
 
 static WORKER_POOL: OnceLock<Option<WorkerPool>> = OnceLock::new();
 
+/// Workers to run VM fibers on, from `ASH_WORKERS` or the machine.
+///
+/// A value that does not parse falls back to the machine default and says so.
+/// Silently reading a typo as zero disables the pool outright, and since the
+/// pool currently costs more than it earns on allocation-heavy workloads, that
+/// misconfiguration looks like a speed-up rather than a mistake.
 fn configured_worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
-        if let Ok(value) = std::env::var("ASH_WORKERS") {
-            return value.trim().parse().unwrap_or(0);
+        let machine_default = || {
+            std::thread::available_parallelism()
+                .map(|count| count.get().saturating_sub(1))
+                .unwrap_or(0)
+        };
+        match std::env::var("ASH_WORKERS") {
+            Ok(value) => match value.trim().parse::<usize>() {
+                Ok(n) => n,
+                Err(_) => {
+                    let n = machine_default();
+                    eprintln!(
+                        "[ash] ASH_WORKERS={value:?} is not a worker count; using {n}. \
+                         Set ASH_WORKERS=0 to run fibers on the main scheduler."
+                    );
+                    n
+                }
+            },
+            Err(_) => machine_default(),
         }
-        std::thread::available_parallelism()
-            .map(|count| count.get().saturating_sub(1))
-            .unwrap_or(0)
     })
 }
 

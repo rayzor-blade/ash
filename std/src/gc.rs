@@ -14,7 +14,10 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
-use std::{collections::HashSet, mem};
+use std::{
+    collections::{HashMap, HashSet},
+    mem,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
     DiscardVirtualMemory, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
@@ -101,8 +104,6 @@ fn spill_callee_saved(buf: &mut [usize; CALLEE_SAVED_WORDS]) {
 #[inline(never)]
 fn spill_callee_saved(_buf: &mut [usize; CALLEE_SAVED_WORDS]) {}
 
-use std::sync::atomic::AtomicUsize;
-
 // ── Mutator bump region (TLAB) ──────────────────────────────────────────────
 //
 // The mutator (the thread running HL code — HashLink is !HL_THREADS, so
@@ -127,16 +128,22 @@ use std::sync::atomic::AtomicUsize;
 // The cursor and limit are exported statics so a JIT tier can inline the
 // bump sequence later; today they are used from these Rust fast paths.
 
-#[no_mangle]
-pub static ASH_TLAB_CUR: AtomicUsize = AtomicUsize::new(0);
-#[no_mangle]
-pub static ASH_TLAB_LIMIT: AtomicUsize = AtomicUsize::new(0);
-/// The one mutator allowed to use the exported process-global TLAB cursor.
-///
-/// Additional registered mutators deliberately take the locked allocation
-/// path until the JIT ABI grows a per-worker TLAB. Sharing `ASH_TLAB_CUR`
-/// between OS threads would make two allocations return overlapping memory.
-static TLAB_OWNER_THREAD: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// This thread's bump cursor and the end of its region.
+    ///
+    /// Per thread, not per process: the M:N fiber pool runs VM code on every
+    /// `ash-vm-*` worker, and a shared cursor would either hand two threads
+    /// overlapping memory or — as it did — confine the lock-free path to one
+    /// owner thread and send every other worker through the global GC lock on
+    /// every allocation. That serialization is what made more workers slower.
+    ///
+    /// `const`-initialized so the access carries no lazy-init branch.
+    static TLAB_CUR: Cell<usize> = const { Cell::new(0) };
+    static TLAB_LIMIT: Cell<usize> = const { Cell::new(0) };
+    /// Heap offset of the block this thread is bumping through, so a refill
+    /// can hand the previous one back to the sweep.
+    static TLAB_BLOCK: Cell<usize> = const { Cell::new(usize::MAX) };
+}
 
 /// Largest object the bump region serves. At one line, nothing in the
 /// region ever needs an `alloc_sizes` span entry.
@@ -278,7 +285,6 @@ fn register_current_mutator(stack_top: usize) {
         });
     }
     MUTATOR_REGISTERED.with(|registered| registered.set(true));
-    let _ = TLAB_OWNER_THREAD.compare_exchange(0, thread, Ordering::Relaxed, Ordering::Relaxed);
 }
 
 /// Register the current OS worker using the platform's real stack boundary.
@@ -337,13 +343,8 @@ fn unregister_current_mutator() {
     MUTATOR_WORLD.changed.notify_all();
     drop(world);
 
-    if TLAB_OWNER_THREAD
-        .compare_exchange(thread, 0, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
-    {
-        ASH_TLAB_CUR.store(0, Ordering::Relaxed);
-        ASH_TLAB_LIMIT.store(0, Ordering::Relaxed);
-    }
+    // The region goes back to the sweep with the thread that owned it.
+    release_tlab_region(&mut gc_locked());
 }
 
 #[inline]
@@ -537,11 +538,6 @@ fn publish_current_scan_ranges() {
     }
 }
 
-#[inline]
-fn on_mutator() -> bool {
-    TLAB_OWNER_THREAD.load(Ordering::Relaxed) == thread_self_fast()
-}
-
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.
 fn tlab_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -558,16 +554,16 @@ fn tlab_enabled() -> bool {
 /// when it can and the locked path when it cannot.
 pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
     let aligned = (size.max(8) + 15) & !15;
-    if aligned <= TLAB_MAX_OBJ && tlab_enabled() && on_mutator() {
-        let cur = ASH_TLAB_CUR.load(Ordering::Relaxed);
+    if aligned <= TLAB_MAX_OBJ && tlab_enabled() && current_mutator_registered() {
+        let cur = TLAB_CUR.with(Cell::get);
         if cur != 0 {
             let mut p = cur;
             if (p & (LINE_SIZE - 1)) + aligned > LINE_SIZE {
                 p = (p + LINE_SIZE - 1) & !(LINE_SIZE - 1);
             }
             let np = p + aligned;
-            if np <= ASH_TLAB_LIMIT.load(Ordering::Relaxed) {
-                ASH_TLAB_CUR.store(np, Ordering::Relaxed);
+            if np <= TLAB_LIMIT.with(Cell::get) {
+                TLAB_CUR.with(|c| c.set(np));
                 // Pre-zeroed at refill.
                 return Some(unsafe { NonNull::new_unchecked(p as *mut u8) });
             }
@@ -580,6 +576,28 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
 /// Region exhausted (or never opened): take the lock, run the ordinary
 /// trigger logic, carve a fresh block, zero it once, and serve the pending
 /// allocation from its head.
+/// Install `block` as this thread's bump region, releasing the previous one.
+///
+/// The set of in-use regions lives on the heap because `sweep` consults it
+/// under the same lock this runs under; only the cursor is thread-local.
+/// Releasing the old block simply makes it ordinary again — its live objects
+/// are marked conservatively like any others; it just stops being exempt
+/// from reclamation.
+fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize) {
+    gc.heap.tlab_blocks.insert(thread_self_fast(), block);
+    TLAB_BLOCK.with(|b| b.set(block));
+    TLAB_CUR.with(|c| c.set(cur));
+    TLAB_LIMIT.with(|l| l.set(limit));
+}
+
+/// Give up this thread's bump region entirely (thread exit).
+fn release_tlab_region(gc: &mut ImmixAllocator) {
+    gc.heap.tlab_blocks.remove(&thread_self_fast());
+    TLAB_BLOCK.with(|b| b.set(usize::MAX));
+    TLAB_CUR.with(|c| c.set(0));
+    TLAB_LIMIT.with(|l| l.set(0));
+}
+
 #[cold]
 fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     let mut gc = gc_locked();
@@ -613,7 +631,6 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
             // Zeroed for the same reason a fresh block is: every caller of
             // this path is promised zeroed memory.
             unsafe { std::ptr::write_bytes(base, 0, span_bytes) };
-            gc.heap.tlab_block = Some(rblock);
             gc.heap.bytes_since_gc += span_bytes;
             gc.heap.alloc_count += 1;
             GC_STATS
@@ -622,8 +639,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
             GC_STATS
                 .lines_recycled
                 .fetch_add(len as u64, Ordering::Relaxed);
-            ASH_TLAB_CUR.store(base as usize + aligned, Ordering::Relaxed);
-            ASH_TLAB_LIMIT.store(base as usize + span_bytes, Ordering::Relaxed);
+            adopt_tlab_region(&mut gc, rblock, base as usize + aligned, base as usize + span_bytes);
             return Some(unsafe { NonNull::new_unchecked(base) });
         }
     }
@@ -638,7 +654,6 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     };
     let base = unsafe { gc.heap.memory.as_mut_ptr().add(block) };
     unsafe { std::ptr::write_bytes(base, 0, BLOCK_SIZE) };
-    gc.heap.tlab_block = Some(block);
     // Coarse trigger accounting: the whole region counts when it is carved,
     // not per object. Slightly early triggers, never late ones.
     gc.heap.bytes_since_gc += BLOCK_SIZE;
@@ -646,8 +661,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     GC_STATS
         .bytes_allocated
         .fetch_add(BLOCK_SIZE as u64, Ordering::Relaxed);
-    ASH_TLAB_CUR.store(base as usize + aligned, Ordering::Relaxed);
-    ASH_TLAB_LIMIT.store(base as usize + BLOCK_SIZE, Ordering::Relaxed);
+    adopt_tlab_region(&mut gc, block, base as usize + aligned, base as usize + BLOCK_SIZE);
     Some(unsafe { NonNull::new_unchecked(base) })
 }
 
@@ -1431,7 +1445,14 @@ struct ImmixHeap {
     /// The block the mutator's bump region currently lives in. `sweep` never
     /// frees it: the cursor points into it, and the youngest objects there
     /// may be live with their only references in mutator registers.
-    tlab_block: Option<usize>,
+    /// Which block each thread is bumping through. `sweep` never reclaims one:
+    /// its owner is still allocating inside it.
+    ///
+    /// Keyed by THREAD rather than held as a set of blocks, because the
+    /// recycled-span path can hand two threads separate spans of the SAME
+    /// block. With a plain set, whichever refilled first would remove the
+    /// block from it and expose the other thread's live region to the sweep.
+    tlab_blocks: HashMap<u64, usize>,
     /// True once the interpreter has registered scan ranges. The interpreter
     /// roots its bytecode registers via a SNAPSHOT (sync_gc_scan_roots) that
     /// is complete only at the moment it is published — values written to
@@ -1516,7 +1537,7 @@ impl ImmixAllocator {
             last_collect: Instant::now(),
             last_pressure_relief: Instant::now(),
             reusable_blocks: HashSet::new(),
-            tlab_block: None,
+            tlab_blocks: HashMap::new(),
             safepoint_mode: false,
             collect_pending: false,
         };
@@ -2557,7 +2578,7 @@ impl ImmixAllocator {
             // The mutator's live bump region: marks still reset below for
             // the next cycle, but the block is never reclaimed under the
             // cursor.
-            let is_tlab = self.heap.tlab_block == Some(block_addr);
+            let is_tlab = self.heap.tlab_blocks.values().any(|&b| b == block_addr);
             let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
             let mut is_empty = true;
@@ -3216,9 +3237,14 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     w(format!("blocks-used {}", gc.heap.used_blocks.len()));
     w(format!("blocks-free {}", gc.heap.free_blocks.len()));
     w(format!("blocks-reusable {}", gc.heap.reusable_blocks.len()));
-    match gc.heap.tlab_block {
-        Some(b) => w(format!("tlab-block {:#x}", heap_base + b)),
-        None => w("tlab-block none".into()),
+    if gc.heap.tlab_blocks.is_empty() {
+        w("tlab-blocks none".into());
+    } else {
+        let mut blocks: Vec<usize> = gc.heap.tlab_blocks.values().copied().collect();
+        blocks.sort_unstable();
+        let rendered: Vec<String> =
+            blocks.iter().map(|b| format!("{:#x}", heap_base + b)).collect();
+        w(format!("tlab-blocks {}", rendered.join(" ")));
     }
     w(format!("alloc-count {}", gc.heap.alloc_count));
     w(format!("bytes-since-gc {}", gc.heap.bytes_since_gc));

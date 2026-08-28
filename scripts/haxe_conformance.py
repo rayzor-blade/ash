@@ -18,6 +18,14 @@ fails this" into the far more useful "ash fails this and HashLink does not".
     scripts/haxe_conformance.py --suites sys --reference ~/hashlink/hl
     scripts/haxe_conformance.py --json out.json
 
+Not every upstream tree is VM material, and the report says so instead of
+omitting them. `misc` is mixed: its expected-compile-error projects run under
+the host haxe and land in a compiler bucket kept apart from the VM tally,
+while the one piece upstream's Hl CI genuinely executes on a VM (eventLoop)
+is built to .hl and run under ash. `optimization`, `nullsafety`, `server` and
+`sourcemaps` test the compiler alone and appear as explicit NOT_APPLICABLE
+rows, each with its reason.
+
 Exit status is 1 if any suite regressed against `--baseline`, else 0. Without
 a baseline it always exits 0: a first run is a measurement, not a verdict.
 """
@@ -37,8 +45,10 @@ import tempfile
 import time
 
 # Suites that compile to HashLink bytecode and are meaningful for a VM.
-# `misc`, `server`, `sourcemaps` and `nullsafety` test the *compiler*, not the
-# runtime, so they are not here -- ash cannot pass or fail them.
+# The remaining upstream trees are covered below: `misc` is mixed (a compiler
+# tree plus the piece upstream really does execute on hl), and the trees in
+# COMPILER_ONLY_SUITES test the *compiler*, not the runtime -- ash cannot
+# pass or fail them, so they get explicit NOT_APPLICABLE rows instead.
 SUITES = {
     "unit": {
         "dir": "tests/unit",
@@ -76,6 +86,125 @@ SUITES = {
         "about": "Threads, locks, mutexes, deques.",
     },
 }
+
+# Trees that test the compiler alone, surveyed against how upstream CI really
+# runs each one (tests/runci/targets/*.hx). None of them ever produces a
+# runnable .hl, so ash can neither pass nor fail them -- but a suite absent
+# from the report is indistinguishable from a suite someone forgot, so every
+# one appears in every run as an explicit NOT_APPLICABLE row with its reason.
+COMPILER_ONLY_SUITES = {
+    "optimization": "analyzer/codegen assertions over the typed AST, per "
+                    "target (upstream Js.hx runs run.hxml under --interp and "
+                    "-js); recompiling with -hl fails TestBaseMacro's "
+                    "eval-specific const-fold expectations -- no runtime "
+                    "behaviour is under test",
+    "nullsafety": "compile-time null-safety diagnostics checked by a macro "
+                  "hook (upstream Macro.hx runs test.hxml, which has no "
+                  "target and emits no artifact at all)",
+    "server": "compilation-server/IDE protocol tests, compiled to JS and "
+              "driven by node against `haxe --wait` (upstream Js.hx); the "
+              "process under test is the compiler itself",
+    "sourcemaps": "source-map emission checks run under eval (upstream "
+                  "Macro.hx runs run.hxml with --interp); the artifact under "
+                  "test is the map, not a program",
+}
+
+# `misc` is mixed, and the split matters. Its projects/ tree is a compiler
+# suite -- 590 .hxml cases, 384 of them *-fail.hxml expected-COMPILE-error
+# tests with .stderr expectations, zero targeting hl -- so those run under
+# the host `haxe` exactly as upstream's Macro CI does, and land in a compiler
+# bucket deliberately kept apart from the VM tally: ash cannot move that
+# number, the rows exist so the tree is visibly covered. The one piece
+# upstream's Hl CI target (runci/targets/Hl.hx) both compiles to bytecode AND
+# executes on a HashLink VM is eventLoop; that is real VM conformance and
+# lands in the ash tally. misc/hl's projects are compile-only even upstream
+# (the single .hl they emit, Issue11196, is never executed by CI), so they
+# stay on the compiler side rather than being promoted to a VM claim
+# upstream never makes.
+MISC_ABOUT = ("Mixed tree: an expected-compile-error suite (compiler bucket, "
+              "host haxe) plus what upstream's Hl CI actually executes on a "
+              "VM (ash's tally).")
+
+# VM side: built to .hl, executed under ash, classified OK/FAIL/CRASH/EMPTY.
+MISC_VM_CASES = [
+    {
+        "name": "eventLoop",
+        "dir": "tests/misc/eventLoop",
+        "hxml": "build-hl.hxml",
+        "program": "eventLoop.hl",
+        "about": "haxe.MainLoop/haxe.Timer ordering -- the machinery behind "
+                 "every game loop. Upstream disables its stdout expectation "
+                 "(build-hl.hxml.stdout.disabled), so exit status is the "
+                 "upstream-faithful criterion; a silent exit-0 still lands "
+                 "as EMPTY, never as a pass.",
+    },
+]
+
+# Compiler side: each entry reproduces one upstream invocation, with its own
+# cwd and hxml. Entries with "runner" use upstream's own eval harness
+# (misc/src/Main.hx): it walks projects/, executes every *.hxml as a fresh
+# `haxe`, enforces the expected-failure and .stderr/.stdout contracts, prints
+# "Running haxe <path>" per case and "Done running N tests with M failures"
+# at the end, and exits with the failure count. Entries without "runner" are
+# a single plain compile whose whole contract is exit 0.
+MISC_COMPILER_RUNS = [
+    {
+        "name": "projects",
+        "cwd": "tests/misc",
+        "hxml": "compile.hxml",
+        "runner": True,
+        # One invocation covering ~590 fresh `haxe` processes; give it more
+        # room than a single suite build gets.
+        "timeout_scale": 4,
+        "about": "the 590-case expected-error/diagnostic tree (384 "
+                 "*-fail.hxml); upstream: Macro.hx",
+    },
+    {
+        "name": "resolution",
+        "cwd": "tests/misc/resolution",
+        "hxml": "run.hxml",
+        "runner": True,
+        "about": "import-resolution diagnostics, same runner; upstream: Macro.hx",
+    },
+    {
+        "name": "hl",
+        "cwd": "tests/misc/hl",
+        "hxml": "run.hxml",
+        "runner": True,
+        "about": "hl-target compiler checks (hlc.json defines, HLC source "
+                 "headers, hl.I64 typing); compile-only even upstream -- the "
+                 "one .hl emitted is never executed by CI; upstream: Hl.hx",
+    },
+    {
+        "name": "hl/reserved-keywords",
+        "cwd": "tests/misc/hl/reserved-keywords",
+        "hxml": "compile.hxml",
+        "about": "hl/c emission of C-reserved identifiers; upstream compiles "
+                 "this everywhere and only C-compiles+runs it on Linux CI; "
+                 "upstream: Hl.hx",
+    },
+    {
+        "name": "compiler_loops",
+        "cwd": "tests/misc/compiler_loops",
+        "hxml": "run.hxml",
+        "runner": True,
+        "platforms": ("linux",),
+        "about": "compile-time loop/recursion limits; upstream runs this on "
+                 "Linux only (its runner shells through `timeout`); "
+                 "upstream: Macro.hx",
+    },
+]
+
+# misc trees that belong to OTHER targets entirely. Nothing in them compiles
+# to hl -- forcing them through the hl target would measure preprocessor
+# gating, not conformance -- so they are excluded as one visible row rather
+# than ninety empty ones.
+MISC_OTHER_TARGET_TREES = ("cpp, cppObjc, cs, es6, flash, java, js, lua, "
+                           "luaDeadCode, neko, php, python, weakmap")
+
+# Everything a default run covers: the VM suites, the mixed misc tree, and
+# the compiler-only trees (whose rows exist to be visibly not-applicable).
+ALL_SUITES = [*SUITES, "misc", *COMPILER_ONLY_SUITES]
 
 # utest's own verdict lines. A suite that neither fails nor announces success
 # is treated as a pass only if it also exited zero -- see classify().
@@ -527,6 +656,213 @@ def missing_natives(out: str) -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# The misc tree
+#
+# Two buckets from one suite, and the report never blends them. Compiler rows
+# carry engine "haxe" and bucket "compiler": the VM summary filters on
+# engine "ash:*", so nothing in that bucket can leak into ash's score in
+# either direction. VM rows carry engine "ash:<mode>" like every other suite
+# and use the per-case OK/FAIL/CRASH/EMPTY vocabulary.
+# ---------------------------------------------------------------------------
+
+# The upstream misc runner's own narration; both are stable output of
+# misc/src/Main.hx.
+RE_MISC_CASE = re.compile(r"^Running haxe (\S+)", re.M)
+RE_MISC_DONE = re.compile(r"^Done running (\d+) tests? with (\d+) failures?", re.M)
+# Failing case paths as the SUMMARY block names them. The runner prints that
+# block only for runs of more than 20 cases; smaller runs inline their
+# diagnostics instead, so the output tail is the fallback.
+RE_MISC_FAILPATH = re.compile(r"^(projects[/\\]\S+\.hxml)\s*$", re.M)
+
+
+def haxe_env(haxe: str) -> dict:
+    """PATH with the compiler under test first.
+
+    The misc runners invoke the bare name `haxe` for every case, and several
+    hl projects re-enter it via `--cmd haxe --run ...` from inside an hxml,
+    so whichever haxe leads PATH is the one actually measured. Pin it to the
+    one this script was pointed at.
+    """
+    env = os.environ.copy()
+    resolved = shutil.which(haxe) or haxe
+    env["PATH"] = (str(pathlib.Path(resolved).resolve().parent)
+                   + os.pathsep + env.get("PATH", ""))
+    return env
+
+
+def run_misc_compiler(spec: dict, src: pathlib.Path, haxe: str,
+                      timeout: int, misc_filter: str | None) -> dict:
+    """One upstream compiler-runner invocation, as a compiler-bucket row."""
+    rec = {"suite": "misc", "program": f"{spec['name']}/{spec['hxml']}",
+           "engine": "haxe", "bucket": "compiler", "detail": ""}
+    cdir = src / spec["cwd"]
+    if not cdir.is_dir():
+        rec.update(status="SKIP", detail=f"{spec['cwd']} not present at this tag")
+        return rec
+    if spec.get("platforms") and sys.platform not in spec["platforms"]:
+        rec.update(status="SKIP",
+                   detail=f"upstream runs this on {'/'.join(spec['platforms'])} only")
+        return rec
+    cmd = [haxe, spec["hxml"]]
+    if misc_filter and spec.get("runner"):
+        # Before the hxml, not after: several of these hxmls end in `--run
+        # Main`, and anything appended after that point becomes a program
+        # argument -- the define would silently never reach the compiler.
+        cmd = [haxe, "-D", f"MISC_TEST_FILTER={misc_filter}", spec["hxml"]]
+    limit = timeout * spec.get("timeout_scale", 1)
+    t0 = time.perf_counter()
+    try:
+        r = run(cmd, cwd=str(cdir), timeout=limit, env=haxe_env(haxe))
+    except subprocess.TimeoutExpired:
+        rec.update(status="TIMEOUT", detail=f"no exit within {limit}s")
+        return rec
+    except OSError as exc:
+        # No working haxe (e.g. --skip-build on a compilerless machine). The
+        # VM suites can still run pre-built bytecode; this bucket cannot.
+        rec.update(status="SKIP", detail=f"cannot invoke {haxe}: {exc}")
+        return rec
+    rec["ms"] = round((time.perf_counter() - t0) * 1000, 1)
+    out = (r.stdout or "") + (r.stderr or "")
+    tail = " / ".join(l.strip() for l in out.splitlines() if l.strip())[-400:]
+    if not spec.get("runner"):
+        # A plain compile: exit status is the whole contract.
+        ok = r.returncode == 0
+        rec.update(status="OK" if ok else "FAIL",
+                   cases_total=1, cases_ok=int(ok), cases_failed=int(not ok),
+                   detail="" if ok else f"exit {r.returncode}: {tail[-200:]}")
+        return rec
+    done = RE_MISC_DONE.search(out)
+    if done is None:
+        # The runner died before printing its tally -- a harness failure, not
+        # a counted verdict. How many cases it started is still worth keeping.
+        rec.update(status="CRASH", cases_total=len(RE_MISC_CASE.findall(out)),
+                   detail=f"runner died before its tally (exit {r.returncode}): "
+                          f"{tail[-200:]}")
+        return rec
+    # The Done line, not the exit code, is the authority: the runner exits
+    # with its failure count, which wraps at 256.
+    total, failed = int(done.group(1)), int(done.group(2))
+    rec.update(cases_total=total, cases_ok=total - failed, cases_failed=failed,
+               status="OK" if failed == 0 else "FAIL", detail=done.group(0))
+    if failed:
+        paths = (RE_MISC_FAILPATH.findall(out.split("SUMMARY:", 1)[1])
+                 if "SUMMARY:" in out else [])
+        rec["failed_cases"] = paths[:40]
+        if not paths:
+            rec["detail"] += " | " + tail[-300:]
+    return rec
+
+
+def classify_vm_program(out: str, rc: int, elapsed_ms: float,
+                        timed_out: bool) -> tuple[str, str]:
+    """OK/FAIL/CRASH/TIMEOUT/EMPTY for a plain (non-utest) .hl program.
+
+    Exit status is the criterion, as it is for upstream's Hl CI target -- so
+    no verdict-line grepping here: these programs trace freely and their text
+    is not a contract. EMPTY follows the is_empty_on_target precedent: they
+    narrate what they do via trace(), so a run that exits 0 having printed
+    nothing means the target conditionals compiled the interesting code away
+    (or the VM ran none of it) -- report that, never count it as a pass.
+    """
+    if timed_out:
+        return "TIMEOUT", f"no exit within the limit ({elapsed_ms:.0f}ms elapsed)"
+    for needle in ("=== CRASH:", "panicked at"):
+        if needle in out:
+            line = next((l for l in out.splitlines() if needle in l), "")
+            return "CRASH", line.strip()[:200]
+    if rc != 0:
+        last = [l for l in out.splitlines() if l.strip()][-1:] or [""]
+        return "FAIL", f"exit {rc}: {last[0][:140]}"
+    if not out.strip():
+        return "EMPTY", "exited 0 without printing anything; nothing ran on this target"
+    return "OK", ""
+
+
+def run_misc_suite(src: pathlib.Path, haxe: str, ash: str, modes: list[str],
+                   reference: str | None, timeout: int, skip_build: bool,
+                   misc_filter: str | None) -> list[dict]:
+    """The whole misc tree: compiler bucket, exclusion row, then VM cases."""
+    rows = []
+    print(f"\n== misc — {MISC_ABOUT}")
+
+    for spec in MISC_COMPILER_RUNS:
+        rec = run_misc_compiler(spec, src, haxe, timeout, misc_filter)
+        rows.append(rec)
+        mark = "ok  " if rec["status"] == "OK" else rec["status"].ljust(4)
+        cases = (f"{rec.get('cases_ok', 0)}/{rec.get('cases_total', 0)} cases"
+                 if "cases_total" in rec else "")
+        print(f"   {mark} {'haxe':<14} {rec['program']:<34} "
+              f"{rec.get('ms', 0):7.0f}ms  {cases:<14} {rec['detail'][:60]}")
+
+    # The other targets' project trees, excluded as one visible row.
+    excl = {"suite": "misc", "program": "per-target trees", "engine": "-",
+            "bucket": "compiler", "status": "NOT_APPLICABLE",
+            "detail": f"other targets' project dirs ({MISC_OTHER_TARGET_TREES}): "
+                      "nothing in them compiles to hl"}
+    rows.append(excl)
+    print(f"   n/a  {'-':<14} {excl['program']:<34} {excl['detail'][:76]}")
+
+    for case in MISC_VM_CASES:
+        sdir = src / case["dir"]
+        prog_id = f"{case['name']}/{case['program']}"
+        if not sdir.is_dir():
+            rows.append({"suite": "misc", "program": prog_id, "engine": "-",
+                         "bucket": "vm", "status": "SKIP",
+                         "detail": f"{case['dir']} not present at this tag"})
+            continue
+        if not skip_build:
+            print(f"   building {case['hxml']} ...", flush=True)
+            r = run([haxe, case["hxml"]], cwd=str(sdir), timeout=timeout,
+                    env=haxe_env(haxe))
+            if r.returncode != 0:
+                err = (r.stdout + r.stderr).strip().splitlines()
+                detail = next((l for l in err if "Error" in l),
+                              err[-1] if err else "")
+                print(f"   SKIP: {case['name']} did not compile — {detail[:150]}")
+                rows.append({"suite": "misc", "program": prog_id, "engine": "-",
+                             "bucket": "vm", "status": "SKIP",
+                             "detail": f"compile failed: {detail[:300]}"})
+                continue
+        p = sdir / case["program"]
+        if not p.is_file():
+            rows.append({"suite": "misc", "program": prog_id, "engine": "-",
+                         "bucket": "vm", "status": "SKIP",
+                         "detail": f"{case['program']} not produced"})
+            continue
+
+        engines = [(f"ash:{m}", [ash, "--mode", m]) for m in modes]
+        if reference:
+            engines.append(("hashlink", [reference]))
+        for label, argv0 in engines:
+            t0 = time.perf_counter()
+            timed_out = False
+            try:
+                # eventLoop finishes in about a second; a hang here is a
+                # finding in its own right, not a reason to stall the run
+                # for the full suite budget.
+                res = run(argv0 + [str(p)], cwd=str(sdir),
+                          timeout=min(timeout, 120))
+                out = (res.stdout or "") + (res.stderr or "")
+                rc = res.returncode
+            except subprocess.TimeoutExpired as e:
+                out = ((e.stdout or b"").decode("utf-8", "replace")
+                       if isinstance(e.stdout, bytes) else (e.stdout or ""))
+                rc, timed_out = -1, True
+            ms = (time.perf_counter() - t0) * 1000
+            status, detail = classify_vm_program(out, rc, ms, timed_out)
+            rec = {"suite": "misc", "program": prog_id, "engine": label,
+                   "bucket": "vm", "status": status, "detail": detail,
+                   "ms": round(ms, 1)}
+            natives = missing_natives(out)
+            if natives:
+                rec["missing_natives"] = natives
+            rows.append(rec)
+            mark = "ok  " if status == "OK" else status.ljust(4)
+            print(f"   {mark} {label:<14} {prog_id:<34} {ms:7.0f}ms  {detail[:70]}")
+    return rows
+
+
 def main(argv=None) -> int:
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description=__doc__,
@@ -540,8 +876,8 @@ def main(argv=None) -> int:
     ap.add_argument("--haxelib", default=shutil.which("haxelib") or "haxelib")
     ap.add_argument("--tag", default=None,
                     help="Haxe tag to test against (default: the installed compiler's version)")
-    ap.add_argument("--suites", default=",".join(SUITES),
-                    help=f"comma-separated subset of: {', '.join(SUITES)}")
+    ap.add_argument("--suites", default=",".join(ALL_SUITES),
+                    help=f"comma-separated subset of: {', '.join(ALL_SUITES)}")
     ap.add_argument("--modes", default="interp",
                     help="ash modes to run, comma-separated (interp, hybrid, jit)")
     ap.add_argument("--reference", default=None,
@@ -565,6 +901,10 @@ def main(argv=None) -> int:
                     help="per-case timeout in seconds for --isolate (default 60)")
     ap.add_argument("--isolate-limit", type=int, default=None,
                     help="run only the first N cases (for a quick check)")
+    ap.add_argument("--misc-filter", default=None,
+                    help="regex handed to the misc projects runners as "
+                         "MISC_TEST_FILTER, limiting which .hxml cases they "
+                         "execute (for a quick check)")
     args = ap.parse_args(argv)
 
     root = args.repo_root.resolve()
@@ -635,7 +975,7 @@ def main(argv=None) -> int:
 
     src = ensure_checkout(work, tag)
     wanted = [s.strip() for s in args.suites.split(",") if s.strip()]
-    unknown = [s for s in wanted if s not in SUITES]
+    unknown = [s for s in wanted if s not in ALL_SUITES]
     if unknown:
         sys.exit(f"unknown suite(s): {', '.join(unknown)}")
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
@@ -672,6 +1012,19 @@ def main(argv=None) -> int:
         return env
 
     for name in wanted:
+        if name in COMPILER_ONLY_SUITES:
+            reason = COMPILER_ONLY_SUITES[name]
+            print(f"\n== {name}: NOT APPLICABLE — {reason}")
+            report["results"].append({"suite": name, "program": "",
+                                      "engine": "-", "bucket": "compiler",
+                                      "status": "NOT_APPLICABLE",
+                                      "detail": reason})
+            continue
+        if name == "misc":
+            report["results"].extend(run_misc_suite(
+                src, args.haxe, ash, modes, args.reference, args.timeout,
+                args.skip_build, args.misc_filter))
+            continue
         spec = SUITES[name]
         sdir = src / spec["dir"]
         if not sdir.is_dir():
@@ -834,8 +1187,17 @@ def main(argv=None) -> int:
                     print(f"        unresolved natives ({len(natives)}): {', '.join(natives[:6])}"
                           + (" ..." if len(natives) > 6 else ""))
 
+    # Compiler-bucket and NOT_APPLICABLE rows carry engine "haxe" or "-", so
+    # the ash: filter keeps the VM tally pure by construction. EMPTY rows are
+    # named and excluded from the denominator, following the isolation
+    # precedent: a program with nothing to run on this target is not a score
+    # ash can move.
     ash_rows = [r for r in report["results"]
-                if r["engine"].startswith("ash:") and r["status"] != "SKIP"]
+                if r.get("engine", "").startswith("ash:")
+                and r["status"] not in ("SKIP", "EMPTY")]
+    ash_empty = [r for r in report["results"]
+                 if r.get("engine", "").startswith("ash:")
+                 and r["status"] == "EMPTY"]
     successful = {"PASS", "OK"}
     passes = sum(1 for r in ash_rows if r["status"] in successful)
     total = len(ash_rows)
@@ -931,6 +1293,10 @@ def main(argv=None) -> int:
               f"{sm['cases_empty']} empty on this target]")
     print(f"\n{tests_passed}/{tests_accepted} tests passed across all suites")
     print(f"{passes}/{total} suites passed")
+    if ash_empty:
+        names = ", ".join(f"{r['suite']}/{r.get('program', '')}" for r in ash_empty)
+        print(f"{len(ash_empty)} program(s) EMPTY on this target, excluded "
+              f"from the denominator: {names}")
     if t_total:
         print(f"{t_reached}/{t_total} tests reached "
               f"({report['summary']['test_pct']}%, denominator from the reference VM)")
@@ -942,6 +1308,41 @@ def main(argv=None) -> int:
               f"({report['summary']['assertion_pct']}%)")
     else:
         print("no suite ran to completion, so utest printed no assertion tally")
+
+    # The compiler bucket, summarised apart from everything above: these are
+    # host-haxe verdicts on compiler behaviour. They share the report so the
+    # trees are visibly covered; they are not ash conformance and no key of
+    # the VM summary includes them.
+    comp_rows = [r for r in report["results"]
+                 if r.get("bucket") == "compiler"
+                 and r["status"] not in ("SKIP", "NOT_APPLICABLE")]
+    if comp_rows:
+        cc_total = sum(r.get("cases_total", 0) for r in comp_rows)
+        cc_ok = sum(r.get("cases_ok", 0) for r in comp_rows)
+        report["summary"]["compiler_bucket"] = {
+            "runs": len(comp_rows),
+            "runs_ok": sum(1 for r in comp_rows if r["status"] == "OK"),
+            "cases_total": cc_total,
+            "cases_ok": cc_ok,
+            "cases_failed": sum(r.get("cases_failed", 0) for r in comp_rows),
+            "case_pct": round(100.0 * cc_ok / cc_total, 1) if cc_total else None,
+        }
+        print(f"\ncompiler bucket (host haxe, not ash — kept out of the VM "
+              f"tally): {cc_ok}/{cc_total} cases ok across "
+              f"{len(comp_rows)} invocation(s)")
+
+    # Suites and subtrees that cannot apply to a VM, each with its reason.
+    # Printed every run: absence would be indistinguishable from an oversight.
+    na_rows = [r for r in report["results"] if r["status"] == "NOT_APPLICABLE"]
+    if na_rows:
+        report["summary"]["not_applicable"] = [
+            {"suite": r["suite"], "program": r.get("program", ""),
+             "reason": r["detail"]}
+            for r in na_rows]
+        print(f"\nnot applicable to a VM ({len(na_rows)}):")
+        for r in na_rows:
+            what = r["suite"] + (f" ({r['program']})" if r.get("program") else "")
+            print(f"  {what}: {r['detail']}")
 
     # Every distinct unresolved native across the whole run, which is the most
     # directly actionable output this harness produces.
@@ -964,11 +1365,13 @@ def main(argv=None) -> int:
                   f"{base['ash_profile']} baseline — the two report different "
                   "failures for the same defect")
             return 0
-        was = {(r["suite"], r.get("program", ""), r["engine"]): r["status"]
+        # .get("engine"): rows recorded before the compiler bucket existed
+        # (and SKIP rows to this day) may carry "mode" instead.
+        was = {(r["suite"], r.get("program", ""), r.get("engine", "-")): r["status"]
                for r in base.get("results", [])}
         regressed = [
             r for r in report["results"]
-            if was.get((r["suite"], r.get("program", ""), r["engine"])) in successful
+            if was.get((r["suite"], r.get("program", ""), r.get("engine", "-"))) in successful
             and r["status"] not in successful
         ]
         if regressed:

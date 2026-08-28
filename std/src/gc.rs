@@ -11,7 +11,7 @@ use std::cell::{Cell, RefCell};
 use std::os::raw::c_void;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{LazyLock, OnceLock};
 use std::time::{Duration, Instant};
 use std::{collections::HashSet, mem};
@@ -833,6 +833,22 @@ static GC_STATS: GcStatCounters = GcStatCounters {
 /// including from under the GC lock.
 static GC_ENABLED: AtomicBool = AtomicBool::new(true);
 
+// ── Collector flags (`Gc.flags`) ────────────────────────────────────────────
+
+/// Bit values of `hl.Gc.GcFlag`, fixed by the Haxe enum's ordinals.
+const GC_FLAG_PROFILE: i32 = 1;
+
+/// Upstream's `gc_flags`. Programs read-modify-write it (`flags.set(..)` is a
+/// get, an or, and a set), so the whole word round-trips even where a bit
+/// names something ash's collector does not have.
+static GC_FLAGS: AtomicI32 = AtomicI32::new(0);
+
+/// True when `flag` is currently set. Cheap enough for the allocation path.
+#[inline]
+fn gc_flag(flag: i32) -> bool {
+    GC_FLAGS.load(Ordering::Relaxed) & flag != 0
+}
+
 /// Pressure at which a disabled collector collects anyway.
 ///
 /// `Gc.enable(false)` with no matching re-enable is a real pattern — a load
@@ -1547,18 +1563,28 @@ impl ImmixAllocator {
         }
     }
 
-    /// Byte-driven collection triggers, checked on every allocation
-    /// (wren_lift gc_marksweep.rs trigger + gc.rs:667-725 heartbeat):
+    /// Whether an automatic collection is owed, given the stress setting and
+    /// the bytes accumulated since the last cycle:
     /// 1. ASH_GC_STRESS: collect every Nth allocation (validation mode).
     /// 2. Allocated + external bytes since last collect >= adaptive threshold.
     /// 3. Wall-clock heartbeat so long-idle processes deflate.
     ///
-    /// In interpreter (safepoint) mode a fired trigger is deferred to the
-    /// next root-snapshot publication instead of collecting immediately —
-    /// unless pressure is extreme (hard trigger), where collecting with a
-    /// possibly-stale snapshot matches the old exhaustion-path behavior.
-    /// [`Self::maybe_collect`] at a point known to be a safepoint: a due
-    /// trigger collects immediately instead of deferring to the next
+    /// Shared by the safepoint and allocation triggers so the two cannot
+    /// drift: they are the same question asked from two places.
+    fn collection_due(&self, stress: usize, pressure: usize) -> bool {
+        if stress > 0 {
+            // alloc_count resets on every collection: collect on the Nth
+            // allocation since the last one (N=1 → every allocation).
+            return self.heap.alloc_count + 1 >= stress;
+        }
+        pressure >= self.heap.trigger_threshold
+            // Heartbeat: clock read only every 1024 allocations.
+            || (self.heap.alloc_count & 1023 == 0
+                && self.heap.last_collect.elapsed() >= HEARTBEAT)
+    }
+
+    /// [`Self::collection_due`] checked at a point known to be a safepoint: a
+    /// due trigger collects immediately instead of deferring to the next
     /// interpreter snapshot.
     pub(crate) fn maybe_collect_at_safepoint(&mut self) {
         if !current_mutator_registered() {
@@ -1566,13 +1592,7 @@ impl ImmixAllocator {
         }
         let stress = gc_stress_every();
         let pressure = self.heap.bytes_since_gc + self.heap.external_since_gc;
-        let due = if stress > 0 {
-            self.heap.alloc_count + 1 >= stress
-        } else {
-            pressure >= self.heap.trigger_threshold
-                || (self.heap.alloc_count & 1023 == 0
-                    && self.heap.last_collect.elapsed() >= HEARTBEAT)
-        };
+        let due = self.collection_due(stress, pressure);
         if !(due || self.heap.collect_pending) {
             return;
         }
@@ -1594,16 +1614,7 @@ impl ImmixAllocator {
         }
         let stress = gc_stress_every();
         let pressure = self.heap.bytes_since_gc + self.heap.external_since_gc;
-        let due = if stress > 0 {
-            // alloc_count resets on every collection: collect on the Nth
-            // allocation since the last one (N=1 → every allocation).
-            self.heap.alloc_count + 1 >= stress
-        } else {
-            pressure >= self.heap.trigger_threshold
-                // Heartbeat: clock read only every 1024 allocations.
-                || (self.heap.alloc_count & 1023 == 0
-                    && self.heap.last_collect.elapsed() >= HEARTBEAT)
-        };
+        let due = self.collection_due(stress, pressure);
         if !due {
             return;
         }
@@ -2147,7 +2158,10 @@ impl ImmixAllocator {
             .fetch_add(pause_ns, Ordering::Relaxed);
         GC_STATS.pause_ns_max.fetch_max(pause_ns, Ordering::Relaxed);
 
-        if gc_stats_enabled() {
+        // `Gc.flags.set(Profile)` asks for the same per-cycle census
+        // `ASH_GC_STATS` prints, so it routes here rather than to a second
+        // report that could drift from this one.
+        if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
                 "[gc] #{} pause={:.2}ms freed={} blocks live={} blocks ({}) next-trigger={}",
                 n,
@@ -3094,6 +3108,36 @@ pub unsafe extern "C" fn hlp_gc_track_external(bytes: u64) {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_enable(b: bool) {
     GC_ENABLED.store(b, Ordering::Relaxed);
+}
+
+/// `hl.Gc.flags` getter.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_get_flags() -> i32 {
+    GC_FLAGS.load(Ordering::Relaxed)
+}
+
+/// `hl.Gc.flags` setter.
+///
+/// The word is stored whole, so a program that reads the flags, flips one bit
+/// and writes them back gets its own value back.
+///
+/// One bit changes behaviour: `Profile` prints the per-cycle census.
+///
+/// The rest are stored and reported back without acting. `ForceMajor` asks
+/// upstream's generational collector to promote the next cycle from minor to
+/// major; ash's Immix heap has no such split — every collection is a full
+/// conservative mark — so the request is already satisfied by construction.
+/// (Wiring it to the allocation trigger instead would mean collecting on
+/// every allocation, and since a cycle resets the bump pointer, every object
+/// would then claim a fresh 32KB block.) `NoThreads` exists upstream to skip
+/// a stop-the-world handshake ash's scan never performs, and skipping the
+/// scan itself would lose live objects rather than save time. `DumpMem`
+/// would have to write the heap from inside the allocator, which already
+/// holds the GC lock the dumper takes; `Gc.dumpMemory()` produces the same
+/// file from a caller that can.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_set_flags(f: i32) {
+    GC_FLAGS.store(f, Ordering::Relaxed);
 }
 
 /// Read a NUL-terminated UTF-8 C string, bounded so a caller that forgets the

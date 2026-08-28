@@ -2,11 +2,11 @@
 //!
 //! HashLink's hl target assumes HL_THREADS: Haxe code spawns worker threads
 //! and blocks on locks/deques they release. Each OS thread that enters the VM
-//! owns a scheduler and its worker-affine krio fibers. Compiled AIR V2 thread
-//! bodies are distributed over an M:N worker pool; interpreter/hybrid bodies
-//! remain on the main scheduler because their frames belong to one
-//! `HLInterpreter`. Blocking primitives park the current fiber and let
-//! runnable siblings advance.
+//! owns a scheduler and its worker-affine krio fibers. AIR V2 thread bodies
+//! that the host can compile without interpreter re-entry are distributed
+//! over an M:N worker pool; pure-interpreter bodies remain on the main
+//! scheduler because their frames belong to one `HLInterpreter`. Blocking
+//! primitives park the current fiber and let runnable siblings advance.
 //!
 //! GC: each fiber stack is registered with the conservative scanner
 //! (krio's switch spills all callee-saved regs — including d8-d15 — onto
@@ -66,6 +66,12 @@ enum SchedulerCommand {
 struct SchedulerEndpoint {
     commands: Mutex<VecDeque<SchedulerCommand>>,
     changed: Condvar,
+    /// Logical fibers assigned to this worker, including parked fibers.
+    ///
+    /// krio stacks are `!Send`, so a fiber cannot migrate after installation.
+    /// Choosing the least-loaded endpoint before installation is therefore
+    /// the scheduler's load-balancing boundary.
+    assigned: AtomicUsize,
 }
 
 impl SchedulerEndpoint {
@@ -73,6 +79,7 @@ impl SchedulerEndpoint {
         Self {
             commands: Mutex::new(VecDeque::new()),
             changed: Condvar::new(),
+            assigned: AtomicUsize::new(0),
         }
     }
 
@@ -164,9 +171,9 @@ pub unsafe extern "C" fn hlp_set_fiber_switch_hook(hook: FiberSwitchHook) {
     FIBER_SWITCH_HOOK.store(hook as usize, Ordering::Release);
 }
 
-/// The host enables worker dispatch only for compiled-only AIR V2 execution.
-/// Hybrid/interpreter closures need their owning `HLInterpreter` and remain
-/// on its main scheduler.
+/// The host enables worker dispatch whenever it can resolve a thread body to
+/// compiled AIR V2 without interpreter re-entry. Pure-interpreter closures
+/// still need their owning `HLInterpreter` and remain on its main scheduler.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_set_compiled_worker_mode(enabled: bool) {
     COMPILED_WORKERS_ENABLED.store(enabled, Ordering::Release);
@@ -457,7 +464,20 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
     let Some(pool) = worker_pool() else {
         return false;
     };
-    let index = pool.next.fetch_add(1, Ordering::Relaxed) % pool.workers.len();
+    // Suspended krio stacks are deliberately !Send: once a worker creates a
+    // fiber, moving it would also move native TLS/trap assumptions captured by
+    // its stack. Balance at the last safe point instead -- before creation.
+    // Rotate the starting point so equal loads do not permanently favor lane
+    // zero, then choose the least-loaded endpoint.
+    let start = pool.next.fetch_add(1, Ordering::Relaxed) % pool.workers.len();
+    let index = (0..pool.workers.len())
+        .min_by_key(|offset| {
+            let index = (start + offset) % pool.workers.len();
+            pool.workers[index].assigned.load(Ordering::Acquire)
+        })
+        .map(|offset| (start + offset) % pool.workers.len())
+        .unwrap_or(start);
+    pool.workers[index].assigned.fetch_add(1, Ordering::AcqRel);
     worker_trace("dispatch", id as u64, index as u64);
     pool.workers[index].push(SchedulerCommand::Spawn {
         id,
@@ -890,6 +910,17 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     ensure_preemption_timer();
     request_fiber_poll();
     worker_trace("create", id as u64, (*c).fun as usize as u64);
+    if std::env::var_os("ASH_DBG_FIBER").is_some() {
+        let nargs = (*c)
+            .t
+            .as_ref()
+            .and_then(|ty| ty.__bindgen_anon_1.fun.as_ref())
+            .map_or(-1, |fun| fun.nargs);
+        eprintln!(
+            "[fiber] create closure={c:p} fun={:p} has_value={} value={:p} nargs={nargs}",
+            (*c).fun, (*c).hasValue, (*c).value
+        );
+    }
     if can_dispatch_to_worker() {
         // A freshly-created closure commonly still carries findex+1. Resolve
         // that sentinel before choosing a lane so the first Haxe thread gets
@@ -928,6 +959,16 @@ unsafe fn remove_fiber(fiber: VmFiber, state: FiberState) {
     crate::gc::gc_unregister_fiber_stack(fiber.id);
     crate::gc::gc_remove_persistent(fiber.closure as *mut vdynamic);
     LOGICAL_THREADS.fetch_sub(1, Ordering::Release);
+    if WORKER_LANE.with(Cell::get) {
+        SCHEDULER.with(|scheduler| {
+            let endpoint = Arc::clone(&scheduler.borrow().endpoint);
+            let _ = endpoint
+                .assigned
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |load| {
+                    Some(load.saturating_sub(1))
+                });
+        });
+    }
     if let FiberState::Errored = state {
         eprintln!("[ash] fiber {} terminated with a panic", fiber.id);
     }

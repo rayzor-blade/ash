@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use beadie::{Bead, HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter, TieredBound};
 
@@ -681,13 +681,27 @@ struct TieredSharedCtx {
     /// back-edge ticks, at most 64 iterations later.
     pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
     /// Per-findex beads for compiled-only lazy sentinel resolution. The lock
-    /// spans a cold compile so two workers cannot define/install the same
-    /// function concurrently; Cranelift's module is serialized regardless.
+    /// protects bead creation; the backend mutexes serialize cold compiles.
     worker_beads: Mutex<HashMap<usize, Arc<Bead>>>,
+    /// Serializes the check/compile/install sequence for cold worker entries.
+    /// Dependency discovery runs after this guard is released, so recursive
+    /// closure graphs do not deadlock it.
+    worker_compile_lock: Mutex<()>,
+    /// Functions whose AIR V2 closure dependencies have been prepared for
+    /// native worker execution. A second OS worker waits for an in-progress
+    /// scan; recursion on the preparing thread recognizes its own cycle.
+    worker_closure_deps: Mutex<HashMap<usize, WorkerClosureDepsState>>,
+    worker_closure_deps_changed: Condvar,
     attempted: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     cranelift_promotions: std::sync::atomic::AtomicU64,
     llvm_promotions: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WorkerClosureDepsState {
+    Preparing(std::thread::ThreadId),
+    Ready,
 }
 
 impl TieredSharedCtx {
@@ -1025,11 +1039,14 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
     }
 }
 
-/// Resolve one cold compiled-only call without touching `HLInterpreter`.
+/// Resolve one cold worker-lane call without touching `HLInterpreter`.
 /// Generated code retains the typed call ABI and invokes the returned pointer
-/// directly, so this path only needs the immutable/shared tier context.
-fn resolve_compiled_only_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
-    if !ctx.compiled_only || findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
+/// directly, so this path only needs the immutable/shared tier context. It is
+/// valid for compiled-only JIT and for hybrid thread bodies: the latter are
+/// compiled at dispatch specifically so their interpreter frames never cross
+/// OS-thread boundaries.
+fn resolve_worker_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
+    if findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
         return std::ptr::null_mut();
     }
     let Some(bytecode) = ctx.bytecode_ptr() else {
@@ -1043,34 +1060,136 @@ fn resolve_compiled_only_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut
         return std::ptr::null_mut();
     }
 
-    let mut beads = ctx
-        .worker_beads
-        .lock()
-        .expect("worker beads mutex poisoned");
-    if ctx.arrays.functions_ptrs != 0 {
-        let current =
-            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) } as usize;
-        if current >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
-            return current as *mut ();
+    if std::env::var_os("ASH_DBG_STUB").is_some() {
+        eprintln!("[stub] resolve findex={findex}");
+    }
+    let code = {
+        let _compile = ctx
+            .worker_compile_lock
+            .lock()
+            .expect("worker compile mutex poisoned");
+        let installed = if ctx.arrays.functions_ptrs == 0 {
+            std::ptr::null_mut()
+        } else {
+            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) }
+        };
+        if installed as usize >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            installed.cast::<()>()
+        } else {
+            let bead = {
+                let mut beads = ctx
+                    .worker_beads
+                    .lock()
+                    .expect("worker beads mutex poisoned");
+                Arc::clone(
+                    beads
+                        .entry(findex)
+                        .or_insert_with(|| Bead::new(findex as beadie::CoreHandle, None)),
+                )
+            };
+            if let Some(code) = bead.compiled() {
+                code
+            } else {
+                let code = tiered_compile_tier(ctx, 0, findex, &bead);
+                if code.is_null() {
+                    return code;
+                }
+                if bead.eager_install(code) || bead.compiled().is_some() {
+                    bead.compiled().unwrap_or(code)
+                } else {
+                    return std::ptr::null_mut();
+                }
+            }
         }
-    }
-    let bead = Arc::clone(
-        beads
-            .entry(findex)
-            .or_insert_with(|| Bead::new(findex as beadie::CoreHandle, None)),
-    );
-    if let Some(code) = bead.compiled() {
-        return code;
-    }
-    let code = compile_with_cranelift(ctx, findex, &bead);
-    if code.is_null() {
-        return code;
-    }
-    if bead.eager_install(code) || bead.compiled().is_some() {
-        bead.compiled().unwrap_or(code)
+    };
+    if prepare_worker_closure_dependencies(ctx, findex) {
+        code
     } else {
         std::ptr::null_mut()
     }
+}
+
+/// Compile exact closure targets that may escape from `findex` into a native
+/// caller. Guarded AIR V2 call sites can resolve a sentinel lazily; an HDLL
+/// invokes `vclosure.fun` directly and therefore cannot. Scan optimized AIR
+/// itself -- never serialize it back into legacy HashLink opcodes.
+fn prepare_worker_closure_dependencies(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
+    let current_thread = std::thread::current().id();
+    {
+        let mut states = ctx
+            .worker_closure_deps
+            .lock()
+            .expect("worker closure dependency mutex poisoned");
+        loop {
+            match states.get(&findex) {
+                Some(WorkerClosureDepsState::Ready) => return true,
+                Some(WorkerClosureDepsState::Preparing(owner)) if *owner == current_thread => {
+                    return true;
+                }
+                Some(WorkerClosureDepsState::Preparing(_)) => {
+                    states = ctx
+                        .worker_closure_deps_changed
+                        .wait(states)
+                        .expect("worker closure dependency mutex poisoned");
+                }
+                None => {
+                    states.insert(
+                        findex,
+                        WorkerClosureDepsState::Preparing(current_thread),
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    let prepared = (|| {
+        let bytecode = ctx.bytecode_ptr()?;
+        let raw = bytecode
+            .functions
+            .iter()
+            .find(|function| function.findex as usize == findex)?;
+        let module = ash_core::air_pipeline::AshModule::new(bytecode);
+        let optimized = ash_core::air_pipeline::optimized(&module, raw).ok()?;
+        let mut targets = Vec::new();
+        for block in &optimized.ir.blocks {
+            for instr in &block.instrs {
+                let target = match instr {
+                    air::v2::Instr::StaticClosure { fun, .. }
+                    | air::v2::Instr::InstanceClosure { fun, .. } => Some(*fun),
+                    _ => None,
+                };
+                if let Some(target) = target {
+                    let is_haxe_function = bytecode
+                        .functions
+                        .iter()
+                        .any(|function| function.findex as usize == target);
+                    if is_haxe_function && !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
+        targets
+            .into_iter()
+            .all(|target| !resolve_worker_stub(ctx, target).is_null())
+            .then_some(())
+    })()
+    .is_some();
+
+    {
+        let mut states = ctx
+            .worker_closure_deps
+            .lock()
+            .expect("worker closure dependency mutex poisoned");
+        if prepared {
+            states.insert(findex, WorkerClosureDepsState::Ready);
+        } else {
+            states.remove(&findex);
+        }
+    }
+    ctx.worker_closure_deps_changed.notify_all();
+    prepared
 }
 
 /// Write a freshly installed code address into every materialized vtable
@@ -1646,6 +1765,26 @@ pub struct HLInterpreter {
     /// consecutively, so an indexed load answers it instead. See
     /// [`CallTarget`].
     targets: Vec<CallTarget>,
+    /// Compiled code address → findex, for closures built by compiled code.
+    ///
+    /// The JIT lowers `StaticClosure`/`InstanceClosure` by loading
+    /// `functions_ptrs[findex]` at run time, so a closure a compiled function
+    /// allocates carries whatever that slot held — the real entry address once
+    /// the callee is promoted, not the `findex + 1` stub sentinel the
+    /// interpreter stores. Handed such a closure, the interpreter has to walk
+    /// back from the address to the findex, and `functions_ptrs` is the table
+    /// the JIT read it from.
+    ///
+    /// Filled on miss by scanning that table, and never invalidated: a cached
+    /// entry stays true because an address only ever belonged to one findex.
+    ///
+    /// The TABLE, though, overwrites rather than accumulates -- a tier-1
+    /// install replaces the tier-0 address in the slot -- so an address that
+    /// was never scanned before it was replaced cannot be recovered from it.
+    /// Every slot is therefore indexed on the first miss, which captures the
+    /// addresses installed so far, and re-promotion adds the new address on
+    /// the next miss while the old one remains cached from before.
+    code_addr_findex: HashMap<usize, usize>,
     /// Hot-reloaded bytecode (replaces the original for function lookup).
     /// Leaked to 'static so it can be passed to interpret_loop without borrow conflicts.
     reloaded_bytecode: Option<&'static ash_core::bytecode::DecodedBytecode>,
@@ -1677,7 +1816,7 @@ pub struct HLInterpreter {
     fn_alloc_dynobj: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_virtual
     fn_alloc_virtual: *mut c_void,
-    /// Resolve a structural view without replacing the interpreter's raw value.
+    /// Resolve an object to HashLink's canonical `vvirtual` representation.
     fn_to_virtual: *mut c_void,
     /// Boxed virtual dispatch for implementation/interface signature mismatches.
     fn_vcall_dyn: *mut c_void,
@@ -1739,6 +1878,7 @@ pub struct HLInterpreter {
     /// kinds instead. Plain fields rather than a map so they can be copied
     /// out before a `frame` borrow is taken.
     prim_t_i32: *mut c_void,
+    prim_t_i64: *mut c_void,
     prim_t_f64: *mut c_void,
     prim_t_bool: *mut c_void,
     prim_t_bytes: *mut c_void,
@@ -1825,6 +1965,7 @@ impl HLInterpreter {
             }
         };
         let prim_t_i32 = find_prim(&mut c_type_factory, hl::hl_type_kind_HI32);
+        let prim_t_i64 = find_prim(&mut c_type_factory, hl::hl_type_kind_HI64);
         let prim_t_f64 = find_prim(&mut c_type_factory, hl::hl_type_kind_HF64);
         let prim_t_bool = find_prim(&mut c_type_factory, hl::hl_type_kind_HBOOL);
         let prim_t_bytes = find_prim(&mut c_type_factory, hl::hl_type_kind_HBYTES);
@@ -1954,6 +2095,7 @@ impl HLInterpreter {
             osr_forced: std::collections::HashSet::new(),
             demand_local: Vec::new(),
             targets,
+            code_addr_findex: HashMap::new(),
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
@@ -2000,6 +2142,7 @@ impl HLInterpreter {
             fn_gc_set_scan_roots,
             scan_range_buf: Vec::new(),
             prim_t_i32: prim_t_i32 as *mut c_void,
+            prim_t_i64: prim_t_i64 as *mut c_void,
             prim_t_f64: prim_t_f64 as *mut c_void,
             prim_t_bool: prim_t_bool as *mut c_void,
             prim_t_bytes: prim_t_bytes as *mut c_void,
@@ -2273,6 +2416,9 @@ impl HLInterpreter {
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
             worker_beads: Mutex::new(HashMap::new()),
+            worker_compile_lock: Mutex::new(()),
+            worker_closure_deps: Mutex::new(HashMap::new()),
+            worker_closure_deps_changed: Condvar::new(),
             attempted: std::sync::atomic::AtomicU64::new(0),
             failed: std::sync::atomic::AtomicU64::new(0),
             cranelift_promotions: std::sync::atomic::AtomicU64::new(0),
@@ -2653,6 +2799,50 @@ impl HLInterpreter {
         let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
             unsafe { std::mem::transmute(fn_make_dyn) };
         let boxed = unsafe { make_dyn(&mut data as *mut i64 as *mut c_void, t) };
+        if boxed.is_null() {
+            val
+        } else {
+            NanBoxedValue::from_ptr(boxed as usize)
+        }
+    }
+
+    /// Materialize the interpreter's unboxed Dynamic register value at a
+    /// compiled ABI boundary (argument or return).
+    ///
+    /// AIR V2 native code represents `HDYN`/`HNULL` as `vdynamic*`. The
+    /// interpreter deliberately keeps primitive values unboxed while they
+    /// remain in registers, so forwarding their numeric payload as an i64
+    /// turns values such as `5` into pointer `0x5`. Box exactly at this
+    /// boundary; already self-describing heap values pass through unchanged.
+    fn box_for_compiled_dynamic_value(&self, val: NanBoxedValue) -> NanBoxedValue {
+        if self.fn_make_dyn.is_null() || val.is_null() || val.is_void() || val.is_ptr() {
+            return val;
+        }
+
+        let (t, mut data): (*mut c_void, i64) = if val.is_i32() {
+            (self.prim_t_i32, val.as_i32() as i64)
+        } else if val.is_i64() {
+            (self.prim_t_i64, val.as_i64_lossy())
+        } else if val.is_bool() {
+            (self.prim_t_bool, val.as_bool() as i64)
+        } else if val.is_f64() {
+            (self.prim_t_f64, val.as_f64().to_bits() as i64)
+        } else if val.is_bytes() {
+            (self.prim_t_bytes, val.as_ptr() as i64)
+        } else {
+            // Function-index sentinels should already have been materialized
+            // by StaticClosure before a Dynamic call. Preserve the value if a
+            // future representation reaches this boundary instead of making
+            // up a vdynamic header for it.
+            return val;
+        };
+        if t.is_null() {
+            return val;
+        }
+
+        let make_dyn: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            unsafe { std::mem::transmute(self.fn_make_dyn) };
+        let boxed = unsafe { make_dyn((&mut data as *mut i64).cast(), t) };
         if boxed.is_null() {
             val
         } else {
@@ -3591,10 +3781,7 @@ impl HLInterpreter {
             }
         }
         unsafe {
-            let compiled_only = self
-                .tiered_runtime
-                .as_ref()
-                .is_some_and(|tiered| tiered.config.compiled_only);
+            let worker_compilation = self.tiered_runtime.is_some();
             let fiber_is_root_closure = native_resolver
                 .resolve_function("std", "hlp_fiber_is_root_closure")
                 .unwrap_or(std::ptr::null_mut());
@@ -3614,7 +3801,6 @@ impl HLInterpreter {
                 compiled_stub_ctx: self
                     .tiered_runtime
                     .as_ref()
-                    .filter(|tiered| tiered.config.compiled_only)
                     .map(|tiered| Arc::clone(&tiered.shared_ctx)),
             });
             let set = native_resolver
@@ -3640,7 +3826,7 @@ impl HLInterpreter {
                 .unwrap_or(std::ptr::null_mut());
             if !set_worker_mode.is_null() {
                 let set_mode: unsafe extern "C" fn(bool) = std::mem::transmute(set_worker_mode);
-                set_mode(compiled_only);
+                set_mode(worker_compilation);
             }
             let set_stub_resolver = native_resolver
                 .resolve_function("std", "hlp_set_stub_resolver")
@@ -3682,7 +3868,7 @@ impl HLInterpreter {
             let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
                 return std::ptr::null_mut();
             };
-            resolve_compiled_only_stub(shared, findex as usize)
+            resolve_worker_stub(shared, findex as usize)
         }
 
         unsafe extern "C" fn jit_stub_call_bridge(
@@ -3771,7 +3957,29 @@ impl HLInterpreter {
             }
 
             match result {
-                Ok(v) => interp.value_to_i64(v, ret_kind),
+                Ok(v) => {
+                    // The bridge is the inverse of `call_compiled_function`:
+                    // interpreter Dynamic registers may carry primitives
+                    // inline, but compiled AIR V2 consumes and returns a
+                    // `vdynamic*`. Returning integer 2 as word 0x2 makes the
+                    // first compiled SafeCast dereference address 0x2.
+                    let v = if matches!(
+                        ret_kind,
+                        hl::hl_type_kind_HDYN
+                            | hl::hl_type_kind_HNULL
+                            | hl::hl_type_kind_HDYNOBJ
+                    ) {
+                        interp.box_for_compiled_dynamic_value(v)
+                    } else {
+                        v
+                    };
+                    if std::env::var_os("ASH_DBG_STUB").is_some() {
+                        eprintln!(
+                            "[stub] call findex={findex} ret_kind={ret_kind} value={v:?}"
+                        );
+                    }
+                    interp.value_to_i64(v, ret_kind)
+                }
                 // Every failure leaves through the native trap chain — see
                 // `raise_stub_bridge_failure`. Returning a value here would
                 // hand compiled code a word it is about to use as a pointer.
@@ -3804,7 +4012,22 @@ impl HLInterpreter {
             if !loop_fn.is_null() {
                 // The loop function is a vclosure — extract findex from stub pointer
                 let cl = loop_fn as *const hl::_vclosure;
-                let findex = unsafe { (*cl).fun as usize }.wrapping_sub(1);
+                let loop_fun = unsafe { (*cl).fun as usize };
+                let findex =
+                    if (loop_fun as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                        loop_fun.wrapping_sub(1)
+                    } else {
+                        // `hlp_sys_set_loop` was called from compiled code, so
+                        // the closure carries a real entry address.
+                        match self.findex_for_code_addr(loop_fun) {
+                            Some(fi) => fi,
+                            None => {
+                                return Err(anyhow!(
+                                    "VM event loop closure has an unknown compiled target"
+                                ))
+                            }
+                        }
+                    };
                 let bound = unsafe {
                     if (*cl).hasValue != 0 && !(*cl).value.is_null() {
                         Some(NanBoxedValue::from_ptr((*cl).value as usize))
@@ -5180,6 +5403,30 @@ impl HLInterpreter {
         let arg_kinds = entry.args();
         let ret_kind = entry.ret_kind;
 
+        // Compiled AIR V2 uses the native HashLink ABI: Dynamic parameters
+        // are vdynamic pointers. Interpreter registers may carry their
+        // primitive payload inline, so materialize those boxes before the
+        // typed call instead of forwarding (for example) integer 5 as 0x5.
+        let mut marshaled_args = [NanBoxedValue::null(); 8];
+        for (index, &arg) in args.iter().enumerate() {
+            let kind = arg_kinds
+                .get(index)
+                .copied()
+                .unwrap_or(hl::hl_type_kind_HVOID);
+            marshaled_args[index] = if matches!(
+                kind,
+                hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
+            ) {
+                self.box_for_compiled_dynamic_value(arg)
+            } else {
+                arg
+            };
+        }
+        let args = &marshaled_args[..args.len()];
+        // Boxing may allocate. Republish the complete interpreted root set
+        // before entering code that can itself trigger a collection.
+        self.sync_gc_scan_roots();
+
         let is_float_kind =
             |k: hl::hl_type_kind| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
         let ret_is_float = is_float_kind(ret_kind);
@@ -6552,12 +6799,7 @@ impl HLInterpreter {
                 frame.registers.set(dst.0, val);
             }
             Opcode::ToVirtual { dst, src } => {
-                // Keep raw objects in virtual-typed registers. The interpreter
-                // resolves structural fields and methods from the runtime
-                // object at the use site, where it still has the bytecode type
-                // needed to marshal interpreter stubs safely.
-                let val = frame.registers.get(src.0);
-                frame.registers.set(dst.0, val);
+                return self.op_to_virtual(func, dst.0, src.0);
             }
 
             // ===== Object Creation =====
@@ -7601,6 +7843,71 @@ impl HLInterpreter {
         Ok(StepResult::Continue)
     }
 
+    /// Materialize HashLink's canonical structural-interface view.
+    ///
+    /// Keeping the source HOBJ pointer in an HVIRTUAL register looks harmless
+    /// while the value stays in the interpreter, because its field helpers can
+    /// resolve by hash. It is not ABI-compatible once that value is cached in
+    /// an object field or passed to compiled AIR V2: generated code correctly
+    /// reads the `vvirtual` header and its field-address table. A raw object in
+    /// that slot therefore turns ordinary object fields into bogus virtual
+    /// entries. Upstream's OToVirtual calls `hl_to_virtual`, and every Ash
+    /// execution tier must preserve that representation boundary as well.
+    fn op_to_virtual(
+        &mut self,
+        func: &HLFunction,
+        dst: u32,
+        src: u32,
+    ) -> Result<StepResult> {
+        let value = self.stack.last().unwrap().registers.get(src);
+        if value.is_null() || value.is_void() {
+            self.stack.last_mut().unwrap().registers.set(dst, value);
+            return Ok(StepResult::Continue);
+        }
+        if !value.is_ptr() || self.fn_to_virtual.is_null() {
+            return Err(anyhow!("ToVirtual cannot materialize value {value:?}"));
+        }
+
+        let dst_type = self.c_type_factory.get(func.regs[dst as usize].0);
+        if dst_type.is_null() {
+            return Err(anyhow!("ToVirtual destination type is unavailable"));
+        }
+
+        // The helper allocates. Publish the backing object before entering it;
+        // on return there is no allocation point before the view is installed
+        // in the destination register and becomes part of the live root set.
+        self.sync_gc_scan_roots();
+        type FnToVirtual = unsafe extern "C" fn(
+            *mut hl_type,
+            *mut hl::vdynamic,
+        ) -> *mut hl::vvirtual;
+        let to_virtual: FnToVirtual = unsafe { std::mem::transmute(self.fn_to_virtual) };
+        // Through the trap boundary: materializing a view over a dynobj
+        // recasts mismatched fields, and a failed recast throws. Without an
+        // installed trap that longjmp aborts the process instead of
+        // surfacing as a catchable HL exception.
+        let stack_depth = self.stack.len();
+        let mut view: *mut hl::vvirtual = std::ptr::null_mut();
+        let jumped = run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+            view = unsafe { to_virtual(dst_type, value.as_ptr() as *mut hl::vdynamic) };
+        });
+        if jumped != 0 {
+            return Err(self.longjmp_error(
+                stack_depth,
+                "exception while materializing a virtual view".to_string(),
+            ));
+        }
+        if view.is_null() {
+            return Err(anyhow!("ToVirtual returned null for a non-null object"));
+        }
+        self.stack
+            .last_mut()
+            .unwrap()
+            .registers
+            .set(dst, NanBoxedValue::from_ptr(view as usize));
+        Ok(StepResult::Continue)
+    }
+
     /// Box a value into a vdynamic for native consumption.
     ///
     /// Extracted from `execute_opcode` so the SSA dispatcher in
@@ -8115,7 +8422,14 @@ impl HLInterpreter {
                 }
             };
             if let Some(findex) = findex_opt {
-                let closure_type = self.c_type_factory.get(func.regs[dst as usize].0);
+                // The METHOD's full type, for the same reason
+                // `op_instance_closure` passes it: the destination register
+                // carries the already-stripped signature with a null parent,
+                // and a bound closure's dynamic callers read that parent to
+                // learn they must marshal the receiver.
+                let closure_type = func_of(&self.targets, findex)
+                    .map(|fi| self.c_type_factory.get(bytecode.functions[fi].type_.0))
+                    .unwrap_or_else(|| self.c_type_factory.get(func.regs[dst as usize].0));
                 let value = unsafe {
                     Self::alloc_bound_closure(
                         self.fn_alloc_closure_ptr,
@@ -8160,7 +8474,25 @@ impl HLInterpreter {
         } else {
             obj_val.as_ptr() as *mut std::ffi::c_void
         };
-        let closure_type = self.c_type_factory.get(func.regs[dst as usize].0);
+        // Hand the allocator the METHOD's full type -- the one whose first
+        // argument is the receiver -- exactly as HashLink's OInstanceClosure
+        // does. `hlp_alloc_closure_ptr` strips it down to the closure's own
+        // signature and, in doing so, sets `fun->parent` back to the full
+        // type it was given.
+        //
+        // The destination register's type is the ALREADY-stripped signature,
+        // and the bytecode reader hard-codes `parent: None` for every HFUN it
+        // builds (crates/ash/src/bytecode.rs, `read_type_fun`), so passing it
+        // hands the allocator a type whose parent is null and leaves it null.
+        // Five places in std/src/fun.rs read `cl->t->fun->parent` for a bound
+        // closure, and the fiber's dynamic runner reads it to learn that it
+        // must marshal the receiver: with it null, the runner built a 1-value
+        // argument array against an arity-0 signature, the receiver was never
+        // passed, and the callee read `this` out of a register nobody set --
+        // SIGSEGV at offset 0x20 inside the compiled method.
+        let closure_type = func_of(&self.targets, fun)
+            .map(|fi| self.c_type_factory.get(bytecode.functions[fi].type_.0))
+            .unwrap_or_else(|| self.c_type_factory.get(func.regs[dst as usize].0));
         let value = unsafe {
             Self::alloc_bound_closure(self.fn_alloc_closure_ptr, closure_type, fun, obj_ptr)
         };
@@ -8340,7 +8672,13 @@ impl HLInterpreter {
                         }
                         let packed = self.pack_varargs_array(func, args, &arg_vals)?;
                         let wrapped_fun = (*wrapped).fun as usize;
-                        let fi = wrapped_fun.wrapping_sub(1);
+                        let fi = if (wrapped_fun as u64)
+                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                        {
+                            wrapped_fun.wrapping_sub(1)
+                        } else {
+                            self.findex_for_code_addr(wrapped_fun).unwrap_or(usize::MAX)
+                        };
                         if func_of(&self.targets, fi).is_none()
                             && native_of(&self.targets, fi).is_none()
                         {
@@ -8358,8 +8696,17 @@ impl HLInterpreter {
                         });
                     }
 
-                    // Extract findex from stub pointer (findex+1)
-                    let fi = (fun_ptr as usize).wrapping_sub(1);
+                    // `fun` holds either the interpreter's `findex + 1` stub
+                    // sentinel or, when compiled code allocated this closure
+                    // from `functions_ptrs`, a real entry address.
+                    let fi = if (fun_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                    {
+                        (fun_ptr as usize).wrapping_sub(1)
+                    } else {
+                        self.findex_for_code_addr(fun_ptr as usize).ok_or_else(|| {
+                            anyhow!("CallClosure on unknown compiled closure {fun_ptr:?}")
+                        })?
+                    };
                     let bound_value = (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null();
                     // What this site called, for the LLVM tier's guarded
                     // devirtualisation. Only sentinel-form targets are worth
@@ -8441,8 +8788,8 @@ impl HLInterpreter {
             ));
         }
 
-        // HVIRTUAL dispatch: ToVirtual is a no-op in the interpreter,
-        // so `this_val` holds the raw HOBJ pointer directly.
+        // HVIRTUAL dispatch. Canonical values are vvirtual views; tolerate a
+        // raw HOBJ as well for values arriving from older/external producers.
         // Resolve the findex by matching the virtual field's hashed_name
         // against the runtime object's proto chain.
         let this_reg_type_idx = func.regs[args[0].0 as usize].0;
@@ -8500,7 +8847,15 @@ impl HLInterpreter {
                                 if !slot.is_null() {
                                     let closure = *(slot as *const *const _vclosure);
                                     if !closure.is_null() {
-                                        let fi = ((*closure).fun as usize).wrapping_sub(1);
+                                        let cfun = (*closure).fun as usize;
+                                        let fi = if (cfun as u64)
+                                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                        {
+                                            cfun.wrapping_sub(1)
+                                        } else {
+                                            self.findex_for_code_addr(cfun)
+                                                .unwrap_or(usize::MAX)
+                                        };
                                         if func_of(&self.targets, fi).is_some()
                                             || native_of(&self.targets, fi).is_some()
                                         {
@@ -8522,6 +8877,75 @@ impl HLInterpreter {
                                             });
                                         }
                                     }
+                                }
+                            }
+                        }
+                        // Upstream's OCallMethod fast path for a real view
+                        // over an object: `hl_to_virtual` already resolved
+                        // each METHOD field to the target's entry from
+                        // `rt->methods`, so `vfields[field]` holds a function
+                        // address — a `findex + 1` stub sentinel or compiled
+                        // code — and the call receiver is the wrapped value.
+                        // Re-resolving by hashed name here is both slower and
+                        // weaker: it cannot see what the view already bound.
+                        if !header.is_null()
+                            && (*header).kind == hl::hl_type_kind_HVIRTUAL
+                            && !dispatch_obj.is_null()
+                            && {
+                                let dk = *(dispatch_obj as *const *mut hl_type);
+                                !dk.is_null()
+                                    && ((*dk).kind == hl::hl_type_kind_HOBJ
+                                        || (*dk).kind == hl::hl_type_kind_HSTRUCT)
+                            }
+                        {
+                            let fields = obj_ptr.add(std::mem::size_of::<hl::vvirtual>())
+                                as *const *mut c_void;
+                            let entry = *fields.add(field) as usize;
+                            if entry != 0 {
+                                let fi = if (entry as u64)
+                                    < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                {
+                                    entry.wrapping_sub(1)
+                                } else {
+                                    self.findex_for_code_addr(entry).unwrap_or(usize::MAX)
+                                };
+                                // Direct only when the callee's declared
+                                // return and the call site's destination agree
+                                // on representation. The view may be typed
+                                // Iterator<Int> while the call site reads it
+                                // as Iterator<Dynamic> (type-parameter
+                                // erasure): a raw i32 return stored into a
+                                // Dynamic register is a pointer-shaped lie.
+                                // Upstream's fast path calls through
+                                // emit_dyn_call, which coerces the return;
+                                // ours falls back to the boxed dispatch below,
+                                // which marshals both directions.
+                                let ret_compatible = func_of(&self.targets, fi)
+                                    .and_then(|f_idx| {
+                                        let ft = &bytecode.functions[f_idx];
+                                        bytecode.types[ft.type_.0]
+                                            .fun
+                                            .as_ref()
+                                            .map(|f| bytecode.types[f.ret.0].kind)
+                                    })
+                                    .map(|ret_kind| {
+                                        let dst_kind =
+                                            bytecode.types[func.regs[dst as usize].0].kind;
+                                        Self::is_ptr_kind(ret_kind)
+                                            == Self::is_ptr_kind(dst_kind)
+                                    });
+                                if ret_compatible == Some(true)
+                                    && (func_of(&self.targets, fi).is_some()
+                                        || native_of(&self.targets, fi).is_some())
+                                {
+                                    let mut call_args = arg_vals;
+                                    call_args[0] =
+                                        NanBoxedValue::from_ptr(dispatch_obj as usize);
+                                    return Ok(StepResult::Call {
+                                        findex: fi,
+                                        args: call_args,
+                                        dst,
+                                    });
                                 }
                             }
                         }
@@ -8570,7 +8994,15 @@ impl HLInterpreter {
                                 if closure_value.is_ptr() {
                                     let closure = closure_value.as_ptr() as *const _vclosure;
                                     if !closure.is_null() {
-                                        let fi = ((*closure).fun as usize).wrapping_sub(1);
+                                        let cfun = (*closure).fun as usize;
+                                        let fi = if (cfun as u64)
+                                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                        {
+                                            cfun.wrapping_sub(1)
+                                        } else {
+                                            self.findex_for_code_addr(cfun)
+                                                .unwrap_or(usize::MAX)
+                                        };
                                         if func_of(&self.targets, fi).is_some()
                                             || native_of(&self.targets, fi).is_some()
                                         {
@@ -8622,6 +9054,30 @@ impl HLInterpreter {
                                 } else {
                                     false
                                 };
+                            // A resolved target whose declared return does
+                            // not share the destination's representation must
+                            // ALSO go boxed: a direct call would store a raw
+                            // scalar into a pointer-typed register (or vice
+                            // versa). Same erasure hazard as the vfields fast
+                            // path above.
+                            let needs_boxed_dispatch = needs_boxed_dispatch
+                                || found.is_some_and(|fi| {
+                                    func_of(&self.targets, fi).is_some_and(|f_idx| {
+                                        let ft = &bytecode.functions[f_idx];
+                                        bytecode.types[ft.type_.0].fun.as_ref().is_some_and(
+                                            |f| {
+                                                let ret_kind =
+                                                    bytecode.types[f.ret.0].kind;
+                                                let dst_kind = bytecode.types
+                                                    [func.regs[dst as usize].0]
+                                                    .kind;
+                                                dst_kind != hl::hl_type_kind_HVOID
+                                                    && Self::is_ptr_kind(ret_kind)
+                                                        != Self::is_ptr_kind(dst_kind)
+                                            },
+                                        )
+                                    })
+                                });
                             (found, receiver, hname, needs_boxed_dispatch)
                         }
                     } else {
@@ -8694,6 +9150,60 @@ impl HLInterpreter {
                     args: call_args,
                     dst,
                 });
+            }
+
+            // Upstream ends OCallMethod-on-virtual with an unconditional
+            // `hl_dyn_call_obj(v->value, ...)`: whatever static resolution
+            // missed is resolved dynamically by the field's hashed name. A
+            // live view that reaches this point with nothing resolved gets
+            // that dispatch — falling through to the object proto path below
+            // would look for a vtable on the HVIRTUAL header and fail.
+            let runtime_is_view = unsafe {
+                let hdr = *(this_val.as_ptr() as *const *mut hl_type);
+                !hdr.is_null() && (*hdr).kind == hl::hl_type_kind_HVIRTUAL
+            };
+            if runtime_is_view {
+                if self.fn_vcall_dyn.is_null() {
+                    return Err(anyhow!("hlp_vcall_dyn is unavailable"));
+                }
+                let packed = self.pack_varargs_array(func, &args[1..], &arg_vals[1..])?;
+                type FnVCallDyn = unsafe extern "C" fn(
+                    *mut hl::vdynamic,
+                    i32,
+                    *mut hl::varray,
+                ) -> *mut hl::vdynamic;
+                let vcall: FnVCallDyn = unsafe { std::mem::transmute(self.fn_vcall_dyn) };
+                // Through the trap boundary: the dispatched method can throw
+                // (a failed dyn cast in its marshalling included), and a
+                // longjmp with no HL trap installed aborts the process.
+                let stack_depth = self.stack.len();
+                let mut result: *mut hl::vdynamic = std::ptr::null_mut();
+                let jumped = run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+                    result = unsafe {
+                        vcall(
+                            this_val.as_ptr() as *mut hl::vdynamic,
+                            hfield,
+                            packed.as_ptr() as *mut hl::varray,
+                        )
+                    };
+                });
+                if jumped != 0 {
+                    return Err(self.longjmp_error(
+                        stack_depth,
+                        format!("exception in virtual dispatch (field={field})"),
+                    ));
+                }
+                let dst_type_idx = func.regs[dst as usize].0;
+                let dst_kind = bytecode.types[dst_type_idx].kind;
+                let value = if dst_kind == hl::hl_type_kind_HVOID || result.is_null() {
+                    Self::coerce_value_for_static_kind(NanBoxedValue::null(), dst_kind)
+                } else if Self::is_unboxable_primitive_kind(dst_kind) {
+                    self.dynamic_to_value_for_kind(result, dst_kind)
+                } else {
+                    NanBoxedValue::from_ptr(result as usize)
+                };
+                self.stack.last_mut().unwrap().registers.set(dst, value);
+                return Ok(StepResult::Continue);
             }
         }
 
@@ -9411,11 +9921,12 @@ impl HLInterpreter {
                             set!(dst, NanBoxedValue::from_i32(i));
                         }
                     }
-                    K::UnsafeCast | K::ToVirtual => {
-                        // AIR V2 keeps the raw object representation here;
-                        // structural consumers resolve a view at the use site.
+                    K::UnsafeCast => {
                         let v = get!(src);
                         set!(dst, v);
+                    }
+                    K::ToVirtual => {
+                        self.op_to_virtual(func, dst.0, src.0)?;
                     }
                 }
             }
@@ -9986,6 +10497,53 @@ impl HLInterpreter {
             }
         }
         if op == CmpOp::Eq || op == CmpOp::NotEq {
+            // Upstream `hl_dyn_compare` compares a virtual by its wrapped
+            // value (TK2(HOBJ,HVIRTUAL) and friends): a view over an object
+            // IS that object for equality. Unwrap before any pointer
+            // identity below, or `interface_var == object` is always false.
+            let unwrap_view = |v: NanBoxedValue, declared: hl::hl_type_kind| -> NanBoxedValue {
+                // Only kinds whose register value starts with an hl_type
+                // header may be probed — an HBYTES register holds raw UTF-16
+                // data, and a Dynamic register can carry a pointer-shaped
+                // immediate (hence the 0x10000 floor other probes here use).
+                let headered = matches!(
+                    declared,
+                    hl::hl_type_kind_HVIRTUAL
+                        | hl::hl_type_kind_HDYN
+                        | hl::hl_type_kind_HOBJ
+                        | hl::hl_type_kind_HDYNOBJ
+                );
+                if headered && v.is_ptr() && !v.is_null() && !v.is_void() && v.as_ptr() >= 0x10000
+                {
+                    unsafe {
+                        let hdr = *(v.as_ptr() as *const *mut hl_type);
+                        if !hdr.is_null()
+                            && (hdr as usize) >= 0x10000
+                            && (*hdr).kind == hl::hl_type_kind_HVIRTUAL
+                        {
+                            let value = (*(v.as_ptr() as *const hl::vvirtual)).value;
+                            if !value.is_null() {
+                                return NanBoxedValue::from_ptr(value as usize);
+                            }
+                        }
+                    }
+                }
+                v
+            };
+            let va = unwrap_view(va, ak);
+            let vb = unwrap_view(vb, bk);
+            // Identity after unwrapping settles it for every pointer kind:
+            // a view and its object, or two views over one object, are equal.
+            // Decided here because the declared-kind arms below want matching
+            // kinds on both sides, which a view/object mix never has.
+            if va.is_ptr()
+                && vb.is_ptr()
+                && !va.is_null()
+                && !vb.is_null()
+                && va.as_ptr() == vb.as_ptr()
+            {
+                return op == CmpOp::Eq;
+            }
             if ak == hl::hl_type_kind_HBYTES && bk == hl::hl_type_kind_HBYTES {
                 let pa = if va.is_null() || va.is_void() {
                     std::ptr::null()
@@ -11651,14 +12209,24 @@ impl HLInterpreter {
     /// Closures can be stored as:
     /// - TAG_FUNC: just a function index (StaticClosure with no capture)
     /// - TAG_PTR: pointer to a _vclosure struct (InstanceClosure or heap-allocated)
-    fn closure_findex_and_value(&self, val: NanBoxedValue) -> (usize, Option<NanBoxedValue>) {
+    fn closure_findex_and_value(
+        &mut self,
+        val: NanBoxedValue,
+    ) -> (usize, Option<NanBoxedValue>) {
         if val.is_func() {
             (val.as_func_index(), None)
         } else if val.is_ptr() {
             let cl_ptr = val.as_ptr() as *const hl::_vclosure;
             unsafe {
+                // `fun` is a `findex + 1` stub only when the interpreter
+                // built the closure; compiled code stores the real entry it
+                // loaded from `functions_ptrs`.
                 let stub = (*cl_ptr).fun as usize;
-                let findex = stub.wrapping_sub(1);
+                let findex = if (stub as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                    stub.wrapping_sub(1)
+                } else {
+                    self.findex_for_code_addr(stub).unwrap_or(usize::MAX)
+                };
                 let bound = if (*cl_ptr).hasValue != 0 && !(*cl_ptr).value.is_null() {
                     Some(NanBoxedValue::from_ptr((*cl_ptr).value as usize))
                 } else {
@@ -12595,6 +13163,54 @@ impl HLInterpreter {
                 }
             }
         }
+    }
+
+    /// Upstream's `hl_is_ptr`: kinds at or above HBYTES live in a machine
+    /// word that holds a pointer; kinds below it are value scalars.
+    #[inline(always)]
+    fn is_ptr_kind(kind: hl::hl_type_kind) -> bool {
+        kind >= hl::hl_type_kind_HBYTES
+    }
+
+    /// Resolve a real compiled entry address back to the findex it belongs to.
+    ///
+    /// Compiled code allocates closures from `functions_ptrs[findex]`, so the
+    /// `fun` field of a closure that crossed the compiled→interpreter boundary
+    /// may hold an entry address where the interpreter expects a `findex + 1`
+    /// stub sentinel. `functions_ptrs` is the table that address came from, so
+    /// it is also the map back.
+    ///
+    /// The scan is amortised: a miss indexes the whole table at once, and
+    /// promotion only ever adds addresses, so a cached entry stays true.
+    fn findex_for_code_addr(&mut self, addr: usize) -> Option<usize> {
+        if let Some(&fi) = self.code_addr_findex.get(&addr) {
+            return Some(fi);
+        }
+        // Every install registers its entry, and that registry accumulates
+        // rather than overwriting, so it answers for superseded tiers too.
+        if let Some(fi) = ash_core::profile::findex_at_entry(addr) {
+            let fi = fi as usize;
+            self.code_addr_findex.insert(addr, fi);
+            return Some(fi);
+        }
+        let module_ctx = self.c_type_factory.module_ctx();
+        if module_ctx.is_null() {
+            return None;
+        }
+        // SAFETY: `module_ctx` is the process-lifetime context the type
+        // factory owns; `functions_ptrs` is its findex-indexed slot table,
+        // sized to hold every findex in `targets`.
+        let ptrs = unsafe { (*module_ctx).functions_ptrs };
+        if ptrs.is_null() {
+            return None;
+        }
+        for findex in 0..self.targets.len() {
+            let slot = unsafe { *ptrs.add(findex) } as usize;
+            if slot as u64 >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                self.code_addr_findex.entry(slot).or_insert(findex);
+            }
+        }
+        self.code_addr_findex.get(&addr).copied()
     }
 
     /// Resolve a vtable slot to its findex from the object's RUNTIME type:

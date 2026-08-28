@@ -287,6 +287,10 @@ cargo run -p ash_cli -- --mode hybrid examples/heaps_base2d/bin/game.hl
 
 See the [Heaps on Ash guide](https://rayzor-blade.github.io/ash/heaps.html) for matching haxelib versions, HDLL placement, Apple Silicon setup, and troubleshooting.
 
+For RandomityGuy's SDL2-based MarbleGame, use the isolated
+[MBHaxe workflow](docs/mbhaxe.md). It pins the game's dependency forks and
+rejects any `sdl.hdll` produced by Ash's decommissioned Rust SDL shim.
+
 ## Status
 
 Known gaps, open defects and planned work are tracked in [BACKLOG.md](BACKLOG.md).

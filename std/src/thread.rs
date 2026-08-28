@@ -827,10 +827,10 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_create(callback: *mut c_void) -> *mut c_void {
-    // Haxe threads run as cooperative stackful fibers (krio). Compiled AIR V2
-    // bodies are distributed over worker OS threads; interpreter/hybrid
-    // bodies remain on the main scheduler. Upstream prim is
-    // _FUN(_VOID,_NO_ARG): callback is a vclosure*.
+    // Haxe threads run as cooperative stackful fibers (krio). AIR V2 bodies
+    // that the host resolves to native code are distributed over worker OS
+    // threads; pure-interpreter bodies remain on the main scheduler. Upstream
+    // prim is _FUN(_VOID,_NO_ARG): callback is a vclosure*.
     crate::fiber::thread_create(callback as *mut crate::hl::vclosure)
 }
 

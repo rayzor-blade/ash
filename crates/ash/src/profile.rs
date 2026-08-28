@@ -393,6 +393,25 @@ pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
         .push(CodeRange { addr, findex, tier });
 }
 
+/// The findex whose compiled entry is exactly `addr`, if any.
+///
+/// Exact match, not nearest-below: the caller has a function POINTER (from a
+/// closure built by compiled code), not an arbitrary PC. Answering from this
+/// registry rather than from `functions_ptrs` matters because a slot in that
+/// table is overwritten on re-promotion, whereas every install pushes here —
+/// so a closure still holding a tier-0 address stays resolvable after tier 1
+/// has replaced the slot.
+pub fn findex_at_entry(addr: usize) -> Option<u32> {
+    if addr == 0 {
+        return None;
+    }
+    let ranges = jit_code().lock().ok()?;
+    ranges
+        .iter()
+        .find(|r| r.addr == addr)
+        .map(|r| r.findex)
+}
+
 /// Which compiled function a PC falls in, for the crash handler.
 ///
 /// Nearest-entry-below, same rule the sampler uses, since neither backend

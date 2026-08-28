@@ -5816,7 +5816,6 @@ impl<'ctx> JITModule<'ctx> {
                     .build_load(ptr_type, fun_addr_ptr, "inst_closure_fun")?
                     .into_pointer_value();
 
-                // Get closure type via hlp_get_closure_type(func_type)
                 // This removes the first param (bound obj's type) from the fn signature
                 let func_type_ptr = self.func_types[findex] as u64;
                 let func_type_const = self
@@ -5824,17 +5823,14 @@ impl<'ctx> JITModule<'ctx> {
                     .i64_type()
                     .const_int(func_type_ptr, false)
                     .const_to_pointer(ptr_type);
-                let get_closure_type = self.declare_native(
-                    "hlp_get_closure_type",
-                    &[ptr_type.into()],
-                    Some(ptr_type.into()),
-                );
-                let closure_type = self
-                    .builder
-                    .build_call(get_closure_type, &[func_type_const.into()], "closure_type")?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
+                // The METHOD's full type, unstripped: `hlp_alloc_closure_ptr`
+                // does the single strip itself, exactly as upstream's
+                // OInstanceClosure does (jit_emit.c passes
+                // `functions[functions_indexes[fun]].type`) and as the
+                // Cranelift tier does. Stripping here first made the
+                // allocator strip a SECOND time, walking off the end of the
+                // `hl_type_fun` it was handed.
+                let closure_type: inkwell::values::BasicValueEnum = func_type_const.into();
 
                 // Load bound object
                 let obj_val =
@@ -5959,24 +5955,15 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                     .into_pointer_value();
 
-                // Get closure type via hlp_get_closure_type(func_type)
                 let func_type_ptr = self.func_types[findex] as u64;
                 let func_type_const = self
                     .context
                     .i64_type()
                     .const_int(func_type_ptr, false)
                     .const_to_pointer(ptr_type);
-                let get_closure_type = self.declare_native(
-                    "hlp_get_closure_type",
-                    &[ptr_type.into()],
-                    Some(ptr_type.into()),
-                );
-                let closure_type = self
-                    .builder
-                    .build_call(get_closure_type, &[func_type_const.into()], "vclos_type")?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
+                // Full method type; the allocator strips once. See
+                // OInstanceClosure above.
+                let closure_type: inkwell::values::BasicValueEnum = func_type_const.into();
 
                 // Call hlp_alloc_closure_ptr(closure_type, fun_addr, obj_ptr)
                 let alloc = self.declare_native(

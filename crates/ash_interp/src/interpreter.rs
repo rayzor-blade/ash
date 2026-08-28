@@ -2910,6 +2910,16 @@ impl HLInterpreter {
         }
         let kind = unsafe { (*field_t).kind };
         if !Self::is_primitive_or_bytes_kind(kind) {
+            // A Dynamic-typed source says nothing about what it holds, but the
+            // value's own tag does, and a tagged primitive must still become a
+            // real box before it lands in Dynamic STORAGE: upstream's contract
+            // is that an HDYN slot always holds a vdynamic*, and every reader
+            // (hl_dyn_casti and friends) dereferences it unconditionally.
+            // Returning the payload as a pointer here wrote the integer itself
+            // into the array, and the first compiled reader faulted on it.
+            if !val.is_ptr() {
+                return self.box_for_compiled_dynamic_value(val);
+            }
             return NanBoxedValue::from_ptr(val.as_ptr());
         }
         if self.fn_make_dyn.is_null() {

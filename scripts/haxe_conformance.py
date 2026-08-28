@@ -33,6 +33,7 @@ a baseline it always exits 0: a first run is a measurement, not a verdict.
 import argparse
 import collections
 import concurrent.futures as cf
+import functools
 import filecmp
 import json
 import os
@@ -676,6 +677,61 @@ RE_MISC_DONE = re.compile(r"^Done running (\d+) tests? with (\d+) failures?", re
 RE_MISC_FAILPATH = re.compile(r"^(projects[/\\]\S+\.hxml)\s*$", re.M)
 
 
+# Backends and runners an upstream misc case can shell out to, keyed by the
+# hxml flag that selects them. A case naming one of these is testing THAT
+# generator, not the compiler's HL path, so on a host without the tool the
+# case cannot run at all — and reporting it as a failure would make ash's
+# report depend on which SDKs happen to be installed.
+CASE_TOOLCHAIN = [
+    (re.compile(r"(?<![-\w])--?cmd\s+node\b"), "node"),
+    (re.compile(r"(?<![-\w])--?java\s"), "javac"),
+    (re.compile(r"(?<![-\w])--?cs\s"), "mcs"),
+    (re.compile(r"(?<![-\w])--?cpp\s"), "g++"),
+    (re.compile(r"(?<![-\w])--?php\s"), "php"),
+    (re.compile(r"(?<![-\w])--?python\s"), "python3"),
+    (re.compile(r"(?<![-\w])--?lua\s"), "lua"),
+    (re.compile(r"(?<![-\w])--?neko\s"), "neko"),
+]
+
+
+@functools.lru_cache(maxsize=None)
+def host_has_tool(tool: str) -> bool:
+    """Is `tool` actually usable here, not merely present?
+
+    macOS ships a /usr/bin/javac shim that exists, resolves, and then tells
+    you to install a JDK — so presence on PATH is not the question, and
+    `shutil.which` alone would call this host Java-capable and file the
+    resulting failure against ash.
+    """
+    exe = shutil.which(tool)
+    if exe is None:
+        return False
+    if tool in ("javac", "java"):
+        try:
+            return run([exe, "-version"], timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return True
+
+
+def case_missing_tool(case_dir: pathlib.Path, rel: str) -> str | None:
+    """The external tool this case needs and this host lacks, if any.
+
+    Read from the case's own hxml rather than guessed from its name. Returns
+    None when the case is either self-contained or fully equipped here, in
+    which case a failure is a real verdict and stays one.
+    """
+    hxml = case_dir / rel
+    try:
+        text = hxml.read_text(errors="replace")
+    except OSError:
+        return None
+    for pattern, tool in CASE_TOOLCHAIN:
+        if pattern.search(text) and not host_has_tool(tool):
+            return tool
+    return None
+
+
 def haxe_env(haxe: str) -> dict:
     """PATH with the compiler under test first.
 
@@ -751,6 +807,48 @@ def run_misc_compiler(spec: dict, src: pathlib.Path, haxe: str,
         rec["failed_cases"] = paths[:40]
         if not paths:
             rec["detail"] += " | " + tail[-300:]
+        # Separate "this host cannot run the case" from "the case disagreed".
+        # Both arrive as a failure in the runner's tally, and only the second
+        # is a verdict: a case that shells into node or a JDK is testing that
+        # backend, so on a machine without one it is unrun, not failing.
+        # Without this split the report's headline moves with the SDKs
+        # installed on whoever's laptop, which is the one property a
+        # conformance gate must not have.
+        blocked = {}
+        for rel in rec["failed_cases"]:
+            tool = case_missing_tool(cdir, rel)
+            if tool:
+                blocked[rel] = tool
+        if not rec["failed_cases"]:
+            # Runs of 20 cases or fewer inline their diagnostics instead of
+            # printing a SUMMARY block, so the failures are unnamed. Every
+            # case the runner STARTED is named though, and a case needing an
+            # absent tool cannot have passed — so scan those for missing
+            # prerequisites and attribute up to the failure count. Capped at
+            # `failed` so this can only ever explain failures, never invent
+            # or hide them.
+            candidates = {}
+            for rel in RE_MISC_CASE.findall(out):
+                tool = case_missing_tool(cdir, rel)
+                if tool:
+                    candidates[rel] = tool
+            for rel, tool in sorted(candidates.items())[:failed]:
+                blocked[rel] = tool
+            if blocked:
+                rec["blocked_attribution"] = (
+                    "by prerequisite scan; this runner does not name its "
+                    "failures")
+        if blocked:
+            rec["blocked_cases"] = blocked
+            rec["cases_blocked"] = len(blocked)
+            rec["cases_failed"] = failed - len(blocked)
+            missing = sorted(set(blocked.values()))
+            rec["detail"] += (f" | {len(blocked)} of them unrunnable here "
+                              f"(missing: {', '.join(missing)})")
+            if rec["cases_failed"] == 0:
+                # Nothing actually disagreed; the row is as green as this
+                # host can make it.
+                rec["status"] = "OK"
     return rec
 
 
@@ -1319,17 +1417,32 @@ def main(argv=None) -> int:
     if comp_rows:
         cc_total = sum(r.get("cases_total", 0) for r in comp_rows)
         cc_ok = sum(r.get("cases_ok", 0) for r in comp_rows)
+        cc_blocked = sum(r.get("cases_blocked", 0) for r in comp_rows)
+        cc_failed = sum(r.get("cases_failed", 0) for r in comp_rows)
+        # Blocked cases leave the denominator: the score is over what this
+        # host could actually attempt, so the same tree reports the same
+        # number on a machine that happens to have node and a JDK.
+        attemptable = cc_total - cc_blocked
         report["summary"]["compiler_bucket"] = {
             "runs": len(comp_rows),
             "runs_ok": sum(1 for r in comp_rows if r["status"] == "OK"),
             "cases_total": cc_total,
             "cases_ok": cc_ok,
-            "cases_failed": sum(r.get("cases_failed", 0) for r in comp_rows),
-            "case_pct": round(100.0 * cc_ok / cc_total, 1) if cc_total else None,
+            "cases_failed": cc_failed,
+            "cases_blocked": cc_blocked,
+            "cases_attemptable": attemptable,
+            "case_pct": (round(100.0 * cc_ok / attemptable, 1)
+                         if attemptable else None),
         }
+        blocked_note = ""
+        if cc_blocked:
+            tools = sorted({t for r in comp_rows
+                            for t in r.get("blocked_cases", {}).values()})
+            blocked_note = (f"; {cc_blocked} unrunnable on this host "
+                            f"(missing: {', '.join(tools)})")
         print(f"\ncompiler bucket (host haxe, not ash — kept out of the VM "
-              f"tally): {cc_ok}/{cc_total} cases ok across "
-              f"{len(comp_rows)} invocation(s)")
+              f"tally): {cc_ok}/{attemptable} cases ok across "
+              f"{len(comp_rows)} invocation(s){blocked_note}")
 
     # Suites and subtrees that cannot apply to a VM, each with its reason.
     # Printed every run: absence would be indistinguishable from an oversight.

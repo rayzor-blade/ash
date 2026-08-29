@@ -592,7 +592,8 @@
                 style="width:11px;height:11px;border-radius:2px;background:#8a6a4a;display:inline-block"></span>HashLink
               hl2-ir</span>
             <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C</span>
+                style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C
+              <span style="color:#8a807a">(AOT, not a VM)</span></span>
             <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
                 style="width:11px;height:11px;border-radius:2px;background:#6e7f8c;display:inline-block"></span>Haxe
               JVM</span>
@@ -613,10 +614,13 @@
           </div>
         </div>
         <div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the
-          pure wall time of one run. HashLink/C's ahead-of-time build is excluded; every row is verified against the
-          benchmark's accepted checksums before it is published. Each benchmark is measured in its own CI job, so the
-          engines within a row share a machine but different rows may not — compare engines within a row, not
-          milliseconds across sweeps. Hover a number for the CPU that produced it.</div>
+          pure wall time of one run, verified against the benchmark's accepted checksums before it is published.
+          <strong style="color:#5c5450">HashLink/C is not a VM.</strong> <code>haxe -hl main.c</code> emits C that the
+          system compiler builds into a native executable, so its bar is this bytecode running as ordinary compiled
+          code — a ceiling to measure against rather than a peer. That build takes one to six seconds and is excluded
+          from its bar, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is measured in
+          its own CI job, so the engines within a row share a machine but different rows may not — compare engines
+          within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.</div>
       </div>
 
       <p id="bench-provenance"

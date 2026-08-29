@@ -447,6 +447,11 @@ impl<'ctx> JITModule<'ctx> {
         *SPEC.get_or_init(|| std::env::var("ASH_PROMOTE_MODULE").ok().map(|v| v != "0"))
     }
 
+/// How many function bodies the shared promotion module may hold before
+/// promotions move to private modules. Above this the module-level passes
+/// cost more than the cross-function inlining they enable.
+const SHARED_MODULE_BODY_LIMIT: usize = 256;
+
     /// Whether `findex` compiles into a module of its own.
     fn promote_uses_own_module(&self, findex: usize) -> bool {
         if self.lazy_compilation {
@@ -454,6 +459,31 @@ impl<'ctx> JITModule<'ctx> {
         }
         if let Some(forced) = Self::promote_module_override() {
             return forced;
+        }
+        // The shared module is only worth its cost while it is SMALL. Its
+        // whole rationale is that the inliner can see other bodies, priced at
+        // "35-71ms of codegen per promotion" -- true when a module holds a
+        // benchmark, false when it holds a game. MCJIT emits a module whole
+        // and default<O2> runs module-level IPO passes across all of it, so
+        // the price is O(everything promoted so far): on MBHaxe the shared
+        // module reached 2883 bodies and 19914 globals, one promotion took
+        // 14.7s, and 41 of them spent 40.6s of a 60s run inside the middle
+        // end. The same run with private modules spent 0.6s, max 191ms.
+        //
+        // So keep the shared module while it is cheap and switch to private
+        // once it is not. Measured on the benchmark corpus, private-only
+        // costs nothing anyway (fib, method_call, closure_call, inlined_call,
+        // free_call, binary_trees, dyn_dispatch, deltablue all within +-4%),
+        // because the AIR inliner now runs at O3 before LLVM sees the body --
+        // the cross-function inlining this path was protecting has already
+        // happened by then.
+        let shared_bodies = self
+            .module
+            .get_functions()
+            .filter(|f| f.count_basic_blocks() > 0)
+            .count();
+        if shared_bodies > Self::SHARED_MODULE_BODY_LIMIT {
+            return true;
         }
         let Some(raw) = self
             .bytecode

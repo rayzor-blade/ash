@@ -812,7 +812,7 @@ fn tiered_compile_tier(
 ) -> *mut () {
     use std::sync::atomic::Ordering;
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
-    if std::env::var("ASH_TIER1_PROBE").is_ok() {
+    if tier1_probe() {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         let t0 = *T0.get_or_init(std::time::Instant::now);
         eprintln!(
@@ -1055,6 +1055,19 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
 /// valid for compiled-only JIT and for hybrid thread bodies: the latter are
 /// compiled at dispatch specifically so their interpreter frames never cross
 /// OS-thread boundaries.
+/// Read once. `resolve_worker_stub` runs on every unresolved sentinel -- 92k
+/// times a minute on MBHaxe -- and `env::var_os` locks and scans the
+/// environment on each call.
+fn dbg_stub() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("ASH_DBG_STUB").is_some())
+}
+
+fn tier1_probe() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_TIER1_PROBE").is_ok())
+}
+
 fn resolve_worker_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
     if findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
         return std::ptr::null_mut();
@@ -1070,7 +1083,7 @@ fn resolve_worker_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
         return std::ptr::null_mut();
     }
 
-    if std::env::var_os("ASH_DBG_STUB").is_some() {
+    if dbg_stub() {
         eprintln!("[stub] resolve findex={findex}");
     }
     let code = {
@@ -3994,7 +4007,7 @@ impl HLInterpreter {
                     } else {
                         v
                     };
-                    if std::env::var_os("ASH_DBG_STUB").is_some() {
+                    if dbg_stub() {
                         eprintln!(
                             "[stub] call findex={findex} ret_kind={ret_kind} value={v:?}"
                         );

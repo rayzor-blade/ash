@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Context as _, Result};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::Path;
@@ -11410,7 +11412,33 @@ impl HLInterpreter {
     ///
     /// Built lazily and only when something needs to print a trace, so a run
     /// that never faults never pays for it.
-    fn function_name_table(&self, bytecode: &DecodedBytecode) -> HashMap<usize, String> {
+    /// findex -> "Class.method", built once per bytecode image.
+    ///
+    /// This is a pure function of the image, and building it walks every type,
+    /// every proto and every binding, allocating a String for each. Rebuilding
+    /// it per call made throwing an exception cost O(program): MBHaxe throws
+    /// while loading a level, and the loading screen sat in this function
+    /// through thousands of rebuilds. A trace is only ever read once, and only
+    /// if it escapes -- the table has no business being rebuilt to produce it.
+    fn function_name_table(&self, bytecode: &DecodedBytecode) -> Rc<HashMap<usize, String>> {
+        thread_local! {
+            static CACHE: RefCell<Option<(usize, Rc<HashMap<usize, String>>)>> =
+                const { RefCell::new(None) };
+        }
+        let key = bytecode as *const DecodedBytecode as usize;
+        if let Some(hit) = CACHE.with(|c| {
+            c.borrow()
+                .as_ref()
+                .and_then(|(k, t)| (*k == key).then(|| Rc::clone(t)))
+        }) {
+            return hit;
+        }
+        let table = Rc::new(self.build_function_name_table(bytecode));
+        CACHE.with(|c| *c.borrow_mut() = Some((key, Rc::clone(&table))));
+        table
+    }
+
+    fn build_function_name_table(&self, bytecode: &DecodedBytecode) -> HashMap<usize, String> {
         let mut names: HashMap<usize, String> = HashMap::new();
         for ty in &bytecode.types {
             let Some(obj) = ty.obj.as_ref() else { continue };

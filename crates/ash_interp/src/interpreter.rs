@@ -13609,6 +13609,9 @@ mod stub_bridge_tests {
                 let err = anyhow::Error::new(HLExceptionPropagation {
                     value: NanBoxedValue::null(),
                     message: Some("Null access".to_string()),
+                    // No frames: the bridge raises before any interpreter
+                    // frame exists to capture.
+                    stack: Vec::new(),
                 });
                 HLInterpreter::raise_stub_bridge_failure(&resolver, 698, err);
             });

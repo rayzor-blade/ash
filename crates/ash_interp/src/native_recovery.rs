@@ -132,10 +132,27 @@ pub unsafe fn try_recover_from_signal(sig: i32, fault_addr: usize) -> bool {
 #[cfg(unix)]
 unsafe fn arm_slot(index: usize) -> i32 {
     let slot = &SLOTS[index];
-    let result = sigsetjmp(slot.buf.get() as *mut u64, 1);
+    // savemask 0, not 1. Arming happens on every native call the interpreter
+    // makes, and on macOS saving the mask costs TWO syscalls per arm --
+    // sigprocmask for the mask and sigaltstack for the stack state. Sampling
+    // MBHaxe's loading screen put both at the top of the profile, ahead of
+    // the interpreter itself, because loading a level is a long run of native
+    // calls into SDL and the image codecs.
+    //
+    // The mask only needs restoring when a fault actually happened: the
+    // handler runs with the delivered signal blocked, and siglongjmp out of
+    // it would leave it blocked. That is the cold path, so unblock there
+    // instead of paying for the save on every arm.
+    let result = sigsetjmp(slot.buf.get() as *mut u64, 0);
     if result == 0 {
         slot.owner.store(current_thread_id(), Ordering::Relaxed);
         slot.active.store(true, Ordering::Relaxed);
+    } else {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGSEGV);
+        libc::sigaddset(&mut set, libc::SIGBUS);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
     result
 }

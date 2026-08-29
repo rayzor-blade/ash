@@ -138,12 +138,21 @@ checkout_pinned() {
     if ! git -C "${checkout_dir}" cat-file -e "${commit}^{commit}" 2>/dev/null; then
         git -C "${checkout_dir}" fetch --depth 1 origin "${commit}"
     fi
-    if [[ "$(git -C "${checkout_dir}" rev-parse HEAD 2>/dev/null || true)" != "${commit}" ]]; then
-        if [[ -n "$(git -C "${checkout_dir}" status --porcelain)" ]]; then
+    # `git clone --no-checkout` writes no working tree while HEAD already names
+    # the default branch tip. When the pinned commit IS that tip, comparing
+    # HEAD to it succeeds and the checkout below is skipped -- leaving a repo
+    # with no files, which surfaces much later as a missing subdirectory.
+    local populated=1
+    if [[ -z "$(ls -A "${checkout_dir}" 2>/dev/null | grep -v '^\.git$' || true)" ]]; then
+        populated=0
+    fi
+    if [[ "${populated}" -eq 0 ]] \
+        || [[ "$(git -C "${checkout_dir}" rev-parse HEAD 2>/dev/null || true)" != "${commit}" ]]; then
+        if [[ "${populated}" -eq 1 && -n "$(git -C "${checkout_dir}" status --porcelain)" ]]; then
             echo "error: refusing to replace dirty generated checkout ${checkout_dir}" >&2
             exit 1
         fi
-        git -C "${checkout_dir}" checkout --detach "${commit}"
+        git -C "${checkout_dir}" checkout --detach --force "${commit}"
     fi
     if [[ "$(git -C "${checkout_dir}" rev-parse HEAD)" != "${commit}" ]]; then
         echo "error: failed to pin ${name} to ${commit}" >&2
@@ -259,6 +268,22 @@ if [[ -n "${NATIVE_DIR}" ]]; then
             libhl*.dylib) continue ;;
         esac
         cp "${dylib}" "${RUN_ROOT}/"
+    done
+    # A copied Mach-O keeps a signature that no longer validates at its new
+    # path, and anything fetched with a browser also carries a quarantine
+    # attribute. Either one makes dlopen fail with "library load disallowed by
+    # system policy", which reads like a missing dependency rather than a
+    # signing problem. Re-sign ad hoc, exactly as this script already does for
+    # the artifacts it builds itself.
+    xattr -cr "${RUN_ROOT}" 2>/dev/null || true
+    for staged in "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
+        case "$(basename "${staged}")" in
+            libhl.dylib|libhl.1.dylib) continue ;;
+        esac
+        codesign --force -s - "${staged}" >/dev/null 2>&1 || {
+            echo "error: could not sign staged native $(basename "${staged}")" >&2
+            exit 1
+        }
     done
     shopt -u nullglob
 fi

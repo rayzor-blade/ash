@@ -1887,6 +1887,97 @@ impl<'ctx> JITModule<'ctx> {
         string_global.as_pointer_value()
     }
 
+    /// Materialize one constant global on first use.
+    ///
+    /// Pre-scanning a function's raw opcodes cannot see constants that AIR V2
+    /// introduces by inlining a callee, and a missing global fails the compile
+    /// and drops the function silently back to the interpreter. Creating them
+    /// where they are actually referenced makes the set exact by construction,
+    /// so a module holds only what it uses no matter how the body was
+    /// optimized -- a game's whole constant pool no longer rides along with
+    /// every promoted function.
+    pub fn ensure_int_global(&mut self, index: usize) -> Option<GlobalValue<'ctx>> {
+        if let Some(g) = self.int_globals.get(index).copied().flatten() {
+            return Some(g);
+        }
+        let v = *self.bytecode.ints.get(index)?;
+        let global = self
+            .module
+            .add_global(self.context.i32_type(), None, &format!("Int_{index}"));
+        global.set_initializer(&self.context.i32_type().const_int(v as u64, false));
+        global.set_constant(true);
+        if self.int_globals.len() <= index {
+            self.int_globals.resize(index + 1, None);
+        }
+        self.int_globals[index] = Some(global);
+        Some(global)
+    }
+
+    pub fn ensure_float_global(&mut self, index: usize) -> Option<GlobalValue<'ctx>> {
+        if let Some(g) = self.float_globals.get(index).copied().flatten() {
+            return Some(g);
+        }
+        let v = *self.bytecode.floats.get(index)?;
+        let global = self
+            .module
+            .add_global(self.context.f64_type(), None, &format!("Float_{index}"));
+        global.set_initializer(&self.context.f64_type().const_float(v));
+        global.set_constant(true);
+        if self.float_globals.len() <= index {
+            self.float_globals.resize(index + 1, None);
+        }
+        self.float_globals[index] = Some(global);
+        Some(global)
+    }
+
+    pub fn ensure_string_global(&mut self, index: usize) -> Option<GlobalValue<'ctx>> {
+        if let Some(g) = self.string_globals.get(index).copied().flatten() {
+            return Some(g);
+        }
+        let s = self.bytecode.strings.get(index)?.clone();
+        let utf16: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+        let utf16_bytes: Vec<u8> = utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+        let global = self.module.add_global(
+            self.context.i8_type().array_type(utf16_bytes.len() as u32),
+            None,
+            &format!("String_{index}"),
+        );
+        global.set_initializer(&self.context.const_string(&utf16_bytes, false));
+        global.set_constant(true);
+        global.set_alignment(2);
+        if self.string_globals.len() <= index {
+            self.string_globals.resize(index + 1, None);
+        }
+        self.string_globals[index] = Some(global);
+        Some(global)
+    }
+
+    pub fn ensure_bytes_global(&mut self, index: usize) -> Option<GlobalValue<'ctx>> {
+        if let Some(g) = self.bytes_globals.get(index).copied().flatten() {
+            return Some(g);
+        }
+        let pos = *self.bytecode.bytes_pos.get(index)?;
+        let end = self
+            .bytecode
+            .bytes_pos
+            .get(index + 1)
+            .copied()
+            .unwrap_or(self.bytecode.bytes_data.len());
+        let slice = self.bytecode.bytes_data.get(pos..end)?.to_vec();
+        let global = self.module.add_global(
+            self.context.i8_type().array_type(slice.len() as u32),
+            None,
+            &format!("Bytes_{index}"),
+        );
+        global.set_initializer(&self.context.const_string(&slice, false));
+        global.set_constant(true);
+        if self.bytes_globals.len() <= index {
+            self.bytes_globals.resize(index + 1, None);
+        }
+        self.bytes_globals[index] = Some(global);
+        Some(global)
+    }
+
     pub fn get_int_global(&self, index: usize) -> Option<GlobalValue<'ctx>> {
         self.int_globals.get(index).copied().flatten()
     }

@@ -483,11 +483,15 @@ impl<'ctx> JITModule<'ctx> {
         let host_strings = std::mem::take(&mut self.string_globals);
         let host_bytes = std::mem::take(&mut self.bytes_globals);
         let host_types = std::mem::take(&mut self.type_info_globals);
-        if self.lazy_compilation {
-            self.create_constant_pool_globals_for(findex);
-        } else {
-            self.create_constant_pool_globals();
-        }
+        // Seed with this function's own constants and let anything else
+        // materialize on demand (`ensure_*_global`). Cloning the entire pool
+        // instead put a game's whole constant table into a module holding ONE
+        // function, and the module-level passes then walk all of it: MBHaxe
+        // spent 40s compiling a 94-instruction function that way. The seed is
+        // only an optimization now -- correctness no longer depends on it
+        // predicting which constants the optimized body will reference, which
+        // a raw-opcode scan cannot do once AIR V2 inlines a callee.
+        self.create_constant_pool_globals_for(findex);
 
         let built = self.init_required_natives().and_then(|()| {
             self.compile_function(findex)?;
@@ -530,7 +534,20 @@ impl<'ctx> JITModule<'ctx> {
                 .count();
             crate::profile::count("middle-end functions processed", n as u64);
             crate::profile::count("middle-end functions in module", n as u64);
+            let me_t0 = std::time::Instant::now();
             super::module::run_middle_end(&promo_module)?;
+            if std::env::var_os("ASH_MIDDLE_END_LOG").is_some() {
+                let globals = promo_module.get_globals().count();
+                let decls = promo_module
+                    .get_functions()
+                    .filter(|f| f.count_basic_blocks() == 0)
+                    .count();
+                eprintln!(
+                    "[me] findex={findex} bodies={n} decls={decls} globals={globals} \
+                     took={:.0}ms",
+                    me_t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
         }
 
         if let Err(e) = promo_module.verify() {
@@ -628,7 +645,21 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
             let parked = self.park_optimized_functions(target);
+            let me_t0 = std::time::Instant::now();
             let result = super::module::run_middle_end(&self.module);
+            if std::env::var_os("ASH_MIDDLE_END_LOG").is_some() {
+                let bodies = self
+                    .module
+                    .get_functions()
+                    .filter(|f| f.count_basic_blocks() > 0)
+                    .count();
+                let globals = self.module.get_globals().count();
+                eprintln!(
+                    "[me-shared] findex={findex} bodies={bodies} parked={} globals={globals} took={:.0}ms",
+                    parked.len(),
+                    me_t0.elapsed().as_secs_f64() * 1e3
+                );
+            }
             self.release_parked_functions(&parked);
             result?;
             self.record_optimized_functions(&parked);
@@ -2551,7 +2582,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             Opcode::Int { dst, ptr } => {
                 let int_val = self
-                    .get_int_global(ptr.0)
+                    .ensure_int_global(ptr.0)
                     .ok_or_else(|| anyhow!("Int constant not found"))?;
                 let loaded_int = self.builder.build_load(
                     self.context.i32_type(),
@@ -2563,7 +2594,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             Opcode::Float { dst, ptr } => {
                 let float_val = self
-                    .get_float_global(ptr.0)
+                    .ensure_float_global(ptr.0)
                     .ok_or_else(|| anyhow!("Float constant not found"))?;
                 let loaded_float = self.builder.build_load(
                     self.context.f64_type(),
@@ -2580,7 +2611,7 @@ impl<'ctx> JITModule<'ctx> {
             }
             Opcode::String { dst, ptr } => {
                 let string_val = self
-                    .get_string_global(ptr.0)
+                    .ensure_string_global(ptr.0)
                     .ok_or_else(|| anyhow!("String constant not found"))?;
                 // Store the ADDRESS of the string constant (pointer to first byte)
                 self.builder
@@ -6234,7 +6265,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- Bytes: load bytes constant ---
             Opcode::Bytes { dst, ptr } => {
-                if let Some(bytes_global) = self.get_bytes_global(ptr.0) {
+                if let Some(bytes_global) = self.ensure_bytes_global(ptr.0) {
                     self.builder
                         .build_store(registers[dst.0 as usize], bytes_global.as_pointer_value())?;
                 } else {

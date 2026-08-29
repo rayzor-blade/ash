@@ -244,6 +244,11 @@ fn native_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
     }
 }
 
+/// findex -> "Class.method", shared by every trace taken from one image.
+type NameTable = Rc<HashMap<usize, String>>;
+/// The image the cached table was built for, and the table.
+type NameTableCache = RefCell<Option<(usize, NameTable)>>;
+
 /// Carries a thrown HL exception value up through the Rust call stack.
 /// Distinguishable from other errors so callers can catch it via downcast.
 #[derive(Debug, Clone)]
@@ -11443,10 +11448,9 @@ impl HLInterpreter {
     /// while loading a level, and the loading screen sat in this function
     /// through thousands of rebuilds. A trace is only ever read once, and only
     /// if it escapes -- the table has no business being rebuilt to produce it.
-    fn function_name_table(&self, bytecode: &DecodedBytecode) -> Rc<HashMap<usize, String>> {
+    fn function_name_table(&self, bytecode: &DecodedBytecode) -> NameTable {
         thread_local! {
-            static CACHE: RefCell<Option<(usize, Rc<HashMap<usize, String>>)>> =
-                const { RefCell::new(None) };
+            static CACHE: NameTableCache = const { RefCell::new(None) };
         }
         let key = bytecode as *const DecodedBytecode as usize;
         if let Some(hit) = CACHE.with(|c| {
@@ -11476,8 +11480,8 @@ impl HLInterpreter {
             // not from this type's own fields: `$NullAcc` binds field 6 while
             // owning only two, because its parent contributes the first five.
             let inherited = Self::inherited_field_count(bytecode, obj);
-            for pair in obj.bindings.chunks_exact(2) {
-                let (field_idx, findex) = (pair[0], pair[1]);
+            let (pairs, _) = obj.bindings.as_chunks::<2>();
+            for &[field_idx, findex] in pairs {
                 if findex < 0 {
                     continue;
                 }

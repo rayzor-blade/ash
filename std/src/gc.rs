@@ -2220,9 +2220,29 @@ impl ImmixAllocator {
                 self.heap.collect_pending,
             );
         }
+        // Split the pause. Which half dominates decides the fix: marking can be
+        // parallelised inside the stop -- the world is already stopped, so no
+        // write barrier is involved -- while sweeping only visits UNMARKED
+        // blocks and could run after the world resumes. Optimising the wrong
+        // half buys nothing.
+        let t_stop = t0.elapsed();
+        let t_mark0 = Instant::now();
         self.mark_roots(&stopped_world.snapshots);
+        let t_mark = t_mark0.elapsed();
+        let t_sweep0 = Instant::now();
         let freed_blocks = self.sweep(&stopped_world.snapshots);
+        let t_sweep = t_sweep0.elapsed();
         let pause = t0.elapsed();
+        if gc_stats_enabled() {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+            eprintln!(
+                "[gc-split] stop={:.2}ms mark={:.2}ms sweep={:.2}ms total={:.2}ms",
+                ms(t_stop),
+                ms(t_mark),
+                ms(t_sweep),
+                ms(pause)
+            );
+        }
 
         let live_blocks = self.heap.used_blocks.len();
         let live_bytes = live_blocks * BLOCK_SIZE;

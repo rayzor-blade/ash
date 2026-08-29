@@ -5372,7 +5372,19 @@ impl HLInterpreter {
 
     /// Restore interpreter-owned state after an HL longjmp and turn the
     /// runtime's pending value into the Rust error used by the call paths.
-    fn longjmp_error(&mut self, stack_depth: usize, fallback: String) -> anyhow::Error {
+    fn longjmp_error(
+        &mut self,
+        bytecode: Option<&DecodedBytecode>,
+        stack_depth: usize,
+        fallback: String,
+    ) -> anyhow::Error {
+        // BEFORE the drain below: a Haxe `throw` reaches hl_throw as a native
+        // longjmp and lands here, and the frames it was thrown from are the
+        // ones about to be discarded. Capturing after would leave the trace
+        // holding only the entrypoint, which is what it used to report.
+        let stack = bytecode
+            .map(|bc| self.capture_call_stack(bc))
+            .unwrap_or_default();
         for frame in self.stack.drain(stack_depth..) {
             if self.reg_pool.len() < POOL_CAP {
                 self.reg_pool.push(frame.into_buffer());
@@ -5387,7 +5399,9 @@ impl HLInterpreter {
             if !exc_ptr.is_null() {
                 // Formatting may allocate, so preserve the pending runtime
                 // exception until its Rust representation is complete.
-                let exception = self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                let mut exception =
+                    self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                exception.stack = stack;
                 if !self.fn_clear_exc_value.is_null() {
                     type FnClearExc = unsafe extern "C" fn();
                     unsafe {
@@ -7924,6 +7938,7 @@ impl HLInterpreter {
         });
         if jumped != 0 {
             return Err(self.longjmp_error(
+                None,
                 stack_depth,
                 "exception while materializing a virtual view".to_string(),
             ));
@@ -9220,6 +9235,7 @@ impl HLInterpreter {
                 });
                 if jumped != 0 {
                     return Err(self.longjmp_error(
+                        Some(bytecode),
                         stack_depth,
                         format!("exception in virtual dispatch (field={field})"),
                     ));
@@ -11984,6 +12000,7 @@ impl HLInterpreter {
             if jumped != 0 {
                 crate::native_recovery::disarm_native_recovery();
                 return Err(self.longjmp_error(
+                    Some(bytecode),
                     stack_depth,
                     format!("Native longjmp without exception value: {func_name}"),
                 ));
@@ -12275,6 +12292,7 @@ impl HLInterpreter {
         if jumped != 0 {
             crate::native_recovery::disarm_native_recovery();
             return Err(self.longjmp_error(
+                Some(bytecode),
                 stack_depth,
                 format!("Native longjmp without exception value: {func_name}"),
             ));

@@ -263,7 +263,23 @@ if [[ -n "${NATIVE_DIR}" ]]; then
     shopt -u nullglob
 fi
 
-ln -s "${SOURCE_ROOT}/MBHaxe/data" "${RUN_ROOT}/data"
+# A real directory, not a symlink into the source checkout.
+#
+# heaps resolves resource paths through the link and then mangles the result:
+# with `data` symlinked to <work>/source/MBHaxe/data it looked for
+# <work>/run/ce/MBHaxe/data/font/DomCasualD.fnt — the four characters of
+# "sour" eaten off "source". The missing font threw inside
+# ResourceLoader.init's callback, so hxd.App never reached
+# `hxd.System.setLoop(mainLoop)`; the window and audio came up, the event loop
+# ticked, and nothing was ever drawn because the loop function stayed null.
+#
+# Hard links keep the 375MB from being copied twice while still presenting a
+# real directory tree, and fall back to a copy on filesystems that refuse
+# them. Either way the game sees ordinary paths.
+rm -rf "${RUN_ROOT}/data"
+if ! cp -al "${SOURCE_ROOT}/MBHaxe/data" "${RUN_ROOT}/data" 2>/dev/null; then
+    cp -R "${SOURCE_ROOT}/MBHaxe/data" "${RUN_ROOT}/data"
+fi
 
 codesign --force -s - "${RUN_ROOT}/sdl.hdll" >/dev/null
 codesign --force -s - "${RUN_ROOT}/libhl.dylib" >/dev/null

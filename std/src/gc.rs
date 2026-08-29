@@ -754,6 +754,16 @@ fn recycle_lines() -> bool {
     *V.get_or_init(|| matches!(std::env::var("ASH_GC_RECYCLE").as_deref(), Ok("1")))
 }
 
+/// ASH_GC_OCCUPANCY=1: per-collection report of how full the RETAINED blocks
+/// are. Reclamation is block-level, so a 32KB block survives on one marked
+/// line out of 256; with conservative marking one integer that looks like a
+/// pointer is enough. Low mean occupancy means the "live" figure is mostly
+/// retained garbage, and marking cost is being paid for memory that is dead.
+fn occupancy_stats() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_OCCUPANCY").is_ok())
+}
+
 /// Diagnostic: ASH_GC_NO_RECLAIM=1 makes sweep retain every block (marks
 /// still reset; nothing returns to the free list). Splits "collector
 /// reclaims a live block" from every non-reclamation corruption source.
@@ -2599,6 +2609,8 @@ impl ImmixAllocator {
         self.heap.recycle_spans.clear();
         let used_block_addrs: Vec<usize> = self.heap.used_blocks.iter().copied().collect();
         let mut freed: Vec<usize> = Vec::new();
+        let (mut occ_blocks, mut occ_marked) = (0usize, 0usize);
+        let mut occ_hist = [0usize; 6];
         // The retained-heap half of the use-after-free audit needs this
         // cycle's marks AFTER the loop below has reset them: only words in
         // lines that were marked LIVE are meaningful referrers — dead lines
@@ -2623,6 +2635,7 @@ impl ImmixAllocator {
             let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
             let mut is_empty = true;
+            let mut marked_lines = 0usize;
             // Runs of unmarked lines, harvested in the pass that resets the
             // marks. Only for blocks this sweep KEEPS: an empty block goes
             // back whole, and the TLAB block is still being bumped through.
@@ -2631,6 +2644,7 @@ impl ImmixAllocator {
             for (line_index, mark) in block.mark_bits.iter_mut().enumerate() {
                 if *mark {
                     is_empty = false;
+                    marked_lines += 1;
                     if let Some(start) = run_start.take() {
                         spans.push((start, line_index - start));
                     }
@@ -2643,6 +2657,18 @@ impl ImmixAllocator {
                 spans.push((start, LINES_PER_BLOCK - start));
             }
 
+            if occupancy_stats() && !is_empty {
+                occ_blocks += 1;
+                occ_marked += marked_lines;
+                occ_hist[match marked_lines {
+                    1 => 0,
+                    2..=4 => 1,
+                    5..=16 => 2,
+                    17..=64 => 3,
+                    65..=192 => 4,
+                    _ => 5,
+                }] += 1;
+            }
             if !is_empty && !is_tlab && recycle_lines() {
                 for (start, len) in spans {
                     self.heap.recycle_spans.push((block_addr, start, len));
@@ -2888,6 +2914,18 @@ impl ImmixAllocator {
                     }
                 }
             }
+        }
+
+        if occupancy_stats() && occ_blocks > 0 {
+            let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
+            let pct = occ_marked as f64 / (occ_blocks * LINES_PER_BLOCK) as f64 * 100.0;
+            eprintln!(
+                "[gc-occ] #{seq} retained={occ_blocks} blocks ({:.1}MB) marked_lines={occ_marked} \
+                 ({:.1}MB, {pct:.1}% full)  by-marked-lines: 1={} 2-4={} 5-16={} 17-64={} 65-192={} 193+={}",
+                (occ_blocks * BLOCK_SIZE) as f64 / 1048576.0,
+                (occ_marked * LINE_SIZE) as f64 / 1048576.0,
+                occ_hist[0], occ_hist[1], occ_hist[2], occ_hist[3], occ_hist[4], occ_hist[5],
+            );
         }
 
         freed.len()

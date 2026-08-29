@@ -147,31 +147,6 @@ impl HLInterpreter {
             // never re-entered the interpreter, hlp_obj_get_field returned
             // the stale field.) The natives handle virtuals correctly since
             // the Phase-11/12 fixes; the crutch now only creates divergence.
-            // macOS OpenGL core profile jumps from GLSL 1.20 → 1.50 (no 1.30/1.40).
-            // Heaps probes #version 130, fails, and treats it as fatal.
-            // Patch the source bytes in-place so the probe succeeds.
-            #[cfg(target_os = "macos")]
-            "gl_shader_source" if args.len() >= 2 && args[1].is_ptr() => {
-                let obj_ptr = args[1].as_ptr() as *const u8;
-                if !obj_ptr.is_null() && (obj_ptr as usize) > 0x10000 {
-                    // HOBJ String: UTF-16 data pointer at offset 8
-                    let data_ptr = unsafe { *(obj_ptr.add(8) as *const *mut u16) };
-                    if !data_ptr.is_null() && (data_ptr as usize) > 0x10000 {
-                        // Read first 12 UTF-16 chars: "#version 1X0"
-                        let prefix = unsafe { std::slice::from_raw_parts(data_ptr, 12) };
-                        let prefix_str = String::from_utf16_lossy(prefix);
-                        if prefix_str.starts_with("#version 130")
-                            || prefix_str.starts_with("#version 140")
-                        {
-                            // Patch char at index 10: '3'/'4' → '5' (UTF-16 LE)
-                            unsafe {
-                                *data_ptr.add(10) = b'5' as u16;
-                            }
-                        }
-                    }
-                }
-                // Fall through to normal dispatch
-            }
             // No thread/event/lock interceptions needed — the stdlib's
             // non-blocking lock_wait handles single-threaded mode correctly.
             _ => {}

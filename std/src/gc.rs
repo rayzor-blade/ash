@@ -538,6 +538,29 @@ fn publish_current_scan_ranges() {
     }
 }
 
+/// Replace this mutator's published scan set in one hold of the world lock.
+///
+/// Built in place on `scan_ranges` rather than staged and swapped. No observer
+/// can read that vector without this mutex — `mark_roots` and `sweep` work
+/// from snapshots cloned under it — so the intermediate state is unobservable
+/// and publication is atomic either way. Staging would leave the PREVIOUS set
+/// sitting in `staged_scan_ranges` afterwards, and those addresses are
+/// interpreter frame register buffers that go straight back to the frame pool;
+/// keeping "staged is empty after a publish" means a later stray
+/// `hlp_gc_scan_roots_done` cannot republish freed memory as roots. Clearing in
+/// place also retains the vector's capacity, so publishing a steady root set
+/// allocates nothing.
+fn set_current_scan_ranges(ranges: &[(usize, usize)]) {
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.scan_ranges.clear();
+        record
+            .scan_ranges
+            .extend(ranges.iter().copied().filter(|&(a, s)| a != 0 && s != 0));
+    }
+}
+
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.
 fn tlab_enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -3097,16 +3120,19 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
     let mut gc = gc_locked();
-    gc.clear_scan_ranges();
-    if !ranges.is_null() {
-        for i in 0..count {
-            let (addr, size) = *ranges.add(i);
-            if size != 0 {
-                gc.add_scan_range(addr as *const c_void, size);
-            }
-        }
+    gc.heap.safepoint_mode = true;
+    let ranges: &[(usize, usize)] = if ranges.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ranges, count)
+    };
+    set_current_scan_ranges(ranges);
+    // The world lock is released by now, and must be: honouring a deferred
+    // collection reaches stop_mutator_world, which takes it again.
+    if gc.heap.collect_pending {
+        set_collect_origin(1);
+        gc.collect_garbage();
     }
-    gc.scan_roots_done();
 }
 
 /// Charge off-heap memory (fiber stacks, native buffers, JIT structures) as

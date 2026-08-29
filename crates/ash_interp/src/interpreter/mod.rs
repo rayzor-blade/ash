@@ -544,13 +544,15 @@ impl HLInterpreter {
     ///
     /// Set `ASH_DUMP_ARITY=1`. Prints once, before anything runs.
     fn dump_arity_report(bytecode: &DecodedBytecode) {
-        let arity_of = |type_idx: usize| -> Option<Vec<u32>> {
+        // Alias-typed, never a fixed-width integer: bindgen gives
+        // `hl_type_kind` u32 under clang and i32 under MSVC.
+        let arity_of = |type_idx: usize| -> Option<Vec<hl::hl_type_kind>> {
             bytecode.types[type_idx]
                 .fun
                 .as_ref()
                 .map(|f| f.args.iter().map(|a| bytecode.types[a.0].kind).collect())
         };
-        let report = |label: &str, limit: usize, rows: Vec<(String, Vec<u32>)>| {
+        let report = |label: &str, limit: usize, rows: Vec<(String, Vec<hl::hl_type_kind>)>| {
             let mut hist = std::collections::BTreeMap::<usize, usize>::new();
             for (_, kinds) in &rows {
                 *hist.entry(kinds.len()).or_default() += 1;
@@ -570,7 +572,7 @@ impl HLInterpreter {
             // List the widest signatures whether or not they clear the limit:
             // a shape just under it still has to be marshalled, and the float
             // dispatcher's coverage is per-shape, not per-arity.
-            let mut over: Vec<&(String, Vec<u32>)> =
+            let mut over: Vec<&(String, Vec<hl::hl_type_kind>)> =
                 rows.iter().filter(|(_, k)| k.len() > limit.min(8)).collect();
             over.sort_by_key(|(_, k)| std::cmp::Reverse(k.len()));
             for (name, kinds) in over.iter().take(40) {

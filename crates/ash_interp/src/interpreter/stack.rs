@@ -6,8 +6,6 @@
 //! reaches `HLInterpreter`'s private fields without widening them.
 
 use anyhow::Result;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::c_void;
 
 use ash_core::bytecode::DecodedBytecode;
@@ -116,6 +114,8 @@ impl HLInterpreter {
         // leaf in the whole process. Ownership is a property of the mapping,
         // so every address in a page shares one answer, and a stack walk
         // revisits the same handful of pages over and over.
+        use std::cell::RefCell;
+        use std::collections::HashMap;
         const PAGE: usize = 4096;
         thread_local! {
             static OWNED: RefCell<HashMap<usize, bool>> =

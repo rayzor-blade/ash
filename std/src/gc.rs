@@ -754,6 +754,15 @@ fn recycle_lines() -> bool {
     *V.get_or_init(|| matches!(std::env::var("ASH_GC_RECYCLE").as_deref(), Ok("1")))
 }
 
+/// ASH_GC_HANDBACK=0 stops returning free blocks to the OS. The pages stay
+/// mapped and dirty, so RSS holds steady instead of falling -- the point is to
+/// attribute a growing process footprint, which on macOS is a kernel ledger
+/// and not a measurement of how much memory is really held.
+fn handback_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| !matches!(std::env::var("ASH_GC_HANDBACK").as_deref(), Ok("0")))
+}
+
 /// ASH_GC_OCCUPANCY=1: per-collection report of how full the RETAINED blocks
 /// are. Reclamation is block-level, so a 32KB block survives on one marked
 /// line out of 256; with conservative marking one integer that looks like a
@@ -2906,19 +2915,29 @@ impl ImmixAllocator {
                 .take(surplus)
                 .filter(|a| !self.heap.reusable_blocks.contains(a))
                 .collect();
-            if !hand_back.is_empty() {
+            if !hand_back.is_empty() && handback_enabled() {
                 hand_back.sort_unstable();
                 let base = self.heap.memory.as_mut_ptr();
                 let mut run_start = hand_back[0];
                 let mut run_len = BLOCK_SIZE;
-                let advise = |start: usize, len: usize| unsafe {
+                // Returns whether the range was actually handed back. On
+                // macOS the REUSABLE/REUSE pair is a LEDGER: REUSABLE debits
+                // the process footprint, REUSE credits it. Recording a block
+                // as reusable when the advice failed means the matching REUSE
+                // still runs later and credits memory that was never debited,
+                // so the footprint climbs by the whole recycled set every
+                // collection while RSS stays flat. Measured on MBHaxe: a
+                // steady 144MB live set churning 512MB per cycle drove the
+                // reported footprint to 1.2GB, 2.4GB, 3.6GB, 4.8GB, 6.0GB in
+                // even steps, and the machine paged itself to a stop.
+                let advise = |start: usize, len: usize| -> bool {
                     #[cfg(unix)]
-                    {
+                    unsafe {
                         #[cfg(target_os = "macos")]
                         let advice = libc::MADV_FREE_REUSABLE;
                         #[cfg(not(target_os = "macos"))]
                         let advice = libc::MADV_DONTNEED;
-                        libc::madvise(base.add(start) as *mut c_void, len, advice);
+                        return libc::madvise(base.add(start) as *mut c_void, len, advice) == 0;
                     }
                     // Windows' MADV_DONTNEED: the pages leave the working set
                     // (so RSS falls, which is the whole point here) but stay
@@ -2927,22 +2946,36 @@ impl ImmixAllocator {
                     // the unix paths are, since a reacquired block is zeroed
                     // before anything reads it.
                     #[cfg(windows)]
-                    {
+                    unsafe {
                         DiscardVirtualMemory(base.add(start) as *mut c_void, len);
+                        return true;
                     }
+                    #[allow(unreachable_code)]
+                    true
                 };
+                let mut runs: Vec<(usize, usize)> = Vec::new();
                 for &addr in &hand_back[1..] {
                     if addr == run_start + run_len {
                         run_len += BLOCK_SIZE;
                     } else {
-                        advise(run_start, run_len);
+                        runs.push((run_start, run_len));
                         run_start = addr;
                         run_len = BLOCK_SIZE;
                     }
                 }
-                advise(run_start, run_len);
-                for &addr in &hand_back {
-                    self.heap.reusable_blocks.insert(addr);
+                runs.push((run_start, run_len));
+                // Only a range the kernel accepted is recorded, so the REUSE
+                // that pairs with it is only ever issued against a range that
+                // was really handed back.
+                for (start, len) in runs {
+                    if !advise(start, len) {
+                        continue;
+                    }
+                    let mut addr = start;
+                    while addr < start + len {
+                        self.heap.reusable_blocks.insert(addr);
+                        addr += BLOCK_SIZE;
+                    }
                 }
                 if trace_map() {
                     let base = self.heap.memory.as_ptr() as usize;

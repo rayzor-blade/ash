@@ -11564,10 +11564,37 @@ impl HLInterpreter {
         if pc == 0 {
             return false;
         }
-        unsafe {
+        // Answered per PAGE, because `dladdr` is not cheap: it walks the
+        // loaded images to find the closest symbol, and this runs for every
+        // frame of every captured stack. On MBHaxe, which throws while
+        // loading a level, dyld's findClosestSymbol was the busiest non-idle
+        // leaf in the whole process. Ownership is a property of the mapping,
+        // so every address in a page shares one answer, and a stack walk
+        // revisits the same handful of pages over and over.
+        const PAGE: usize = 4096;
+        thread_local! {
+            static OWNED: RefCell<HashMap<usize, bool>> =
+                RefCell::new(HashMap::new());
+        }
+        let page = pc / PAGE;
+        if let Some(hit) = OWNED.with(|c| c.borrow().get(&page).copied()) {
+            return hit;
+        }
+        let owned = unsafe {
             let mut info: libc::Dl_info = std::mem::zeroed();
             libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_fbase.is_null()
-        }
+        };
+        OWNED.with(|c| {
+            let mut m = c.borrow_mut();
+            // JIT code is mapped and unmapped over a run, so the map is a
+            // cache and not a registry: bound it rather than let a long run
+            // accumulate a page entry per compiled function.
+            if m.len() > 8192 {
+                m.clear();
+            }
+            m.insert(page, owned);
+        });
+        owned
     }
 
     #[cfg(not(unix))]

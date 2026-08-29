@@ -530,6 +530,67 @@ pub(crate) unsafe fn current_id() -> u32 {
     ACTIVE_FIBER.with(|active| active.get().map_or(0, |fiber| fiber.id))
 }
 
+/// The OS thread that runs the program, recorded so threads a native library
+/// spawns can be told apart from it. Claimed by the first caller if
+/// `mark_main_thread` never ran.
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Record the calling thread as the one running the program. `hlp_sys_init`
+/// calls this before any library has had a chance to start a thread.
+pub(crate) fn mark_main_thread() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
+}
+
+pub(crate) fn is_main_thread() -> bool {
+    *MAIN_THREAD.get_or_init(|| std::thread::current().id()) == std::thread::current().id()
+}
+
+/// Distinguishes fiber-less threads from one another. Fibers never consult it.
+static NEXT_FOREIGN_OWNER: AtomicU32 = AtomicU32::new(1);
+thread_local! {
+    static FOREIGN_OWNER: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Identity of whoever can hold a lock: the running fiber when there is one,
+/// otherwise the OS thread itself.
+///
+/// [`current_id`] answers a different question — which logical Haxe thread the
+/// scheduler is running — and necessarily gives every fiber-less thread the
+/// same answer, because from the scheduler's side none of them is a fiber. A
+/// lock owner cannot be identified that way. Threads a native library starts
+/// for its own callbacks have no fiber, so two of them would compare equal,
+/// and a mutex would take the second one's acquire for a recursive re-entry by
+/// the first and let it straight through. Tagged above the fiber id space so
+/// the two can never collide.
+pub(crate) unsafe fn current_owner() -> u64 {
+    if let Some(fiber) = ACTIVE_FIBER.with(|active| active.get()) {
+        return fiber.id as u64;
+    }
+    FOREIGN_OWNER.with(|slot| {
+        let mut id = slot.get();
+        if id == 0 {
+            id = NEXT_FOREIGN_OWNER.fetch_add(1, Ordering::Relaxed).max(1);
+            slot.set(id);
+            if !is_main_thread() {
+                FOREIGN_THREAD_SEEN.store(true, Ordering::Release);
+            }
+        }
+        (1u64 << 32) | id as u64
+    })
+}
+
+static FOREIGN_THREAD_SEEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether any thread the runtime did not create has taken a lock or a permit.
+///
+/// A program with no fibers and no such thread has nobody who could ever
+/// release, so a blocking wait there is a hang rather than a wait and the
+/// primitives decline instead. Once a native library's own thread is in play
+/// that reasoning no longer holds: it can release, so the wait is real.
+pub(crate) fn foreign_threads_seen() -> bool {
+    FOREIGN_THREAD_SEEN.load(Ordering::Acquire)
+}
+
 pub(crate) unsafe fn new_waiter() -> Waiter {
     let token = NEXT_WAIT_TOKEN.fetch_add(1, Ordering::Relaxed).max(1);
     let waiter = Waiter {
@@ -640,6 +701,31 @@ unsafe fn scheduler_idle(deadline: Option<Instant>) {
 /// scheduler; the main context drives the scheduler while it waits.
 pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
     debug_assert_eq!(waiter.fiber_id, current_id());
+    if waiter.fiber_id == 0 && !is_main_thread() {
+        // A thread the runtime never created. It has no fiber to yield and no
+        // claim on the scheduler — driving one from here would run Haxe work
+        // on a thread the collector does not know about — so it waits on the
+        // OS instead and only reads the notification the waker leaves.
+        worker_trace("park-foreign", waiter.token, deadline.is_some() as u64);
+        loop {
+            match wait_status(waiter.token) {
+                Some(WaitStatus::Notified) => {
+                    finish_wait(waiter.token);
+                    return true;
+                }
+                Some(WaitStatus::TimedOut) | None => {
+                    finish_wait(waiter.token);
+                    return false;
+                }
+                Some(WaitStatus::Waiting) => {}
+            }
+            if deadline.is_some_and(|limit| Instant::now() >= limit) {
+                let _ = claim_timeout(waiter.token);
+                return finish_wait(waiter.token) == Some(WaitStatus::Notified);
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+    }
     if waiter.fiber_id == 0 {
         worker_trace("park-main", waiter.token, deadline.is_some() as u64);
         loop {

@@ -486,6 +486,8 @@ static HL_FILE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 /// `hlp_sys_args` and `hlp_sys_hl_file` fall back to reading the real argv.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile: *mut vbyte) {
+    // Before any native library has had a chance to start a thread of its own.
+    crate::fiber::mark_main_thread();
     let mut collected = Vec::new();
     if !args.is_null() {
         for i in 0..nargs.max(0) as usize {

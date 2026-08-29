@@ -37,13 +37,13 @@ struct HlMutex {
 }
 
 struct MutexState {
-    owner: Option<u32>,
+    owner: Option<u64>,
     depth: u32,
     waiters: VecDeque<Waiter>,
 }
 
 unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
-    let current = crate::fiber::current_id();
+    let current = crate::fiber::current_owner();
     let mut state = (*mutex).state.lock().unwrap();
     match state.owner {
         None => {
@@ -62,7 +62,7 @@ unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
 unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
     loop {
         let waiter = {
-            let current = crate::fiber::current_id();
+            let current = crate::fiber::current_owner();
             let mut state = (*mutex).state.lock().unwrap();
             match state.owner {
                 None => {
@@ -85,7 +85,7 @@ unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
         let mut state = (*mutex).state.lock().unwrap();
         remove_waiter(&mut state.waiters, waiter);
         if state.owner.is_none() {
-            state.owner = Some(crate::fiber::current_id());
+            state.owner = Some(crate::fiber::current_owner());
             state.depth = 1;
             return;
         }
@@ -94,7 +94,7 @@ unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
 
 unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
     let mut state = (*mutex).state.lock().unwrap();
-    if state.owner != Some(crate::fiber::current_id()) || state.depth == 0 {
+    if state.owner != Some(crate::fiber::current_owner()) || state.depth == 0 {
         return;
     }
     state.depth -= 1;
@@ -231,8 +231,14 @@ unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool
             state.value -= 1;
             return true;
         }
+        // A program with no fibers at all has nothing that could release the
+        // permit while the main context waits, so it still declines rather
+        // than hanging. A thread the runtime did not create is a different
+        // case: something else is running and will release, so it waits.
         if deadline.is_some_and(|limit| Instant::now() >= limit)
-            || !crate::fiber::fibers_active()
+            || (!crate::fiber::fibers_active()
+                && crate::fiber::is_main_thread()
+                && !crate::fiber::foreign_threads_seen())
         {
             return false;
         }
@@ -329,7 +335,7 @@ struct HlCondition {
 }
 
 struct ConditionState {
-    owner: Option<u32>,
+    owner: Option<u64>,
     depth: u32,
     mutex_waiters: VecDeque<Waiter>,
     waiters: VecDeque<Waiter>,
@@ -338,7 +344,7 @@ struct ConditionState {
 unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
     loop {
         let waiter = {
-            let current = crate::fiber::current_id();
+            let current = crate::fiber::current_owner();
             let mut state = (*c).state.lock().unwrap();
             match state.owner {
                 None => {
@@ -364,7 +370,7 @@ unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
 }
 
 unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
-    let current = crate::fiber::current_id();
+    let current = crate::fiber::current_owner();
     let mut state = (*c).state.lock().unwrap();
     match state.owner {
         None => {
@@ -382,7 +388,7 @@ unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
 
 unsafe fn condition_mutex_release(c: *mut HlCondition) {
     let mut state = (*c).state.lock().unwrap();
-    if state.owner != Some(crate::fiber::current_id()) || state.depth == 0 {
+    if state.owner != Some(crate::fiber::current_owner()) || state.depth == 0 {
         return;
     }
     state.depth -= 1;
@@ -427,11 +433,14 @@ pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
 }
 
 unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -> bool {
-    if !crate::fiber::fibers_active() {
+    if !crate::fiber::fibers_active()
+        && crate::fiber::is_main_thread()
+        && !crate::fiber::foreign_threads_seen()
+    {
         return true;
     }
     let (waiter, depth) = {
-        let current = crate::fiber::current_id();
+        let current = crate::fiber::current_owner();
         let mut state = (*c).state.lock().unwrap();
         if state.owner != Some(current) {
             return false;
@@ -713,7 +722,7 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
 
 struct HlTls {
     gc_value: bool,
-    values: std::sync::Mutex<HashMap<u32, *mut c_void>>,
+    values: std::sync::Mutex<HashMap<u64, *mut c_void>>,
 }
 
 #[no_mangle]
@@ -730,7 +739,7 @@ pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
         return;
     }
     let tls = tls as *mut HlTls;
-    let id = crate::fiber::current_id();
+    let id = crate::fiber::current_owner();
     if (*tls).gc_value && !value.is_null() {
         crate::gc::gc_add_persistent(value as *mut vdynamic);
     }
@@ -759,7 +768,7 @@ pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
         .values
         .lock()
         .unwrap()
-        .get(&crate::fiber::current_id())
+        .get(&crate::fiber::current_owner())
         .copied()
         .unwrap_or(ptr::null_mut())
 }
@@ -1022,4 +1031,218 @@ pub unsafe extern "C" fn hlp_sys_exit(code: i32) {
         eprintln!("{}", std::backtrace::Backtrace::force_capture());
     }
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod foreign_thread_tests {
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Threads the runtime did not create — the ones a native library spawns
+    /// for its own callbacks — must still exclude each other on an HL mutex.
+    ///
+    /// This is the shape hxDatachannel uses: libdatachannel's callback threads
+    /// take `hl_mutex_acquire`, push onto an intrusive list, and release. If
+    /// the mutex lets two of them in at once the list is linked and freed
+    /// concurrently, which surfaces as "pointer being freed was not
+    /// allocated" inside the consumer.
+    #[test]
+    fn foreign_threads_exclude_each_other_on_a_mutex() {
+        unsafe {
+            crate::fiber::mark_main_thread();
+            let m = super::hlp_mutex_alloc(false);
+            assert!(!m.is_null());
+
+            // Held by exactly one thread at a time, checked from inside.
+            let inside = Arc::new(AtomicU32::new(0));
+            let overlaps = Arc::new(AtomicUsize::new(0));
+            // Plain counter, written only under the mutex: a lost update is
+            // the same race the intrusive list loses a node to.
+            let counter = Arc::new(AtomicUsize::new(0));
+
+            let addr = m as usize;
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let inside = Arc::clone(&inside);
+                let overlaps = Arc::clone(&overlaps);
+                let counter = Arc::clone(&counter);
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        super::hlp_mutex_acquire(addr as *mut std::ffi::c_void);
+                        if inside.fetch_add(1, Ordering::AcqRel) != 0 {
+                            overlaps.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let seen = counter.load(Ordering::Relaxed);
+                        std::hint::spin_loop();
+                        counter.store(seen + 1, Ordering::Relaxed);
+                        inside.fetch_sub(1, Ordering::AcqRel);
+                        super::hlp_mutex_release(addr as *mut std::ffi::c_void);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+            super::hlp_mutex_free(m);
+
+            assert_eq!(
+                overlaps.load(Ordering::Relaxed),
+                0,
+                "two runtime-external threads were inside the mutex at once"
+            );
+            assert_eq!(
+                counter.load(Ordering::Relaxed),
+                4 * 2000,
+                "updates were lost under the mutex"
+            );
+        }
+    }
+
+    /// A blocking semaphore acquire must not return until it holds a permit.
+    ///
+    /// The producer side of the hxDatachannel queue signals from a library
+    /// thread and the consumer drains on the main thread, so the permit count
+    /// is the only thing keeping the queue length and the drain loop agreed.
+    #[test]
+    fn a_blocking_acquire_on_a_foreign_thread_waits_for_its_permit() {
+        unsafe {
+            crate::fiber::mark_main_thread();
+            let sem = super::hlp_semaphore_alloc(0);
+            assert!(!sem.is_null());
+            let addr = sem as usize;
+
+            let acquired = Arc::new(AtomicUsize::new(0));
+            let a2 = Arc::clone(&acquired);
+            let waiter = std::thread::spawn(move || {
+                super::hlp_semaphore_acquire(addr as *mut std::ffi::c_void);
+                a2.fetch_add(1, Ordering::Release);
+            });
+
+            // No permit has been released, so nothing may get through.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let early = acquired.load(Ordering::Acquire);
+
+            super::hlp_semaphore_release(sem);
+            waiter.join().unwrap();
+            super::hlp_semaphore_free(sem);
+
+            assert_eq!(early, 0, "acquire returned before any permit was released");
+        }
+    }
+
+    /// Every permit a producer releases is taken exactly once.
+    #[test]
+    fn semaphore_permits_are_conserved_across_foreign_threads() {
+        unsafe {
+            let sem = super::hlp_semaphore_alloc(0);
+            let addr = sem as usize;
+            const PRODUCERS: usize = 4;
+            const PER: usize = 1000;
+
+            let mut handles = Vec::new();
+            for _ in 0..PRODUCERS {
+                handles.push(std::thread::spawn(move || {
+                    for _ in 0..PER {
+                        super::hlp_semaphore_release(addr as *mut std::ffi::c_void);
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            let mut taken = 0usize;
+            while super::hlp_semaphore_try_acquire(sem, std::ptr::null_mut()) {
+                taken += 1;
+                if taken > PRODUCERS * PER {
+                    break;
+                }
+            }
+            super::hlp_semaphore_free(sem);
+            assert_eq!(taken, PRODUCERS * PER, "permits were lost or duplicated");
+        }
+    }
+
+    /// The hxDatachannel queue in miniature: several library threads push
+    /// onto one intrusive list under a mutex and signal a counting semaphore,
+    /// while the main thread drains it with `try_acquire`.
+    ///
+    /// Each node carries a magic word, so a node published before its payload
+    /// store is visible, or handed out twice, is caught here rather than as
+    /// `pointer being freed was not allocated` inside the consumer.
+    #[test]
+    fn multiple_producers_one_consumer_over_a_mutex_and_semaphore() {
+        const MAGIC: usize = 0x5EA1_600D;
+        const PRODUCERS: usize = 4;
+        const PER: usize = 500;
+
+        struct Node {
+            magic: usize,
+            payload: Box<[u8; 64]>,
+            seq: usize,
+            next: *mut Node,
+        }
+
+        // The list head, exactly as the C shim keeps it: a plain global that
+        // only the mutex protects.
+        static HEAD: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe {
+            crate::fiber::mark_main_thread();
+            let m = super::hlp_mutex_alloc(false);
+            let sem = super::hlp_semaphore_alloc(0);
+            let (maddr, saddr) = (m as usize, sem as usize);
+            HEAD.store(0, Ordering::Release);
+
+            let mut handles = Vec::new();
+            for p in 0..PRODUCERS {
+                handles.push(std::thread::spawn(move || {
+                    for i in 0..PER {
+                        super::hlp_mutex_acquire(maddr as *mut std::ffi::c_void);
+                        let node = Box::into_raw(Box::new(Node {
+                            magic: MAGIC,
+                            payload: Box::new([(p as u8).wrapping_add(i as u8); 64]),
+                            seq: p * PER + i,
+                            next: HEAD.load(Ordering::Relaxed) as *mut Node,
+                        }));
+                        HEAD.store(node as usize, Ordering::Relaxed);
+                        super::hlp_semaphore_release(saddr as *mut std::ffi::c_void);
+                        super::hlp_mutex_release(maddr as *mut std::ffi::c_void);
+                    }
+                }));
+            }
+
+            // Consumer: drain while permits last, exactly as process_events does.
+            let mut seen = vec![false; PRODUCERS * PER];
+            let mut drained = 0usize;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while drained < PRODUCERS * PER && std::time::Instant::now() < deadline {
+                if !super::hlp_semaphore_try_acquire(sem, std::ptr::null_mut()) {
+                    std::thread::yield_now();
+                    continue;
+                }
+                super::hlp_mutex_acquire(m);
+                let head = HEAD.load(Ordering::Relaxed) as *mut Node;
+                assert!(!head.is_null(), "a permit outlived its node");
+                assert_eq!((*head).magic, MAGIC, "node observed before it was published");
+                assert_eq!((*head).payload.len(), 64);
+                let seq = (*head).seq;
+                assert!(!seen[seq], "node {seq} was drained twice");
+                seen[seq] = true;
+                HEAD.store((*head).next as usize, Ordering::Relaxed);
+                drop(Box::from_raw(head));
+                drained += 1;
+                super::hlp_mutex_release(m);
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+            super::hlp_semaphore_free(sem);
+            super::hlp_mutex_free(m);
+
+            assert_eq!(drained, PRODUCERS * PER, "queue lost messages");
+            assert_eq!(HEAD.load(Ordering::Relaxed), 0, "queue was left non-empty");
+        }
+    }
 }

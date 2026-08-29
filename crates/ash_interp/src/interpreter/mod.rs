@@ -3908,7 +3908,21 @@ impl HLInterpreter {
             .map(|f| f.args.len())
             .unwrap_or(0);
         if nargs > config.max_jit_args || nargs > 8 {
-            return Err("arg_count_over_limit".to_string());
+            let kinds: Vec<String> = bytecode.types[func.type_.0]
+                .fun
+                .as_ref()
+                .map(|f| {
+                    f.args
+                        .iter()
+                        .map(|a| format!("{:?}", bytecode.types[a.0].kind))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Err(format!(
+                "arg_count_over_limit nargs={nargs} max={} kinds=[{}]",
+                config.max_jit_args.min(8),
+                kinds.join(",")
+            ));
         }
         let func_name = func.name();
         if !config.compiled_only

@@ -30,12 +30,26 @@ pub(crate) fn prepare_llvm(
         (true, AirOptLevel::O3) => AirOptLevel::O2,
         (_, level) => level,
     };
-    let module = if hot_reload || isolate_callees {
-        AshModule::new(bc).without_callees()
-    } else {
+    let callees_visible = !(hot_reload || isolate_callees);
+    let module = if callees_visible {
         AshModule::new(bc)
+    } else {
+        AshModule::new(bc).without_callees()
     };
-    air_pipeline::prepare_ir(&module, f, level, &pass_options()).map(|(ir, _)| ir)
+    let opts = pass_options();
+    // Through the shared cache, not a private pipeline run. AIR for a findex
+    // is a pure function of (level, fma, callees_visible), which is exactly
+    // what AirConfigKey keys on, so promotion has no reason to recompute what
+    // the Cranelift tier already produced -- and in Auto mode Cranelift always
+    // runs first, so this is a hit. Recomputing meant every LLVM promotion
+    // redid lowering, the whole pass manager, and verification for a function
+    // whose optimized SSA was already sitting in memory.
+    let cfg = air_pipeline::AirConfigKey {
+        level,
+        fma: opts.fma,
+        callees_visible,
+    };
+    air_pipeline::optimized_with_config(&module, f, cfg).map(|o| o.ir.clone())
 }
 
 /// The v2 opt level, from `ASH_AIR_LEVEL` — the same variable, and now the

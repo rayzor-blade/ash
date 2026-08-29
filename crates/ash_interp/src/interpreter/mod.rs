@@ -526,7 +526,79 @@ impl Drop for HLInterpreter {
 }
 
 impl HLInterpreter {
+    /// Report how wide the program's call signatures get, so the two
+    /// marshalling ceilings can be sized against a real workload rather than
+    /// guessed: `call_compiled_function` for promoted bytecode functions and
+    /// `call_native` for HDLL entry points.
+    ///
+    /// Set `ASH_DUMP_ARITY=1`. Prints once, before anything runs.
+    fn dump_arity_report(bytecode: &DecodedBytecode) {
+        let arity_of = |type_idx: usize| -> Option<Vec<u32>> {
+            bytecode.types[type_idx]
+                .fun
+                .as_ref()
+                .map(|f| f.args.iter().map(|a| bytecode.types[a.0].kind).collect())
+        };
+        let report = |label: &str, limit: usize, rows: Vec<(String, Vec<u32>)>| {
+            let mut hist = std::collections::BTreeMap::<usize, usize>::new();
+            for (_, kinds) in &rows {
+                *hist.entry(kinds.len()).or_default() += 1;
+            }
+            let max = hist.keys().copied().max().unwrap_or(0);
+            eprintln!(
+                "[arity] {label}: {} entries, max {max} args, bridge limit {limit}",
+                rows.len()
+            );
+            let widest: Vec<String> = hist
+                .iter()
+                .rev()
+                .take(6)
+                .map(|(n, c)| format!("{n}:{c}"))
+                .collect();
+            eprintln!("[arity] {label}: widest buckets (args:count) {}", widest.join(" "));
+            // List the widest signatures whether or not they clear the limit:
+            // a shape just under it still has to be marshalled, and the float
+            // dispatcher's coverage is per-shape, not per-arity.
+            let mut over: Vec<&(String, Vec<u32>)> =
+                rows.iter().filter(|(_, k)| k.len() > limit.min(8)).collect();
+            over.sort_by_key(|(_, k)| std::cmp::Reverse(k.len()));
+            for (name, kinds) in over.iter().take(40) {
+                let ks: Vec<String> = kinds.iter().map(|k| format!("{k}")).collect();
+                eprintln!(
+                    "[arity] {label}: OVER {:>2} args {name} kinds=[{}]",
+                    kinds.len(),
+                    ks.join(",")
+                );
+            }
+            eprintln!("[arity] {label}: {} over the limit", over.len());
+        };
+
+        report(
+            "bytecode",
+            8,
+            bytecode
+                .functions
+                .iter()
+                .filter_map(|f| arity_of(f.type_.0).map(|k| (f.name().to_string(), k)))
+                .collect(),
+        );
+        report(
+            "native",
+            12,
+            bytecode
+                .natives
+                .iter()
+                .filter_map(|n| {
+                    arity_of(n.type_.0).map(|k| (format!("{}@{}", n.lib, n.name), k))
+                })
+                .collect(),
+        );
+    }
+
     pub fn new(bytecode: &DecodedBytecode, native_resolver: &NativeFunctionResolver) -> Self {
+        if env_flag!("ASH_DUMP_ARITY") {
+            Self::dump_arity_report(bytecode);
+        }
         // Build the dense findex table. Sized to the largest findex actually
         // seen rather than to functions.len() + natives.len(): the two share
         // one numbering, and nothing guarantees it has no gaps.

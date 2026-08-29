@@ -890,11 +890,20 @@ impl<'ctx> JITModule<'ctx> {
         let host_strings = std::mem::take(&mut self.string_globals);
         let host_bytes = std::mem::take(&mut self.bytes_globals);
         let host_types = std::mem::take(&mut self.type_info_globals);
-        if self.lazy_compilation {
-            self.create_constant_pool_globals_for(findex);
-        } else {
-            self.create_constant_pool_globals();
-        }
+        // Seed with this entry's own constants, as the promote path does.
+        // Anything the optimized body turns out to reference materializes on
+        // demand through `ensure_*_global`, so the seed is an optimization and
+        // not a prediction it has to get right.
+        //
+        // The `else` arm here took the WHOLE pool, and `lazy_compilation` is
+        // false in --mode hybrid, so every OSR entry a game built carried the
+        // program's entire constant table: measured on MBHaxe, 1194 ints + 717
+        // floats + 17998 strings = 19909 globals and ~708KB of UTF-16 rodata,
+        // each string re-encoded with encode_utf16().collect() as it was
+        // added. They are emitted with external linkage, so GlobalDCE and
+        // GlobalOpt in the default<O2> run below cannot drop a single one, and
+        // no module is ever removed from the engine.
+        self.create_constant_pool_globals_for(findex);
         // `Opcode::New` fetches a pre-created native caller out of `func_cache`
         // by generated name, so emptying the cache is not enough on its own --
         // the new module needs its own copy of those declarations.

@@ -811,6 +811,7 @@ fn tiered_compile_tier(
     tier: usize,
     findex: usize,
     bead: &Arc<Bead>,
+    may_block: bool,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
@@ -825,11 +826,11 @@ fn tiered_compile_tier(
     }
     let code = match (ctx.mode, tier) {
         (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
-        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex),
+        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex, may_block),
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
-                compile_with_llvm(ctx, 0, findex)
+                compile_with_llvm(ctx, 0, findex, may_block)
             } else {
                 cl
             }
@@ -875,7 +876,7 @@ fn tiered_compile_tier(
             // 8ms and 15ms and took the run from 94ms to 400ms. A signal that
             // cannot be read must not be treated as a signal that is absent.
             if ctx.compiled_only || crate::ssa::enabled() {
-                return compile_with_llvm(ctx, 1, findex);
+                return compile_with_llvm(ctx, 1, findex, may_block);
             }
             // Refusing leaves the bead on Cranelift and is a postponement,
             // not a veto: beadie lowers the tier-1 queued flag when a compile
@@ -892,7 +893,7 @@ fn tiered_compile_tier(
                 }
                 return std::ptr::null_mut();
             }
-            compile_with_llvm(ctx, 1, findex)
+            compile_with_llvm(ctx, 1, findex, may_block)
         }
         _ => std::ptr::null_mut(),
     };
@@ -1057,7 +1058,15 @@ fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<
 /// valid for compiled-only JIT and for hybrid thread bodies: the latter are
 /// compiled at dispatch specifically so their interpreter frames never cross
 /// OS-thread boundaries.
-fn resolve_worker_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
+/// `may_block` is false when a null answer is acceptable -- an ordinary
+/// guarded call site falls through to the interpreter. A fiber worker lane
+/// cannot (`jit_stub_call_bridge` raises on an unprepared sentinel), and
+/// neither can closure dependencies a native caller invokes directly.
+fn resolve_worker_stub(
+    ctx: &Arc<TieredSharedCtx>,
+    findex: usize,
+    may_block: bool,
+) -> *mut () {
     if findex >= ctx.max_findex.load(std::sync::atomic::Ordering::Acquire) {
         return std::ptr::null_mut();
     }
@@ -1102,7 +1111,7 @@ fn resolve_worker_stub(ctx: &Arc<TieredSharedCtx>, findex: usize) -> *mut () {
             if let Some(code) = bead.compiled() {
                 code
             } else {
-                let code = tiered_compile_tier(ctx, 0, findex, &bead);
+                let code = tiered_compile_tier(ctx, 0, findex, &bead, may_block);
                 if code.is_null() {
                     return code;
                 }
@@ -1184,7 +1193,7 @@ fn prepare_worker_closure_dependencies(ctx: &Arc<TieredSharedCtx>, findex: usize
         }
         targets
             .into_iter()
-            .all(|target| !resolve_worker_stub(ctx, target).is_null())
+            .all(|target| !resolve_worker_stub(ctx, target, true).is_null())
             .then_some(())
     })()
     .is_some();
@@ -1494,13 +1503,31 @@ fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
 /// The `llvm` mutex is held across the whole armed region, so the single
 /// global tiered recovery slot stays owned by one thread at a time even
 /// though two broker threads can reach this function.
-fn compile_with_llvm(ctx: &TieredSharedCtx, tier: usize, findex: usize) -> *mut () {
+/// `may_block` is false on the mutator. A null return there is a handled
+/// outcome -- the guarded call site falls through to its interpreter path --
+/// so the mutator declines to queue behind a broker's compile rather than
+/// parking for the length of one. The comment below already recorded what
+/// that parking costs; it just had no way to opt out.
+fn compile_with_llvm(
+    ctx: &TieredSharedCtx,
+    tier: usize,
+    findex: usize,
+    may_block: bool,
+) -> *mut () {
     // A tier-0 failure permanently invalidates the bead (beadie's primary
     // broker); a tier-1 failure is silent and the bead keeps its current tier.
     let on_fail = if tier == 0 { "blacklist" } else { "keep-tier" };
     use std::sync::atomic::Ordering;
     let t0 = std::time::Instant::now();
-    let mut guard = ctx.llvm.lock().expect("tiered llvm mutex poisoned");
+    let mut guard = if may_block {
+        ctx.llvm.lock().expect("tiered llvm mutex poisoned")
+    } else {
+        match ctx.llvm.try_lock() {
+            Ok(g) => g,
+            Err(std::sync::TryLockError::WouldBlock) => return std::ptr::null_mut(),
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        }
+    };
     // Every promotion serialises on this one mutex and holds it for the whole
     // compile — ~500ms on this machine. Checking the abandon flag only before
     // the lock is useless: by the time the program ends, the chases are
@@ -3891,7 +3918,16 @@ impl HLInterpreter {
             let Some(shared) = ctx.compiled_stub_ctx.as_ref() else {
                 return std::ptr::null_mut();
             };
-            resolve_worker_stub(shared, findex as usize)
+            // The mutator must not park behind a broker's compile. A worker
+            // lane has no interpreter to fall back to, so it still waits.
+            let may_block = if ctx.fiber_is_worker_lane.is_null() {
+                false
+            } else {
+                let is_worker: unsafe extern "C" fn() -> bool =
+                    std::mem::transmute(ctx.fiber_is_worker_lane);
+                is_worker()
+            };
+            resolve_worker_stub(shared, findex as usize, may_block)
         }
 
         unsafe extern "C" fn jit_stub_call_bridge(
@@ -4724,7 +4760,7 @@ impl HLInterpreter {
                     if let Some(bound) = t.beads.get(findex).and_then(|b| b.as_ref()) {
                         let ctx = Arc::clone(&t.shared_ctx);
                         let submitted = t.adapter.force_promote(bound, 1, move |b| {
-                            tiered_compile_tier(&ctx, 1, findex, b)
+                            tiered_compile_tier(&ctx, 1, findex, b, true)
                         });
                         if submitted && t.shared_ctx.tier_log {
                             eprintln!("[tier] osr-transfer proposes findex={findex} tier=llvm");
@@ -5036,7 +5072,7 @@ impl HLInterpreter {
             let bound = tiered.beads[findex].as_ref()?;
             let ctx = Arc::clone(&tiered.shared_ctx);
             tiered.adapter.on_invoke(bound, move |tier, bead| {
-                tiered_compile_tier(&ctx, tier, findex, bead)
+                tiered_compile_tier(&ctx, tier, findex, bead, true)
             })?
         };
 
@@ -5152,7 +5188,7 @@ impl HLInterpreter {
         };
 
         if bead.compiled().is_none() {
-            let code = tiered_compile_tier(&ctx, 0, findex, &bead);
+            let code = tiered_compile_tier(&ctx, 0, findex, &bead, true);
             if code.is_null() {
                 return Err(anyhow!(
                     "JIT tier 0 failed to compile findex {} ({})",
@@ -5261,7 +5297,7 @@ impl HLInterpreter {
                     .ok_or_else(|| anyhow!("JIT lost bead for findex {}", findex))?;
                 let promote_ctx = Arc::clone(&tiered.shared_ctx);
                 tiered.adapter.force_promote(bound, 1, move |promote_bead| {
-                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead)
+                    tiered_compile_tier(&promote_ctx, 1, findex, promote_bead, true)
                 })
             };
             if !queued && config.log_promotions {

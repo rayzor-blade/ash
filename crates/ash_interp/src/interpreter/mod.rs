@@ -465,6 +465,17 @@ pub struct HLInterpreter {
     fn_gc_set_scan_roots: *mut c_void,
     /// Reused across publishes so building the range list allocates once.
     scan_range_buf: Vec<(usize, usize)>,
+    /// Marshaled arguments for a call too wide for the inline array in
+    /// `call_compiled_function`. Reused, and published to the collector by
+    /// `sync_gc_scan_roots` over its whole capacity: boxing a Dynamic
+    /// allocates, so a value written here has to already sit inside a
+    /// registered range or a collection landing mid-marshal frees it. A plain
+    /// local `Vec` is invisible to the collector — its buffer is in neither a
+    /// published range nor a GC block.
+    wide_call_args: Vec<NanBoxedValue>,
+    /// Raw argument words for the same call, in the encoding the backend's
+    /// uniform entry decodes. Reused so a wide call allocates nothing.
+    wide_call_words: Vec<i64>,
     /// c_type pointers for the primitive kinds, resolved once, used to BOX a
     /// value entering a Dynamic slot. std's `hlt_i32()` and friends are plain
     /// Rust fns rather than `#[no_mangle]` exports, so the native resolver
@@ -807,6 +818,8 @@ impl HLInterpreter {
             fn_gc_add_scan_root,
             fn_gc_set_scan_roots,
             scan_range_buf: Vec::new(),
+            wide_call_args: Vec::new(),
+            wide_call_words: Vec::new(),
             prim_t_i32: prim_t_i32 as *mut c_void,
             prim_t_i64: prim_t_i64 as *mut c_void,
             prim_t_f64: prim_t_f64 as *mut c_void,
@@ -1081,6 +1094,7 @@ impl HLInterpreter {
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
+            uniform_entries: Mutex::new(HashMap::new()),
             worker_beads: Mutex::new(HashMap::new()),
             worker_compile_lock: Mutex::new(()),
             worker_closure_deps: Mutex::new(HashMap::new()),
@@ -1275,6 +1289,14 @@ impl HLInterpreter {
                 if !regs.is_empty() {
                     buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
                 }
+            }
+            // Whole capacity, not just the filled prefix: the wide marshal
+            // loop writes into this range while it boxes, and boxing collects.
+            if self.wide_call_args.capacity() > 0 {
+                buf.push((
+                    self.wide_call_args.as_ptr() as usize,
+                    self.wide_call_args.capacity() * std::mem::size_of::<NanBoxedValue>(),
+                ));
             }
             unsafe { set(buf.as_ptr(), buf.len()) };
             self.scan_range_buf = buf;
@@ -3675,12 +3697,25 @@ impl HLInterpreter {
                         let f = &bytecode.functions[func_idx];
                         if let Some(tf) = bytecode.types[f.type_.0].fun.as_ref() {
                             let mut arg_kinds = [hl::hl_type_kind_HVOID; 8];
-                            let nargs = tf.args.len().min(8);
                             for (i, a) in tf.args.iter().take(8).enumerate() {
                                 arg_kinds[i] = bytecode.types[a.0].kind;
                             }
-                            let ret_kind = bytecode.types[tf.ret.0].kind;
-                            tiered.sigs[findex] = Some((arg_kinds, nargs as u8, ret_kind));
+                            // Wider than the inline array: keep the whole list,
+                            // leaked once, so the entry stays `Copy`.
+                            let wide_kinds = (tf.args.len() > 8).then(|| {
+                                let all: Vec<hl::hl_type_kind> = tf
+                                    .args
+                                    .iter()
+                                    .map(|a| bytecode.types[a.0].kind)
+                                    .collect();
+                                &*Box::leak(all.into_boxed_slice())
+                            });
+                            tiered.sigs[findex] = Some(CallSignature {
+                                arg_kinds,
+                                nargs: tf.args.len().min(u8::MAX as usize) as u8,
+                                ret_kind: bytecode.types[tf.ret.0].kind,
+                                wide_kinds,
+                            });
                         }
                     }
                     Err(reason) => {
@@ -3745,12 +3780,22 @@ impl HLInterpreter {
                 }
             }
         }
-        let (arg_kinds, nargs, ret_kind) = tiered.sigs[findex]?;
+        let sig = tiered.sigs[findex]?;
+        let uniform_addr = tiered
+            .shared_ctx
+            .uniform_entries
+            .lock()
+            .expect("uniform_entries mutex poisoned")
+            .get(&findex)
+            .copied()
+            .unwrap_or(0);
         let entry = CompiledFunctionEntry {
             fn_addr: addr,
-            arg_kinds,
-            nargs,
-            ret_kind,
+            arg_kinds: sig.arg_kinds,
+            nargs: sig.nargs,
+            ret_kind: sig.ret_kind,
+            uniform_addr,
+            wide_kinds: sig.wide_kinds,
         };
         tiered.stats.successful_promotions += 1;
         if tiered.config.log_promotions {
@@ -3973,13 +4018,15 @@ impl HLInterpreter {
                 return Err("not_in_only_set".to_string());
             }
         }
-        // Static signature arg count; call_compiled_function marshals at most 8.
+        // Static signature arg count. `call_compiled_function` marshals eight
+        // inline and reaches anything wider through the backend's uniform
+        // entry, so only an explicit --jit-max-args caps this now.
         let nargs = bytecode.types[func.type_.0]
             .fun
             .as_ref()
             .map(|f| f.args.len())
             .unwrap_or(0);
-        if nargs > config.max_jit_args || nargs > 8 {
+        if nargs > config.max_jit_args {
             let kinds: Vec<String> = bytecode.types[func.type_.0]
                 .fun
                 .as_ref()
@@ -3992,7 +4039,7 @@ impl HLInterpreter {
                 .unwrap_or_default();
             return Err(format!(
                 "arg_count_over_limit nargs={nargs} max={} kinds=[{}]",
-                config.max_jit_args.min(8),
+                config.max_jit_args,
                 kinds.join(",")
             ));
         }
@@ -4100,9 +4147,14 @@ impl HLInterpreter {
         entry: &CompiledFunctionEntry,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
-        if args.len() > 8 {
+        // A signature the fixed-arity ladder below cannot express is called
+        // through the uniform entry the backend emitted for it: one word per
+        // argument, unpacked and re-applied with the real ABI by code that
+        // knew the exact arity at compile time.
+        let uniform_addr = entry.uniform_addr;
+        if uniform_addr == 0 && args.len() > 8 {
             return Err(anyhow!(
-                "Compiled call {} has {} args (max 8)",
+                "Compiled call {} has {} args (max 8, no uniform entry)",
                 findex,
                 args.len()
             ));
@@ -4122,12 +4174,22 @@ impl HLInterpreter {
         // primitive payload inline, so materialize those boxes before the
         // typed call instead of forwarding (for example) integer 5 as 0x5.
         let mut marshaled_args = [NanBoxedValue::null(); 8];
-        for (index, &arg) in args.iter().enumerate() {
+        let nargs = args.len();
+        let is_wide = nargs > marshaled_args.len();
+        if is_wide {
+            // Size and publish before writing: from here on every slot the
+            // boxing loop fills is already inside a registered scan range.
+            self.wide_call_args.clear();
+            self.wide_call_args.resize(nargs, NanBoxedValue::null());
+            self.sync_gc_scan_roots();
+        }
+        for index in 0..nargs {
+            let arg = args[index];
             let kind = arg_kinds
                 .get(index)
                 .copied()
                 .unwrap_or(hl::hl_type_kind_HVOID);
-            marshaled_args[index] = if matches!(
+            let marshaled = if matches!(
                 kind,
                 hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
             ) {
@@ -4135,11 +4197,38 @@ impl HLInterpreter {
             } else {
                 arg
             };
+            if is_wide {
+                self.wide_call_args[index] = marshaled;
+            } else {
+                marshaled_args[index] = marshaled;
+            }
         }
-        let args = &marshaled_args[..args.len()];
+        // SAFETY: a view of the buffer rather than a move of it. Taking the
+        // Vec would drop it out of the published scan ranges for the duration
+        // of the call; nothing resizes it before the call returns.
+        let args: &[NanBoxedValue] = if is_wide {
+            unsafe { std::slice::from_raw_parts(self.wide_call_args.as_ptr(), nargs) }
+        } else {
+            &marshaled_args[..nargs]
+        };
         // Boxing may allocate. Republish the complete interpreted root set
         // before entering code that can itself trigger a collection.
         self.sync_gc_scan_roots();
+
+        // One 8-byte word per argument, in the encoding the emitted entry
+        // decodes: `value_to_i64` already writes floats as their f64 bits.
+        // Filled through a temporary because writing needs `&mut self` while
+        // reading the kinds needs `&self`, then handed straight back so the
+        // next wide call reuses the capacity and allocates nothing.
+        let mut packed = std::mem::take(&mut self.wide_call_words);
+        packed.clear();
+        if uniform_addr != 0 {
+            packed.extend(args.iter().enumerate().map(|(i, &a)| {
+                self.value_to_i64(a, arg_kinds.get(i).copied().unwrap_or(hl::hl_type_kind_HVOID))
+            }));
+        }
+        self.wide_call_words = packed;
+        let packed_ptr = self.wide_call_words.as_ptr();
 
         let is_float_kind =
             |k: hl::hl_type_kind| k == hl::hl_type_kind_HF32 || k == hl::hl_type_kind_HF64;
@@ -4173,7 +4262,13 @@ impl HLInterpreter {
         let stack_depth = self.stack.len();
         let mut dispatch_res = None;
         let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
-            dispatch_res = Some(if ret_is_float || float_mask != 0 {
+            dispatch_res = Some(if uniform_addr != 0 {
+                Ok(unsafe {
+                    let f: unsafe extern "C" fn(*const i64) -> i64 =
+                        std::mem::transmute(uniform_addr as *mut c_void);
+                    f(packed_ptr)
+                })
+            } else if ret_is_float || float_mask != 0 {
                 self.dispatch_float_native(
                     func_ptr,
                     args,

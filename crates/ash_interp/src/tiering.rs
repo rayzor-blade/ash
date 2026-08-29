@@ -87,6 +87,10 @@ pub struct TieredConfig {
     /// arrives too late, at 100-250 it is 156ms — better than the speculative
     /// path managed (163ms), with fib, deltablue and binary_trees unchanged.
     pub opt_threshold: u64,
+    /// Explicit cap on how wide a signature may be to promote. Nothing in
+    /// the marshaling path needs one any more — anything past the inline
+    /// eight goes through the backend's uniform entry — so this defaults to
+    /// the `u8` that stores the arity and exists only to pin a bisect.
     pub max_jit_args: usize,
     pub min_ops_for_promotion: usize,
     pub log_promotions: bool,
@@ -102,7 +106,7 @@ impl Default for TieredConfig {
             compiled_only: false,
             jit_threshold: 100,
             opt_threshold: 250,
-            max_jit_args: 8,
+            max_jit_args: u8::MAX as usize,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
             log_promotions: false,
@@ -264,9 +268,10 @@ pub(crate) fn kind_u32(kind: hl::hl_type_kind) -> u32 {
 /// `Copy`, deliberately. This is read on every invocation of every compiled
 /// function — ~10M times in one nbody run — and an `Arc<[u32]>` here cost an
 /// atomic increment and decrement per call for a value that never changes once
-/// the function is compiled. Promotion already refuses anything above eight
-/// arguments (`nargs > max_jit_args || nargs > 8`), so the kinds fit inline and
-/// the steady-state dispatch path touches no refcount and no allocation.
+/// the function is compiled. Signatures up to eight arguments — every one that
+/// matters for throughput — keep their kinds inline, so the steady-state
+/// dispatch path touches no refcount and no allocation. A wider signature
+/// carries a leaked slice instead, allocated once at registration.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompiledFunctionEntry {
     pub(crate) fn_addr: usize,
@@ -277,13 +282,34 @@ pub(crate) struct CompiledFunctionEntry {
     pub(crate) arg_kinds: [hl::hl_type_kind; 8],
     pub(crate) nargs: u8,
     pub(crate) ret_kind: hl::hl_type_kind,
+    /// Backend-emitted uniform entry, `extern "C" fn(*const i64) -> i64`, for
+    /// signatures no fixed-arity ladder in Rust can express. Zero when the
+    /// ordinary typed call handles this function.
+    pub(crate) uniform_addr: usize,
+    /// The full kind list once `nargs` exceeds the inline array. Leaked once
+    /// per wide function — a handful per program — so the entry stays `Copy`
+    /// and the common path keeps its refcount-free dispatch.
+    pub(crate) wide_kinds: Option<&'static [hl::hl_type_kind]>,
 }
 
 impl CompiledFunctionEntry {
     #[inline(always)]
     pub(crate) fn args(&self) -> &[hl::hl_type_kind] {
-        &self.arg_kinds[..self.nargs as usize]
+        match self.wide_kinds {
+            Some(wide) => wide,
+            None => &self.arg_kinds[..self.nargs as usize],
+        }
     }
+}
+
+/// A callee's marshaling signature, read off the bytecode once at bead
+/// registration. Same inline/wide split as [`CompiledFunctionEntry`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CallSignature {
+    pub(crate) arg_kinds: [hl::hl_type_kind; 8],
+    pub(crate) nargs: u8,
+    pub(crate) ret_kind: hl::hl_type_kind,
+    pub(crate) wide_kinds: Option<&'static [hl::hl_type_kind]>,
 }
 
 /// The pre-warmed LLVM JIT module, owned by whichever broker thread first
@@ -437,6 +463,11 @@ pub(crate) struct TieredSharedCtx {
     /// for a single-invocation hot loop that observation comes from the
     /// back-edge ticks, at most 64 iterations later.
     pub(crate) pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
+    /// Uniform-ABI entries the backends emitted, `findex -> address`. The
+    /// marshaling signature is read off the bytecode at bead registration,
+    /// before any compile has happened, so the address a compile produces has
+    /// to reach the entry builder some other way.
+    pub(crate) uniform_entries: Mutex<HashMap<usize, usize>>,
     /// Per-findex beads for compiled-only lazy sentinel resolution. The lock
     /// protects bead creation; the backend mutexes serialize cold compiles.
     pub(crate) worker_beads: Mutex<HashMap<usize, Arc<Bead>>>,
@@ -494,7 +525,7 @@ pub(crate) struct TieredRuntime {
     pub(crate) entries: Vec<Option<CompiledFunctionEntry>>,
     /// findex-indexed marshaling signature, derived from the bytecode and
     /// therefore identical for every tier.
-    pub(crate) sigs: Vec<Option<([hl::hl_type_kind; 8], u8, hl::hl_type_kind)>>,
+    pub(crate) sigs: Vec<Option<CallSignature>>,
     pub(crate) shared_ctx: Arc<TieredSharedCtx>,
     /// Interp-side counters; broker-side counters live in `shared_ctx`.
     pub(crate) stats: TieredStats,
@@ -732,6 +763,37 @@ pub(crate) fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, 
     match result {
         Ok(Ok((addr, meta))) => {
             ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
+            // A signature wider than the interpreter's fixed-arity ladder gets
+            // a second, uniform-ABI entry compiled for it. Cranelift knows the
+            // arity here, so it can emit the call the bridge cannot express.
+            if meta.arg_kinds.len() > 8 {
+                match ash_core::cranelift::codegen::compile_uniform_entry(
+                    &tier.backend,
+                    &tier.ctx,
+                    bead,
+                    findex,
+                    addr,
+                ) {
+                    Ok(uniform) => {
+                        ctx.uniform_entries
+                            .lock()
+                            .expect("uniform_entries mutex poisoned")
+                            .insert(findex, uniform);
+                        if ctx.tier_log {
+                            eprintln!(
+                                "[tier] uniform entry findex={findex} nargs={} addr={uniform:#x}",
+                                meta.arg_kinds.len()
+                            );
+                        }
+                    }
+                    // Without one the bridge cannot call this function at all,
+                    // so say why rather than failing later as an arity refusal.
+                    Err(e) => eprintln!(
+                        "[tiered] uniform entry declined findex={findex} nargs={}: {e:#}",
+                        meta.arg_kinds.len()
+                    ),
+                }
+            }
             ash_core::profile::register_jit_code(
                 findex as u32,
                 ash_core::profile::Tier::Cranelift,

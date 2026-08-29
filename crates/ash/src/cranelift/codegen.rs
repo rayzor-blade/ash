@@ -387,6 +387,122 @@ pub fn compile_osr_entry(
     Ok(code as usize)
 }
 
+/// Compile a uniform-ABI entry for `findex`: `extern "C" fn(*const i64) -> i64`.
+///
+/// Rust cannot synthesize a call whose signature it only learns at runtime, so
+/// the interpreter's compiled-call bridge is a ladder of fixed arities and
+/// refuses anything wider. Cranelift knows the exact signature here, so it
+/// emits the unpacking and an ABI-correct call instead — registers or stack,
+/// whichever the platform calls for, at any arity.
+///
+/// The buffer encoding is the inverse of the one `stub_guarded_indirect` uses
+/// when compiled code calls *out* through the stub: one 8-byte word per
+/// argument, floats as their f64 bit pattern, narrower integers zero-extended.
+/// `target` is the address of the already-compiled natural-ABI entry.
+pub fn compile_uniform_entry(
+    backend: &AshCraneliftBackend,
+    ctx: &CraneliftTierContext,
+    bead: &std::sync::Arc<beadie::Bead>,
+    findex: usize,
+    target: usize,
+) -> Result<usize> {
+    let bytecode = ctx.bytecode();
+    let func_idx = ctx
+        .func_index(findex)
+        .ok_or_else(|| anyhow!("findex {findex} is not a bytecode function"))?;
+    let func = &bytecode.functions[func_idx];
+    let tf = bytecode.types[func.type_.0]
+        .fun
+        .as_ref()
+        .ok_or_else(|| anyhow!("no function type"))?;
+    let ret_class = entry_return_class(bytecode.types[tf.ret.0].kind);
+
+    let mut sig = backend.make_signature();
+    sig.params.push(AbiParam::new(types::I64)); // the argument buffer
+    sig.returns.push(AbiParam::new(types::I64)); // always one raw word
+    let name = backend.unique_name(findex, "uniform");
+    let mut def = backend
+        .new_def(sig, &name)
+        .map_err(|e| anyhow!("declare_function({name}): {e}"))?;
+
+    // The callee's real signature, built from the same classes the ordinary
+    // entry is compiled with, so the two agree by construction.
+    let mut target_sig = backend.make_signature();
+    let mut arg_types = Vec::with_capacity(tf.args.len());
+    for a in &tf.args {
+        let ty = argument_abi_class(ctx.type_kind(a.0)?)
+            .clif_type()
+            .ok_or_else(|| anyhow!("void argument in uniform entry signature"))?;
+        target_sig.params.push(AbiParam::new(ty));
+        arg_types.push(ty);
+    }
+    if let Some(ty) = ret_class.clif_type() {
+        target_sig.returns.push(AbiParam::new(ty));
+    }
+
+    // Capture before `builder()` takes a mutable borrow of `def`.
+    let fcfg = def.frontend_config();
+    {
+        let mut b = def.builder();
+        let sig_ref = b.import_signature(target_sig);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        b.seal_block(entry);
+        let buf = b.block_params(entry)[0];
+
+        let mut args = Vec::with_capacity(arg_types.len());
+        for (i, &ty) in arg_types.iter().enumerate() {
+            let off = (i * 8) as i32;
+            let v = if ty == types::F32 {
+                // Packed as an f64 bit pattern, matching the outbound path.
+                let raw = b.ins().load(types::I64, MemFlagsData::trusted(), buf, off);
+                let wide = b.ins().bitcast(types::F64, MemFlagsData::new(), raw);
+                b.ins().fdemote(types::F32, wide)
+            } else {
+                // F64 and every integer width load directly: the word holds
+                // the f64 bits, and a narrow integer sits in the low bytes.
+                b.ins().load(ty, MemFlagsData::trusted(), buf, off)
+            };
+            args.push(v);
+        }
+
+        let addr = b.ins().iconst(types::I64, target as i64);
+        let call = b.ins().call_indirect(sig_ref, addr, &args);
+        let out = match b.inst_results(call).first().copied() {
+            None => b.ins().iconst(types::I64, 0),
+            Some(r) => {
+                let ty = b.func.dfg.value_type(r);
+                if ty == types::F64 {
+                    b.ins().bitcast(types::I64, MemFlagsData::new(), r)
+                } else if ty == types::F32 {
+                    let wide = b.ins().fpromote(types::F64, r);
+                    b.ins().bitcast(types::I64, MemFlagsData::new(), wide)
+                } else if ty.bits() < 64 {
+                    b.ins().uextend(types::I64, r)
+                } else {
+                    r
+                }
+            }
+        };
+        b.ins().return_(&[out]);
+        b.finalize(fcfg);
+    }
+
+    if super::lower::clif_dump_wanted(findex) {
+        eprintln!(
+            "=== CLIF (uniform entry) findex={findex} nargs={} ===\n{}",
+            arg_types.len(),
+            def.ctx.func.display()
+        );
+    }
+
+    let code = backend
+        .compile_def(bead, def)
+        .map_err(|e| anyhow!("uniform entry compile: {e}"))?;
+    Ok(code as usize)
+}
+
 /// Declare every native this function calls, from AIR's own forward
 /// declarations. The signature is built out of [`NativeImport`]'s recorded
 /// argument and return types, so nothing here re-reads the bytecode's native

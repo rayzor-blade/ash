@@ -84,7 +84,7 @@ pub fn reject_reason_for_ops(
 }
 
 /// The half of [`reject_reason_for_ops`] that looks only at the function's
-/// signature — what the interpreter can marshal across the boundary.
+/// signature, rather than at the opcodes in its body.
 ///
 /// Split out because the AIR codegen path ([`super::codegen`]) needs exactly
 /// these checks and none of the opcode ones: it screens the IR instead, and
@@ -102,9 +102,12 @@ pub fn signature_reject_reason(
         Some(tf) => tf,
         None => return Some("no_function_type".to_string()),
     };
-    if tf.args.len() > 8 {
-        return Some("arg_count_over_8".to_string());
-    }
+    // Arity is not a signature limit here. Cranelift builds the entry
+    // signature from these very arguments, so it places them by the platform
+    // ABI at any width; what used to be capped was the interpreter's
+    // fixed-arity call bridge, and a wider function now reaches it through
+    // the uniform entry `super::codegen::compile_uniform_entry` emits.
+    //
     // AIR V2 Cranelift uses the declared f32 ABI directly. The interpreter's
     // typed boundary also narrows f32 arguments and widens f32 results into
     // its NanBox f64 representation, so rejecting these signatures here was

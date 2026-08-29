@@ -358,6 +358,128 @@ fn symbol_key(library_name: &str, function_name: &str) -> String {
 #[derive(Debug)]
 pub struct NativeLibraryManager;
 
+/// Read a file's magic bytes and say what it is.
+///
+/// An HDLL is native code, so it has to match the platform and architecture of
+/// the runtime loading it. When it does not, the loader's own message says so
+/// only obliquely — Windows reports "%1 is not a valid Win32 application" and
+/// dyld prints every path it tried — naming neither the file's real format nor
+/// the mismatch.
+fn describe_object_file(path: &Path) -> Option<(&'static str, &'static str, String)> {
+    let mut head = [0u8; 64];
+    let read = {
+        use std::io::Read;
+        let mut f = std::fs::File::open(path).ok()?;
+        f.read(&mut head).ok()?
+    };
+    if read < 4 {
+        return None;
+    }
+    let le32 =
+        |o: usize| -> u32 { u32::from_le_bytes([head[o], head[o + 1], head[o + 2], head[o + 3]]) };
+    let le16 = |o: usize| -> u16 { u16::from_le_bytes([head[o], head[o + 1]]) };
+
+    // Architectures are named the way `std::env::consts::ARCH` names them, so
+    // the file's own claim can be compared with the running build's.
+    let mach_arch = |cpu: u32| match cpu {
+        0x0100_000C => "aarch64",
+        0x0000_000C => "arm",
+        0x0100_0007 => "x86_64",
+        0x0000_0007 => "x86",
+        _ => "an unknown architecture",
+    };
+    match le32(0) {
+        0xFEED_FACF if read >= 8 => {
+            let a = mach_arch(le32(4));
+            Some(("Mach-O", a, format!("a macOS Mach-O 64-bit {a} library")))
+        }
+        0xFEED_FACE if read >= 8 => {
+            let a = mach_arch(le32(4));
+            Some(("Mach-O", a, format!("a macOS Mach-O 32-bit {a} library")))
+        }
+        // Universal ("fat") archives store their magic big-endian and carry
+        // several architectures, so none is singled out here.
+        0xBEBA_FECA | 0xCAFE_BABE => Some((
+            "Mach-O",
+            "several architectures",
+            "a macOS universal (fat) library".to_string(),
+        )),
+        0x464C_457F => {
+            let a = match le16(18) {
+                0x3E => "x86_64",
+                0xB7 => "aarch64",
+                0x28 => "arm",
+                0x03 => "x86",
+                _ => "an unknown architecture",
+            };
+            Some(("ELF", a, format!("a Linux/BSD ELF {a} shared object")))
+        }
+        _ => {
+            // PE keeps its real header behind the DOS stub.
+            if head[0] == b'M' && head[1] == b'Z' && read >= 0x40 {
+                let off = le32(0x3C) as usize;
+                if off + 6 <= read && &head[off..off + 4] == b"PE\0\0" {
+                    let a = match le16(off + 4) {
+                        0x8664 => "x86_64",
+                        0xAA64 => "aarch64",
+                        0x014C => "x86",
+                        _ => "an unknown architecture",
+                    };
+                    return Some(("PE", a, format!("a Windows PE {a} DLL")));
+                }
+                return Some(("PE", "an unknown architecture", "a Windows PE DLL".to_string()));
+            }
+            None
+        }
+    }
+}
+
+/// The object family this build can load.
+fn host_object_family() -> &'static str {
+    if cfg!(target_os = "macos") || cfg!(target_os = "ios") {
+        "Mach-O"
+    } else if cfg!(windows) {
+        "PE"
+    } else {
+        "ELF"
+    }
+}
+
+/// Explain a failed HDLL load in terms of what the file actually is.
+///
+/// The loader's own text goes last: dyld in particular prints every path it
+/// tried, which buries the one line that matters.
+fn hdll_load_error(name: &str, path: &Path, cause: &str) -> anyhow::Error {
+    let host_os = std::env::consts::OS;
+    let host_arch = std::env::consts::ARCH;
+    let display = path.display();
+    match describe_object_file(path) {
+        Some((family, arch, kind)) if family != host_object_family() || arch != host_arch => {
+            anyhow!(
+                "cannot load HDLL \"{name}\" from {display}\n\
+                 It is {kind}, but this ash build runs on {host_os} {host_arch}.\n\
+                 An HDLL is native code and has to be built for the same platform and \
+                 architecture as the runtime loading it. Rebuild it for {host_os} \
+                 {host_arch}, or run an ash build matching the HDLL.\n\
+                 Loader said: {cause}"
+            )
+        }
+        Some((_, _, kind)) => anyhow!(
+            "cannot load HDLL \"{name}\" from {display}\n\
+             It is {kind}, which suits this build ({host_os} {host_arch}), so the \
+             refusal is not a platform mismatch — a library it depends on is the \
+             usual cause.\n\
+             Loader said: {cause}"
+        ),
+        None => anyhow!(
+            "cannot load HDLL \"{name}\" from {display}\n\
+             The file is not a native library this ash build ({host_os} {host_arch}) \
+             recognises; it may be a text file, an archive, or truncated.\n\
+             Loader said: {cause}"
+        ),
+    }
+}
+
 impl NativeLibraryManager {
     pub fn new() -> Self {
         NativeLibraryManager
@@ -403,12 +525,13 @@ impl NativeLibraryManager {
                 unsafe { libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
             if handle.is_null() {
                 let err = unsafe { std::ffi::CStr::from_ptr(libc::dlerror()) };
-                return Err(anyhow!("Failed to load {}: {:?}", name, err));
+                return Err(hdll_load_error(name, path, &err.to_string_lossy()));
             }
             unsafe { Library::from(libloading::os::unix::Library::from_raw(handle)) }
         };
         #[cfg(not(unix))]
-        let library = unsafe { Library::new(path) }?;
+        let library = unsafe { Library::new(path) }
+            .map_err(|e| hdll_load_error(name, path, &e.to_string()))?;
         registry.insert(clean, Arc::new(library));
         Ok(())
     }
@@ -623,6 +746,101 @@ mod tests {
         assert_eq!(
             program_directory(Path::new("games/marblegame.hl")),
             Path::new("games")
+        );
+    }
+}
+
+#[cfg(test)]
+mod hdll_format_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(name);
+        let mut f = std::fs::File::create(&p).expect("temp file");
+        f.write_all(bytes).expect("write");
+        p
+    }
+
+    fn macho_arm64() -> Vec<u8> {
+        // magic 0xFEEDFACF then cputype CPU_TYPE_ARM64, both little-endian.
+        let mut v = 0xFEED_FACFu32.to_le_bytes().to_vec();
+        v.extend_from_slice(&0x0100_000Cu32.to_le_bytes());
+        v.extend_from_slice(&[0u8; 56]);
+        v
+    }
+
+    fn elf_x86_64() -> Vec<u8> {
+        let mut v = vec![0x7F, b'E', b'L', b'F', 2, 1, 1, 0];
+        v.extend_from_slice(&[0u8; 10]);
+        v.extend_from_slice(&0x3Eu16.to_le_bytes()); // e_machine at 18
+        v.extend_from_slice(&[0u8; 44]);
+        v
+    }
+
+    fn pe_x86_64() -> Vec<u8> {
+        let mut v = vec![0u8; 64];
+        v[0] = b'M';
+        v[1] = b'Z';
+        let off: u32 = 0x30; // e_lfanew, inside the 64 bytes we read
+        v[0x3C..0x40].copy_from_slice(&off.to_le_bytes());
+        v[0x30..0x34].copy_from_slice(b"PE\0\0");
+        v[0x34..0x36].copy_from_slice(&0x8664u16.to_le_bytes());
+        v
+    }
+
+    #[test]
+    fn every_hdll_format_is_named_from_its_magic() {
+        let cases: [(&str, Vec<u8>, &str); 3] = [
+            ("ash_fmt_macho.hdll", macho_arm64(), "Mach-O 64-bit aarch64"),
+            ("ash_fmt_elf.hdll", elf_x86_64(), "ELF x86_64"),
+            ("ash_fmt_pe.hdll", pe_x86_64(), "PE x86_64"),
+        ];
+        for (name, bytes, expect) in cases {
+            let p = write_temp(name, &bytes);
+            let got = describe_object_file(&p).map(|(_, _, k)| k).unwrap_or_default();
+            assert!(got.contains(expect), "{name}: expected {expect:?}, got {got:?}");
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_library_is_not_guessed_at() {
+        let p = write_temp("ash_fmt_text.hdll", b"this is not a library at all\n");
+        assert!(describe_object_file(&p).is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// The issue a Windows user hit in reverse: an HDLL built for another
+    /// platform must fail with a message that names the file's real format and
+    /// the running build, not just the loader's complaint.
+    #[test]
+    fn loading_a_foreign_hdll_explains_the_mismatch() {
+        // Pick a format this build definitely cannot load.
+        let (name, bytes) = if cfg!(windows) {
+            ("ash_foreign_load.hdll", macho_arm64())
+        } else {
+            ("ash_foreign_load.hdll", pe_x86_64())
+        };
+        let p = write_temp(name, &bytes);
+        let mut resolver = NativeFunctionResolver::new();
+        let err = resolver
+            .load_library("sdl", &p)
+            .expect_err("a foreign-format library must not load");
+        let msg = format!("{err:#}");
+        let _ = std::fs::remove_file(&p);
+        // Shown by `cargo test -- --nocapture`: this is the text a user sees.
+        println!("--- HDLL mismatch message ---\n{msg}\n-----------------------------");
+
+        assert!(msg.contains("cannot load HDLL"), "msg: {msg}");
+        assert!(msg.contains("sdl"), "msg names the library: {msg}");
+        assert!(
+            msg.contains(std::env::consts::OS),
+            "msg names the running build: {msg}"
+        );
+        assert!(
+            msg.contains("built for the same platform"),
+            "msg explains the fix: {msg}"
         );
     }
 }

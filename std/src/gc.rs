@@ -49,7 +49,7 @@ const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
 /// Bounds on the machine-derived ceiling (see `trigger_ceiling_bytes`).
 const TRIGGER_CEILING_MIN: usize = 64 * 1024 * 1024;
-const TRIGGER_CEILING_MAX: usize = 2 * 1024 * 1024 * 1024;
+const TRIGGER_CEILING_MAX: usize = 512 * 1024 * 1024;
 /// Share of usable memory the collector will let a program run through
 /// between collections. Conservative on purpose: peak RSS is roughly the
 /// live set plus this, and a runtime that sizes itself off the machine has
@@ -923,9 +923,6 @@ fn gc_flag(flag: i32) -> bool {
 /// legitimate no-collect window while still leaving most of the default
 /// reservation in hand.
 const TRIGGER_CEILING_SHARE: usize = 32;
-/// Share of the heap cap the ceiling also tracks, so headroom grows with the
-/// heap a program is allowed to use rather than with RAM alone.
-const TRIGGER_CEILING_HEAP_SHARE: usize = 2;
 
 /// Usable memory for this process, in bytes.
 ///
@@ -1020,22 +1017,17 @@ fn usable_ram_bytes() -> usize {
 /// is the dominant GC cost on an allocation-heavy program. `ASH_GC_TRIGGER_MB`
 /// still overrides it outright.
 ///
-/// It also scales with the heap cap, because a ceiling expressed only as a
-/// share of RAM stops being headroom once the live set passes it: the adaptive
-/// threshold is `live * growth`, so a program holding 1GB wants to run through
-/// about 2GB between collections, and clamping that to a fixed 512MB makes the
-/// collector fire at half the live set — collecting continuously and reclaiming
-/// progressively less. A heaps/MBHaxe scene load hit exactly that, at roughly
-/// one collection per second with pauses of 130-360ms. Peak footprint is about
-/// the live set plus this, and the heap cap already bounds the total, so
-/// deriving the ceiling from the cap keeps the two policies consistent.
+/// This bounds FIXED headroom only. A ceiling below the live set would make
+/// the collector fire at a fraction of what is live, collecting continuously
+/// and reclaiming progressively less — a heaps/MBHaxe scene load hit that at
+/// roughly one collection per second. `collect_garbage` therefore raises the
+/// effective ceiling to the live set when the live set is larger, which keeps
+/// peak near 2x live. Scaling this constant with the whole heap instead did
+/// fix the pauses, but let a ~1GB live set accumulate 2GB of garbage.
 fn trigger_ceiling_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
-        let by_ram = usable_ram_bytes() / TRIGGER_CEILING_SHARE;
-        let by_heap = heap_max_bytes() / TRIGGER_CEILING_HEAP_SHARE;
-        by_ram
-            .max(by_heap)
+        (usable_ram_bytes() / TRIGGER_CEILING_SHARE)
             .clamp(TRIGGER_CEILING_MIN, TRIGGER_CEILING_MAX)
     })
 }
@@ -2234,8 +2226,16 @@ impl ImmixAllocator {
         // contradiction. Without the `max` the clamp panics with `min > max`,
         // which is what any value over 64MB used to do.
         let floor = trigger_floor_bytes();
-        self.heap.trigger_threshold = (live_bytes.saturating_mul(growth_factor()))
-            .clamp(floor, trigger_ceiling_bytes().max(floor));
+        // The ceiling bounds FIXED headroom, but it must never sit below the
+        // live set: triggering at half of what is live collects continuously
+        // and reclaims progressively less, which is what made a scene load
+        // pause every second. Allowing one live-set's worth of garbage is the
+        // ordinary space cost of mark-sweep and keeps peak near 2x live --
+        // where scaling the ceiling with the whole heap instead let a ~1GB
+        // live set accumulate 2GB of garbage and pushed the process past 5GB.
+        let ceiling = trigger_ceiling_bytes().max(live_bytes).max(floor);
+        self.heap.trigger_threshold =
+            (live_bytes.saturating_mul(growth_factor())).clamp(floor, ceiling);
 
         self.heap.bytes_since_gc = 0;
         self.heap.external_since_gc = 0;

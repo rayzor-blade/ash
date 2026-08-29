@@ -29,7 +29,7 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 <header style="position:sticky;top:0;z-index:20;background:rgba(245,241,234,.9);backdrop-filter:blur(10px);border-bottom:1px solid rgba(34,29,26,.1)">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px clamp(24px,6vw,64px);max-width:1080px;margin:0 auto">
 <a href="index.html" style="display:flex;align-items:center;gap:9px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700"><img src="ash-mark-tight.png" alt="Ash" style="height:36px;width:auto"><span style="padding-top:9px">ash</span></a>
-<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="#install">Install</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#troubleshoot">Troubleshoot</a><a href="https://github.com/rayzor-blade/ash">GitHub</a></nav>
+<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="#install">Install</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#ship">Ship</a><a href="#troubleshoot">Troubleshoot</a><a href="#diagnose">Diagnose</a><a href="https://github.com/rayzor-blade/ash">GitHub</a></nav>
 </div>
 </header>
 
@@ -80,15 +80,83 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 <div class="note" style="margin-top:20px"><strong>Heaps lifecycle:</strong> <code>Main.main()</code> runs as soon as bytecode and HDLL loading complete. <code>hxd.App.init()</code> runs later, after Heaps creates its window, event loop, engine, and graphics context. In the Base2D example the measured gap was about 1.39 seconds. Do not add sleeps, pause the sentinel, or manually drive <code>hxd.System.mainLoop()</code>; those workarounds create an artificial delay.</div>
 </section>
 
+<section id="ship" style="scroll-margin-top:90px;margin-top:64px">
+<div class="eyebrow">04 · Ship</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Move the runtime with the game</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Ash compiles its standard library into the executable, so an ordinary program runs from the binary alone. Native extensions are the exception: an HDLL imports <code>hl_*</code> from <code>@rpath/libhl.dylib</code>, and dyld resolves that against a file on disk &mdash; it cannot see the copy inside Ash. Every rule below follows from that one fact.</p>
+
+<div class="card" style="margin-bottom:12px">
+<div class="step">Six rules</div>
+<div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
+<div><strong style="color:#221d1a">Ship both names.</strong> <code>libhl.dylib</code> and <code>libhl.1.dylib</code>. HDLLs disagree about which they link, and the versioned name is what upstream uses.</div>
+<div><strong style="color:#221d1a">Both are Ash's runtime.</strong> Copies of Ash's own library, never a HashLink build. A stale one shadows a fresh one silently.</div>
+<div><strong style="color:#221d1a">Re-sign what you copied.</strong> A signed Mach-O stops validating once it moves.</div>
+<div><strong style="color:#221d1a">Clear quarantine.</strong> Anything a browser downloaded carries an attribute that blocks loading.</div>
+<div><strong style="color:#221d1a">Match the architecture.</strong> <code>lipo -archs</code> on every HDLL.</div>
+<div><strong style="color:#221d1a">One runtime instance.</strong> Two copies of <code>libhl</code> means two garbage collectors, and the crash surfaces far from the cause.</div>
+</div>
+</div>
+
+<div class="card" style="margin-bottom:12px">
+<div class="step">Stage</div>
+<pre class="shell"><span style="color:#caa06f">$</span> cp libash_std.dylib game/libhl.dylib
+<span style="color:#caa06f">$</span> cp libash_std.dylib game/libhl.1.dylib
+<span style="color:#caa06f">$</span> install_name_tool -id @rpath/libhl.dylib   game/libhl.dylib
+<span style="color:#caa06f">$</span> install_name_tool -id @rpath/libhl.1.dylib game/libhl.1.dylib
+
+<span style="color:#8a807a"># point each HDLL at that runtime, and let @rpath mean "next to me"</span>
+<span style="color:#caa06f">$</span> install_name_tool -change /abs/path/libash_std.dylib \
+      @rpath/libhl.dylib game/mylib.hdll
+<span style="color:#caa06f">$</span> install_name_tool -add_rpath @loader_path game/mylib.hdll
+
+<span style="color:#8a807a"># clear quarantine BEFORE signing, or the signature covers a modified file</span>
+<span style="color:#caa06f">$</span> xattr -cr game/
+<span style="color:#caa06f">$</span> for f in game/*.hdll game/*.dylib; do codesign --force -s - "$f"; done</pre>
+</div>
+
+<div class="card">
+<div class="step">Verify</div>
+<pre class="shell"><span style="color:#caa06f">$</span> lipo -archs game/*.hdll
+<span style="color:#caa06f">$</span> otool -L game/*.hdll | grep -E 'libhl|libash_std'
+<span style="color:#caa06f">$</span> codesign -v game/*.hdll</pre>
+<p style="color:#5c5450;line-height:1.65;margin:14px 0 0">An rpath that points anywhere but the game directory loads a second runtime. Check <code>otool -l</code> for <code>LC_RPATH</code> and keep only <code>@loader_path</code>.</p>
+</div>
+</section>
+
 <section id="troubleshoot" style="scroll-margin-top:90px;margin-top:64px">
-<div class="eyebrow">04 · Troubleshoot</div>
+<div class="eyebrow">05 · Troubleshoot</div>
 <h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Read the first failure, not the cascade</h2>
 <div style="display:flex;flex-direction:column;gap:12px">
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Shader calls crash after startup</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Confirm <code>glCreateShader</code> is not merely the first visible symptom. A second <code>libhl</code> can create the shader successfully and then crash while hlsdl boxes its numeric ID. Use this relocatable HDLL and verify the compatibility-runtime line appears before any HDLL line.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Unresolved sdl@hlp_* symbol</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Your Haxe hlsdl externs and native <code>sdl.hdll</code> are from different revisions. Recompile <code>game.hl</code> after selecting hlsdl 1.17.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No compatibility-runtime line</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Update Ash. Older macOS builds mishandled a bare bytecode filename such as <code>ash game.hl</code> and selected the static runtime before discovering HDLLs in the current directory.</p></div>
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Minimize/restore crash in hybrid mode</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Use a current Ash build. Its HashLink callback compatibility layer preserves safe defaults when hlsdl supplies null wrapper callbacks; the Base2D example is tested through repeated minimize/restore cycles.</p></div>
+
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">library load disallowed by system policy</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The signature stopped validating when the file moved. Re-sign it: <code>codesign --force -s -</code>. Every one of these messages names a <em>missing</em> library when the library is present and merely unloadable.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">code signature not valid for use in process</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Same cause, or a quarantine attribute from a browser download. Run <code>xattr -cr</code> first, then re-sign.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">slice is not valid mach-o file</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Not a macOS binary, or the wrong architecture. Some Haxe library releases ship a Windows DLL under the <code>.hdll</code> name. Check with <code>file x.hdll</code> &mdash; expect <code>Mach-O … arm64</code>.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Required library 'x' not found</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">The bytecode imports an HDLL that is not in the directory. Ash requires it at startup even when the feature goes unused, so stage it or rebuild the bytecode without that library.</p></div>
+<div class="card"><strong style="font-family:'IBM Plex Mono',monospace">No error, but random crashes or corruption</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Two runtime instances, usually an rpath resolving <code>@rpath/libhl.dylib</code> to a copy outside the game directory. Two <code>libhl</code> images mean two garbage collectors managing the same objects.</p></div>
 </div>
+<div class="note" style="margin-top:20px"><strong>Dependencies travel with the HDLL.</strong> An <code>fmt.hdll</code> built against shared libpng and libjpeg needs those dylibs staged too; one that links them statically does not. <code>otool -L</code> tells you which you have.</div>
+</section>
+
+<section id="diagnose" style="scroll-margin-top:90px;margin-top:64px">
+<div class="eyebrow">06 · Diagnose</div>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">When it runs, but badly</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Each flag is read once at startup and costs nothing when unset.</p>
+<div class="card">
+<div style="display:flex;flex-direction:column;gap:13px;color:#5c5450;line-height:1.6">
+<div><code style="color:#a8703c">ASH_GC_STATS=1</code> &mdash; every collection: pause, blocks freed, live set. Start here for stutter. A pause past roughly 50&nbsp;ms is a visible hitch and long enough to break audio.</div>
+<div><code style="color:#a8703c">ASH_GC_HEAP_MB=n</code> &mdash; heap cap, defaulting to a share of machine RAM. Raise it if allocation fails.</div>
+<div><code style="color:#a8703c">ASH_PROFILE=phases</code> &mdash; where wall-clock time went, split by phase.</div>
+<div><code style="color:#a8703c">ASH_TIER1_PROBE=1</code> &mdash; one line per compile with findex and timestamp; gaps are stalls.</div>
+<div><code style="color:#a8703c">ASH_WORKERS=n</code> &mdash; scheduler threads, defaulting to cores minus one.</div>
+<div><code style="color:#a8703c">ASH_GC_STRESS=1</code> &mdash; collects constantly. Very slow, and the fastest way to expose a rooting bug.</div>
+<div><code style="color:#a8703c">ASH_LIBHL=system|embedded</code> &mdash; overrides runtime selection when you suspect the wrong <code>libhl</code>.</div>
+</div>
+</div>
+<div class="note" style="margin-top:20px"><strong>Reporting a stall.</strong> A <code>sample &lt;pid&gt;</code> captured while the game is stuck is worth more than any description: it names the thread and the function, and separates a garbage-collection pause from a compile from a lock wait &mdash; three problems that feel identical from outside.</div>
 </section>
 
 <section style="margin-top:70px;padding-top:30px;border-top:1px solid rgba(34,29,26,.1);display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center">

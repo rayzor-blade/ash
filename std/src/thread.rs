@@ -1246,3 +1246,184 @@ mod foreign_thread_tests {
         }
     }
 }
+
+/// hxDatachannel's callback queue, reproduced at the level that matters: the
+/// exact head/end pointer protocol from `datachannel.c`, over ash's real HL
+/// mutex and semaphore.
+///
+/// Driving libdatachannel itself would need two peers and a network, and would
+/// reproduce this only by luck. The defect is in the queue bookkeeping, so the
+/// queue is what is modelled -- `callback_result_alloc` linking through an end
+/// pointer, and `process_events` draining under a `try_acquire` that may leave
+/// early.
+#[cfg(test)]
+mod datachannel_queue_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct Node {
+        next: *mut Node,
+        seq: usize,
+    }
+
+    /// The globals `datachannel.c` keeps, plus a record of which nodes are
+    /// still allocated. Held per run rather than in statics so two tests can
+    /// run at once without sharing a queue.
+    struct Queue {
+        head: *mut Node,
+        end: *mut Node,
+        live: std::collections::HashSet<usize>,
+    }
+    unsafe impl Send for Queue {}
+
+    struct Counters {
+        /// Times the consumer freed a node that `end` still pointed at.
+        dangling: AtomicUsize,
+        /// Times a producer reached a node that was already freed.
+        uaf: AtomicUsize,
+        /// Sum of drained sequence numbers, so a callback dropped or handed
+        /// out twice shows up even when the pointer bookkeeping survives.
+        seq_sum: AtomicUsize,
+    }
+
+    /// `callback_result_alloc()`, verbatim in structure.
+    fn callback_result_alloc(q: &mut Queue, c: &Counters, seq: usize) {
+        let fresh = Box::into_raw(Box::new(Node {
+            next: std::ptr::null_mut(),
+            seq,
+        }));
+        if q.end.is_null() {
+            q.head = fresh;
+        } else if q.live.contains(&(q.end as usize)) {
+            unsafe { (*q.end).next = fresh };
+        } else {
+            // The write upstream performs unconditionally: `end` may name a
+            // node the consumer has already freed.
+            c.uaf.fetch_add(1, Ordering::Relaxed);
+        }
+        q.end = fresh;
+        q.live.insert(fresh as usize);
+    }
+
+    fn run(fixed: bool) -> (usize, usize) {
+        const PRODUCERS: usize = 3;
+        const PER: usize = 400;
+        const TOTAL: usize = PRODUCERS * PER;
+
+        unsafe {
+            crate::fiber::mark_main_thread();
+            let m = super::hlp_mutex_alloc(false);
+            let sem = super::hlp_semaphore_alloc(0);
+            let (ma, sa) = (m as usize, sem as usize);
+
+            let q = Arc::new(Mutex::new(Queue {
+                head: std::ptr::null_mut(),
+                end: std::ptr::null_mut(),
+                live: std::collections::HashSet::new(),
+            }));
+            let c = Arc::new(Counters {
+                dangling: AtomicUsize::new(0),
+                uaf: AtomicUsize::new(0),
+                seq_sum: AtomicUsize::new(0),
+            });
+
+            let mut handles = Vec::new();
+            for p in 0..PRODUCERS {
+                let (q, c) = (Arc::clone(&q), Arc::clone(&c));
+                handles.push(std::thread::spawn(move || {
+                    for i in 0..PER {
+                        super::hlp_mutex_acquire(ma as *mut std::ffi::c_void);
+                        callback_result_alloc(&mut q.lock().unwrap(), &c, p * PER + i);
+                        super::hlp_semaphore_release(sa as *mut std::ffi::c_void);
+                        super::hlp_mutex_release(ma as *mut std::ffi::c_void);
+                    }
+                }));
+            }
+
+            // `process_events()`: drain while permits last, then reset `end`.
+            let mut drained = 0usize;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while drained < TOTAL && std::time::Instant::now() < deadline {
+                let mut looped = false;
+                loop {
+                    if q.lock().unwrap().head.is_null()
+                        || !super::hlp_semaphore_try_acquire(sem, std::ptr::null_mut())
+                    {
+                        break;
+                    }
+                    super::hlp_mutex_acquire(m);
+                    {
+                        let mut g = q.lock().unwrap();
+                        let res = g.head;
+                        g.head = (*res).next;
+                        // The fix: a node leaving the list must also leave the
+                        // end pointer, under the lock that frees it.
+                        if fixed && g.head.is_null() {
+                            g.end = std::ptr::null_mut();
+                        }
+                        g.live.remove(&(res as usize));
+                        // Checked as an invariant rather than as a race: if
+                        // `end` still names the node being freed, the next
+                        // producer writes through it. Whether one arrives in
+                        // the window decides when the heap corruption
+                        // surfaces, not whether it will.
+                        if g.end == res {
+                            c.dangling.fetch_add(1, Ordering::Relaxed);
+                        }
+                        c.seq_sum.fetch_add((*res).seq, Ordering::Relaxed);
+                        drop(Box::from_raw(res));
+                        drained += 1;
+                    }
+                    super::hlp_mutex_release(m);
+                    looped = true;
+                }
+                if looped {
+                    super::hlp_mutex_acquire(m);
+                    q.lock().unwrap().end = std::ptr::null_mut();
+                    super::hlp_mutex_release(m);
+                }
+                std::thread::yield_now();
+            }
+
+            for h in handles {
+                h.join().unwrap();
+            }
+            super::hlp_semaphore_free(sem);
+            super::hlp_mutex_free(m);
+
+            assert_eq!(drained, TOTAL, "queue lost callbacks");
+            // 0 + 1 + ... + (TOTAL-1), reached only if each node drained once.
+            assert_eq!(
+                c.seq_sum.load(Ordering::Relaxed),
+                TOTAL * (TOTAL - 1) / 2,
+                "a queued callback was dropped or drained twice"
+            );
+            (
+                c.dangling.load(Ordering::Relaxed),
+                c.uaf.load(Ordering::Relaxed),
+            )
+        }
+    }
+
+    /// As written upstream, the consumer frees nodes without ever clearing
+    /// `end`, leaving it naming freed memory. The next `callback_result_alloc`
+    /// writes `end->next` through it, into malloc's metadata, and the process
+    /// aborts later with "pointer being freed was not allocated".
+    #[test]
+    fn upstream_queue_leaves_end_naming_a_freed_node() {
+        let (dangling, _) = run(false);
+        assert!(
+            dangling > 0,
+            "the upstream shape should leave a dangling end pointer"
+        );
+    }
+
+    /// Clearing `end` as the list empties, under the same lock that frees the
+    /// node, closes it.
+    #[test]
+    fn clearing_end_with_the_last_node_closes_it() {
+        let (dangling, uaf) = run(true);
+        assert_eq!(dangling, 0, "end still named a freed node");
+        assert_eq!(uaf, 0, "a producer still reached a freed node");
+    }
+}

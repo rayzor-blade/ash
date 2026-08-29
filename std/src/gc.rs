@@ -1633,13 +1633,24 @@ impl ImmixAllocator {
             heap.free_blocks.push(i);
         }
 
-        let blocks = vec![
-            Block {
-                mark_bits: [false; LINES_PER_BLOCK],
-                has_span: false,
-            };
-            heap_size / BLOCK_SIZE
-        ];
+        // Zeroed rather than element-wise cloned, so the pages stay
+        // demand-committed like the heap mapping itself. `vec![elem; n]`
+        // writes every element, which turned the block table into real
+        // startup work proportional to the CAP: at a 4GB cap that is ~33MB of
+        // memset on a program that may touch none of it, and it cost a fixed
+        // ~5ms — 7% of a 56ms benchmark. Sound because an all-zero Block is a
+        // valid Block: `mark_bits` is [bool; N] and `false` is 0, `has_span`
+        // likewise.
+        let block_count = heap_size / BLOCK_SIZE;
+        let blocks: Vec<Block> = unsafe {
+            let layout = std::alloc::Layout::array::<Block>(block_count)
+                .expect("block table layout");
+            let ptr = std::alloc::alloc_zeroed(layout) as *mut Block;
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
+            Vec::from_raw_parts(ptr, block_count, block_count)
+        };
 
         if gc_stats_enabled() {
             unsafe {

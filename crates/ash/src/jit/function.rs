@@ -1128,15 +1128,37 @@ impl<'ctx> JITModule<'ctx> {
         // left `Fun_16`, `Fun_20` and `Fun_23` undefined and jumped through a
         // null pointer. Compiling them here duplicates their code into this
         // module, which is the price of the module being self-contained.
-        if self.lazy_compilation {
-            // Every bytecode call in a lazy module dispatches through the
-            // live runtime table. Closure construction may still have created
-            // a declaration while asking for its ABI; compiling that queued
-            // body would rebuild a transitive mini-module and, on a declined
-            // callee, leave invalid half-emitted IR behind.
-            self.clear_pending_compilations();
-        } else {
+        // Duplicate the callee closure into this module only when the body
+        // actually needs it, using the same question the promote path asks:
+        // does a loop on the hot path still contain a call the AIR inliner did
+        // not remove.
+        //
+        // Lowering them unconditionally made an OSR entry carry the transitive
+        // direct-call closure of its body and run default<O2> over all of it.
+        // On bench_free_call that was 83.13ms of a 106ms run -- 78.6% --
+        // against 3.50ms for the promotion the entry belongs to, and dropping
+        // it cost that benchmark nothing. But bench_method_call and
+        // bench_closure_call lost 21% and 38%: their loops still call, so the
+        // entry needs the callee present to inline it.
+        //
+        // Under lazy compilation every bytecode call dispatches through the
+        // live runtime table, so nothing is needed either way. Closure
+        // construction may also have queued a declaration merely to ask for
+        // its ABI; compiling that body would rebuild a transitive mini-module
+        // and, on a declined callee, leave invalid half-emitted IR behind.
+        let wants_callees = !self.lazy_compilation
+            && self
+                .bytecode
+                .functions
+                .iter()
+                .find(|f| f.findex == source.findex)
+                .is_some_and(|raw| {
+                    super::air::promotion_wants_full_module(&self.bytecode, raw, self.hot_reload)
+                });
+        if wants_callees {
             self.compile_pending_functions()?;
+        } else {
+            self.clear_pending_compilations();
         }
         if std::env::var_os("ASH_OSR_LOG").is_some() {
             eprintln!(

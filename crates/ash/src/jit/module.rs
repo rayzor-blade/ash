@@ -96,8 +96,9 @@ pub struct JITModule<'ctx> {
     /// Function pointer table indexed by findex, used by hl_module_context.
     pub(crate) functions_ptrs: Vec<*mut c_void>,
     pub(crate) shared_runtime: Option<SharedRuntimeHandles>,
-    /// When true, the IndirectCallRewritePass converts direct calls to bytecode
-    /// functions into indirect dispatch through functions_ptrs, enabling hot-reload.
+    /// When true, direct calls to bytecode functions become indirect dispatch
+    /// through functions_ptrs, so a reloaded function is picked up by its
+    /// callers instead of them holding the old address.
     pub(crate) hot_reload: bool,
     /// Compile reached functions into independent modules and dispatch calls
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
@@ -1614,122 +1615,6 @@ impl<'ctx> JITModule<'ctx> {
 
         Ok(enum_type.as_any_type_enum())
     }
-
-    // pub(crate) fn get_type_index(&self, llvm_type: AnyTypeEnum<'ctx>) -> Result<usize> {
-    //     match llvm_type {
-    //         AnyTypeEnum::IntType(int_type) => match int_type.get_bit_width() {
-    //             1 => Ok(self
-    //                 .bytecode
-    //                 .types
-    //                 .iter()
-    //                 .position(|t| matches!(t, Type::Bool))
-    //                 .unwrap()),
-    //             8 => Ok(self
-    //                 .bytecode
-    //                 .types
-    //                 .iter()
-    //                 .position(|t| matches!(t, Type::UI8))
-    //                 .unwrap()),
-    //             16 => Ok(self
-    //                 .bytecode
-    //                 .types
-    //                 .iter()
-    //                 .position(|t| matches!(t, Type::UI16))
-    //                 .unwrap()),
-    //             32 => Ok(self
-    //                 .bytecode
-    //                 .types
-    //                 .iter()
-    //                 .position(|t| matches!(t, Type::I32))
-    //                 .unwrap()),
-    //             64 => Ok(self
-    //                 .bytecode
-    //                 .types
-    //                 .iter()
-    //                 .position(|t| matches!(t, Type::I64))
-    //                 .unwrap()),
-    //             _ => Err(anyhow!("Unsupported integer bit width")),
-    //         },
-    //         AnyTypeEnum::FloatType(float_type) => {
-    //             // match float_type {
-    //             //     32 => Ok(self.bytecode.types.iter().position(|t| matches!(t, Type::F32)).unwrap()),
-    //             //     64 => Ok(self.bytecode.types.iter().position(|t| matches!(t, Type::F64)).unwrap()),
-    //             //     _ => Err(anyhow!("Unsupported float bit width")),
-    //             // }
-    //             // In LLVM, we can compare the float type directly with the context's float types
-    //             if float_type == self.context.f32_type() {
-    //                 Ok(self
-    //                     .bytecode
-    //                     .types
-    //                     .iter()
-    //                     .position(|t| matches!(t, Type::F32))
-    //                     .unwrap())
-    //             } else if float_type == self.context.f64_type() {
-    //                 Ok(self
-    //                     .bytecode
-    //                     .types
-    //                     .iter()
-    //                     .position(|t| matches!(t, Type::F64))
-    //                     .unwrap())
-    //             } else {
-    //                 Err(anyhow!("Unsupported float type"))
-    //             }
-    //         }
-    //         AnyTypeEnum::PointerType(ptr_type) => {
-    //             match ptr_type.as_any_type_enum() {
-    //                 AnyTypeEnum::IntType(int_type) if int_type.get_bit_width() == 8 => {
-    //                     // This is likely a string or bytes
-    //                     Ok(self
-    //                         .bytecode
-    //                         .types
-    //                         .iter()
-    //                         .position(|t| matches!(t, Type::Bytes))
-    //                         .unwrap())
-    //                 }
-    //                 AnyTypeEnum::StructType(struct_type) => {
-    //                     // This could be an object or array
-    //                     if let Some(name) = struct_type.get_name() {
-    //                         let type_name = name.to_str().unwrap();
-    //                         if type_name == "Array" {
-    //                             Ok(self
-    //                                 .bytecode
-    //                                 .types
-    //                                 .iter()
-    //                                 .position(|t| matches!(t, Type::Array))
-    //                                 .unwrap())
-    //                         } else {
-    //                             self.bytecode.types.iter()
-    //                                 .position(|t| matches!(t, Type::Obj(obj) if self.get_obj_type_name(obj.clone()) == type_name))
-    //                                 .ok_or_else(|| anyhow!("Object type not found: {}", type_name))
-    //                         }
-    //                     } else {
-    //                         Err(anyhow!("Anonymous struct types are not supported"))
-    //                     }
-    //                 }
-    //                 _ => Err(anyhow!("Unsupported pointer element type")),
-    //             }
-    //         }
-    //         AnyTypeEnum::StructType(struct_type) => {
-    //             if let Some(name) = struct_type.get_name() {
-    //                 let type_name = name.to_str().unwrap();
-
-    //                 // self.bytecode.types.iter()
-    //                 //     .position(|t| matches!(t, Type::Obj(obj) if self.get_obj_type_name(obj.clone()) == type_name))
-    //                 //     .ok_or_else(|| anyhow!("Struct type not found: {}", type_name))
-    //             } else {
-    //                 Err(anyhow!("Anonymous struct types are not supported"))
-    //             }
-    //         }
-    //         AnyTypeEnum::VoidType(_) => Ok(self
-    //             .bytecode
-    //             .types
-    //             .iter()
-    //             .position(|t| matches!(t, Type::Void))
-    //             .unwrap()),
-    //         // Add more cases as needed
-    //         _ => Err(anyhow!("Unsupported type for GetType operation")),
-    //     }
-    // }
 
     fn get_type_name_by_index(&self, type_index: usize) -> String {
         self.get_type_name(self.bytecode.types.get(type_index).expect("Unknown type"))

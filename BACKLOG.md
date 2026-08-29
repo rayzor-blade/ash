@@ -1442,16 +1442,11 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
 
 ## Runtime & Heaps
 
-- **`win_create_ex` argument-swap heuristic** (`crates/ash_sdl/src/sdl.rs`)
-  papers over caller-side marshaling: it guesses based on value magnitude.
-- **~40 no-op stubs in `ash_sdl`** — controllers, joystick, haptics, cursors,
-  clipboard, displays, surfaces.
 - **`hlp_thread_create` fibers**: `hlp_tls_*` is still pthread-keyed rather
   than per-fiber, and blocking primitives yield only when fibers exist.
-- **Debug output sweep** — `ash_sdl` first-N-call counters, the
-  `ASH_DUMP_TYPES` block with hardcoded Heaps indices in `ash_cli`, and the
-  post-main `hlp_sys_get_loop` print (the last two also break
-  `parity_matrix`, which compares stderr).
+- **Debug output sweep** — the `ASH_DUMP_TYPES` block with hardcoded Heaps
+  indices in `ash_cli`, and the post-main `hlp_sys_get_loop` print. Both break
+  `parity_matrix`, which compares stderr.
 - **Committed build artifacts** in `examples/heaps_base2d/bin/` (`game.hl`
   plus eight `.hdll` files).
 

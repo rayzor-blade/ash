@@ -154,8 +154,6 @@ no action.
   xmm6-15 non-volatile. Compiles-but-corrupts without a third arm —
   a runtime blocker for Reflect/constructors that CI cannot see.
 - **hlp_throw's `_longjmp`** — fork 1's throwing side.
-- `ash_sdl` links nothing on Windows (needs `SDL2.lib` or crate
-  exclusion).
 - krio-fiber's `cfg(not(unix))` stacks lack a guard page (upstream fix).
 
 ## Ranked order
@@ -166,5 +164,4 @@ dlsym gate (workspace compiles) → 4. `ash` CLI SEH handler (workspace
 + CLI compile) → 5. setjmp/longjmp model — fork 1, the first thing that
 blocks *running* rather than building → 6. `thread_stack_base` via
 GetCurrentThreadStackLimits (GC-fatal) → 7. HDLL binding — fork 2 → 8.
-ash_static_call Win64 arm → 9. thread priority, ash_sdl link, krio
-guard pages.
+ash_static_call Win64 arm → 9. thread priority, krio guard pages.

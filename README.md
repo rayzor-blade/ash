@@ -203,7 +203,6 @@ timings taken on a busy machine otherwise look like ordinary results.
 | **ash_interp** | Bytecode interpreter with NaN-boxed values, and the promotion hot path |
 | **air** | Intermediate representation — CFG, dominators, loops, SSA, and the optimization passes |
 | **ash_std** | HashLink standard library in Rust (cdylib, embedded into the binary) |
-| **ash_sdl** | SDL/GL bindings exposed as an HDLL, for Heaps.io and other windowed programs |
 | **ash_macro** | Procedural macros for FFI symbol loading |
 
 ## Tests

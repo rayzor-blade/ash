@@ -30,8 +30,18 @@ const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
 
-/// Maximum heap reservation (virtual, demand-committed — NOT resident).
-const DEFAULT_HEAP_MB: usize = 512;
+/// Floor and ceiling on the machine-derived heap cap.
+///
+/// The mapping itself is virtual and demand-zeroed, so a large cap costs no
+/// resident memory for it. What the cap does size eagerly is the per-block
+/// metadata (`blocks`), at 257 bytes per 32KB block — about heap/128. That is
+/// the whole price of a bigger ceiling: measured on a trivial program, 512MB
+/// costs 31MB RSS and 4GB costs 60MB, with startup time unchanged at both.
+/// The ceiling is what bounds that tax on a large machine.
+const HEAP_MAX_FLOOR: usize = 512 * 1024 * 1024;
+const HEAP_MAX_CEILING: usize = 4 * 1024 * 1024 * 1024;
+/// Share of usable RAM the heap cap defaults to.
+const HEAP_MAX_SHARE: usize = 4;
 /// First collection fires after this many bytes allocated (wren_lift
 /// gc_marksweep INITIAL_THRESHOLD pattern).
 const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
@@ -793,14 +803,22 @@ fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok())
 }
 
-/// Maximum heap reservation in bytes (ASH_GC_HEAP_MB, default 512).
+/// Maximum heap reservation in bytes.
+///
+/// `ASH_GC_HEAP_MB` overrides; otherwise a share of usable RAM, so the same
+/// binary runs a game on a workstation and a script in a small container.
+/// A fixed default cannot do both: a real heaps/MBHaxe scene carries a live
+/// set near 1GB, and a cap below it does not degrade — allocation fails and
+/// the caller has nowhere to go.
 fn heap_max_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
-        let mb = env_usize("ASH_GC_HEAP_MB")
-            .unwrap_or(DEFAULT_HEAP_MB)
-            .max(32);
-        (mb * 1024 * 1024 / BLOCK_SIZE) * BLOCK_SIZE
+        let bytes = match env_usize("ASH_GC_HEAP_MB") {
+            Some(mb) => mb.max(32) * 1024 * 1024,
+            None => (usable_ram_bytes() / HEAP_MAX_SHARE)
+                .clamp(HEAP_MAX_FLOOR, HEAP_MAX_CEILING),
+        };
+        (bytes / BLOCK_SIZE) * BLOCK_SIZE
     })
 }
 

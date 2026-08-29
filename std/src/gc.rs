@@ -49,7 +49,7 @@ const INITIAL_TRIGGER_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_TRIGGER_FLOOR: usize = 8 * 1024 * 1024;
 /// Bounds on the machine-derived ceiling (see `trigger_ceiling_bytes`).
 const TRIGGER_CEILING_MIN: usize = 64 * 1024 * 1024;
-const TRIGGER_CEILING_MAX: usize = 512 * 1024 * 1024;
+const TRIGGER_CEILING_MAX: usize = 2 * 1024 * 1024 * 1024;
 /// Share of usable memory the collector will let a program run through
 /// between collections. Conservative on purpose: peak RSS is roughly the
 /// live set plus this, and a runtime that sizes itself off the machine has
@@ -923,6 +923,9 @@ fn gc_flag(flag: i32) -> bool {
 /// legitimate no-collect window while still leaving most of the default
 /// reservation in hand.
 const TRIGGER_CEILING_SHARE: usize = 32;
+/// Share of the heap cap the ceiling also tracks, so headroom grows with the
+/// heap a program is allowed to use rather than with RAM alone.
+const TRIGGER_CEILING_HEAP_SHARE: usize = 2;
 
 /// Usable memory for this process, in bytes.
 ///
@@ -1016,17 +1019,43 @@ fn usable_ram_bytes() -> usize {
 /// on a 6GB CI container than on a 64GB workstation, and the collection COUNT
 /// is the dominant GC cost on an allocation-heavy program. `ASH_GC_TRIGGER_MB`
 /// still overrides it outright.
+///
+/// It also scales with the heap cap, because a ceiling expressed only as a
+/// share of RAM stops being headroom once the live set passes it: the adaptive
+/// threshold is `live * growth`, so a program holding 1GB wants to run through
+/// about 2GB between collections, and clamping that to a fixed 512MB makes the
+/// collector fire at half the live set — collecting continuously and reclaiming
+/// progressively less. A heaps/MBHaxe scene load hit exactly that, at roughly
+/// one collection per second with pauses of 130-360ms. Peak footprint is about
+/// the live set plus this, and the heap cap already bounds the total, so
+/// deriving the ceiling from the cap keeps the two policies consistent.
 fn trigger_ceiling_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
-        (usable_ram_bytes() / TRIGGER_CEILING_SHARE)
+        let by_ram = usable_ram_bytes() / TRIGGER_CEILING_SHARE;
+        let by_heap = heap_max_bytes() / TRIGGER_CEILING_HEAP_SHARE;
+        by_ram
+            .max(by_heap)
             .clamp(TRIGGER_CEILING_MIN, TRIGGER_CEILING_MAX)
     })
 }
 
+/// Never defer a collection past this much pressure, whatever policy asked to.
+///
+/// Deferral is only ever an optimisation; running out of heap is not
+/// recoverable, because the allocator's callers are `extern "C"` and a failed
+/// allocation aborts rather than unwinding. Every "collect later" path is
+/// therefore capped below the heap so the collection still happens while it
+/// can do some good.
+fn max_deferred_pressure() -> usize {
+    heap_max_bytes() / 2
+}
+
 /// A GC disabled by the embedder still collects under this much pressure.
 fn gc_disabled_max_pressure() -> usize {
-    trigger_ceiling_bytes().saturating_mul(4)
+    trigger_ceiling_bytes()
+        .saturating_mul(4)
+        .min(max_deferred_pressure())
 }
 
 /// Is a *triggered* collection allowed to run right now? `pressure` is the
@@ -1701,7 +1730,8 @@ impl ImmixAllocator {
                 .heap
                 .trigger_threshold
                 .saturating_mul(4)
-                .max(trigger_ceiling_bytes());
+                .max(trigger_ceiling_bytes())
+                .min(max_deferred_pressure());
             if pressure < hard {
                 self.heap.collect_pending = true;
                 return;

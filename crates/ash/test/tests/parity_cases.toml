@@ -515,3 +515,27 @@ expectation = "exact"
 normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
+
+# Compiled HVIRTUAL dispatch under heap pressure — the shape a heaps/MBHaxe
+# scene load has, and one no other case in this corpus covers: a survey of the
+# existing benchmarks (deltablue, binary_trees, method_call, closure_call,
+# field_access, stdlib) found ZERO calls into hlp_vcall_dyn, so the whole suite
+# stays green through changes that rewrite dynamic dispatch. Two attempts at
+# that rewrite passed parity, stdlib and 1069/1069 unit conformance and then
+# hung MarbleGame with a >1GB heap.
+#
+# Both ingredients matter. Calls go through a structural type so compiled code
+# lowers them to hlp_vcall_dyn rather than a vtable slot; and the benchmark
+# RETAINS a large object graph, because with a tiny live set every collection
+# is cheap and per-dispatch garbage stays invisible. The elapsed_ms line is
+# informational — the checksum is the gate.
+[[case]]
+name = "BenchDynDispatch"
+main = "BenchDynDispatch"
+hl = "bench_dyn_dispatch.hl"
+slow = false
+timeout_secs = 120
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true

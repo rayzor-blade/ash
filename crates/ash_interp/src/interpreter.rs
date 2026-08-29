@@ -248,15 +248,25 @@ fn native_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
 struct HLExceptionPropagation {
     value: NanBoxedValue,
     message: Option<String>,
+    /// Innermost-first call stack, captured where the exception was raised.
+    ///
+    /// Captured at the throw rather than rendered at the top: by the time an
+    /// uncaught exception reaches the CLI the frames it came from have been
+    /// popped, and "Uncaught exception: Null access" with nothing else is the
+    /// report HashLink users are least able to act on.
+    stack: Vec<String>,
 }
 
 impl std::fmt::Display for HLExceptionPropagation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(msg) = &self.message {
-            write!(f, "HL exception: {}", msg)
-        } else {
-            write!(f, "HL exception: {:?}", self.value)
+        match &self.message {
+            Some(msg) => write!(f, "Uncaught exception: {msg}")?,
+            None => write!(f, "Uncaught exception: {:?}", self.value)?,
         }
+        for frame in &self.stack {
+            write!(f, "\nCalled from {frame}")?;
+        }
+        Ok(())
     }
 }
 
@@ -3440,6 +3450,7 @@ impl HLInterpreter {
         HLExceptionPropagation {
             value: val,
             message: msg,
+            stack: Vec::new(),
         }
     }
 
@@ -6675,9 +6686,11 @@ impl HLInterpreter {
                 // CATCHABLE exception, and the unit suite executes it
                 // deliberately. A hard interpreter error killed the whole
                 // suite at the first assert-testing case (Issue3702).
+                let stack = self.capture_call_stack(bytecode);
                 return Err(anyhow::Error::new(HLExceptionPropagation {
                     value: self.internal_exception_value("assert"),
                     message: Some("assert".to_string()),
+                    stack,
                 }));
             }
 
@@ -7119,7 +7132,9 @@ impl HLInterpreter {
                     frame.registers.set(exc_reg, val);
                     return Ok(StepResult::JumpAbs(target_pc));
                 } else {
-                    return Err(anyhow::Error::new(self.format_hl_exception(val)));
+                    let mut exc = self.format_hl_exception(val);
+                    exc.stack = self.capture_call_stack(bytecode);
+                    return Err(anyhow::Error::new(exc));
                 }
             }
             Opcode::Rethrow { exc } => {
@@ -7128,7 +7143,9 @@ impl HLInterpreter {
                     frame.registers.set(exc_reg, val);
                     return Ok(StepResult::JumpAbs(target_pc));
                 } else {
-                    return Err(anyhow::Error::new(self.format_hl_exception(val)));
+                    let mut exc = self.format_hl_exception(val);
+                    exc.stack = self.capture_call_stack(bytecode);
+                    return Err(anyhow::Error::new(exc));
                 }
             }
             Opcode::NullCheck { reg } => {
@@ -7139,9 +7156,11 @@ impl HLInterpreter {
                     if env_flag!("ASH_TRACE_NULLACC") {
                         eprintln!("[nullacc] {} pc={} r{}", func.name(), frame.pc, reg.0);
                     }
+                    let stack = self.capture_call_stack(bytecode);
                     return Err(anyhow::Error::new(HLExceptionPropagation {
                         value: self.internal_exception_value("Null access"),
                         message: Some("Null access".to_string()),
+                        stack,
                     }));
                 }
             }
@@ -7523,6 +7542,8 @@ impl HLInterpreter {
             Err(anyhow::Error::new(HLExceptionPropagation {
                 value,
                 message: Some("Invalid cast".to_string()),
+                // Static helper: it has the frame but not the frame STACK.
+                stack: Vec::new(),
             }))
         }
     }
@@ -9945,9 +9966,11 @@ impl HLInterpreter {
                     if env_flag!("ASH_TRACE_NULLACC") {
                         eprintln!("[nullacc/ssa] {} v{}", func.name(), value.0);
                     }
+                    let stack = self.capture_call_stack(bc);
                     return Err(anyhow::Error::new(HLExceptionPropagation {
                         value: self.internal_exception_value("Null access"),
                         message: Some("Null access".to_string()),
+                        stack,
                     }));
                 }
             }
@@ -10309,9 +10332,11 @@ impl HLInterpreter {
             I::Assert => {
                 // Catchable, like upstream hl_assert() — see the classic
                 // dispatcher's Opcode::Assert.
+                let stack = self.capture_call_stack(bc);
                 return Err(anyhow::Error::new(HLExceptionPropagation {
                     value: self.internal_exception_value("assert"),
                     message: Some("assert".to_string()),
+                    stack,
                 }));
             }
             I::Prefetch { .. } | I::Asm { .. } => {}
@@ -11323,6 +11348,109 @@ impl HLInterpreter {
             }
             _ => None,
         }
+    }
+
+    /// How many fields this type inherits, so a binding's chain-wide field
+    /// index can be turned back into one of the type's own fields.
+    fn inherited_field_count(
+        bytecode: &DecodedBytecode,
+        obj: &ash_core::types::HLTypeObj,
+    ) -> usize {
+        let mut count = 0usize;
+        let mut parent = obj.super_.clone();
+        // Bounded by the type table: a malformed chain must not spin here.
+        for _ in 0..bytecode.types.len() {
+            let Some(tref) = parent.clone() else { break };
+            let Some(sup) = bytecode.types.get(tref.0).and_then(|t| t.obj.as_ref()) else {
+                break;
+            };
+            count += sup.fields.len();
+            parent = sup.super_.clone();
+        }
+        count
+    }
+
+    /// findex -> "Class.method", built once from the type tables.
+    ///
+    /// A function does not carry its own name: `HLFunction::field_name` is set
+    /// only in the cases the reader can attribute directly, so most functions
+    /// render as `Fun_<findex>` and a stack trace naming five of those is
+    /// barely a trace at all. The names live on the TYPES — every `obj` lists
+    /// its protos (method name + findex) and its bindings (field index +
+    /// findex) — so one pass over the type table recovers them.
+    ///
+    /// Built lazily and only when something needs to print a trace, so a run
+    /// that never faults never pays for it.
+    fn function_name_table(&self, bytecode: &DecodedBytecode) -> HashMap<usize, String> {
+        let mut names: HashMap<usize, String> = HashMap::new();
+        for ty in &bytecode.types {
+            let Some(obj) = ty.obj.as_ref() else { continue };
+            for proto in &obj.proto {
+                if proto.findex >= 0 {
+                    names.insert(proto.findex as usize, format!("{}.{}", obj.name, proto.name));
+                }
+            }
+            // Bindings are (field index, findex) pairs — how a class's STATIC
+            // functions are named, which is most of what a Haxe stack trace
+            // shows. The index counts from the top of the inheritance chain,
+            // not from this type's own fields: `$NullAcc` binds field 6 while
+            // owning only two, because its parent contributes the first five.
+            let inherited = Self::inherited_field_count(bytecode, obj);
+            for pair in obj.bindings.chunks_exact(2) {
+                let (field_idx, findex) = (pair[0], pair[1]);
+                if findex < 0 {
+                    continue;
+                }
+                let own = usize::try_from(field_idx)
+                    .ok()
+                    .and_then(|i| i.checked_sub(inherited));
+                if let Some(field) = own.and_then(|i| obj.fields.get(i)) {
+                    // `$Name` is HashLink's own marker for a class's statics
+                    // type; upstream traces read `Name.method`.
+                    let owner = obj.name.strip_prefix('$').unwrap_or(&obj.name);
+                    names
+                        .entry(findex as usize)
+                        .or_insert_with(|| format!("{owner}.{}", field.name));
+                }
+            }
+        }
+        names
+    }
+
+    /// The interpreted call stack as HashLink reports it: innermost first,
+    /// `Class.method(file:line)` per frame, using the debug info the bytecode
+    /// already carries.
+    fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<String> {
+        let bc = self.reloaded_bytecode.unwrap_or(bytecode);
+        let names = self.function_name_table(bc);
+        self.stack
+            .iter()
+            .rev()
+            .map(|frame| {
+                // Never drop a frame: a trace that silently omits the frames
+                // it could not name is worse than one that admits them, since
+                // the gap is invisible and the caller looks like the callee.
+                let Some(func) = bc.functions.get(frame.function_index) else {
+                    return format!("<unresolved findex {}>", frame.function_index);
+                };
+                let name = names
+                    .get(&(func.findex as usize))
+                    .cloned()
+                    .unwrap_or_else(|| func.name());
+                let debug_pc = frame.pc.min(func.ops.len().saturating_sub(1));
+                let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
+                let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
+                match usize::try_from(file_idx)
+                    .ok()
+                    .and_then(|i| bc.debug_files.get(i))
+                {
+                    Some(file) => format!("{name}({file}:{line})"),
+                    // No debug info (a release build): the name alone still
+                    // says which function, which beats printing nothing.
+                    None => name,
+                }
+            })
+            .collect()
     }
 
     fn stack_symbol_for_function(

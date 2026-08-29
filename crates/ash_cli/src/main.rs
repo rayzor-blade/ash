@@ -136,7 +136,15 @@ fn main() {
     let result = run();
     ash_core::profile::report();
     let code = if let Err(e) = result {
-        eprintln!("Error: {:#}", e);
+        // An uncaught HL exception is the PROGRAM's failure and already reads
+        // as HashLink prints it ("Uncaught exception: ..." plus its stack);
+        // prefixing it with "Error:" would frame it as an ash malfunction.
+        let text = format!("{e:#}");
+        if text.starts_with("Uncaught exception:") {
+            eprintln!("{text}");
+        } else {
+            eprintln!("Error: {text}");
+        }
         1
     } else {
         0

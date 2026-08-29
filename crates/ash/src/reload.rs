@@ -115,7 +115,7 @@ fn is_obj_kind(kind: hl::hl_type_kind) -> bool {
 }
 
 /// Collect the set of native function findexes from bytecode.
-/// Used by `IndirectCallRewritePass` to know which calls should stay direct.
+/// Natives are not reloadable, so calls to them stay direct.
 pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
     bytecode.natives.iter().map(|n| n.findex as usize).collect()
 }

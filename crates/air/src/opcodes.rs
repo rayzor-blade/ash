@@ -791,7 +791,8 @@ pub enum Opcode {
     },
     /// Indirect call through `functions_ptrs[findex]`.
     ///
-    /// Introduced by the `IndirectCallRewritePass` for hot-reload support.
+    /// Emitted under hot reload, where a direct call would bake in an
+    /// address the next version of the function will not live at.
     /// Semantically identical to `Call0/1/2/3/4/N` but the JIT emits an
     /// indirect call via the function pointer table instead of a direct
     /// LLVM function reference, allowing the callee to be patched at runtime.

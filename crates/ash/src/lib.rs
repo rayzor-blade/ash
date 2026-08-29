@@ -21,7 +21,7 @@ pub mod hl_bindings {
     #![allow(clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/hl_bindings.rs"));
 }
-pub mod jit;
+pub mod llvm;
 pub mod layout;
 pub mod native_lib;
 pub mod opcodes;

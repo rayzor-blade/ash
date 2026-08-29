@@ -381,7 +381,7 @@ impl<'ctx> JITModule<'ctx> {
             // function back into HashLink opcodes here made the old bytecode
             // translator the real backend and discarded AIR's phis, cells,
             // resolved fields and effects before code generation.
-            let air = crate::jit::air::prepare_llvm(
+            let air = crate::llvm::air::prepare_llvm(
                 &self.bytecode,
                 &f,
                 self.hot_reload,
@@ -769,7 +769,7 @@ impl<'ctx> JITModule<'ctx> {
         match fun_ptr {
             FuncPtr::Fun(f) => {
                 let f = f.clone();
-                let air = crate::jit::air::prepare_llvm(
+                let air = crate::llvm::air::prepare_llvm(
                     &self.bytecode,
                     &f,
                     self.hot_reload,
@@ -7166,7 +7166,7 @@ impl<'ctx> JITModule<'ctx> {
         let is_stub = self.builder.build_int_compare(
             IntPredicate::ULT,
             addr,
-            i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+            i64_type.const_int(crate::llvm::stub_bridge::STUB_SENTINEL_LIMIT, false),
             &format!("{}_is_stub", name),
         )?;
 
@@ -7263,7 +7263,7 @@ impl<'ctx> JITModule<'ctx> {
                 let slot_real = self.builder.build_int_compare(
                     IntPredicate::UGE,
                     slot_addr,
-                    i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+                    i64_type.const_int(crate::llvm::stub_bridge::STUB_SENTINEL_LIMIT, false),
                     &format!("{}_slot_real", name),
                 )?;
                 let not_null = self.builder.build_not(is_null, &format!("{}_nn", name))?;
@@ -7302,7 +7302,7 @@ impl<'ctx> JITModule<'ctx> {
         let resolver_type = i64_type.fn_type(&[i64_type.into()], false);
         let resolver_ptr = i64_type
             .const_int(
-                crate::jit::stub_bridge::ash_jit_resolve_stub as usize as u64,
+                crate::llvm::stub_bridge::ash_jit_resolve_stub as usize as u64,
                 false,
             )
             .const_to_pointer(ptr_type);
@@ -7321,7 +7321,7 @@ impl<'ctx> JITModule<'ctx> {
         let resolved_real = self.builder.build_int_compare(
             IntPredicate::UGE,
             resolved_addr,
-            i64_type.const_int(crate::jit::stub_bridge::STUB_SENTINEL_LIMIT, false),
+            i64_type.const_int(crate::llvm::stub_bridge::STUB_SENTINEL_LIMIT, false),
             &format!("{}_resolved_real", name),
         )?;
         self.builder
@@ -7418,7 +7418,7 @@ impl<'ctx> JITModule<'ctx> {
         );
         let stub_fn_ptr = i64_type
             .const_int(
-                crate::jit::stub_bridge::ash_jit_call_stub as usize as u64,
+                crate::llvm::stub_bridge::ash_jit_call_stub as usize as u64,
                 false,
             )
             .const_to_pointer(ptr_type);
@@ -7531,7 +7531,7 @@ impl<'ctx> JITModule<'ctx> {
             self.functions_ptrs.get(findex).copied()?
         };
         let addr = addr as usize;
-        (addr >= crate::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize).then_some(addr)
+        (addr >= crate::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize).then_some(addr)
     }
 
     /// Bind declarations in an isolated MCJIT module to code already

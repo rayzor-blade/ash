@@ -48,7 +48,7 @@ use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
 use super::{abi_class, argument_abi_class, entry_return_class, AbiClass};
 use crate::hl_bindings as hl;
-use crate::jit::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
+use crate::llvm::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 
 // Cranelift has no floating remainder instruction. Keeping these helpers in
 // Rust avoids depending on a platform-specific libm symbol name while still

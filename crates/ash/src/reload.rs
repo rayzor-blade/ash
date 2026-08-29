@@ -5,7 +5,7 @@
 
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
-use crate::jit::module::SharedRuntimeHandles;
+use crate::llvm::module::SharedRuntimeHandles;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -132,10 +132,10 @@ pub fn perform_reload(
     path: &std::path::Path,
     old_bytecode: &DecodedBytecode,
     functions_ptrs: &mut Vec<*mut std::ffi::c_void>,
-    shared_runtime: &crate::jit::module::SharedRuntimeHandles,
+    shared_runtime: &crate::llvm::module::SharedRuntimeHandles,
 ) -> anyhow::Result<ReloadDiff> {
     use crate::bytecode::BytecodeDecoder;
-    use crate::jit::module::JITModule;
+    use crate::llvm::module::JITModule;
     use inkwell::context::Context;
 
     // Step 1: Re-decode
@@ -205,7 +205,7 @@ pub fn perform_reload(
 
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
 fn flush_affected_protos(
-    shared: &crate::jit::module::SharedRuntimeHandles,
+    shared: &crate::llvm::module::SharedRuntimeHandles,
     _changed_findexes: &[usize],
 ) {
     // Resolve hlp_flush_proto dynamically from the std library

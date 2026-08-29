@@ -12,7 +12,7 @@ use beadie::{Bead, HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter, Tier
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::c_types::CTypeFactory;
 use ash_core::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type, hl_type_kind_HSTRUCT};
-use ash_core::jit::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
+use ash_core::llvm::module::{CompiledFunctionMeta, JITModule, SharedRuntimeHandles};
 use ash_core::native_lib::NativeFunctionResolver;
 use ash_core::opcodes::{Opcode, Reg};
 use ash_core::types::{HLFunction, ValueTypeKind};
@@ -1099,7 +1099,7 @@ fn resolve_worker_stub(
         } else {
             unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) }
         };
-        if installed as usize >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             installed.cast::<()>()
         } else {
             let bead = {
@@ -3547,7 +3547,7 @@ impl HLInterpreter {
                 eprintln!("[ash] fiber runner: null closure function");
                 return std::ptr::null_mut();
             }
-            if fun >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            if fun >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
                 if ctx.jit_closure_runner.is_null() {
                     eprintln!("[ash] fiber runner: compiled closure bridge unavailable");
                     return std::ptr::null_mut();
@@ -3909,7 +3909,7 @@ impl HLInterpreter {
         // shared functions_ptrs/vtable/closure slots and re-enters the
         // interpreter through this bridge instead of SIGBUSing on them.
         // Args/result are raw i64 words per the callee's declared bytecode
-        // signature (see ash_core::jit::stub_bridge for the encoding contract).
+        // signature (see ash_core::llvm::stub_bridge for the encoding contract).
         // Same raw-pointer-context justification as the closure runner above:
         // JIT code only runs within execute_entrypoint's dynamic extent, on
         // this OS thread.
@@ -4050,8 +4050,8 @@ impl HLInterpreter {
                 Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
             }
         }
-        ash_core::jit::stub_bridge::set_stub_resolver(jit_stub_resolver);
-        ash_core::jit::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
+        ash_core::llvm::stub_bridge::set_stub_resolver(jit_stub_resolver);
+        ash_core::llvm::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
 
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
@@ -4078,7 +4078,7 @@ impl HLInterpreter {
                 let cl = loop_fn as *const hl::_vclosure;
                 let loop_fun = unsafe { (*cl).fun as usize };
                 let findex =
-                    if (loop_fun as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                    if (loop_fun as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
                         loop_fun.wrapping_sub(1)
                     } else {
                         // `hlp_sys_set_loop` was called from compiled code, so
@@ -8762,7 +8762,7 @@ impl HLInterpreter {
                         let packed = self.pack_varargs_array(func, args, &arg_vals)?;
                         let wrapped_fun = (*wrapped).fun as usize;
                         let fi = if (wrapped_fun as u64)
-                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                            < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                         {
                             wrapped_fun.wrapping_sub(1)
                         } else {
@@ -8788,7 +8788,7 @@ impl HLInterpreter {
                     // `fun` holds either the interpreter's `findex + 1` stub
                     // sentinel or, when compiled code allocated this closure
                     // from `functions_ptrs`, a real entry address.
-                    let fi = if (fun_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                    let fi = if (fun_ptr as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                     {
                         (fun_ptr as usize).wrapping_sub(1)
                     } else {
@@ -8802,7 +8802,7 @@ impl HLInterpreter {
                     // recording: the emitted guard compares the fun field
                     // against `findex + 1`, which is what that form holds.
                     if self.tiered_runtime.is_some()
-                        && (fun_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                        && (fun_ptr as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                     {
                         ash_core::callsite_profile::record_closure(
                             bytecode.functions[func_idx].findex as u32,
@@ -8938,7 +8938,7 @@ impl HLInterpreter {
                                     if !closure.is_null() {
                                         let cfun = (*closure).fun as usize;
                                         let fi = if (cfun as u64)
-                                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                            < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                                         {
                                             cfun.wrapping_sub(1)
                                         } else {
@@ -8992,7 +8992,7 @@ impl HLInterpreter {
                             let entry = *fields.add(field) as usize;
                             if entry != 0 {
                                 let fi = if (entry as u64)
-                                    < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                    < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                                 {
                                     entry.wrapping_sub(1)
                                 } else {
@@ -9085,7 +9085,7 @@ impl HLInterpreter {
                                     if !closure.is_null() {
                                         let cfun = (*closure).fun as usize;
                                         let fi = if (cfun as u64)
-                                            < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT
+                                            < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
                                         {
                                             cfun.wrapping_sub(1)
                                         } else {
@@ -9308,7 +9308,7 @@ impl HLInterpreter {
                 let vobj_proto = (*type_ptr).vobj_proto;
                 if !vobj_proto.is_null() && vobj_proto as usize > 1 {
                     let method_ptr = *vobj_proto.add(field);
-                    if (method_ptr as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                    if (method_ptr as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
                         // Interpreter stub: the slot encodes findex+1.
                         (method_ptr as usize).wrapping_sub(1)
                     } else {
@@ -12473,7 +12473,7 @@ impl HLInterpreter {
                 // built the closure; compiled code stores the real entry it
                 // loaded from `functions_ptrs`.
                 let stub = (*cl_ptr).fun as usize;
-                let findex = if (stub as u64) < ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+                let findex = if (stub as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
                     stub.wrapping_sub(1)
                 } else {
                     self.findex_for_code_addr(stub).unwrap_or(usize::MAX)
@@ -13457,7 +13457,7 @@ impl HLInterpreter {
         }
         for findex in 0..self.targets.len() {
             let slot = unsafe { *ptrs.add(findex) } as usize;
-            if slot as u64 >= ash_core::jit::stub_bridge::STUB_SENTINEL_LIMIT {
+            if slot as u64 >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
                 self.code_addr_findex.entry(slot).or_insert(findex);
             }
         }

@@ -545,16 +545,67 @@ mod sampler {
         let target = unsafe { libc::pthread_self() };
         let target = TargetThread(target);
 
+        // `ASH_PROFILE_THREADS=all` samples every registered mutator instead.
+        // The default is right for asking where the program goes; this is for
+        // asking where a *worker* goes, which the single-thread sampler cannot
+        // see at all -- a fiber worker holding up a world stop for 350ms leaves
+        // no trace in a profile that never signals it.
+        let all_threads = std::env::var("ASH_PROFILE_THREADS")
+            .map(|v| v == "all")
+            .unwrap_or(false);
+
         std::thread::Builder::new()
             .name("ash-profiler".to_string())
             .spawn(move || {
                 let target = target;
                 let interval =
                     std::time::Duration::from_nanos(1_000_000_000 / HZ.load(Ordering::Relaxed));
+                // Resolved rather than linked: the collector lives in the
+                // runtime dylib, which is loaded by the time sampling starts.
+                type ThreadList = unsafe extern "C" fn(*mut u64, usize) -> usize;
+                let list: Option<ThreadList> = if all_threads {
+                    let name = c"hlp_gc_registered_threads";
+                    let sym = unsafe {
+                        libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr())
+                    };
+                    if sym.is_null() {
+                        eprintln!(
+                            "[profile] ASH_PROFILE_THREADS=all: the runtime exports no \
+                             thread list; sampling the starting thread only"
+                        );
+                        None
+                    } else {
+                        Some(unsafe { std::mem::transmute::<*mut libc::c_void, ThreadList>(sym) })
+                    }
+                } else {
+                    None
+                };
+                let mut threads = [0u64; 64];
+                let mut count = 0usize;
+                let mut ticks: u32 = 0;
                 while !STOP.load(Ordering::Relaxed) {
                     std::thread::sleep(interval);
-                    unsafe {
-                        libc::pthread_kill(target.0, libc::SIGPROF);
+                    match list {
+                        None => unsafe {
+                            libc::pthread_kill(target.0, libc::SIGPROF);
+                        },
+                        Some(list) => {
+                            // Threads come and go; refresh occasionally rather
+                            // than every tick, which would take the world lock
+                            // at the sample rate.
+                            if ticks % 64 == 0 {
+                                count = unsafe { list(threads.as_mut_ptr(), threads.len()) };
+                            }
+                            ticks = ticks.wrapping_add(1);
+                            if count == 0 {
+                                unsafe { libc::pthread_kill(target.0, libc::SIGPROF) };
+                            }
+                            for &t in threads.iter().take(count) {
+                                unsafe {
+                                    libc::pthread_kill(t as libc::pthread_t, libc::SIGPROF);
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -988,6 +1039,32 @@ fn demangle(sym: &str) -> String {
 
 /// Print everything collected. Safe to call when profiling is off (does
 /// nothing) and safe to call twice (the second call sees an empty profile).
+/// Emit the report on `SIGTERM`/`SIGINT` as well as at exit.
+///
+/// A long-running program -- a game -- is normally stopped by a signal, and
+/// the report is the whole reason for sampling it. Without this, profiling
+/// anything that does not return from `main` produces nothing at all.
+pub fn report_on_termination() {
+    if !enabled() {
+        return;
+    }
+    extern "C" fn on_signal(sig: i32) {
+        // `report` allocates and formats, which is not async-signal-safe. It is
+        // still the least bad option here: the alternative is no report, the
+        // process is being torn down either way, and every other thread is
+        // about to stop mattering.
+        report();
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+    unsafe {
+        libc::signal(libc::SIGTERM, on_signal as usize);
+        libc::signal(libc::SIGINT, on_signal as usize);
+    }
+}
+
 pub fn report() {
     if !enabled() {
         return;

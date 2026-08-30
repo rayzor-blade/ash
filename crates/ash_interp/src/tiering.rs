@@ -586,7 +586,40 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
 /// Cranelift decline must never leave the bead with null code, because
 /// beadie's primary broker treats a null tier-0 result as a permanent
 /// invalidation and the function would then never reach the LLVM tier either.
+/// Compile `findex` at `tier`.
+///
+/// Every caller runs this on whichever thread demanded the code, which is
+/// regularly a fiber worker, and a compile takes long enough to be the reason
+/// a collection waits -- one MBHaxe world stop spent 352ms on a worker that
+/// reached no safepoint in that window. So the whole compile is declared
+/// blocking: it touches no GC object, and `hl_blocking` publishes the thread's
+/// stack pointer and callee-saved registers before returning, leaving the
+/// stack conservatively scannable while the collector runs alongside. On a
+/// thread that is not a registered mutator the primitive is a no-op.
 pub(crate) fn tiered_compile_tier(
+    ctx: &Arc<TieredSharedCtx>,
+    tier: usize,
+    findex: usize,
+    bead: &Arc<Bead>,
+    may_block: bool,
+) -> *mut () {
+    // SAFETY: the primitive only touches this thread's own mutator record.
+    unsafe { ash_core::hl_bindings::hl_blocking(true) };
+    let began = std::time::Instant::now();
+    let code = tiered_compile_tier_inner(ctx, tier, findex, bead, may_block);
+    let took = began.elapsed();
+    unsafe { ash_core::hl_bindings::hl_blocking(false) };
+    if took.as_millis() >= 20 && (ctx.tier_log || env_flag!("ASH_TIER_LOG")) {
+        eprintln!(
+            "[tier] compile findex={findex} tier={tier} took {:.1}ms on thread {:#x}",
+            took.as_secs_f64() * 1e3,
+            unsafe { libc::pthread_self() } as usize
+        );
+    }
+    code
+}
+
+fn tiered_compile_tier_inner(
     ctx: &Arc<TieredSharedCtx>,
     tier: usize,
     findex: usize,

@@ -573,6 +573,36 @@ fn stop_mutator_world() -> StoppedWorld {
     }
 }
 
+/// Copy the registered mutator thread handles into `out`, returning how many
+/// were written.
+///
+/// The sampling profiler interrupts one thread, the one that started it, which
+/// makes a worker invisible: a fiber worker holding up a world stop for 350ms
+/// leaves no trace in a profile that never signals it. `thread_self_fast`
+/// returns the same value `pthread_self` does on both supported platforms, so
+/// these handles can be signalled directly.
+///
+/// `try_lock`, deliberately: the sampler must never block on the world lock,
+/// least of all while a collection holds it. A tick that finds it contended
+/// simply samples nothing.
+///
+/// # Safety
+/// `out` must be valid for `cap` `u64` writes.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_registered_threads(out: *mut u64, cap: usize) -> usize {
+    if out.is_null() || cap == 0 {
+        return 0;
+    }
+    let Ok(world) = MUTATOR_WORLD.state.try_lock() else {
+        return 0;
+    };
+    let n = world.mutators.len().min(cap);
+    for (i, m) in world.mutators.iter().take(n).enumerate() {
+        *out.add(i) = m.thread;
+    }
+    n
+}
+
 fn mutator_scan_range_count() -> usize {
     MUTATOR_WORLD
         .state

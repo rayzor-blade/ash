@@ -134,6 +134,7 @@ fn main() {
     // interrupts whichever thread calls init, and that must be the one that
     // runs the program.
     ash_core::profile::init();
+    ash_core::profile::report_on_termination();
 
     let result = run();
     ash_core::profile::report();

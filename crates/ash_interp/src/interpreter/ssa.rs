@@ -45,6 +45,24 @@ impl HLInterpreter {
         let mut phi_buf: Vec<(u32, NanBoxedValue)> = Vec::new();
 
         'blocks: loop {
+            // The tiering ladder is driven by back edges, and it was the
+            // opcode loop alone that counted them: under this walker a hot
+            // loop raised no demand and never asked for a compile, so a
+            // hybrid run stayed interpreted no matter how hot it got. A
+            // branch to a block at or before this one is the same signal the
+            // opcode loop reads from a negative jump offset.
+            if let Some(prev) = prev_block {
+                if block <= prev as usize {
+                    let frame = self.stack.last_mut().unwrap();
+                    frame.backedges = frame.backedges.wrapping_add(1);
+                    // Every 64th, for the reason the opcode loop gives: there
+                    // are two thresholds to cross, so one signal would stall
+                    // the ladder at Cranelift.
+                    if frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0 {
+                        self.note_hot_loop(bc, func_idx, block);
+                    }
+                }
+            }
             let blk = ir
                 .blocks
                 .get(block)

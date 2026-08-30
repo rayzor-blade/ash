@@ -513,7 +513,7 @@ pub struct HLInterpreter {
     /// VM-lifetime storage backing every opaque `hl_symbol` token handed to Haxe.
     /// Exception objects resolve these lazily, long after a newer exception may
     /// have replaced the current stack snapshot.
-    stack_symbol_arena: Vec<Box<[u16]>>,
+    stack_symbols_interned: std::collections::HashMap<(usize, i32, i32), Box<[u16]>>,
     /// Opaque `hl_symbol` tokens backing the most recent call-stack query.
     call_stack_symbols: Vec<usize>,
     /// Stack captured at the most recent non-rethrow exception origin.
@@ -837,7 +837,7 @@ impl HLInterpreter {
             utf16_strings: HashMap::new(),
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
-            stack_symbol_arena: Vec::new(),
+            stack_symbols_interned: std::collections::HashMap::new(),
             call_stack_symbols: Vec::new(),
             exception_stack_symbols: Vec::new(),
             tiered_runtime: None,

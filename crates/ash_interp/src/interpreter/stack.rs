@@ -53,48 +53,68 @@ impl HLInterpreter {
             .collect()
     }
 
-    pub(super) fn stack_symbol_for_function(
-        bytecode: &DecodedBytecode,
-        func: &HLFunction,
-        pc: usize,
-    ) -> Box<[u16]> {
+    /// The `(findex, file, line)` a frame symbolicates to. Two reads off the
+    /// debug table and no allocation, so it can key the symbol cache.
+    fn stack_symbol_key(func: &HLFunction, pc: usize) -> (usize, i32, i32) {
         let debug_pc = pc.min(func.ops.len().saturating_sub(1));
         let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
         let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
+        (func.findex as usize, file_idx, line)
+    }
+
+    /// Pointer to the interned UTF-16 symbol for `key`, built once.
+    ///
+    /// `write_call_stack` hands these pointers to Haxe, so a symbol has to
+    /// outlive the capture that produced it. The symbol is also a pure
+    /// function of its key, so interning serves both ends: the map owns every
+    /// box for the life of the interpreter, and a frame that recurs costs a
+    /// lookup rather than a `format!` and a UTF-16 re-encode. Its size is
+    /// bounded by the distinct source positions a trace ever names, where
+    /// appending per capture is bounded by nothing -- MBHaxe throws while
+    /// loading a level, and each throw symbolicated every frame afresh.
+    fn intern_stack_symbol(&mut self, bytecode: &DecodedBytecode, key: (usize, i32, i32)) -> usize {
+        if let Some(symbol) = self.stack_symbols_interned.get(&key) {
+            return symbol.as_ptr() as usize;
+        }
+        let (findex, file_idx, line) = key;
         let file = usize::try_from(file_idx)
             .ok()
             .and_then(|idx| bytecode.debug_files.get(idx))
             .map(String::as_str)
             .unwrap_or("unknown");
-        let mut symbol: Vec<u16> = format!("fun${}({file}:{line})", func.findex)
+        let mut symbol: Vec<u16> = format!("fun${findex}({file}:{line})")
             .encode_utf16()
             .collect();
         symbol.push(0);
-        symbol.into_boxed_slice()
+        self.stack_symbols_interned
+            .entry(key)
+            .or_insert_with(|| symbol.into_boxed_slice())
+            .as_ptr() as usize
     }
 
-    pub(super) fn stack_symbol(
+    fn stack_symbol(
+        &mut self,
         bytecode: &DecodedBytecode,
         function_index: usize,
         pc: usize,
-    ) -> Option<Box<[u16]>> {
-        let func = bytecode.functions.get(function_index)?;
-        Some(Self::stack_symbol_for_function(bytecode, func, pc))
+    ) -> Option<usize> {
+        let key = Self::stack_symbol_key(bytecode.functions.get(function_index)?, pc);
+        Some(self.intern_stack_symbol(bytecode, key))
     }
 
-    pub(super) fn interpreter_stack_symbol(
-        &self,
+    fn interpreter_stack_symbol(
+        &mut self,
         bytecode: &DecodedBytecode,
         function_index: usize,
         pc: usize,
-    ) -> Option<Box<[u16]>> {
+    ) -> Option<usize> {
         bytecode.functions.get(function_index)?;
         // AIR V2's serializer renumbers opcodes. Cache::prepare builds a
         // matching debug table for that optimized body, so frame.pc must be
         // resolved against the body the interpreter actually executes rather
         // than the original bytecode function at the same numeric index.
-        let func = self.air.body(bytecode, function_index);
-        Some(Self::stack_symbol_for_function(bytecode, func, pc))
+        let key = Self::stack_symbol_key(self.air.body(bytecode, function_index), pc);
+        Some(self.intern_stack_symbol(bytecode, key))
     }
 
     /// Return true when the loader owns `pc` as part of the executable or a
@@ -253,49 +273,52 @@ impl HLInterpreter {
     /// a stable UTF-16 buffer address as the token lets that second call return
     /// the already-rendered value without exposing Rust frame storage to Haxe.
     pub(super) fn stack_symbols(
-        &self,
+        &mut self,
         bytecode: &DecodedBytecode,
         frame_hint: *const usize,
-    ) -> Vec<Box<[u16]>> {
+    ) -> Vec<usize> {
         let compiled = self.compiled_stack_functions(frame_hint);
-        let mut symbols: Vec<Box<[u16]>> = compiled
-            .iter()
+        let mut symbols: Vec<usize> = Vec::with_capacity(compiled.len() + self.stack.len() + 1);
+        for &function_index in &compiled {
             // Cranelift does not currently expose per-instruction native PC
             // offsets. Use the function's first debug position; the opaque
             // token remains structurally valid and identifies the exact Haxe
             // function while source-map plumbing is added independently.
-            .filter_map(|&function_index| Self::stack_symbol(bytecode, function_index, 0))
-            .collect();
+            if let Some(symbol) = self.stack_symbol(bytecode, function_index, 0) {
+                symbols.push(symbol);
+            }
+        }
         let mut last = compiled.last().copied();
-        for &function_index in self.jit_bridge_callers.iter().rev() {
+        // Indexed rather than iterated: symbolicating borrows the interpreter
+        // mutably to fill the cache.
+        for i in (0..self.jit_bridge_callers.len()).rev() {
+            let function_index = self.jit_bridge_callers[i];
             if last == Some(function_index) {
                 continue;
             }
-            if let Some(symbol) = Self::stack_symbol(bytecode, function_index, 0) {
+            if let Some(symbol) = self.stack_symbol(bytecode, function_index, 0) {
                 symbols.push(symbol);
                 last = Some(function_index);
             }
         }
-        for frame in self.stack.iter().rev() {
-            if last == Some(frame.function_index) {
+        for i in (0..self.stack.len()).rev() {
+            let (function_index, pc) = (self.stack[i].function_index, self.stack[i].pc);
+            if last == Some(function_index) {
                 continue;
             }
-            if let Some(symbol) =
-                self.interpreter_stack_symbol(bytecode, frame.function_index, frame.pc)
-            {
+            if let Some(symbol) = self.interpreter_stack_symbol(bytecode, function_index, pc) {
                 symbols.push(symbol);
-                last = Some(frame.function_index);
+                last = Some(function_index);
             }
         }
 
         // NativeStackTrace deliberately discards the outermost raw entry.
         // HashLink's platform unwinders naturally include a C runtime frame;
         // append an equivalent opaque terminator so the last Haxe frame is
-        // retained even when Ash filters all non-JIT PCs above.
+        // retained even when Ash filters all non-JIT PCs above. Findex 0 with
+        // no debug file interns to exactly "fun$0(unknown:0)".
         if !symbols.is_empty() {
-            let mut terminator: Vec<u16> = "fun$0(unknown:0)".encode_utf16().collect();
-            terminator.push(0);
-            symbols.push(terminator.into_boxed_slice());
+            symbols.push(self.intern_stack_symbol(bytecode, (0, -1, 0)));
         }
         symbols
     }
@@ -305,12 +328,7 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         frame_hint: *const usize,
     ) -> usize {
-        let symbols = self.stack_symbols(bytecode, frame_hint);
-        self.call_stack_symbols = symbols
-            .iter()
-            .map(|symbol| symbol.as_ptr() as usize)
-            .collect();
-        self.stack_symbol_arena.extend(symbols);
+        self.call_stack_symbols = self.stack_symbols(bytecode, frame_hint);
         self.call_stack_symbols.len()
     }
 

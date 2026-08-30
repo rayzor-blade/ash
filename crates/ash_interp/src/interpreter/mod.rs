@@ -261,7 +261,7 @@ struct HLExceptionPropagation {
     /// uncaught exception reaches the CLI the frames it came from have been
     /// popped, and "Uncaught exception: Null access" with nothing else is the
     /// report HashLink users are least able to act on.
-    stack: Vec<String>,
+    stack: Vec<std::sync::Arc<str>>,
 }
 
 impl std::fmt::Display for HLExceptionPropagation {

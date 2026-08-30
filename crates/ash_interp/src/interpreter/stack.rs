@@ -6,7 +6,10 @@
 //! reaches `HLInterpreter`'s private fields without widening them.
 
 use anyhow::Result;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::Arc;
 
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::hl_bindings as hl;
@@ -20,37 +23,60 @@ impl HLInterpreter {
     /// The interpreted call stack as HashLink reports it: innermost first,
     /// `Class.method(file:line)` per frame, using the debug info the bytecode
     /// already carries.
-    pub(super) fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<String> {
+    pub(super) fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<Arc<str>> {
         let bc = self.reloaded_bytecode.unwrap_or(bytecode);
         let names = self.function_name_table(bc);
-        self.stack
-            .iter()
-            .rev()
-            .map(|frame| {
-                // Never drop a frame: a trace that silently omits the frames
-                // it could not name is worse than one that admits them, since
-                // the gap is invisible and the caller looks like the callee.
-                let Some(func) = bc.functions.get(frame.function_index) else {
-                    return format!("<unresolved findex {}>", frame.function_index);
-                };
-                let name = names
-                    .get(&(func.findex as usize))
-                    .cloned()
-                    .unwrap_or_else(|| func.name());
-                let debug_pc = frame.pc.min(func.ops.len().saturating_sub(1));
-                let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
-                let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
-                match usize::try_from(file_idx)
-                    .ok()
-                    .and_then(|i| bc.debug_files.get(i))
-                {
-                    Some(file) => format!("{name}({file}:{line})"),
-                    // No debug info (a release build): the name alone still
-                    // says which function, which beats printing nothing.
-                    None => name,
-                }
-            })
-            .collect()
+        // Same reasoning as the UTF-16 symbols this module interns for the
+        // native side: a frame's label is a pure function of its findex and
+        // source position, a throw renders every frame on the stack, and
+        // MBHaxe throws continuously while loading. Rendering them afresh put
+        // `format!` at 96% of this function's time in a sampled freeze.
+        // Keyed per bytecode, matching `function_name_table`, so a hot reload
+        // does not serve labels built against the old program.
+        thread_local! {
+            static FRAMES: RefCell<Option<(usize, HashMap<(usize, i32, i32), Arc<str>>)>> =
+                const { RefCell::new(None) };
+        }
+        let bc_key = bc as *const DecodedBytecode as usize;
+        FRAMES.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if !matches!(slot.as_ref(), Some((k, _)) if *k == bc_key) {
+                *slot = Some((bc_key, HashMap::new()));
+            }
+            let cache = &mut slot.as_mut().expect("just populated").1;
+            self.stack
+                .iter()
+                .rev()
+                .map(|frame| {
+                    // Never drop a frame: a trace that silently omits the
+                    // frames it could not name is worse than one that admits
+                    // them, since the gap is invisible and the caller looks
+                    // like the callee.
+                    let Some(func) = bc.functions.get(frame.function_index) else {
+                        return Arc::from(
+                            format!("<unresolved findex {}>", frame.function_index).as_str(),
+                        );
+                    };
+                    let key = Self::stack_symbol_key(func, frame.pc);
+                    Arc::clone(cache.entry(key).or_insert_with(|| {
+                        let (findex, file_idx, line) = key;
+                        let name = names
+                            .get(&findex)
+                            .cloned()
+                            .unwrap_or_else(|| func.name());
+                        match usize::try_from(file_idx)
+                            .ok()
+                            .and_then(|i| bc.debug_files.get(i))
+                        {
+                            Some(file) => Arc::from(format!("{name}({file}:{line})").as_str()),
+                            // No debug info (a release build): the name alone
+                            // still says which function, which beats nothing.
+                            None => Arc::from(name.as_str()),
+                        }
+                    }))
+                })
+                .collect()
+        })
     }
 
     /// The `(findex, file, line)` a frame symbolicates to. Two reads off the

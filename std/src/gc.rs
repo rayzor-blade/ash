@@ -240,6 +240,10 @@ struct MutatorSnapshot {
 
 struct MutatorRecord {
     thread: u64,
+    /// How this thread came to be a mutator. Only used to explain a slow world
+    /// stop: the three kinds reach a safepoint by quite different means, and
+    /// which one is late is the whole diagnosis.
+    role: &'static str,
     stack_top: usize,
     stopped_sp: usize,
     saved_regs: [usize; CALLEE_SAVED_WORDS],
@@ -266,12 +270,18 @@ static MUTATOR_WORLD: LazyLock<MutatorWorld> = LazyLock::new(|| MutatorWorld {
     changed: std::sync::Condvar::new(),
 });
 static GC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// When the current stop was asked for, as nanoseconds since the process's
+/// first collection. A thread that takes a long time to arrive reports where
+/// it was — the collector cannot walk another thread's stack, but the thread
+/// itself can, once it gets here.
+static GC_STOP_ASKED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GC_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 thread_local! {
     static MUTATOR_REGISTERED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn register_current_mutator(stack_top: usize) {
+fn register_current_mutator(stack_top: usize, role: &'static str) {
     if stack_top == 0 {
         return;
     }
@@ -285,6 +295,7 @@ fn register_current_mutator(stack_top: usize) {
     } else {
         world.mutators.push(MutatorRecord {
             thread,
+            role,
             stack_top,
             stopped_sp: 0,
             saved_regs: [0; CALLEE_SAVED_WORDS],
@@ -337,7 +348,7 @@ pub(crate) fn gc_register_current_os_thread() {
     };
 
     if stack_top != 0 {
-        register_current_mutator(stack_top);
+        register_current_mutator(stack_top, "os-worker");
     }
 }
 
@@ -390,6 +401,22 @@ pub(crate) fn gc_safepoint() {
         record.stopped_sp = sp;
         record.saved_regs = saved_regs;
         record.parked = true;
+    }
+    // Arriving late is the interesting case: the collector can name which
+    // thread it waited on but not what that thread was doing, and only the
+    // thread itself can answer that.
+    if gc_stats_enabled() {
+        let asked = GC_STOP_ASKED_NS.load(Ordering::Relaxed);
+        let waited_ms = GC_EPOCH.elapsed().as_nanos() as u64 - asked;
+        let waited_ms = waited_ms as f64 / 1e6;
+        if waited_ms > 20.0 {
+            eprintln!(
+                "[gc] thread {:#x} reached a safepoint {:.1}ms after the stop was asked for; it was at:\n{}",
+                thread,
+                waited_ms,
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
     }
     MUTATOR_WORLD.changed.notify_all();
     while world.stop_requested {
@@ -482,6 +509,10 @@ fn stop_mutator_world() -> StoppedWorld {
     if needs_stop {
         world.stop_requested = true;
         world.collector = collector;
+        GC_STOP_ASKED_NS.store(
+            GC_EPOCH.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
         GC_STOP_REQUESTED.store(true, Ordering::Release);
         crate::fiber::request_fiber_poll();
         // A mutator may already be sleeping in the GC-lock slow path. Wake it
@@ -507,7 +538,7 @@ fn stop_mutator_world() -> StoppedWorld {
                     .mutators
                     .iter()
                     .filter(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
-                    .map(|m| format!("thread {:#x}", m.thread))
+                    .map(|m| format!("{} {:#x}", m.role, m.thread))
                     .collect();
                 eprintln!(
                     "[gc] world stop waiting {:.1}ms on {} of {} mutators: {}",
@@ -3430,7 +3461,7 @@ pub unsafe extern "C" fn hlp_gc_init() {
 /// Called once at JIT entry before running user code.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
-    register_current_mutator(top);
+    register_current_mutator(top, "runtime");
 }
 
 /// HashLink-compatible OS-mutator registration used by HDLL-created worker
@@ -3438,7 +3469,10 @@ pub unsafe extern "C" fn hlp_gc_set_stack_top(top: usize) {
 /// both feed the same per-thread registry.
 #[no_mangle]
 pub unsafe extern "C" fn hl_register_thread(stack_top: *mut c_void) {
-    register_current_mutator(stack_top as usize);
+    // A thread a native library started. It runs native code and reaches a
+    // safepoint only by calling back into the runtime or by marking itself
+    // blocking, so it is the likeliest to be late.
+    register_current_mutator(stack_top as usize, "hdll");
 }
 
 #[no_mangle]

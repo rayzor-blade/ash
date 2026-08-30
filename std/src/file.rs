@@ -322,6 +322,23 @@ unsafe fn state_of<'a>(f: *mut c_void) -> Option<&'a Mutex<FileState>> {
 }
 
 // DEFINE_PRIM(_FILE, file_open, _BYTES _I32 _BOOL)
+/// Run a blocking file operation with the collector told to expect it.
+///
+/// A thread inside a read is not going to reach a safepoint until the kernel
+/// returns, and the collector would otherwise wait for it: one MBHaxe world
+/// stop spent 352ms waiting on a fiber worker. `gc_set_blocking` publishes the
+/// thread's stack pointer and callee-saved registers first, so the stack stays
+/// conservatively scannable for the whole call — the same contract the socket
+/// primitives already use.
+#[inline]
+fn blocking_io<T>(f: impl FnOnce() -> T) -> T {
+    // SAFETY: the primitive only touches this thread's mutator record.
+    unsafe { crate::thread::hlp_blocking(true) };
+    let out = f();
+    unsafe { crate::thread::hlp_blocking(false) };
+    out
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_file_open(
     name: *const vbyte,
@@ -388,7 +405,7 @@ pub unsafe extern "C" fn hlp_file_write(
     // fwrite reports the count that made it; a partial write behind the
     // staging buffer cannot be attributed, so a failure reports none, which
     // is the short count Haxe already turns into an Eof.
-    match lock(m).write(data) {
+    match blocking_io(|| lock(m).write(data)) {
         Ok(n) => n as c_int,
         Err(_) => 0,
     }
@@ -409,7 +426,7 @@ pub unsafe extern "C" fn hlp_file_read(
         return 0;
     }
     let out = std::slice::from_raw_parts_mut(buf.add(pos as usize), len as usize);
-    match lock(m).read(out) {
+    match blocking_io(|| lock(m).read(out)) {
         Ok(n) => n as c_int,
         Err(_) => 0,
     }
@@ -422,7 +439,7 @@ pub unsafe extern "C" fn hlp_file_write_char(f: *mut c_void, c: c_int) -> bool {
         return false;
     };
     let byte = [c as u8];
-    matches!(lock(m).write(&byte), Ok(1))
+    matches!(blocking_io(|| lock(m).write(&byte)), Ok(1))
 }
 
 // DEFINE_PRIM(_I32, file_read_char, _FILE)
@@ -432,7 +449,7 @@ pub unsafe extern "C" fn hlp_file_read_char(f: *mut c_void) -> c_int {
         return -2;
     };
     let mut byte = [0u8; 1];
-    match lock(m).read(&mut byte) {
+    match blocking_io(|| lock(m).read(&mut byte)) {
         Ok(1) => byte[0] as c_int,
         _ => -2,
     }

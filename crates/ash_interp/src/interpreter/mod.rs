@@ -534,6 +534,9 @@ pub struct HLInterpreter {
     /// Exception objects resolve these lazily, long after a newer exception may
     /// have replaced the current stack snapshot.
     stack_symbols_interned: std::collections::HashMap<(usize, i32, i32), Box<[u16]>>,
+    /// Whether `ASH_STALL_LOG` armed the watchdog, read once so the dispatch
+    /// loops branch on a field rather than an atomic.
+    stall_armed: bool,
     /// Counts dispatch steps so the stall watchdog is polled cheaply, and so
     /// a report can quote throughput. See `report_stall_if_asked`.
     stall_tick: u32,
@@ -875,6 +878,7 @@ impl HLInterpreter {
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
             stack_symbols_interned: std::collections::HashMap::new(),
+            stall_armed: std::env::var_os("ASH_STALL_LOG").is_some(),
             stall_tick: 0,
             stall_tick_reported: 0,
             stall_reported_at: std::time::Instant::now(),
@@ -4599,14 +4603,14 @@ impl HLInterpreter {
             }
         };
 
-        {
+        if self.ssa.needs_prepare(func_idx) {
             let _compiling = CompileBlocking::enter(self.fn_blocking);
             self.ssa.prepare(bc, func_idx);
         }
         if let Some(prep) = self.ssa.body(func_idx) {
             return self.execute_ssa_function(bc, native_resolver, func_idx, prep, args);
         }
-        {
+        if self.air.needs_prepare(func_idx) {
             let _compiling = CompileBlocking::enter(self.fn_blocking);
             self.air.prepare(bc, func_idx);
         }

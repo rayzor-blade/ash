@@ -79,7 +79,15 @@ impl HLInterpreter {
     /// the frame stack is owned by this thread and racing another one on it
     /// would be undefined. Polled once every 4096 calls, so with the watchdog
     /// disarmed this costs an increment and a predictable branch.
+    #[inline(always)]
     pub(super) fn report_stall_if_asked(&mut self, bytecode: &DecodedBytecode) {
+        // Read from the interpreter rather than an atomic: this sits in both
+        // dispatch loops, and when the watchdog is disarmed -- every normal
+        // run -- it should cost one predictable branch. Polling the atomic
+        // unconditionally cost 2% of an interpreted mandelbrot.
+        if !self.stall_armed {
+            return;
+        }
         self.stall_tick = self.stall_tick.wrapping_add(1);
         if self.stall_tick & 0xFFF != 0 || !STALL_PING.swap(false, Ordering::Relaxed) {
             return;

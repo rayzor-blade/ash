@@ -276,6 +276,12 @@ impl Cache {
     /// Called once per function at entry, never per call: `optimize_with` runs
     /// the whole pass pipeline, which is far more expensive than interpreting
     /// the function it is optimizing.
+    /// Whether [`Self::prepare`] would do more than look up a cached body.
+    /// See the note on `crate::ssa::Cache::needs_prepare`.
+    pub fn needs_prepare(&self, func_idx: usize) -> bool {
+        enabled() && matches!(self.bodies.get(func_idx), None | Some(Body::Untried))
+    }
+
     pub fn prepare(&mut self, bc: &DecodedBytecode, func_idx: usize) {
         if !enabled() {
             return;

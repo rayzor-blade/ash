@@ -148,6 +148,16 @@ pub struct Cache {
 
 impl Cache {
     /// Decide `func_idx`'s body, if it has not been decided already.
+    /// Whether [`Self::prepare`] would do more than look up a cached body.
+    ///
+    /// The caller wraps preparation in a blocking scope so the collector does
+    /// not wait out a compile; that scope costs two trips through the world
+    /// lock, which is far more than the early-out it would be guarding on the
+    /// overwhelmingly common cached path.
+    pub fn needs_prepare(&self, func_idx: usize) -> bool {
+        enabled() && !matches!(self.bodies.get(func_idx), Some(Body::Ready(_)) | Some(Body::Raw))
+    }
+
     pub fn prepare(&mut self, bc: &DecodedBytecode, func_idx: usize) {
         if !enabled() {
             return;

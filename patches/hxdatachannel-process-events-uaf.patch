@@ -1,0 +1,117 @@
+From: ash runtime investigation
+Subject: [PATCH] process_events: unlink each node before dispatching it
+
+Two heap bugs in the callback queue, both reproducible under MBHaxe's
+multiplayer host/join and both ending in
+
+    malloc: *** error for object 0x...: pointer being freed was not allocated
+
+with the abort inside datachannel_process_events.
+
+1. hl_dyn_call runs Haxe, and that Haxe calls back into process_events.
+   An hl_mutex is recursive, so it does not keep the same thread out. The
+   node was only unlinked *after* the dispatch, so the nested drain found
+   the same list head and freed arg1.v.bytes a second time. Observed
+   directly with a probe: "REENTRANT process_events depth=2" immediately
+   followed by "DOUBLE FREE arg1 cb=onDescription depth=2".
+
+2. Drained nodes were freed without ever clearing *_end, so the end
+   pointer named freed memory. Between the consumer releasing the mutex on
+   the last node and re-acquiring it to reset the pointer, a producer's
+   *_alloc took its `end != NULL` branch and wrote end->next into the node
+   just freed -- straight into malloc's metadata.
+
+   The trailing `if (looped) { *_end = NULL; }` blocks were themselves a
+   bug: the drain can leave early through `else break` with the list still
+   populated, and clearing the end pointer there makes the next *_alloc
+   overwrite the list head, orphaning every queued node while their
+   semaphore permits stay outstanding.
+
+Both are fixed by unlinking a node, and clearing the end pointer with it,
+under the same lock that frees it. The consumer also re-reads the head
+under that lock, since the value sampled before acquiring it can have been
+replaced by a producer.
+
+Note for anyone tempted to add a reentrancy guard instead: a depth counter
+does not work here. A Haxe exception inside hl_dyn_call unwinds by longjmp
+straight past process_events, so the counter is never decremented and every
+later call returns early -- callbacks then queue forever and exactly one
+ever dispatches. Unlinking before dispatch is what makes reentrancy safe.
+---
+--- a/cpp/src/datachannel.c	2026-08-30 00:24:51
++++ b/cpp/src/datachannel.c	2026-08-30 01:38:00
+@@ -367,6 +367,15 @@
+         datachannel_callback* res = datachannel_callbacks;
+ 
+         hl_mutex_acquire(callback_result_mutex);
++        /* Unlink before dispatching. hl_dyn_call below runs Haxe, and that
++           Haxe calls back into process_events; an hl_mutex is recursive, so it
++           does not keep the same thread out. While this node is still the list
++           head the nested drain picks it up again and frees it a second time.
++           Clearing the end pointer here too keeps it from naming freed memory,
++           which the next *_alloc would write through. */
++        datachannel_callbacks = res->next;
++        if (datachannel_callbacks == NULL)
++            datachannel_callbacks_end = NULL;
+         hl_rtc_datachannel* hldc = hl_rtc_make_datachannel(res->dc);
+ 
+         vdynamic* args[2];
+@@ -399,18 +408,11 @@
+         }
+ 
+         
+-        datachannel_callbacks = datachannel_callbacks->next;
+         free(res);
+         hl_mutex_release(callback_result_mutex);
+ 
+         looped = true;
+     }
+-    if (looped) 
+-    {
+-        hl_mutex_acquire(callback_result_mutex);
+-        datachannel_callbacks_end = NULL;
+-        hl_mutex_release(callback_result_mutex);
+-    }
+     looped = false;
+     while (callback_results != NULL)
+     {
+@@ -419,6 +421,18 @@
+         if (hl_semaphore_try_acquire(callback_result_semaphore, NULL))
+         {
+             hl_mutex_acquire(callback_result_mutex);
++            /* Re-read under the lock: `res` above was sampled without it, and
++               a producer can install a new head while this thread waits. */
++            res = callback_results;
++            if (res == NULL)
++            {
++                hl_mutex_release(callback_result_mutex);
++                break;
++            }
++            /* Unlink before dispatching, for the reason given above. */
++            callback_results = res->next;
++            if (callback_results == NULL)
++                callback_results_end = NULL;
+             vdynamic* args[2];
+             vdynamic arg1 = res->arg1;
+             vdynamic arg2 = res->arg2;
+@@ -456,7 +470,6 @@
+                 }
+             }
+ 
+-            callback_results = callback_results->next;
+             free(res);
+             hl_mutex_release(callback_result_mutex);
+ 
+@@ -464,12 +477,6 @@
+         }
+         else
+             break;
+-    }
+-    if (looped)
+-    {
+-        hl_mutex_acquire(callback_result_mutex);
+-        callback_results_end = NULL;
+-        hl_mutex_release(callback_result_mutex);
+     }
+ }
+ 

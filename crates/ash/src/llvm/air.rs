@@ -105,6 +105,17 @@ fn pass_options() -> AirPassOptions {
 /// - No loop at all means the cost is per invocation. A SELF call does not
 ///   count: the body is already in whatever module holds the function, so
 ///   fib needs nothing else and gains most of all — 72ms to 17ms.
+/// Whether a shared-module promotion could inline anything at all.
+///
+/// The shared module's only product is inlined callees: it lowers the whole
+/// transitive closure so the inliner has bodies to work with, and that is what
+/// costs 2287ms per promotion on MBHaxe. If no call site in the root has a
+/// callee small enough to inline, the closure is lowered for nothing --
+/// measured, 8 of 21 promotions inlined nothing and paid 8158ms between them.
+///
+/// Direct calls name their target. Indirect ones are asked of the same
+/// call-site profile the devirtualiser itself consults, so a monomorphic
+/// closure or method site counts exactly when the guard would fire.
 pub(crate) fn promotion_wants_full_module(
     bc: &DecodedBytecode,
     f: &HLFunction,

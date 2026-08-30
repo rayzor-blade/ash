@@ -447,6 +447,33 @@ impl<'ctx> JITModule<'ctx> {
         *SPEC.get_or_init(|| std::env::var("ASH_PROMOTE_MODULE").ok().map(|v| v != "0"))
     }
 
+    /// How many function bodies the shared module may hold before promotions
+    /// stop being compiled into it, or `None` to let it grow without bound.
+    ///
+    /// Off by default: capping at 1024 cut MBHaxe's shared middle end from
+    /// 61.9s to 24.4s, but the game hung twice on the capped arm and the
+    /// cause was never pinned down -- both hangs were also a second launch
+    /// seconds after a SIGKILL, with a person playing the run being timed, so
+    /// the evidence does not separate the cap from the confounds. Turning it
+    /// on wants an A/B where the game is driven the same way in both arms.
+    fn promote_module_cap() -> Option<usize> {
+        static CAP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        *CAP.get_or_init(|| {
+            std::env::var("ASH_PROMOTE_MODULE_CAP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+    }
+
+    /// Function bodies currently in the shared module -- what a promotion into
+    /// it pays the middle end to walk.
+    fn shared_module_bodies(&self) -> usize {
+        self.module
+            .get_functions()
+            .filter(|f| f.count_basic_blocks() > 0)
+            .count()
+    }
+
     /// Whether `findex` compiles into a module of its own.
     fn promote_uses_own_module(&self, findex: usize) -> bool {
         if self.lazy_compilation {
@@ -454,6 +481,18 @@ impl<'ctx> JITModule<'ctx> {
         }
         if let Some(forced) = Self::promote_module_override() {
             return forced;
+        }
+        // A promotion into the shared module re-optimizes the whole module, so
+        // its cost tracks the module's size rather than the promoted function:
+        // measured on MBHaxe, cost correlates +0.93 with body count and -0.07
+        // with the root's own size, and a 4-instruction root cost 2.3s. Once
+        // the module is large enough for that walk to outweigh the inlining
+        // the shared path buys, promote alone instead. Benchmarks reach 19
+        // bodies, so the cap only engages on program-sized workloads.
+        if let Some(cap) = Self::promote_module_cap() {
+            if self.shared_module_bodies() >= cap {
+                return true;
+            }
         }
         let Some(raw) = self
             .bytecode

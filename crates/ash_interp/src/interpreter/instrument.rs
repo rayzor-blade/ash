@@ -147,3 +147,71 @@ impl HLInterpreter {
         out
     }
 }
+
+/// Whether the array-layout probe is on. See its use in `GetArray`.
+pub(super) fn stride_probe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_STRIDE_PROBE").is_ok())
+}
+
+/// Report, once per program, whether the referenced objects in one array sit
+/// at a constant stride.
+///
+/// # Safety
+/// `arr` must be a live `varray`: header at 0, size at 16, data at 24.
+pub(super) unsafe fn stride_probe(arr: *const u8, func: &str) {
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let size = *(arr.add(16) as *const i32);
+    if size < 4 || DONE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let n = size.min(64) as usize;
+    let data = arr.add(24) as *const usize;
+    let mut ptrs = Vec::with_capacity(n);
+    for i in 0..n {
+        let p = *data.add(i);
+        // Only pointer-like elements say anything about object layout.
+        if p < 0x1000 || p % 8 != 0 {
+            return;
+        }
+        ptrs.push(p);
+    }
+    let deltas: Vec<i64> = ptrs.windows(2).map(|w| w[1] as i64 - w[0] as i64).collect();
+    let first = deltas[0];
+    let constant = deltas.iter().all(|&d| d == first);
+    let mut uniq: Vec<i64> = deltas.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    // The histogram matters more than the verdict: a stride that holds for
+    // most of an array with a few jumps is a different (and checkable)
+    // situation from one that is genuinely scattered.
+    {
+        let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for &d in &deltas {
+            *counts.entry(d).or_default() += 1;
+        }
+        let mut rows: Vec<(i64, usize)> = counts.into_iter().collect();
+        rows.sort_by_key(|&(_, c)| std::cmp::Reverse(c));
+        let dominant = rows[0];
+        eprintln!(
+            "[stride-probe] delta histogram: {:?} — dominant {} covers {}/{}",
+            &rows[..rows.len().min(6)],
+            dominant.0,
+            dominant.1,
+            deltas.len()
+        );
+    }
+    eprintln!(
+        "[stride-probe] {func}: {n} elements, deltas {} — {}",
+        if uniq.len() <= 4 {
+            format!("{uniq:?}")
+        } else {
+            format!("{} distinct, first={first}", uniq.len())
+        },
+        if constant {
+            format!("CONSTANT STRIDE {first} bytes: a[i].field is strided, not a gather")
+        } else {
+            "NOT constant: a[i].field needs a gather".to_string()
+        }
+    );
+}

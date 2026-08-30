@@ -22,8 +22,9 @@ use ash_core::hl_bindings::{_vclosure, hl_type};
 
 use crate::tiering::env_flag;
 
+use super::instrument::{stride_probe, stride_probe_enabled};
 use super::{
-    func_of, hash_field_name, native_of, run_with_hl_trap, stride_probe, stride_probe_enabled, FnAllocDynObj, FnAllocObj, FnAllocVirtual, HLInterpreter, StepResult,
+    func_of, hash_field_name, native_of, run_with_hl_trap, FnAllocDynObj, FnAllocObj, FnAllocVirtual, HLInterpreter, StepResult,
 };
 
 impl HLInterpreter {

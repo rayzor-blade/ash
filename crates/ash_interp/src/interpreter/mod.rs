@@ -288,6 +288,48 @@ use crate::tiering::env_flag;
 pub use crate::tiering::{TierMode, TierPreset, TieredConfig, TieredStats};
 use crate::tiering::*;
 
+/// Tells the collector this thread will not reach a safepoint for a while.
+///
+/// Preparing a body runs the AIR pipeline -- lower, inline, verify, build a
+/// dominator tree -- on whichever thread first calls the function, and there
+/// is no poll anywhere in it. A fiber worker doing that held every world stop
+/// open for its whole duration: 150-350ms on MBHaxe, sampled to
+/// `Inlining::is_stack_sensitive_inner` and `lower_with`. The pipeline builds
+/// Rust structures over bytecode and touches no GC object, and `hlp_blocking`
+/// publishes the stack pointer and callee-saved registers first, so the
+/// interpreter frames underneath stay conservatively scannable throughout.
+impl HLInterpreter {
+    fn poll_gap_limit() -> Option<u128> {
+        static V: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
+        *V.get_or_init(|| {
+            std::env::var("ASH_POLL_GAP_MS")
+                .ok()
+                .and_then(|v| v.parse::<u128>().ok())
+        })
+    }
+}
+
+struct CompileBlocking(*mut c_void);
+
+impl CompileBlocking {
+    fn enter(f: *mut c_void) -> Self {
+        if !f.is_null() {
+            type FnBlocking = unsafe extern "C" fn(bool);
+            unsafe { (std::mem::transmute::<*mut c_void, FnBlocking>(f))(true) };
+        }
+        Self(f)
+    }
+}
+
+impl Drop for CompileBlocking {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            type FnBlocking = unsafe extern "C" fn(bool);
+            unsafe { (std::mem::transmute::<*mut c_void, FnBlocking>(self.0))(false) };
+        }
+    }
+}
+
 struct HlpName<'a>(&'a str);
 impl std::fmt::Display for HlpName<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -498,6 +540,9 @@ pub struct HLInterpreter {
     /// do not necessarily call a blocking primitive, so their worker fibers
     /// need bounded turns from the AIR V2 dispatcher itself.
     fn_fiber_poll: *mut c_void,
+    /// `hlp_blocking`, used to excuse this thread from a world stop while it
+    /// prepares a body. See `CompileBlocking`.
+    fn_blocking: *mut c_void,
     /// AIR V2 work units remaining before the next fiber scheduling turn.
     fiber_poll_budget: u32,
     /// Whether GC globals/stack top were initialized for this interpreter.
@@ -517,6 +562,11 @@ pub struct HLInterpreter {
     /// Counts dispatch steps so the stall watchdog is polled cheaply, and so
     /// a report can quote throughput. See `report_stall_if_asked`.
     stall_tick: u32,
+    /// When this thread last reached a GC poll, for `ASH_POLL_GAP_MS`.
+    last_poll_at: std::time::Instant,
+    /// Bytecode pointer kept for the poll-gap report, which has no `bytecode`
+    /// argument of its own.
+    bytecode_for_gap: *const DecodedBytecode,
     stall_tick_reported: u32,
     stall_reported_at: std::time::Instant,
     /// Opaque `hl_symbol` tokens backing the most recent call-stack query.
@@ -770,6 +820,9 @@ impl HLInterpreter {
         let fn_fiber_poll = native_resolver
             .resolve_function("std", "hlp_fiber_poll")
             .unwrap_or(std::ptr::null_mut());
+        let fn_blocking = native_resolver
+            .resolve_function("std", "hlp_blocking")
+            .unwrap_or(std::ptr::null_mut());
         HLInterpreter {
             globals,
             stack: Vec::with_capacity(64),
@@ -837,6 +890,7 @@ impl HLInterpreter {
             fn_gc_set_stack_top,
             fn_gc_set_globals,
             fn_fiber_poll,
+            fn_blocking,
             fiber_poll_budget: FIBER_POLL_WORK,
             gc_runtime_initialized: false,
             utf16_strings: HashMap::new(),
@@ -844,6 +898,8 @@ impl HLInterpreter {
             virtual_fields: HashMap::new(),
             stack_symbols_interned: std::collections::HashMap::new(),
             stall_tick: 0,
+            last_poll_at: std::time::Instant::now(),
+            bytecode_for_gap: std::ptr::null(),
             stall_tick_reported: 0,
             stall_reported_at: std::time::Instant::now(),
             call_stack_symbols: Vec::new(),
@@ -3661,6 +3717,27 @@ impl HLInterpreter {
             return;
         }
         self.fiber_poll_budget = FIBER_POLL_WORK;
+        // `ASH_POLL_GAP_MS`: report how long this thread went without polling,
+        // and what it was running. A world stop waits for the slowest poll, so
+        // the gap IS the stall -- and unlike a sampler or a native timer, this
+        // sees the gap whatever caused it.
+        if let Some(limit) = Self::poll_gap_limit() {
+            let now = std::time::Instant::now();
+            let gap = now.duration_since(self.last_poll_at);
+            self.last_poll_at = now;
+            if gap.as_millis() >= limit {
+                let bc = self.reloaded_bytecode.unwrap_or(unsafe { &*self.bytecode_for_gap });
+                let stack = self.capture_call_stack(bc);
+                eprintln!(
+                    "[poll-gap] {:.1}ms without a poll on {}, stack innermost first:",
+                    gap.as_secs_f64() * 1e3,
+                    std::thread::current().name().unwrap_or("main"),
+                );
+                for frame in stack.iter().take(12) {
+                    eprintln!("[poll-gap]   {frame}");
+                }
+            }
+        }
         if self.fn_fiber_poll.is_null() {
             return;
         }
@@ -4425,6 +4502,7 @@ impl HLInterpreter {
         func_idx: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
+        self.bytecode_for_gap = bytecode as *const DecodedBytecode;
         self.report_stall_if_asked(bytecode);
         // Use reloaded bytecode if available (hot-reload swapped function bodies)
         let using_reloaded = self.reloaded_bytecode.is_some();
@@ -4485,11 +4563,17 @@ impl HLInterpreter {
             }
         };
 
-        self.ssa.prepare(bc, func_idx);
+        {
+            let _compiling = CompileBlocking::enter(self.fn_blocking);
+            self.ssa.prepare(bc, func_idx);
+        }
         if let Some(prep) = self.ssa.body(func_idx) {
             return self.execute_ssa_function(bc, native_resolver, func_idx, prep, args);
         }
-        self.air.prepare(bc, func_idx);
+        {
+            let _compiling = CompileBlocking::enter(self.fn_blocking);
+            self.air.prepare(bc, func_idx);
+        }
         let func = self.air.body(bc, func_idx);
         if using_reloaded && env_flag!("ASH_DBG_RELOAD") {
             eprintln!(

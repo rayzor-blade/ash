@@ -842,9 +842,25 @@ fn growth_factor() -> usize {
     })
 }
 
+/// Reuse the unmarked lines inside blocks a sweep kept. `ASH_GC_RECYCLE=0`
+/// falls back to retaining those blocks whole.
+///
+/// On by default because block-granularity reuse fragments without bound in a
+/// long-running program: measured on MBHaxe, occupancy of the retained blocks
+/// fell 54% -> 41% -> 23% -> 17% while the marked set stayed flat near 195MB,
+/// so 1132MB was held to store 195MB of live data and marking paid to walk
+/// all of it -- pauses reached 362ms and were still growing. Recycling holds
+/// occupancy near 42% and retention near 566MB on the same workload, with a
+/// worst pause of 195ms.
+///
+/// The reason it was off: retaining a block whole hides a live object the
+/// conservative scanner failed to mark, where reusing its line would zero it.
+/// That risk is real, so this is gated on evidence rather than argument --
+/// the suite passes under `ASH_GC_STRESS=1`, which collects on every
+/// allocation, and a full game session ran clean.
 fn recycle_lines() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| matches!(std::env::var("ASH_GC_RECYCLE").as_deref(), Ok("1")))
+    *V.get_or_init(|| !matches!(std::env::var("ASH_GC_RECYCLE").as_deref(), Ok("0")))
 }
 
 /// ASH_GC_HANDBACK=0 stops returning free blocks to the OS. The pages stay
@@ -857,10 +873,12 @@ fn handback_enabled() -> bool {
 }
 
 /// ASH_GC_OCCUPANCY=1: per-collection report of how full the RETAINED blocks
-/// are. Reclamation is block-level, so a 32KB block survives on one marked
-/// line out of 256; with conservative marking one integer that looks like a
-/// pointer is enough. Low mean occupancy means the "live" figure is mostly
-/// retained garbage, and marking cost is being paid for memory that is dead.
+/// are. A 32KB block survives on one marked line out of 256; with
+/// conservative marking one integer that looks like a pointer is enough. Low
+/// mean occupancy means the "live" figure is mostly retained garbage, and
+/// marking cost is being paid for memory that is dead. Watch the trend rather
+/// than one reading: a decaying series is fragmentation, and it is what
+/// `recycle_lines` exists to arrest.
 fn occupancy_stats() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var("ASH_GC_OCCUPANCY").is_ok())

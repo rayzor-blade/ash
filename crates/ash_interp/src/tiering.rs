@@ -639,11 +639,11 @@ fn tiered_compile_tier_inner(
     }
     let code = match (ctx.mode, tier) {
         (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
-        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex, may_block),
+        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex, may_block, Some(bead)),
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
-                compile_with_llvm(ctx, 0, findex, may_block)
+                compile_with_llvm(ctx, 0, findex, may_block, Some(bead))
             } else {
                 cl
             }
@@ -689,7 +689,7 @@ fn tiered_compile_tier_inner(
             // 8ms and 15ms and took the run from 94ms to 400ms. A signal that
             // cannot be read must not be treated as a signal that is absent.
             if ctx.compiled_only || crate::ssa::enabled() {
-                return compile_with_llvm(ctx, 1, findex, may_block);
+                return compile_with_llvm(ctx, 1, findex, may_block, Some(bead));
             }
             // Refusing leaves the bead on Cranelift and is a postponement,
             // not a veto: beadie lowers the tier-1 queued flag when a compile
@@ -706,7 +706,7 @@ fn tiered_compile_tier_inner(
                 }
                 return std::ptr::null_mut();
             }
-            compile_with_llvm(ctx, 1, findex, may_block)
+            compile_with_llvm(ctx, 1, findex, may_block, Some(bead))
         }
         _ => std::ptr::null_mut(),
     };
@@ -1352,11 +1352,17 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
 /// so the mutator declines to queue behind a broker's compile rather than
 /// parking for the length of one. The comment below already recorded what
 /// that parking costs; it just had no way to opt out.
+/// `bead` is consulted after the module lock is taken, not only before it.
+/// Promotions queue behind one mutex and a single compile can hold it for
+/// seconds, so by the time a waiter is served its function may have been
+/// invalidated, blacklisted, or replaced. Compiling it then produces code
+/// nothing will call while every promotion behind it keeps waiting.
 pub(crate) fn compile_with_llvm(
     ctx: &TieredSharedCtx,
     tier: usize,
     findex: usize,
     may_block: bool,
+    bead: Option<&Arc<Bead>>,
 ) -> *mut () {
     // A tier-0 failure permanently invalidates the bead (beadie's primary
     // broker); a tier-1 failure is silent and the bead keeps its current tier.
@@ -1385,6 +1391,21 @@ pub(crate) fn compile_with_llvm(
     // nothing can call the code this would have produced.
     if retier_abandoned() {
         return std::ptr::null_mut();
+    }
+    // The same reasoning per function rather than per program: this waiter may
+    // have sat behind a multi-second compile, and beadie's state is the
+    // authority on whether its result is still wanted.
+    if let Some(bead) = bead {
+        if !bead.is_valid() || bead.is_blacklisted() {
+            if ctx.tier_log {
+                eprintln!(
+                    "[tier] dropping queued tier-{tier} compile for findex={findex}: \
+                     the bead is no longer {}",
+                    if bead.is_blacklisted() { "eligible" } else { "valid" }
+                );
+            }
+            return std::ptr::null_mut();
+        }
     }
     // The OSR work this promotion should carry, computed before the compile
     // so its entries ride the promotion's own module -- one middle-end run,

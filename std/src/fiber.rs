@@ -708,6 +708,12 @@ pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
         // OS instead and only reads the notification the waker leaves.
         worker_trace("park-foreign", waiter.token, deadline.is_some() as u64);
         loop {
+            // Polled here for the same reason `park-main` polls: a registered
+            // mutator that never reaches a safepoint holds up every world
+            // stop for as long as it waits. This loop used to sleep without
+            // one, so a foreign thread parked on a token was invisible to the
+            // collector until its waker arrived.
+            crate::gc::gc_safepoint();
             match wait_status(waiter.token) {
                 Some(WaitStatus::Notified) => {
                     finish_wait(waiter.token);

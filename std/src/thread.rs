@@ -597,7 +597,11 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
 // pacing and never consumes native events itself.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
+    // Told to the collector: a thread asleep here reaches no safepoint, and a
+    // world stop would otherwise wait out the frame.
+    hlp_blocking(true);
     std::thread::sleep(std::time::Duration::from_millis(16));
+    hlp_blocking(false);
 }
 
 #[no_mangle]

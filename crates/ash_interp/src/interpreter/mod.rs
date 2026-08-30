@@ -514,6 +514,11 @@ pub struct HLInterpreter {
     /// Exception objects resolve these lazily, long after a newer exception may
     /// have replaced the current stack snapshot.
     stack_symbols_interned: std::collections::HashMap<(usize, i32, i32), Box<[u16]>>,
+    /// Counts dispatch steps so the stall watchdog is polled cheaply, and so
+    /// a report can quote throughput. See `report_stall_if_asked`.
+    stall_tick: u32,
+    stall_tick_reported: u32,
+    stall_reported_at: std::time::Instant,
     /// Opaque `hl_symbol` tokens backing the most recent call-stack query.
     call_stack_symbols: Vec<usize>,
     /// Stack captured at the most recent non-rethrow exception origin.
@@ -838,6 +843,9 @@ impl HLInterpreter {
             field_hash_cache: HashMap::new(),
             virtual_fields: HashMap::new(),
             stack_symbols_interned: std::collections::HashMap::new(),
+            stall_tick: 0,
+            stall_tick_reported: 0,
+            stall_reported_at: std::time::Instant::now(),
             call_stack_symbols: Vec::new(),
             exception_stack_symbols: Vec::new(),
             tiered_runtime: None,
@@ -2157,6 +2165,7 @@ impl HLInterpreter {
         native_resolver: &NativeFunctionResolver,
     ) -> Result<NanBoxedValue> {
         self.ensure_gc_runtime_initialized();
+        stack::arm_stall_watchdog();
         // Initialize constants (pre-populated globals) before running
         self.init_constants(bytecode, native_resolver)?;
 
@@ -4416,6 +4425,7 @@ impl HLInterpreter {
         func_idx: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
+        self.report_stall_if_asked(bytecode);
         // Use reloaded bytecode if available (hot-reload swapped function bodies)
         let using_reloaded = self.reloaded_bytecode.is_some();
         let bc: &DecodedBytecode = self.reloaded_bytecode.unwrap_or(bytecode);
@@ -4537,6 +4547,9 @@ impl HLInterpreter {
         func_idx: usize,
     ) -> Result<NanBoxedValue> {
         loop {
+            // Same reason as the SSA block loop: a Haxe loop that makes no
+            // calls is invisible to a poll placed at function entry.
+            self.report_stall_if_asked(bytecode);
             self.fiber_safe_point(1);
             let func = self.air.body(bytecode, func_idx);
             let frame = self.stack.last().unwrap();

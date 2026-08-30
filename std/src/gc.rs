@@ -2601,13 +2601,16 @@ impl ImmixAllocator {
         // report that could drift from this one.
         if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
-                "[gc] #{} pause={:.2}ms freed={} blocks live={} blocks ({}) next-trigger={}",
+                "[gc] #{} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
+                 next-trigger={} free={} blocks",
                 n,
+                ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize],
                 pause_ns as f64 / 1e6,
                 freed_blocks,
                 live_blocks,
                 fmt_mb(live_bytes as u64),
                 fmt_mb(self.heap.trigger_threshold as u64),
+                self.heap.free_blocks.len(),
             );
         }
     }

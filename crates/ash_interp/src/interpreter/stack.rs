@@ -9,6 +9,7 @@ use anyhow::Result;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use ash_core::bytecode::DecodedBytecode;
@@ -19,7 +20,64 @@ use crate::values::NanBoxedValue;
 
 use super::{func_of, HLInterpreter};
 
+/// Set by the stall watchdog; cleared by the interpreter once it has reported.
+static STALL_PING: AtomicBool = AtomicBool::new(false);
+
+/// Start the watchdog behind `ASH_STALL_LOG=<seconds>`, if asked.
+///
+/// A wedged run looks identical from a native sampler whether it is stuck or
+/// merely slow -- the interpreter's frames carry no Haxe identity there. This
+/// makes the interpreter name the function it is in.
+pub(super) fn arm_stall_watchdog() {
+    static ARMED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    let Some(secs) = std::env::var("ASH_STALL_LOG")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    else {
+        return;
+    };
+    ARMED.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("ash-stall-watchdog".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(secs.max(1)));
+                STALL_PING.store(true, Ordering::Relaxed);
+            });
+    });
+}
+
 impl HLInterpreter {
+    /// Print this interpreter's own Haxe stack when the watchdog asks.
+    ///
+    /// The interpreter reports itself rather than the watchdog reading it:
+    /// the frame stack is owned by this thread and racing another one on it
+    /// would be undefined. Polled once every 4096 calls, so with the watchdog
+    /// disarmed this costs an increment and a predictable branch.
+    pub(super) fn report_stall_if_asked(&mut self, bytecode: &DecodedBytecode) {
+        self.stall_tick = self.stall_tick.wrapping_add(1);
+        if self.stall_tick & 0xFFF != 0 || !STALL_PING.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        // Throughput as well as position: a main loop that is turning slowly
+        // and one that is turning fast but rendering nothing look identical
+        // from the stack alone.
+        let now = std::time::Instant::now();
+        let steps = self.stall_tick.wrapping_sub(self.stall_tick_reported) as f64;
+        let secs = now.duration_since(self.stall_reported_at).as_secs_f64();
+        self.stall_tick_reported = self.stall_tick;
+        self.stall_reported_at = now;
+        let stack = self.capture_call_stack(bytecode);
+        eprintln!(
+            "[stall] {:.0} dispatch steps/s over {:.1}s; stack innermost first, {} frames:",
+            if secs > 0.0 { steps / secs } else { 0.0 },
+            secs,
+            stack.len()
+        );
+        for frame in stack.iter().take(30) {
+            eprintln!("[stall]   {frame}");
+        }
+    }
+
     /// The interpreted call stack as HashLink reports it: innermost first,
     /// `Class.method(file:line)` per frame, using the debug info the bytecode
     /// already carries.

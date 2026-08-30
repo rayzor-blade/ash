@@ -51,6 +51,10 @@ impl HLInterpreter {
                 .ok_or_else(|| anyhow!("SSA block {} out of range in {}", block, func.name()))?;
             let work = (blk.instrs.len() + 1).min(u32::MAX as usize) as u32;
             self.fiber_safe_point(work);
+            // Polled per block rather than per call: a Haxe loop whose body
+            // AIR inlined makes no calls at all, so a function-entry poll
+            // never sees it.
+            self.report_stall_if_asked(bc);
             // Published for the same reason the opcode loop publishes `pc`:
             // it is the only record of where a frame is when something below
             // it fails.

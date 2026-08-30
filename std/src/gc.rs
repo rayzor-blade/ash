@@ -251,6 +251,15 @@ struct MutatorRecord {
     parked: bool,
     scan_ranges: Vec<(usize, usize)>,
     staged_scan_ranges: Vec<(usize, usize)>,
+    /// A live view of the mutator's range table: `(ranges, len)`, both raw
+    /// pointers into memory it owns for as long as it is registered.
+    ///
+    /// Publishing by copy costs the world lock and an O(depth) copy on every
+    /// interpreted call, which is most of what a recursive program does. With
+    /// a view, a call writes one entry and bumps a length, and the copy
+    /// happens once per collection instead -- at the snapshot below, where the
+    /// mutator is already stopped and the table cannot move under us.
+    scan_live: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -303,6 +312,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             parked: false,
             scan_ranges: Vec::new(),
             staged_scan_ranges: Vec::new(),
+            scan_live: None,
         });
     }
     MUTATOR_REGISTERED.with(|registered| registered.set(true));
@@ -564,7 +574,21 @@ fn stop_mutator_world() -> StoppedWorld {
             stack_top: m.stack_top,
             stack_sp: m.stopped_sp,
             saved_regs: m.saved_regs,
-            scan_ranges: m.scan_ranges.clone(),
+            scan_ranges: match m.scan_live {
+                // SAFETY: the mutator is stopped, and it owns this table for
+                // as long as it is registered. A stop only lands at a
+                // safepoint, never between an entry's write and the length
+                // bump that publishes it.
+                Some((ranges, len)) if ranges != 0 && len != 0 => unsafe {
+                    let n = *(len as *const usize);
+                    std::slice::from_raw_parts(ranges as *const (usize, usize), n)
+                        .iter()
+                        .copied()
+                        .filter(|&(a, sz)| a != 0 && sz != 0)
+                        .collect()
+                },
+                _ => m.scan_ranges.clone(),
+            },
         })
         .collect();
     StoppedWorld {
@@ -3611,6 +3635,24 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
 /// # Safety
 /// `ranges` must point to `count` initialised `(usize, usize)` pairs, and
 /// each pair must describe memory that stays valid until the next publish.
+#[no_mangle]
+/// Hand the collector a live view of this mutator's scan-range table.
+///
+/// Called once; afterwards the mutator maintains the table itself and the
+/// collector reads it when it stops the world. Replaces a per-call copy under
+/// two locks -- on a recursive program that copy was most of the run.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_set_scan_roots_live(
+    ranges: *const (usize, usize),
+    len: *const usize,
+) {
+    let thread = thread_self_fast();
+    let mut world = MUTATOR_WORLD.state.lock().unwrap();
+    if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
+        record.scan_live = Some((ranges as usize, len as usize));
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_set_scan_roots(ranges: *const (usize, usize), count: usize) {
     let mut gc = gc_locked();

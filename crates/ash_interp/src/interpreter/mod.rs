@@ -475,6 +475,13 @@ pub struct HLInterpreter {
     /// `wide_call_args` capacity when the prefix was last built; a change
     /// means its address may have moved and the prefix must be rebuilt.
     scan_wide_cap: usize,
+    /// Length of the published range table, at an address the collector holds.
+    /// Boxed so it does not move when the interpreter does.
+    scan_len: Box<usize>,
+    /// `hlp_gc_set_scan_roots_live`, handed the table and length once.
+    fn_gc_set_scan_roots_live: *mut c_void,
+    /// Whether the collector already holds the live view.
+    scan_live_published: bool,
     /// Marshaled arguments for a call too wide for the inline array in
     /// `call_compiled_function`. Reused, and published to the collector by
     /// `sync_gc_scan_roots` over its whole capacity: boxing a Dynamic
@@ -771,6 +778,9 @@ impl HLInterpreter {
         let fn_gc_add_scan_root = native_resolver
             .resolve_function("std", "hlp_gc_add_scan_root")
             .unwrap_or(std::ptr::null_mut());
+        let fn_gc_set_scan_roots_live = native_resolver
+            .resolve_function("std", "hlp_gc_set_scan_roots_live")
+            .unwrap_or(std::ptr::null_mut());
         let fn_gc_set_scan_roots = native_resolver
             .resolve_function("std", "hlp_gc_set_scan_roots")
             .unwrap_or(std::ptr::null_mut());
@@ -843,6 +853,9 @@ impl HLInterpreter {
             scan_range_buf: Vec::new(),
             scan_prefix_len: 0,
             scan_wide_cap: 0,
+            scan_len: Box::new(0),
+            fn_gc_set_scan_roots_live,
+            scan_live_published: false,
             wide_call_args: Vec::new(),
             wide_call_words: Vec::new(),
             prim_t_i32: prim_t_i32 as *mut c_void,
@@ -1311,12 +1324,22 @@ impl HLInterpreter {
             return;
         }
         let entry = (regs.as_ptr() as usize, std::mem::size_of_val(regs));
-        let mut buf = std::mem::take(&mut self.scan_range_buf);
-        buf.push(entry);
+        // Growing would move the table the collector is reading, so hand that
+        // case back to the full rebuild, which re-reserves and re-publishes.
+        if self.scan_range_buf.len() == self.scan_range_buf.capacity() {
+            self.sync_gc_scan_roots();
+            return;
+        }
+        self.scan_range_buf.push(entry);
+        if self.scan_live_published {
+            // The entry is written before the length that reveals it, and a
+            // world stop only lands at a safepoint -- never between the two.
+            *self.scan_len = self.scan_range_buf.len();
+            return;
+        }
         type FnSet = unsafe extern "C" fn(*const (usize, usize), usize);
         let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
-        unsafe { set(buf.as_ptr(), buf.len()) };
-        self.scan_range_buf = buf;
+        unsafe { set(self.scan_range_buf.as_ptr(), self.scan_range_buf.len()) };
     }
 
     /// Drop the range for a frame about to be popped, if it published one.
@@ -1328,12 +1351,14 @@ impl HLInterpreter {
             self.sync_gc_scan_roots();
             return;
         }
-        let mut buf = std::mem::take(&mut self.scan_range_buf);
-        buf.pop();
+        self.scan_range_buf.pop();
+        if self.scan_live_published {
+            *self.scan_len = self.scan_range_buf.len();
+            return;
+        }
         type FnSet = unsafe extern "C" fn(*const (usize, usize), usize);
         let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
-        unsafe { set(buf.as_ptr(), buf.len()) };
-        self.scan_range_buf = buf;
+        unsafe { set(self.scan_range_buf.as_ptr(), self.scan_range_buf.len()) };
     }
 
     /// Publish interpreter register memory as conservative GC scan ranges.
@@ -1382,7 +1407,22 @@ impl HLInterpreter {
                     buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
                 }
             }
-            unsafe { set(buf.as_ptr(), buf.len()) };
+            // Reserved once, to a bound the stack cannot exceed, so the table
+            // never moves and the collector's view of it stays valid.
+            let want = self.max_stack_depth + self.scan_prefix_len + 64;
+            if buf.capacity() < want {
+                buf.reserve_exact(want - buf.len());
+            }
+            *self.scan_len = buf.len();
+            if !self.fn_gc_set_scan_roots_live.is_null() {
+                type FnLive = unsafe extern "C" fn(*const (usize, usize), *const usize);
+                let live: FnLive =
+                    unsafe { std::mem::transmute(self.fn_gc_set_scan_roots_live) };
+                unsafe { live(buf.as_ptr(), &*self.scan_len as *const usize) };
+                self.scan_live_published = true;
+            } else {
+                unsafe { set(buf.as_ptr(), buf.len()) };
+            }
             self.scan_range_buf = buf;
             return;
         }

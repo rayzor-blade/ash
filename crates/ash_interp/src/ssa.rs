@@ -73,7 +73,7 @@
 use std::sync::OnceLock;
 
 use air::v2::{Function, Instr};
-use ash_core::air_pipeline::{prepare_ir, AirOptLevel, AshModule};
+use ash_core::air_pipeline::{optimized, AshModule};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
 
@@ -96,20 +96,6 @@ fn logging() -> bool {
     *CELL.get_or_init(|| std::env::var("ASH_AIR_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
-/// Opt level from `ASH_AIR_LEVEL`, defaulting to `O2` as the sweep does.
-fn level() -> AirOptLevel {
-    static CELL: OnceLock<AirOptLevel> = OnceLock::new();
-    *CELL.get_or_init(|| match std::env::var("ASH_AIR_LEVEL") {
-        Ok(s) if !s.is_empty() => match ash_core::air_pipeline::parse_level(&s) {
-            Some(l) => l,
-            None => {
-                eprintln!("[ssa] ignoring ASH_AIR_LEVEL='{s}' (expected O0|O1|O2|O3); using O2");
-                AirOptLevel::O2
-            }
-        },
-        _ => AirOptLevel::O2,
-    })
-}
 
 /// An IR body plus the type view the shared `op_*` semantics read operand
 /// types out of.
@@ -191,8 +177,14 @@ impl Cache {
 
         let m = self.module.expect("module cached just above").1;
         let raw = &bc.functions[func_idx];
-        self.bodies[func_idx] = match prepare_ir(m, raw, level(), &Default::default()) {
-            Ok((ir, _)) => match unsupported(&ir) {
+        // The same entry point, and the same cached result, the tiers compile
+        // from. Preparing separately produced a different body -- different
+        // pass options, so different blocks -- and an OSR site named by this
+        // walker then did not exist in the one the entry was built from: the
+        // header this reported as pc=13 was staged at pc=12. Going through
+        // the shared cache also stops the pipeline running twice per function.
+        self.bodies[func_idx] = match optimized(m, raw).map(|o| (o.ir.clone(), o.ser.clone())) {
+            Ok((ir, ser_view)) => match unsupported(&ir) {
                 Some(what) => {
                     if logging() {
                         eprintln!(
@@ -211,9 +203,7 @@ impl Cache {
                     // bytecode pc, and this is where that mapping is computed.
                     // The body itself is still executed from the IR; only the
                     // table is kept.
-                    let block_pcs: Vec<usize> = air::v2::serialize::serialize(&ir)
-                        .map(|s| s.block_pcs)
-                        .unwrap_or_default();
+                    let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
                     let mut shim = raw.clone();
                     // air numbers types with u32, ash with usize; same indices.
                     shim.regs = ir

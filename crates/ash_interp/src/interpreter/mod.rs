@@ -3468,6 +3468,8 @@ impl HLInterpreter {
     /// and everything after it; control does not come back for this
     /// invocation. `None` means no entry is installed yet and the interpreter
     /// should carry on.
+    /// Hand a running frame over to an OSR entry, if one is installed here.
+    ///
     fn try_osr_transfer(
         &mut self,
         bytecode: &DecodedBytecode,

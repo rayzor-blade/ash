@@ -87,10 +87,14 @@ pub struct TieredConfig {
     /// arrives too late, at 100-250 it is 156ms — better than the speculative
     /// path managed (163ms), with fib, deltablue and binary_trees unchanged.
     pub opt_threshold: u64,
-    /// Explicit cap on how wide a signature may be to promote. Nothing in
-    /// the marshaling path needs one any more — anything past the inline
-    /// eight goes through the backend's uniform entry — so this defaults to
-    /// the `u8` that stores the arity and exists only to pin a bisect.
+    /// Cap on how wide a signature may be to promote.
+    ///
+    /// The marshaling path itself no longer needs one: anything past the
+    /// inline eight goes through the backend's uniform entry. But letting
+    /// Cranelift compile those signatures for the first time produced a frame
+    /// sized for one function running another's opcodes on MBHaxe, and the
+    /// default is not the place to carry an unproven path. Raise it explicitly
+    /// to exercise the uniform entry.
     pub max_jit_args: usize,
     pub min_ops_for_promotion: usize,
     pub log_promotions: bool,
@@ -106,7 +110,7 @@ impl Default for TieredConfig {
             compiled_only: false,
             jit_threshold: 100,
             opt_threshold: 250,
-            max_jit_args: u8::MAX as usize,
+            max_jit_args: 8,
             // 0 disables the static opcode-size gate; promotion hotness is call-count based.
             min_ops_for_promotion: 0,
             log_promotions: false,

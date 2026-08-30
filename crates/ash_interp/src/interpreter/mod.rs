@@ -279,45 +279,17 @@ impl std::fmt::Display for HLExceptionPropagation {
 
 impl std::error::Error for HLExceptionPropagation {}
 
+mod instrument;
 mod natives;
 mod ops;
 mod ssa;
 mod stack;
 
+use instrument::CompileBlocking;
+
 use crate::tiering::env_flag;
 pub use crate::tiering::{TierMode, TierPreset, TieredConfig, TieredStats};
 use crate::tiering::*;
-
-/// Tells the collector this thread will not reach a safepoint for a while.
-///
-/// Preparing a body runs the AIR pipeline -- lower, inline, verify, build a
-/// dominator tree -- on whichever thread first calls the function, and there
-/// is no poll anywhere in it. A fiber worker doing that held every world stop
-/// open for its whole duration: 150-350ms on MBHaxe, sampled to
-/// `Inlining::is_stack_sensitive_inner` and `lower_with`. The pipeline builds
-/// Rust structures over bytecode and touches no GC object, and `hlp_blocking`
-/// publishes the stack pointer and callee-saved registers first, so the
-/// interpreter frames underneath stay conservatively scannable throughout.
-struct CompileBlocking(*mut c_void);
-
-impl CompileBlocking {
-    fn enter(f: *mut c_void) -> Self {
-        if !f.is_null() {
-            type FnBlocking = unsafe extern "C" fn(bool);
-            unsafe { (std::mem::transmute::<*mut c_void, FnBlocking>(f))(true) };
-        }
-        Self(f)
-    }
-}
-
-impl Drop for CompileBlocking {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            type FnBlocking = unsafe extern "C" fn(bool);
-            unsafe { (std::mem::transmute::<*mut c_void, FnBlocking>(self.0))(false) };
-        }
-    }
-}
 
 struct HlpName<'a>(&'a str);
 impl std::fmt::Display for HlpName<'_> {
@@ -2203,7 +2175,7 @@ impl HLInterpreter {
         native_resolver: &NativeFunctionResolver,
     ) -> Result<NanBoxedValue> {
         self.ensure_gc_runtime_initialized();
-        stack::arm_stall_watchdog();
+        instrument::arm_stall_watchdog();
         // Initialize constants (pre-populated globals) before running
         self.init_constants(bytecode, native_resolver)?;
 

@@ -25,47 +25,7 @@ use super::{
 
 impl HLInterpreter {
     /// Call a native function via FFI.
-    /// Time each native and report the slow ones, when `ASH_SLOW_NATIVE_MS`
-    /// asks.
-    ///
-    /// A native runs with no safepoint poll in it, so one that takes long
-    /// enough holds up every world stop for its whole duration. The collector
-    /// can say a thread reached a safepoint late but not what it was doing
-    /// before it got there, and a sampler catches only what it happens to
-    /// land on. This names the call and its cost directly.
-    pub(super) fn call_native(
-        &mut self,
-        bytecode: &DecodedBytecode,
-        native_resolver: &NativeFunctionResolver,
-        native_idx: usize,
-        args: &[NanBoxedValue],
-    ) -> Result<NanBoxedValue> {
-        static LIMIT: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
-        let limit = *LIMIT.get_or_init(|| {
-            std::env::var("ASH_SLOW_NATIVE_MS")
-                .ok()
-                .and_then(|v| v.parse::<u128>().ok())
-        });
-        let Some(limit) = limit else {
-            return self.call_native_inner(bytecode, native_resolver, native_idx, args);
-        };
-        let started = std::time::Instant::now();
-        let out = self.call_native_inner(bytecode, native_resolver, native_idx, args);
-        let took = started.elapsed();
-        if took.as_millis() >= limit {
-            let native = &bytecode.natives[native_idx];
-            eprintln!(
-                "[slow-native] hlp_{} lib={} took {:.1}ms on {}",
-                native.name,
-                native.lib,
-                took.as_secs_f64() * 1e3,
-                std::thread::current().name().unwrap_or("main"),
-            );
-        }
-        out
-    }
-
-    fn call_native_inner(
+    pub(super) fn call_native_inner(
         &mut self,
         bytecode: &DecodedBytecode,
         native_resolver: &NativeFunctionResolver,

@@ -298,17 +298,6 @@ use crate::tiering::*;
 /// Rust structures over bytecode and touches no GC object, and `hlp_blocking`
 /// publishes the stack pointer and callee-saved registers first, so the
 /// interpreter frames underneath stay conservatively scannable throughout.
-impl HLInterpreter {
-    fn poll_gap_limit() -> Option<u128> {
-        static V: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
-        *V.get_or_init(|| {
-            std::env::var("ASH_POLL_GAP_MS")
-                .ok()
-                .and_then(|v| v.parse::<u128>().ok())
-        })
-    }
-}
-
 struct CompileBlocking(*mut c_void);
 
 impl CompileBlocking {
@@ -562,11 +551,6 @@ pub struct HLInterpreter {
     /// Counts dispatch steps so the stall watchdog is polled cheaply, and so
     /// a report can quote throughput. See `report_stall_if_asked`.
     stall_tick: u32,
-    /// When this thread last reached a GC poll, for `ASH_POLL_GAP_MS`.
-    last_poll_at: std::time::Instant,
-    /// Bytecode pointer kept for the poll-gap report, which has no `bytecode`
-    /// argument of its own.
-    bytecode_for_gap: *const DecodedBytecode,
     stall_tick_reported: u32,
     stall_reported_at: std::time::Instant,
     /// Opaque `hl_symbol` tokens backing the most recent call-stack query.
@@ -898,8 +882,6 @@ impl HLInterpreter {
             virtual_fields: HashMap::new(),
             stack_symbols_interned: std::collections::HashMap::new(),
             stall_tick: 0,
-            last_poll_at: std::time::Instant::now(),
-            bytecode_for_gap: std::ptr::null(),
             stall_tick_reported: 0,
             stall_reported_at: std::time::Instant::now(),
             call_stack_symbols: Vec::new(),
@@ -3717,27 +3699,6 @@ impl HLInterpreter {
             return;
         }
         self.fiber_poll_budget = FIBER_POLL_WORK;
-        // `ASH_POLL_GAP_MS`: report how long this thread went without polling,
-        // and what it was running. A world stop waits for the slowest poll, so
-        // the gap IS the stall -- and unlike a sampler or a native timer, this
-        // sees the gap whatever caused it.
-        if let Some(limit) = Self::poll_gap_limit() {
-            let now = std::time::Instant::now();
-            let gap = now.duration_since(self.last_poll_at);
-            self.last_poll_at = now;
-            if gap.as_millis() >= limit {
-                let bc = self.reloaded_bytecode.unwrap_or(unsafe { &*self.bytecode_for_gap });
-                let stack = self.capture_call_stack(bc);
-                eprintln!(
-                    "[poll-gap] {:.1}ms without a poll on {}, stack innermost first:",
-                    gap.as_secs_f64() * 1e3,
-                    std::thread::current().name().unwrap_or("main"),
-                );
-                for frame in stack.iter().take(12) {
-                    eprintln!("[poll-gap]   {frame}");
-                }
-            }
-        }
         if self.fn_fiber_poll.is_null() {
             return;
         }
@@ -4502,7 +4463,6 @@ impl HLInterpreter {
         func_idx: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
-        self.bytecode_for_gap = bytecode as *const DecodedBytecode;
         self.report_stall_if_asked(bytecode);
         // Use reloaded bytecode if available (hot-reload swapped function bodies)
         let using_reloaded = self.reloaded_bytecode.is_some();

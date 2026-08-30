@@ -645,8 +645,46 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
             let parked = self.park_optimized_functions(target);
+            // What the shared path is actually buying. It exists so the
+            // inliner has callee bodies to work with, and it pays for the
+            // whole transitive closure to get them -- 263 functions per
+            // promotion on MBHaxe. Inlining removes calls from the root and
+            // grows it, so measuring the root either side of the middle end
+            // says how many of those bodies were worth lowering.
+            let root_shape = |f: inkwell::values::FunctionValue<'ctx>| -> (usize, usize) {
+                let mut calls = 0;
+                let mut instrs = 0;
+                for bb in f.get_basic_blocks() {
+                    let mut i = bb.get_first_instruction();
+                    while let Some(ins) = i {
+                        instrs += 1;
+                        if matches!(
+                            ins.get_opcode(),
+                            inkwell::values::InstructionOpcode::Call
+                        ) {
+                            calls += 1;
+                        }
+                        i = ins.get_next_instruction();
+                    }
+                }
+                (calls, instrs)
+            };
+            let before = std::env::var_os("ASH_INLINE_LOG").is_some().then(|| root_shape(target));
             let me_t0 = std::time::Instant::now();
             let result = super::module::run_middle_end(&self.module);
+            if let Some((calls_before, instrs_before)) = before {
+                let (calls_after, instrs_after) = root_shape(target);
+                eprintln!(
+                    "[inline] findex={findex} lowered={} parked={} root_calls={}->{} root_instrs={}->{} me={:.0}ms",
+                    self.module.get_functions().filter(|f| f.count_basic_blocks() > 0).count(),
+                    parked.len(),
+                    calls_before,
+                    calls_after,
+                    instrs_before,
+                    instrs_after,
+                    me_t0.elapsed().as_secs_f64() * 1e3,
+                );
+            }
             if std::env::var_os("ASH_MIDDLE_END_LOG").is_some() {
                 let bodies = self
                     .module

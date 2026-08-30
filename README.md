@@ -6,7 +6,20 @@
 
 <p align="center">A fast HashLink virtual machine written in Rust.</p>
 
+<p align="center">
+  <a href="https://github.com/rayzor-blade/ash/actions/workflows/lint.yml"><img src="https://github.com/rayzor-blade/ash/actions/workflows/lint.yml/badge.svg" alt="lint"></a>
+  <a href="https://github.com/rayzor-blade/ash/actions/workflows/parity_gate.yml"><img src="https://github.com/rayzor-blade/ash/actions/workflows/parity_gate.yml/badge.svg" alt="parity gate"></a>
+  <a href="https://github.com/rayzor-blade/ash/actions/workflows/conformance.yml"><img src="https://github.com/rayzor-blade/ash/actions/workflows/conformance.yml/badge.svg" alt="haxe conformance"></a>
+  <a href="https://github.com/rayzor-blade/ash/actions/workflows/bench.yml"><img src="https://github.com/rayzor-blade/ash/actions/workflows/bench.yml/badge.svg" alt="benchmarks"></a>
+  <br>
+  <a href="https://rayzor-blade.github.io/ash/#conformance"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Frayzor-blade.github.io%2Fash%2Fbench%2Fconformance.json&query=%24.summary.case_pct&suffix=%25&label=Haxe%20suite&color=2ea44f" alt="Haxe conformance"></a>
+  <a href="https://rayzor-blade.github.io/ash/#benchmarks"><img src="https://img.shields.io/badge/benchmarks-published-a8703c" alt="benchmarks"></a>
+  <a href="https://discord.gg/NYdr8eWxF4"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
+
 ASH executes [HashLink](https://hashlink.haxe.org/) bytecode (`.hl` files) compiled from [Haxe](https://haxe.org/). Execution is tiered: a bytecode interpreter runs everything, hot functions are promoted to Cranelift-compiled code, and the hottest are recompiled by LLVM.
+
+Against the Haxe 4.3.6 compiler test suite it passes **1069 of 1069 attemptable cases** — 4/4 suites, 1372/1372 tests, 12199/12199 assertions. The suite holds 1195 cases in total; the remaining 126 have nothing to run on the `hl` target (other targets' project directories, and suites that test the compiler rather than a program — null-safety diagnostics, source maps, the compilation server). Live numbers, including that breakdown, are on the [conformance page](https://rayzor-blade.github.io/ash/#conformance).
 
 ## Execution tiers
 

@@ -8075,6 +8075,37 @@ impl<'ctx> JITModule<'ctx> {
         );
         crate::profile::count("middle-end functions in module", with_body as u64);
         crate::profile::count("middle-end functions parked", parked.len() as u64);
+        // Distinct against total answers whether the scoped runs are doing the
+        // same work repeatedly: a callee reachable from several hot functions
+        // is re-optimised once per promotion, and if that is where the time
+        // goes the fix is to keep the result rather than to optimise less.
+        {
+            use std::collections::HashSet;
+            use std::sync::Mutex;
+            static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+            let mut seen = SEEN.lock().expect("middle-end seen set poisoned");
+            let seen = seen.get_or_insert_with(HashSet::new);
+            let before = seen.len();
+            for f in self.module.get_functions() {
+                if f.count_basic_blocks() == 0
+                    || f.get_enum_attribute(AttributeLoc::Function, optnone_id)
+                        .is_some()
+                {
+                    continue;
+                }
+                if let Ok(name) = f.get_name().to_str() {
+                    seen.insert(name.to_string());
+                }
+            }
+            // Only the delta: `count` accumulates, so summing it over every
+            // promotion gives the number of functions optimised once and only
+            // once. Reporting the running total instead would sum a running
+            // total, which means nothing.
+            crate::profile::count(
+                "middle-end functions optimised for the first time",
+                (seen.len() - before) as u64,
+            );
+        }
         parked
     }
 

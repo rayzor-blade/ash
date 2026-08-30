@@ -1039,14 +1039,23 @@ fn demangle(sym: &str) -> String {
 
 /// Print everything collected. Safe to call when profiling is off (does
 /// nothing) and safe to call twice (the second call sees an empty profile).
-/// Emit the report on `SIGTERM`/`SIGINT` as well as at exit.
+/// Emit the report on a signal as well as at exit.
 ///
 /// A long-running program -- a game -- is normally stopped by a signal, and
 /// the report is the whole reason for sampling it. Without this, profiling
 /// anything that does not return from `main` produces nothing at all.
+///
+/// `SIGUSR1` dumps and keeps running, which is the one that survives: a
+/// windowing library installs its own `SIGTERM`/`SIGINT` handlers during init
+/// and replaces whatever was there, so those two are best-effort.
 pub fn report_on_termination() {
     if !enabled() {
         return;
+    }
+    // Dump on request and carry on, so a profile can be taken from a running
+    // program without ending it.
+    extern "C" fn on_dump(_sig: i32) {
+        report();
     }
     extern "C" fn on_signal(sig: i32) {
         // `report` allocates and formats, which is not async-signal-safe. It is
@@ -1060,6 +1069,7 @@ pub fn report_on_termination() {
         }
     }
     unsafe {
+        libc::signal(libc::SIGUSR1, on_dump as usize);
         libc::signal(libc::SIGTERM, on_signal as usize);
         libc::signal(libc::SIGINT, on_signal as usize);
     }

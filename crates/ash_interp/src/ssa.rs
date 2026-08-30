@@ -120,6 +120,10 @@ pub struct Prepared {
     pub shim: &'static HLFunction,
     /// Where the cell block starts in the frame, i.e. `ir.values.len()`.
     pub cell_base: u32,
+    /// Bytecode pc each AIR block starts at, so a hot back edge can name its
+    /// header the way the tiering and OSR machinery do -- both key on a pc,
+    /// and `compile_osr_entry` finds the block by searching this same table.
+    pub block_pcs: &'static [usize],
 }
 
 /// What a function executes, decided once on its first call.
@@ -202,6 +206,14 @@ impl Cache {
                 }
                 None => {
                     let cell_base = ir.values.len() as u32;
+                    // Serialized once, for the block -> pc table alone: the
+                    // tiering and OSR machinery key a loop header on a
+                    // bytecode pc, and this is where that mapping is computed.
+                    // The body itself is still executed from the IR; only the
+                    // table is kept.
+                    let block_pcs: Vec<usize> = air::v2::serialize::serialize(&ir)
+                        .map(|s| s.block_pcs)
+                        .unwrap_or_default();
                     let mut shim = raw.clone();
                     // air numbers types with u32, ash with usize; same indices.
                     shim.regs = ir
@@ -229,6 +241,7 @@ impl Cache {
                         ir: Box::leak(Box::new(ir)),
                         shim: Box::leak(Box::new(shim)),
                         cell_base,
+                        block_pcs: Box::leak(block_pcs.into_boxed_slice()),
                     })))
                 }
             },

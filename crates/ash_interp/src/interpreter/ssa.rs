@@ -58,8 +58,14 @@ impl HLInterpreter {
                     // Every 64th, for the reason the opcode loop gives: there
                     // are two thresholds to cross, so one signal would stall
                     // the ladder at Cranelift.
-                    if frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0 {
-                        self.note_hot_loop(bc, func_idx, block);
+                    let hot = frame.backedges & (super::HOT_LOOP_BACKEDGES - 1) == 0;
+                    // Named by the header's bytecode pc, which is what the
+                    // tiering map and `compile_osr_entry` both key on -- the
+                    // block index would look up a different block, or none.
+                    if hot {
+                        if let Some(&header_pc) = prep.block_pcs.get(block) {
+                            self.note_hot_loop(bc, func_idx, header_pc);
+                        }
                     }
                 }
             }

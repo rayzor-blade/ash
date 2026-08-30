@@ -1624,6 +1624,13 @@ struct Block {
     /// walking a sea of zero `alloc_sizes` entries — that walk was 76% of
     /// mandelbrot once NaN-box decoding multiplied candidate hits.
     has_span: bool,
+    /// Set by the marker the first time any line in this block is claimed.
+    /// Sweep reads it to skip the per-line scan of a block that nothing
+    /// reached: its bits are already clear from the previous sweep, so there
+    /// is nothing to read and nothing to reset. Most swept blocks are empty --
+    /// 16228 of 27000 in one MBHaxe collection -- and each cost 256 byte reads
+    /// to discover that.
+    any_marked: AtomicBool,
 }
 
 /// Claim a line for the marker. Returns true for the thread that set it, so a
@@ -1638,7 +1645,15 @@ fn claim_line(block: &Block, line_idx: usize) -> bool {
     if bit.load(Ordering::Relaxed) {
         return false;
     }
-    !bit.swap(true, Ordering::Relaxed)
+    if bit.swap(true, Ordering::Relaxed) {
+        return false;
+    }
+    // Only on a successful claim, and only when not already set, so the store
+    // stays off the path for every line after a block's first.
+    if !block.any_marked.load(Ordering::Relaxed) {
+        block.any_marked.store(true, Ordering::Relaxed);
+    }
+    true
 }
 
 #[inline]
@@ -2752,6 +2767,8 @@ impl ImmixAllocator {
 
             if block_index < self.blocks.len() {
                 self.blocks[block_index].mark_bits[line_index].store(true, Ordering::Relaxed);
+            self.blocks[block_index].any_marked.store(true, Ordering::Relaxed);
+                self.blocks[block_index].any_marked.store(true, Ordering::Relaxed);
             }
 
             current_addr += LINE_SIZE;
@@ -2950,13 +2967,20 @@ impl ImmixAllocator {
             } else {
                 None
             };
+        // Hoisted: this was a linear scan of every TLAB for every swept block.
+        let tlab_set: std::collections::HashSet<usize> =
+            self.heap.tlab_blocks.values().copied().collect();
         for block_addr in used_block_addrs {
             // The mutator's live bump region: marks still reset below for
             // the next cycle, but the block is never reclaimed under the
             // cursor.
-            let is_tlab = self.heap.tlab_blocks.values().any(|&b| b == block_addr);
+            let is_tlab = tlab_set.contains(&block_addr);
             let block_index = block_addr / BLOCK_SIZE;
             let block = &mut self.blocks[block_index];
+            // Nothing reached this block, so every bit is already clear and
+            // the scan below could only confirm it.
+            let touched = *block.any_marked.get_mut();
+            *block.any_marked.get_mut() = false;
             let mut is_empty = true;
             let mut marked_lines = 0usize;
             // Runs of unmarked lines, harvested in the pass that resets the
@@ -2964,22 +2988,34 @@ impl ImmixAllocator {
             // back whole, and the TLAB block is still being bumped through.
             let mut spans: Vec<(usize, usize)> = Vec::new();
             let mut run_start: Option<usize> = None;
-            // Read and reset in one operation: the bit has to be clear for the
-            // next cycle either way, and a swap saves a second pass.
-            for (line_index, mark) in block.mark_bits.iter().enumerate() {
-                if mark.swap(false, Ordering::Relaxed) {
-                    is_empty = false;
-                    marked_lines += 1;
-                    if let Some(start) = run_start.take() {
-                        spans.push((start, line_index - start));
+            // Plain reads and writes, not atomics: sweep holds `&mut self`, so
+            // no marker is running and `get_mut` reaches the bit directly. The
+            // read-modify-write this replaces ran 256 times per block, which at
+            // a 680MB live set is millions of atomics for no ordering anyone
+            // observes.
+            if touched {
+                for (line_index, mark) in block.mark_bits.iter_mut().enumerate() {
+                    let mark = mark.get_mut();
+                    let was_marked = *mark;
+                    *mark = false;
+                    if was_marked {
+                        is_empty = false;
+                        marked_lines += 1;
+                        if let Some(start) = run_start.take() {
+                            spans.push((start, line_index - start));
+                        }
+                    } else if run_start.is_none() {
+                        run_start = Some(line_index);
                     }
-                } else if run_start.is_none() {
-                    run_start = Some(line_index);
+                }
+                if let Some(start) = run_start.take() {
+                    spans.push((start, LINES_PER_BLOCK - start));
                 }
             }
-            if let Some(start) = run_start.take() {
-                spans.push((start, LINES_PER_BLOCK - start));
-            }
+            // An untouched block stays `is_empty` with no spans, which is what
+            // the two branches below already do with a block nothing reached:
+            // reclaim it whole, or keep it whole when it is a TLAB or when
+            // reclamation is off. Neither reads `spans`.
 
             if occupancy_stats() && !is_empty {
                 occ_blocks += 1;

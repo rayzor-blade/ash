@@ -3599,7 +3599,7 @@ fn pass_manager_reports_per_pass_statistics() {
     verify(&f).unwrap();
     assert_eq!(
         pm.pass_names(),
-        vec!["cellfwd", "null-check-elim", "gvn", "licm", "fma", "dce"]
+        vec!["cellfwd", "celldse", "null-check-elim", "gvn", "licm", "fma", "dce"]
     );
     assert_eq!(report.stats_for("null-check-elim").eliminated, 1);
     assert_eq!(report.stats_for("gvn").eliminated, 1);

@@ -3635,7 +3635,6 @@ pub unsafe extern "C" fn hlp_gc_add_scan_root(ptr: *const c_void, size: usize) {
 /// # Safety
 /// `ranges` must point to `count` initialised `(usize, usize)` pairs, and
 /// each pair must describe memory that stays valid until the next publish.
-#[no_mangle]
 /// Hand the collector a live view of this mutator's scan-range table.
 ///
 /// Called once; afterwards the mutator maintains the table itself and the

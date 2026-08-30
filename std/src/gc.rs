@@ -487,10 +487,42 @@ fn stop_mutator_world() -> StoppedWorld {
         // A mutator may already be sleeping in the GC-lock slow path. Wake it
         // so it can observe the stop request and publish its stack.
         GC_LOCK.wake_for_world_stop();
+        // Bounded waits rather than one open-ended one, so a slow mutator can
+        // be named. Stopping the world is normally microseconds; when it is
+        // not, the question is always which thread had not reached a
+        // safepoint, and an untimed wait cannot answer it.
+        let began = Instant::now();
+        let mut reported = false;
         while world.mutators.iter().any(|m| {
             m.thread != collector && !m.parked && m.blocking_depth == 0
         }) {
-            world = MUTATOR_WORLD.changed.wait(world).unwrap();
+            let (guard, timed_out) = MUTATOR_WORLD
+                .changed
+                .wait_timeout(world, std::time::Duration::from_millis(20))
+                .unwrap();
+            world = guard;
+            if timed_out.timed_out() && !reported && gc_stats_enabled() {
+                reported = true;
+                let stragglers: Vec<String> = world
+                    .mutators
+                    .iter()
+                    .filter(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
+                    .map(|m| format!("thread {:#x}", m.thread))
+                    .collect();
+                eprintln!(
+                    "[gc] world stop waiting {:.1}ms on {} of {} mutators: {}",
+                    began.elapsed().as_secs_f64() * 1e3,
+                    stragglers.len(),
+                    world.mutators.len(),
+                    stragglers.join(", ")
+                );
+            }
+        }
+        if reported {
+            eprintln!(
+                "[gc] world stopped after {:.1}ms",
+                began.elapsed().as_secs_f64() * 1e3
+            );
         }
     }
     let snapshots = world

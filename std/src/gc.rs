@@ -1546,15 +1546,48 @@ struct ImmixHeap {
     /// A trigger fired while in safepoint mode; collect at the next snapshot.
     collect_pending: bool,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Block {
-    mark_bits: [bool; LINES_PER_BLOCK],
+    /// One claim bit per line. Atomic so the mark phase can run on several
+    /// threads: marking is the bulk of the pause and is pointer-chasing over
+    /// the whole live set, which is latency-bound rather than compute-bound.
+    /// Relaxed ordering throughout — the world is stopped, so the only thing
+    /// these order is the marker against itself, and a line's claim is
+    /// established by the swap alone.
+    mark_bits: [AtomicBool; LINES_PER_BLOCK],
     /// True while any multi-line allocation span is recorded in this block.
     /// The marker's walk-back only exists to find span starts; a block that
     /// never held one (every TLAB churn block) marks in O(1) instead of
     /// walking a sea of zero `alloc_sizes` entries — that walk was 76% of
     /// mandelbrot once NaN-box decoding multiplied candidate hits.
     has_span: bool,
+}
+
+/// Claim a line for the marker. Returns true for the thread that set it, so a
+/// line is pushed onto exactly one worklist however many threads race for it.
+#[inline(always)]
+fn claim_line(block: &Block, line_idx: usize) -> bool {
+    // Load first. A read-modify-write on every line costs about a third of the
+    // mark phase, and by far the commonest case is a line that is already
+    // marked — the plain load settles those without one. The swap then decides
+    // the race for the few that are genuinely unclaimed.
+    let bit = &block.mark_bits[line_idx];
+    if bit.load(Ordering::Relaxed) {
+        return false;
+    }
+    !bit.swap(true, Ordering::Relaxed)
+}
+
+#[inline]
+fn clear_marks(block: &Block) {
+    for bit in &block.mark_bits {
+        bit.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Plain copy of a block's marks, for the sweep audit.
+fn snapshot_marks(block: &Block) -> [bool; LINES_PER_BLOCK] {
+    std::array::from_fn(|i| block.mark_bits[i].load(Ordering::Relaxed))
 }
 
 struct RootSet {
@@ -1591,6 +1624,100 @@ impl Default for ImmixAllocator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The span walk from [`ImmixAllocator::mark_allocation_at_line`], over shared
+/// borrows so the mark phase can run it from several threads. Everything it
+/// reads — `alloc_sizes`, `has_span`, the block table — is immutable for the
+/// duration of a collection; the only mutation is the claim bit.
+fn mark_allocation_shared(
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    line: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let mut start = line;
+    loop {
+        let b = start / LINES_PER_BLOCK;
+        if blocks.get(b).is_none_or(|blk| !blk.has_span) {
+            start = line;
+            break;
+        }
+        let floor = b * LINES_PER_BLOCK;
+        while start > floor && alloc_sizes[start] == 0 {
+            start -= 1;
+        }
+        if alloc_sizes[start] != 0 {
+            break;
+        }
+        if start == 0 {
+            break;
+        }
+        start -= 1;
+    }
+    let num_lines = alloc_sizes[start] as usize;
+    let num_lines = if num_lines == 0 { 1 } else { num_lines };
+
+    let block_idx = line / LINES_PER_BLOCK;
+    let line_idx = line % LINES_PER_BLOCK;
+    if block_idx < blocks.len() && claim_line(&blocks[block_idx], line_idx) {
+        out.push((block_idx, line_idx));
+    }
+    for l in start..start + num_lines {
+        let block_idx = l / LINES_PER_BLOCK;
+        let line_idx = l % LINES_PER_BLOCK;
+        if block_idx < blocks.len() && claim_line(&blocks[block_idx], line_idx) {
+            out.push((block_idx, line_idx));
+        }
+    }
+}
+
+/// Scan one already-claimed line for heap pointers, claiming what it reaches.
+#[inline]
+fn scan_line_shared(
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    heap_start: usize,
+    heap_end: usize,
+    block_idx: usize,
+    line_idx: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    let line_start = heap_start + block_idx * BLOCK_SIZE + line_idx * LINE_SIZE;
+    for off in (0..LINE_SIZE).step_by(8) {
+        let val = unsafe { *((line_start + off) as *const usize) };
+        if val >= heap_start && val < heap_end {
+            let child_line = (val - heap_start) / LINE_SIZE;
+            let cb = child_line / LINES_PER_BLOCK;
+            let cl = child_line % LINES_PER_BLOCK;
+            if cb < blocks.len() && !blocks[cb].mark_bits[cl].load(Ordering::Relaxed) {
+                mark_allocation_shared(blocks, alloc_sizes, child_line, out);
+            }
+        }
+    }
+}
+
+/// How many threads mark. `ASH_GC_MARK_THREADS` overrides; 1 keeps the phase
+/// on the collecting thread.
+fn mark_threads() -> usize {
+    static N: OnceLock<usize> = OnceLock::new();
+    *N.get_or_init(|| {
+        if let Ok(v) = std::env::var("ASH_GC_MARK_THREADS") {
+            if let Ok(n) = v.parse::<usize>() {
+                return n.max(1);
+            }
+        }
+        std::thread::available_parallelism()
+            .map(|n| n.get().clamp(1, 8))
+            .unwrap_or(1)
+    })
+}
+
+struct MarkQueue {
+    work: std::sync::Mutex<Vec<(usize, usize)>>,
+    ready: std::sync::Condvar,
+    idle: std::sync::atomic::AtomicUsize,
+    done: AtomicBool,
 }
 
 impl ImmixAllocator {
@@ -1640,8 +1767,8 @@ impl ImmixAllocator {
         // startup work proportional to the CAP: at a 4GB cap that is ~33MB of
         // memset on a program that may touch none of it, and it cost a fixed
         // ~5ms — 7% of a 56ms benchmark. Sound because an all-zero Block is a
-        // valid Block: `mark_bits` is [bool; N] and `false` is 0, `has_span`
-        // likewise.
+        // valid Block: `mark_bits` is [AtomicBool; N], whose `false` is 0 and
+        // whose layout matches `bool`, and `has_span` likewise.
         let block_count = heap_size / BLOCK_SIZE;
         let blocks: Vec<Block> = unsafe {
             let layout = std::alloc::Layout::array::<Block>(block_count)
@@ -1759,7 +1886,7 @@ impl ImmixAllocator {
         let addr = self.heap.free_blocks.pop()?;
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
-        self.blocks[addr / BLOCK_SIZE].mark_bits = [false; LINES_PER_BLOCK];
+        clear_marks(&self.blocks[addr / BLOCK_SIZE]);
         if trace_freed() {
             let base = self.heap.memory.as_ptr() as usize;
             eprintln!("[gc-reuse] {:#x}..{:#x}", base + addr, base + addr + BLOCK_SIZE);
@@ -1925,7 +2052,7 @@ impl ImmixAllocator {
                 for block in removed {
                     self.heap.used_blocks.insert(block);
                     self.reclaim_block_pages(block);
-                    self.blocks[block / BLOCK_SIZE].mark_bits = [false; LINES_PER_BLOCK];
+                    clear_marks(&self.blocks[block / BLOCK_SIZE]);
                 }
                 self.heap.bytes_since_gc += blocks_needed * BLOCK_SIZE;
                 GC_STATS
@@ -2013,7 +2140,7 @@ impl ImmixAllocator {
         let line_index = (addr % BLOCK_SIZE) / LINE_SIZE;
 
         // Check if the line is marked (i.e., in use)
-        if !self.blocks[block_index].mark_bits[line_index] {
+        if !self.blocks[block_index].mark_bits[line_index].load(Ordering::Relaxed) {
             return false;
         }
 
@@ -2096,16 +2223,14 @@ impl ImmixAllocator {
         {
             let block_idx = line / LINES_PER_BLOCK;
             let line_idx = line % LINES_PER_BLOCK;
-            if block_idx < self.blocks.len() && !self.blocks[block_idx].mark_bits[line_idx] {
-                self.blocks[block_idx].mark_bits[line_idx] = true;
+            if block_idx < self.blocks.len() && claim_line(&self.blocks[block_idx], line_idx) {
                 out.push((block_idx, line_idx));
             }
         }
         for l in start..start + num_lines {
             let block_idx = l / LINES_PER_BLOCK;
             let line_idx = l % LINES_PER_BLOCK;
-            if block_idx < self.blocks.len() && !self.blocks[block_idx].mark_bits[line_idx] {
-                self.blocks[block_idx].mark_bits[line_idx] = true;
+            if block_idx < self.blocks.len() && claim_line(&self.blocks[block_idx], line_idx) {
                 out.push((block_idx, line_idx));
             }
         }
@@ -2142,7 +2267,7 @@ impl ImmixAllocator {
                     let block_idx = line / LINES_PER_BLOCK;
                     let line_idx = line % LINES_PER_BLOCK;
                     if block_idx < this.blocks.len()
-                        && !this.blocks[block_idx].mark_bits[line_idx]
+                        && !this.blocks[block_idx].mark_bits[line_idx].load(Ordering::Relaxed)
                     {
                         this.mark_allocation_at_line(line, out);
                     }
@@ -2167,28 +2292,91 @@ impl ImmixAllocator {
     fn conservative_trace(&mut self, initial: Vec<(usize, usize)>) {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
-        let mut worklist = initial;
-
-        while let Some((block_idx, line_idx)) = worklist.pop() {
-            let line_start = heap_start + block_idx * BLOCK_SIZE + line_idx * LINE_SIZE;
-            for off in (0..LINE_SIZE).step_by(8) {
-                let val = unsafe { *((line_start + off) as *const usize) };
-                if val >= heap_start && val < heap_end {
-                    let offset = val - heap_start;
-                    let child_line = offset / LINE_SIZE;
-                    let child_block_idx = child_line / LINES_PER_BLOCK;
-                    let child_line_idx = child_line % LINES_PER_BLOCK;
-                    if child_block_idx < self.blocks.len()
-                        && !self.blocks[child_block_idx].mark_bits[child_line_idx]
-                    {
-                        // Straight into the worklist: the mark-bit test above
-                        // and the one inside gate every push, so a line enters
-                        // it at most once and the trace still terminates.
-                        self.mark_allocation_at_line(child_line, &mut worklist);
-                    }
-                }
+        let threads = mark_threads();
+        // Below a few hundred roots the spawn costs more than the trace saves.
+        if threads <= 1 || initial.len() < 256 {
+            let blocks = &self.blocks;
+            let alloc_sizes = &self.heap.alloc_sizes;
+            let mut worklist = initial;
+            while let Some((block_idx, line_idx)) = worklist.pop() {
+                scan_line_shared(
+                    blocks, alloc_sizes, heap_start, heap_end, block_idx, line_idx,
+                    &mut worklist,
+                );
             }
+            return;
         }
+
+        // Marking is pointer-chasing over the whole live set: latency-bound,
+        // so several threads keep more misses outstanding. The world is
+        // already stopped, which is why this needs no write barrier -- nothing
+        // mutates the heap while the trace runs, and a line is claimed exactly
+        // once however many threads reach it.
+        let blocks: &[Block] = &self.blocks;
+        let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
+        let queue = MarkQueue {
+            work: std::sync::Mutex::new(initial),
+            ready: std::sync::Condvar::new(),
+            idle: std::sync::atomic::AtomicUsize::new(0),
+            done: AtomicBool::new(false),
+        };
+        let queue = &queue;
+
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(move || {
+                    const BATCH: usize = 64;
+                    const SPILL: usize = 512;
+                    let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
+                    loop {
+                        if local.is_empty() {
+                            let mut work = queue.work.lock().expect("mark queue poisoned");
+                            loop {
+                                if !work.is_empty() {
+                                    let take = work.len().min(BATCH);
+                                    let at = work.len() - take;
+                                    local.extend(work.drain(at..));
+                                    break;
+                                }
+                                if queue.done.load(Ordering::Relaxed) {
+                                    return;
+                                }
+                                // Everyone idle with an empty queue means the
+                                // trace is finished: a thread only reaches
+                                // here having drained its own local list.
+                                let idle = queue.idle.fetch_add(1, Ordering::Relaxed) + 1;
+                                if idle == threads {
+                                    queue.done.store(true, Ordering::Relaxed);
+                                    queue.ready.notify_all();
+                                    return;
+                                }
+                                // Timed, so a lost wakeup cannot strand anyone.
+                                let (w, _) = queue
+                                    .ready
+                                    .wait_timeout(work, std::time::Duration::from_micros(200))
+                                    .expect("mark queue poisoned");
+                                work = w;
+                                queue.idle.fetch_sub(1, Ordering::Relaxed);
+                            }
+                        }
+                        while let Some((block_idx, line_idx)) = local.pop() {
+                            scan_line_shared(
+                                blocks, alloc_sizes, heap_start, heap_end, block_idx,
+                                line_idx, &mut local,
+                            );
+                            if local.len() >= SPILL {
+                                let half = local.len() / 2;
+                                let mut work =
+                                    queue.work.lock().expect("mark queue poisoned");
+                                work.extend(local.drain(..half));
+                                drop(work);
+                                queue.ready.notify_all();
+                            }
+                        }
+                    }
+                });
+            }
+        });
     }
 
     /// Charge off-heap memory (fiber stacks, JIT structures) as allocation
@@ -2500,7 +2688,7 @@ impl ImmixAllocator {
             let line_index = (offset % BLOCK_SIZE) / LINE_SIZE;
 
             if block_index < self.blocks.len() {
-                self.blocks[block_index].mark_bits[line_index] = true;
+                self.blocks[block_index].mark_bits[line_index].store(true, Ordering::Relaxed);
             }
 
             current_addr += LINE_SIZE;
@@ -2524,8 +2712,10 @@ impl ImmixAllocator {
         let block_index = offset / BLOCK_SIZE;
         let line_index = (offset % BLOCK_SIZE) / LINE_SIZE;
 
-        if block_index < self.blocks.len() && !self.blocks[block_index].mark_bits[line_index] {
-            self.blocks[block_index].mark_bits[line_index] = true;
+        if block_index < self.blocks.len()
+            && !self.blocks[block_index].mark_bits[line_index].load(Ordering::Relaxed)
+        {
+            self.blocks[block_index].mark_bits[line_index].store(true, Ordering::Relaxed);
 
             // Mark children based on the type of object
             unsafe {
@@ -2691,7 +2881,7 @@ impl ImmixAllocator {
                 Some(
                     used_block_addrs
                         .iter()
-                        .map(|&a| (a, self.blocks[a / BLOCK_SIZE].mark_bits))
+                        .map(|&a| (a, snapshot_marks(&self.blocks[a / BLOCK_SIZE])))
                         .collect(),
                 )
             } else {
@@ -2711,8 +2901,10 @@ impl ImmixAllocator {
             // back whole, and the TLAB block is still being bumped through.
             let mut spans: Vec<(usize, usize)> = Vec::new();
             let mut run_start: Option<usize> = None;
-            for (line_index, mark) in block.mark_bits.iter_mut().enumerate() {
-                if *mark {
+            // Read and reset in one operation: the bit has to be clear for the
+            // next cycle either way, and a swap saves a second pass.
+            for (line_index, mark) in block.mark_bits.iter().enumerate() {
+                if mark.swap(false, Ordering::Relaxed) {
                     is_empty = false;
                     marked_lines += 1;
                     if let Some(start) = run_start.take() {
@@ -2721,7 +2913,6 @@ impl ImmixAllocator {
                 } else if run_start.is_none() {
                     run_start = Some(line_index);
                 }
-                *mark = false; // Reset for next GC cycle
             }
             if let Some(start) = run_start.take() {
                 spans.push((start, LINES_PER_BLOCK - start));
@@ -3471,7 +3662,7 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
         let live = gc.blocks[block_addr / BLOCK_SIZE]
             .mark_bits
             .iter()
-            .filter(|m| **m)
+            .filter(|m| m.load(Ordering::Relaxed))
             .count();
         w(format!(
             "block {:#x} {live} {}",

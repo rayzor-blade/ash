@@ -469,6 +469,12 @@ pub struct HLInterpreter {
     fn_gc_set_scan_roots: *mut c_void,
     /// Reused across publishes so building the range list allocates once.
     scan_range_buf: Vec<(usize, usize)>,
+    /// How many entries of `scan_range_buf` precede this stack's frames, so a
+    /// call can append and a return truncate. See `scan_roots_push_frame`.
+    scan_prefix_len: usize,
+    /// `wide_call_args` capacity when the prefix was last built; a change
+    /// means its address may have moved and the prefix must be rebuilt.
+    scan_wide_cap: usize,
     /// Marshaled arguments for a call too wide for the inline array in
     /// `call_compiled_function`. Reused, and published to the collector by
     /// `sync_gc_scan_roots` over its whole capacity: boxing a Dynamic
@@ -835,6 +841,8 @@ impl HLInterpreter {
             fn_gc_add_scan_root,
             fn_gc_set_scan_roots,
             scan_range_buf: Vec::new(),
+            scan_prefix_len: 0,
+            scan_wide_cap: 0,
             wide_call_args: Vec::new(),
             wide_call_words: Vec::new(),
             prim_t_i32: prim_t_i32 as *mut c_void,
@@ -1281,6 +1289,53 @@ impl HLInterpreter {
         self.gc_runtime_initialized = true;
     }
 
+    /// Publish the frame just pushed, without revisiting the ones below it.
+    ///
+    /// The full rebuild leaves this stack's frames as a suffix of
+    /// `scan_range_buf`, so a call appends one range and a return drops one.
+    /// Falls back to the full rebuild whenever the prefix could have moved --
+    /// a fiber switch replaces the stack wholesale, and a grown
+    /// `wide_call_args` has a new address.
+    fn scan_roots_push_frame(&mut self) {
+        if self.fn_gc_set_scan_roots.is_null() || self.wide_call_args.capacity() != self.scan_wide_cap
+        {
+            self.sync_gc_scan_roots();
+            return;
+        }
+        let Some(frame) = self.stack.last() else {
+            self.sync_gc_scan_roots();
+            return;
+        };
+        let regs = frame.registers.as_slice();
+        if regs.is_empty() {
+            return;
+        }
+        let entry = (regs.as_ptr() as usize, std::mem::size_of_val(regs));
+        let mut buf = std::mem::take(&mut self.scan_range_buf);
+        buf.push(entry);
+        type FnSet = unsafe extern "C" fn(*const (usize, usize), usize);
+        let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
+        unsafe { set(buf.as_ptr(), buf.len()) };
+        self.scan_range_buf = buf;
+    }
+
+    /// Drop the range for a frame about to be popped, if it published one.
+    fn scan_roots_pop_frame(&mut self, published: bool) {
+        if !published {
+            return;
+        }
+        if self.fn_gc_set_scan_roots.is_null() || self.scan_range_buf.len() <= self.scan_prefix_len {
+            self.sync_gc_scan_roots();
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.scan_range_buf);
+        buf.pop();
+        type FnSet = unsafe extern "C" fn(*const (usize, usize), usize);
+        let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
+        unsafe { set(buf.as_ptr(), buf.len()) };
+        self.scan_range_buf = buf;
+    }
+
     /// Publish interpreter register memory as conservative GC scan ranges.
     /// This keeps live values held in bytecode registers visible to the std GC.
     fn sync_gc_scan_roots(&mut self) {
@@ -1301,11 +1356,11 @@ impl HLInterpreter {
             let set: FnSet = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots) };
             let mut buf = std::mem::take(&mut self.scan_range_buf);
             buf.clear();
-            for frame in self
-                .stack
-                .iter()
-                .chain(self.fiber_stacks.values().flatten())
-            {
+            // Everything that is not this stack's frames goes first, so the
+            // frames occupy a suffix that a call can extend and a return can
+            // truncate. Rebuilding the whole thing per call was O(depth), and
+            // the interpreter does it twice per call: 60% of a fib run.
+            for frame in self.fiber_stacks.values().flatten() {
                 let regs = frame.registers.as_slice();
                 if !regs.is_empty() {
                     buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
@@ -1318,6 +1373,14 @@ impl HLInterpreter {
                     self.wide_call_args.as_ptr() as usize,
                     self.wide_call_args.capacity() * std::mem::size_of::<NanBoxedValue>(),
                 ));
+            }
+            self.scan_prefix_len = buf.len();
+            self.scan_wide_cap = self.wide_call_args.capacity();
+            for frame in self.stack.iter() {
+                let regs = frame.registers.as_slice();
+                if !regs.is_empty() {
+                    buf.push((regs.as_ptr() as usize, std::mem::size_of_val(regs)));
+                }
             }
             unsafe { set(buf.as_ptr(), buf.len()) };
             self.scan_range_buf = buf;
@@ -4538,7 +4601,11 @@ impl HLInterpreter {
         }
 
         self.stack.push(frame);
-        self.sync_gc_scan_roots();
+        let published = self
+            .stack
+            .last()
+            .is_some_and(|f| !f.registers.as_slice().is_empty());
+        self.scan_roots_push_frame();
 
         // Main interpretation loop — always pop the frame even on error.
         // The findex is published for the sampling profiler so a sample landing
@@ -4552,7 +4619,7 @@ impl HLInterpreter {
                 self.reg_pool.push(f.into_buffer());
             }
         }
-        self.sync_gc_scan_roots();
+        self.scan_roots_pop_frame(published);
         result
     }
 
@@ -6052,7 +6119,11 @@ impl HLInterpreter {
         }
 
         self.stack.push(frame);
-        self.sync_gc_scan_roots();
+        let published = self
+            .stack
+            .last()
+            .is_some_and(|f| !f.registers.as_slice().is_empty());
+        self.scan_roots_push_frame();
 
         let prev_findex = ash_core::profile::enter_interp(bc.functions[func_idx].findex as u32);
         let result = self.ssa_loop(bc, native_resolver, func_idx, prep, args);
@@ -6062,7 +6133,7 @@ impl HLInterpreter {
                 self.reg_pool.push(f.into_buffer());
             }
         }
-        self.sync_gc_scan_roots();
+        self.scan_roots_pop_frame(published);
         result
     }
 

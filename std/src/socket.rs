@@ -908,6 +908,7 @@ pub unsafe extern "C" fn hlp_socket_send(
         return e;
     }
     trace::io("send", r as c_int);
+    trace::message("send", buf.wrapping_offset(pos as isize) as *const u8, r as i32);
     // Upstream returns the requested `len` rather than `r`, which reports a
     // short write on a non-blocking socket as a complete one and silently
     // drops the tail. Returning the count actually sent can only ever be
@@ -935,6 +936,7 @@ pub unsafe extern "C" fn hlp_socket_recv(
         return e;
     }
     trace::io("recv", ret as c_int);
+    trace::message("recv", buf.wrapping_offset(pos as isize) as *const u8, ret as i32);
     // 0 is end-of-stream here, which `sys.net.Socket` turns into Eof.
     ret as c_int
 }
@@ -1042,6 +1044,44 @@ mod trace {
             b[0], b[1], b[2], b[3], port,
             if ok { "ok" } else { "FAILED" }
         );
+    }
+
+    /// Report a frame's protocol `type` field, and nothing else.
+    ///
+    /// These frames carry the join password and the SDP, so the payload is
+    /// never printed. Scanning for `"type":"..."` says which step of the
+    /// handshake moved -- whether a `turn_credentials` reply ever comes back,
+    /// for one -- without putting a credential in a log. Server frames are
+    /// unmasked and readable; client frames are masked, so an unreadable
+    /// buffer simply yields nothing.
+    ///
+    /// # Safety
+    /// `buf` must be valid for `len` bytes.
+    pub unsafe fn message(dir: &str, buf: *const u8, len: i32) {
+        if !on() || buf.is_null() || len <= 0 {
+            return;
+        }
+        let bytes = std::slice::from_raw_parts(buf, len as usize);
+        let Some(at) = bytes.windows(6).position(|w| w == b"\"type\"") else {
+            return;
+        };
+        // Past `"type"`, its colon and opening quote, to the value.
+        let rest = &bytes[at + 6..];
+        let Some(open) = rest.iter().position(|&c| c == b'"') else {
+            return;
+        };
+        let value = &rest[open + 1..];
+        let Some(end) = value.iter().position(|&c| c == b'"') else {
+            return;
+        };
+        let name: String = value[..end]
+            .iter()
+            .take(48)
+            .map(|&c| if c.is_ascii_graphic() { c as char } else { '.' })
+            .collect();
+        if !name.is_empty() {
+            eprintln!("[sock] {dir} type=\"{name}\"");
+        }
     }
 
     /// `n` is the native return: >0 bytes, -1 would-block, -2 error, 0 eof.

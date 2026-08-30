@@ -5,12 +5,18 @@ use crate::values::NanBoxedValue;
 #[derive(Debug)]
 pub struct RegisterFile {
     registers: Vec<NanBoxedValue>,
+    /// The function this frame was sized for. Carried only so an out-of-range
+    /// register can name it: the bare index panic says a frame of 5 was
+    /// written at 15 without saying whose opcodes were running, and the two
+    /// disagreeing is the whole bug.
+    owner: usize,
 }
 
 impl RegisterFile {
     pub fn new(register_count: usize) -> Self {
         Self {
             registers: vec![NanBoxedValue::void(); register_count],
+            owner: usize::MAX,
         }
     }
 
@@ -24,7 +30,10 @@ impl RegisterFile {
     pub fn from_buffer(mut buf: Vec<NanBoxedValue>, register_count: usize) -> Self {
         buf.clear();
         buf.resize(register_count, NanBoxedValue::void());
-        Self { registers: buf }
+        Self {
+            registers: buf,
+            owner: usize::MAX,
+        }
     }
 
     /// Hand the buffer back so the next call can have it.
@@ -32,20 +41,62 @@ impl RegisterFile {
         self.registers
     }
 
+    /// Record which function the frame belongs to, for the panic message.
+    #[inline(always)]
+    pub fn set_owner(&mut self, function_index: usize) {
+        self.owner = function_index;
+    }
+
     #[inline(always)]
     pub fn get(&self, index: u32) -> NanBoxedValue {
-        self.registers[index as usize]
+        let i = index as usize;
+        match self.registers.get(i) {
+            Some(v) => *v,
+            None => self.out_of_range(i, "read"),
+        }
     }
 
     #[inline(always)]
     pub fn set(&mut self, index: u32, value: NanBoxedValue) {
-        self.registers[index as usize] = value;
+        let i = index as usize;
+        let owner = self.owner;
+        match self.registers.get_mut(i) {
+            Some(slot) => *slot = value,
+            None => RegisterFile::report(owner, i, 0, "write"),
+        }
     }
 
     /// Get a mutable pointer to a register slot (for Ref opcode).
     #[inline(always)]
     pub fn slot_ptr(&mut self, index: u32) -> *mut NanBoxedValue {
-        &mut self.registers[index as usize] as *mut NanBoxedValue
+        let i = index as usize;
+        let owner = self.owner;
+        let len = self.registers.len();
+        match self.registers.get_mut(i) {
+            Some(slot) => slot as *mut NanBoxedValue,
+            None => RegisterFile::report(owner, i, len, "take a reference to"),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn out_of_range(&self, index: usize, what: &str) -> ! {
+        RegisterFile::report(self.owner, index, self.registers.len(), what)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn report(owner: usize, index: usize, len: usize, what: &str) -> ! {
+        panic!(
+            "cannot {what} register {index}: the frame holds {len}, and was built \
+             for function index {}. A frame sized for one function is running \
+             another's opcodes -- the mismatch is the bug, not the index.",
+            if owner == usize::MAX {
+                "<unrecorded>".to_string()
+            } else {
+                owner.to_string()
+            }
+        )
     }
 
     #[inline(always)]
@@ -95,7 +146,11 @@ impl InterpreterFrame {
     pub fn new(function_index: usize, register_count: usize) -> Self {
         Self {
             function_index,
-            registers: RegisterFile::new(register_count),
+            registers: {
+                let mut r = RegisterFile::new(register_count);
+                r.set_owner(function_index);
+                r
+            },
             pc: 0,
             trap_stack: Vec::new(),
             backedges: 0,
@@ -110,7 +165,11 @@ impl InterpreterFrame {
     ) -> Self {
         Self {
             function_index,
-            registers: RegisterFile::from_buffer(buf, register_count),
+            registers: {
+                let mut r = RegisterFile::from_buffer(buf, register_count);
+                r.set_owner(function_index);
+                r
+            },
             pc: 0,
             trap_stack: Vec::new(),
             backedges: 0,

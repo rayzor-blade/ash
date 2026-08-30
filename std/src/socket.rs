@@ -882,8 +882,11 @@ pub unsafe extern "C" fn hlp_socket_send_char(s: *mut hl_socket, c: c_int) -> c_
     }
     let byte = c as u8;
     if sys::send((*s).sock, &byte, 1) < 0 {
-        return sys::block_error();
+        let e = sys::block_error();
+        trace::io("send", e);
+        return e;
     }
+    trace::io("send", 1);
     1
 }
 
@@ -900,8 +903,11 @@ pub unsafe extern "C" fn hlp_socket_send(
     }
     let r = sys::send((*s).sock, buf.wrapping_offset(pos as isize), len);
     if r < 0 {
-        return sys::block_error();
+        let e = sys::block_error();
+        trace::io("send", e);
+        return e;
     }
+    trace::io("send", r as c_int);
     // Upstream returns the requested `len` rather than `r`, which reports a
     // short write on a non-blocking socket as a complete one and silently
     // drops the tail. Returning the count actually sent can only ever be
@@ -924,8 +930,11 @@ pub unsafe extern "C" fn hlp_socket_recv(
     let ret = sys::recv((*s).sock, buf.wrapping_offset(pos as isize), len);
     hl_blocking(false);
     if ret < 0 {
-        return sys::block_error();
+        let e = sys::block_error();
+        trace::io("recv", e);
+        return e;
     }
+    trace::io("recv", ret as c_int);
     // 0 is end-of-stream here, which `sys.net.Socket` turns into Eof.
     ret as c_int
 }
@@ -941,11 +950,15 @@ pub unsafe extern "C" fn hlp_socket_recv_char(s: *mut hl_socket) -> c_int {
     let ret = sys::recv((*s).sock, &mut byte, 1);
     hl_blocking(false);
     if ret < 0 {
-        return sys::block_error();
+        let e = sys::block_error();
+        trace::io("recv", e);
+        return e;
     }
     if ret == 0 {
+        trace::io("recv", 0);
         return -2;
     }
+    trace::io("recv", 1);
     byte as c_int
 }
 
@@ -999,6 +1012,66 @@ pub unsafe extern "C" fn hlp_host_local() -> *mut vbyte {
     }
 }
 
+
+/// Socket activity tracing, behind `ASH_TRACE_SOCKET=1`.
+///
+/// A native library's connection failing tells you nothing on its own: the
+/// question is always whether the connect succeeded, whether bytes moved, and
+/// which direction stopped first. Totals are reported per socket so a stalled
+/// stream is distinguishable from one that never opened.
+mod trace {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    pub fn on() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| std::env::var("ASH_TRACE_SOCKET").is_ok())
+    }
+
+    static SENT: AtomicU64 = AtomicU64::new(0);
+    static RECVD: AtomicU64 = AtomicU64::new(0);
+    static OPS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn connect(host: i32, port: i32, ok: bool) {
+        if !on() {
+            return;
+        }
+        let b = host.to_le_bytes();
+        eprintln!(
+            "[sock] connect {}.{}.{}.{}:{} -> {}",
+            b[0], b[1], b[2], b[3], port,
+            if ok { "ok" } else { "FAILED" }
+        );
+    }
+
+    /// `n` is the native return: >0 bytes, -1 would-block, -2 error, 0 eof.
+    pub fn io(dir: &str, n: i32) {
+        if !on() {
+            return;
+        }
+        if n > 0 {
+            let total = if dir == "send" {
+                SENT.fetch_add(n as u64, Ordering::Relaxed) + n as u64
+            } else {
+                RECVD.fetch_add(n as u64, Ordering::Relaxed) + n as u64
+            };
+            // The opening exchange in full -- that is where a handshake goes
+            // wrong -- then sparsely, so a busy stream stays readable.
+            let ops = OPS.fetch_add(1, Ordering::Relaxed) + 1;
+            if ops <= 24 || ops.is_multiple_of(256) {
+                eprintln!("[sock] {dir} {n} bytes (total {total}, op {ops})");
+            }
+        } else if n == 0 || n == -2 {
+            eprintln!(
+                "[sock] {dir} {} (sent {} recvd {})",
+                if n == 0 { "EOF" } else { "ERROR" },
+                SENT.load(Ordering::Relaxed),
+                RECVD.load(Ordering::Relaxed)
+            );
+        }
+    }
+}
+
 /// `DEFINE_PRIM(_BOOL, socket_connect, _SOCK _I32 _I32)`
 #[no_mangle]
 pub unsafe extern "C" fn hlp_socket_connect(s: *mut hl_socket, host: c_int, port: c_int) -> bool {
@@ -1012,6 +1085,7 @@ pub unsafe extern "C" fn hlp_socket_connect(s: *mut hl_socket, host: c_int, port
     hl_blocking(false);
     // A non-blocking connect reports "in progress"; upstream calls that a
     // success and lets select decide when the handshake finished.
+    trace::connect(host, port, ok || blocked);
     ok || blocked
 }
 

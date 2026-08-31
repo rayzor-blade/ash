@@ -1033,8 +1033,8 @@ impl<'ctx> JITModule<'ctx> {
         // host already has for it. MCJIT resolves across the modules it holds,
         // but only for symbols that are actually defined somewhere it can see;
         // a bytecode function that was never compiled has no definition, and
-        // the call lands on a null pointer. Resolving them explicitly is what
-        // rayzor does with its runtime symbols.
+        // the call lands on a null pointer. Resolving them explicitly is the
+        // only way a fresh module reaches the runtime symbols.
         self.bind_module_declarations(&osr_module, &format!("osr module {name}"))?;
 
         self.execution_engine

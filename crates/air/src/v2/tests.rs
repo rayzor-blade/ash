@@ -4395,7 +4395,7 @@ fn fix_fib(findex: usize) -> (Vec<Opcode>, Vec<TypeRef>) {
 }
 
 /// A DIRECT self-call is expanded — that is deliberate (it lowers the
-/// recurrence base; rayzor and GCC -O2 do the same) — but ONLY under its own
+/// recurrence base; GCC -O2 does the same) — but ONLY under its own
 /// budget, held across manager rounds. Before the budget existed, the depth
 /// vector reset every round and fib's 11-instruction body compounded to 319:
 /// an optimizer whose output was 29x its input. The invariant pinned here is
@@ -4447,7 +4447,7 @@ fn inline_bounds_direct_self_recursion_across_rounds() {
 
 /// Direct mutual recursion (A calls B, B calls A) is never expanded: each
 /// round would re-open the other function's call site, and no per-site
-/// budget bounds that. rayzor's policy, via its `can_reach` check.
+/// budget bounds that. Reachability is what decides it.
 #[test]
 fn inline_refuses_direct_mutual_recursion() {
     // Function 9 calls 10; the body offered for 10 calls 9.

@@ -643,6 +643,21 @@ fn tiered_compile_tier_inner(
     may_block: bool,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
+    // Whoever compiled it first publishes through `functions_ptrs`, and that
+    // slot is the one piece of state both compile paths can see. The beads
+    // cannot see each other: the interpreter ticks the bead in
+    // `TieredRuntime::beads`, the broker keeps its own in `worker_beads`
+    // because the interpreter's Vec is not in the shared context, and
+    // beadie's guard is per bead. So each decided independently that the
+    // function needed compiling -- deltablue built 52 bodies for 45 distinct
+    // (function, tier) pairs, main and beadie-broker each producing one.
+    if tier == 0 && ctx.arrays.functions_ptrs != 0 {
+        let installed =
+            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
+        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            return installed.cast::<()>();
+        }
+    }
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
     if std::env::var("ASH_TIER1_PROBE").is_ok() {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -858,9 +873,10 @@ pub(crate) fn compile_with_cranelift(
             );
             if ctx.tier_log {
                 eprintln!(
-                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
+                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms on {}",
                     meta.num_ops,
-                    t0.elapsed().as_secs_f64() * 1e3
+                    t0.elapsed().as_secs_f64() * 1e3,
+                    std::thread::current().name().unwrap_or("main"),
                 );
             }
             // Publish through `functions_ptrs` too. The LLVM tier always did

@@ -510,7 +510,17 @@ impl HLInterpreter {
                 set!(dst, r);
             }
             I::Call { dst, fun, args: a } => {
-                let argv: Vec<NanBoxedValue> = a.iter().map(|v| get!(v)).collect();
+                // From the pool `ssa_call` returns them to. Collecting a fresh
+                // one made every call above arity zero a malloc and a free,
+                // with the pool filling up and never being read -- the same
+                // one-sided pooling the opcode loop had, mirrored.
+                let mut argv = self.arg_pool.pop().unwrap_or_default();
+                argv.clear();
+                argv.reserve(a.len());
+                for v in a.iter() {
+                    let x = get!(v);
+                    argv.push(x);
+                }
                 return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);
             }
             I::CallMethod {

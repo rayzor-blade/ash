@@ -3645,6 +3645,13 @@ pub unsafe extern "C" fn hlp_gc_set_scan_roots_live(
     ranges: *const (usize, usize),
     len: *const usize,
 ) {
+    // Same signal the copying publish gives: a mutator that publishes roots
+    // can be asked to defer a collection to its next safepoint. Without it
+    // the deferral branch never runs, and collections stop being batched --
+    // every origin on an MBHaxe session became `hard-pressure`, which is the
+    // bound deferral exists to stay under, not the path it should take.
+    let mut gc = gc_locked();
+    gc.heap.safepoint_mode = true;
     let thread = thread_self_fast();
     let mut world = MUTATOR_WORLD.state.lock().unwrap();
     if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {

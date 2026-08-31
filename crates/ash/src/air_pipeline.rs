@@ -65,6 +65,14 @@ pub struct AshModule<'b> {
     /// is inert, which is how a caller measures the module without letting
     /// inlining reshape the functions it is measuring.
     offer_callees: bool,
+    /// Callees already lowered, by findex.
+    ///
+    /// The inliner asks for a body once per candidate site, and handing it
+    /// `CalleeBody::Bytecode` made that a clone of the opcode array plus a
+    /// fresh lowering every time. Lowering a given callee is the same work
+    /// whoever asks, so it is done once: measured on deltablue, the inliner
+    /// was 11.2ms of the 15.2ms this pipeline spent preparing bodies.
+    lowered: Mutex<HashMap<usize, Function>>,
 }
 
 impl<'b> AshModule<'b> {
@@ -84,6 +92,7 @@ impl<'b> AshModule<'b> {
                 .map(|(i, f)| (f.findex as usize, i))
                 .collect(),
             offer_callees: true,
+            lowered: Mutex::new(HashMap::new()),
         }
     }
 
@@ -194,11 +203,36 @@ impl<'b> ModuleInfo for AshModule<'b> {
         if !self.offer_callees {
             return None;
         }
+        // Measurement knob: how much of `air prepare` is the inliner asking
+        // for bodies, and what does losing it cost at run time.
+        if std::env::var_os("ASH_AIR_NO_INLINE").is_some() {
+            return None;
+        }
+        if let Some(hit) = self
+            .lowered
+            .lock()
+            .expect("callee cache poisoned")
+            .get(&findex)
+        {
+            return Some(CalleeBody::Air(hit.clone()));
+        }
         let f = self.function(findex)?;
-        Some(CalleeBody::Bytecode {
-            ops: f.ops.clone(),
-            reg_types: reg_types_of(f),
-        })
+        // Lowered against a module that offers no callees: this is the callee's
+        // own body, and letting it inline its own callees here would expand
+        // the same work at every site that asks for it.
+        let bare = AshModule {
+            bc: self.bc,
+            native_at: self.native_at.clone(),
+            function_at: self.function_at.clone(),
+            offer_callees: false,
+            lowered: Mutex::new(HashMap::new()),
+        };
+        let body = air::v2::lower::lower_with(&f.ops, &reg_types_of(f), &bare).ok()?;
+        self.lowered
+            .lock()
+            .expect("callee cache poisoned")
+            .insert(findex, body.clone());
+        Some(CalleeBody::Air(body))
     }
 }
 

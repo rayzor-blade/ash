@@ -1050,12 +1050,15 @@ impl HLInterpreter {
             }
 
             // ---- trap regions -------------------------------------------
-            I::EndTrap { cell, .. } => {
-                let frame = self.stack.last_mut().unwrap();
-                frame.trap_stack.pop();
-                frame
-                    .registers
-                    .set(cell_base + cell.0, NanBoxedValue::null());
+            I::EndTrap { .. } => {
+                // Pop the handler and leave the cell alone. Ending a trap says
+                // nothing about the value in its exception cell, and lowering
+                // reuses that cell for other things: Template's try/catch
+                // wrapper stores the call result there, ends the trap, then
+                // reads it back to return it. Clearing on the way out returned
+                // null from every such function, and the opcode loop -- which
+                // only pops -- is the reference.
+                self.stack.last_mut().unwrap().trap_stack.pop();
             }
 
             // ---- misc ---------------------------------------------------

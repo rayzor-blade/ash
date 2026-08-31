@@ -450,7 +450,7 @@ impl<'ctx> JITModule<'ctx> {
     /// How many function bodies the shared module may hold before promotions
     /// stop being compiled into it, or `None` to let it grow without bound.
     ///
-    /// Off by default: capping at 1024 cut MBHaxe's shared middle end from
+    /// Off by default: capping at 1024 cut a game's shared middle end from
     /// 61.9s to 24.4s, but the game hung twice on the capped arm and the
     /// cause was never pinned down -- both hangs were also a second launch
     /// seconds after a SIGKILL, with a person playing the run being timed, so
@@ -484,7 +484,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         // A promotion into the shared module re-optimizes the whole module, so
         // its cost tracks the module's size rather than the promoted function:
-        // measured on MBHaxe, cost correlates +0.93 with body count and -0.07
+        // measured on a large program, cost correlates +0.93 with body count and -0.07
         // with the root's own size, and a 4-instruction root cost 2.3s. Once
         // the module is large enough for that walk to outweigh the inlining
         // the shared path buys, promote alone instead. Benchmarks reach 19
@@ -525,7 +525,7 @@ impl<'ctx> JITModule<'ctx> {
         // Seed with this function's own constants and let anything else
         // materialize on demand (`ensure_*_global`). Cloning the entire pool
         // instead put a game's whole constant table into a module holding ONE
-        // function, and the module-level passes then walk all of it: MBHaxe
+        // function, and the module-level passes then walk all of it: a game
         // spent 40s compiling a 94-instruction function that way. The seed is
         // only an optimization now -- correctness no longer depends on it
         // predicting which constants the optimized body will reference, which
@@ -687,7 +687,7 @@ impl<'ctx> JITModule<'ctx> {
             // What the shared path is actually buying. It exists so the
             // inliner has callee bodies to work with, and it pays for the
             // whole transitive closure to get them -- 263 functions per
-            // promotion on MBHaxe. Inlining removes calls from the root and
+            // promotion in a large program. Inlining removes calls from the root and
             // grows it, so measuring the root either side of the middle end
             // says how many of those bodies were worth lowering.
             let root_shape = |f: inkwell::values::FunctionValue<'ctx>| -> (usize, usize) {
@@ -974,7 +974,7 @@ impl<'ctx> JITModule<'ctx> {
         //
         // The `else` arm here took the WHOLE pool, and `lazy_compilation` is
         // false in --mode hybrid, so every OSR entry a game built carried the
-        // program's entire constant table: measured on MBHaxe, 1194 ints + 717
+        // program's entire constant table: measured on a game, 1194 ints + 717
         // floats + 17998 strings = 19909 globals and ~708KB of UTF-16 rodata,
         // each string re-encoded with encode_utf16().collect() as it was
         // added. They are emitted with external linkage, so GlobalDCE and

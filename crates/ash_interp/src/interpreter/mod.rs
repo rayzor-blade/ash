@@ -6373,7 +6373,7 @@ impl HLInterpreter {
     ///
     /// This is a pure function of the image, and building it walks every type,
     /// every proto and every binding, allocating a String for each. Rebuilding
-    /// it per call made throwing an exception cost O(program): MBHaxe throws
+    /// it per call made throwing an exception cost O(program): a game throws
     /// while loading a level, and the loading screen sat in this function
     /// through thousands of rebuilds. A trace is only ever read once, and only
     /// if it escapes -- the table has no business being rebuilt to produce it.

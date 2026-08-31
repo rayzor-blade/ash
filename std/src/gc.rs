@@ -870,7 +870,7 @@ fn growth_factor() -> usize {
 /// falls back to retaining those blocks whole.
 ///
 /// On by default because block-granularity reuse fragments without bound in a
-/// long-running program: measured on MBHaxe, occupancy of the retained blocks
+/// long-running program: measured on a game, occupancy of the retained blocks
 /// fell 54% -> 41% -> 23% -> 17% while the marked set stayed flat near 195MB,
 /// so 1132MB was held to store 195MB of live data and marking paid to walk
 /// all of it -- pauses reached 362ms and were still growing. Recycling holds
@@ -961,7 +961,7 @@ fn env_usize(name: &str) -> Option<usize> {
 ///
 /// `ASH_GC_HEAP_MB` overrides; otherwise a share of usable RAM, so the same
 /// binary runs a game on a workstation and a script in a small container.
-/// A fixed default cannot do both: a real heaps/MBHaxe scene carries a live
+/// A fixed default cannot do both: a real 3D scene carries a live
 /// set near 1GB, and a cap below it does not degrade — allocation fails and
 /// the caller has nowhere to go.
 fn heap_max_bytes() -> usize {
@@ -1163,7 +1163,7 @@ fn usable_ram_bytes() -> usize {
 ///
 /// This bounds FIXED headroom only. A ceiling below the live set would make
 /// the collector fire at a fraction of what is live, collecting continuously
-/// and reclaiming progressively less — a heaps/MBHaxe scene load hit that at
+/// and reclaiming progressively less — a 3D scene load hit that at
 /// roughly one collection per second. `collect_garbage` therefore raises the
 /// effective ceiling to the live set when the live set is larger, which keeps
 /// peak near 2x live. Scaling this constant with the whole heap instead did
@@ -1700,7 +1700,7 @@ struct Block {
     /// Sweep reads it to skip the per-line scan of a block that nothing
     /// reached: its bits are already clear from the previous sweep, so there
     /// is nothing to read and nothing to reset. Most swept blocks are empty --
-    /// 16228 of 27000 in one MBHaxe collection -- and each cost 256 byte reads
+    /// 16228 of 27000 in one measured collection -- and each cost 256 byte reads
     /// to discover that.
     any_marked: AtomicBool,
 }
@@ -3311,7 +3311,7 @@ impl ImmixAllocator {
                 // as reusable when the advice failed means the matching REUSE
                 // still runs later and credits memory that was never debited,
                 // so the footprint climbs by the whole recycled set every
-                // collection while RSS stays flat. Measured on MBHaxe: a
+                // collection while RSS stays flat. Measured on a game: a
                 // steady 144MB live set churning 512MB per cycle drove the
                 // reported footprint to 1.2GB, 2.4GB, 3.6GB, 4.8GB, 6.0GB in
                 // even steps, and the machine paged itself to a stop.
@@ -3648,7 +3648,7 @@ pub unsafe extern "C" fn hlp_gc_set_scan_roots_live(
     // Same signal the copying publish gives: a mutator that publishes roots
     // can be asked to defer a collection to its next safepoint. Without it
     // the deferral branch never runs, and collections stop being batched --
-    // every origin on an MBHaxe session became `hard-pressure`, which is the
+    // every origin on a game session became `hard-pressure`, which is the
     // bound deferral exists to stay under, not the path it should take.
     let mut gc = gc_locked();
     gc.heap.safepoint_mode = true;

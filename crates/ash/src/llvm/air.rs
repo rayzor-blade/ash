@@ -109,7 +109,7 @@ fn pass_options() -> AirPassOptions {
 ///
 /// The shared module's only product is inlined callees: it lowers the whole
 /// transitive closure so the inliner has bodies to work with, and that is what
-/// costs 2287ms per promotion on MBHaxe. If no call site in the root has a
+/// costs 2287ms per promotion in a large program. If no call site in the root has a
 /// callee small enough to inline, the closure is lowered for nothing --
 /// measured, 8 of 21 promotions inlined nothing and paid 8158ms between them.
 ///

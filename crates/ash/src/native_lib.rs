@@ -744,7 +744,7 @@ mod tests {
     fn bare_program_filename_uses_current_directory() {
         assert_eq!(program_directory(Path::new("game.hl")), Path::new("."));
         assert_eq!(
-            program_directory(Path::new("games/marblegame.hl")),
+            program_directory(Path::new("games/demo.hl")),
             Path::new("games")
         );
     }

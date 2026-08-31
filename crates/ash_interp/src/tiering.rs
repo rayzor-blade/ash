@@ -92,7 +92,7 @@ pub struct TieredConfig {
     /// The marshaling path itself no longer needs one: anything past the
     /// inline eight goes through the backend's uniform entry. But letting
     /// Cranelift compile those signatures for the first time produced a frame
-    /// sized for one function running another's opcodes on MBHaxe, and the
+    /// sized for one function running another's opcodes in a large program, and the
     /// default is not the place to carry an unproven path. Raise it explicitly
     /// to exercise the uniform entry.
     pub max_jit_args: usize,
@@ -590,7 +590,7 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
 ///
 /// Every caller runs this on whichever thread demanded the code, which is
 /// regularly a fiber worker, and a compile takes long enough to be the reason
-/// a collection waits -- one MBHaxe world stop spent 352ms on a worker that
+/// a collection waits -- one measured world stop spent 352ms on a worker that
 /// reached no safepoint in that window. So the whole compile is declared
 /// blocking: it touches no GC object, and `hl_blocking` publishes the thread's
 /// stack pointer and callee-saved registers before returning, leaving the

@@ -5604,10 +5604,10 @@ fn escape_separates_iteration_local_allocations_from_carried_ones() {
 }
 
 // ---------------------------------------------------------------------------
-// cellfwd regressions (MBHaxe marblegame refusals)
+// cellfwd regressions (refusals found in a large program)
 // ---------------------------------------------------------------------------
 
-/// marblegame f310 `init`, minimized: an in-place redefine of a pinned
+/// f310 `init` from a game fixture, minimized: an in-place redefine of a pinned
 /// register (`Not r, r`) whose `CellGet` cellfwd forwards and deletes. The
 /// pass used to skip `compact_values`, leaving the deleted load's dst as an
 /// undefined value-table entry that nothing else cleaned up when no later
@@ -5640,7 +5640,7 @@ fn cellfwd_compacts_after_deleting_forwarded_loads() {
     verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
 }
 
-/// marblegame f6227 `initFromScene`, minimized: a `CellSet` whose stored
+/// f6227 `initFromScene` from a game fixture, minimized: a `CellSet` whose stored
 /// value is itself the dst of a forwarded (hence deleted) `CellGet`. The
 /// forward tuples are collected before any rewriting, so applying
 /// `(v2 -> v1)` after `(v1 -> v0)` must chase the chain to `v0`; pointing

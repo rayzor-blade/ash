@@ -31,7 +31,10 @@ windows-sys = { version = "0.59", features = [
 winapi = { version = "0.3", features = ["debugapi", "winnt"] }
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# `staticlib` for AOT: the emitted object links the runtime in rather
+# than dlopen-ing a cdylib, which wasm cannot do at all and which for
+# native AOT would only relocate the C-wrapper problem into a dylib.
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 
 [build-dependencies]

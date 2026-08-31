@@ -29,6 +29,37 @@ Measured, not assumed:
 * **`ash_std` is 363 `hlp_*` natives**, the majority pure computation —
   strings, math, JSON, arrays, maps.
 
+## The runtime must be statically linked
+
+Today `ash_std` is a **cdylib** whose bytes are embedded with `include_bytes!`
+and written to disk at runtime for `dlopen` (`native_lib.rs:278`). The
+`libash_std.a` in `OUT_DIR` is a dylib wearing a `.a` filename — `file` says
+"Mach-O 64-bit dynamically linked shared library" — and the name is fixed only
+because `include_bytes!` needs a stable path (`build.rs:301`).
+
+That mechanism has no analogue in either AOT target. wasm has no `dlopen`, and
+for native AOT a dylib dependency merely relocates the C-wrapper problem
+instead of removing it. So AOT needs genuine static linking, in three
+ascending forms:
+
+1. **`declare` + static archive.** `External` declarations in the IR — which
+   says nothing about static vs dynamic, only "not defined here" — plus a real
+   `staticlib` crate-type so the linker pulls `libash_std.a` into the output.
+2. **Whole-archive.** Natives are reached through `functions_ptrs` and closure
+   tables, so the linker cannot see they are live and will garbage-collect
+   them. Needs `--whole-archive` or an explicit retained list; `reachable.rs`
+   already answers that question for us.
+3. **Bitcode + LTO.** Emit `ash_std` as LLVM bitcode, link it into the module
+   at IR level, and run the middle end over program and runtime together.
+
+**Three is what "optimal AOT" means here.** `gc.rs:138` says the TLAB cursor
+and limit are exported statics "so a JIT tier can inline the bump sequence
+later" — and that was never built, because a JIT cannot see across an opaque
+native call. Under IR-level LTO it needs no new code: `hlp_alloc_obj` becomes
+inlinable at the allocation site and the bump folds into the caller. On
+binary_trees that body alone is ~12% of the run. The same argument applies to
+the closure guards that LICM could not hoist past a call boundary.
+
 ## Route
 
 **Take the LLVM WebAssembly backend (Route A).** AIR → LLVM IR → wasm32
@@ -120,10 +151,26 @@ blockers below are the same, in the order they bite:
    `Trap`/`EndTrap` to an explicit result-tag check in AIR. The second is
    portable to every engine and is a pass we could reuse elsewhere; the first
    is far less work. Decide with a spike, not in this document.
-4. **Threads and fibers.** Ten sites reference `krio-fiber` or
-   `thread::spawn`. Phase 1 is single-threaded: `hl_blocking` is a no-op, the
-   fiber poll compiles to nothing, and `Thread.create` raises. Wasm threads
-   are a later phase and need shared memory plus a very different GC.
+4. **Threads and fibers — implementable, not deferred.** Ten sites reference
+   `krio-fiber` or `thread::spawn`. Both have real wasm answers:
+
+   * **Threads** via the threads proposal: `wasm32-wasip1-threads` is already
+     an installed rustup target, and in a browser shared memory needs
+     cross-origin isolation (COOP/COEP headers) to get `SharedArrayBuffer`.
+     Workers then run the same module against one shared linear memory.
+   * **Stackful fibers on Workers.** A fiber is not an OS thread — it is a
+     stack plus a switch — so a Worker per fiber is a legitimate
+     implementation, with the scheduler handing off through the shared
+     memory. `krio-fiber`'s switch is the part that needs a wasm backend, not
+     the concept.
+
+   Phase 1 still *starts* single-threaded — `hl_blocking` a no-op, the fiber
+   poll compiled away, `Thread.create` raising — because it is the shortest
+   path to a running program. But the design must not paint threads out: the
+   GC in particular has to keep its mutator registry, since a single-mutator
+   shortcut would have to be unpicked to add Workers later. COEP is a
+   deployment constraint on the embedder, so it belongs in the Phase 3 host
+   documentation rather than being discovered by a framework author.
 
 *Done when:* `ash_std.wasm` links and a hand-written test module can allocate
 an object, build a string, and throw and catch.

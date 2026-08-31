@@ -60,6 +60,20 @@ pub struct CompiledFunctionMeta {
     pub ret_kind: hl_type_kind,
 }
 
+impl CompiledFunctionMeta {
+    /// An AOT lowering has no address: the function is a symbol in the module
+    /// and gets one when the object is linked. `fn_addr == 0` is the marker,
+    /// and nothing in the AOT path dispatches through it.
+    pub fn aot_placeholder(findex: usize) -> Self {
+        CompiledFunctionMeta {
+            findex,
+            fn_addr: 0,
+            arg_kinds: Vec::new(),
+            ret_kind: 0,
+        }
+    }
+}
+
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
     /// Alias metadata for emitted loads and stores; see [`super::tbaa`].
@@ -100,6 +114,12 @@ pub struct JITModule<'ctx> {
     /// through functions_ptrs, so a reloaded function is picked up by its
     /// callers instead of them holding the old address.
     pub(crate) hot_reload: bool,
+    /// Ahead-of-time mode: emit an object file rather than JIT into this
+    /// process. Natives become `External` declarations the linker resolves
+    /// against `libash_std.a` instead of absolute addresses baked into the
+    /// IR, because an address valid in THIS process means nothing in the one
+    /// that will run the object. See `docs/wasm-target.md`.
+    pub(crate) aot: bool,
     /// Compile reached functions into independent modules and dispatch calls
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:
     /// MCJIT modules cannot accept new function bodies after finalization.
@@ -248,6 +268,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: None,
             hot_reload: false,
+            aot: false,
             lazy_compilation: false,
             current_findex: usize::MAX,
         };
@@ -465,6 +486,65 @@ impl<'ctx> JITModule<'ctx> {
             .collect();
     }
 
+    /// Emit for ahead-of-time compilation. Must be set before any function is
+    /// lowered: it changes how natives are referenced, and a module that has
+    /// already baked an address cannot be un-baked.
+    /// The module's bytecode functions, for a driver that wants to lower all
+    /// of them.
+    pub fn bytecode_functions(&self) -> &[crate::types::HLFunction] {
+        &self.bytecode.functions
+    }
+
+    /// The findex the module starts at.
+    pub fn entrypoint_findex(&self) -> u32 {
+        self.bytecode.entrypoint
+    }
+
+    /// The symbol the entrypoint is emitted under. Functions take their Haxe
+    /// name when they have one and `Fun_<findex>` only as a fallback, so a
+    /// driver cannot assume the latter.
+    pub fn entrypoint_symbol(&self) -> String {
+        let fx = self.bytecode.entrypoint as i32;
+        self.bytecode
+            .functions
+            .iter()
+            .find(|f| f.findex == fx)
+            .map(|f| f.name().to_string())
+            .unwrap_or_else(|| format!("Fun_{fx}"))
+    }
+
+    pub fn set_aot(&mut self, enabled: bool) {
+        self.aot = enabled;
+    }
+
+    /// Write this module as an object file for `triple`, the AOT counterpart
+    /// of `execution_engine.get_function_address`. The lowering above is
+    /// target-independent; only this tail and `declare_native` are not.
+    pub fn emit_object(&self, triple: &str, path: &std::path::Path) -> Result<u64> {
+        use inkwell::targets::{
+            CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
+        };
+        Target::initialize_all(&InitializationConfig::default());
+        let tt = TargetTriple::create(triple);
+        self.module.set_triple(&tt);
+        let target = Target::from_triple(&tt)
+            .map_err(|e| anyhow!("no target for {triple}: {e}"))?;
+        let machine = target
+            .create_target_machine(
+                &tt,
+                "generic",
+                "",
+                inkwell::OptimizationLevel::Aggressive,
+                RelocMode::PIC,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| anyhow!("could not create a TargetMachine for {triple}"))?;
+        machine
+            .write_to_file(&self.module, FileType::Object, path)
+            .map_err(|e| anyhow!("emit {}: {e}", path.display()))?;
+        Ok(std::fs::metadata(path)?.len())
+    }
+
     pub fn set_hot_reload(&mut self, enabled: bool) {
         self.hot_reload = enabled;
     }
@@ -562,6 +642,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: Some(shared.clone()),
             hot_reload: false,
+            aot: false,
             lazy_compilation: false,
             current_findex: usize::MAX,
         };

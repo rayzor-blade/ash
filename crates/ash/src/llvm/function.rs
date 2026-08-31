@@ -141,6 +141,23 @@ impl<'ctx> JITModule<'ctx> {
             None => self.context.void_type().fn_type(param_types, false),
         };
 
+        // AOT: reference the native by NAME and let the linker resolve it
+        // against libash_std.a. An address resolved in this process is
+        // meaningless in the one that runs the object, and there is no dlopen
+        // in a wasm sandbox at all. `External` here says only "not defined in
+        // this module" -- it is orthogonal to static vs dynamic linking, and
+        // the AOT link is static.
+        if self.aot {
+            if let Some(f) = self.module.get_function(name) {
+                return f;
+            }
+            return self.module.add_function(
+                name,
+                fn_type,
+                Some(inkwell::module::Linkage::External),
+            );
+        }
+
         let func_addr = self
             .native_function_resolver
             .resolve_function("std", name)
@@ -637,7 +654,11 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
 
-        if self.promote_uses_own_module(findex) {
+        // AOT lowers everything into ONE module: the per-function promo module
+        // exists to hand MCJIT a small unit to codegen and is added to the
+        // engine, which an AOT build has no use for and cannot satisfy —
+        // resolving a symbol in this process is exactly what AOT must not do.
+        if !self.aot && self.promote_uses_own_module(findex) {
             let fn_addr = self.promote_in_own_module(findex)?;
             self.install_function_address(findex, fn_addr as *mut c_void);
             return self.compiled_meta_for(findex, fn_addr);
@@ -773,6 +794,13 @@ impl<'ctx> JITModule<'ctx> {
                 findex
             )
         })?;
+        // The JIT/AOT fork. Everything above is target-independent IR
+        // construction; only this tail differs. In AOT there is no address to
+        // return -- the function exists as a symbol in the module, and
+        // `emit_object` turns the whole module into relocatable code later.
+        if self.aot {
+            return Ok(CompiledFunctionMeta::aot_placeholder(findex));
+        }
         // Where MCJIT actually emits machine code: the address request is what
         // forces codegen and relocation for everything reachable.
         let fn_addr = {

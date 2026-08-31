@@ -1002,13 +1002,12 @@ pub unsafe extern "C" fn hlp_sys_get_loop() -> *mut std::ffi::c_void {
     SYS_LOOP_FUNC
 }
 
-/// Upstream returns this thread's `hl_thread_info`. ash keeps no such
-/// registry, and the one caller-visible use of a null answer ("this is not a
-/// registered VM thread") is the honest one for every ash thread today. The
-/// real implementation belongs with the thread bookkeeping in thread.rs.
+/// Upstream returns this thread's `hl_thread_info`. ash keeps no thread
+/// registry, but it does keep the one field native code reads -- see
+/// `thread::ThreadInfo` for why null is not an option here.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_get_thread_info() -> *mut c_void {
-    std::ptr::null_mut()
+    crate::thread::thread_info() as *mut c_void
 }
 
 /// Whether a debugger is attached.

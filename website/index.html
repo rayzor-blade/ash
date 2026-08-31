@@ -200,6 +200,26 @@
       background: #221d1a
     }
 
+    .seg-aot {
+      height: 100%;
+      background: #7a4a1e
+    }
+
+    /* Marks the two lanes whose compile happened before the clock started.
+       Small, and on the label rather than the bar, so it says which category
+       a row is in without competing with the measurement. */
+    .aot-tag {
+      display: inline-block;
+      margin-left: 5px;
+      padding: 0 3px;
+      border: 1px solid #cbbfae;
+      border-radius: 2px;
+      font-size: 8.5px;
+      letter-spacing: .04em;
+      vertical-align: 1px;
+      color: #8a7a63
+    }
+
     .seg-hl2 {
       height: 100%;
       background: #8a6a4a
@@ -622,10 +642,13 @@
         </div>
         <div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the
           pure wall time of one run, verified against the benchmark's accepted checksums before it is published.
-          <strong style="color:#5c5450">HashLink/C is not a VM.</strong> <code>haxe -hl main.c</code> emits C that the
-          system compiler builds into a native executable, so its bar is this bytecode running as ordinary compiled
-          code — a ceiling to measure against rather than a peer. That build takes one to six seconds and is excluded
-          from its bar, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is measured in
+          <strong style="color:#5c5450">Two kinds of row, marked AOT.</strong> The lanes tagged
+          <span class="aot-tag">AOT</span> — <code>Ash AOT</code> and <code>HashLink/C</code> — were compiled to a
+          native binary before timing began, so their bars are this bytecode running as ordinary compiled code. The
+          rest are still compiling inside the window being measured, which is the honest reason to read the two groups
+          apart rather than as one ranking. <code>haxe -hl main.c</code> emits C for the system compiler to build;
+          <code>ash</code> emits the object itself, with no C in the path. Both builds take one to six seconds and are
+          excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is measured in
           its own CI job, so the engines within a row share a machine but different rows may not — compare engines
           within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.</div>
       </div>
@@ -824,21 +847,28 @@
             var line = el('div', 'bench-line');
             var label = el('div', 'bench-label');
             label.textContent = r.label + (r.engine === 'ash' && r.mode && r.mode !== 'hybrid-auto' ? ' (' + r.mode + ')' : '');
+            if (r.kind === 'aot') {
+              var tag = el('span', 'aot-tag');
+              tag.textContent = 'AOT';
+              tag.title = 'Compiled ahead of time; the build is excluded from the bar';
+              label.appendChild(tag);
+            }
             line.appendChild(label);
 
             var track = el('div', 'bench-track');
             var total = r.median_ms * unit;
             var segClass = r.engine === 'ash' ? 'seg-exec'
-              : r.engine === 'hashlink-c' ? 'seg-hlc'
-                : r.engine === 'hxjvm' ? 'seg-jvm'
-                  : r.engine === 'hashlink-hl2' ? 'seg-hl2' : 'seg-hl';
+              : r.engine === 'ash-aot' ? 'seg-aot'
+                : r.engine === 'hashlink-c' ? 'seg-hlc'
+                  : r.engine === 'hxjvm' ? 'seg-jvm'
+                    : r.engine === 'hashlink-hl2' ? 'seg-hl2' : 'seg-hl';
             var seg = el('div', segClass);
             seg.style.width = Math.max(total, 1.2) + '%';
             track.appendChild(seg);
             line.appendChild(track);
 
             var num = el('div', 'bench-num');
-            num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'hashlink-c' ? '#5c5450' : r.engine === 'hxjvm' ? '#6e7f8c' : r.engine === 'hashlink-hl2' ? '#8a6a4a' : '#8a807a';
+            num.style.color = r.engine === 'ash' ? '#a8703c' : r.engine === 'ash-aot' ? '#7a4a1e' : r.engine === 'hashlink-c' ? '#5c5450' : r.engine === 'hxjvm' ? '#6e7f8c' : r.engine === 'hashlink-hl2' ? '#8a6a4a' : '#8a807a';
             var ms = el('span', 'ms');
             ms.textContent = fmtMs(r.median_ms);
             if (r.median_ms === fastest) ms.style.fontWeight = '700';

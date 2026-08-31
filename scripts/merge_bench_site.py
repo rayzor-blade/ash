@@ -41,6 +41,7 @@ from pathlib import Path
 # partials is appended alphabetically — the page renders whatever is present.
 KNOWN = [
     ("fib", "fib(40)"),
+    ("fib_calls", "fib(40), real calls"),
     ("binary_trees", "binary trees"),
     ("deltablue", "deltablue"),
     ("mandelbrot", "mandelbrot"),
@@ -95,6 +96,7 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
     checksum = (pick.get("checksum") or {}).get("value")
     row = {
         "engine": "ash",
+        "kind": "jit",
         "label": "Ash",
         "mode": pick.get("mode"),
         "status": pick.get("status"),
@@ -140,7 +142,19 @@ HL_LABELS = {
     "hashlink-hl2": "HashLink hl2-ir",
     "hashlink-c": "HashLink/C",
     "hxjvm": "Haxe JVM",
+    "ash-aot": "Ash AOT",
 }
+
+# How each engine got to machine code. The page groups on this, because the
+# two are not measured on comparable terms: an ahead-of-time binary has its
+# compile behind it before the clock starts, while a JIT is still compiling
+# inside the window being timed. Putting `Ash AOT` and `HashLink/C` together,
+# and apart from the rest, is what makes the row honest to read.
+AOT_ENGINES = {"hashlink-c", "ash-aot"}
+
+
+def engine_kind(engine: str) -> str:
+    return "aot" if engine in AOT_ENGINES else "jit"
 
 
 def hl_row(doc: dict, bench: str, engine: str) -> dict | None:
@@ -159,6 +173,7 @@ def hl_row(doc: dict, bench: str, engine: str) -> dict | None:
     row = {
         "engine": engine,
         "label": HL_LABELS[engine],
+        "kind": engine_kind(engine),
         "status": rec.get("status"),
         "detail": rec.get("detail", ""),
     }
@@ -183,7 +198,7 @@ def main() -> int:
         except json.JSONDecodeError as e:
             print(f"::warning::skipping unparseable partial {p}: {e}")
             continue
-        if doc.get("tool") == "hl_bench" or doc.get("engine") == "hashlink-jit":
+        if doc.get("tool") in ("hl_bench", "aot_bench") or doc.get("engine") == "hashlink-jit":
             hl_docs.append(doc)
         elif "results" in doc:
             ash_docs.append(doc)
@@ -219,18 +234,22 @@ def main() -> int:
             if row:
                 rows.append(row)
                 break
-        for doc in hl_docs:
-            row = hl_row(doc, name, "hashlink-c")
-            if row:
-                rows.append(row)
-                break
-        # Last: not a HashLink engine at all, so it reads as the outside
-        # reference rather than part of the family.
+        # Not a HashLink engine at all, so it reads as the outside reference
+        # rather than part of the family.
         for doc in hl_docs:
             row = hl_row(doc, name, "hxjvm")
             if row:
                 rows.append(row)
                 break
+        # The ahead-of-time pair last and adjacent: both had their compile
+        # done before the clock started, so they belong beside each other and
+        # not interleaved with engines that are still compiling as they run.
+        for engine in ("hashlink-c", "ash-aot"):
+            for doc in hl_docs:
+                row = hl_row(doc, name, engine)
+                if row:
+                    rows.append(row)
+                    break
         group = next(
             (
                 r.get("group")

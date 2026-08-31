@@ -99,11 +99,18 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
     source = tests_dir / bench["hl"]
     if not source.exists():
         return None, f"no bytecode at {source}", 0.0
-    spike = repo / "target" / "release" / "examples" / "aot_spike"
-    if not spike.exists():
-        spike = repo / "target" / "debug" / "examples" / "aot_spike"
-    if not spike.exists():
+    # Newest, not release-first. A stale release build sitting beside a fresh
+    # debug one silently emits an object from older compiler code -- here it
+    # produced one with no `main` at all, and the failure surfaced as a link
+    # error naming a symbol the emitter had simply stopped writing.
+    candidates = [
+        repo / "target" / profile / "examples" / "aot_spike"
+        for profile in ("release", "debug")
+    ]
+    existing = [c for c in candidates if c.exists()]
+    if not existing:
         return None, "no aot_spike (cargo build -p ash_core --example aot_spike)", 0.0
+    spike = max(existing, key=lambda c: c.stat().st_mtime)
 
     obj = workdir / "prog.o"
     binary = workdir / "prog"
@@ -134,6 +141,14 @@ def main() -> int:
     ap.add_argument("--cc", default=os.environ.get("CC", "cc"))
     ap.add_argument("--hashlink-dir", type=Path, default=None)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--lanes", default="ash-aot,ash-jit,ash-hybrid,hlc",
+                    help="comma-separated lanes to run; CI asks for ash-aot "
+                         "alone, because ash_bench.py and hl_bench.py already "
+                         "produce the others and running them twice would put "
+                         "two different measurements of one engine on the page")
+    ap.add_argument("--emit-partial", type=Path, default=None,
+                    help="also write a merge_bench_site.py partial carrying "
+                         "the ash-aot lane")
     args = ap.parse_args()
 
     repo = args.repo_root.resolve()
@@ -163,11 +178,13 @@ def main() -> int:
     else:
         selected = [b for b in doc["bench"] if b.get("checksums")]
 
-    ash = repo / "target" / "release" / "ash"
-    if not ash.exists():
-        ash = repo / "target" / "debug" / "ash"
-    if not ash.exists():
+    ash_candidates = [
+        repo / "target" / profile / "ash" for profile in ("release", "debug")
+    ]
+    ash_existing = [c for c in ash_candidates if c.exists()]
+    if not ash_existing:
         sys.exit("no ash binary (cargo build --release -p ash)")
+    ash = max(ash_existing, key=lambda c: c.stat().st_mtime)
 
     haxe = args.haxe or shutil.which("haxe")
     cc = shutil.which(args.cc)
@@ -179,6 +196,7 @@ def main() -> int:
             prev = run_env.get(var, "")
             run_env[var] = f"{args.hashlink_dir}{':' + prev if prev else ''}"
 
+    lanes = {l.strip() for l in args.lanes.split(",") if l.strip()}
     results = []
     for bench in selected:
         name = bench["name"]
@@ -191,7 +209,10 @@ def main() -> int:
         lane_env = dict(run_env)
         lane_env.update({str(k): str(v) for k, v in bench.get("env", {}).items()})
 
-        with tempfile.TemporaryDirectory(prefix=f"aot-{name}-") as td:
+        if "ash-aot" not in lanes:
+            row["lanes"]["ash-aot"] = {"status": "SKIP", "detail": "lane not selected"}
+        else:
+          with tempfile.TemporaryDirectory(prefix=f"aot-{name}-") as td:
             binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td), lane_env)
             if binary is None:
                 row["lanes"]["ash-aot"] = {"status": "FAIL", "detail": detail}
@@ -205,18 +226,26 @@ def main() -> int:
                 row["lanes"]["ash-aot"] = rec
 
         jit_cmd = [str(ash), "--mode", "jit", str(source)]
-        row["lanes"]["ash-jit"] = hlb.time_command(
+        if "ash-jit" not in lanes:
+            row["lanes"]["ash-jit"] = {"status": "SKIP", "detail": "lane not selected"}
+        else:
+          row["lanes"]["ash-jit"] = hlb.time_command(
             jit_cmd, bench, args.iterations, args.warmups, timeout, lane_env)
         row["lanes"]["ash-jit"]["peak_rss_bytes"] = peak_rss(jit_cmd, timeout, lane_env)
         # Explicitly hybrid: `ash <file>` with no mode is the INTERPRETER,
         # and timing fib(40) under it measures the interpreter, not the
         # engine anyone ships. Hybrid is what the published table runs.
         hybrid_cmd = [str(ash), "--mode", "hybrid", str(source)]
-        row["lanes"]["ash-hybrid"] = hlb.time_command(
+        if "ash-hybrid" not in lanes:
+            row["lanes"]["ash-hybrid"] = {"status": "SKIP", "detail": "lane not selected"}
+        else:
+          row["lanes"]["ash-hybrid"] = hlb.time_command(
             hybrid_cmd, bench, args.iterations, args.warmups, timeout, lane_env)
         row["lanes"]["ash-hybrid"]["peak_rss_bytes"] = peak_rss(hybrid_cmd, timeout, lane_env)
 
-        if not hlc_ready:
+        if "hlc" not in lanes:
+            row["lanes"]["hlc"] = {"status": "SKIP", "detail": "lane not selected"}
+        elif not hlc_ready:
             row["lanes"]["hlc"] = {"status": "UNAVAILABLE",
                                    "detail": "needs haxe, a C compiler and --hashlink-dir"}
         else:
@@ -252,6 +281,37 @@ def main() -> int:
     }
     args.out.write_text(json.dumps(payload, indent=2))
     print(f"wrote {args.out}")
+
+    if args.emit_partial:
+        # Same record shape hl_bench.py writes, so the site merger needs no
+        # third code path: one engine per record, judged the same way.
+        records = []
+        for row in results:
+            rec = row["lanes"].get("ash-aot") or {}
+            if rec.get("status") in (None, "SKIP"):
+                continue
+            out = {
+                "benchmark": row["name"],
+                "engine": "ash-aot",
+                "status": rec["status"],
+                "detail": rec.get("detail", ""),
+            }
+            if rec.get("wall_ms"):
+                out["wall_ms"] = rec["wall_ms"]
+            if rec.get("build_ms") is not None:
+                # Reported, never timed: the page says "AOT build excluded",
+                # and it means it -- this is what a developer waits for once,
+                # not what the program costs to run.
+                out["aot_build_ms"] = rec["build_ms"]
+            if rec.get("peak_rss_bytes") is not None:
+                out["peak_rss_bytes"] = rec["peak_rss_bytes"]
+            records.append(out)
+        args.emit_partial.write_text(json.dumps({
+            "tool": "aot_bench",
+            "host": payload["host"],
+            "results": records,
+        }, indent=2))
+        print(f"wrote {args.emit_partial}")
 
     invalid = [r["name"] for r in results
                for rec in r["lanes"].values() if rec.get("status") == "INVALID"]

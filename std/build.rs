@@ -98,6 +98,18 @@ fn main() {
     // layout rules: 15 guaranteed E0080s about pthread_t and __darwin_*
     // types that exist on no Windows machine. Host != target is exactly the
     // condition under which the headers are borrowed, so it is the gate.
+    //
+    // Borrowing them is not automatic: without the variable, clang takes the
+    // Windows triple, finds no sysroot, and stops at `'stdlib.h' file not
+    // found` -- which reads like a missing libc rather than a missing SDK.
+    // From macOS the cross-check is:
+    //
+    //     BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-apple-darwin \
+    //       -isysroot $(xcrun --show-sdk-path)" \
+    //       cargo check --target x86_64-pc-windows-msvc -p ash_std
+    //
+    // CI does not need it: the windows-check job builds natively on a
+    // windows-2022 runner, where the headers are the target's own.
     let cross = env::var("HOST").unwrap_or_default() != env::var("TARGET").unwrap_or_default();
 
     let bindings = bindgen::Builder::default()

@@ -235,7 +235,9 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <span style="color:#caa06f">&gt;</span> haxelib git hlsdl https://github.com/HaxeFoundation/hashlink.git master libs/sdl
 <span style="color:#caa06f">&gt;</span> haxelib path heaps
 <span style="color:#caa06f">&gt;</span> haxelib path hlsdl</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:18px">Ash needs nothing else installed. Its Windows release carries the HashLink runtime beside <code>ash.exe</code> as <code>libhl.dll</code>, together with the <code>libhl.1.dll</code> alias that HashLink 1.x builds import.</p>
+<p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:22px">Ash itself installs globally, once:</p>
+<pre class="shell"><span style="color:#caa06f">&gt;</span> irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex</pre>
+<p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:18px">That puts <code>ash.exe</code> in <code>~\.ash\bin</code> and adds the directory to your user PATH. The HashLink runtime travels with it &mdash; <code>libhl.dll</code> and the <code>libhl.1.dll</code> alias that HashLink 1.x builds import &mdash; so there is nothing further to install, and nothing to copy per game.</p>
 </section>
 
 <section id="win-compile" style="margin-top:64px">
@@ -266,33 +268,29 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 
 <section id="win-ship" style="margin-top:64px">
 <div class="eyebrow">04 · Ship</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Move the runtime with the game</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Ash compiles its standard library into the executable, so an ordinary program runs from the binary alone. Native extensions are the exception: an HDLL's import table names <code>libhl.dll</code>, and the loader binds that name to a file on disk &mdash; it cannot see the copy inside Ash. Every rule below follows from that one fact.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">What travels with the game</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Ash is installed once and runs from wherever the installer put it; the runtime it hands the HDLLs is the <code>libhl.dll</code> sitting beside <code>ash.exe</code> there. Nothing about that needs copying, renaming, or repointing. What ships with the game is the native code the bytecode asks for &mdash; the HDLLs, and the plain DLLs those import.</p>
 
 <div class="card" style="margin-bottom:12px">
-<div class="step">Five rules</div>
-<div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
-<div><strong style="color:#221d1a">Ship both names.</strong> <code>libhl.dll</code> and <code>libhl.1.dll</code>. HDLLs disagree about which they import, and the versioned name is what HashLink 1.x CMake builds use. Copies rather than symlinks &mdash; creating a symlink on Windows needs Developer Mode or an elevated prompt.</div>
-<div><strong style="color:#221d1a">Both are Ash's runtime.</strong> Copies of Ash's own library, never a HashLink <code>libhl.dll</code>. Whichever loads first wins, and a HashLink build is a second runtime.</div>
-<div><strong style="color:#221d1a">Ship the plain DLLs too.</strong> <code>SDL3.dll</code> and <code>OpenAL32.dll</code> are not HDLLs and nothing stages them for you.</div>
-<div><strong style="color:#221d1a">Match the architecture.</strong> Every HDLL must be a 64-bit PE. A Mach-O or ELF file under a <code>.hdll</code> name fails at load.</div>
-<div><strong style="color:#221d1a">One runtime instance.</strong> Two copies of <code>libhl</code> means two garbage collectors, and the crash surfaces far from the cause.</div>
-</div>
+<div class="step">In the game directory</div>
+<pre class="shell">bin\
+  game.hl
+  sdl.hdll fmt.hdll ui.hdll uv.hdll
+  SDL3.dll       <span style="color:#8a807a">&lt;- found because it sits beside sdl.hdll</span>
+  OpenAL32.dll   <span style="color:#8a807a">&lt;- only if the program uses openal.hdll</span></pre>
+<p style="color:#5c5450;line-height:1.65;margin:14px 0 0">Ash loads HDLLs with <code>LOAD_WITH_ALTERED_SEARCH_PATH</code>, so a DLL beside the HDLL is found first. Windows would otherwise start its search at the executable's directory and never look in the HDLL's own.</p>
 </div>
 
 <div class="card">
-<div class="step">Layout</div>
-<pre class="shell">game\
-  ash.exe
-  libhl.dll        <span style="color:#8a807a">&lt;- Ash's runtime, beside the executable</span>
-  libhl.1.dll      <span style="color:#8a807a">&lt;- same file, the name HashLink 1.x imports</span>
-  zlib.dll zstd.dll libxml2.dll
-  bin\
-    game.hl
-    sdl.hdll fmt.hdll ui.hdll uv.hdll
-    SDL3.dll       <span style="color:#8a807a">&lt;- found because it sits beside sdl.hdll</span></pre>
-<p style="color:#5c5450;line-height:1.65;margin:14px 0 0">Ash loads HDLLs with <code>LOAD_WITH_ALTERED_SEARCH_PATH</code>, so a DLL beside the HDLL is found first. Windows would otherwise start its search at the executable's directory and never look in the HDLL's own.</p>
+<div class="step">Three rules</div>
+<div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
+<div><strong style="color:#221d1a">The runtime is not yours to stage.</strong> Ash ships <code>libhl.dll</code> and the <code>libhl.1.dll</code> alias beside its own executable. Do not put a copy in the game directory, and never a HashLink <code>libhl.dll</code> &mdash; a second runtime is a second garbage collector, and the crash surfaces far from the cause.</div>
+<div><strong style="color:#221d1a">Ship the plain DLLs.</strong> <code>SDL3.dll</code> and <code>OpenAL32.dll</code> are ordinary dependencies rather than HDLLs, and nothing stages them for you. They come from the same HashLink archive as the HDLLs.</div>
+<div><strong style="color:#221d1a">Match the architecture.</strong> Every HDLL must be a 64-bit PE. A Mach-O or ELF file under a <code>.hdll</code> name fails at load, and Ash says which it found.</div>
 </div>
+</div>
+
+<div class="note" style="margin-top:20px"><strong>Ash comes from the installer, not from your build.</strong> <code>install.ps1</code> puts it in <code>~\.ash\bin</code> with its runtime and adds that to PATH. A machine running the game needs Ash the way it would need any interpreter &mdash; installed once, not copied in beside every title.</div>
 </section>
 
 <section id="win-troubleshoot" style="margin-top:64px">

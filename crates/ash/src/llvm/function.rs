@@ -5085,6 +5085,33 @@ impl<'ctx> JITModule<'ctx> {
                     i32_type.const_int(2, false),
                     "closure_is_wrapper",
                 )?;
+                // Branch rather than load-then-select. `wrappedFun` lives at
+                // offset 32, which exists only on a `vclosure_wrapper` (40
+                // bytes); a plain `vclosure` is 32, and that is what
+                // `hlp_alloc_closure_void`/`_ptr` allocate. Loading it
+                // unconditionally and discarding it in a `select` read 8 bytes
+                // past the end of every ordinary closure, on every call --
+                // harmless inside an Immix block, a fault when the closure is
+                // the last object before an unmapped page. Guarding the load
+                // also keeps the common path within the 32 bytes the object is
+                // known to have.
+                let unwrap_function = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let unwrap_bb = self
+                    .context
+                    .append_basic_block(unwrap_function, "closure_unwrap");
+                let unwrap_done_bb = self
+                    .context
+                    .append_basic_block(unwrap_function, "closure_unwrap_done");
+                let unwrap_from_bb = self.builder.get_insert_block().unwrap();
+                self.builder
+                    .build_conditional_branch(is_wrapper, unwrap_bb, unwrap_done_bb)?;
+
+                self.builder.position_at_end(unwrap_bb);
                 let wrapped_fun_gep = unsafe {
                     self.builder.build_gep(
                         i8_type,
@@ -5097,15 +5124,15 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, wrapped_fun_gep, "closure_wrapped_fun")?
                     .into_pointer_value();
-                let closure_ptr = self
-                    .builder
-                    .build_select(
-                        is_wrapper,
-                        wrapped_fun,
-                        raw_closure_ptr,
-                        "closure_unwrapped",
-                    )?
-                    .into_pointer_value();
+                self.builder.build_unconditional_branch(unwrap_done_bb)?;
+
+                self.builder.position_at_end(unwrap_done_bb);
+                let closure_phi = self.builder.build_phi(ptr_type, "closure_unwrapped")?;
+                closure_phi.add_incoming(&[
+                    (&wrapped_fun, unwrap_bb),
+                    (&raw_closure_ptr, unwrap_from_bb),
+                ]);
+                let closure_ptr = closure_phi.as_basic_value().into_pointer_value();
 
                 // vclosure.fun at offset 8
                 let fun_field_gep = unsafe {

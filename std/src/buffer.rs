@@ -322,6 +322,10 @@ pub unsafe extern "C" fn hlp_type_str_rec(b: *mut hl_buffer, t: *mut hl_type, pa
     }
 }
 
+// DEFINE_PRIM(_BYTES, type_str, _TYPE) — bytecode asks for `std@type_str` by
+// name, so this needs an export as well as the internal callers in cast.rs
+// and obj.rs; without one the resolver fails the whole module load.
+#[no_mangle]
 pub unsafe extern "C" fn hlp_type_str(t: *mut hl_type) -> *const uchar {
     // A kind outside the table is a corrupt or non-type pointer; naming it
     // "?" beats indexing out of bounds, which panics inside the very
@@ -829,4 +833,112 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
 #[no_mangle]
 pub unsafe extern "C" fn hlp_buffer_val(b: *mut hl_buffer, v: *mut vdynamic) {
     hlp_buffer_rec(b, v, std::ptr::null_mut())
+}
+
+#[cfg(test)]
+mod type_str_tests {
+    use super::*;
+    use crate::types::{
+        hlt_array, hlt_bool, hlt_bytes, hlt_dyn, hlt_dynobj, hlt_f32, hlt_f64, hlt_i32, hlt_i64,
+        hlt_type, hlt_void,
+    };
+
+    unsafe fn name_of(t: *mut hl_type) -> String {
+        let p = hlp_type_str(t);
+        assert!(!p.is_null(), "hlp_type_str handed back nothing");
+        let mut len = 0usize;
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+    }
+
+    /// The kinds TSTR names outright, each read through the crate's own
+    /// persistent singleton rather than a hand-built hl_type. The table was
+    /// once a slot short after "dynamic", which shifted every name from HOBJ
+    /// on and printed "array" for objects; pinning the concrete names is what
+    /// catches that class of slip.
+    #[test]
+    fn the_flat_kinds_get_their_documented_names() {
+        unsafe {
+            for (t, want) in [
+                (hlt_void(), "void"),
+                (hlt_i32(), "i32"),
+                (hlt_i64(), "i64"),
+                (hlt_f32(), "f32"),
+                (hlt_f64(), "f64"),
+                (hlt_bool(), "bool"),
+                (hlt_bytes(), "bytes"),
+                (hlt_dyn(), "dynamic"),
+                (hlt_array(), "array"),
+                (hlt_type(), "type"),
+                (hlt_dynobj(), "dynobj"),
+            ] {
+                assert_eq!(name_of(t), want, "kind {}", (*t).kind);
+            }
+        }
+    }
+
+    /// Every name is indexed by kind, so the table has to be as long as the
+    /// kind enum. It was 22 entries once, one short, which made any packed
+    /// type's name an out-of-bounds panic inside the routine that exists to
+    /// describe what went wrong.
+    #[test]
+    fn the_name_table_covers_every_kind() {
+        assert_eq!(TSTR.len(), hl::hl_type_kind_HLAST as usize);
+        assert_eq!(TSTR.len(), 23);
+        // The recursive kinds are marked, not named, and the marker has to
+        // stay spelled the way hlp_type_str tests for it.
+        for k in [
+            hl_type_kind_HFUN,
+            hl_type_kind_HOBJ,
+            hl_type_kind_HREF,
+            hl_type_kind_HVIRTUAL,
+            hl_type_kind_HABSTRACT,
+            hl_type_kind_HENUM,
+            hl_type_kind_HNULL,
+            hl_type_kind_HMETHOD,
+            hl_type_kind_HSTRUCT,
+            hl_type_kind_HPACKED,
+        ] {
+            assert_eq!(TSTR[k as usize], "null", "kind {k} should recurse");
+        }
+    }
+
+    /// A null type names itself "?" instead of faulting. hlp_type_str is
+    /// reached from cast-error reporting, so it is called precisely when the
+    /// pointer in hand is already suspect (Issue2937).
+    #[test]
+    fn a_null_type_is_named_rather_than_dereferenced() {
+        unsafe {
+            assert_eq!(name_of(std::ptr::null_mut()), "?");
+        }
+    }
+
+    /// The returned string is NUL-terminated UTF-16, which is what the
+    /// bytecode side reads it as. A UTF-8 pointer cast to `*const uchar`
+    /// would still be non-null and would still terminate, but every
+    /// character after the first would be wrong.
+    #[test]
+    fn the_result_is_nul_terminated_utf16() {
+        unsafe {
+            let p = hlp_type_str(hlt_dynobj());
+            let want: Vec<u16> = "dynobj".encode_utf16().collect();
+            for (i, u) in want.iter().enumerate() {
+                assert_eq!(*p.add(i), *u, "unit {i}");
+            }
+            assert_eq!(*p.add(want.len()), 0, "missing terminator");
+        }
+    }
+
+    /// DEFINE_PRIM(_BYTES, type_str, _TYPE). The export exists because the
+    /// resolver looks the symbol up by name and fails the whole module load
+    /// when it is absent -- the failure this test is here to prevent.
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: unsafe extern "C" fn(*mut hl_type) -> *const uchar = hlp_type_str;
+        unsafe {
+            assert!(!f(hlt_i32()).is_null());
+        }
+    }
 }

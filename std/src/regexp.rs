@@ -170,3 +170,137 @@ pub unsafe extern "C" fn hlp_regexp_matched_pos(r: *mut c_void, n: i32, size: *m
     }
     *pos
 }
+
+// DEFINE_PRIM(_I32, regexp_matched_num, _EREG)
+#[no_mangle]
+pub unsafe extern "C" fn hlp_regexp_matched_num(r: *mut c_void) -> i32 {
+    if r.is_null() {
+        return -1;
+    }
+    let state = &*(r as *mut RegexpState);
+    // -1 is upstream's "no match on this regexp yet", and Haxe's EReg.matched
+    // relies on it to tell that apart from a pattern with no groups. A
+    // successful match stored one row per group including group 0, which is
+    // the count pcre2 reports as `n_groups`.
+    match &state.last_groups {
+        Some(groups) => groups.len() as i32,
+        None => -1,
+    }
+}
+
+#[cfg(test)]
+mod regexp_matched_num_tests {
+    use super::*;
+
+    /// Subjects and patterns cross this boundary as NUL-terminated UTF-16,
+    /// which is what `read_utf16z` on the other side expects.
+    fn u16z(s: &str) -> Vec<u16> {
+        let mut v: Vec<u16> = s.encode_utf16().collect();
+        v.push(0);
+        v
+    }
+
+    unsafe fn new_regexp(pattern: &str) -> *mut c_void {
+        let p = u16z(pattern);
+        let o = u16z("");
+        let r = hlp_regexp_new_options(p.as_ptr() as *const vbyte, o.as_ptr() as *const vbyte);
+        assert!(!r.is_null(), "failed to build /{pattern}/");
+        r
+    }
+
+    unsafe fn run_match(r: *mut c_void, subject: &str) -> i32 {
+        let s = u16z(subject);
+        hlp_regexp_match(r, s.as_ptr() as *const vbyte, 0, -1)
+    }
+
+    #[test]
+    fn a_null_regexp_reports_no_match() {
+        unsafe {
+            assert_eq!(hlp_regexp_matched_num(std::ptr::null_mut()), -1);
+        }
+    }
+
+    /// -1 is upstream's "no match on this regexp yet", and Haxe's EReg
+    /// relies on it to tell that state apart from a pattern that matched but
+    /// has no groups -- which answers 1, not 0.
+    #[test]
+    fn before_any_match_it_is_minus_one() {
+        unsafe {
+            let r = new_regexp("a(b)c");
+            assert_eq!(hlp_regexp_matched_num(r), -1);
+        }
+    }
+
+    /// One row per group including group 0, so a groupless pattern that
+    /// matched answers 1. This is the value that must not collide with the
+    /// unmatched state.
+    #[test]
+    fn a_match_counts_group_zero_and_every_group() {
+        unsafe {
+            let r = new_regexp("abc");
+            assert_eq!(run_match(r, "xxabcxx"), 1);
+            assert_eq!(hlp_regexp_matched_num(r), 1, "group 0 alone");
+
+            let r = new_regexp("(a)(b)(c)");
+            assert_eq!(run_match(r, "abc"), 1);
+            assert_eq!(hlp_regexp_matched_num(r), 4, "group 0 plus three");
+
+            // A group present in the pattern but not in the match still
+            // occupies a row: the count is the pattern's, not the match's.
+            let r = new_regexp("(a)|(b)");
+            assert_eq!(run_match(r, "a"), 1);
+            assert_eq!(hlp_regexp_matched_num(r), 3);
+            assert_eq!(hlp_regexp_matched_pos(r, 2, std::ptr::null_mut()), -1);
+        }
+    }
+
+    /// A failed match puts the regexp back into the unmatched state rather
+    /// than leaving the previous match's count standing -- otherwise EReg
+    /// would read groups out of a match that did not happen.
+    #[test]
+    fn a_failed_match_returns_to_minus_one() {
+        unsafe {
+            let r = new_regexp("(a)(b)");
+            assert_eq!(hlp_regexp_matched_num(r), -1, "before");
+
+            assert_eq!(run_match(r, "ab"), 1);
+            assert_eq!(hlp_regexp_matched_num(r), 3, "after a match");
+
+            assert_eq!(run_match(r, "zz"), 0);
+            assert_eq!(
+                hlp_regexp_matched_num(r),
+                -1,
+                "a failed match left the previous count in place"
+            );
+
+            // And it recovers on the next success.
+            assert_eq!(run_match(r, "qqab"), 1);
+            assert_eq!(hlp_regexp_matched_num(r), 3);
+        }
+    }
+
+    /// The count is per regexp, not per process: two live regexps keep their
+    /// own state.
+    #[test]
+    fn the_count_belongs_to_its_own_regexp() {
+        unsafe {
+            let a = new_regexp("(x)(y)(z)");
+            let b = new_regexp("q");
+            assert_eq!(run_match(a, "xyz"), 1);
+            assert_eq!(hlp_regexp_matched_num(a), 4);
+            assert_eq!(hlp_regexp_matched_num(b), -1);
+            assert_eq!(run_match(b, "q"), 1);
+            assert_eq!(hlp_regexp_matched_num(b), 1);
+            assert_eq!(hlp_regexp_matched_num(a), 4);
+        }
+    }
+
+    /// DEFINE_PRIM(_I32, regexp_matched_num, _EREG).
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: unsafe extern "C" fn(*mut c_void) -> i32 = hlp_regexp_matched_num;
+        unsafe {
+            assert_eq!(f(std::ptr::null_mut()), -1);
+        }
+    }
+}

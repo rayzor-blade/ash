@@ -1039,8 +1039,18 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
 pub struct ThreadInfo {
     pub thread_id: i32,
     pub gc_blocking: i32,
-    _rest: [u8; 2952],
+    /// `stack_top` through `exc_value` upstream: six pointers ash keeps
+    /// nowhere. Named padding, so `flags` lands on upstream's offset.
+    _through_exc_value: [u8; 48],
+    /// Upstream's `flags`, the word `hl_set_thread_flags` edits.
+    pub flags: i32,
+    _rest: [u8; 2900],
 }
+
+// The padding above is load-bearing in one direction only -- an hdll indexes
+// this record by upstream's offsets -- and nothing else would catch a slip.
+const _: () = assert!(std::mem::offset_of!(ThreadInfo, flags) == 56);
+const _: () = assert!(std::mem::size_of::<ThreadInfo>() == 2960);
 
 thread_local! {
     static THREAD_INFO: std::cell::Cell<*mut ThreadInfo> =
@@ -1059,7 +1069,9 @@ pub(crate) fn thread_info() -> *mut ThreadInfo {
             info = Box::into_raw(Box::new(ThreadInfo {
                 thread_id: current_os_thread_id() as i32,
                 gc_blocking: 0,
-                _rest: [0; 2952],
+                _through_exc_value: [0; 48],
+                flags: 0,
+                _rest: [0; 2900],
             }));
             slot.set(info);
         }
@@ -1091,6 +1103,22 @@ pub unsafe extern "C" fn hlp_blocking(b: bool) {
 #[no_mangle]
 pub unsafe extern "C" fn hl_is_blocking() -> bool {
     crate::fiber::is_gc_blocking()
+}
+
+/// Upstream `hl_set_thread_flags` (gc.c): a read-modify-write of this
+/// thread's flag word, `mask` selecting the bits `flags` supplies.
+///
+/// Nothing inside ash reads them. HL_THREAD_INVISIBLE steers a thread
+/// registry the collector here does not keep, the profiler-pause bit belongs
+/// to a profiler ash implements elsewhere, and the tracking bits above the
+/// shift gate `hlp_track_call`, which is a stub. The write still has to
+/// land, because the word is not private: an hdll reaching
+/// `hl_get_thread()->flags` reads this slot, and that crossing is the whole
+/// observable contract.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_set_thread_flags(flags: i32, mask: i32) {
+    let t = thread_info();
+    (*t).flags = ((*t).flags & !mask) | flags;
 }
 
 // ============================================================================
@@ -1509,5 +1537,193 @@ mod datachannel_queue_tests {
         let (dangling, uaf) = run(true);
         assert_eq!(dangling, 0, "end still named a freed node");
         assert_eq!(uaf, 0, "a producer still reached a freed node");
+    }
+}
+
+/// `hlp_set_thread_flags` writes a word an hdll reads back by upstream's
+/// offset, so the two const asserts above pin `flags` to offset 56 and the
+/// record to 2960 bytes. Neither of them can see where the *write* goes:
+/// they would still hold if the field were correct and the store landed in
+/// `_through_exc_value` or `_rest`. These tests read the slot the way the
+/// hdll does -- a raw i32 load 56 bytes into the record -- so a write that
+/// misses is a failure rather than a silently ignored flag.
+#[cfg(test)]
+mod thread_flags_tests {
+    use super::{hlp_set_thread_flags, thread_info, ThreadInfo};
+
+    /// Upstream's offset for `hl_thread_info.flags`, spelled as a raw byte
+    /// count rather than as the field, because the field is what is on
+    /// trial.
+    const FLAGS_OFFSET: usize = 56;
+
+    /// The hdll's view: `((char*)hl_get_thread())[56]` read as an int.
+    unsafe fn flags_at_upstream_offset() -> i32 {
+        let t = thread_info();
+        assert!(!t.is_null(), "thread_info() handed back nothing");
+        (t as *const u8).add(FLAGS_OFFSET).cast::<i32>().read()
+    }
+
+    /// Restore whatever this thread's word held, so a test that runs after
+    /// another on the same thread starts from the same place.
+    unsafe fn set_raw(v: i32) {
+        (*thread_info()).flags = v;
+    }
+
+    #[test]
+    fn a_write_lands_on_the_field_the_hdll_reads() {
+        unsafe {
+            set_raw(0);
+            hlp_set_thread_flags(0x0000_0001, 0x0000_0001);
+            assert_eq!(
+                flags_at_upstream_offset(),
+                1,
+                "the store missed offset {FLAGS_OFFSET}"
+            );
+            // The named field and the raw offset have to be the same word.
+            assert_eq!((*thread_info()).flags, flags_at_upstream_offset());
+        }
+    }
+
+    /// The whole word, one bit at a time: a store that landed a few bytes
+    /// off would still pass a single-bit check often enough to look fine.
+    #[test]
+    fn every_bit_of_the_word_round_trips() {
+        unsafe {
+            for bit in 0..32 {
+                let v = 1i32 << bit;
+                set_raw(0);
+                hlp_set_thread_flags(v, v);
+                assert_eq!(
+                    flags_at_upstream_offset(),
+                    v,
+                    "bit {bit} did not survive the round trip"
+                );
+            }
+            set_raw(0);
+        }
+    }
+
+    /// `mask` selects what is cleared, `flags` supplies what is set --
+    /// upstream's `(t->flags & ~mask) | flags`.
+    #[test]
+    fn mask_clears_and_flags_set_within_the_mask() {
+        unsafe {
+            set_raw(0b1111);
+            // Clear bits 0 and 1, set bit 0 back.
+            hlp_set_thread_flags(0b0001, 0b0011);
+            assert_eq!(flags_at_upstream_offset(), 0b1101);
+
+            // A bit outside the mask is left exactly as it was found.
+            set_raw(0b1000_0000);
+            hlp_set_thread_flags(0, 0b0000_0001);
+            assert_eq!(flags_at_upstream_offset(), 0b1000_0000);
+
+            // And a bit set in `flags` but absent from `mask` is still set:
+            // upstream ORs the whole of `flags`, it does not filter it.
+            set_raw(0);
+            hlp_set_thread_flags(0b0100, 0b0001);
+            assert_eq!(flags_at_upstream_offset(), 0b0100);
+
+            set_raw(0);
+        }
+    }
+
+    /// Successive calls accumulate rather than replace -- the read half of
+    /// the read-modify-write.
+    #[test]
+    fn successive_calls_accumulate() {
+        unsafe {
+            set_raw(0);
+            hlp_set_thread_flags(0b0001, 0b0001);
+            hlp_set_thread_flags(0b0010, 0b0010);
+            hlp_set_thread_flags(0b0100, 0b0100);
+            assert_eq!(flags_at_upstream_offset(), 0b0111);
+            hlp_set_thread_flags(0, 0b0010);
+            assert_eq!(flags_at_upstream_offset(), 0b0101);
+            set_raw(0);
+        }
+    }
+
+    /// The word is thread-local, which is what lets the tests above run
+    /// beside each other under the harness's thread pool. Confirmed rather
+    /// than assumed: a shared word would make every one of them flaky.
+    #[test]
+    fn the_word_is_private_to_its_thread() {
+        unsafe {
+            set_raw(0);
+            hlp_set_thread_flags(0x00ff_0000, -1);
+            let here = thread_info() as usize;
+
+            let (there, seen) = std::thread::spawn(|| {
+                // A fresh thread starts at zero, not at the parent's value.
+                let start = flags_at_upstream_offset();
+                hlp_set_thread_flags(0x0000_00ff, -1);
+                (thread_info() as usize, (start, flags_at_upstream_offset()))
+            })
+            .join()
+            .unwrap();
+
+            assert_ne!(there, here, "both threads shared one ThreadInfo");
+            assert_eq!(seen.0, 0, "a new thread inherited flags");
+            assert_eq!(seen.1, 0x0000_00ff);
+            assert_eq!(
+                flags_at_upstream_offset(),
+                0x00ff_0000,
+                "the child's write reached this thread's word"
+            );
+            set_raw(0);
+        }
+    }
+
+    /// Guards the padding either side of `flags`: a store wider than the
+    /// field, or one bit off, shows up as a disturbed neighbour rather than
+    /// as a wrong flag value.
+    #[test]
+    fn the_write_does_not_spill_into_its_neighbours() {
+        unsafe {
+            let t = thread_info();
+            let base = t as *const u8;
+            // 8 bytes before and after the field, sampled before and after.
+            let before: [u8; 8] = std::ptr::read(base.add(FLAGS_OFFSET - 8).cast());
+            let after: [u8; 8] = std::ptr::read(base.add(FLAGS_OFFSET + 4).cast());
+
+            set_raw(0);
+            hlp_set_thread_flags(-1, -1);
+            assert_eq!(flags_at_upstream_offset(), -1);
+
+            assert_eq!(
+                std::ptr::read::<[u8; 8]>(base.add(FLAGS_OFFSET - 8).cast()),
+                before,
+                "the store reached back before the field"
+            );
+            assert_eq!(
+                std::ptr::read::<[u8; 8]>(base.add(FLAGS_OFFSET + 4).cast()),
+                after,
+                "the store ran past the end of the field"
+            );
+            set_raw(0);
+        }
+    }
+
+    /// The two const asserts restated at runtime. They cannot fire on a host
+    /// where the crate already compiled, but they name what the offsets above
+    /// depend on, so a future edit that moves the field fails here with a
+    /// message rather than only in a `const _: ()`.
+    #[test]
+    fn the_record_still_matches_upstreams_layout() {
+        assert_eq!(std::mem::offset_of!(ThreadInfo, flags), FLAGS_OFFSET);
+        assert_eq!(std::mem::size_of::<ThreadInfo>(), 2960);
+    }
+
+    /// The signature the resolver binds by name. A `no_mangle` prim whose
+    /// arity or types drift fails at the call, not at the build; naming the
+    /// type here makes that a compile error.
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: unsafe extern "C" fn(i32, i32) = hlp_set_thread_flags;
+        unsafe {
+            f(0, -1);
+            assert_eq!(flags_at_upstream_offset(), 0);
+        }
     }
 }

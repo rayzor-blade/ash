@@ -3770,6 +3770,126 @@ pub unsafe extern "C" fn hlp_gc_set_flags(f: i32) {
     GC_FLAGS.store(f, Ordering::Relaxed);
 }
 
+/// Upstream hl_gc_major (gc.c): collect now, whatever the trigger thinks.
+///
+/// `Gc.enable(false)` is deliberately not consulted, exactly as upstream's
+/// `hl_gc_major` calls `gc_major()` directly: a program naming a collection
+/// is not asking about the automatic trigger, and [`hlp_gc_enable`] already
+/// documents that explicit collections still run.
+///
+/// Running a full cycle from a native entry point is the same shape as the
+/// exhaustion backstop in [`ImmixAllocator::allocate`], which has always
+/// collected here: the calling thread becomes the collector, its own
+/// callee-saved registers are spilled into the frame its live-stack scan
+/// covers, and the other mutators stop through the usual handshake. The GC
+/// lock is reentrant, so a caller already holding it gets its collection
+/// rather than a deadlock.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_major() {
+    let mut gc = gc_locked_init();
+    set_collect_origin(6); // "explicit" — see ORIGIN_NAMES
+    gc.collect_garbage();
+}
+
+/// Upstream hl_gc_stats (gc.c): three counters through out-params, read by
+/// `hl.Gc.stats()` as `totalAllocated` / `allocationCount` / `currentMemory`.
+/// Doubles because the byte totals outrun an i32 within seconds of running.
+///
+/// Two of the three are ash's own numbers; the third is one ash does not have.
+///
+/// * `total_allocated` — [`GC_STATS`]`.bytes_allocated`, cumulative and never
+///   reset, the same figure the `ASH_GC_STATS` report prints. Like upstream's
+///   it counts bytes the collector HANDED OUT rather than bytes requested;
+///   ash's is coarser, because a TLAB refill charges its whole 32KB region
+///   when the region is carved instead of per object bumped out of it.
+///   Memory charged through [`hlp_gc_track_external`] is excluded: it is
+///   allocation pressure from off-heap buffers, not GC heap, and folding it
+///   in would make this number disagree with the same field in the report.
+/// * `allocation_count` — 0, because ash counts no allocations. The TLAB fast
+///   path is a thread-local pointer bump that deliberately touches no shared
+///   counter (an atomic there was the cost the TLAB exists to remove), and
+///   `heap.alloc_count` counts refills and locked allocations only and resets
+///   at every collection: it is the trigger's input, not a census. Reporting
+///   it here would undercount by orders of magnitude AND shrink between two
+///   samples, so a caller differencing successive stats calls would read the
+///   allocation rate as negative. A constant zero is visibly not an answer.
+/// * `current_memory` — blocks currently handed out, at block granularity.
+///   Upstream reports the total size of the pages it has mapped; ash reserves
+///   its entire heap up front and commits on first touch, so the reservation
+///   (hundreds of MB, machine-derived) would report the same number for every
+///   program. Used blocks is the figure that tracks what the program holds.
+///
+/// The null checks are for the C side: a `hl.Ref` from Haxe is never null,
+/// but an HDLL caller that wants one field can pass NULL for the others, and
+/// that must not be a store to address 0.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_stats(
+    total_allocated: *mut f64,
+    allocation_count: *mut f64,
+    current_memory: *mut f64,
+) {
+    if !total_allocated.is_null() {
+        *total_allocated = GC_STATS.bytes_allocated.load(Ordering::Relaxed) as f64;
+    }
+    if !allocation_count.is_null() {
+        *allocation_count = 0.0;
+    }
+    if !current_memory.is_null() {
+        let gc = gc_locked_init();
+        *current_memory = (gc.heap.used_blocks.len() * BLOCK_SIZE) as f64;
+    }
+}
+
+/// Upstream hl_gc_profile (gc.c): the `Profile` flag as a function.
+///
+/// It writes the same `GC_FLAGS` word [`hlp_gc_set_flags`] does, so the two
+/// spellings cannot drift: `Gc.profile(true)` then reading `Gc.flags` shows
+/// the bit, and `collect_garbage` already keys its per-cycle census on it.
+///
+/// `false` clears that bit and nothing else. Upstream writes
+/// `gc_flags &= GC_PROFILE`, which keeps profiling on and clears every OTHER
+/// flag — a missing `~` rather than a semantic, since upstream's own
+/// `Gc.flags.unset(Profile)` does what this does.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_profile(b: bool) {
+    if b {
+        GC_FLAGS.fetch_or(GC_FLAG_PROFILE, Ordering::Relaxed);
+    } else {
+        GC_FLAGS.fetch_and(!GC_FLAG_PROFILE, Ordering::Relaxed);
+    }
+}
+
+/// Upstream hl_gc_get_live_objects (gc.c): count the live objects of a type,
+/// filling `arr` with as many as it holds.
+///
+/// Ash returns -1 — upstream's "cannot answer" value — for every type,
+/// including the ones upstream answers for, and leaves `arr` untouched.
+///
+/// Upstream can enumerate because its heap is typed by construction: every
+/// GC block begins an object, each page carries a memory kind, so walking
+/// the live blocks of the matching kind and wrapping each address with
+/// `hl_make_dyn` yields real objects. Ash's Immix heap has neither half.
+/// Marking is per 128-byte LINE while small objects are bump-packed 16 bytes
+/// apart inside one, so a marked line is not an object address — only
+/// multi-line allocations record a start, in `alloc_sizes`, and only to let
+/// the marker walk back — and nothing anywhere records an allocation's type.
+/// Handing back line addresses as `t` would give the caller interior
+/// pointers and non-objects to read fields from: a crash inside caller code,
+/// pointing away from its cause.
+///
+/// So the honest answers are -1 or 0, and 0 is the wrong one: it asserts
+/// "no live objects of this type", which is a claim about a heap ash cannot
+/// enumerate. -1 leaves `for i in 0...n` empty for a caller that treats the
+/// result as a count, and is a value a caller checking for failure already
+/// handles. What either answer buys over the absent symbol is that the call
+/// returns: an unresolved native resolves to a call-time trap (the JIT's stub,
+/// the interpreter's failed lazy lookup), so a program that reaches this one
+/// dies at the call site instead of being told ash cannot enumerate its heap.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_get_live_objects(_t: *mut hl_type, _arr: *mut hl::varray) -> i32 {
+    -1
+}
+
 /// Read a NUL-terminated UTF-8 C string, bounded so a caller that forgets the
 /// terminator walks a page rather than the address space.
 ///
@@ -4075,5 +4195,283 @@ mod tests {
         finish.store(true, Ordering::Release);
         worker.join().unwrap();
         unsafe { hl_unregister_thread() };
+    }
+
+    /// The four `hl.Gc` reporting primitives, held to the contract their doc
+    /// comments state. A Windows build reported
+    /// `345 natives resolved, 1 missing: std@hlp_gc_stats` on a real program,
+    /// so what these return is now something a shipped program reads.
+    ///
+    /// ONE test rather than four, for the reason `sys::tests` gives above its
+    /// own single test: the collector is process-global and the harness runs
+    /// separate `#[test]` functions on separate threads. Split up, the
+    /// `gc_profile` case would be flipping a process-global flag word while
+    /// the `gc_major` case collected, and each would see the other's writes.
+    /// Here every assertion runs in sequence on one thread.
+    ///
+    /// That still leaves the other `#[test]` in this file collecting
+    /// concurrently, so the body holds the GC lock for its whole length: no
+    /// other thread can collect, or carve a block, between a pair of samples.
+    /// The lock is reentrant, so each primitive's own `gc_locked_init` nests
+    /// inside that hold rather than deadlocking — the same property
+    /// [`hlp_gc_major`] documents — and a thread waiting on it parks at the
+    /// safepoint in `ReentrantGcLock::acquire`, so holding it cannot starve
+    /// the other test's stop-the-world.
+    ///
+    /// This thread registers as a mutator because the body keeps GC pointers
+    /// in its own frame across a collection: only a registered mutator's
+    /// stack is in the snapshot `mark_roots` scans.
+    #[test]
+    fn gc_reporting_prims_keep_their_documented_contract() {
+        unsafe { hlp_gc_init() };
+        let stack_anchor = 0usize;
+        unsafe {
+            hlp_gc_set_stack_top(
+                (&stack_anchor as *const usize as usize) + mem::size_of::<usize>(),
+            )
+        };
+
+        // Both of these are process-global and have to be put back even when
+        // an assertion below fails: a leaked Profile bit makes every later
+        // collection in this binary print a census, and a mutator record left
+        // behind by a finished thread makes the next stop-the-world wait for a
+        // thread that will never park. The whole flag word is saved, not just
+        // the Profile bit, because the body sets a neighbouring bit too, and
+        // while it holds the GC lock nothing else in this binary writes them.
+        let saved_flags = unsafe { hlp_gc_get_flags() };
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(gc_reporting_prims_body));
+        unsafe { hlp_gc_set_flags(saved_flags) };
+        unsafe { hl_unregister_thread() };
+        // The registered stack top points just past this local, so it has to
+        // outlive every collection the body runs.
+        std::hint::black_box(&stack_anchor);
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    /// Sequenced body of
+    /// [`gc_reporting_prims_keep_their_documented_contract`], split out so the
+    /// caller restores the globals it touches on the unwind path too.
+    ///
+    /// `inline(never)` is load-bearing, not tidiness. A conservative scan
+    /// covers `[sp, stack_top)`, so the registered anchor only bounds frames
+    /// BELOW it — and an anchor is just one local among a frame's others.
+    /// Inlined into the caller, this function's root array landed 24 bytes
+    /// ABOVE the anchor and the cycle swept 7 of its 8 blocks. Its own frame
+    /// is unconditionally below the caller's.
+    #[inline(never)]
+    fn gc_reporting_prims_body() {
+        // 4KB is above `TLAB_MAX_OBJ`, so every chunk takes the locked path
+        // and is charged its own bytes instead of 32KB at a time; 64 of them
+        // is well under `INITIAL_TRIGGER_BYTES`, so the loop does not collect.
+        const CHUNK: usize = 4096;
+        const CHUNKS: usize = 64;
+        const LIVE_BYTES: usize = CHUNK * CHUNKS;
+
+        let gc = gc_locked_init();
+
+        // ── hlp_gc_stats writes all three out-params ──────────────────────
+        // NaN is a poison none of the three can produce, so `is_finite` is
+        // proof the store happened rather than that the value looks plausible.
+        let (mut total0, mut count0, mut current0) = (f64::NAN, f64::NAN, f64::NAN);
+        unsafe { hlp_gc_stats(&mut total0, &mut count0, &mut current0) };
+        assert!(
+            total0.is_finite() && total0 >= 0.0,
+            "total_allocated not written: {total0}"
+        );
+        assert!(count0.is_finite(), "allocation_count not written: {count0}");
+        assert!(
+            current0.is_finite() && current0 >= 0.0,
+            "current_memory not written: {current0}"
+        );
+
+        // Documented as honestly unavailable: ash counts no allocations, and
+        // the doc comment on `hlp_gc_stats` says why reporting
+        // `heap.alloc_count` would be a worse answer than none — it shrinks at
+        // every collection, so a caller differencing two samples would read
+        // the allocation rate as negative. Asserted as the DOCUMENTED constant
+        // so that implementing it for real fails here, and whoever does it
+        // updates the contract on purpose.
+        assert_eq!(
+            count0, 0.0,
+            "allocation_count is documented as a constant 0.0"
+        );
+
+        // ── NULL is legal for any out-param ───────────────────────────────
+        // An HDLL caller that wants one field passes NULL for the others; that
+        // must not be a store to address 0.
+        unsafe {
+            hlp_gc_stats(ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            let mut one = f64::NAN;
+            hlp_gc_stats(&mut one, ptr::null_mut(), ptr::null_mut());
+            assert!(one.is_finite(), "total_allocated alone: {one}");
+            let mut one = f64::NAN;
+            hlp_gc_stats(ptr::null_mut(), &mut one, ptr::null_mut());
+            assert_eq!(one, 0.0, "allocation_count alone: {one}");
+            let mut one = f64::NAN;
+            hlp_gc_stats(ptr::null_mut(), ptr::null_mut(), &mut one);
+            assert!(one.is_finite(), "current_memory alone: {one}");
+        }
+
+        // ── total_allocated across real allocation ────────────────────────
+        // The pointers live in a stack array, not a Vec: conservative marking
+        // scans this frame, and a Vec's buffer is on the malloc heap, which it
+        // does not scan.
+        let mut live = [ptr::null_mut::<u8>(); CHUNKS];
+        for slot in live.iter_mut() {
+            let p = gc_alloc(CHUNK).expect("GC heap exhausted allocating a test chunk");
+            unsafe { p.as_ptr().write_bytes(0xA5, CHUNK) };
+            *slot = p.as_ptr();
+        }
+
+        let (mut total1, mut count1, mut current1) = (f64::NAN, f64::NAN, f64::NAN);
+        unsafe { hlp_gc_stats(&mut total1, &mut count1, &mut current1) };
+        assert_eq!(
+            count1, 0.0,
+            "allocation_count is documented as a constant 0.0"
+        );
+        // The contract is non-decreasing: the counter is cumulative and never
+        // reset. No exact byte total is asserted — the allocator charges in
+        // 32KB regions on the TLAB path, and other threads add to the same
+        // counter — only that this much allocation moved it at least this far.
+        assert!(
+            total1 >= total0,
+            "total_allocated went backwards: {total0} -> {total1}"
+        );
+        assert!(
+            total1 - total0 >= LIVE_BYTES as f64,
+            "{LIVE_BYTES} bytes of above-TLAB_MAX_OBJ allocation moved total_allocated by only {}",
+            total1 - total0
+        );
+
+        // ── current_memory: non-zero, block-granular, under the ceiling ───
+        // The ceiling is the heap reservation itself; `used_blocks` is a
+        // subset of it by construction, so a figure above it would mean the
+        // count and the unit had come apart.
+        let ceiling = gc.heap.memory.len as f64;
+        assert!(
+            current1 > 0.0,
+            "current_memory is 0 with {LIVE_BYTES} bytes live"
+        );
+        assert!(
+            current1 <= ceiling,
+            "current_memory {current1} exceeds the heap reservation {ceiling}"
+        );
+        assert!(
+            current1 >= LIVE_BYTES as f64,
+            "current_memory {current1} is under the {LIVE_BYTES} bytes the heap is holding"
+        );
+        assert_eq!(
+            current1 as usize % BLOCK_SIZE,
+            0,
+            "current_memory is used blocks, so it is a multiple of BLOCK_SIZE: {current1}"
+        );
+
+        // ── hlp_gc_major runs a real cycle ────────────────────────────────
+        let collections_before = GC_STATS.collections.load(Ordering::Relaxed);
+        unsafe { hlp_gc_major() };
+        let collections_after = GC_STATS.collections.load(Ordering::Relaxed);
+        assert!(
+            collections_after > collections_before,
+            "hlp_gc_major ran no cycle: collections {collections_before} -> {collections_after}"
+        );
+        // ...and it ran on its own account rather than riding a trigger that
+        // happened to fire: 6 is `ORIGIN_NAMES`' "explicit", and nothing else
+        // can have collected while this thread holds the lock.
+        assert_eq!(
+            COLLECT_ORIGIN.load(Ordering::Relaxed),
+            6,
+            "hlp_gc_major should collect with the explicit origin"
+        );
+
+        let (mut total2, mut count2, mut current2) = (f64::NAN, f64::NAN, f64::NAN);
+        unsafe { hlp_gc_stats(&mut total2, &mut count2, &mut current2) };
+        assert_eq!(
+            count2, 0.0,
+            "allocation_count is documented as a constant 0.0"
+        );
+        assert!(
+            total2 >= total1,
+            "a collection must not reset total_allocated: {total1} -> {total2}"
+        );
+        // Nothing can have carved a block while this thread holds the GC lock,
+        // so a cycle can only hand blocks back.
+        assert!(
+            current2 <= current1,
+            "current_memory grew across a collection: {current1} -> {current2}"
+        );
+        // And the chunks are still referenced from this frame on a registered
+        // mutator, so the cycle keeps their blocks.
+        assert!(
+            current2 >= LIVE_BYTES as f64,
+            "a collection dropped below the {LIVE_BYTES} still-reachable bytes: {current2}"
+        );
+        std::hint::black_box(&live);
+
+        // ── hlp_gc_profile sets and clears exactly one bit ────────────────
+        // The neighbouring bit is what makes this a test rather than a
+        // tautology. Upstream's `hl_gc_profile(false)` writes
+        // `gc_flags &= GC_PROFILE` — a missing `~` — which leaves profiling ON
+        // and clears every OTHER flag. Ash clears the one bit instead, per the
+        // note on `hlp_gc_profile`, so both halves are asserted: Profile goes
+        // away, the neighbour stays.
+        const NEIGHBOUR: i32 = 1 << 4; // a bit `hlp_gc_set_flags` stores without acting on
+        unsafe { hlp_gc_set_flags(NEIGHBOUR) };
+        assert_eq!(
+            unsafe { hlp_gc_get_flags() } & GC_FLAG_PROFILE,
+            0,
+            "test setup left Profile set"
+        );
+
+        unsafe { hlp_gc_profile(true) };
+        assert_ne!(
+            unsafe { hlp_gc_get_flags() } & GC_FLAG_PROFILE,
+            0,
+            "gc_profile(true) did not set Profile"
+        );
+        assert_ne!(
+            unsafe { hlp_gc_get_flags() } & NEIGHBOUR,
+            0,
+            "gc_profile(true) disturbed a flag other than Profile"
+        );
+
+        unsafe { hlp_gc_profile(false) };
+        assert_eq!(
+            unsafe { hlp_gc_get_flags() } & GC_FLAG_PROFILE,
+            0,
+            "gc_profile(false) left Profile set, which is upstream's missing `~`"
+        );
+        assert_ne!(
+            unsafe { hlp_gc_get_flags() } & NEIGHBOUR,
+            0,
+            "gc_profile(false) cleared a flag other than Profile, which is upstream's `&= GC_PROFILE`"
+        );
+
+        // ── hlp_gc_get_live_objects cannot answer, and says so ────────────
+        // -1 is upstream's "cannot answer". 0 is the wrong answer: it asserts
+        // "none of this type are live", a claim about a heap ash cannot
+        // enumerate, because nothing records an allocation's type and a marked
+        // line is not an object address.
+        let mut ty: hl_type = unsafe { mem::zeroed() };
+        let mut arr: hl::varray = unsafe { mem::zeroed() };
+        assert_eq!(
+            unsafe { hlp_gc_get_live_objects(&mut ty, &mut arr) },
+            -1,
+            "gc_get_live_objects must report -1 (cannot answer), never 0 (none live)"
+        );
+        // `arr` is documented as left untouched, so it is never partially
+        // filled behind a -1.
+        assert_eq!(arr.size, 0, "gc_get_live_objects wrote into arr");
+        // The arguments are not dereferenced, so a caller passing NULL for the
+        // array it did not bother to allocate gets the same answer.
+        assert_eq!(
+            unsafe { hlp_gc_get_live_objects(ptr::null_mut(), ptr::null_mut()) },
+            -1,
+            "gc_get_live_objects must tolerate NULL arguments"
+        );
+
+        drop(gc);
     }
 }

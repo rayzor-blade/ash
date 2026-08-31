@@ -103,3 +103,72 @@ pub unsafe extern "C" fn hlp_math_fceil(x: c_double) -> c_double {
 pub unsafe extern "C" fn hlp_math_fround(x: c_double) -> c_double {
     (x + 0.5).floor()
 }
+
+/// Upstream: DEFINE_PRIM(_F64, nan, _NO_ARG) — where `Math.NaN` comes from.
+///
+/// `f64::NAN` is the platform's quiet NaN, the same value upstream's `NAN`
+/// macro expands to; the bit pattern spelled out there is a fallback for
+/// toolchains that lack the macro, not a different number.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_nan() -> c_double {
+    f64::NAN
+}
+
+#[cfg(test)]
+mod nan_tests {
+    use super::*;
+
+    /// NaN is the one value that is not equal to itself, so `== f64::NAN`
+    /// would pass whatever this returned. `is_nan()` is the only check that
+    /// means anything here.
+    #[test]
+    fn nan_returns_a_nan() {
+        let x = unsafe { hlp_nan() };
+        assert!(x.is_nan(), "hlp_nan returned {x}");
+        #[allow(clippy::eq_op)]
+        {
+            assert!(x != x, "a NaN compares unequal to itself");
+        }
+        // Unordered against everything, which is the property that makes
+        // every comparison Haxe writes against Math.NaN come out false.
+        assert!(x.partial_cmp(&0.0).is_none());
+        assert!(x.partial_cmp(&f64::INFINITY).is_none());
+    }
+
+    /// Quiet, not signalling: the comment claims the platform's quiet NaN,
+    /// and a signalling one would trap in arithmetic a Haxe program does
+    /// freely. Bit 51 (the top mantissa bit) set is what makes it quiet on
+    /// every IEEE-754 binary64 target ash builds for.
+    #[test]
+    fn the_nan_is_quiet_and_matches_the_platforms_own() {
+        let x = unsafe { hlp_nan() };
+        let bits = x.to_bits();
+        assert_eq!(
+            bits & 0x7ff0_0000_0000_0000,
+            0x7ff0_0000_0000_0000,
+            "exponent is not all ones"
+        );
+        assert_ne!(bits & 0x000f_ffff_ffff_ffff, 0, "that is an infinity");
+        assert_ne!(bits & 0x0008_0000_0000_0000, 0, "signalling NaN");
+        // The same number the C `NAN` macro expands to on this platform.
+        assert_eq!(bits, f64::NAN.to_bits());
+    }
+
+    /// A NaN has to stay a NaN through the arithmetic Math.NaN feeds, or
+    /// `Math.isNaN` downstream reads a number.
+    #[test]
+    fn nan_propagates_through_arithmetic() {
+        let x = unsafe { hlp_nan() };
+        assert!((x + 1.0).is_nan());
+        assert!((x * 0.0).is_nan());
+        assert!(unsafe { hlp_math_abs(x) }.is_nan());
+        assert!(unsafe { hlp_math_sqrt(x) }.is_nan());
+    }
+
+    /// DEFINE_PRIM(_F64, nan, _NO_ARG): no arguments, returns a double.
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: unsafe extern "C" fn() -> c_double = hlp_nan;
+        assert!(unsafe { f() }.is_nan());
+    }
+}

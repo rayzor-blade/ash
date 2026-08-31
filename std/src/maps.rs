@@ -617,7 +617,7 @@ pub unsafe extern "C" fn hlp_hbsize(m: *mut hl::hl_hb_map) -> i32 {
 }
 
 // ============================================================================
-// IntMap (hi*) and ObjectMap (ho*)
+// IntMap (hi*), Int64Map (hi64*) and ObjectMap (ho*)
 //
 // The index stays a Rust HashMap, but it must never be the only holder of a
 // GC pointer: the collector does not scan the malloc heap, so a GC object
@@ -840,6 +840,126 @@ pub unsafe extern "C" fn hlp_hisize(m: *mut c_void) -> i32 {
 }
 
 // ============================================================================
+// Int64Map (hi64*) -- the int map above with a 64-bit key.
+//
+// Upstream separates the two only by key width and by hash: maps.c defines
+// hl_hi64hash as the two halves of the key xored together, because its cell
+// index is `hash % ncells`. A Rust HashMap hashes the whole i64 itself, so
+// that fold has no counterpart here and the key type is the only difference.
+// The key is a scalar and stays in the off-heap index; only the value is a GC
+// pointer, so one slot per entry roots everything the collector must see.
+// ============================================================================
+type Int64Index = SlotIndex<i64>;
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64alloc() -> *mut c_void {
+    rooted_alloc::<i64>()
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64set(m: *mut c_void, key: i64, value: *mut hl::vdynamic) {
+    if m.is_null() {
+        return;
+    }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut Int64Index);
+    if let Some(&slot) = idx.slot_of.get(&key) {
+        *(*rm).slots.add(slot) = value;
+        return;
+    }
+    if let Some(slot) = slot_claim(rm, idx, 1) {
+        *(*rm).slots.add(slot) = value;
+        idx.slot_of.insert(key, slot);
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64exists(m: *mut c_void, key: i64) -> bool {
+    if m.is_null() {
+        return false;
+    }
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const Int64Index);
+    idx.slot_of.contains_key(&key)
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64get(m: *mut c_void, key: i64) -> *mut hl::vdynamic {
+    if m.is_null() {
+        return ptr::null_mut();
+    }
+    let rm = m as *const RootedMap;
+    match (*((*rm).index as *const Int64Index)).slot_of.get(&key) {
+        Some(&slot) => *(*rm).slots.add(slot),
+        None => ptr::null_mut(),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64remove(m: *mut c_void, key: i64) -> bool {
+    if m.is_null() {
+        return false;
+    }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut Int64Index);
+    match idx.slot_of.remove(&key) {
+        Some(slot) => {
+            // Drop the reference so the value becomes collectable.
+            *(*rm).slots.add(slot) = ptr::null_mut();
+            idx.free.push(slot);
+            true
+        }
+        None => false,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64keys(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() {
+        return ptr::null_mut();
+    }
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const Int64Index);
+    // hlt_i64, matching `#define hlt_key hlt_i64` for this map in maps.c:
+    // the caller indexes the result with an 8-byte stride.
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_i64(), idx.slot_of.len() as i32);
+    for (i, &key) in idx.slot_of.keys().enumerate() {
+        *(crate::types::hl_aptr::<i64>(arr)).add(i) = key;
+    }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64values(m: *mut c_void) -> *mut hl::varray {
+    if m.is_null() {
+        return ptr::null_mut();
+    }
+    let rm = m as *const RootedMap;
+    let idx = &*((*rm).index as *const Int64Index);
+    let arr = crate::array::hlp_alloc_array(crate::types::hlt_dyn(), idx.slot_of.len() as i32);
+    for (i, &slot) in idx.slot_of.values().enumerate() {
+        *(crate::types::hl_aptr::<*mut hl::vdynamic>(arr)).add(i) = *(*rm).slots.add(slot);
+    }
+    arr
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64clear(m: *mut c_void) {
+    if m.is_null() {
+        return;
+    }
+    let rm = m as *mut RootedMap;
+    let idx = &mut *((*rm).index as *mut Int64Index);
+    for &slot in idx.slot_of.values() {
+        *(*rm).slots.add(slot) = ptr::null_mut();
+    }
+    idx.slot_of.clear();
+    idx.free.clear();
+    idx.high = 0;
+}
+#[no_mangle]
+pub unsafe extern "C" fn hlp_hi64size(m: *mut c_void) -> i32 {
+    if m.is_null() {
+        return 0;
+    }
+    let rm = m as *const RootedMap;
+    (*((*rm).index as *const Int64Index)).slot_of.len() as i32
+}
+
+// ============================================================================
 // ObjectMap (ho*) -- two slots per entry so the key object is rooted too.
 // ============================================================================
 type ObjIndex = SlotIndex<usize>;
@@ -952,4 +1072,389 @@ pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 {
     }
     let rm = m as *const RootedMap;
     (*((*rm).index as *const ObjIndex)).slot_of.len() as i32
+}
+
+// ============================================================================
+// hi64* contract tests
+//
+// These nine prims are reached by NAME from the primitive resolver as
+// `unsafe extern "C"`, so nothing about them is checked at build time: a
+// narrowed key or a dropped argument links and then misbehaves. What follows
+// pins the contract the callers rely on -- round-trip, miss values, overwrite,
+// size, and the index alignment `keys`/`values` promise -- and deliberately
+// does not pin iteration ORDER, which is a HashMap's to choose.
+// ============================================================================
+#[cfg(test)]
+mod hi64_tests {
+    use super::*;
+    use crate::hl::{vdynamic, varray};
+
+    /// Every `#[test]` runs on its own harness thread and every prim below
+    /// allocates from the process-wide collector. A thread the collector has
+    /// not been told about is left out of the conservative stack scan, so a
+    /// collection forced by another test -- `gc::tests` forces one -- would
+    /// find no root for the map header, its slot array, or the boxed values,
+    /// and could hand their block back to the free list underneath us.
+    ///
+    /// Registration uses the platform's real stack boundary rather than
+    /// `hlp_gc_set_stack_top`'s `&local + 8`: the latter only covers frames
+    /// below that local, and which locals the optimiser places above it is not
+    /// ours to predict. Unregistering from `Drop` is the part that matters on
+    /// the failure path -- a panicking assertion must not leave a phantom
+    /// mutator behind for the next `stop_mutator_world` to wait on.
+    struct Mutator;
+
+    impl Mutator {
+        fn enter() -> Mutator {
+            // Must precede registration: a registered thread allocates through
+            // the TLAB, whose refill takes `gc_locked()` and expects the
+            // singleton to already exist.
+            unsafe { crate::gc::hlp_gc_init() };
+            crate::gc::gc_register_current_os_thread();
+            Mutator
+        }
+    }
+
+    impl Drop for Mutator {
+        fn drop(&mut self) {
+            crate::gc::gc_unregister_current_os_thread();
+        }
+    }
+
+    /// Box an i64 the way the runtime does. Fabricating a pointer instead
+    /// would put a non-heap word in a GC-visible slot, which is a crash rather
+    /// than a failed assertion.
+    unsafe fn dyn_i64(v: i64) -> *mut vdynamic {
+        let mut raw = v;
+        let d = crate::cast::hlp_make_dyn(
+            &mut raw as *mut i64 as *mut c_void,
+            crate::types::hlt_i64(),
+        );
+        assert!(!d.is_null(), "hlp_make_dyn returned null for {v}");
+        d
+    }
+
+    unsafe fn unbox_i64(d: *mut vdynamic) -> i64 {
+        assert!(!d.is_null(), "expected a boxed value, got null");
+        (*d).v.i64_
+    }
+
+    unsafe fn keys_of(m: *mut c_void) -> Vec<i64> {
+        let a = hlp_hi64keys(m);
+        assert!(!a.is_null(), "hi64keys returned null for a live map");
+        let n = (*a).size as usize;
+        (0..n)
+            .map(|i| *(crate::types::hl_aptr::<i64>(a)).add(i))
+            .collect()
+    }
+
+    unsafe fn values_of(m: *mut c_void) -> Vec<*mut vdynamic> {
+        let a = hlp_hi64values(m);
+        assert!(!a.is_null(), "hi64values returned null for a live map");
+        let n = (*a).size as usize;
+        (0..n)
+            .map(|i| *(crate::types::hl_aptr::<*mut vdynamic>(a)).add(i))
+            .collect()
+    }
+
+    /// Keys chosen to cover the width: a 64-bit map that quietly truncated to
+    /// i32 would collide `1 << 40` with 0, and `i64::MIN` with `i64::MAX + 1`.
+    const WIDE_KEYS: [i64; 8] = [
+        0,
+        -1,
+        1,
+        i64::MIN,
+        i64::MAX,
+        i32::MAX as i64 + 1,
+        i32::MIN as i64 - 1,
+        1i64 << 40,
+    ];
+
+    /// Injective, so a key/value pairing that drifted by one slot shows up.
+    fn payload(key: i64) -> i64 {
+        key.wrapping_mul(31).wrapping_add(7)
+    }
+
+    #[test]
+    fn set_then_get_round_trips_extreme_keys() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            assert!(!map.is_null());
+
+            for &k in &WIDE_KEYS {
+                hlp_hi64set(map, k, dyn_i64(payload(k)));
+            }
+            assert_eq!(hlp_hi64size(map), WIDE_KEYS.len() as i32);
+
+            for &k in &WIDE_KEYS {
+                assert_eq!(
+                    unbox_i64(hlp_hi64get(map, k)),
+                    payload(k),
+                    "round trip for key {k}"
+                );
+            }
+        }
+    }
+
+    /// The implementation documents a miss as a null `vdynamic*`, not a
+    /// sentinel and not a panic.
+    #[test]
+    fn get_on_a_missing_key_returns_null() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            assert!(hlp_hi64get(map, 7).is_null(), "miss on an empty map");
+
+            hlp_hi64set(map, 7, dyn_i64(70));
+            assert!(hlp_hi64get(map, 8).is_null(), "miss beside a hit");
+            assert!(hlp_hi64get(map, -7).is_null(), "sign is part of the key");
+            // A truncating implementation would answer this one with 7's value.
+            assert!(
+                hlp_hi64get(map, 7 + (1i64 << 32)).is_null(),
+                "the high half of the key must participate"
+            );
+            assert!(!hlp_hi64get(map, 7).is_null(), "the hit still hits");
+        }
+    }
+
+    #[test]
+    fn set_on_an_existing_key_overwrites_without_growing() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            hlp_hi64set(map, i64::MIN, dyn_i64(1));
+            assert_eq!(hlp_hi64size(map), 1);
+
+            hlp_hi64set(map, i64::MIN, dyn_i64(2));
+            assert_eq!(hlp_hi64size(map), 1, "overwrite must not duplicate");
+            assert_eq!(unbox_i64(hlp_hi64get(map, i64::MIN)), 2);
+
+            hlp_hi64set(map, i64::MIN, dyn_i64(3));
+            assert_eq!(hlp_hi64size(map), 1);
+            assert_eq!(unbox_i64(hlp_hi64get(map, i64::MIN)), 3);
+            assert_eq!(keys_of(map), vec![i64::MIN]);
+        }
+    }
+
+    #[test]
+    fn exists_follows_set_and_remove() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            assert!(!hlp_hi64exists(map, i64::MAX));
+
+            hlp_hi64set(map, i64::MAX, dyn_i64(1));
+            assert!(hlp_hi64exists(map, i64::MAX));
+            assert!(!hlp_hi64exists(map, i64::MIN));
+
+            // A key whose value is null is still present.
+            hlp_hi64set(map, i64::MIN, ptr::null_mut());
+            assert!(hlp_hi64exists(map, i64::MIN), "presence is not value-ness");
+            assert!(hlp_hi64get(map, i64::MIN).is_null());
+            assert_eq!(hlp_hi64size(map), 2);
+
+            assert!(hlp_hi64remove(map, i64::MAX));
+            assert!(!hlp_hi64exists(map, i64::MAX));
+            assert!(hlp_hi64exists(map, i64::MIN));
+        }
+    }
+
+    #[test]
+    fn remove_reports_whether_it_removed_and_the_key_then_misses() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            assert!(!hlp_hi64remove(map, 5), "removing from an empty map is false");
+
+            hlp_hi64set(map, 5, dyn_i64(50));
+            assert!(hlp_hi64remove(map, 5), "removing a present key is true");
+            assert!(!hlp_hi64remove(map, 5), "a second remove is false");
+            assert!(hlp_hi64get(map, 5).is_null(), "the key misses afterwards");
+            assert!(!hlp_hi64exists(map, 5));
+            assert_eq!(hlp_hi64size(map), 0);
+
+            // The freed slot is reused; the new occupant must not inherit the
+            // old value.
+            hlp_hi64set(map, 6, dyn_i64(60));
+            assert_eq!(unbox_i64(hlp_hi64get(map, 6)), 60);
+            assert!(hlp_hi64get(map, 5).is_null());
+            assert_eq!(hlp_hi64size(map), 1);
+        }
+    }
+
+    #[test]
+    fn size_follows_a_set_remove_clear_sequence() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            assert_eq!(hlp_hi64size(map), 0);
+
+            for (n, &k) in WIDE_KEYS.iter().enumerate() {
+                hlp_hi64set(map, k, dyn_i64(payload(k)));
+                assert_eq!(hlp_hi64size(map), n as i32 + 1);
+            }
+            // Re-setting every key changes nothing.
+            for &k in &WIDE_KEYS {
+                hlp_hi64set(map, k, dyn_i64(payload(k)));
+            }
+            assert_eq!(hlp_hi64size(map), WIDE_KEYS.len() as i32);
+
+            let mut expected = WIDE_KEYS.len() as i32;
+            for &k in &WIDE_KEYS[..3] {
+                assert!(hlp_hi64remove(map, k));
+                expected -= 1;
+                assert_eq!(hlp_hi64size(map), expected);
+            }
+            assert!(!hlp_hi64remove(map, WIDE_KEYS[0]));
+            assert_eq!(hlp_hi64size(map), expected);
+
+            hlp_hi64clear(map);
+            assert_eq!(hlp_hi64size(map), 0);
+        }
+    }
+
+    /// The one property the implementation promises about the two arrays:
+    /// same length, and `key[i]` belongs with `value[i]`. Order is
+    /// deliberately unspecified, so nothing here depends on it.
+    #[test]
+    fn keys_and_values_are_index_aligned() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+
+            assert!(keys_of(map).is_empty(), "empty map yields an empty array");
+            assert!(values_of(map).is_empty());
+
+            for &k in &WIDE_KEYS {
+                hlp_hi64set(map, k, dyn_i64(payload(k)));
+            }
+            // Removing first exercises a slot table with a hole in it, which
+            // is where a positional (rather than paired) walk goes wrong.
+            assert!(hlp_hi64remove(map, WIDE_KEYS[2]));
+            hlp_hi64set(map, 999, dyn_i64(payload(999)));
+
+            let keys = keys_of(map);
+            let values = values_of(map);
+            assert_eq!(keys.len(), values.len(), "arrays must be the same length");
+            assert_eq!(keys.len(), hlp_hi64size(map) as usize);
+
+            for (i, &k) in keys.iter().enumerate() {
+                assert_eq!(
+                    unbox_i64(values[i]),
+                    payload(k),
+                    "values[{i}] does not belong to keys[{i}] = {k}"
+                );
+            }
+
+            // Same contents as the map, order aside.
+            let mut got = keys;
+            got.sort_unstable();
+            let mut want: Vec<i64> = WIDE_KEYS
+                .iter()
+                .copied()
+                .filter(|&k| k != WIDE_KEYS[2])
+                .chain(std::iter::once(999))
+                .collect();
+            want.sort_unstable();
+            assert_eq!(got, want);
+        }
+    }
+
+    /// The 64-bit key width is the whole difference from `hi*`. An array
+    /// tagged `hlt_i32` here would be half the size the caller indexes and
+    /// would truncate every key.
+    #[test]
+    fn keys_and_values_arrays_carry_the_upstream_element_types() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            let big = 1i64 << 40;
+            hlp_hi64set(map, big, dyn_i64(payload(big)));
+
+            let ka = hlp_hi64keys(map);
+            assert_eq!((*ka).at, crate::types::hlt_i64(), "keys element type");
+            assert_eq!(crate::types::hlp_type_size((*ka).at), 8, "key stride");
+            assert_eq!((*ka).size, 1);
+            assert_eq!(*crate::types::hl_aptr::<i64>(ka), big);
+
+            let va = hlp_hi64values(map);
+            assert_eq!((*va).at, crate::types::hlt_dyn(), "values element type");
+            assert_eq!((*va).size, 1);
+        }
+    }
+
+    #[test]
+    fn clear_empties_the_map_and_leaves_it_usable() {
+        let _m = Mutator::enter();
+        unsafe {
+            let map = hlp_hi64alloc();
+            for &k in &WIDE_KEYS {
+                hlp_hi64set(map, k, dyn_i64(payload(k)));
+            }
+
+            hlp_hi64clear(map);
+            assert_eq!(hlp_hi64size(map), 0);
+            for &k in &WIDE_KEYS {
+                assert!(!hlp_hi64exists(map, k), "key {k} survived clear");
+                assert!(hlp_hi64get(map, k).is_null(), "value for {k} survived clear");
+            }
+            assert!(keys_of(map).is_empty());
+            assert!(values_of(map).is_empty());
+
+            // Still usable, and the recycled slots hold the new values.
+            for &k in &WIDE_KEYS {
+                hlp_hi64set(map, k, dyn_i64(payload(k) + 1));
+            }
+            assert_eq!(hlp_hi64size(map), WIDE_KEYS.len() as i32);
+            for &k in &WIDE_KEYS {
+                assert_eq!(unbox_i64(hlp_hi64get(map, k)), payload(k) + 1);
+            }
+
+            hlp_hi64clear(map);
+            assert_eq!(hlp_hi64size(map), 0);
+        }
+    }
+
+    /// Every prim guards a null handle. The resolver hands these out to
+    /// bytecode, so an unset Map field must return the documented default
+    /// rather than fault.
+    #[test]
+    fn null_map_handles_are_inert() {
+        let _m = Mutator::enter();
+        unsafe {
+            let nil = ptr::null_mut();
+            hlp_hi64set(nil, 1, dyn_i64(1));
+            hlp_hi64clear(nil);
+            assert!(!hlp_hi64exists(nil, 1));
+            assert!(hlp_hi64get(nil, 1).is_null());
+            assert!(!hlp_hi64remove(nil, 1));
+            assert_eq!(hlp_hi64size(nil), 0);
+            assert!(hlp_hi64keys(nil).is_null());
+            assert!(hlp_hi64values(nil).is_null());
+        }
+    }
+
+    /// A compile-time contract test. The prims are resolved by name with no
+    /// prototype on the other side, so a key narrowed to `i32`, a dropped
+    /// argument or a changed return would build and link cleanly and only show
+    /// up as corruption at runtime. Naming all nine through their upstream
+    /// signatures turns that into a compile error.
+    #[test]
+    fn every_prim_matches_its_upstream_signature() {
+        let table: [*const c_void; 9] = [
+            (hlp_hi64alloc as unsafe extern "C" fn() -> *mut c_void) as *const c_void,
+            (hlp_hi64set as unsafe extern "C" fn(*mut c_void, i64, *mut vdynamic))
+                as *const c_void,
+            (hlp_hi64exists as unsafe extern "C" fn(*mut c_void, i64) -> bool) as *const c_void,
+            (hlp_hi64get as unsafe extern "C" fn(*mut c_void, i64) -> *mut vdynamic)
+                as *const c_void,
+            (hlp_hi64remove as unsafe extern "C" fn(*mut c_void, i64) -> bool) as *const c_void,
+            (hlp_hi64keys as unsafe extern "C" fn(*mut c_void) -> *mut varray) as *const c_void,
+            (hlp_hi64values as unsafe extern "C" fn(*mut c_void) -> *mut varray) as *const c_void,
+            (hlp_hi64clear as unsafe extern "C" fn(*mut c_void)) as *const c_void,
+            (hlp_hi64size as unsafe extern "C" fn(*mut c_void) -> i32) as *const c_void,
+        ];
+        assert!(table.iter().all(|p| !p.is_null()));
+    }
 }

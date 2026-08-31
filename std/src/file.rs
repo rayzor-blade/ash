@@ -616,3 +616,133 @@ pub unsafe extern "C" fn hlp_file_is_locked(name: *const vbyte) -> bool {
         None => cfg!(windows),
     }
 }
+
+// DEFINE_PRIM(_I32, file_error_code, _NO_ARG)
+//
+// Upstream returns the raw `errno` left behind by the last failing stdio
+// call, and `std::fs` reaches the same syscalls through the same libc, so
+// this is the same number for the same reason. What it is not is a latch:
+// errno belongs to the thread, not to the handle, and the staging above can
+// interpose a call between a failed read and this query. Haxe only asks
+// after a primitive already reported failure, which is where the two agree.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_file_error_code() -> c_int {
+    io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod file_error_code_tests {
+    use super::*;
+
+    /// Fail a syscall with a known errno and read it straight back, with no
+    /// intervening call that could set errno itself. libc rather than
+    /// `std::fs`, because std may allocate or retry on the way out and the
+    /// point here is what the *last* failing call left behind.
+    unsafe fn errno_after_failed_open(path: &str) -> c_int {
+        let mut p = path.as_bytes().to_vec();
+        p.push(0);
+        let fd = libc::open(p.as_ptr() as *const libc::c_char, libc::O_RDONLY);
+        assert_eq!(fd, -1, "{path} unexpectedly opened");
+        hlp_file_error_code()
+    }
+
+    fn missing_path(tag: &str) -> String {
+        let p = std::env::temp_dir().join(format!(
+            "ash_file_error_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p.to_str().unwrap().to_string()
+    }
+
+    /// The documented contract: the raw errno the last failing call left, the
+    /// same number upstream reads out of the C library.
+    #[test]
+    fn it_reports_the_errno_of_the_last_failing_call() {
+        unsafe {
+            assert_eq!(errno_after_failed_open(&missing_path("enoent")), libc::ENOENT);
+
+            // A different failure gives a different number, so the value is
+            // being read rather than returned as a constant. Opening a
+            // directory for writing fails on every platform ash targets.
+            let dir = std::env::temp_dir();
+            let mut p = dir.to_str().unwrap().as_bytes().to_vec();
+            p.push(0);
+            let fd = libc::open(p.as_ptr() as *const libc::c_char, libc::O_WRONLY);
+            if fd == -1 {
+                let code = hlp_file_error_code();
+                assert_ne!(code, libc::ENOENT, "the temp directory does not exist");
+                assert_ne!(code, 0, "a failed open left errno clear");
+            } else {
+                libc::close(fd);
+            }
+
+            // Closing a descriptor that was never open is EBADF everywhere.
+            assert_eq!(libc::close(-1), -1);
+            assert_eq!(hlp_file_error_code(), libc::EBADF);
+        }
+    }
+
+    /// The comment is explicit that this is not a latch: errno belongs to the
+    /// thread, so a later failure overwrites an earlier one and the value is
+    /// only meaningful straight after a primitive reported failure. Both
+    /// halves are asserted, so the honest limitation is recorded rather than
+    /// quietly assumed away.
+    #[test]
+    fn it_is_a_thread_errno_read_not_a_per_handle_latch() {
+        unsafe {
+            assert_eq!(libc::close(-1), -1);
+            assert_eq!(hlp_file_error_code(), libc::EBADF);
+
+            // A second, different failure replaces it -- nothing is held on
+            // behalf of the first, and no handle is consulted.
+            assert_eq!(errno_after_failed_open(&missing_path("latch")), libc::ENOENT);
+
+            // Reading does not consume the value either.
+            assert_eq!(hlp_file_error_code(), libc::ENOENT);
+            assert_eq!(hlp_file_error_code(), libc::ENOENT);
+        }
+    }
+
+    /// errno is per-thread, which is what lets the query take no handle
+    /// argument. An implementation that cached the last error in a process
+    /// global would pass every test above and fail this one: the child would
+    /// open onto the parent's EBADF.
+    ///
+    /// The child checks before it has failed at anything, because that is the
+    /// only moment a leaked global would be visible. It asserts the parent's
+    /// value is absent rather than that errno is exactly zero -- a thread's
+    /// startup path is entitled to leave something behind, and the bug this
+    /// is aimed at leaves EBADF specifically.
+    #[test]
+    fn the_code_belongs_to_the_calling_thread() {
+        unsafe {
+            assert_eq!(libc::close(-1), -1);
+            assert_eq!(hlp_file_error_code(), libc::EBADF);
+
+            let child = std::thread::spawn(|| {
+                let leaked = hlp_file_error_code();
+                let own = errno_after_failed_open(&missing_path("child"));
+                (leaked, own)
+            })
+            .join()
+            .unwrap();
+
+            assert_ne!(
+                child.0,
+                libc::EBADF,
+                "the parent thread's error was visible on a fresh thread"
+            );
+            assert_eq!(child.1, libc::ENOENT);
+        }
+    }
+
+    /// DEFINE_PRIM(_I32, file_error_code, _NO_ARG).
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: unsafe extern "C" fn() -> c_int = hlp_file_error_code;
+        unsafe {
+            let _ = f();
+        }
+    }
+}

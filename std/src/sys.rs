@@ -1021,6 +1021,73 @@ pub unsafe extern "C" fn hlp_sys_has_debugger() -> bool {
     false
 }
 
+/// Resident memory of this process, in bytes.
+///
+/// Upstream answers 0.0 everywhere but Windows and the consoles, and a
+/// caller cannot tell that apart from a process holding nothing. Each
+/// platform here reports what its own accounting calls the working set:
+/// `pti_resident_size` on Darwin, the resident column of /proc/self/statm on
+/// Linux. That is pages the kernel has actually backed, not the GC heap,
+/// which is the figure a profiler weighs against the machine's RAM.
+#[no_mangle]
+pub extern "C" fn hlp_sys_process_memory() -> f64 {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe {
+        let mut ti: libc::proc_taskinfo = std::mem::zeroed();
+        let want = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+        let got = libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut ti as *mut _ as *mut c_void,
+            want,
+        );
+        if got != want {
+            return 0.0;
+        }
+        ti.pti_resident_size as f64
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Field 2 of statm is the resident set in pages. Reading the file is
+        // a syscall pair, not a /proc directory walk, so it is cheap enough
+        // to call from a per-frame profiler.
+        let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
+            return 0.0;
+        };
+        let Some(pages) = statm.split_whitespace().nth(1) else {
+            return 0.0;
+        };
+        let Ok(pages) = pages.parse::<f64>() else {
+            return 0.0;
+        };
+        let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if page <= 0 {
+            return 0.0;
+        }
+        pages * page as f64
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut inf: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut inf, size) == 0 {
+            return 0.0;
+        }
+        inf.WorkingSetSize as f64
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", windows)))]
+    {
+        // No portable accounting call on the remaining targets; upstream
+        // returns 0.0 here too.
+        0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,5 +1190,64 @@ mod tests {
             assert_eq!(hlp_sys_set_flags(0), 0);
             hlp_sys_set_flags(PR_AUTO_FLUSH);
         }
+    }
+}
+
+#[cfg(test)]
+mod process_memory_tests {
+    use super::*;
+
+    const MIB: f64 = 1024.0 * 1024.0;
+
+    /// A plausible resident size, asserted as a range rather than a value:
+    /// the exact figure is the kernel's and moves between runs. Upstream
+    /// answers 0.0 on this platform, and 0.0 is also what a caller sees when
+    /// the accounting call fails, so the floor is the interesting half --
+    /// a test process that has loaded LLVM cannot be resident in under a
+    /// megabyte.
+    #[test]
+    fn it_reports_a_plausible_resident_size() {
+        let rss = hlp_sys_process_memory();
+        assert!(rss.is_finite(), "rss={rss}");
+        assert!(rss > 0.0, "reported nothing resident; the query failed");
+        assert!(rss > MIB, "rss={rss} is below a megabyte");
+        assert!(rss < 64.0 * 1024.0 * MIB, "rss={rss} exceeds 64GiB");
+        // A byte count, not a page count: a resident set under a megabyte
+        // would mean the Linux arm forgot to multiply by the page size.
+        assert_eq!(rss, rss.trunc(), "rss={rss} is not a whole number of bytes");
+    }
+
+    /// Residency, not the GC heap and not a constant. Touching every page of
+    /// a fresh mapping is what makes the kernel back it, so the figure has to
+    /// move; a stub returning a fixed number would pass the range check above
+    /// and fail here.
+    #[test]
+    fn it_tracks_pages_the_kernel_has_actually_backed() {
+        let before = hlp_sys_process_memory();
+        assert!(before > 0.0);
+
+        // 64MiB, written a page at a time. Kept alive across the second
+        // reading, or the allocator may hand it straight back.
+        let mut block = vec![0u8; 64 * 1024 * 1024];
+        for i in (0..block.len()).step_by(4096) {
+            block[i] = 1;
+        }
+        let after = hlp_sys_process_memory();
+        assert!(
+            after - before > 8.0 * MIB,
+            "touching 64MiB moved the resident set by {} bytes",
+            after - before
+        );
+        assert_eq!(block[0], 1);
+        drop(block);
+    }
+
+    /// DEFINE_PRIM(_F64, sys_process_memory, _NO_ARG) -- no arguments, and a
+    /// double rather than an int, because a resident set outgrows i32 on any
+    /// machine that matters.
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let f: extern "C" fn() -> f64 = hlp_sys_process_memory;
+        assert!(f() > 0.0);
     }
 }

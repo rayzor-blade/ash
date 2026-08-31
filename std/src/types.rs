@@ -437,6 +437,36 @@ pub extern "C" fn hlp_type_get_global(t: *mut hl::hl_type) -> *mut hl::vdynamic 
     }
 }
 
+/// Names registered for GUID values, keyed by the guid itself.
+///
+/// Owned by ash, not by the collector: upstream parks the names in a GC'd
+/// int64 map because it hands the `vbyte*` straight back out, and a raw GC
+/// pointer sitting in a Rust container is a root the collector cannot see.
+/// Copying the characters in sidesteps the whole question.
+static GUID_NAMES: OnceLock<std::sync::Mutex<std::collections::HashMap<i64, Box<[u16]>>>> =
+    OnceLock::new();
+
+// DEFINE_PRIM(_VOID, register_guid_name, _I64 _BYTES)
+//
+// Upstream's only reader is `hl_guid_str`, which prints a registered name in
+// place of the base64 of a guid's bits. ash's kind table stops at HPACKED —
+// there is no HGUID to render — so nothing reads this back yet. Retained
+// anyway: dropping a name the program handed over would make the day someone
+// adds the reader look like a registration bug. A null name deregisters,
+// matching upstream's hi64remove branch.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_register_guid_name(guid: i64, name: *mut vbyte) {
+    let names = GUID_NAMES.get_or_init(Default::default);
+    let mut names = names.lock().unwrap_or_else(|e| e.into_inner());
+    if name.is_null() {
+        names.remove(&guid);
+        return;
+    }
+    let s = name as *const u16;
+    let len = crate::hl_compat::ustrlen(s);
+    names.insert(guid, std::slice::from_raw_parts(s, len).into());
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
     if t.is_null() {
@@ -722,4 +752,170 @@ pub unsafe extern "C" fn hlp_init_enum(et: *mut hl_type, _m: *mut hl_module_cont
     }
 
     (*et).mark_bits = mark as *mut ::std::os::raw::c_uint;
+}
+
+/// `hlp_register_guid_name` writes into a process-global map, so these tests
+/// share one table with each other and with any future caller. They key off
+/// distinct guids, never assert the table's size, and remove what they added,
+/// so they hold whatever else is in there and survive being run twice.
+#[cfg(test)]
+mod guid_name_tests {
+    use super::{hlp_register_guid_name, GUID_NAMES};
+
+    /// The map is only reachable from this module, which is the point: the
+    /// doc comment says nothing reads these back yet, so the stored value is
+    /// the only observable the primitive has.
+    fn stored(guid: i64) -> Option<Vec<u16>> {
+        let names = GUID_NAMES.get_or_init(Default::default);
+        let names = names.lock().unwrap_or_else(|e| e.into_inner());
+        names.get(&guid).map(|b| b.to_vec())
+    }
+
+    /// Names arrive as NUL-terminated UTF-16, the way `ustrlen` reads them.
+    fn u16z(s: &str) -> Vec<u16> {
+        let mut v: Vec<u16> = s.encode_utf16().collect();
+        v.push(0);
+        v
+    }
+
+    fn want(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn a_name_round_trips_and_a_second_one_replaces_it() {
+        const GUID: i64 = 0x0a51_7e57_0000_0001;
+        unsafe {
+            let first = u16z("Renderer");
+            hlp_register_guid_name(GUID, first.as_ptr() as *mut _);
+            assert_eq!(stored(GUID).as_deref(), Some(want("Renderer").as_slice()));
+
+            // Keyed by guid, so registering again replaces rather than adds.
+            let second = u16z("Audio");
+            hlp_register_guid_name(GUID, second.as_ptr() as *mut _);
+            assert_eq!(stored(GUID).as_deref(), Some(want("Audio").as_slice()));
+
+            hlp_register_guid_name(GUID, std::ptr::null_mut());
+            assert_eq!(stored(GUID), None);
+        }
+    }
+
+    /// The characters are copied in, not aliased. Upstream can hand the
+    /// `vbyte*` straight back out because its map is GC'd; a raw GC pointer
+    /// parked in a Rust container would be a root the collector cannot see,
+    /// so this side copies. If it ever stopped copying, the stored name would
+    /// follow the caller's buffer -- including after the buffer is freed.
+    #[test]
+    fn the_characters_are_copied_not_aliased() {
+        const GUID: i64 = 0x0a51_7e57_0000_0002;
+        unsafe {
+            let mut name = u16z("Physics");
+            hlp_register_guid_name(GUID, name.as_mut_ptr() as *mut _);
+            assert_eq!(stored(GUID).as_deref(), Some(want("Physics").as_slice()));
+
+            // Scribble over the caller's buffer, then drop it entirely.
+            name[0] = 'X' as u16;
+            name[1] = 0;
+            assert_eq!(
+                stored(GUID).as_deref(),
+                Some(want("Physics").as_slice()),
+                "the stored name followed the caller's buffer"
+            );
+            drop(name);
+            assert_eq!(stored(GUID).as_deref(), Some(want("Physics").as_slice()));
+
+            hlp_register_guid_name(GUID, std::ptr::null_mut());
+            assert_eq!(stored(GUID), None);
+        }
+    }
+
+    /// A null name deregisters, matching upstream's hi64remove branch, and
+    /// deregistering something never registered is not an error.
+    #[test]
+    fn a_null_name_deregisters_and_is_safe_on_an_absent_guid() {
+        const PRESENT: i64 = 0x0a51_7e57_0000_0003;
+        const ABSENT: i64 = 0x0a51_7e57_0000_0004;
+        unsafe {
+            hlp_register_guid_name(ABSENT, std::ptr::null_mut());
+            assert_eq!(stored(ABSENT), None);
+
+            let n = u16z("Net");
+            hlp_register_guid_name(PRESENT, n.as_ptr() as *mut _);
+            assert!(stored(PRESENT).is_some());
+            hlp_register_guid_name(PRESENT, std::ptr::null_mut());
+            assert_eq!(stored(PRESENT), None);
+            // Twice over, so a stale entry would show.
+            hlp_register_guid_name(PRESENT, std::ptr::null_mut());
+            assert_eq!(stored(PRESENT), None);
+        }
+    }
+
+    /// Length comes from `ustrlen`, so the terminator bounds the name and
+    /// nothing past it is read. An empty name is a name, not a removal.
+    #[test]
+    fn the_stored_length_stops_at_the_terminator() {
+        const GUID: i64 = 0x0a51_7e57_0000_0005;
+        unsafe {
+            // "ab\0cd\0": everything after the first NUL must be ignored.
+            let buf: Vec<u16> = vec![
+                'a' as u16, 'b' as u16, 0, 'c' as u16, 'd' as u16, 0,
+            ];
+            hlp_register_guid_name(GUID, buf.as_ptr() as *mut _);
+            assert_eq!(stored(GUID).as_deref(), Some(want("ab").as_slice()));
+
+            let empty = u16z("");
+            hlp_register_guid_name(GUID, empty.as_ptr() as *mut _);
+            assert_eq!(
+                stored(GUID).as_deref(),
+                Some([].as_slice()),
+                "an empty name should register, not deregister"
+            );
+
+            // Non-ASCII survives as UTF-16 code units rather than bytes.
+            let uni = u16z("\u{00e9}\u{4e2d}");
+            hlp_register_guid_name(GUID, uni.as_ptr() as *mut _);
+            assert_eq!(stored(GUID).as_deref(), Some(want("\u{00e9}\u{4e2d}").as_slice()));
+
+            hlp_register_guid_name(GUID, std::ptr::null_mut());
+            assert_eq!(stored(GUID), None);
+        }
+    }
+
+    /// The map is shared across threads, which is why it is behind a mutex.
+    /// Registering from several at once must not lose an entry or poison the
+    /// lock for the next caller.
+    #[test]
+    fn concurrent_registrations_all_land() {
+        const BASE: i64 = 0x0a51_7e57_0001_0000;
+        let mut handles = Vec::new();
+        for t in 0..4i64 {
+            handles.push(std::thread::spawn(move || unsafe {
+                for i in 0..64i64 {
+                    let guid = BASE + t * 1000 + i;
+                    let n = u16z(&format!("t{t}n{i}"));
+                    hlp_register_guid_name(guid, n.as_ptr() as *mut _);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        for t in 0..4i64 {
+            for i in 0..64i64 {
+                let guid = BASE + t * 1000 + i;
+                assert_eq!(
+                    stored(guid).as_deref(),
+                    Some(want(&format!("t{t}n{i}")).as_slice()),
+                    "guid {guid} went missing"
+                );
+                unsafe { hlp_register_guid_name(guid, std::ptr::null_mut()) };
+            }
+        }
+    }
+
+    /// DEFINE_PRIM(_VOID, register_guid_name, _I64 _BYTES).
+    #[test]
+    fn the_exported_signature_is_the_one_upstream_declares() {
+        let _: unsafe extern "C" fn(i64, *mut super::vbyte) = hlp_register_guid_name;
+    }
 }

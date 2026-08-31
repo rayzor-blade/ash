@@ -264,10 +264,14 @@ impl HLInterpreter {
             C::SLte => cmp(CmpOp::SLte),
             C::ULt => cmp(CmpOp::ULt),
             C::UGte => cmp(CmpOp::UGte),
-            // The reference dispatcher reads the NaN-aware forms as their
-            // plain negations, and parity with it is the bar.
-            C::NotLt => cmp(CmpOp::SGte),
-            C::NotGte => cmp(CmpOp::SLt),
+            // The NEGATION of the comparison, not its opposite: every
+            // comparison against NaN is false, so !(a < b) is true for NaN
+            // where (a >= b) is false. Integers are a total order and the two
+            // agree there, which is why reading them as opposites passed
+            // everything except TestNaN. The opcode loop spells out the same
+            // reasoning over JNotLt/JNotGte.
+            C::NotLt => !cmp(CmpOp::SLt),
+            C::NotGte => !cmp(CmpOp::SGte),
             C::Eq => cmp(CmpOp::Eq),
             C::NotEq => cmp(CmpOp::NotEq),
         }

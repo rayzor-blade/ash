@@ -93,8 +93,8 @@ def peak_rss(cmd: list[str], timeout: float, env: dict | None) -> int | None:
     return parse_rss_bytes(res.stderr)
 
 
-def build_aot(bench: dict, tests_dir: Path, repo: Path,
-              workdir: Path) -> tuple[Path | None, str, float]:
+def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
+              env: dict | None = None) -> tuple[Path | None, str, float]:
     """Emit and link one bench ahead of time. Returns (binary, detail, ms)."""
     source = tests_dir / bench["hl"]
     if not source.exists():
@@ -109,7 +109,7 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path,
     binary = workdir / "prog"
     t0 = time.perf_counter()
     p = subprocess.run([str(spike), str(source), str(obj)],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, timeout=900, env=env)
     if p.returncode != 0:
         return None, f"emit failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0
     refused = [l for l in p.stdout.splitlines() if "refused" in l]
@@ -151,6 +151,7 @@ def main() -> int:
         b.setdefault("hl", base.get("hl", ""))
         b.setdefault("main", base.get("main", ""))
         b.setdefault("timeout_secs", base.get("timeout_secs", 120))
+        b.setdefault("env", {})
 
     benches = {b["name"]: b for b in doc["bench"]}
     if args.benchmarks:
@@ -184,31 +185,36 @@ def main() -> int:
         source = tests_dir / bench["hl"]
         timeout = bench["timeout_secs"] * 4
         row: dict = {"name": name, "lanes": {}}
+        # A bench may pin engine configuration -- see `fib_calls`, which turns
+        # off pure-call CSE so the row measures calls. It has to reach the AOT
+        # compile too, not only the run: that is where the elimination happens.
+        lane_env = dict(run_env)
+        lane_env.update({str(k): str(v) for k, v in bench.get("env", {}).items()})
 
         with tempfile.TemporaryDirectory(prefix=f"aot-{name}-") as td:
-            binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td))
+            binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td), lane_env)
             if binary is None:
                 row["lanes"]["ash-aot"] = {"status": "FAIL", "detail": detail}
             else:
                 rec = hlb.time_command([str(binary)], bench, args.iterations,
-                                       args.warmups, timeout, run_env)
+                                       args.warmups, timeout, lane_env)
                 rec["build_ms"] = round(build_ms, 1)
-                rec["peak_rss_bytes"] = peak_rss([str(binary)], timeout, run_env)
+                rec["peak_rss_bytes"] = peak_rss([str(binary)], timeout, lane_env)
                 if detail:
                     rec["note"] = detail
                 row["lanes"]["ash-aot"] = rec
 
         jit_cmd = [str(ash), "--mode", "jit", str(source)]
         row["lanes"]["ash-jit"] = hlb.time_command(
-            jit_cmd, bench, args.iterations, args.warmups, timeout, run_env)
-        row["lanes"]["ash-jit"]["peak_rss_bytes"] = peak_rss(jit_cmd, timeout, run_env)
+            jit_cmd, bench, args.iterations, args.warmups, timeout, lane_env)
+        row["lanes"]["ash-jit"]["peak_rss_bytes"] = peak_rss(jit_cmd, timeout, lane_env)
         # Explicitly hybrid: `ash <file>` with no mode is the INTERPRETER,
         # and timing fib(40) under it measures the interpreter, not the
         # engine anyone ships. Hybrid is what the published table runs.
         hybrid_cmd = [str(ash), "--mode", "hybrid", str(source)]
         row["lanes"]["ash-hybrid"] = hlb.time_command(
-            hybrid_cmd, bench, args.iterations, args.warmups, timeout, run_env)
-        row["lanes"]["ash-hybrid"]["peak_rss_bytes"] = peak_rss(hybrid_cmd, timeout, run_env)
+            hybrid_cmd, bench, args.iterations, args.warmups, timeout, lane_env)
+        row["lanes"]["ash-hybrid"]["peak_rss_bytes"] = peak_rss(hybrid_cmd, timeout, lane_env)
 
         if not hlc_ready:
             row["lanes"]["hlc"] = {"status": "UNAVAILABLE",

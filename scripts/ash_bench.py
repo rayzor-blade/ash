@@ -436,6 +436,14 @@ class Bench:
         self.description: str = raw.get("description", "")
         self.windowed: bool = bool(raw.get("windowed", False))
         self.parity_case: str | None = raw.get("parity_case")
+        # Per-bench environment overlay. A benchmark sometimes has to measure
+        # the engine in a configuration the engine does not ship in -- see
+        # `fib_calls`, which suppresses pure-call CSE so the row reports call
+        # cost rather than how much of the program the optimizer could prove
+        # away. Applied on top of `build_env`, so it wins over the defaults.
+        self.env: dict[str, str] = {
+            str(k): str(v) for k, v in (raw.get("env") or {}).items()
+        }
 
         base: dict = {}
         if self.parity_case:
@@ -625,11 +633,11 @@ def first_difference(want: str, got: str, source: str) -> str:
 # ── the sweep ───────────────────────────────────────────────────────────────
 
 
-def build_env(args, instrumented: bool) -> dict:
+def build_env(args, instrumented: bool, bench=None) -> dict:
     env = dict(os.environ)
     # Strip inherited knobs so a shell that happens to export them cannot
     # silently change what is measured.
-    for k in ("ASH_GC_STATS", "ASH_TIER_LOG", "ASH_TIER"):
+    for k in ("ASH_GC_STATS", "ASH_TIER_LOG", "ASH_TIER", "ASH_NO_PURE_CSE"):
         env.pop(k, None)
     if args.gc_heap_mb:
         env["ASH_GC_HEAP_MB"] = str(args.gc_heap_mb)
@@ -638,6 +646,8 @@ def build_env(args, instrumented: bool) -> dict:
             env["ASH_GC_STATS"] = "1"
         if args.tier_log:
             env["ASH_TIER_LOG"] = "1"
+    if bench is not None:
+        env.update(bench.env)
     return env
 
 
@@ -700,7 +710,7 @@ def resolve_reference(
     ref_mode = Mode({"name": "interp", "args": ["--mode", "interp"]})
     cmd = command_for(ref_mode, bench, binaries, jit_log=False)
     res = exec_run(
-        cmd, cwd, build_env(args, instrumented=False), bench.timeout_secs * args.timeout_scale
+        cmd, cwd, build_env(args, instrumented=False, bench=bench), bench.timeout_secs * args.timeout_scale
     )
     if not res.ok:
         return Reference("interp(failed)", None, None)
@@ -723,7 +733,7 @@ def run_instrumented(mode: Mode, bench: Bench, binaries: dict, args, cwd: pathli
     res = exec_run(
         cmd,
         cwd,
-        build_env(args, instrumented=True),
+        build_env(args, instrumented=True, bench=bench),
         bench.timeout_secs * args.timeout_scale,
     )
     return {
@@ -744,7 +754,7 @@ def run_one(
     cwd: pathlib.Path,
 ) -> dict:
     timeout = bench.timeout_secs * args.timeout_scale
-    env = build_env(args, instrumented=False)
+    env = build_env(args, instrumented=False, bench=bench)
     cmd = command_for(mode, bench, binaries, jit_log=False)
 
     record = {

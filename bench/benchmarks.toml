@@ -286,6 +286,25 @@ one long-lived survivor: the GC-pressure row of the set. The n=14 variant \
 reproduces upstream's @:result(26208); the n=16 checksum is cross-validated \
 between ash's interpreter (arm64) and stock HashLink 1.15 (x86_64)."""
 
+# fib does not measure calls unless it is made to.
+#
+# LLVM infers `memory(none)` on `fib`, and once AIR's recursive inliner has
+# exposed two calls with the same argument, GVN collapses the tree: 331 million
+# invocations "run" in 1.7ms, which is 0.015 cycles per call -- not a fast call,
+# an absent one. clang and gcc do the same to a C `fib`, so this is a property
+# of the optimizer, not a trick. It is also NOT uniform across our own tiers:
+# whole-module `--mode jit` keeps the calls while hybrid and AOT eliminate them,
+# because the collapse depends on how much of the module each tier hands the
+# optimizer at once. A row whose meaning changes with promotion scoping cannot
+# be read.
+#
+# So the corpus carries both, and says which is which. `fib` below is the
+# unrestricted engine. `fib_calls` pins ASH_NO_PURE_CSE, which stops LLVM
+# proving the body effect-free and leaves everything else -- inlining very much
+# included -- alone. Suppressing the INLINER instead would have been the easy
+# mistake: it drops fib's recurrence base 1.618 -> 1.380 on its own, so turning
+# it off understates call cost (0.26s) rather than isolating the elimination
+# (0.18s).
 [[bench]]
 name = "fib"
 main = "BenchFib"
@@ -301,6 +320,20 @@ group = "call"
 modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
 modes_reason = "recursion depth 40 is minutes under the interpreter"
 description = "Recursive fib(40): raw call/return latency with no loop to vectorize."
+
+[[bench]]
+name = "fib_calls"
+main = "BenchFib"
+hl = "bench_fib.hl"
+expectation = "checksum"
+checksum_marker = "BenchFib"
+checksums = [{ value = "102334155", label = "reference" }]
+timeout_secs = 300
+group = "call"
+description = "Recursive fib(40) with pure-call CSE suppressed: 331M real invocations."
+env = { ASH_NO_PURE_CSE = "1" }
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+modes_reason = "recursion depth 40 is minutes under the interpreter"
 
 [[bench]]
 name = "array_push"

@@ -449,6 +449,7 @@ impl<'ctx> JITModule<'ctx> {
 
             let basic_block = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(basic_block);
+            self.emit_purity_barrier()?;
 
             self.translate_air_v2(&f, &air, function)?;
 
@@ -7770,6 +7771,45 @@ impl<'ctx> JITModule<'ctx> {
             .i64_type()
             .const_int(crate::hl::_setjmp as usize as u64, false)
             .const_to_pointer(ptr_type))
+    }
+
+    /// Under `ASH_NO_PURE_CSE`, stop LLVM from proving a body effect-free.
+    ///
+    /// This exists for one measurement, and it is worth saying exactly which.
+    /// `fib` is a call benchmark that a good compiler does not run: LLVM
+    /// infers `memory(none)`, and once AIR's recursive inliner has exposed two
+    /// calls with the same argument, GVN collapses the tree. The reported
+    /// number is then optimizer visibility, not call cost -- clang and gcc do
+    /// the same to a C `fib`.
+    ///
+    /// The honest row needs the CSE suppressed and nothing else. It would be
+    /// easy and wrong to reach for `ASH_AIR_NO_INLINE` instead: inlining is a
+    /// separate optimization that drops the recurrence base on its own, and
+    /// turning it off would UNDERSTATE call performance rather than isolate
+    /// the elimination. An empty side-effecting asm is inert -- it emits no
+    /// instruction -- but a function containing one cannot be `memory(none)`,
+    /// so identical calls stop being redundant while every other pass,
+    /// inlining included, carries on unchanged.
+    ///
+    /// Never on by default. A build that sets it is measuring, not shipping.
+    fn emit_purity_barrier(&self) -> Result<()> {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("ASH_NO_PURE_CSE").is_some()) {
+            return Ok(());
+        }
+        let barrier = self.context.void_type().fn_type(&[], false);
+        let asm = self.context.create_inline_asm(
+            barrier,
+            String::new(),
+            String::new(),
+            true,  // has side effects
+            false, // not align-stack
+            None,
+            false,
+        );
+        self.builder
+            .build_indirect_call(barrier, asm, &[], "ash_purity_barrier")?;
+        Ok(())
     }
 
     /// Refuse to bake an address of this process into an object file.

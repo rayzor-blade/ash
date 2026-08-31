@@ -981,6 +981,61 @@ unsafe fn install_fiber(id: u32, c: *mut vclosure) {
     });
 }
 
+/// Install a fiber whose body is a native callback rather than a Haxe
+/// closure. There is no vclosure for the closure runner to run and no GC root
+/// to keep, but everything else -- the stack registration, the allocation
+/// pressure it charges, the ready queue -- is the same fiber.
+unsafe fn install_native_fiber(id: u32, entry: usize, param: usize) {
+    worker_trace("install-native", id as u64, entry as u64);
+    let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
+        let entry: unsafe extern "C" fn(*mut c_void) = std::mem::transmute(entry as *mut c_void);
+        entry(param as *mut c_void);
+    }));
+    let (base, len) = fiber.stack_range();
+    crate::gc::gc_register_fiber_stack(id, base as usize, len);
+    crate::gc::hlp_gc_track_external(len as u64);
+
+    SCHEDULER.with(|scheduler| {
+        let mut scheduler = scheduler.borrow_mut();
+        scheduler.fibers.push(VmFiber {
+            fiber,
+            id,
+            closure: std::ptr::null_mut(),
+            run_state: FiberRunState::Runnable,
+            resume_cause: ResumeCause::Scheduled,
+            gc_blocking_depth: 0,
+            trap_head: std::ptr::null_mut(),
+            exc_value: std::ptr::null_mut(),
+        });
+        scheduler.enqueue_ready(id);
+    });
+}
+
+/// Start a native library's callback as a fiber, the way `thread_create`
+/// starts a Haxe one. Returns the same opaque handle.
+///
+/// ash has no OS threads to hand out. The callbacks that reach here are
+/// HashLink's own -- ui.hdll's sentinel is the one in reach -- and they mark
+/// their sleeps with `hl_blocking`, which is where the fiber yields, so the
+/// scheduler keeps its turn.
+pub(crate) unsafe fn native_thread_start(entry: *mut c_void, param: *mut c_void) -> *mut c_void {
+    if entry.is_null() {
+        return std::ptr::null_mut();
+    }
+    let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
+    LOGICAL_THREADS.fetch_add(1, Ordering::Release);
+    ensure_preemption_timer();
+    request_fiber_poll();
+    worker_trace("create-native", id as u64, entry as usize as u64);
+    install_native_fiber(id, entry as usize, param as usize);
+
+    // Give the new thread a chance to run to its first blocking point,
+    // matching the "starts immediately" expectation of real threads.
+    schedule_step();
+
+    ((id as usize) << 4 | 1) as *mut c_void
+}
+
 unsafe fn drain_scheduler_commands() {
     let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
     let commands: Vec<SchedulerCommand> = {

@@ -148,11 +148,36 @@ thread_local! {
     /// every allocation. That serialization is what made more workers slower.
     ///
     /// `const`-initialized so the access carries no lazy-init branch.
-    static TLAB_CUR: Cell<usize> = const { Cell::new(0) };
-    static TLAB_LIMIT: Cell<usize> = const { Cell::new(0) };
+    ///
+    /// One struct rather than one `thread_local!` per field, because each
+    /// `thread_local!` is its own TLS lookup: on Mach-O that is a `_tlv_get_addr`
+    /// call, and the allocation fast path touched four of them (registered,
+    /// cursor, limit, cursor again). Profiling binary_trees, that one symbol was
+    /// 26% of the entire run -- more than the collector. The fields are read and
+    /// written through a single `TLAB.with`, so the fast path pays one lookup.
+    /// Same shape as the fix in `gc_thread_token` above, for the same reason.
+    static TLAB: Tlab = const {
+        Tlab {
+            cur: Cell::new(0),
+            limit: Cell::new(0),
+            block: Cell::new(usize::MAX),
+            registered: Cell::new(false),
+        }
+    };
+}
+
+/// This thread's bump region, plus whether it is a registered mutator.
+struct Tlab {
+    /// Bump cursor and the end of the region.
+    cur: Cell<usize>,
+    limit: Cell<usize>,
     /// Heap offset of the block this thread is bumping through, so a refill
     /// can hand the previous one back to the sweep.
-    static TLAB_BLOCK: Cell<usize> = const { Cell::new(usize::MAX) };
+    block: Cell<usize>,
+    /// Whether this thread is registered with `MUTATOR_WORLD`. Lives here only
+    /// because the allocation fast path reads it: keeping it in its own
+    /// `thread_local!` made every allocation pay a second TLS lookup.
+    registered: Cell<bool>,
 }
 
 /// Largest object the bump region serves. At one line, nothing in the
@@ -286,10 +311,6 @@ static GC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 static GC_STOP_ASKED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GC_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-thread_local! {
-    static MUTATOR_REGISTERED: Cell<bool> = const { Cell::new(false) };
-}
-
 fn register_current_mutator(stack_top: usize, role: &'static str) {
     if stack_top == 0 {
         return;
@@ -315,7 +336,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             scan_live: None,
         });
     }
-    MUTATOR_REGISTERED.with(|registered| registered.set(true));
+    TLAB.with(|t| t.registered.set(true));
 }
 
 /// Register the current OS worker using the platform's real stack boundary.
@@ -370,7 +391,7 @@ fn unregister_current_mutator() {
     let thread = thread_self_fast();
     let mut world = MUTATOR_WORLD.state.lock().unwrap();
     world.mutators.retain(|m| m.thread != thread);
-    MUTATOR_REGISTERED.with(|registered| registered.set(false));
+    TLAB.with(|t| t.registered.set(false));
     MUTATOR_WORLD.changed.notify_all();
     drop(world);
 
@@ -380,7 +401,7 @@ fn unregister_current_mutator() {
 
 #[inline]
 fn current_mutator_registered() -> bool {
-    MUTATOR_REGISTERED.with(Cell::get)
+    TLAB.with(|t| t.registered.get())
 }
 
 /// Park a registered mutator at an AIR V2 or allocation safepoint.
@@ -704,21 +725,37 @@ fn tlab_enabled() -> bool {
 /// when it can and the locked path when it cannot.
 pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
     let aligned = (size.max(8) + 15) & !15;
-    if aligned <= TLAB_MAX_OBJ && tlab_enabled() && current_mutator_registered() {
-        let cur = TLAB_CUR.with(Cell::get);
-        if cur != 0 {
-            let mut p = cur;
-            if (p & (LINE_SIZE - 1)) + aligned > LINE_SIZE {
-                p = (p + LINE_SIZE - 1) & !(LINE_SIZE - 1);
-            }
-            let np = p + aligned;
-            if np <= TLAB_LIMIT.with(Cell::get) {
-                TLAB_CUR.with(|c| c.set(np));
-                // Pre-zeroed at refill.
-                return Some(unsafe { NonNull::new_unchecked(p as *mut u8) });
-            }
+    if aligned <= TLAB_MAX_OBJ && tlab_enabled() {
+        // One TLS lookup for the whole sequence -- see `TLAB`.
+        enum Step {
+            Bumped(usize),
+            Refill,
+            Unregistered,
         }
-        return tlab_refill_then_alloc(aligned);
+        let step = TLAB.with(|t| {
+            if !t.registered.get() {
+                return Step::Unregistered;
+            }
+            let cur = t.cur.get();
+            if cur != 0 {
+                let mut p = cur;
+                if (p & (LINE_SIZE - 1)) + aligned > LINE_SIZE {
+                    p = (p + LINE_SIZE - 1) & !(LINE_SIZE - 1);
+                }
+                let np = p + aligned;
+                if np <= t.limit.get() {
+                    t.cur.set(np);
+                    return Step::Bumped(p);
+                }
+            }
+            Step::Refill
+        });
+        match step {
+            // Pre-zeroed at refill.
+            Step::Bumped(p) => return Some(unsafe { NonNull::new_unchecked(p as *mut u8) }),
+            Step::Refill => return tlab_refill_then_alloc(aligned),
+            Step::Unregistered => {}
+        }
     }
     gc_locked_init().allocate(size)
 }
@@ -735,17 +772,21 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
 /// from reclamation.
 fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize) {
     gc.heap.tlab_blocks.insert(thread_self_fast(), block);
-    TLAB_BLOCK.with(|b| b.set(block));
-    TLAB_CUR.with(|c| c.set(cur));
-    TLAB_LIMIT.with(|l| l.set(limit));
+    TLAB.with(|t| {
+        t.block.set(block);
+        t.cur.set(cur);
+        t.limit.set(limit);
+    });
 }
 
 /// Give up this thread's bump region entirely (thread exit).
 fn release_tlab_region(gc: &mut ImmixAllocator) {
     gc.heap.tlab_blocks.remove(&thread_self_fast());
-    TLAB_BLOCK.with(|b| b.set(usize::MAX));
-    TLAB_CUR.with(|c| c.set(0));
-    TLAB_LIMIT.with(|l| l.set(0));
+    TLAB.with(|t| {
+        t.block.set(usize::MAX);
+        t.cur.set(0);
+        t.limit.set(0);
+    });
 }
 
 #[cold]

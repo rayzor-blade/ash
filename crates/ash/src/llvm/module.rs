@@ -473,12 +473,18 @@ impl<'ctx> JITModule<'ctx> {
         self.lazy_compilation = enabled;
     }
 
+    /// `bytecode` is the caller's already-decoded module. Decoding is not
+    /// cheap -- var-ints, UTF-16 conversion and a `__hlp_hash_gen` for every
+    /// field and proto name -- and the interpreter has always held a decoded
+    /// copy by the time it pre-warms, so this used to parse the same file a
+    /// second time. Cloning it instead is a memcpy.
     pub fn new_with_shared_runtime(
         context: &'ctx Context,
         path: &Path,
+        bytecode: &DecodedBytecode,
         shared: SharedRuntimeHandles,
     ) -> Self {
-        Self::new_for_tiered(context, path, shared)
+        Self::new_for_tiered(context, path, bytecode, shared)
     }
 
     /// Minimal constructor for tiered promotion (hybrid pre-warm) and
@@ -502,14 +508,19 @@ impl<'ctx> JITModule<'ctx> {
     /// Unlike the full constructor, nothing here allocates from the GC, so no
     /// GC lock is needed and it is safe to run mid-program (hot-reload
     /// callback) without stalling collections.
-    fn new_for_tiered(context: &'ctx Context, path: &Path, shared: SharedRuntimeHandles) -> Self {
+    fn new_for_tiered(
+        context: &'ctx Context,
+        path: &Path,
+        bytecode: &DecodedBytecode,
+        shared: SharedRuntimeHandles,
+    ) -> Self {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
         crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
-        let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
-        phase_timer!(timing, "tiered decode", t);
+        let bytecode = bytecode.clone();
+        phase_timer!(timing, "tiered clone", t);
         t = std::time::Instant::now();
 
         link_in_mcjit();

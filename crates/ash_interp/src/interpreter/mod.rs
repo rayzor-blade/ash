@@ -1013,7 +1013,8 @@ impl HLInterpreter {
         let prewarm_start = std::time::Instant::now();
         let prewarmed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let context: &'static Context = Box::leak(Box::new(Context::create()));
-            let mut jit = JITModule::new_with_shared_runtime(context, &hl_path, shared.clone());
+            let mut jit =
+                JITModule::new_with_shared_runtime(context, &hl_path, bytecode, shared.clone());
             jit.set_hot_reload(hot_reload);
             jit.set_lazy_compilation(config.compiled_only);
             Box::into_raw(Box::new(ManuallyDrop::new(jit)))

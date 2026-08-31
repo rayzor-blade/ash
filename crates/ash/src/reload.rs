@@ -167,7 +167,10 @@ pub fn perform_reload(
     // (LLVM modules are immutable post-compilation; we leak the context
     //  intentionally — old JIT code may still be on active call stacks)
     let context = Box::leak(Box::new(Context::create()));
-    let mut jit = JITModule::new_with_shared_runtime(context, path, shared_runtime.clone());
+    let decoded = crate::bytecode::BytecodeDecoder::decode(path)
+        .expect("Failed to decode bytecode");
+    let mut jit =
+        JITModule::new_with_shared_runtime(context, path, &decoded, shared_runtime.clone());
 
     for &findex in &diff.changed {
         match jit.promote_function_strict(findex) {

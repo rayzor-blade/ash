@@ -57,10 +57,12 @@ pub use air::v2::{OptLevel as AirOptLevel, PassOptions as AirPassOptions};
 /// rebuilding them per function would make a whole-module sweep quadratic.
 pub struct AshModule<'b> {
     bc: &'b DecodedBytecode,
-    /// `findex` -> index into `bc.natives`.
-    native_at: HashMap<usize, usize>,
+    /// `findex` -> index into `bc.natives`. Shared, so that deriving a second
+    /// view of the same module (see [`AshModule::without_callees_view`]) does
+    /// not rebuild the maps this type exists to build once.
+    native_at: Arc<HashMap<usize, usize>>,
     /// `findex` -> index into `bc.functions`.
-    function_at: HashMap<usize, usize>,
+    function_at: Arc<HashMap<usize, usize>>,
     /// Whether [`ModuleInfo::callee`] hands out bodies. Off means the inliner
     /// is inert, which is how a caller measures the module without letting
     /// inlining reshape the functions it is measuring.
@@ -79,18 +81,20 @@ impl<'b> AshModule<'b> {
     pub fn new(bc: &'b DecodedBytecode) -> Self {
         AshModule {
             bc,
-            native_at: bc
-                .natives
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.findex as usize, i))
-                .collect(),
-            function_at: bc
-                .functions
-                .iter()
-                .enumerate()
-                .map(|(i, f)| (f.findex as usize, i))
-                .collect(),
+            native_at: Arc::new(
+                bc.natives
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| (n.findex as usize, i))
+                    .collect(),
+            ),
+            function_at: Arc::new(
+                bc.functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| (f.findex as usize, i))
+                    .collect(),
+            ),
             offer_callees: true,
             lowered: Mutex::new(HashMap::new()),
         }
@@ -101,6 +105,19 @@ impl<'b> AshModule<'b> {
     pub fn without_callees(mut self) -> Self {
         self.offer_callees = false;
         self
+    }
+
+    /// The same module with callee bodies withheld, without rebuilding the
+    /// findex maps — for the callers that need both views of one module, or
+    /// that hold the with-callees view by reference.
+    pub fn without_callees_view(&self) -> AshModule<'b> {
+        AshModule {
+            bc: self.bc,
+            native_at: Arc::clone(&self.native_at),
+            function_at: Arc::clone(&self.function_at),
+            offer_callees: false,
+            lowered: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn bytecode(&self) -> &'b DecodedBytecode {
@@ -220,13 +237,7 @@ impl<'b> ModuleInfo for AshModule<'b> {
         // Lowered against a module that offers no callees: this is the callee's
         // own body, and letting it inline its own callees here would expand
         // the same work at every site that asks for it.
-        let bare = AshModule {
-            bc: self.bc,
-            native_at: self.native_at.clone(),
-            function_at: self.function_at.clone(),
-            offer_callees: false,
-            lowered: Mutex::new(HashMap::new()),
-        };
+        let bare = self.without_callees_view();
         let body = air::v2::lower::lower_with(&f.ops, &reg_types_of(f), &bare).ok()?;
         self.lowered
             .lock()
@@ -450,6 +461,65 @@ impl AirConfigKey {
             fma: PassOptions::default().fma,
             callees_visible: true,
         }
+    }
+
+    /// The configuration the *interpreter* walks: [`standard`] with the
+    /// inliner held off.
+    ///
+    /// Not a tuning preference. Inlining is a codegen optimization, and the
+    /// walker is not codegen: a callee inlined into a body the tiers have not
+    /// promoted is a callee the interpreter now executes itself, instead of
+    /// calling the compiled version that already exists. Inlining therefore
+    /// moves work *out* of the tiers and back into the walker. Measured on
+    /// binary_trees, where it costs 68ms of a 425ms run:
+    ///
+    /// | | inlined | not inlined |
+    /// |---|---|---|
+    /// | interpreter | 99ms | 31ms |
+    /// | cranelift+llvm | 56ms | 72ms |
+    ///
+    /// Entry-point promotion keeps [`standard`], so the shapes inlining exists
+    /// for still get it once they are compiled -- fib is 8.5x on that alone.
+    ///
+    /// **Any consumer that maps an interpreter pc onto compiled code must use
+    /// this, not [`standard`].** OSR hands a live interpreter frame to a
+    /// compiled body by position, through `Optimized::ser.block_pcs`; if the
+    /// two were lowered under different configurations those positions
+    /// describe different bodies, and the transfer silently reads the wrong
+    /// state. It does not fail closed -- closure_call returned a different
+    /// checksum on every run until the OSR sites were moved onto this key.
+    pub fn interpreter() -> Self {
+        Self {
+            callees_visible: false,
+            ..Self::standard()
+        }
+    }
+}
+
+/// The configuration the interpreter walks `f` under, and the one every OSR
+/// site must lower `f` under to stay positionally compatible with it.
+///
+/// [`AirConfigKey::interpreter`] is the profitable choice for a function the
+/// tiers will only ever replace at its entry, and the wrong one for a function
+/// OSR can enter. A loop-carrying function is exactly the second case: OSR
+/// enters it at a loop header, so its OSR body *is* the compiled body that
+/// runs the loop, and lowering that without the inliner costs far more than
+/// keeping the walker's callees compiled ever returns -- mandelbrot ran 7.5x
+/// slower, and lost the cross-call FMA pairs its checksum depends on. A
+/// function with no back edge is never an OSR target, so nothing maps onto it
+/// by position and the walker keeps its callees compiled.
+///
+/// The back edge is read off the raw opcodes on purpose: choosing the
+/// configuration cannot require the AIR that the configuration produces.
+pub fn interpreter_config_for(f: &HLFunction) -> AirConfigKey {
+    let has_back_edge = f
+        .ops
+        .iter()
+        .any(|op| air::opcode_info::jump_offset(op).is_some_and(|d| d < 0));
+    if has_back_edge {
+        AirConfigKey::standard()
+    } else {
+        AirConfigKey::interpreter()
     }
 }
 

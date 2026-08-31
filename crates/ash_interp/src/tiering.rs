@@ -1202,7 +1202,19 @@ pub(crate) fn produce_cranelift_osr_entries(
     else {
         return 0;
     };
-    let Ok(opt) = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
+    // The OSR body must be lowered exactly as the interpreter walks it: the
+    // transfer is by position through `ser.block_pcs`.
+    let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    let shared = tier.ctx.air_module();
+    let bare;
+    let osr_module = if cfg.callees_visible {
+        shared
+    } else {
+        bare = shared.without_callees_view();
+        &bare
+    };
+    let Ok(opt) = ash_core::air_pipeline::optimized_with_config(osr_module, raw, cfg)
+    else {
         return 0;
     };
     let plan = ash_core::osr::analyze(&opt.ir);
@@ -1306,8 +1318,14 @@ pub(crate) fn osr_plan_for(
         .functions
         .iter()
         .find(|f| f.findex as usize == findex)?;
-    let m = ash_core::air_pipeline::AshModule::new(bytecode);
-    let optimized = ash_core::air_pipeline::optimized(&m, raw).ok()?;
+    // Lowered as the interpreter walks it: OSR transfers by position.
+    let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    let m = if cfg.callees_visible {
+        ash_core::air_pipeline::AshModule::new(bytecode)
+    } else {
+        ash_core::air_pipeline::AshModule::new(bytecode).without_callees()
+    };
+    let optimized = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg).ok()?;
     let plan = ash_core::osr::analyze(&optimized.ir);
     let eligible: std::collections::HashSet<usize> = plan
         .entry_headers

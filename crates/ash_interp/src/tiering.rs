@@ -942,6 +942,13 @@ pub(crate) fn compile_with_cranelift(
 /// guarded call site falls through to the interpreter. A fiber worker lane
 /// cannot (`jit_stub_call_bridge` raises on an unprepared sentinel), and
 /// neither can closure dependencies a native caller invokes directly.
+/// Escape hatch for the deferral above, so the old behaviour is one variable
+/// away when a program turns out to need the callee compiled right now.
+fn defer_disabled() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| std::env::var_os("ASH_STUB_COMPILE_INLINE").is_some())
+}
+
 pub(crate) fn resolve_worker_stub(
     ctx: &Arc<TieredSharedCtx>,
     findex: usize,
@@ -963,6 +970,21 @@ pub(crate) fn resolve_worker_stub(
 
     if std::env::var_os("ASH_DBG_STUB").is_some() {
         eprintln!("[stub] resolve findex={findex}");
+    }
+
+    // The mutator asked not to park behind a compile, and Cranelift's is a
+    // compile like any other. `may_block` reached only the LLVM branch below,
+    // so a call from compiled code into a not-yet-compiled callee still ran
+    // the whole Cranelift pipeline on the thread that was executing the
+    // program: 17 functions and 6.5ms of a 46.7ms deltablue run, in the
+    // foreground, while a broker thread sat idle beside it.
+    //
+    // A null here is the documented answer for an ordinary guarded call site
+    // -- it falls through to the interpreter -- and the callee promotes on its
+    // own invocation count like every other function. A worker lane still
+    // waits, because it has no interpreter to fall back to.
+    if !may_block && !defer_disabled() {
+        return std::ptr::null_mut();
     }
     let code = {
         let _compile = ctx

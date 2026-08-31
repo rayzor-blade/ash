@@ -12,11 +12,6 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      try_windows:
-        description: "Attempt the experimental Windows build (docs/windows-port.md tracks why it does not compile yet)"
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -111,15 +106,14 @@ jobs:
           path: dist/ash-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
-  # Does not compile yet — docs/windows-port.md is the port plan. Kept wired
-  # behind the try_windows dispatch input so turning it on is one click once
-  # the architectural items land; it never gates publish.
-  windows-experimental:
-    name: build (windows-x86_64, experimental)
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.try_windows }}
+  # Its own job rather than a matrix leg: the runner has no LLVM development
+  # files, so this one installs them before it can build at all.
+  windows:
+    name: build (windows-x86_64)
     runs-on: windows-2022
-    continue-on-error: true
-    timeout-minutes: 60
+    # Same budget as the matrix: a stalled runner must fail this leg rather
+    # than hold the release behind it.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -208,7 +202,7 @@ jobs:
           }
           Write-Host "all llvm-config --system-libs resolve under $libdir"
           "LLVM_SYS_211_PREFIX=$prefix" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-      - name: Build (expected to fail until the port lands)
+      - name: Build
         shell: bash
         run: |
           cargo build --release -p ash_std
@@ -250,21 +244,18 @@ jobs:
           # Copy the Conda/LLVM runtime DLLs bundled in the previous step
           cp target/release/*.dll dist/
           
-          # Bundle the diagnostic / HashLink runtime
-          if [ -f "target/release/ash_std.dll" ]; then
-            echo "Bundling ash_std.dll and creating libhl aliases..."
-            # *.dll above already copied ash_std.dll, but we need the HashLink names:
-            
-            # Keep a compatibility-named copy beside ash for native extensions
-            cp target/release/ash_std.dll dist/libhl.dll
-            
-            # HashLink 1.x CMake builds import libhl.1.dll. 
-            # We copy instead of symlink because Windows symlinks can require 
-            # Admin rights/Developer Mode and break user extraction.
-            cp target/release/ash_std.dll dist/libhl.1.dll
-          else
-            echo "::warning::ash_std.dll not found; installed ash will extract its runtime on every run"
-          fi
+          # crates/ash_cli/build.rs stages ash_std.dll under the names an
+          # hdll's import table asks for, so the `*.dll` copy above already
+          # carries them. Check rather than repeat it: without libhl.dll the
+          # binary still starts and then fails on the first HDLL, which is a
+          # bad way to find out. (Copies, not symlinks -- a Windows symlink
+          # needs Developer Mode or admin rights to create.)
+          for name in libhl.dll libhl.1.dll; do
+            if [ ! -f "dist/$name" ]; then
+              echo "::error::build.rs staged no $name; hdlls would bind a runtime that is not there"
+              exit 1
+            fi
+          done
           
           # Compress inside the dist directory
           cd dist
@@ -284,14 +275,12 @@ jobs:
 
   publish:
     name: Publish release
-    # Now it waits for both the Unix matrix and the Windows job to finish (or skip)
-    needs: [build, windows-experimental]
-    
-    # `always()` ensures it still publishes if a job fails (as your comment notes),
-    # but we check both jobs to ensure we don't publish if you manually cancel the run.
-    # If the Windows job is skipped (because `try_windows` is false), its result is 
-    # 'skipped', which safely passes this check.
-    if: ${{ always() && needs.build.result != 'cancelled' && needs.windows-experimental.result != 'cancelled' }}
+    needs: [build, windows]
+
+    # `always()` so one platform failing still publishes the others -- the
+    # "at least one tarball" step below is what makes an empty release an
+    # error. A cancelled run publishes nothing.
+    if: ${{ always() && needs.build.result != 'cancelled' && needs.windows.result != 'cancelled' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

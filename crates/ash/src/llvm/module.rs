@@ -183,6 +183,23 @@ fn link_in_mcjit() {
 /// `ASH_LLVM_PASSES` overrides the pipeline; `off` skips it, which is the
 /// bisect switch when a miscompile is suspected.
 pub(crate) fn run_middle_end(module: &inkwell::module::Module<'_>) -> Result<()> {
+    run_middle_end_at(module, "default<O2>")
+}
+
+/// The same pipeline at a caller-chosen strength.
+///
+/// The O2 default below is a JIT tradeoff: compilation sits on the critical
+/// path there, and O3 costs more than it returns. AOT inherited that tradeoff
+/// without inheriting the reason -- its compile is a build step, reported as
+/// `build_ms` and excluded from the bar by construction, so strength is free.
+/// Measured on the AOT lane, O3 against O2: closure_call 0.13 -> 0.11s, which
+/// is where clang-built HashLink/C lands on the same machine; method_call
+/// 0.13 -> 0.12; mandelbrot, nbody, binary_trees and fib unchanged. Output is
+/// identical on all ten programs checked.
+pub(crate) fn run_middle_end_at(
+    module: &inkwell::module::Module<'_>,
+    default_spec: &str,
+) -> Result<()> {
     use inkwell::passes::PassBuilderOptions;
     use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
     use inkwell::OptimizationLevel;
@@ -194,7 +211,8 @@ pub(crate) fn run_middle_end(module: &inkwell::module::Module<'_>) -> Result<()>
     // Functions that can catch are excluded upstream — see
     // `shield_trap_functions_from_optimization`, which is what makes running
     // this safe at all.
-    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| "default<O2>".to_string());
+    let spec =
+        std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| default_spec.to_string());
     if spec == "off" {
         return Ok(());
     }

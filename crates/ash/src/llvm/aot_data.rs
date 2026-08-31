@@ -1117,7 +1117,9 @@ impl<'ctx> JITModule<'ctx> {
         if std::env::var_os("ASH_MIDDLE_END_LOG").is_some() {
             eprintln!("[me-aot] shielded {shielded} trap functions");
         }
-        super::module::run_middle_end(&self.module)
+        // O3, not the JIT's O2. Compile time is a build step here, not
+        // something the measured program waits for.
+        super::module::run_middle_end_at(&self.module, "default<O3>")
     }
 
     /// Write the module as LLVM IR, the textual counterpart of `emit_object`.

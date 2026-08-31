@@ -69,6 +69,17 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     hot_reload: bool,
 
+    /// Run the AIR pipeline over every function and write the result as a
+    /// HashLink bytecode file, then exit without running the program.
+    ///
+    /// The output is an ordinary `.hl` that stock `hl`, HL/C or hl2 will run —
+    /// ash is used here as an optimizer rather than a runtime. Debug info is
+    /// not carried across: the decoder drops the `assigns` table, and after
+    /// inlining a pc->line mapping describes a function the source no longer
+    /// has. Use --air-level to choose how much optimization runs.
+    #[arg(long, value_name = "PATH")]
+    emit_optimized: Option<std::path::PathBuf>,
+
     /// Which rungs of the interpreter -> Cranelift -> LLVM ladder to use.
     /// `auto` (default) runs both JIT tiers; `cranelift` and `llvm` pin a
     /// single tier for testing; `off` disables promotion. Overridden by the
@@ -636,6 +647,10 @@ fn run() -> Result<()> {
         let _p = ash_core::profile::scope("decode bytecode");
         std::sync::Arc::new(BytecodeDecoder::decode(&hl_path)?)
     };
+
+    if let Some(out) = cli.emit_optimized.clone() {
+        return emit_optimized(&bytecode, &out, cli.quiet);
+    }
     let mut native_resolver = NativeFunctionResolver::new();
 
     // Give the profiler findex → name so sampled JIT frames and hot
@@ -948,4 +963,151 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// `--emit-optimized`: run the AIR pipeline over every function and write the
+/// module back out as HashLink bytecode.
+///
+/// The AIR pipeline already produces exactly what this needs. `optimized()`
+/// returns a serialized form whose `ops` and `reg_types` ARE HL opcodes and
+/// register types — that is the form the interpreter walks — so writing an
+/// optimized module is a matter of swapping each function's body for its
+/// serialized AIR and handing the result to the encoder.
+///
+/// A function the pipeline refuses is left exactly as it was rather than
+/// failing the whole file: an unoptimized body is still a correct body.
+fn emit_optimized(
+    bytecode: &ash_core::bytecode::DecodedBytecode,
+    out: &std::path::Path,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    use ash_core::types::TypeRef;
+
+    let module = ash_core::air_pipeline::AshModule::new(bytecode);
+    let mut optimized_bc = bytecode.clone();
+
+    // Nothing here executes the program: each function is lowered, optimized
+    // and serialized independently, and `optimized()` is already called
+    // concurrently by the tier brokers -- its cache takes a lock only to look
+    // up and insert, never across the pipeline itself. So this is a parallel
+    // map, and on a module of a few hundred functions it is the whole cost of
+    // the command.
+    //
+    // `std::thread::scope` rather than a data-parallel crate: rayon is not a
+    // dependency of this workspace, and a chunked scope is the same thing for
+    // a map over a slice.
+    enum Outcome {
+        Optimized(Vec<ash_core::opcodes::Opcode>, Vec<TypeRef>),
+        /// The pipeline refused this function; its original body stands.
+        Refused,
+        /// The optimized body cannot be encoded -- see `backward_switch`.
+        Unencodable,
+        /// The function takes the address of a register, and ash and stock
+        /// HashLink do not agree on the optimized form -- see `takes_ref`.
+        Pinned,
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(optimized_bc.functions.len().max(1));
+    let chunk = optimized_bc.functions.len().div_ceil(threads.max(1));
+    let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
+        let module = &module;
+        let handles: Vec<_> = bytecode
+            .functions
+            .chunks(chunk.max(1))
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|f| match ash_core::air_pipeline::optimized(module, f) {
+                            Ok(o) => {
+                                if f.ops.iter().any(takes_ref) {
+                                    Outcome::Pinned
+                                } else if o.ser.ops.iter().any(backward_switch) {
+                                    Outcome::Unencodable
+                                } else {
+                                    Outcome::Optimized(
+                                        o.ser.ops.clone(),
+                                        o.ser
+                                            .reg_types
+                                            .iter()
+                                            .map(|t| TypeRef(t.0 as usize))
+                                            .collect(),
+                                    )
+                                }
+                            }
+                            Err(_) => Outcome::Refused,
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("optimize worker panicked"))
+            .collect()
+    });
+
+    let (mut done, mut refused, mut unencodable, mut pinned) = (0usize, 0usize, 0usize, 0usize);
+    for (f, outcome) in optimized_bc.functions.iter_mut().zip(outcomes) {
+        match outcome {
+            Outcome::Optimized(ops, regs) => {
+                f.ops = ops;
+                f.regs = regs;
+                // The mapping the old body carried does not describe the new
+                // one, and the encoder writes no debug section regardless.
+                f.debug.clear();
+                done += 1;
+            }
+            Outcome::Refused => refused += 1,
+            Outcome::Unencodable => unencodable += 1,
+            Outcome::Pinned => pinned += 1,
+        }
+    }
+    let version = 5;
+    let bytes = ash_core::bytecode_encode::encode(&optimized_bc, version)?;
+    std::fs::write(out, &bytes)?;
+    if !quiet {
+        eprintln!(
+            "[emit] {} optimized, {} refused, {} kept (backward switch), \
+             {} kept (ref-taken) -> {} ({} bytes, HLB v{})",
+            done,
+            refused,
+            unencodable,
+            pinned,
+            out.display(),
+            bytes.len(),
+            version
+        );
+    }
+    Ok(())
+}
+
+/// Whether `op` is a `Switch` the bytecode format cannot represent, because
+/// one of its offsets points backwards and the format reads them unsigned.
+fn backward_switch(op: &ash_core::opcodes::Opcode) -> bool {
+    match op {
+        ash_core::opcodes::Opcode::Switch { offsets, end, .. } => {
+            *end < 0 || offsets.iter().any(|o| *o < 0)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `op` takes the address of a register.
+///
+/// A register whose address is taken is *pinned*: every definition of it must
+/// keep the same register id, because `Unref`/`SetRef` read and write through
+/// the pointer rather than the register. The AIR pipeline honours that for its
+/// own consumers, but the emitted bytecode is not portable to stock HashLink
+/// -- `test_ref_cells` prints `loop=9` under both ash and `hl` unoptimized,
+/// and under ash optimized, yet `loop=6.75` under `hl` optimized. Until that
+/// divergence is understood, a function that takes a reference keeps the body
+/// it came with.
+fn takes_ref(op: &ash_core::opcodes::Opcode) -> bool {
+    use ash_core::opcodes::Opcode;
+    matches!(
+        op,
+        Opcode::Ref { .. } | Opcode::RefData { .. } | Opcode::RefOffset { .. }
+    )
 }

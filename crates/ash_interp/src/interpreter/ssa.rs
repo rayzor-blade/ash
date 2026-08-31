@@ -65,6 +65,14 @@ impl HLInterpreter {
                     if hot {
                         if let Some(&header_pc) = prep.block_pcs.get(block) {
                             self.note_hot_loop(bc, func_idx, header_pc);
+                            // Promotion swaps a pointer, which only the next
+                            // call observes; a loop entered once would keep
+                            // interpreting past its own compile without this.
+                            if let Some(ret) =
+                                self.try_osr_transfer(bc, func_idx, header_pc, Some((prep, block, prev_block)))?
+                            {
+                                return Ok(ret);
+                            }
                         }
                     }
                 }
@@ -82,7 +90,12 @@ impl HLInterpreter {
             // Published for the same reason the opcode loop publishes `pc`:
             // it is the only record of where a frame is when something below
             // it fails.
-            self.stack.last_mut().unwrap().pc = block;
+            // The block's bytecode pc, not its index: everything that reads
+            // this reads it as a pc -- a trace resolves it against the debug
+            // table, which numbered lines by opcode. Publishing the index put
+            // a frame on whatever line happened to share its number.
+            self.stack.last_mut().unwrap().pc =
+                prep.block_pcs.get(block).copied().unwrap_or(block);
 
             // A phi group is a parallel copy. Read every source before writing
             // any destination, or `x, y = y, x` collapses into `x, y = y, y`.
@@ -175,7 +188,15 @@ impl HLInterpreter {
                             prev_block = Some(block as u32);
                             block = handler;
                         }
-                        None => return Err(anyhow::Error::new(self.format_hl_exception(val))),
+                        None => {
+                            // Carried the same way the opcode loop carries it:
+                            // an uncaught exception reports the frames it came
+                            // from, and those are gone by the time it reaches
+                            // the CLI.
+                            let mut exc = self.format_hl_exception(val);
+                            exc.stack = self.capture_call_stack(bc);
+                            return Err(anyhow::Error::new(exc));
+                        }
                     }
                 }
                 air::v2::Terminator::Rethrow { exc } => {
@@ -187,7 +208,15 @@ impl HLInterpreter {
                             prev_block = Some(block as u32);
                             block = handler;
                         }
-                        None => return Err(anyhow::Error::new(self.format_hl_exception(val))),
+                        None => {
+                            // Carried the same way the opcode loop carries it:
+                            // an uncaught exception reports the frames it came
+                            // from, and those are gone by the time it reaches
+                            // the CLI.
+                            let mut exc = self.format_hl_exception(val);
+                            exc.stack = self.capture_call_stack(bc);
+                            return Err(anyhow::Error::new(exc));
+                        }
                     }
                 }
                 air::v2::Terminator::Trap {

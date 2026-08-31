@@ -3470,11 +3470,20 @@ impl HLInterpreter {
     /// should carry on.
     /// Hand a running frame over to an OSR entry, if one is installed here.
     ///
+    /// Hand a running frame to an OSR entry, if one is installed for `header_pc`.
+    ///
+    /// `ssa` is `Some((prepared, header_block))` when the caller is the AIR
+    /// walker. Its frame is indexed by SSA value where the entry's buffer is
+    /// indexed by register, and the two are only relatable at a program point:
+    /// values share registers over a function's life, so the value holding a
+    /// register at the header is the one live there. Passing `None` uses the
+    /// serialized body, where the indices coincide.
     fn try_osr_transfer(
         &mut self,
         bytecode: &DecodedBytecode,
         func_idx: usize,
         header_pc: usize,
+        ssa: Option<(&'static crate::ssa::Prepared, usize, Option<u32>)>,
     ) -> Result<Option<NanBoxedValue>> {
         if !osr_transfer_enabled() {
             return Ok(None);
@@ -3501,12 +3510,67 @@ impl HLInterpreter {
         };
         let ret_kind = bytecode.types[fun_ty.ret.0].kind;
 
-        let mut buf: Vec<u64> = Vec::with_capacity(body.regs.len());
+        let regs: &[ash_core::types::TypeRef] = match ssa {
+            Some((prep, _, _)) => prep.osr_reg_types,
+            None => &body.regs,
+        };
+        // Where each register's value sits in the walker's frame at THIS
+        // header. A register no live value carries holds nothing the entry can
+        // read before defining it.
+        let slot_of_reg: Option<Vec<u32>> = ssa.map(|(prep, header_block, from)| {
+            let mut slots = vec![u32::MAX; regs.len()];
+            for &v in prep
+                .liveness
+                .live_in(air::v2::ir::BlockId(header_block as u32))
+            {
+                let r = prep.ir.value_reg(v) as usize;
+                if r < slots.len() {
+                    slots[r] = v.idx() as u32;
+                }
+            }
+            // The header's phis are what a loop carries, and they are not
+            // live-in -- they are defined at entry, by the edge. The walker
+            // tests the back edge before resolving them, so this iteration's
+            // incoming values are still in the phi sources for the edge we
+            // arrived on, and it is those the entry must resume with.
+            if let Some(from) = from {
+                for phi in &prep.ir.blocks[header_block].phis {
+                    let Some(&(_, src)) = phi
+                        .incoming
+                        .iter()
+                        .find(|(pred, _)| pred.idx() as u32 == from)
+                    else {
+                        continue;
+                    };
+                    let r = prep.ir.value_reg(phi.dst) as usize;
+                    if r < slots.len() {
+                        slots[r] = src.idx() as u32;
+                    }
+                }
+            }
+            // Cells last: a pinned register is backed by its cell for the
+            // whole function, so the cell owns the register wherever both
+            // could claim it.
+            for (i, c) in prep.ir.cells.iter().enumerate() {
+                let r = c.reg as usize;
+                if r < slots.len() {
+                    slots[r] = prep.cell_base + i as u32;
+                }
+            }
+            slots
+        });
+        let mut buf: Vec<u64> = Vec::with_capacity(regs.len());
         {
             let frame = self.stack.last().expect("frame for the running function");
-            for (i, reg) in body.regs.iter().enumerate() {
+            for (i, reg) in regs.iter().enumerate() {
                 let kind = bytecode.types[reg.0].kind;
-                let v = frame.registers.get(i as u32);
+                let v = match &slot_of_reg {
+                    Some(slots) => match slots[i] {
+                        u32::MAX => NanBoxedValue::void(),
+                        slot => frame.registers.get(slot),
+                    },
+                    None => frame.registers.get(i as u32),
+                };
                 buf.push(self.value_to_i64(v, kind) as u64);
             }
         }
@@ -4760,7 +4824,7 @@ impl HLInterpreter {
                     };
                     if hot {
                         self.note_hot_loop(bytecode, func_idx, next_pc);
-                        if let Some(ret) = self.try_osr_transfer(bytecode, func_idx, next_pc)? {
+                        if let Some(ret) = self.try_osr_transfer(bytecode, func_idx, next_pc, None)? {
                             return Ok(ret);
                         }
                     }

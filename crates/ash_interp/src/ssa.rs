@@ -110,6 +110,10 @@ pub struct Prepared {
     /// header the way the tiering and OSR machinery do -- both key on a pc,
     /// and `compile_osr_entry` finds the block by searching this same table.
     pub block_pcs: &'static [usize],
+    /// Which values are live where, for building an OSR entry's live state.
+    pub liveness: &'static air::v2::liveness::Liveness,
+    /// Type of each serialized register, for encoding that state.
+    pub osr_reg_types: &'static [TypeRef],
 }
 
 /// What a function executes, decided once on its first call.
@@ -204,6 +208,10 @@ impl Cache {
                     // The body itself is still executed from the IR; only the
                     // table is kept.
                     let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
+                    let cfg = air::v2::CfgInfo::build(&ir);
+                    let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
+                    let osr_reg_types: Vec<TypeRef> =
+                        ser_view.reg_types.iter().map(|t| TypeRef(t.0 as usize)).collect();
                     let mut shim = raw.clone();
                     // air numbers types with u32, ash with usize; same indices.
                     shim.regs = ir
@@ -232,6 +240,8 @@ impl Cache {
                         shim: Box::leak(Box::new(shim)),
                         cell_base,
                         block_pcs: Box::leak(block_pcs.into_boxed_slice()),
+                        liveness: Box::leak(Box::new(liveness)),
+                        osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
                     })))
                 }
             },

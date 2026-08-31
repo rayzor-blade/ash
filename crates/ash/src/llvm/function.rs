@@ -5058,22 +5058,24 @@ impl<'ctx> JITModule<'ctx> {
                 // Get function type pointer (compile-time constant from func_types)
                 let type_ptr = self.func_type_ptr(findex)?;
 
-                // Call hlp_alloc_closure_void(type, fun_addr) -> *mut vclosure
-                let alloc_closure = self.declare_native(
-                    "hlp_alloc_closure_void",
-                    &[ptr_type.into(), ptr_type.into()],
-                    Some(ptr_type.into()),
-                );
-                let closure = self
-                    .builder
-                    .build_call(
-                        alloc_closure,
-                        &[type_ptr.into(), fun_addr.into()],
-                        "static_closure",
-                    )?
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap();
+                let closure = if self.aot {
+                    self.emit_static_closure(findex, type_ptr)?
+                } else {
+                    let alloc_closure = self.declare_native(
+                        "hlp_alloc_closure_void",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    self.builder
+                        .build_call(
+                            alloc_closure,
+                            &[type_ptr.into(), fun_addr.into()],
+                            "static_closure",
+                        )?
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap()
+                };
                 self.builder
                     .build_store(registers[dst.0 as usize], closure)?;
             }
@@ -7825,6 +7827,74 @@ impl<'ctx> JITModule<'ctx> {
         let merged = self.builder.build_phi(ptr_type, "vobj_proto")?;
         merged.add_incoming(&[(&cached, cached_bb), (&filled, init_end)]);
         Ok(merged.as_basic_value().into_pointer_value())
+    }
+
+    /// An unbound closure as object data, rather than an allocation.
+    ///
+    /// A `StaticClosure` over a known function captures nothing: its `t` and
+    /// `fun` are compile-time constants and its `hasValue` is zero. Allocating
+    /// one at run time hides all three behind an opaque call, and the call
+    /// site then cannot fold anything it reads back -- so bench_closure_call
+    /// re-derived the whole closure (read `hasValue`, test for a wrapper,
+    /// unwrap, read `fun`, compare the type) on each of 100M iterations, for
+    /// an object that never changed.
+    ///
+    /// Emitting it as a global instead makes every one of those a constant,
+    /// and the decode folds. This is what HL/C does -- `static vclosure cl$0 =
+    /// { &type, fn, 0 }` -- and measuring its output settled that the gap was
+    /// never the optimizer: the same C is 0.09s under gcc and 0.11s under
+    /// clang, against 0.22s for what we were emitting through LLVM.
+    ///
+    /// Static storage is sound here because a `vclosure` is written once, by
+    /// whatever builds it, and never again -- `stackCount` included -- and an
+    /// unbound one holds a type pointer, a code pointer and a null. Nothing
+    /// GC-owned, so it never needs scanning or collecting.
+    ///
+    /// One global per lowered site, which is the identity HL/C gives: the same
+    /// site evaluated twice yields the same closure, where allocating gave two.
+    /// AOT only -- a JIT cannot bake `fun`, because the callee may not be
+    /// compiled yet when its address is needed.
+    fn emit_static_closure(
+        &mut self,
+        findex: usize,
+        type_ptr: PointerValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        const _: () = {
+            assert!(std::mem::size_of::<crate::hl::vclosure>() == 32);
+            assert!(std::mem::offset_of!(crate::hl::_vclosure, t) == 0);
+            assert!(std::mem::offset_of!(crate::hl::_vclosure, fun) == 8);
+            assert!(std::mem::offset_of!(crate::hl::_vclosure, hasValue) == 16);
+            assert!(std::mem::offset_of!(crate::hl::_vclosure, stackCount) == 20);
+            assert!(std::mem::offset_of!(crate::hl::_vclosure, value) == 24);
+        };
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let (target, _) = self.get_or_create_function_value(findex)?;
+
+        let value = self.context.const_struct(
+            &[
+                type_ptr.into(),
+                target.as_global_value().as_pointer_value().into(),
+                i32_type.const_zero().into(), // hasValue: unbound
+                i32_type.const_zero().into(), // stackCount
+                ptr_type.const_null().into(), // value
+            ],
+            false,
+        );
+        let global = self
+            .module
+            .add_global(value.get_type(), None, "ash_closure");
+        global.set_initializer(&value);
+        global.set_linkage(inkwell::module::Linkage::Internal);
+        // Constant, and that is the half that makes it pay: without it LLVM
+        // must assume something writes the closure, so `hasValue` stays a
+        // load and the wrapper test survives. Every `vclosure` field --
+        // `stackCount` included -- is written by whatever constructs the
+        // object and never afterwards, so an emitted one is genuinely
+        // read-only for its whole life.
+        global.set_constant(true);
+        global.set_alignment(8);
+        Ok(global.as_pointer_value().into())
     }
 
     /// Refuse to bake an address of this process into an object file.

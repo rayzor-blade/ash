@@ -121,7 +121,7 @@ fn stack_event(op: &Opcode) -> Option<StackEvent> {
     }
 }
 
-fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
+pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
     let before: Vec<(usize, StackEvent)> = raw
         .ops
         .iter()

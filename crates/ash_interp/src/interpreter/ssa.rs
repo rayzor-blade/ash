@@ -115,7 +115,14 @@ impl HLInterpreter {
                 }
             }
 
-            for ins in &blk.instrs {
+            let pcs = prep.instr_pcs.get(block);
+            for (i, ins) in blk.instrs.iter().enumerate() {
+                // The raising instruction's own pc, not its block's: a trace
+                // resolves this against the debug table, and every
+                // instruction in a block shares the block's line otherwise.
+                if let Some(&pc) = pcs.and_then(|v| v.get(i)) {
+                    self.stack.last_mut().unwrap().pc = pc;
+                }
                 let next = match self.ssa_step(bc, native_resolver, func_idx, prep, args, ins) {
                     Ok(next) => next,
                     Err(err) => {

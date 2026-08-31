@@ -138,7 +138,15 @@ impl HLInterpreter {
         // matching debug table for that optimized body, so frame.pc must be
         // resolved against the body the interpreter actually executes rather
         // than the original bytecode function at the same numeric index.
-        let key = Self::stack_symbol_key(self.air.body(bytecode, function_index), pc);
+        // The walker's own body first: it publishes pcs into the serialized
+        // opcodes and carries the debug table built for them. `air.body` is
+        // the right answer only for the path that executes those opcodes.
+        let key = match self.ssa.body(function_index) {
+            Some(prep) if !prep.shim.debug.is_empty() => {
+                Self::stack_symbol_key(prep.shim, pc)
+            }
+            _ => Self::stack_symbol_key(self.air.body(bytecode, function_index), pc),
+        };
         Some(self.intern_stack_symbol(bytecode, key))
     }
 

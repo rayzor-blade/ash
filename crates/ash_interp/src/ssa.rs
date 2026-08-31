@@ -110,6 +110,9 @@ pub struct Prepared {
     /// header the way the tiering and OSR machinery do -- both key on a pc,
     /// and `compile_osr_entry` finds the block by searching this same table.
     pub block_pcs: &'static [usize],
+    /// Bytecode pc of each instruction, indexed by block then position, so a
+    /// frame can name the instruction that raised rather than its block.
+    pub instr_pcs: &'static [Vec<usize>],
     /// Which values are live where, for building an OSR entry's live state.
     pub liveness: &'static air::v2::liveness::Liveness,
     /// Type of each serialized register, for encoding that state.
@@ -208,6 +211,7 @@ impl Cache {
                     // The body itself is still executed from the IR; only the
                     // table is kept.
                     let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
+                    let instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
                     let cfg = air::v2::CfgInfo::build(&ir);
                     let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
                     let osr_reg_types: Vec<TypeRef> =
@@ -221,8 +225,14 @@ impl Cache {
                         .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
                         .collect();
                     shim.ops = Vec::new();
-                    // `debug` is indexed by opcode; there are no opcodes.
-                    shim.debug = Vec::new();
+                    // Indexed by opcode, and the pcs this interpreter
+                    // publishes are indexed into the SERIALIZED opcodes -- so
+                    // the table has to be the one built for those. Leaving it
+                    // empty sent a trace to `air.body()`, which under
+                    // ASH_AIR=v2 is the raw function, whose numbering the
+                    // optimizer has already changed: every reported line was
+                    // off by the drift between them.
+                    shim.debug = crate::air::optimized_debug(raw, &ser_view.ops);
                     if logging() {
                         eprintln!(
                             "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
@@ -240,6 +250,7 @@ impl Cache {
                         shim: Box::leak(Box::new(shim)),
                         cell_base,
                         block_pcs: Box::leak(block_pcs.into_boxed_slice()),
+                        instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
                         liveness: Box::leak(Box::new(liveness)),
                         osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
                     })))

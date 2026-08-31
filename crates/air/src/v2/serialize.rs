@@ -57,6 +57,14 @@ pub struct Serialized {
     /// what lets an OSR producer turn [`crate::v2::analysis`] block ids into
     /// entry sites without re-discovering headers by probe timing.
     pub block_pcs: Vec<usize>,
+    /// Opcode index each instruction is emitted at, indexed by [`BlockId`]
+    /// then position in the block.
+    ///
+    /// `block_pcs` is enough to name a block, which is all a jump target
+    /// needs. A stack trace needs more: it reports the line of the
+    /// instruction that raised, and every instruction in a block would
+    /// otherwise share the block's line.
+    pub instr_pcs: Vec<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -271,6 +279,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     }
     let mut ops: Vec<Opcode> = Vec::new();
     let mut starts = vec![0usize; ne];
+    let mut instr_pcs: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
     let mut sites: Vec<Site> = Vec::new();
 
     let rg = |v: ValueId| Reg(f.value_reg(v));
@@ -308,6 +317,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
             Entry::Real(b) => {
                 let blk = &f.blocks[*b];
                 for ins in &blk.instrs {
+                    instr_pcs[*b].push(ops.len());
                     emit_instr(f, ins, &rg, &cr, &mut ops, &mut reg_types, &mut fma_temps)?;
                 }
                 if let Some(movs) = &inline[*b] {
@@ -463,6 +473,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
         reg_types,
         num_regs,
         block_pcs,
+        instr_pcs,
     })
 }
 

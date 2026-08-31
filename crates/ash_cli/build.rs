@@ -16,6 +16,44 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,--export-dynamic-symbol=hlt_*");
     }
 
+    // PE HDLLs import the HashLink ABI from a DLL named libhl.dll -- the name
+    // is baked into their import table, and a Windows loader binds it by that
+    // name at load time. Keep a compatibility-named copy of the runtime beside
+    // the executable, which is the first directory the loader searches, so an
+    // hdll dropped next to the bytecode finds ash's runtime and not some other
+    // HashLink install.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+        let target_dir = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| manifest.join("../../target"));
+        let target = env::var("TARGET").unwrap();
+        let profile = env::var("PROFILE").unwrap();
+        let candidates = [
+            target_dir.join(&target).join(&profile).join("ash_std.dll"),
+            target_dir.join(&profile).join("ash_std.dll"),
+        ];
+        for candidate in &candidates {
+            println!("cargo:rerun-if-changed={}", candidate.display());
+        }
+        if let Some(runtime) = candidates.iter().find(|path| path.is_file()) {
+            let runtime_dir = runtime.parent().unwrap();
+            // Windows has no symlink to spend here -- creating one needs a
+            // privilege an ordinary build does not have -- so both spellings
+            // are copies. HashLink 1.x CMake builds name the versioned one.
+            for name in ["libhl.dll", "libhl.1.dll"] {
+                let compat = runtime_dir.join(name);
+                fs::copy(runtime, &compat).unwrap_or_else(|err| {
+                    panic!(
+                        "could not stage {} as {}: {err}",
+                        runtime.display(),
+                        compat.display()
+                    )
+                });
+            }
+        }
+    }
+
     // Mach-O HDLLs import the HashLink ABI from a file named libhl.dylib.
     // ash_std is already built separately before ash (the core crate embeds
     // that exact artifact), so keep a compatibility-named copy beside the

@@ -8,16 +8,16 @@
 
 #![allow(dead_code)]
 
+use crate::interpreter::retier_abandoned;
 use anyhow::{anyhow, Result};
+use ash_core::bytecode::DecodedBytecode;
+use ash_core::hl_bindings::{self as hl, hl_type};
+use ash_core::llvm::module::{CompiledFunctionMeta, JITModule};
+use beadie::{Bead, OsrEntry, TieredAdapter, TieredBound};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use beadie::{Bead, OsrEntry, TieredAdapter, TieredBound};
-use crate::interpreter::retier_abandoned;
-use ash_core::bytecode::DecodedBytecode;
-use ash_core::hl_bindings::{self as hl, hl_type};
-use ash_core::llvm::module::{CompiledFunctionMeta, JITModule};
 
 /// Which rungs of the interpreter → Cranelift → LLVM ladder are active.
 ///
@@ -580,6 +580,22 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
         .contains(&findex)
 }
 
+/// This thread's OS id, for the tier log below.
+///
+/// `pthread_self` has no Windows counterpart, and the id is only ever read by
+/// a human comparing two log lines, so the platform's own notion of a thread
+/// id is answer enough on either side.
+fn current_thread_id() -> usize {
+    #[cfg(unix)]
+    {
+        unsafe { libc::pthread_self() as usize }
+    }
+    #[cfg(windows)]
+    {
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() as usize }
+    }
+}
+
 /// Dispatch one compile job to the backend that owns `tier`.
 ///
 /// Tier 0 in `Auto` mode tries Cranelift first and falls back to LLVM: a
@@ -613,7 +629,7 @@ pub(crate) fn tiered_compile_tier(
         eprintln!(
             "[tier] compile findex={findex} tier={tier} took {:.1}ms on thread {:#x}",
             took.as_secs_f64() * 1e3,
-            unsafe { libc::pthread_self() } as usize
+            current_thread_id()
         );
     }
     code
@@ -718,7 +734,11 @@ fn tiered_compile_tier_inner(
 
 /// Cranelift middle tier. Returns null when the function is outside the
 /// lowerable subset or lowering declines — the caller falls back to LLVM.
-pub(crate) fn compile_with_cranelift(ctx: &Arc<TieredSharedCtx>, findex: usize, bead: &Arc<Bead>) -> *mut () {
+pub(crate) fn compile_with_cranelift(
+    ctx: &Arc<TieredSharedCtx>,
+    findex: usize,
+    bead: &Arc<Bead>,
+) -> *mut () {
     use std::sync::atomic::Ordering;
     let Some(bytecode) = ctx.bytecode_ptr() else {
         return std::ptr::null_mut();
@@ -978,7 +998,10 @@ pub(crate) fn resolve_worker_stub(
 /// caller. Guarded AIR V2 call sites can resolve a sentinel lazily; an HDLL
 /// invokes `vclosure.fun` directly and therefore cannot. Scan optimized AIR
 /// itself -- never serialize it back into legacy HashLink opcodes.
-pub(crate) fn prepare_worker_closure_dependencies(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
+pub(crate) fn prepare_worker_closure_dependencies(
+    ctx: &Arc<TieredSharedCtx>,
+    findex: usize,
+) -> bool {
     let current_thread = std::thread::current().id();
     {
         let mut states = ctx
@@ -998,10 +1021,7 @@ pub(crate) fn prepare_worker_closure_dependencies(ctx: &Arc<TieredSharedCtx>, fi
                         .expect("worker closure dependency mutex poisoned");
                 }
                 None => {
-                    states.insert(
-                        findex,
-                        WorkerClosureDepsState::Preparing(current_thread),
-                    );
+                    states.insert(findex, WorkerClosureDepsState::Preparing(current_thread));
                     break;
                 }
             }
@@ -1401,7 +1421,11 @@ pub(crate) fn compile_with_llvm(
                 eprintln!(
                     "[tier] dropping queued tier-{tier} compile for findex={findex}: \
                      the bead is no longer {}",
-                    if bead.is_blacklisted() { "eligible" } else { "valid" }
+                    if bead.is_blacklisted() {
+                        "eligible"
+                    } else {
+                        "valid"
+                    }
                 );
             }
             return std::ptr::null_mut();

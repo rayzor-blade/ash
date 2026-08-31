@@ -51,7 +51,7 @@ pub fn std_is_static() -> bool {
     STATIC_STD.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 fn program_directory(program: &Path) -> &Path {
     program
         .parent()
@@ -65,8 +65,12 @@ fn program_directory(program: &Path) -> &Path {
 /// an HDLL's `libhl.so` dependency, so both callers reach one GC. Mach-O's
 /// two-level namespace instead pins each HDLL import to `libhl.dylib`; when an
 /// HDLL is beside the bytecode, ash selects that compatibility-named copy for
-/// its own std@ resolution as well. The platform mechanisms differ, but the
-/// invariant is the same: exactly one active stdlib state.
+/// its own std@ resolution as well. PE behaves like Mach-O here for the same
+/// reason: an HDLL's imports name `libhl.dll` and the loader binds them to
+/// that module, never to the executable, so ash loads the same file rather
+/// than leaving the hdlls talking to a runtime whose GC nobody started. The
+/// platform mechanisms differ, but the invariant is the same: exactly one
+/// active stdlib state.
 ///
 /// `ASH_STD_LINKAGE=dynamic` remains available for A/B diagnosis on programs
 /// without HDLLs.
@@ -83,13 +87,13 @@ pub fn choose_std_linkage(program: &Path) -> bool {
     // `"".join("sdl.hdll")` as a file in the cwd. Make both decisions use the
     // same directory, or macOS commits to the static runtime and then loads
     // HDLLs bound to a second GC.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     let has_hdll = std::fs::read_dir(program_directory(program)).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|entry| {
             entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll")
         })
     });
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     let has_hdll = false;
 
     let static_ok = !forced_dynamic && !has_hdll;
@@ -170,8 +174,9 @@ fn usable_system_libhl(ext: &str) -> Option<std::path::PathBuf> {
 /// Windows has no system libhl to defer to: there is no /usr/local/lib install
 /// convention, and DLL imports bind at load time rather than through a global
 /// symbol search order, so the sharing argument above cannot arise. The
-/// embedded/on-disk path is taken unconditionally (and `std_is_static`
-/// defaults on anyway, so this branch is A/B-diagnosis-only to begin with).
+/// embedded/on-disk path is taken unconditionally; sharing one runtime with
+/// the hdlls is instead `choose_std_linkage`'s job, by loading the very
+/// `libhl.dll` their import tables name.
 #[cfg(not(unix))]
 fn usable_system_libhl(_ext: &str) -> Option<std::path::PathBuf> {
     None
@@ -200,12 +205,15 @@ pub fn init_std_library() -> Result<()> {
             // The system-libhl preference (and its staleness probe) is a unix
             // concern; see usable_system_libhl for the reasoning and the
             // ASH_LIBHL override. On Windows it always answers None.
-            #[cfg(target_os = "macos")]
-            let sibling_libhl = std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(|dir| dir.join("libhl.dylib")))
-                .filter(|path| path.exists());
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "macos", windows))]
+            let sibling_libhl = {
+                let compat = if cfg!(windows) { "libhl.dll" } else { "libhl.dylib" };
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|dir| dir.join(compat)))
+                    .filter(|path| path.exists())
+            };
+            #[cfg(not(any(target_os = "macos", windows)))]
             let sibling_libhl: Option<std::path::PathBuf> = None;
 
             let lib_path = if let Some(sibling) = sibling_libhl {
@@ -227,7 +235,13 @@ pub fn init_std_library() -> Result<()> {
                 // temp copies have accumulated. A stable on-disk path avoids
                 // that entirely. Candidates are resolved relative to the
                 // executable (NOT the cwd).
-                let lib_name = format!("libash_std.{}", ext);
+                // MSVC drops the `lib` prefix on a cdylib: ash_std.dll, not
+                // libash_std.dll (crates/ash/build.rs names it the same way).
+                let lib_name = if cfg!(windows) {
+                    "ash_std.dll".to_string()
+                } else {
+                    format!("libash_std.{}", ext)
+                };
                 let mut candidates: Vec<std::path::PathBuf> = Vec::new();
                 if let Ok(exe) = std::env::current_exe() {
                     if let Some(exe_dir) = exe.parent() {
@@ -529,9 +543,25 @@ impl NativeLibraryManager {
             }
             unsafe { Library::from(libloading::os::unix::Library::from_raw(handle)) }
         };
+        // A Windows loader resolves an HDLL's own imports -- SDL3.dll for
+        // sdl.hdll, OpenAL32.dll for openal.hdll -- against the standard
+        // search order, which begins at the *executable's* directory and never
+        // includes the directory the HDLL itself came from. HashLink's hl.exe
+        // ships inside that directory, so upstream never meets this; ash is
+        // installed elsewhere, so a game's bin folder would have to copy its
+        // DLLs next to ash.exe instead. LOAD_WITH_ALTERED_SEARCH_PATH puts the
+        // HDLL's own directory at the head of the search, which is what lets a
+        // game directory stay self-contained. It applies only to an absolute
+        // path, hence the join.
         #[cfg(not(unix))]
-        let library = unsafe { Library::new(path) }
-            .map_err(|e| hdll_load_error(name, path, &e.to_string()))?;
+        let library = {
+            use libloading::os::windows::{Library as WinLibrary, LOAD_WITH_ALTERED_SEARCH_PATH};
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let loaded =
+                unsafe { WinLibrary::load_with_flags(&absolute, LOAD_WITH_ALTERED_SEARCH_PATH) }
+                    .map_err(|e| hdll_load_error(name, path, &e.to_string()))?;
+            Library::from(loaded)
+        };
         registry.insert(clean, Arc::new(library));
         Ok(())
     }

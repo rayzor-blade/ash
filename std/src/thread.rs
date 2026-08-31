@@ -862,27 +862,29 @@ pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
     hlp_thread_current()
 }
 
-/// Run `callback(param)` as a fiber, which is what a thread is here.
+/// Upstream starts an OS thread running `callback(param)`. ash has none to
+/// give -- Haxe threads are krio fibers on one scheduler -- and the callbacks
+/// that arrive here are not fiber-shaped either.
 ///
-/// Haxe threads are krio fibers on the scheduler (see `hlp_thread_create`),
-/// and a native library asking for a thread gets the same thing rather than
-/// an OS thread of its own. `with_gc` needs no answer: a fiber's stack is
-/// registered with the collector when it is installed, which is what upstream
-/// spends that flag on.
+/// ui.hdll's sentinel, the only caller in reach, is an OS-thread watchdog by
+/// construction: it sleeps in an unbounded loop that never yields, and when it
+/// fires it calls SuspendThread/GetThreadContext on the thread it watches and
+/// rewrites that thread's instruction pointer to graft a call onto it. Run as
+/// a fiber it would share, and so starve, the very thread it is watching; run
+/// at all against ash's main thread it would be rewriting the pc of a stack
+/// carrying JIT frames.
 ///
-/// ui.hdll imports this whether or not a program ever builds a `ui.Sentinel`,
-/// and a Windows loader resolves every import before it maps a module, so the
-/// symbol has to be here for the library to load at all.
-///
-/// The returned `hl_thread*` is the fiber handle `hlp_thread_current` also
-/// hands out, so the two agree on identity.
+/// Null is upstream's own answer for "no thread was started", and
+/// `ui_start_sentinel` only stores the result -- nothing dereferences it. A
+/// program that asks for a sentinel therefore runs without a watchdog, rather
+/// than not running at all.
 #[no_mangle]
 pub unsafe extern "C" fn hl_thread_start(
-    callback: *mut c_void,
-    param: *mut c_void,
+    _callback: *mut c_void,
+    _param: *mut c_void,
     _with_gc: bool,
 ) -> *mut c_void {
-    crate::fiber::native_thread_start(callback, param)
+    ptr::null_mut()
 }
 
 #[no_mangle]
@@ -1024,11 +1026,66 @@ pub unsafe extern "C" fn hlp_atomic_store_ptr(
 /// OS mutator's stack/register context: once marked blocking, an HDLL promises
 /// not to execute HL code until the matching leave, so collection need not
 /// wait for an AIR V2 poll from that worker.
+/// HashLink's `hl_thread_info`, as much of it as anything outside the runtime
+/// actually reads.
+///
+/// ash keeps no thread registry, so `hl_get_thread` used to answer null. That
+/// is not a graceful "no registry": ui.hdll's sentinel stores the pointer and
+/// its loop condition reads `s->main_thread->gc_blocking` from another thread,
+/// so null is an access violation the moment the sentinel starts. The tail is
+/// zeroed padding out to upstream's size, so an hdll reading a field ash does
+/// not keep reads a zero instead of running off the end of the allocation.
+#[repr(C)]
+pub struct ThreadInfo {
+    pub thread_id: i32,
+    pub gc_blocking: i32,
+    _rest: [u8; 2952],
+}
+
+thread_local! {
+    static THREAD_INFO: std::cell::Cell<*mut ThreadInfo> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// This thread's record, created on first use.
+///
+/// Deliberately leaked: a native library may hold the pointer past the point
+/// where thread-local destructors would have run, and a watchdog polling freed
+/// memory is worse than one polling a stale record.
+pub(crate) fn thread_info() -> *mut ThreadInfo {
+    THREAD_INFO.with(|slot| {
+        let mut info = slot.get();
+        if info.is_null() {
+            info = Box::into_raw(Box::new(ThreadInfo {
+                thread_id: current_os_thread_id() as i32,
+                gc_blocking: 0,
+                _rest: [0; 2952],
+            }));
+            slot.set(info);
+        }
+        info
+    })
+}
+
+/// This thread's OS id, in the form `hlp_thread_current` hands out.
+fn current_os_thread_id() -> usize {
+    #[cfg(unix)]
+    {
+        unsafe { libc::pthread_self() as usize }
+    }
+    #[cfg(windows)]
+    {
+        unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() as usize }
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_blocking(b: bool) {
     if crate::fiber::update_gc_blocking_depth(b) {
         let _ = crate::gc::gc_set_blocking(b);
     }
+    // Published for anyone holding this thread's record -- see ThreadInfo.
+    (*thread_info()).gc_blocking = i32::from(crate::fiber::is_gc_blocking());
 }
 
 #[no_mangle]

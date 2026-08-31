@@ -1276,6 +1276,25 @@ impl HLInterpreter {
                 }
             }
         }
+        #[cfg(windows)]
+        {
+            // Ask the OS rather than fabricate. A default Windows stack is
+            // 1 MB, so the 8 MB guess below lands far past the guard page and
+            // the conservative scan walks unmapped memory -- an access
+            // violation at whatever moment the next collection happens to
+            // come, which is why it presents as a crash at a random time
+            // rather than a reproducible one.
+            unsafe {
+                let mut low: usize = 0;
+                let mut high: usize = 0;
+                windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(
+                    &mut low, &mut high,
+                );
+                if high != 0 {
+                    return high;
+                }
+            }
+        }
         // Fallback: use a high local address
         Self::current_stack_addr() + 8 * 1024 * 1024 // assume 8MB stack
     }

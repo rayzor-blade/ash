@@ -1048,12 +1048,18 @@ fn demangle(sym: &str) -> String {
 /// `SIGUSR1` dumps and keeps running, which is the one that survives: a
 /// windowing library installs its own `SIGTERM`/`SIGINT` handlers during init
 /// and replaces whatever was there, so those two are best-effort.
+///
+/// SIGUSR1 is Unix-only. Windows' CRT defines six signals and none is spare,
+/// so there a profile arrives on termination or not at all.
 pub fn report_on_termination() {
     if !enabled() {
         return;
     }
     // Dump on request and carry on, so a profile can be taken from a running
-    // program without ending it.
+    // program without ending it. Unix-only: the signal that carries the
+    // request is SIGUSR1, and Windows has no user-defined signals -- its CRT
+    // defines six, none of them spare.
+    #[cfg(unix)]
     extern "C" fn on_dump(_sig: i32) {
         report();
     }
@@ -1068,8 +1074,12 @@ pub fn report_on_termination() {
             libc::raise(sig);
         }
     }
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGUSR1, on_dump as usize);
+    }
+    // SIGTERM and SIGINT are C, and the Windows CRT has both.
+    unsafe {
         libc::signal(libc::SIGTERM, on_signal as usize);
         libc::signal(libc::SIGINT, on_signal as usize);
     }

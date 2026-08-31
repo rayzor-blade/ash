@@ -29,7 +29,7 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 <header style="position:sticky;top:0;z-index:20;background:rgba(245,241,234,.9);backdrop-filter:blur(10px);border-bottom:1px solid rgba(34,29,26,.1)">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px clamp(24px,6vw,64px);max-width:1080px;margin:0 auto">
 <a href="index.html" style="display:flex;align-items:center;gap:9px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700"><img src="ash-mark-tight.png" alt="Ash" style="height:36px;width:auto"><span style="padding-top:9px">ash</span></a>
-<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="#install">Install</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#ship">Ship</a><a href="#windows">Windows</a><a href="#troubleshoot">Troubleshoot</a><a href="#diagnose">Diagnose</a><a href="https://github.com/rayzor-blade/ash">GitHub</a><a href="https://discord.gg/NYdr8eWxF4" aria-label="Join the Ash Discord" style="display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z"></path></svg>Discord</a></nav>
+<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="#install">Install</a><a href="#compile">Compile</a><a href="#run">Run</a><a href="#ship">Ship</a><a href="#troubleshoot">Troubleshoot</a><a href="#diagnose">Diagnose</a><a href="https://github.com/rayzor-blade/ash">GitHub</a><a href="https://discord.gg/NYdr8eWxF4" aria-label="Join the Ash Discord" style="display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z"></path></svg>Discord</a></nav>
 </div>
 </header>
 
@@ -123,31 +123,8 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 </div>
 </section>
 
-<section id="windows" style="scroll-margin-top:90px;margin-top:64px">
-<div class="eyebrow">05 · Windows</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Windows x86_64</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:780px;margin:0 0 20px">Take <code>fmt.hdll</code>, <code>ui.hdll</code>, <code>uv.hdll</code> and <code>sdl.hdll</code> from a HashLink win64 release and put them in the same directory as <code>game.hl</code>. Copy <code>SDL3.dll</code> and <code>OpenAL32.dll</code> from that same release: they are ordinary DLLs rather than HDLLs, nothing stages them for you, and <code>sdl.hdll</code> will not load without them.</p>
-
-<pre class="shell"><span style="color:#caa06f">&gt;</span> ash --mode hybrid bin\game.hl
-
-[ash] Loading HDLL-compatible ash_std at ...\libhl.dll
-[ash] Loading HDLL: sdl from "bin\sdl.hdll"</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:780px">The first line confirms Ash and the C HDLLs share one runtime &mdash; one garbage collector, one set of HashLink type globals. Ash's Windows release places <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside <code>ash.exe</code>, so nothing needs to be added to <code>PATH</code> for the runtime itself.</p>
-
-<div class="card" style="margin-top:20px">
-<div class="step">How a library is found</div>
-<div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
-<div><strong>An HDLL names the runtime it imports from.</strong> Its import table asks for <code>libhl.dll</code> by name, and the loader binds it to that file on disk. Ash loads the same file for its own use, which is what keeps one runtime in the process.</div>
-<div><strong>Every import must resolve before a library loads at all.</strong> One symbol an HDLL wants and the runtime lacks fails the entire library, before a line of its code runs &mdash; and the loader names neither the symbol nor where it wanted it from.</div>
-<div><strong>A DLL beside the HDLL is found.</strong> Ash loads HDLLs with <code>LOAD_WITH_ALTERED_SEARCH_PATH</code>, so <code>SDL3.dll</code> in the game folder resolves; an installed HashLink on <code>PATH</code> is still searched after that.</div>
-</div>
-</div>
-
-<div class="note" style="margin-top:20px"><strong>ui.Sentinel does not arm.</strong> HashLink's watchdog suspends the thread it watches and rewrites that thread's instruction pointer to graft a call onto it, which against Ash is a stack carrying JIT frames. <code>hl_thread_start</code> answers null &mdash; HashLink's own "no thread was started" &mdash; so a program that asks for a sentinel runs without a watchdog rather than not running.</div>
-</section>
-
 <section id="troubleshoot" style="scroll-margin-top:90px;margin-top:64px">
-<div class="eyebrow">06 · Troubleshoot</div>
+<div class="eyebrow">05 · Troubleshoot</div>
 <h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 20px">Read the first failure, not the cascade</h2>
 <div style="display:flex;flex-direction:column;gap:12px">
 <div class="card"><strong style="font-family:'IBM Plex Mono',monospace">Shader calls crash after startup</strong><p style="color:#5c5450;line-height:1.65;margin:9px 0 0">Confirm <code>glCreateShader</code> is not merely the first visible symptom. A second <code>libhl</code> can create the shader successfully and then crash while hlsdl boxes its numeric ID. Use this relocatable HDLL and verify the compatibility-runtime line appears before any HDLL line.</p></div>
@@ -165,7 +142,7 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 </section>
 
 <section id="diagnose" style="scroll-margin-top:90px;margin-top:64px">
-<div class="eyebrow">07 · Diagnose</div>
+<div class="eyebrow">06 · Diagnose</div>
 <h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">When it runs, but badly</h2>
 <p style="color:#5c5450;line-height:1.65;max-width:760px;margin:0 0 20px">Each flag is read once at startup and costs nothing when unset.</p>
 <div class="card">

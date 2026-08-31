@@ -325,7 +325,7 @@ unsafe fn state_of<'a>(f: *mut c_void) -> Option<&'a Mutex<FileState>> {
 /// Run a blocking file operation with the collector told to expect it.
 ///
 /// A thread inside a read is not going to reach a safepoint until the kernel
-/// returns, and the collector would otherwise wait for it: one MBHaxe world
+/// returns, and the collector would otherwise wait for it: one measured world
 /// stop spent 352ms waiting on a fiber worker. `gc_set_blocking` publishes the
 /// thread's stack pointer and callee-saved registers first, so the stack stays
 /// conservatively scannable for the whole call — the same contract the socket

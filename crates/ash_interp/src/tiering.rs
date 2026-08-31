@@ -92,7 +92,7 @@ pub struct TieredConfig {
     /// The marshaling path itself no longer needs one: anything past the
     /// inline eight goes through the backend's uniform entry. But letting
     /// Cranelift compile those signatures for the first time produced a frame
-    /// sized for one function running another's opcodes on MBHaxe, and the
+    /// sized for one function running another's opcodes in a large program, and the
     /// default is not the place to carry an unproven path. Raise it explicitly
     /// to exercise the uniform entry.
     pub max_jit_args: usize,
@@ -606,7 +606,7 @@ fn current_thread_id() -> usize {
 ///
 /// Every caller runs this on whichever thread demanded the code, which is
 /// regularly a fiber worker, and a compile takes long enough to be the reason
-/// a collection waits -- one MBHaxe world stop spent 352ms on a worker that
+/// a collection waits -- one measured world stop spent 352ms on a worker that
 /// reached no safepoint in that window. So the whole compile is declared
 /// blocking: it touches no GC object, and `hl_blocking` publishes the thread's
 /// stack pointer and callee-saved registers before returning, leaving the
@@ -643,6 +643,21 @@ fn tiered_compile_tier_inner(
     may_block: bool,
 ) -> *mut () {
     use std::sync::atomic::Ordering;
+    // Whoever compiled it first publishes through `functions_ptrs`, and that
+    // slot is the one piece of state both compile paths can see. The beads
+    // cannot see each other: the interpreter ticks the bead in
+    // `TieredRuntime::beads`, the broker keeps its own in `worker_beads`
+    // because the interpreter's Vec is not in the shared context, and
+    // beadie's guard is per bead. So each decided independently that the
+    // function needed compiling -- deltablue built 52 bodies for 45 distinct
+    // (function, tier) pairs, main and beadie-broker each producing one.
+    if tier == 0 && ctx.arrays.functions_ptrs != 0 {
+        let installed =
+            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
+        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            return installed.cast::<()>();
+        }
+    }
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
     if std::env::var("ASH_TIER1_PROBE").is_ok() {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -858,9 +873,10 @@ pub(crate) fn compile_with_cranelift(
             );
             if ctx.tier_log {
                 eprintln!(
-                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms",
+                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms on {}",
                     meta.num_ops,
-                    t0.elapsed().as_secs_f64() * 1e3
+                    t0.elapsed().as_secs_f64() * 1e3,
+                    std::thread::current().name().unwrap_or("main"),
                 );
             }
             // Publish through `functions_ptrs` too. The LLVM tier always did
@@ -1186,7 +1202,19 @@ pub(crate) fn produce_cranelift_osr_entries(
     else {
         return 0;
     };
-    let Ok(opt) = ash_core::air_pipeline::optimized(tier.ctx.air_module(), raw) else {
+    // The OSR body must be lowered exactly as the interpreter walks it: the
+    // transfer is by position through `ser.block_pcs`.
+    let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    let shared = tier.ctx.air_module();
+    let bare;
+    let osr_module = if cfg.callees_visible {
+        shared
+    } else {
+        bare = shared.without_callees_view();
+        &bare
+    };
+    let Ok(opt) = ash_core::air_pipeline::optimized_with_config(osr_module, raw, cfg)
+    else {
         return 0;
     };
     let plan = ash_core::osr::analyze(&opt.ir);
@@ -1290,8 +1318,14 @@ pub(crate) fn osr_plan_for(
         .functions
         .iter()
         .find(|f| f.findex as usize == findex)?;
-    let m = ash_core::air_pipeline::AshModule::new(bytecode);
-    let optimized = ash_core::air_pipeline::optimized(&m, raw).ok()?;
+    // Lowered as the interpreter walks it: OSR transfers by position.
+    let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    let m = if cfg.callees_visible {
+        ash_core::air_pipeline::AshModule::new(bytecode)
+    } else {
+        ash_core::air_pipeline::AshModule::new(bytecode).without_callees()
+    };
+    let optimized = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg).ok()?;
     let plan = ash_core::osr::analyze(&optimized.ir);
     let eligible: std::collections::HashSet<usize> = plan
         .entry_headers

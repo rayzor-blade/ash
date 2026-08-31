@@ -10,7 +10,7 @@
 //!   a program point. Inverting the value->register map globally picks an
 //!   arbitrary one, which is a wrong answer rather than a slow one.
 //! * **Register assignment.** Returning every value to its originating
-//!   register means a value that cannot go home needs a fresh one: one MBHaxe
+//!   register means a value that cannot go home needs a fresh one: one large
 //!   function serializes 19 registers into 236. Reuse needs interference, and
 //!   interference needs this.
 //! * **Dependence.** The vectorizer refuses over a thousand loops for

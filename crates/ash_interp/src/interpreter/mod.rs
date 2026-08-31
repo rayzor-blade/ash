@@ -3318,8 +3318,14 @@ impl HLInterpreter {
         }
 
         let raw = &bytecode.functions[func_idx];
-        let m = ash_core::air_pipeline::AshModule::new(bytecode);
-        let Ok(opt) = ash_core::air_pipeline::optimized(&m, raw) else {
+        // Lowered as the interpreter walks it: OSR transfers by position.
+        let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+        let m = if cfg.callees_visible {
+            ash_core::air_pipeline::AshModule::new(bytecode)
+        } else {
+            ash_core::air_pipeline::AshModule::new(bytecode).without_callees()
+        };
+        let Ok(opt) = ash_core::air_pipeline::optimized_with_config(&m, raw, cfg) else {
             return;
         };
         let plan = ash_core::osr::analyze(&opt.ir);
@@ -6392,7 +6398,7 @@ impl HLInterpreter {
     ///
     /// This is a pure function of the image, and building it walks every type,
     /// every proto and every binding, allocating a String for each. Rebuilding
-    /// it per call made throwing an exception cost O(program): MBHaxe throws
+    /// it per call made throwing an exception cost O(program): a game throws
     /// while loading a level, and the loading screen sat in this function
     /// through thousands of rebuilds. A trace is only ever read once, and only
     /// if it escapes -- the table has no business being rebuilt to produce it.

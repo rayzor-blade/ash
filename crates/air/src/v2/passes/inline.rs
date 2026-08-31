@@ -56,8 +56,8 @@ use std::collections::{HashMap, HashSet};
 ///   function *per pipeline*, held in [`Inlining::self_expanded`] so manager
 ///   rounds cannot compound it. A callee that calls back into this function
 ///   (direct mutual recursion) is never inlined: no per-site budget bounds
-///   what re-running the rounds would re-open. This is rayzor's
-///   `InliningCostModel::should_inline` policy and zyntax's
+///   what re-running the rounds would re-open. This is the same rule a
+///   cost-model-driven inliner applies, and zyntax's
 ///   `MAX_RECURSIVE_INLINE_*` caps; before it existed, fib's 11-instruction
 ///   body reached `inline_max_function` at 319 instructions — an optimizer
 ///   whose output was 29x its input;
@@ -165,7 +165,7 @@ const SELF_INLINE_MAX_SITES: usize = 4;
 
 /// Ceiling on the function's size as a multiple of what it started the
 /// pipeline at. `inline_max_function` (400) alone let an 11-instruction
-/// function grow 29x; rayzor bounds the same way (`max_growth_percent`).
+/// function grow 29x; a growth percentage is the standard bound for this.
 /// The additive floor keeps tiny functions — constructors are ~5
 /// instructions — able to absorb a helper at all.
 fn growth_cap(original: usize, opts: &PassOptions) -> usize {

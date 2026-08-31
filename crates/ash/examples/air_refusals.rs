@@ -7,8 +7,8 @@
 //! register pinning (`Ref` / `Incr` / `Decr` / `Trap`). A refusal is then
 //! re-run with `verify_each` so the pass that broke the IR names itself.
 //!
-//! This is the ground-truth work queue for field refusals (MBHaxe's
-//! marblegame was the first): the pipeline alone, no execution, no window.
+//! This is the ground-truth work queue for field refusals (a game
+//! fixture was the first): the pipeline alone, no execution, no window.
 //!
 //! Usage: air_refusals [--level O0|O1|O2|O3] <file.hl> [<file.hl>...]
 //!

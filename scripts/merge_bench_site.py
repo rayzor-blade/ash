@@ -85,8 +85,11 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
     )
     if pick is None:
         pick = next((r for r in rows if r.get("status") == "OK"), rows[0])
+    # `or 0.0`, not a `.get` default: `parse_tier_installs` stores an explicit
+    # None for an install line that carried no timing, so the key is present
+    # and the default never fires.
     compile_ms = round(
-        sum(t.get("compile_ms", 0.0) for t in pick.get("tier_installs") or []), 2
+        sum((t.get("compile_ms") or 0.0) for t in pick.get("tier_installs") or []), 2
     )
     tiered = pick.get("tiered") or {}
     checksum = (pick.get("checksum") or {}).get("value")

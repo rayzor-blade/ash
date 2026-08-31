@@ -33,7 +33,7 @@
 use std::{collections::HashMap, sync::OnceLock};
 
 use air::opcodes::Opcode;
-use ash_core::air_pipeline::{optimized, AshModule};
+use ash_core::air_pipeline::{optimized_with_config, AshModule};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
 
@@ -259,9 +259,18 @@ enum Body {
 /// against.
 #[derive(Default)]
 pub struct Cache {
-    /// The `AshModule` AIR lowers against, keyed by the bytecode it was built
-    /// from. See [`Cache::prepare`] for why the key is load-bearing.
-    module: Option<(*const DecodedBytecode, &'static AshModule<'static>)>,
+    /// The two `AshModule` views AIR lowers against, keyed by the bytecode
+    /// they were built from. See [`Cache::prepare`] for why the key is
+    /// load-bearing.
+    ///
+    /// One view offers callee bodies to the inliner and one withholds them.
+    /// Which a function gets is `air_pipeline::interpreter_config_for`, and
+    /// the OSR sites ask the same question so their lowering matches this one.
+    module: Option<(
+        *const DecodedBytecode,
+        &'static AshModule<'static>,
+        &'static AshModule<'static>,
+    )>,
     /// Indexed by index into `bytecode.functions`, like `func_idx` everywhere
     /// else in the interpreter.
     bodies: Vec<Body>,
@@ -288,7 +297,7 @@ impl Cache {
         }
 
         let key = bc as *const DecodedBytecode;
-        if self.module.map(|(p, _)| p) != Some(key) {
+        if self.module.map(|(p, _, _)| p) != Some(key) {
             // `AshModule::new` builds a findex map over every function and
             // every native, so building one per function would make first
             // execution quadratic in module size. It is built once and cached
@@ -300,10 +309,14 @@ impl Cache {
             // reload installs a *different* `DecodedBytecode`, and the stale
             // module — along with every body lowered from it — leaves the
             // cache here, before anything can read through it.
-            let leaked: &AshModule<'_> = Box::leak(Box::new(AshModule::new(bc)));
-            let m: &'static AshModule<'static> = unsafe { std::mem::transmute(leaked) };
+            let built = AshModule::new(bc);
+            let without: &AshModule<'_> = Box::leak(Box::new(built.without_callees_view()));
+            let with: &AshModule<'_> = Box::leak(Box::new(built));
+            let with: &'static AshModule<'static> = unsafe { std::mem::transmute(with) };
+            let without: &'static AshModule<'static> =
+                unsafe { std::mem::transmute(without) };
             self.bodies.clear();
-            self.module = Some((key, m));
+            self.module = Some((key, with, without));
         }
 
         if self.bodies.len() < bc.functions.len() {
@@ -313,15 +326,25 @@ impl Cache {
             return;
         }
 
-        let m = self.module.expect("module cached just above").1;
+        let (_, with_callees, without_callees) =
+            self.module.expect("module cached just above");
         let raw = &bc.functions[func_idx];
+        // A function OSR can enter keeps the inlined body, because that body is
+        // what OSR compiles; everything else drops the inliner so its callees
+        // stay compiled. See `air_pipeline::interpreter_config_for`.
+        let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+        let m = if cfg.callees_visible {
+            with_callees
+        } else {
+            without_callees
+        };
         // The AIR pipeline runs HERE, on the mutator, inside the execute
         // phase -- not on a broker thread like the tiers that consume it. Its
         // own phase so the profile says how much of a run is spent preparing
         // IR rather than executing: on deltablue that is ~20ms of ~51ms.
         let prepared = {
             let _phase = ash_core::profile::scope("air prepare (main thread)");
-            optimized(m, raw).map(|o| o.ser.clone())
+            optimized_with_config(m, raw, cfg).map(|o| o.ser.clone())
         };
         self.bodies[func_idx] = match prepared {
             Ok(ser) => {

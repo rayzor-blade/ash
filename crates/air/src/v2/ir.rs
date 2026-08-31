@@ -197,8 +197,8 @@ pub enum Effect {
 /// [`Instr::Call`] threw that knowledge away twice over — every call is
 /// [`Effect::ClobberAll`], so a single `sqrt` in a loop pinned every
 /// loop-invariant load beside it, and every engine paid an FFI boundary for
-/// an operation that is one machine instruction. rayzor builds these into
-/// its MIR for the same reason.
+/// an operation that is one machine instruction. Representing them as IR
+/// operations rather than calls is what lets the loop passes move them.
 ///
 /// Each kind's semantics are pinned by `ash_std`'s implementations —
 /// `RoundHalfUp` is `floor(x + 0.5)` (HashLink's rounding, not IEEE's), and

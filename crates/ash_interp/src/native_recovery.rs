@@ -135,7 +135,7 @@ unsafe fn arm_slot(index: usize) -> i32 {
     // savemask 0, not 1. Arming happens on every native call the interpreter
     // makes, and on macOS saving the mask costs TWO syscalls per arm --
     // sigprocmask for the mask and sigaltstack for the stack state. Sampling
-    // MBHaxe's loading screen put both at the top of the profile, ahead of
+    // a game's loading screen put both at the top of the profile, ahead of
     // the interpreter itself, because loading a level is a long run of native
     // calls into SDL and the image codecs.
     //

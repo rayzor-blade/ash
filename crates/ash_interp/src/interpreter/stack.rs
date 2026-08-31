@@ -26,7 +26,7 @@ impl HLInterpreter {
         // Same reasoning as the UTF-16 symbols this module interns for the
         // native side: a frame's label is a pure function of its findex and
         // source position, a throw renders every frame on the stack, and
-        // MBHaxe throws continuously while loading. Rendering them afresh put
+        // a game throws continuously while loading. Rendering them afresh put
         // `format!` at 96% of this function's time in a sampled freeze.
         // Keyed per bytecode, matching `function_name_table`, so a hot reload
         // does not serve labels built against the old program.
@@ -95,7 +95,7 @@ impl HLInterpreter {
     /// box for the life of the interpreter, and a frame that recurs costs a
     /// lookup rather than a `format!` and a UTF-16 re-encode. Its size is
     /// bounded by the distinct source positions a trace ever names, where
-    /// appending per capture is bounded by nothing -- MBHaxe throws while
+    /// appending per capture is bounded by nothing -- a game throws while
     /// loading a level, and each throw symbolicated every frame afresh.
     fn intern_stack_symbol(&mut self, bytecode: &DecodedBytecode, key: (usize, i32, i32)) -> usize {
         if let Some(symbol) = self.stack_symbols_interned.get(&key) {
@@ -162,7 +162,7 @@ impl HLInterpreter {
         }
         // Answered per PAGE, because `dladdr` is not cheap: it walks the
         // loaded images to find the closest symbol, and this runs for every
-        // frame of every captured stack. On MBHaxe, which throws while
+        // frame of every captured stack. In a game that throws while
         // loading a level, dyld's findClosestSymbol was the busiest non-idle
         // leaf in the whole process. Ownership is a property of the mapping,
         // so every address in a page shares one answer, and a stack walk

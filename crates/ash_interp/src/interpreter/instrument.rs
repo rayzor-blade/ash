@@ -46,7 +46,7 @@ pub(super) fn arm_stall_watchdog() {
 /// Preparing a body runs the AIR pipeline -- lower, inline, verify, build a
 /// dominator tree -- on whichever thread first calls the function, and there
 /// is no poll anywhere in it. A fiber worker doing that held every world stop
-/// open for its whole duration: 150-350ms on MBHaxe, sampled to
+/// open for its whole duration: 150-350ms in a large program, sampled to
 /// `Inlining::is_stack_sensitive_inner` and `lower_with`. The pipeline builds
 /// Rust structures over bytecode and touches no GC object, and `hlp_blocking`
 /// publishes the stack pointer and callee-saved registers first, so the

@@ -862,6 +862,29 @@ pub unsafe extern "C" fn hl_thread_current() -> *mut c_void {
     hlp_thread_current()
 }
 
+/// Run `callback(param)` as a fiber, which is what a thread is here.
+///
+/// Haxe threads are krio fibers on the scheduler (see `hlp_thread_create`),
+/// and a native library asking for a thread gets the same thing rather than
+/// an OS thread of its own. `with_gc` needs no answer: a fiber's stack is
+/// registered with the collector when it is installed, which is what upstream
+/// spends that flag on.
+///
+/// ui.hdll imports this whether or not a program ever builds a `ui.Sentinel`,
+/// and a Windows loader resolves every import before it maps a module, so the
+/// symbol has to be here for the library to load at all.
+///
+/// The returned `hl_thread*` is the fiber handle `hlp_thread_current` also
+/// hands out, so the two agree on identity.
+#[no_mangle]
+pub unsafe extern "C" fn hl_thread_start(
+    callback: *mut c_void,
+    param: *mut c_void,
+    _with_gc: bool,
+) -> *mut c_void {
+    crate::fiber::native_thread_start(callback, param)
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hl_thread_yield() {
     if crate::fiber::fibers_active() {

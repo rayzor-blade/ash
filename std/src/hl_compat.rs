@@ -94,6 +94,58 @@ pub unsafe extern "C" fn hl_dyn_setp(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn hl_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32) {
+    crate::obj::hlp_dyn_setf(d, hfield, value);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i64) {
+    crate::obj::hlp_dyn_seti64(d, hfield, value);
+}
+
+// The reading half of the same family. A Windows loader resolves every import
+// before it will map a module at all, so ui.hdll's hl_dyn_geti/hl_dyn_getp
+// failed the whole load rather than the call that needed them.
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_geti(d: *mut vdynamic, hfield: i32, t: *mut hl_type) -> i32 {
+    crate::obj::hlp_dyn_geti(d, hfield, t)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_geti64(d: *mut vdynamic, hfield: i32) -> i64 {
+    crate::obj::hlp_dyn_geti64(d, hfield)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_getf(d: *mut vdynamic, hfield: i32) -> f32 {
+    crate::obj::hlp_dyn_getf(d, hfield)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_getd(d: *mut vdynamic, hfield: i32) -> f64 {
+    crate::obj::hlp_dyn_getd(d, hfield)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn hl_dyn_getp(
+    d: *mut vdynamic,
+    hfield: i32,
+    t: *mut hl_type,
+) -> *mut c_void {
+    crate::obj::hlp_dyn_getp(d, hfield, t)
+}
+
+/// Upstream hands back this thread's `hl_thread_info`. ash keeps no such
+/// registry, so the answer is the null `hlp_get_thread_info` documents — but
+/// the symbol has to exist, because ui.hdll imports it whether or not the
+/// program ever builds a `ui.Sentinel`.
+#[no_mangle]
+pub unsafe extern "C" fn hl_get_thread() -> *mut c_void {
+    crate::sys::hlp_get_thread_info()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn hl_hash_gen(name: *const hl::uchar, cache_name: bool) -> i32 {
     crate::obj::hlp_hash_gen(name, cache_name)
 }

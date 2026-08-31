@@ -54,7 +54,13 @@ pub fn hl_debug_break() {
     }
 }
 
-fn hl_detect_debugger() -> bool {
+/// Whether a debugger is attached.
+///
+/// Exported under its HashLink name as well: ui.hdll imports
+/// `hl_detect_debugger`, and on Windows every import has to resolve before the
+/// library will map at all.
+#[no_mangle]
+pub extern "C" fn hl_detect_debugger() -> bool {
     if DEBUGGER_PRESENT.load(Ordering::Relaxed) {
         return true;
     }

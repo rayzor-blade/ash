@@ -125,25 +125,25 @@ code,pre{font-family:'IBM Plex Mono',monospace}
 
 <section id="windows" style="scroll-margin-top:90px;margin-top:64px">
 <div class="eyebrow">05 · Windows</div>
-<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Same runtime rule, different loader</h2>
-<p style="color:#5c5450;line-height:1.65;max-width:780px;margin:0 0 20px">Windows runs Heaps bytecode with HashLink's own prebuilt HDLLs &mdash; take <code>fmt.hdll</code>, <code>ui.hdll</code>, <code>uv.hdll</code> and <code>sdl.hdll</code> from a HashLink win64 release and put them beside <code>game.hl</code>, exactly as on macOS. What differs is how a native library finds the runtime, and every rule below follows from one fact: a PE import table names the DLL a symbol comes from, and the loader binds it to <em>that module</em> &mdash; never to the executable.</p>
+<h2 style="font-family:'IBM Plex Mono',monospace;font-size:clamp(25px,4vw,36px);margin:14px 0 14px">Windows x86_64</h2>
+<p style="color:#5c5450;line-height:1.65;max-width:780px;margin:0 0 20px">Take <code>fmt.hdll</code>, <code>ui.hdll</code>, <code>uv.hdll</code> and <code>sdl.hdll</code> from a HashLink win64 release and put them in the same directory as <code>game.hl</code>. Copy <code>SDL3.dll</code> and <code>OpenAL32.dll</code> from that same release: they are ordinary DLLs rather than HDLLs, nothing stages them for you, and <code>sdl.hdll</code> will not load without them.</p>
 
 <pre class="shell"><span style="color:#caa06f">&gt;</span> ash --mode hybrid bin\game.hl
 
 [ash] Loading HDLL-compatible ash_std at ...\libhl.dll
 [ash] Loading HDLL: sdl from "bin\sdl.hdll"</pre>
-<p style="line-height:1.7;color:#5c5450;max-width:780px">The same first line matters for the same reason, and names <code>libhl.dll</code> here. Ash's Windows release places <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside <code>ash.exe</code> &mdash; copies rather than symlinks, which on Windows need Developer Mode to create. No <code>PATH</code> entry is required for the runtime itself.</p>
+<p style="line-height:1.7;color:#5c5450;max-width:780px">The first line confirms Ash and the C HDLLs share one runtime &mdash; one garbage collector, one set of HashLink type globals. Ash's Windows release places <code>libhl.dll</code> and its <code>libhl.1.dll</code> alias beside <code>ash.exe</code>, so nothing needs to be added to <code>PATH</code> for the runtime itself.</p>
 
 <div class="card" style="margin-top:20px">
-<div class="step">Three differences worth knowing</div>
+<div class="step">How a library is found</div>
 <div style="display:flex;flex-direction:column;gap:11px;color:#5c5450;line-height:1.6">
-<div><strong>Every import resolves before a library loads.</strong> There is no lazy binding: one symbol an HDLL wants and the runtime lacks fails the whole library, and the loader names neither the symbol nor the library it wanted it from.</div>
-<div><strong>An HDLL's dependencies do not come from its own folder by default.</strong> Ash loads HDLLs with <code>LOAD_WITH_ALTERED_SEARCH_PATH</code>, so a DLL beside the HDLL is found first, and <code>PATH</code> is still searched afterwards.</div>
-<div><strong>Plain DLLs are not HDLLs.</strong> <code>SDL3.dll</code> and <code>OpenAL32.dll</code> ship in the same HashLink release but nothing stages them for you. Put them in the game folder, beside <code>ash.exe</code>, or on <code>PATH</code>.</div>
+<div><strong>An HDLL names the runtime it imports from.</strong> Its import table asks for <code>libhl.dll</code> by name, and the loader binds it to that file on disk. Ash loads the same file for its own use, which is what keeps one runtime in the process.</div>
+<div><strong>Every import must resolve before a library loads at all.</strong> One symbol an HDLL wants and the runtime lacks fails the entire library, before a line of its code runs &mdash; and the loader names neither the symbol nor where it wanted it from.</div>
+<div><strong>A DLL beside the HDLL is found.</strong> Ash loads HDLLs with <code>LOAD_WITH_ALTERED_SEARCH_PATH</code>, so <code>SDL3.dll</code> in the game folder resolves; an installed HashLink on <code>PATH</code> is still searched after that.</div>
 </div>
 </div>
 
-<div class="note" style="margin-top:20px"><strong>ui.Sentinel does not arm.</strong> HashLink's watchdog suspends the thread it watches and rewrites its instruction pointer to graft a call onto it &mdash; against Ash that is a stack carrying JIT frames. <code>hl_thread_start</code> answers null, which is HashLink's own "no thread was started", and a program that asks for a sentinel runs without a watchdog rather than not running.</div>
+<div class="note" style="margin-top:20px"><strong>ui.Sentinel does not arm.</strong> HashLink's watchdog suspends the thread it watches and rewrites that thread's instruction pointer to graft a call onto it, which against Ash is a stack carrying JIT frames. <code>hl_thread_start</code> answers null &mdash; HashLink's own "no thread was started" &mdash; so a program that asks for a sentinel runs without a watchdog rather than not running.</div>
 </section>
 
 <section id="troubleshoot" style="scroll-margin-top:90px;margin-top:64px">

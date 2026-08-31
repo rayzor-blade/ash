@@ -338,9 +338,24 @@ jobs:
           # `shutil.which("hl")`, which finds whatever the Haxe toolchain put
           # on PATH rather than the VM this run just built. --hashlink-dir
           # only sets the library search path; it does not choose the binary.
+          # clang, not the default `cc`. HashLink/C's bar is the C its
+          # generator emits, built by whatever compiler is handed to it, and
+          # ash AOT's bar is LLVM by construction -- so leaving this as gcc
+          # measures two compilers as much as two designs. On the identical
+          # generated C for closure_call, gcc produced 0.09s and clang 0.11s:
+          # a fifth of that row's margin was the compiler. Both native lanes
+          # now go through LLVM, and the difference that remains is the IR
+          # each project hands it.
+          CC_ARG=()
+          if command -v clang >/dev/null 2>&1; then
+            CC_ARG=(--cc clang)
+          else
+            echo "::warning::clang not available; the HL/C lane falls back to cc and is not compiler-matched with Ash AOT"
+          fi
           ./scripts/hl_bench.py \
             --benchmarks "${{ matrix.bench }}" \
             --hashlink-dir ~/hashlink \
+            "${CC_ARG[@]}" \
             "${HL[@]}" \
             "${HL2[@]}" \
             --iterations 7 \

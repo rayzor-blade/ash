@@ -647,7 +647,9 @@
           native binary before timing began, so their bars are this bytecode running as ordinary compiled code. The
           rest are still compiling inside the window being measured, which is the honest reason to read the two groups
           apart rather than as one ranking. <code>haxe -hl main.c</code> emits C for the system compiler to build;
-          <code>ash</code> emits the object itself, with no C in the path. Both builds take one to six seconds and are
+          <code>ash</code> emits the object itself, with no C in the path. Both are built through LLVM — the HL/C
+          lane is compiled with <code>clang</code> rather than the default <code>cc</code>, because ash's back end is
+          LLVM by construction and leaving that unmatched would measure two compilers as much as two designs. Both builds take one to six seconds and are
           excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is measured in
           its own CI job, so the engines within a row share a machine but different rows may not — compare engines
           within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.</div>

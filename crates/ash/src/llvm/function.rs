@@ -4639,26 +4639,7 @@ impl<'ctx> JITModule<'ctx> {
                         self.builder.position_at_end(miss_bb);
                     }
 
-                    // Load vobj_proto from hl_type (offset 16)
-                    let get_obj_proto = self.declare_native(
-                        "hl_get_obj_proto",
-                        &[ptr_type.into()],
-                        Some(ptr_type.into()),
-                    );
-                    self.builder
-                        .build_call(get_obj_proto, &[type_ptr.into()], "init_obj_proto")?;
-                    let vobj_proto_gep = unsafe {
-                        self.builder.build_gep(
-                            self.context.i8_type(),
-                            type_ptr,
-                            &[self.context.i64_type().const_int(16, false)],
-                            "vobj_proto_gep",
-                        )?
-                    };
-                    let vobj_proto = self
-                        .builder
-                        .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
-                        .into_pointer_value();
+                    let vobj_proto = self.vobj_proto_ptr(type_ptr)?;
 
                     // Load method pointer from vobj_proto[field.0]
                     let method_gep = unsafe {
@@ -4841,26 +4822,7 @@ impl<'ctx> JITModule<'ctx> {
                     .build_load(ptr_type, obj_val, "ct_type")?
                     .into_pointer_value();
 
-                // Load vobj_proto from hl_type (offset 16)
-                let get_obj_proto = self.declare_native(
-                    "hl_get_obj_proto",
-                    &[ptr_type.into()],
-                    Some(ptr_type.into()),
-                );
-                self.builder
-                    .build_call(get_obj_proto, &[type_ptr.into()], "init_this_proto")?;
-                let vobj_proto_gep = unsafe {
-                    self.builder.build_gep(
-                        self.context.i8_type(),
-                        type_ptr,
-                        &[self.context.i64_type().const_int(16, false)],
-                        "vobj_proto_gep",
-                    )?
-                };
-                let vobj_proto = self
-                    .builder
-                    .build_load(ptr_type, vobj_proto_gep, "vobj_proto")?
-                    .into_pointer_value();
+                let vobj_proto = self.vobj_proto_ptr(type_ptr)?;
 
                 // Load method pointer from vobj_proto[field.0]
                 let method_gep = unsafe {
@@ -6120,31 +6082,8 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, obj_ptr, "vclos_obj_type")?
                     .into_pointer_value();
-                // hl_get_obj_proto initializes the concrete type's cached
-                // proto table. Its vobj_proto field is indexed by pindex and
-                // contains the selected function address.
-                let get_obj_proto = self.declare_native(
-                    "hl_get_obj_proto",
-                    &[ptr_type.into()],
-                    Some(ptr_type.into()),
-                );
-                let _runtime_obj = self.builder.build_call(
-                    get_obj_proto,
-                    &[obj_type_ptr.into()],
-                    "vclos_runtime_obj",
-                )?;
-                let vobj_proto_ptr = unsafe {
-                    self.builder.build_gep(
-                        i8_type,
-                        obj_type_ptr,
-                        &[self.context.i64_type().const_int(16, false)],
-                        "vclos_proto_gep",
-                    )?
-                };
-                let vobj_proto = self
-                    .builder
-                    .build_load(ptr_type, vobj_proto_ptr, "vclos_proto")?
-                    .into_pointer_value();
+                // The concrete type's proto table, indexed by pindex.
+                let vobj_proto = self.vobj_proto_ptr(obj_type_ptr)?;
                 let runtime_fun_ptr = unsafe {
                     self.builder.build_gep(
                         ptr_type,
@@ -7810,6 +7749,82 @@ impl<'ctx> JITModule<'ctx> {
         self.builder
             .build_indirect_call(barrier, asm, &[], "ash_purity_barrier")?;
         Ok(())
+    }
+
+    /// The concrete type's vtable, without a runtime call per dispatch.
+    ///
+    /// `hl_get_obj_proto` fills `vobj_proto` on first use and returns the
+    /// cached table on every call after that -- so all but the first call per
+    /// type does nothing except cost a call. It was emitted unconditionally
+    /// on every dispatch, which put `callq hl_get_obj_proto` inside
+    /// bench_method_call's 100M-iteration loop, immediately followed by the
+    /// load of `t->vobj_proto` it had just guaranteed. Being opaque, it also
+    /// barred the optimizer from moving anything across it, so the cost was
+    /// larger than the call itself.
+    ///
+    /// The same guard hoisted to the call site is a load and a branch that
+    /// predicts perfectly after the first dispatch, and the slow path runs
+    /// once per type for the life of the process. `layout.rs` already does
+    /// this for field ACCESS -- it computes offsets at compile time rather
+    /// than calling `hlp_get_obj_rt` -- but a vtable pointer has no such
+    /// oracle, because the table is built at run time.
+    fn vobj_proto_ptr(&mut self, type_ptr: PointerValue<'ctx>) -> Result<PointerValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| anyhow!("vobj_proto_ptr outside a function"))?;
+
+        let slot = unsafe {
+            self.builder.build_gep(
+                self.context.i8_type(),
+                type_ptr,
+                &[self.context.i64_type().const_int(16, false)],
+                "vobj_proto_gep",
+            )?
+        };
+        let cached = self
+            .builder
+            .build_load(ptr_type, slot, "vobj_proto_cached")?
+            .into_pointer_value();
+        let missing = self.builder.build_is_null(cached, "vobj_proto_missing")?;
+
+        let init_bb = self
+            .context
+            .append_basic_block(function, "vobj_proto_init");
+        let done_bb = self
+            .context
+            .append_basic_block(function, "vobj_proto_done");
+        let cached_bb = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| anyhow!("vobj_proto_ptr lost its block"))?;
+        self.builder
+            .build_conditional_branch(missing, init_bb, done_bb)?;
+
+        self.builder.position_at_end(init_bb);
+        let get_obj_proto = self.declare_native(
+            "hl_get_obj_proto",
+            &[ptr_type.into()],
+            Some(ptr_type.into()),
+        );
+        self.builder
+            .build_call(get_obj_proto, &[type_ptr.into()], "init_obj_proto")?;
+        let filled = self
+            .builder
+            .build_load(ptr_type, slot, "vobj_proto_filled")?
+            .into_pointer_value();
+        let init_end = self
+            .builder
+            .get_insert_block()
+            .ok_or_else(|| anyhow!("vobj_proto_ptr lost its init block"))?;
+        self.builder.build_unconditional_branch(done_bb)?;
+
+        self.builder.position_at_end(done_bb);
+        let merged = self.builder.build_phi(ptr_type, "vobj_proto")?;
+        merged.add_incoming(&[(&cached, cached_bb), (&filled, init_end)]);
+        Ok(merged.as_basic_value().into_pointer_value())
     }
 
     /// Refuse to bake an address of this process into an object file.

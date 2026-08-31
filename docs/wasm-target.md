@@ -60,6 +60,36 @@ inlinable at the allocation site and the bump folds into the caller. On
 binary_trees that body alone is ~12% of the run. The same argument applies to
 the closure guards that LICM could not hoist past a call boundary.
 
+## AOT has two halves; the code half is done
+
+Proven on bench_fib (f5b8d7d): 332/332 functions lowered, a 147KB Mach-O
+object with 370 defined symbols and 23 undefined ones — all `hlp_*`/`hl_*` —
+linking against `libash_std.a` into a 780KB binary that runs. That is the
+**code half**, and it needed only a fork at the tail plus two corrections
+(natives as `External` declarations; one module rather than a promo module
+per function).
+
+The binary does not print, and the reason is the **data half**, which is the
+larger piece:
+
+* **The type table is built in this process.** `c_types.rs` materialises
+  `hl_type` structures with `Box::into_raw`/`Box::leak` and the JIT bakes
+  their addresses into the IR as integer constants. An AOT object must emit
+  those structures as *data with relocations* instead — the type table becomes
+  part of the object, not part of the compiling process's heap.
+* **The constant pool is allocated at compile time.** `init_constants` calls
+  `hlp_alloc_obj` and `hlp_gc_register_root` *now*, in the JIT, and stores the
+  resulting pointers into globals. AOT must instead EMIT code that performs
+  those calls at startup: allocate, register, fill fields, store to global.
+* **Globals** likewise become emitted data rather than a `globals_data` array
+  in the compiler.
+
+This is precisely the work HL/C does by writing C data tables, and it is why
+its output needs a C compiler. We emit the same information as object data
+directly. It is also **exactly the work wasm needs** — a wasm module has no
+access to the compiler's heap either — so the data half is shared and should
+be built once, against the native target where the debugger works.
+
 ## Route
 
 **Take the LLVM WebAssembly backend (Route A).** AIR → LLVM IR → wasm32

@@ -5722,3 +5722,103 @@ fn cellfwd_resolves_forwarding_chains() {
         f.dump()
     );
 }
+
+// ── Liveness ────────────────────────────────────────────────────────────────
+
+/// Every value live on entry to a block is defined in a block that dominates
+/// it. This is the SSA property the analysis exists to respect, and the one an
+/// OSR entry depends on: a value handed over at a header must actually hold
+/// something on every path that reaches it.
+#[test]
+fn liveness_live_in_is_dominated_by_its_definition() {
+    use super::analysis::CfgInfo;
+    use super::ir::BlockId;
+    use super::liveness::Liveness;
+
+    for (name, (ops, tys)) in [
+        ("loop", fix_loop()),
+        ("diamond", fix_diamond()),
+        ("switch", fix_switch()),
+        ("calls", fix_calls_natives()),
+    ] {
+        let f = lower(&ops, &tys).unwrap_or_else(|e| panic!("{name}: lower: {e}"));
+        let cfg = CfgInfo::build(&f);
+        let live = Liveness::analyze(&f, &cfg);
+
+        let mut def_block = vec![usize::MAX; f.values.len()];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            for phi in &b.phis {
+                def_block[phi.dst.idx()] = bi;
+            }
+            for ins in &b.instrs {
+                if let Some(d) = ins.dst() {
+                    def_block[d.idx()] = bi;
+                }
+            }
+        }
+
+        let mut checked = 0usize;
+        for bi in 0..f.blocks.len() {
+            for v in live.live_in(BlockId(bi as u32)) {
+                checked += 1;
+                let d = def_block[v.idx()];
+                assert!(
+                    d != usize::MAX,
+                    "{name}: {v:?} is live-in at b{bi} but nothing defines it"
+                );
+                assert!(
+                    cfg.dom.dominates(d, bi),
+                    "{name}: {v:?} is live-in at b{bi} but its definition in b{d} \
+                     does not dominate it"
+                );
+            }
+        }
+        // Or the assertions above hold because there was nothing to assert.
+        assert!(checked > 0, "{name}: no value was live anywhere");
+    }
+}
+
+/// Nothing is live before the function starts.
+#[test]
+fn liveness_entry_has_nothing_live_in() {
+    use super::analysis::CfgInfo;
+    use super::ir::BlockId;
+    use super::liveness::Liveness;
+
+    let (ops, tys) = fix_loop();
+    let f = lower(&ops, &tys).unwrap();
+    let cfg = CfgInfo::build(&f);
+    let live = Liveness::analyze(&f, &cfg);
+    assert!(
+        live.live_in(BlockId(0)).is_empty(),
+        "entry live-in should be empty, got {:?}",
+        live.live_in(BlockId(0))
+    );
+}
+
+/// A loop carries values across its back edge, so a block inside one has
+/// something live on entry -- the accumulator and the induction variable at
+/// minimum. A liveness that reported nothing here would look like it worked
+/// while telling an OSR entry to resume with an empty frame.
+#[test]
+fn liveness_carries_values_around_a_loop() {
+    use super::analysis::CfgInfo;
+    use super::ir::BlockId;
+    use super::liveness::Liveness;
+
+    let (ops, tys) = fix_loop();
+    let f = lower(&ops, &tys).unwrap();
+    let cfg = CfgInfo::build(&f);
+    let live = Liveness::analyze(&f, &cfg);
+
+    let looping = (0..f.blocks.len())
+        .filter(|&b| cfg.succs[b].iter().any(|s| s.idx() <= b))
+        .collect::<Vec<_>>();
+    assert!(!looping.is_empty(), "fixture has no back edge");
+    for b in looping {
+        assert!(
+            !live.live_in(BlockId(b as u32)).is_empty(),
+            "b{b} closes a loop but reports nothing live on entry"
+        );
+    }
+}

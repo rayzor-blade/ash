@@ -109,6 +109,7 @@ pub mod lower;
 pub mod module;
 pub mod passes;
 pub mod serialize;
+pub mod liveness;
 pub mod vectorize;
 pub mod verify;
 

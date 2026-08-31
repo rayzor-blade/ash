@@ -104,6 +104,30 @@ impl<'ctx> JITModule<'ctx> {
         (&marker as *const u8) as usize
     }
 
+    /// The loop safe point's epoch word.
+    ///
+    /// One word, reached two ways. A JIT asks the runtime for its address and
+    /// bakes it in. An object file cannot: it names the runtime's
+    /// `ash_fiber_poll_epoch` and lets the linker place it, which is the same
+    /// word at a different time.
+    fn fiber_poll_epoch_ptr(&self) -> Result<PointerValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.aot {
+            const SYMBOL: &str = "ash_fiber_poll_epoch";
+            let global = self.module.get_global(SYMBOL).unwrap_or_else(|| {
+                let g = self.module.add_global(self.context.i64_type(), None, SYMBOL);
+                g.set_linkage(inkwell::module::Linkage::External);
+                g
+            });
+            return Ok(global.as_pointer_value());
+        }
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(self.fiber_poll_epoch_address()? as u64, false)
+            .const_to_pointer(ptr_type))
+    }
+
     fn fiber_poll_epoch_address(&self) -> Result<usize> {
         let getter = self
             .native_function_resolver
@@ -195,10 +219,29 @@ impl<'ctx> JITModule<'ctx> {
         name: &str,
         func_type: FunctionType<'ctx>,
     ) -> FunctionValue<'ctx> {
+        self.add_body_function(name, func_type)
+    }
+
+    /// Create the LLVM function for one bytecode body.
+    ///
+    /// Linkage stays external here even under AOT, because this is also how a
+    /// not-yet-lowered callee is declared, and an internal declaration is
+    /// invalid IR. `finalize_aot_data` internalizes the ones that ended up
+    /// with a body.
+    fn add_body_function(
+        &self,
+        name: &str,
+        func_type: FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
         let f = self
             .module
             .add_function(name, func_type, Some(inkwell::module::Linkage::External));
-        self.stamp_host_cpu(f);
+        // Under AOT the object may be built for a machine that is not this
+        // one, and a host-CPU stamp would make it crash there rather than run
+        // slower. The target machine handed to `emit_object` decides instead.
+        if !self.aot {
+            self.stamp_host_cpu(f);
+        }
         f
     }
 
@@ -669,9 +712,19 @@ impl<'ctx> JITModule<'ctx> {
             self.add_pending_compilation(findex);
         }
 
-        self.compile_pending_functions_strict()?;
-        self.compile_function(findex)?;
-        self.compile_pending_functions_strict()?;
+        let lowered = self
+            .compile_pending_functions_strict()
+            .and_then(|()| self.compile_function(findex))
+            .and_then(|()| self.compile_pending_functions_strict());
+        if let Err(error) = lowered {
+            // A refused body is not an absent one. The emitter stops where it
+            // failed and leaves behind blocks with no terminator, which are
+            // invisible until the next middle-end run walks the module and
+            // dies inside SimplifyCFG -- far from the function that caused
+            // it. Sealing keeps the refusal local to the body that earned it.
+            self.seal_partial_bodies()?;
+            return Err(error);
+        }
 
         // Optimize before asking for the address, because asking is what
         // forces codegen. Without this the tiered LLVM tier shipped raw
@@ -681,7 +734,15 @@ impl<'ctx> JITModule<'ctx> {
         //
         // Scoped to this function and its callees: a promotion pays for the
         // function it is promoting, not for the whole module again.
-        {
+        //
+        // Not under AOT. There is no address to ask for, so nothing forces
+        // codegen per function, and running the module pipeline once per
+        // lowered body is both quadratic and destructive: it deletes the
+        // emitted data that no lowered body happens to reference YET, and the
+        // next body to want that type finds a handle pointing at freed
+        // memory. AOT optimizes once, after everything exists -- see
+        // `optimize_module`.
+        if !self.aot {
             let _phase = crate::profile::scope("llvm middle-end (promote)");
             let excluded = self.shield_trap_functions_from_optimization();
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
@@ -1351,9 +1412,7 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expect to get function type");
         let func_type = self.create_function_type(&type_fun)?;
 
-        let f_v = self.module.add_function(&f.name(), func_type, None);
-        self.stamp_host_cpu(f_v);
-        Ok(f_v)
+        Ok(self.add_body_function(&f.name(), func_type))
     }
 
     fn load_function_arguments(
@@ -1547,11 +1606,7 @@ impl<'ctx> JITModule<'ctx> {
             let slot = self
                 .builder
                 .build_alloca(self.context.i64_type(), "air_fiber_poll_epoch")?;
-            let address = self.context.i64_type().const_int(
-                self.fiber_poll_epoch_address()? as u64,
-                false,
-            );
-            let pointer = address.const_to_pointer(self.context.ptr_type(AddressSpace::default()));
+            let pointer = self.fiber_poll_epoch_ptr()?;
             let initial = self.builder.build_load(
                 self.context.i64_type(),
                 pointer,
@@ -2464,11 +2519,7 @@ impl<'ctx> JITModule<'ctx> {
                     .basic()
                     .ok_or_else(|| anyhow!("hlp_setup_trap_jit returned void"))?
                     .into_pointer_value();
-                let setjmp_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(crate::hl::_setjmp as usize as u64, false)
-                    .const_to_pointer(ptr_type);
+                let setjmp_ptr = self.setjmp_ptr()?;
                 let setjmp = self.builder.build_indirect_call(
                     i32_type.fn_type(&[ptr_type.into()], false),
                     setjmp_ptr,
@@ -2631,6 +2682,21 @@ impl<'ctx> JITModule<'ctx> {
             return Ok(*type_);
         }
         let kind = self.types_[type_index].clone().kind;
+
+        if self.aot {
+            // `emit_aot_data` converted every type index before any body was
+            // lowered, so the descriptor exists; what must not happen is the
+            // fallback below, which would fabricate one in this process's heap
+            // and bake its address into an object that runs elsewhere.
+            let descriptor = self
+                .c_ptr_to_type_index
+                .iter()
+                .find_map(|(&ptr, &index)| (index == type_index).then_some(ptr as *mut hl_type))
+                .ok_or_else(|| anyhow!("type {type_index} has no emitted descriptor"))?;
+            let value = self.aot_type_ptr(descriptor)?;
+            self.initialized_type_cache.insert(type_index, value.into());
+            return Ok(value.into());
+        }
 
         // Function, nullable, reference, and packed descriptors contain a
         // type-specific pointer in their union. Reusing the descriptor built
@@ -4019,12 +4085,7 @@ impl<'ctx> JITModule<'ctx> {
 
                 // Load callee address from functions_ptrs[findex] at runtime
                 let findex = fun.0;
-                let fun_addr_slot = self.function_slot_address(findex)?;
-                let fun_addr_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(fun_addr_slot, false)
-                    .const_to_pointer(ptr_type);
+                let fun_addr_ptr = self.function_slot_ptr(findex)?;
                 let fun_addr = self
                     .builder
                     .build_load(ptr_type, fun_addr_ptr, "indirect_call_fn")?
@@ -5036,24 +5097,14 @@ impl<'ctx> JITModule<'ctx> {
 
                 // Load function address from functions_ptrs[findex] at runtime
                 let findex = fun.0 as usize;
-                let fun_addr_slot = self.function_slot_address(findex)?;
-                let fun_addr_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(fun_addr_slot, false)
-                    .const_to_pointer(ptr_type);
+                let fun_addr_ptr = self.function_slot_ptr(findex)?;
                 let fun_addr = self
                     .builder
                     .build_load(ptr_type, fun_addr_ptr, "static_closure_fun")?
                     .into_pointer_value();
 
                 // Get function type pointer (compile-time constant from func_types)
-                let type_ptr_val = self.func_types[findex] as u64;
-                let type_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(type_ptr_val, false)
-                    .const_to_pointer(ptr_type);
+                let type_ptr = self.func_type_ptr(findex)?;
 
                 // Call hlp_alloc_closure_void(type, fun_addr) -> *mut vclosure
                 let alloc_closure = self.declare_native(
@@ -5850,12 +5901,7 @@ impl<'ctx> JITModule<'ctx> {
                     .into_pointer_value();
 
                 // 2. Call _setjmp(buf_ptr) via indirect call (system function, not in stdlib)
-                let setjmp_addr = crate::hl::_setjmp as usize as u64;
-                let setjmp_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(setjmp_addr, false)
-                    .const_to_pointer(ptr_type);
+                let setjmp_ptr = self.setjmp_ptr()?;
                 let setjmp_fn_type = i32_type.fn_type(&[ptr_type.into()], false);
                 let setjmp_call = self.builder.build_indirect_call(
                     setjmp_fn_type,
@@ -5999,24 +6045,14 @@ impl<'ctx> JITModule<'ctx> {
                 let findex = fun.0 as usize;
 
                 // Load function address from functions_ptrs[findex]
-                let fun_addr_slot = self.function_slot_address(findex)?;
-                let fun_addr_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(fun_addr_slot, false)
-                    .const_to_pointer(ptr_type);
+                let fun_addr_ptr = self.function_slot_ptr(findex)?;
                 let fun_addr = self
                     .builder
                     .build_load(ptr_type, fun_addr_ptr, "inst_closure_fun")?
                     .into_pointer_value();
 
                 // This removes the first param (bound obj's type) from the fn signature
-                let func_type_ptr = self.func_types[findex] as u64;
-                let func_type_const = self
-                    .context
-                    .i64_type()
-                    .const_int(func_type_ptr, false)
-                    .const_to_pointer(ptr_type);
+                let func_type_const = self.func_type_ptr(findex)?;
                 // The METHOD's full type, unstripped: `hlp_alloc_closure_ptr`
                 // does the single strip itself, exactly as upstream's
                 // OInstanceClosure does (jit_emit.c passes
@@ -6080,12 +6116,7 @@ impl<'ctx> JITModule<'ctx> {
                         .build_load(ptr_type, registers[obj.0 as usize], "vclos_obj")?;
 
                 // Load function address from functions_ptrs[findex]
-                let fun_addr_slot = self.function_slot_address(findex)?;
-                let fun_addr_ptr = self
-                    .context
-                    .i64_type()
-                    .const_int(fun_addr_slot, false)
-                    .const_to_pointer(ptr_type);
+                let fun_addr_ptr = self.function_slot_ptr(findex)?;
                 let fun_addr = self
                     .builder
                     .build_load(ptr_type, fun_addr_ptr, "vclos_fun")?
@@ -6149,12 +6180,7 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                     .into_pointer_value();
 
-                let func_type_ptr = self.func_types[findex] as u64;
-                let func_type_const = self
-                    .context
-                    .i64_type()
-                    .const_int(func_type_ptr, false)
-                    .const_to_pointer(ptr_type);
+                let func_type_const = self.func_type_ptr(findex)?;
                 // Full method type; the allocator strips once. See
                 // OInstanceClosure above.
                 let closure_type: inkwell::values::BasicValueEnum = func_type_const.into();
@@ -6914,29 +6940,10 @@ impl<'ctx> JITModule<'ctx> {
             // cases), so `unreachable` here was a licence to miscompile a
             // path that runs. hlp_error longjmps to the active trap.
             Opcode::Assert => {
-                let hlp_error_addr = self
-                    .native_function_resolver
-                    .resolve_function("std", "hlp_error")
-                    .map_err(|e| anyhow!("cannot lower Assert (no hlp_error): {}", e))?
-                    as usize;
-                static ASSERT_MSG: std::sync::OnceLock<Vec<u16>> = std::sync::OnceLock::new();
-                let msg_addr = ASSERT_MSG
-                    .get_or_init(|| "assert".encode_utf16().chain(std::iter::once(0)).collect())
-                    .as_ptr() as u64;
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let err_fn_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
-                let err_ptr = self.builder.build_int_to_ptr(
-                    self.context
-                        .i64_type()
-                        .const_int(hlp_error_addr as u64, false),
-                    ptr_type,
-                    "hlp_error",
-                )?;
-                let msg_ptr = self.builder.build_int_to_ptr(
-                    self.context.i64_type().const_int(msg_addr, false),
-                    ptr_type,
-                    "assert_msg",
-                )?;
+                let err_ptr = self.error_function_ptr()?;
+                let msg_ptr = self.utf16_message("assert")?;
                 self.builder.build_indirect_call(
                     err_fn_type,
                     err_ptr,
@@ -7234,6 +7241,7 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.position_at_end(basic_block);
 
         // Embed the function address directly as inttoptr constant
+        self.reject_in_aot("a native caller thunk")?;
         let addr_int = self.context.i64_type().const_int(func_addr as u64, false);
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let func_ptr = self.builder.build_int_to_ptr(addr_int, ptr_type, "fptr")?;
@@ -7277,6 +7285,18 @@ impl<'ctx> JITModule<'ctx> {
         args: &[BasicMetadataValueEnum<'ctx>],
         name: &str,
     ) -> Result<Option<BasicValueEnum<'ctx>>> {
+        if self.aot {
+            // The guard exists to catch an interpreter stub sentinel reaching
+            // compiled code. An AOT binary has no interpreter to fall back
+            // to and no sentinels to catch: `ash_functions` holds emitted
+            // symbols or null, and a null is a body the compiler refused --
+            // faulting on it is the honest outcome, where routing it into a
+            // bridge that is not in the binary is not. Emitting the guard
+            // would also bake this compiler's own addresses into the object.
+            let call = self.builder.build_indirect_call(fn_type, fn_ptr, args, name)?;
+            return Ok(call.try_as_basic_value().basic());
+        }
+
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
         let f64_type = self.context.f64_type();
@@ -7632,6 +7652,194 @@ impl<'ctx> JITModule<'ctx> {
     /// snapshot vector: Cranelift and later LLVM installs update the shared
     /// `hl_module_context`. Loading this slot lets compiled callers and
     /// closures observe tier changes without being rebuilt.
+    /// Give every unterminated block in the module a terminator that reports
+    /// rather than one that guesses.
+    ///
+    /// Only a body whose lowering was abandoned has such a block, so this is
+    /// a no-op for every function that compiled. The sealed body traps
+    /// through `hlp_error`: a caller that reaches it says which function was
+    /// refused, where a bare `unreachable` would let the optimizer conclude
+    /// the call never happens and delete the code around it.
+    fn seal_partial_bodies(&mut self) -> Result<()> {
+        let saved = self.builder.get_insert_block();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let error_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
+
+        let unsealed: Vec<(FunctionValue<'ctx>, Vec<inkwell::basic_block::BasicBlock<'ctx>>)> =
+            self.module
+                .get_functions()
+                .filter_map(|function| {
+                    let open: Vec<_> = function
+                        .get_basic_blocks()
+                        .into_iter()
+                        .filter(|block| block.get_terminator().is_none())
+                        .collect();
+                    (!open.is_empty()).then_some((function, open))
+                })
+                .collect();
+
+        for (function, blocks) in unsealed {
+            let name = function.get_name().to_string_lossy().into_owned();
+            let message = self.utf16_message(&format!("Refused at compile time: {name}"))?;
+            let error = self.error_function_ptr()?;
+            for block in blocks {
+                self.builder.position_at_end(block);
+                self.builder
+                    .build_indirect_call(error_type, error, &[message.into()], "")?;
+                self.builder.build_unreachable()?;
+            }
+        }
+
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        Ok(())
+    }
+
+    /// `hlp_error`, as an address under the JIT and as a symbol under AOT.
+    fn error_function_ptr(&self) -> Result<PointerValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.aot {
+            const SYMBOL: &str = "hlp_error";
+            let function = self.module.get_function(SYMBOL).unwrap_or_else(|| {
+                self.module.add_function(
+                    SYMBOL,
+                    self.context.void_type().fn_type(&[ptr_type.into()], true),
+                    Some(inkwell::module::Linkage::External),
+                )
+            });
+            return Ok(function.as_global_value().as_pointer_value());
+        }
+        let address = self
+            .native_function_resolver
+            .resolve_function("std", "hlp_error")
+            .map_err(|e| anyhow!("cannot seal a refused body (no hlp_error): {}", e))?
+            as u64;
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(address, false)
+            .const_to_pointer(ptr_type))
+    }
+
+    /// A NUL-terminated UTF-16 message the emitted code can hand to
+    /// `hlp_error`: object data under AOT, a leaked buffer under the JIT.
+    fn utf16_message(&self, message: &str) -> Result<PointerValue<'ctx>> {
+        let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+        if self.aot {
+            let bytes: Vec<u8> = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
+            let global = self.module.add_global(
+                self.context.i8_type().array_type(bytes.len() as u32),
+                None,
+                "ash_message",
+            );
+            global.set_initializer(&self.context.const_string(&bytes, false));
+            global.set_linkage(inkwell::module::Linkage::Internal);
+            global.set_constant(true);
+            global.set_alignment(2);
+            return Ok(global.as_pointer_value());
+        }
+        let address = Box::leak(text.into_boxed_slice()).as_ptr() as u64;
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(address, false)
+            .const_to_pointer(self.context.ptr_type(AddressSpace::default())))
+    }
+
+    /// `setjmp`, as an address under the JIT and as a symbol under AOT.
+    ///
+    /// The C function is spelled `_setjmp`, and the IR name `_setjmp` reaches
+    /// it on both object formats that matter here: Mach-O prepends an
+    /// underscore, giving `__setjmp`, which is what libSystem exports, and
+    /// ELF does not, giving `_setjmp`, which is what libc exports.
+    fn setjmp_ptr(&self) -> Result<PointerValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.aot {
+            const SYMBOL: &str = "_setjmp";
+            let function = self.module.get_function(SYMBOL).unwrap_or_else(|| {
+                let declared = self.module.add_function(
+                    SYMBOL,
+                    self.context.i32_type().fn_type(&[ptr_type.into()], false),
+                    Some(inkwell::module::Linkage::External),
+                );
+                // The same attribute a C header gives `setjmp`. Call sites
+                // carry it too, but the declaration is what makes every pass
+                // that asks "does this function call something that returns
+                // twice" answer yes -- which is what keeps a value that is
+                // live across the jump in memory instead of in a register
+                // the longjmp path never restores.
+                declared.add_attribute(
+                    inkwell::attributes::AttributeLoc::Function,
+                    self.context.create_enum_attribute(
+                        inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+                        0,
+                    ),
+                );
+                declared
+            });
+            return Ok(function.as_global_value().as_pointer_value());
+        }
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(crate::hl::_setjmp as usize as u64, false)
+            .const_to_pointer(ptr_type))
+    }
+
+    /// Refuse to bake an address of this process into an object file.
+    ///
+    /// These are the sites that still resolve a pointer at compile time and
+    /// have no symbol to name it by. Under the JIT they are correct; under
+    /// AOT the address means nothing in the process that runs, and the
+    /// failure would be an object that links, runs, and reads whatever
+    /// happens to live there. Refusing the function instead leaves it out of
+    /// `ash_functions`, where a call through it faults immediately and the
+    /// compile reports which construct it could not lower.
+    fn reject_in_aot(&self, what: &str) -> Result<()> {
+        if self.aot {
+            return Err(anyhow!(
+                "cannot emit {what} ahead of time: it has no symbol, only an address in this process"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The address of `functions_ptrs[findex]`, as a value the emitted code
+    /// can use.
+    ///
+    /// Under the JIT that is this process's address for the slot. Under AOT
+    /// it is a constant offset into the emitted `ash_functions` table, since
+    /// nothing about this process's heap survives into the object file.
+    fn function_slot_ptr(&self, findex: usize) -> Result<PointerValue<'ctx>> {
+        if self.aot {
+            return self.aot_function_slot(findex);
+        }
+        let address = self.function_slot_address(findex)?;
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(address, false)
+            .const_to_pointer(self.context.ptr_type(AddressSpace::default())))
+    }
+
+    /// The per-findex `HFUN` descriptor, likewise as an address under the JIT
+    /// and as emitted object data under AOT.
+    fn func_type_ptr(&self, findex: usize) -> Result<PointerValue<'ctx>> {
+        let descriptor = *self
+            .func_types
+            .get(findex)
+            .ok_or_else(|| anyhow!("no function type for findex {findex}"))?;
+        if self.aot {
+            return self.aot_type_ptr(descriptor);
+        }
+        Ok(self
+            .context
+            .i64_type()
+            .const_int(descriptor as u64, false)
+            .const_to_pointer(self.context.ptr_type(AddressSpace::default())))
+    }
+
     fn function_slot_address(&self, findex: usize) -> Result<u64> {
         if let Some(shared) = self.shared_runtime.as_ref() {
             if !shared.module_ctx.is_null() {
@@ -7922,6 +8130,22 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expected to get function type");
         let func_type = self.create_function_type(&type_fun)?;
 
+        if self.aot {
+            // `std` primitives are plain `#[no_mangle]` exports of the runtime
+            // this object links against, so the symbol IS the name. An HDLL
+            // primitive is not: it is reached through a DEFINE_PRIM resolver
+            // in a shared library, and there is no shared library to load.
+            let clean = lib.strip_prefix('?').unwrap_or(lib);
+            if clean != "std" {
+                return Err(anyhow!(
+                    "cannot emit native {lib}@{} ahead of time: HDLL primitives resolve through dlopen",
+                    native_func.name
+                ));
+            }
+            let caller_name = format!("{}_{}_caller", lib, name);
+            return self.generate_native_caller_to_symbol(&caller_name, func_type, &name);
+        }
+
         let func_addr = match self.native_function_resolver.resolve_function(lib, &name) {
             Ok(addr) => addr as usize,
             Err(resolve_err) => {
@@ -7966,6 +8190,48 @@ impl<'ctx> JITModule<'ctx> {
     /// Invoking it throws an HL error ("Unresolved native lib@name") via
     /// hlp_error — matching interpreter semantics, where native resolution
     /// happens lazily at call time and only an executed call can fail.
+    /// The AOT counterpart of `generate_native_caller_with_addr`: the same
+    /// forwarding thunk, but calling a symbol instead of an address.
+    ///
+    /// A bare declaration would be simpler and is what this did first. It
+    /// does not survive: an unused declaration is dead, the module cleanup
+    /// deletes it, and the handle cached in `func_cache` is left dangling --
+    /// which surfaces as a fault inside `LLVMCountBasicBlocks` several
+    /// functions later. A thunk with external linkage is never dead, and the
+    /// inliner folds it into its callers anyway.
+    fn generate_native_caller_to_symbol(
+        &self,
+        caller_name: &str,
+        fn_type: FunctionType<'ctx>,
+        symbol: &str,
+    ) -> Result<FunctionValue<'ctx>> {
+        if let Some(existing) = self.module.get_function(caller_name) {
+            return Ok(existing);
+        }
+        let callee = self.module.get_function(symbol).unwrap_or_else(|| {
+            self.module
+                .add_function(symbol, fn_type, Some(inkwell::module::Linkage::External))
+        });
+
+        let saved_block = self.builder.get_insert_block();
+        let function = self.module.add_function(caller_name, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+
+        let args: Vec<BasicMetadataValueEnum> =
+            function.get_param_iter().map(|arg| arg.into()).collect();
+        let call = self.builder.build_call(callee, &args, "call")?;
+        match call.try_as_basic_value().basic() {
+            Some(value) => self.builder.build_return(Some(&value))?,
+            None => self.builder.build_return(None)?,
+        };
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
     fn generate_missing_native_trap(
         &self,
         lib: &str,
@@ -8288,7 +8554,7 @@ impl<'ctx> JITModule<'ctx> {
     /// optimization while being harder to reason about.
     ///
     /// Returns how many functions were excluded.
-    fn shield_trap_functions_from_optimization(&self) -> usize {
+    pub(crate) fn shield_trap_functions_from_optimization(&self) -> usize {
         let noinline = self.context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
             0,
@@ -8379,11 +8645,7 @@ impl<'ctx> JITModule<'ctx> {
             .basic()
             .unwrap()
             .into_pointer_value();
-        let setjmp_ptr = self
-            .context
-            .i64_type()
-            .const_int(crate::hl::_setjmp as usize as u64, false)
-            .const_to_pointer(ptr_type);
+        let setjmp_ptr = self.setjmp_ptr()?;
         let setjmp_call = self.builder.build_indirect_call(
             i32_type.fn_type(&[ptr_type.into()], false),
             setjmp_ptr,

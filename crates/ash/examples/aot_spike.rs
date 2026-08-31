@@ -25,8 +25,7 @@ fn main() -> Result<()> {
 
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
-    let mut jit = ash_core::llvm::module::JITModule::new(context, p);
-    jit.set_aot(true);
+    let mut jit = ash_core::llvm::module::JITModule::new_aot(context, p)?;
 
     let mut ok = 0usize;
     let mut failed: Vec<(usize, String)> = Vec::new();
@@ -40,6 +39,9 @@ fn main() -> Result<()> {
         if std::env::var("AOT_TRACE").is_ok() {
             eprintln!("lowering findex={fx}");
         }
+        if let Ok(dir) = std::env::var("AOT_DUMP_IR") {
+            jit.write_ir(std::path::Path::new(&dir).join("before.ll").as_path())?;
+        }
         match jit.promote_function_strict(*fx) {
             Ok(_) => ok += 1,
             Err(e) => failed.push((*fx, format!("{e}"))),
@@ -50,6 +52,13 @@ fn main() -> Result<()> {
         println!("   findex={fx}: {}", e.lines().next().unwrap_or(""));
     }
 
+    jit.finalize_aot_data()?;
+    jit.emit_main()?;
+    if std::env::var("AOT_NO_OPT").is_err() {
+        jit.optimize_module()?;
+    }
+
+    jit.write_ir(std::path::Path::new(&out).with_extension("ll").as_path())?;
     let bytes = jit.emit_object(&triple, std::path::Path::new(&out))?;
     println!("emitted {out} for {triple} ({bytes} bytes)");
     println!("entrypoint findex = {}  symbol = {}",

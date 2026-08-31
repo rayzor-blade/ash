@@ -107,6 +107,15 @@ pub struct JITModule<'ctx> {
     pub(crate) pending_compilations: Vec<usize>,
     pub(crate) c_ptr_to_type_index: HashMap<usize, usize>,
     pub(crate) hl_type_struct_type: Option<StructType<'ctx>>,
+    /// AOT only: the object-data counterparts of the pointers a JIT bakes in
+    /// as integer constants. Keyed by the compiler-side address, so a lookup
+    /// answers "what symbol names this pointer in the emitted object".
+    pub(crate) aot_types: HashMap<usize, GlobalValue<'ctx>>,
+    pub(crate) aot_strings: HashMap<usize, GlobalValue<'ctx>>,
+    pub(crate) aot_globals: Option<GlobalValue<'ctx>>,
+    pub(crate) aot_functions: Option<GlobalValue<'ctx>>,
+    pub(crate) aot_function_types: Option<GlobalValue<'ctx>>,
+    pub(crate) aot_module_ctx: Option<GlobalValue<'ctx>>,
     /// Function pointer table indexed by findex, used by hl_module_context.
     pub(crate) functions_ptrs: Vec<*mut c_void>,
     pub(crate) shared_runtime: Option<SharedRuntimeHandles>,
@@ -217,6 +226,20 @@ fn timing_enabled() -> bool {
 
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
+        Self::build(context, path, false).expect("Failed to build JIT module")
+    }
+
+    /// The same construction, with every pointer the lowering needs expressed
+    /// as a symbol rather than as an address in this process.
+    ///
+    /// AOT has to be decided here rather than switched on afterwards: the
+    /// entrypoint is compiled during construction, and a body lowered before
+    /// the switch would already have an address baked into it.
+    pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
+        Self::build(context, path, true)
+    }
+
+    fn build(context: &'ctx Context, path: &Path, aot: bool) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
         crate::native_lib::choose_std_linkage(path);
@@ -265,10 +288,16 @@ impl<'ctx> JITModule<'ctx> {
             c_ptr_to_type_index: HashMap::new(),
             func_types: Vec::new(),
             hl_type_struct_type: None,
+            aot_types: HashMap::new(),
+            aot_strings: HashMap::new(),
+            aot_globals: None,
+            aot_functions: None,
+            aot_function_types: None,
+            aot_module_ctx: None,
             functions_ptrs: Vec::new(),
             shared_runtime: None,
             hot_reload: false,
-            aot: false,
+            aot,
             lazy_compilation: false,
             current_findex: usize::MAX,
         };
@@ -305,19 +334,37 @@ impl<'ctx> JITModule<'ctx> {
         phase_timer!(timing, "init_indexes", t);
         t = std::time::Instant::now();
 
+        // The type table, the global slots and the function tables have to
+        // exist as object data before any body is lowered, because lowering
+        // is what asks for pointers into them.
+        if aot {
+            module.emit_aot_data()?;
+            phase_timer!(timing, "emit_aot_data", t);
+            t = std::time::Instant::now();
+        }
+
         module
             .compile_entrypoint()
             .expect("Failed to compile entrypoint");
         phase_timer!(timing, "compile entrypoint (AIR v2 -> LLVM)", t);
         t = std::time::Instant::now();
 
-        module
-            .init_constants()
-            .expect("Failed to initialize constants");
-        phase_timer!(timing, "init_constants", t);
+        // A JIT can allocate the constant pool now, because the program runs
+        // in this process. An object file cannot: the allocation has to
+        // happen wherever the object eventually runs, so AOT emits the same
+        // work as startup code instead of performing it.
+        if aot {
+            module.emit_module_init()?;
+            phase_timer!(timing, "emit_module_init", t);
+        } else {
+            module
+                .init_constants()
+                .expect("Failed to initialize constants");
+            phase_timer!(timing, "init_constants", t);
+        }
 
         module.register_profile_names();
-        module
+        Ok(module)
     }
 
     /// Teach the profiler this module's findex → name mapping, so sampled
@@ -513,10 +560,6 @@ impl<'ctx> JITModule<'ctx> {
             .unwrap_or_else(|| format!("Fun_{fx}"))
     }
 
-    pub fn set_aot(&mut self, enabled: bool) {
-        self.aot = enabled;
-    }
-
     /// Write this module as an object file for `triple`, the AOT counterpart
     /// of `execution_engine.get_function_address`. The lowering above is
     /// target-independent; only this tail and `declare_native` are not.
@@ -639,6 +682,12 @@ impl<'ctx> JITModule<'ctx> {
             c_ptr_to_type_index: HashMap::new(),
             func_types: Vec::new(),
             hl_type_struct_type: None,
+            aot_types: HashMap::new(),
+            aot_strings: HashMap::new(),
+            aot_globals: None,
+            aot_functions: None,
+            aot_function_types: None,
+            aot_module_ctx: None,
             functions_ptrs: Vec::new(),
             shared_runtime: Some(shared.clone()),
             hot_reload: false,

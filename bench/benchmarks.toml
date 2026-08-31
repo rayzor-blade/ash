@@ -119,6 +119,11 @@ description = "Mandelbrot 298x298, 1000 iterations."
 checksums = [
   { value = "22816350", label = "unfused" },
   { value = "22825041", label = "fused" },
+  # The same AIR-era divergence already recorded on the full-size row below:
+  # the `Fma` peephole forms fused ops on scalars and the LLVM tier then
+  # contracts the mul/add pairs it left behind. Measured on the whole-module
+  # LLVM tier; the accepted set here was never updated when mandelbrot's was.
+  { value = "22825063", label = "fused-air-llvm" },
 ]
 
 [[bench]]

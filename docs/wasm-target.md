@@ -60,35 +60,94 @@ inlinable at the allocation site and the bump folds into the caller. On
 binary_trees that body alone is ~12% of the run. The same argument applies to
 the closure guards that LICM could not hoist past a call boundary.
 
-## AOT has two halves; the code half is done
+## AOT works end to end
 
-Proven on bench_fib (f5b8d7d): 332/332 functions lowered, a 147KB Mach-O
-object with 370 defined symbols and 23 undefined ones — all `hlp_*`/`hl_*` —
-linking against `libash_std.a` into a 780KB binary that runs. That is the
-**code half**, and it needed only a fork at the tail plus two corrections
-(natives as `External` declarations; one module rather than a promo module
-per function).
+Four programs — `bench_fib`, `test_basic`, `test_stdlib`, `bench_deltablue` —
+compile to native objects, link against `libash_std.a`, and print **byte for
+byte what the JIT prints**. `tools/aot/smoke.sh` is that check; it gates on the
+diff, not on the exit status, because a module that starts and runs and prints
+something slightly different is the failure worth catching. No C compiler and
+no C source is in the path: `clang` appears only as the driver that knows where
+crt and libc live.
 
-The binary does not print, and the reason is the **data half**, which is the
-larger piece:
+    bench_fib      OK (lowered 332/332)
+    test_basic     OK (lowered 335/335)
+    test_stdlib    OK (lowered 387/387)
+    bench_deltablue OK (lowered 407/407)
 
-* **The type table is built in this process.** `c_types.rs` materialises
-  `hl_type` structures with `Box::into_raw`/`Box::leak` and the JIT bakes
-  their addresses into the IR as integer constants. An AOT object must emit
-  those structures as *data with relocations* instead — the type table becomes
-  part of the object, not part of the compiling process's heap.
-* **The constant pool is allocated at compile time.** `init_constants` calls
-  `hlp_alloc_obj` and `hlp_gc_register_root` *now*, in the JIT, and stores the
-  resulting pointers into globals. AOT must instead EMIT code that performs
-  those calls at startup: allocate, register, fill fields, store to global.
-* **Globals** likewise become emitted data rather than a `globals_data` array
-  in the compiler.
+### The code half
 
-This is precisely the work HL/C does by writing C data tables, and it is why
-its output needs a C compiler. We emit the same information as object data
-directly. It is also **exactly the work wasm needs** — a wasm module has no
-access to the compiler's heap either — so the data half is shared and should
-be built once, against the native target where the debugger works.
+A fork at the tail — `emit_object` where the JIT calls
+`get_function_address` — plus two corrections: natives become `External`
+declarations behind a forwarding thunk rather than baked addresses, and
+everything lowers into ONE module instead of a promo module per function.
+
+Every remaining site that resolved a pointer at compile time had to become a
+symbol or a refusal, and the list is short enough to state: type descriptors,
+`functions_ptrs` slots, per-findex `HFUN` descriptors, the fiber poll epoch,
+`setjmp`, and `hlp_error`. What could not become a symbol fails the function
+rather than emitting an address — `reject_in_aot`. A refused body is then
+*sealed*: the emitter stops where it failed and leaves blocks with no
+terminator behind, which are invisible until the next middle-end run walks the
+module and dies inside `SimplifyCFG`, far from the cause.
+
+### The data half
+
+* **The type table is emitted as object data.** `aot_data.rs` walks the type
+  graph the compiler already built in memory and writes an LLVM global per
+  node, so an AOT module cannot disagree with the JIT about what the table
+  contains — there is only one builder. Layouts are checked against
+  `size_of` before anything is written; a silent drift here would be an object
+  that links, runs, and reads the wrong words.
+* **The constant pool is emitted as startup code.** `init_constants` allocates
+  and fills in the compiling process; `emit_module_init` emits the identical
+  sequence as `ash_module_init`, reading field offsets from
+  `hlp_get_obj_rt` at startup rather than baking them, because computing them
+  twice is how the two come to disagree.
+* **Globals are `ash_globals`**, a real array in the object, published to the
+  collector with `hlp_gc_set_globals` before the first allocation.
+
+Three arrays anchor the result — `ash_globals`, `ash_functions`,
+`ash_function_types` — and they are what `hl_module_context` points at, so
+reflection, bindings and closure allocation reach the same tables they do
+under the JIT.
+
+### Two findings worth keeping
+
+**Symbols collide.** A bytecode function carries its Haxe name, and in an
+object file that name competes with libc. A Haxe method called `write` linked
+ahead of `libSystem`'s, and the runtime's own `println!` jumped into Haxe code
+and faulted before a single line came out. Every bytecode body is now internal;
+the object exports exactly `main` and `ash_module_init`. Internalizing happens
+after lowering, not at creation — a not-yet-lowered callee is declared through
+the same path, and an internal declaration is invalid IR.
+
+**The trap shield is not optional.** A trap lowers to `setjmp`, and C's rule
+applies to the IR: a local that is not in memory has an indeterminate value
+after the jump. `mem2reg` alone is enough — with the shield down, a nested
+try/catch reported "none" for an exception the inner handler did catch, while
+single-level catches still worked. The JIT raises this shield before every
+promotion; AOT optimizes once, at the end, and has to raise it there.
+
+AOT optimizes once rather than per function on purpose. There is no address to
+ask for, so nothing forces codegen per body, and running the module pipeline
+per lowered function is both quadratic and destructive: it deletes emitted data
+that no lowered body happens to reference *yet*, and the next body to want that
+type finds a handle pointing at freed memory.
+
+### What AOT still cannot do
+
+* **HDLL primitives.** They resolve through a `DEFINE_PRIM` resolver in a
+  shared library, and there is no shared library to load. Refused by name.
+* **Cross-compilation is untested.** The host-CPU stamp is suppressed under
+  AOT so the target machine handed to `emit_object` decides, but only the host
+  triple has been run.
+* **`main` ignores `argc`/`argv`.** Nothing forwards them to the program yet.
+
+This is the same information HL/C writes out as C data tables, which is why its
+output needs a C compiler and ours does not. It is also **exactly what wasm
+needs** — a wasm module has no access to the compiler's heap either — so it was
+built once, against the native target where a debugger still works.
 
 ## Route
 

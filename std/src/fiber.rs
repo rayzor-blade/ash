@@ -49,7 +49,15 @@ static COMPILED_WORKERS_ENABLED: AtomicBool = AtomicBool::new(false);
 /// logical-thread scheduling quantum elapsed, work reached a scheduler, or
 /// the GC requested a stop-the-world rendezvous. Generated loops therefore
 /// pay one read/compare instead of maintaining a counter on every backedge.
-static FIBER_POLL_EPOCH: AtomicU64 = AtomicU64::new(1);
+///
+/// Exported, and named rather than private, because a JIT and an AOT
+/// compiler need it differently: a JIT asks
+/// `hlp_fiber_poll_epoch_address` for the address and bakes it in, while an
+/// object file has to name it and let the linker place it. Both reach the
+/// same word.
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static ash_fiber_poll_epoch: AtomicU64 = AtomicU64::new(1);
 static PREEMPTOR_STARTED: OnceLock<()> = OnceLock::new();
 static PREEMPTOR_WAKE: LazyLock<(Mutex<()>, Condvar)> =
     LazyLock::new(|| (Mutex::new(()), Condvar::new()));
@@ -94,7 +102,7 @@ impl SchedulerEndpoint {
 /// point. The monotonically increasing value means one worker cannot consume
 /// another worker's request.
 pub(crate) fn request_fiber_poll() {
-    FIBER_POLL_EPOCH.fetch_add(1, Ordering::Release);
+    ash_fiber_poll_epoch.fetch_add(1, Ordering::Release);
 }
 
 /// Resolved once by each code generator. LLVM emits a monotonic atomic load;
@@ -103,7 +111,7 @@ pub(crate) fn request_fiber_poll() {
 /// made the safe point itself a hot-path bottleneck on Apple Silicon.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
-    FIBER_POLL_EPOCH.as_ptr()
+    ash_fiber_poll_epoch.as_ptr()
 }
 
 fn ensure_preemption_timer() {

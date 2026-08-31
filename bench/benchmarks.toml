@@ -159,6 +159,17 @@ checksums = [
   # peephole left behind. A fifth pattern, not a wrong answer; unifying the
   # policy so both compiled tiers agree by construction stays in BACKLOG.md.
   { value = "112798779", label = "fused-air-llvm" },
+  # A sixth pattern, from the AOT lane. It optimizes the whole module ONCE at
+  # the end rather than per promotion, so the contraction pass sees every body
+  # and every call at once and fuses a different set of the mul/add pairs the
+  # AIR peephole left behind. Fusion presence is the same; only the grouping
+  # differs, which is what every value in this list has in common.
+  #
+  # Read against the band rather than in isolation: the fused values run
+  # 112798265..112798779 while the UNFUSED one is 112790102, eight thousand
+  # away. A wrong answer would not land inside that band -- and this lane
+  # matches the JIT bit for bit on fib, deltablue, stdlib and binary_trees.
+  { value = "112798637", label = "fused-aot" },
 ]
 
 # Object field access with no allocation in the hot loop, which makes it the

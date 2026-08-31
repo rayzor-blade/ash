@@ -113,12 +113,8 @@ impl<'ctx> JITModule<'ctx> {
     fn fiber_poll_epoch_ptr(&self) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         if self.aot {
-            const SYMBOL: &str = "ash_fiber_poll_epoch";
-            let global = self.module.get_global(SYMBOL).unwrap_or_else(|| {
-                let g = self.module.add_global(self.context.i64_type(), None, SYMBOL);
-                g.set_linkage(inkwell::module::Linkage::External);
-                g
-            });
+            let global =
+                self.aot_runtime_global("ash_fiber_poll_epoch", self.context.i64_type());
             return Ok(global.as_pointer_value());
         }
         Ok(self
@@ -172,14 +168,7 @@ impl<'ctx> JITModule<'ctx> {
         // this module" -- it is orthogonal to static vs dynamic linking, and
         // the AOT link is static.
         if self.aot {
-            if let Some(f) = self.module.get_function(name) {
-                return f;
-            }
-            return self.module.add_function(
-                name,
-                fn_type,
-                Some(inkwell::module::Linkage::External),
-            );
+            return self.aot_runtime_fn(name, fn_type);
         }
 
         let func_addr = self
@@ -7700,15 +7689,11 @@ impl<'ctx> JITModule<'ctx> {
     fn error_function_ptr(&self) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         if self.aot {
-            const SYMBOL: &str = "hlp_error";
-            let function = self.module.get_function(SYMBOL).unwrap_or_else(|| {
-                self.module.add_function(
-                    SYMBOL,
-                    self.context.void_type().fn_type(&[ptr_type.into()], true),
-                    Some(inkwell::module::Linkage::External),
-                )
-            });
-            return Ok(function.as_global_value().as_pointer_value());
+            let signature = self.context.void_type().fn_type(&[ptr_type.into()], true);
+            return Ok(self
+                .aot_runtime_fn("hlp_error", signature)
+                .as_global_value()
+                .as_pointer_value());
         }
         let address = self
             .native_function_resolver
@@ -7825,14 +7810,29 @@ impl<'ctx> JITModule<'ctx> {
 
     /// The per-findex `HFUN` descriptor, likewise as an address under the JIT
     /// and as emitted object data under AOT.
-    fn func_type_ptr(&self, findex: usize) -> Result<PointerValue<'ctx>> {
+    fn func_type_ptr(&mut self, findex: usize) -> Result<PointerValue<'ctx>> {
+        if self.aot {
+            // Use the TYPE TABLE's descriptor, not `func_types[findex]`.
+            //
+            // They describe the same function type and are two different
+            // allocations of it, which is invisible until something compares
+            // them by pointer. A closure call does exactly that: it checks
+            // the closure's own type against `get_initialized_type(type_idx)`
+            // and only falls back to the structural `hlp_same_type` walk when
+            // they differ. Building the closure from the other descriptor
+            // made that check fail every time, so bench_closure_call ran a
+            // recursive type comparison inside a 100M-iteration loop.
+            let type_index = match self.findexes.get(&findex) {
+                Some(FuncPtr::Fun(f)) => f.type_.0,
+                Some(FuncPtr::Native(n)) => n.type_.0,
+                None => return Err(anyhow!("no function type for findex {findex}")),
+            };
+            return Ok(self.get_initialized_type(type_index)?.into_pointer_value());
+        }
         let descriptor = *self
             .func_types
             .get(findex)
             .ok_or_else(|| anyhow!("no function type for findex {findex}"))?;
-        if self.aot {
-            return self.aot_type_ptr(descriptor);
-        }
         Ok(self
             .context
             .i64_type()
@@ -8208,10 +8208,7 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(existing) = self.module.get_function(caller_name) {
             return Ok(existing);
         }
-        let callee = self.module.get_function(symbol).unwrap_or_else(|| {
-            self.module
-                .add_function(symbol, fn_type, Some(inkwell::module::Linkage::External))
-        });
+        let callee = self.aot_runtime_fn(symbol, fn_type);
 
         let saved_block = self.builder.get_insert_block();
         let function = self.module.add_function(caller_name, fn_type, None);

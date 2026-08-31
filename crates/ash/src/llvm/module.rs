@@ -572,11 +572,31 @@ impl<'ctx> JITModule<'ctx> {
         self.module.set_triple(&tt);
         let target = Target::from_triple(&tt)
             .map_err(|e| anyhow!("no target for {triple}: {e}"))?;
+
+        // Emitting for THIS machine means naming it. `generic` on x86-64 is
+        // baseline SSE2 -- no FMA3, no AVX2 -- and codegen for it cost nbody
+        // 3.9x against the same IR run by the JIT, which stamps the host CPU
+        // on every function. The middle end above already optimizes for the
+        // host, so a generic back end also leaves the two halves disagreeing
+        // about what the machine can do. Cross-compiling keeps `generic`,
+        // which is the only safe answer for a machine we cannot ask.
+        let host = inkwell::targets::TargetMachine::get_default_triple();
+        let native = tt == host;
+        let cpu = if native {
+            inkwell::targets::TargetMachine::get_host_cpu_name().to_string()
+        } else {
+            "generic".to_string()
+        };
+        let features = if native {
+            inkwell::targets::TargetMachine::get_host_cpu_features().to_string()
+        } else {
+            String::new()
+        };
         let machine = target
             .create_target_machine(
                 &tt,
-                "generic",
-                "",
+                &cpu,
+                &features,
                 inkwell::OptimizationLevel::Aggressive,
                 RelocMode::PIC,
                 CodeModel::Default,

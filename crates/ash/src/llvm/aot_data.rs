@@ -28,7 +28,7 @@
 
 use anyhow::{anyhow, Result};
 use inkwell::module::Linkage;
-use inkwell::values::{BasicValue, BasicValueEnum, GlobalValue, PointerValue};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::AddressSpace;
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -1127,6 +1127,53 @@ impl<'ctx> JITModule<'ctx> {
             .map_err(|e| anyhow!("write {}: {}", path.display(), e.to_string()))
     }
 
+    /// Declare a symbol that `libash_std.a` will supply, and mark it
+    /// non-preemptible.
+    ///
+    /// The default for an external symbol under PIC is that something could
+    /// interpose it, so every reference goes through the GOT and every call
+    /// through the PLT. For a runtime linked statically into this very binary
+    /// that indirection buys nothing and costs a great deal: the loop safe
+    /// point reads `ash_fiber_poll_epoch` once per iteration, and as a
+    /// preemptible symbol that read is a GOT load the optimizer may not hoist.
+    /// One closure_call object carried 140 such loads and 1362 PLT calls,
+    /// where the JIT -- which bakes absolute addresses -- pays neither.
+    ///
+    /// Hidden is right for `hlp_*`/`hl_*`/`ash_*` and wrong for libc: marking
+    /// a symbol the dynamic linker must supply, such as `_setjmp`, would fail
+    /// the link outright.
+    pub(crate) fn aot_runtime_fn(
+        &self,
+        name: &str,
+        signature: inkwell::types::FunctionType<'ctx>,
+    ) -> FunctionValue<'ctx> {
+        if let Some(existing) = self.module.get_function(name) {
+            return existing;
+        }
+        let function = self
+            .module
+            .add_function(name, signature, Some(Linkage::External));
+        function
+            .as_global_value()
+            .set_visibility(inkwell::GlobalVisibility::Hidden);
+        function
+    }
+
+    /// The data counterpart of `aot_runtime_fn`.
+    pub(crate) fn aot_runtime_global(
+        &self,
+        name: &str,
+        ty: impl inkwell::types::BasicType<'ctx>,
+    ) -> GlobalValue<'ctx> {
+        if let Some(existing) = self.module.get_global(name) {
+            return existing;
+        }
+        let global = self.module.add_global(ty, None, name);
+        global.set_linkage(Linkage::External);
+        global.set_visibility(inkwell::GlobalVisibility::Hidden);
+        global
+    }
+
     /// A runtime symbol, declared but not defined here. Calls through it use
     /// the caller's own signature, so a declaration another path made with a
     /// different shape cannot silently retype the call.
@@ -1135,10 +1182,8 @@ impl<'ctx> JITModule<'ctx> {
         name: &str,
         fallback: inkwell::types::FunctionType<'ctx>,
     ) -> PointerValue<'ctx> {
-        let function = self.module.get_function(name).unwrap_or_else(|| {
-            self.module
-                .add_function(name, fallback, Some(Linkage::External))
-        });
-        function.as_global_value().as_pointer_value()
+        self.aot_runtime_fn(name, fallback)
+            .as_global_value()
+            .as_pointer_value()
     }
 }

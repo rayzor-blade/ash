@@ -32,5 +32,12 @@ case "$(uname -s)" in
   *)      libs=(-lpthread -ldl -lm) ;;
 esac
 
-clang "$obj" "$runtime" -o "$out" "${libs[@]}"
+# Any C driver will do -- it is here for the crt files and the libc search
+# path, not to compile anything. $CC first so a cross build can say so.
+for candidate in "${CC:-}" cc clang gcc; do
+  [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1 && driver="$candidate" && break
+done
+[ -n "${driver:-}" ] || { echo "no C driver found (tried \$CC, cc, clang, gcc)" >&2; exit 1; }
+
+"$driver" "$obj" "$runtime" -o "$out" "${libs[@]}"
 echo "linked $out ($(stat -f%z "$out" 2>/dev/null || stat -c%s "$out") bytes) against $runtime"

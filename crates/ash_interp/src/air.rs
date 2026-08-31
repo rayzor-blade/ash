@@ -253,6 +253,7 @@ enum Body {
     Ready(&'static HLFunction),
     /// The pipeline refused this one; its raw opcodes run from here on.
     Raw,
+
 }
 
 /// Per-function optimized bodies, plus the module view they were lowered
@@ -278,6 +279,23 @@ pub struct Cache {
     refused: usize,
 }
 
+
+/// Whether a function with no back edge skips the AIR pipeline entirely.
+///
+/// Its work is bounded by how often it is CALLED, and running the whole pass
+/// pipeline to walk a body a few times costs more than walking it. A function
+/// WITH a back edge is always optimized: its cost is unbounded by call count,
+/// and dropping the pipeline there costs mandelbrot 3.5x.
+fn skip_loop_free() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| !std::env::var_os("ASH_AIR_ALL").is_some())
+}
+
+fn has_back_edge(f: &HLFunction) -> bool {
+    f.ops
+        .iter()
+        .any(|op| air::opcode_info::jump_offset(op).is_some_and(|d| d < 0))
+}
 
 impl Cache {
     /// Decide `func_idx`'s body, if it has not been decided already.
@@ -329,6 +347,32 @@ impl Cache {
         let (_, with_callees, without_callees) =
             self.module.expect("module cached just above");
         let raw = &bc.functions[func_idx];
+
+        // A function with no back edge cannot loop, so the only work it will
+        // ever do is proportional to how often it is CALLED -- and running the
+        // whole pass pipeline to interpret a body once costs more than
+        // interpreting it. Deltablue prepared 58 functions and compiled 22;
+        // the rest paid an optimizer to be walked a handful of times.
+        //
+        // A function WITH a back edge is left alone deliberately. Its cost is
+        // unbounded by call count, so deferring could lose an arbitrary amount
+        // -- dropping the pipeline entirely costs mandelbrot 3.5x. It is also
+        // the OSR-eligible shape: OSR enters at a loop header, so a loop-free
+        // body can never be an OSR target and deferring one cannot put the
+        // walker and a compiled entry on different AIR. That is the coupling
+        // that fails open, so the predicate is chosen to make it unreachable
+        // rather than to be checked for.
+        // Decided once, here, and never revised. An earlier attempt upgraded a
+        // deferred body when its call count crossed a threshold, and that
+        // corrupts: `body()` is consulted from `execute_opcode`, so swapping a
+        // function's body while an OUTER frame of it is still running changes
+        // the register layout under that frame. test_stdlib died with
+        // "Sub: incompatible types". Whatever is chosen for a function has to
+        // hold for the whole process.
+        if skip_loop_free() && !has_back_edge(raw) {
+            self.bodies[func_idx] = Body::Raw;
+            return;
+        }
         // A function OSR can enter keeps the inlined body, because that body is
         // what OSR compiles; everything else drops the inliner so its callees
         // stay compiled. See `air_pipeline::interpreter_config_for`.

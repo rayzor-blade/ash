@@ -38,7 +38,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HDLL_DIR = ROOT / "crates" / "ash" / "test" / "hdll"
 BUILD_DIR = HDLL_DIR / "build"
-BASELINE = HDLL_DIR / "baseline.json"
+# Per platform. The corpus links real shared libraries and runs real
+# collections, so a row's outcome is a property of the OS as much as of ash --
+# recording one platform's answers and asserting them on another reports every
+# difference as a regression, which is what a macOS baseline did to the first
+# Linux run.
+BASELINE = HDLL_DIR / f"baseline.{platform.system().lower()}.json"
 IS_DARWIN = platform.system() == "Darwin"
 SHLIB = "libhl.dylib" if IS_DARWIN else "libhl.so"
 
@@ -180,12 +185,20 @@ def main() -> int:
         for root in c["roots"]:
             if only_roots and root not in only_roots:
                 continue
-            row = []
+            row, why = [], []
             for mode in modes:
                 status, out = run_case(c, root, mode, ash, args.timeout)
                 results[f"{c['name']}/{root}/{mode}"] = {"status": status, "output": out}
                 row.append(f"{mode}={status}")
+                if status not in ("PASS", "NOMARK") and out:
+                    first = next((l for l in out.splitlines() if l.strip()), "")
+                    if first and first not in why:
+                        why.append(first)
             print(f"{c['name']:<{width}}  root={root:<6}  " + "  ".join(row))
+            # A status alone cannot be acted on from a CI log. One line of what
+            # the program actually said usually can.
+            for line in why[:2]:
+                print(f"{'':<{width}}    | {line[:150]}")
 
     if args.json:
         Path(args.json).write_text(json.dumps(results, indent=2, sort_keys=True))
@@ -197,7 +210,12 @@ def main() -> int:
         return 0
 
     if not BASELINE.exists():
-        print("\nno baseline; run with --update-baseline to record one")
+        # A first run on a platform is a measurement, not a verdict -- the same
+        # rule scripts/haxe_conformance.py follows. The matrix above is the
+        # useful output; a red X asserting one platform's answers on another is
+        # not.
+        print(f"\nno {BASELINE.name}; this platform has no recorded expectations yet.")
+        print("Record them with --update-baseline once the rows are understood.")
         return 0
 
     base = json.loads(BASELINE.read_text())

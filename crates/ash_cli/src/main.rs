@@ -29,6 +29,33 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Mode::Interp)]
     mode: Mode,
 
+    /// Compile to a native object file instead of running.
+    ///
+    /// Link it with tools/aot/link.sh to get a standalone binary that needs
+    /// no bytecode, no interpreter and no JIT at run time.
+    #[arg(long, value_name = "OUT.o")]
+    emit_aot: Option<PathBuf>,
+
+    /// Target triple for --emit-aot. Defaults to this machine.
+    ///
+    /// A non-native triple is cross-compiled for a generic CPU, because the
+    /// host's features cannot be assumed of a machine we cannot ask.
+    #[arg(long, value_name = "TRIPLE", requires = "emit_aot")]
+    target: Option<String>,
+
+    /// Devirtualise from a callsite profile when emitting (--emit-aot).
+    ///
+    /// With no value, reads <file>.prof beside the bytecode. Produce one by
+    /// running the program once with ASH_AOT_PROFILE_OUT set. The profile is
+    /// advisory: every guard it produces re-checks its target at run time, so
+    /// a stale one costs a compare and never an answer.
+    /// A value must be attached with `=`. Without that, `--pgo prog.hl` reads
+    /// as "the profile is prog.hl" and the program argument disappears, which
+    /// is a silent wrong answer rather than an error.
+    #[arg(long, value_name = "PROFILE", num_args = 0..=1, require_equals = true,
+          default_missing_value = "", requires = "emit_aot")]
+    pgo: Option<String>,
+
     /// Hot-call threshold for Cranelift promotion in hybrid mode
     #[arg(long, default_value_t = 100)]
     jit_threshold: u64,
@@ -96,6 +123,96 @@ enum Mode {
     Jit,
     /// Hybrid mode (interpreter with JIT tier promotion)
     Hybrid,
+}
+
+/// Compile the bytecode to a native object instead of running it.
+///
+/// The same lowering the JIT uses, stopped one step earlier: everything up to
+/// the middle end is target-independent, and only the tail differs -- an
+/// address to jump to for the JIT, a file for this. The object defines `main`
+/// and `ash_module_init` and imports the runtime by symbol, so linking it
+/// against libash_std.a produces a binary with no bytecode in it.
+fn emit_aot(
+    file: &std::path::Path,
+    out: &std::path::Path,
+    target: Option<String>,
+    pgo: Option<String>,
+    quiet: bool,
+) -> anyhow::Result<()> {
+    // A profile, if one was asked for. Advisory: a stale file costs a compare.
+    if let Some(pgo) = &pgo {
+        let path = if pgo.is_empty() {
+            file.with_extension("prof")
+        } else {
+            PathBuf::from(pgo)
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let n = ash_core::callsite_profile::load_profile(&text);
+                if !quiet {
+                    eprintln!("[ash] pgo: loaded {n} caller(s) from {}", path.display());
+                }
+            }
+            Err(e) => eprintln!("[ash] pgo: could not read {}: {e}", path.display()),
+        }
+    }
+
+    let triple = target.unwrap_or_else(|| {
+        inkwell::targets::TargetMachine::get_default_triple()
+            .as_str()
+            .to_string_lossy()
+            .into_owned()
+    });
+
+    // Leaked on purpose: the module borrows the context for as long as it
+    // exists, and this one lives until the process ends.
+    let context: &'static inkwell::context::Context =
+        Box::leak(Box::new(inkwell::context::Context::create()));
+    let mut jit = ash_core::llvm::module::JITModule::new_aot(context, file)?;
+
+    let findexes: Vec<usize> = jit
+        .bytecode_functions()
+        .iter()
+        .map(|f| f.findex as usize)
+        .collect();
+    let (mut lowered, mut refused) = (0usize, Vec::new());
+    for fx in &findexes {
+        match jit.promote_function_strict(*fx) {
+            Ok(_) => lowered += 1,
+            Err(e) => refused.push((*fx, format!("{e}"))),
+        }
+    }
+
+    jit.finalize_aot_data()?;
+    jit.emit_main()?;
+    jit.optimize_module()?;
+    let bytes = jit.emit_object(&triple, out)?;
+
+    if !quiet {
+        eprintln!(
+            "[ash] lowered {lowered}/{} functions, {} refused",
+            findexes.len(),
+            refused.len()
+        );
+        for (fx, e) in refused.iter().take(5) {
+            eprintln!("[ash]   findex={fx}: {}", e.lines().next().unwrap_or(""));
+        }
+        if pgo.is_some() {
+            let loaded = ash_core::callsite_profile::aot_profile_size();
+            let hits = ash_core::callsite_profile::aot_profile_hits();
+            if loaded > 0 && hits == 0 {
+                eprintln!(
+                    "[ash] pgo: WARNING none of the {loaded} profiled caller(s) matched \
+                     this bytecode -- the profile is stale, regenerate it"
+                );
+            } else if loaded > 0 {
+                eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
+            }
+        }
+        eprintln!("[ash] wrote {} ({bytes} bytes) for {triple}", out.display());
+        eprintln!("[ash] link it: tools/aot/link.sh {}", out.display());
+    }
+    Ok(())
 }
 
 /// Whether the crash handler should attempt a (deliberately unsafe) backtrace.
@@ -831,6 +948,16 @@ fn run() -> Result<()> {
                 return Ok(());
             }
         }
+    }
+
+    if let Some(out) = cli.emit_aot.clone() {
+        return emit_aot(
+            &hl_path,
+            &out,
+            cli.target.clone(),
+            cli.pgo.clone(),
+            cli.quiet,
+        );
     }
 
     match cli.mode {

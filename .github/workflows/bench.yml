@@ -301,13 +301,12 @@ jobs:
             --gc-stats \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
-      # Profile-guided, via --aot-profile. The tiered lane gets a profile for
-      # free -- its interpreter watches every site before anything promotes --
-      # so emitting AOT without one was not neutrality, it was withholding the
-      # compiler's own information from one lane and not the other. The
-      # profiling run is charged to aot_build_ms, which the site already
-      # reports apart from run time, so its cost is visible rather than
-      # folded into the number.
+      # NOT profile-guided, deliberately. Marking the fiber poll `cold` gets
+      # the same number without one -- 101.4ms against the profile's 101.2ms
+      # on method_call -- so a profiling run would buy nothing here while
+      # costing build time and making this row no longer like-for-like with
+      # HashLink/C, which is not profile-guided. --pgo stays available on
+      # `ash --emit-aot` for anyone whose workload it does help.
       #
       # Runs after ash's own numbers, like the HL/C lane, so compiling a
       # native object cannot disturb the measurement it sits beside. Only the
@@ -322,7 +321,6 @@ jobs:
             ./scripts/aot_bench.py \
               --benchmarks "${{ matrix.bench }}" \
               --lanes ash-aot \
-              --aot-profile \
               --iterations 7 \
               --warmups 1 \
               --out "/tmp/aot-full-${{ matrix.bench }}.json" \

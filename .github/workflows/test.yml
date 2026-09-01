@@ -82,3 +82,42 @@ jobs:
 
       - name: Compare exports against DEFINE_PRIM
         run: ./scripts/check_primitive_exports.sh /tmp/hashlink
+
+  hdll-callbacks:
+    name: hdll callback corpus
+    runs-on: ubuntu-24.04
+    env:
+      HAXE_VERSION: "4.3.4"
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - uses: krdlab/setup-haxe@v1
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install LLVM 21 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+
+      # The corpus runs the real `ash` binary against real .hdll shared
+      # libraries, so both halves have to exist before it can say anything.
+      - name: Build the runtime
+        run: |
+          cargo build -p ash_std
+          cargo build -p ash
+
+      - name: Run the callback corpus
+        run: python3 scripts/hdll_callbacks.py --timeout 60

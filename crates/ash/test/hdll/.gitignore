@@ -1,0 +1,5 @@
+# Everything the harness builds. Sources and the recorded baseline are tracked;
+# the .hl bytecode and .hdll shared libraries are not, because they are
+# platform-specific and go stale silently -- a fixture running yesterday's
+# runtime reports yesterday's answer.
+build/

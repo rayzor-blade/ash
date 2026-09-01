@@ -1,0 +1,156 @@
+# The HDLL callback corpus.
+#
+# Every case is a Haxe program that hands a closure to a C library, lets the
+# collector run, and then has the LIBRARY call it back through hl_dyn_call.
+# That is the shape ash got wrong twice -- once in hl_dyn_call's ABI and once
+# in hl_add_root's contract -- and neither defect is reachable from a Rust
+# unit test, because both live on the boundary a real hdll crosses.
+#
+# `roots` selects the CBn_ROOT switch each harness reads:
+#   none    the library keeps a bare vclosure* in malloc'd memory and declares
+#           nothing. Whether this survives is not contractual -- a 32-byte
+#           closure often lands in a block sweep happens to retain -- so these
+#           rows are recorded, not required.
+#   slot    hl_add_root(&stash->cb), the spelling upstream documents and every
+#           real hdll uses. These rows are the contract.
+#   object  hl_add_root(stash->cb). Upstream has no such form; ash accepted it
+#           until the root path was made unconditional, so these rows exist to
+#           pin down what it does now rather than to demand anything.
+#
+# Run with scripts/hdll_callbacks.py; see that file for how a row is judged.
+
+[[case]]
+name = "cb0"
+class = "Cb0"
+lib = "cb0"
+env_prefix = "CB0"   # the CBn_* switches this library reads
+purpose = "control: static fn taking one Int, stored in malloc'd memory, invoked after churn"
+roots = ["none", "slot", "object"]
+
+[[case]]
+name = "cb0b"
+class = "Cb0b"
+lib = "cb0"
+env_prefix = "CB0"   # the CBn_* switches this library reads
+purpose = "as cb0, but handed over from a helper frame that returns, so no live Haxe register holds it"
+roots = ["none", "slot", "object"]
+
+[[case]]
+name = "cb2"
+class = "TestHdllCb2"
+lib = "cb2test"
+env_prefix = "CB2"   # the CBn_* switches this library reads
+purpose = "static functions with MANY arguments (6..10), exercising the arg-packing path"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb3"
+class = "TestHdllCb3"
+lib = "cb3test"
+env_prefix = "CB3"   # the CBn_* switches this library reads
+purpose = "mixed scalar arguments (Int / Float / Bool) through hl_dyn_call"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb4"
+class = "Cb4"
+lib = "cb4"
+env_prefix = "CB4"   # the CBn_* switches this library reads
+purpose = "String and Bytes arguments -- pointer-typed values that must survive boxing"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb5"
+class = "Cb5"
+lib = "cb5test"
+env_prefix = "CB5"   # the CBn_* switches this library reads
+purpose = "a class instance passed through Dynamic to a Haxe callback"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb6"
+class = "Cb6"
+lib = "cb6"
+env_prefix = "CB6"   # the CBn_* switches this library reads
+purpose = "the callback RETURNS A STRING, so the return value itself needs rooting"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb7"
+class = "Cb7"
+lib = "cb7test"
+env_prefix = "CB7"   # the CBn_* switches this library reads
+purpose = "closures returning Dynamic, called from native code"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb8"
+class = "Cb8"
+lib = "cb8test"
+env_prefix = "CB8"   # the CBn_* switches this library reads
+purpose = "INSTANCE METHOD (bound) closures -- hl_dyn_call must prepend the receiver"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb9"
+class = "Cb9"
+lib = "cb9test"
+env_prefix = "CB9"   # the CBn_* switches this library reads
+purpose = "an anonymous lambda CAPTURING LOCALS, whose captured environment must stay live"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb10"
+class = "Cb10"
+lib = "cb10test"
+env_prefix = "CB10"   # the CBn_* switches this library reads
+purpose = "closure stored by native code, then called after a collection"
+roots = ["none", "slot", "object"]
+
+[[case]]
+name = "cb11"
+class = "Cb11"
+lib = "cb11test"
+env_prefix = "CB11"   # the CBn_* switches this library reads
+purpose = "closure held only by native code across an explicit major collection"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb12"
+class = "Cb12"
+lib = "cb12test"
+env_prefix = "CB12"   # the CBn_* switches this library reads
+purpose = "two closures stored natively and called INTERLEAVED"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb13"
+class = "Cb13"
+lib = "cb13test"
+env_prefix = "CB13"   # the CBn_* switches this library reads
+purpose = "closure called repeatedly from a native loop"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb14"
+class = "Cb14"
+lib = "cb14test"
+env_prefix = "CB14"   # the CBn_* switches this library reads
+purpose = "a FOREIGN native thread calls hl_dyn_call -- the thread has no ash fiber identity"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cb15"
+class = "Cb15"
+lib = "cb15test"
+env_prefix = "CB15"   # the CBn_* switches this library reads
+purpose = "closure passed, native returns, Haxe drops its own reference"
+roots = ["none", "slot"]
+
+[[case]]
+name = "cbtest"
+class = "TestHdllCb"
+lib = "cbtest"
+env_prefix = "CBTEST"   # the CBn_* switches this library reads
+purpose = "minimal end-to-end hl_dyn_call callback"
+roots = ["none", "slot"]

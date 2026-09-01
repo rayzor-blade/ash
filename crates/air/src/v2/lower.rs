@@ -253,6 +253,24 @@ pub fn lower_with(
         if is_block_ender(op) && i + 1 < n && reachable[i + 1] {
             leader[i + 1] = true;
         }
+        // ASH_AIR_SPLIT_CALLS=1: end a block after every call, so the pc a
+        // frame resumes at when its callee returns begins a block.
+        //
+        // OSR can only enter compiled code at a block start -- compile_osr_entry
+        // rejects anything else -- and calls are instructions rather than
+        // terminators, so a frame sitting between two recursive calls is never
+        // at one. That is the whole reason a recursing frame cannot leave the
+        // interpreter: measured on bench_fib, the analysis offered block pcs
+        // [0, 2, 3] with no refusals while the resume point was pc 6.
+        //
+        // Off by default. This renumbers every block in every function, and OSR
+        // transfers BY POSITION through ser.block_pcs -- a walker and an OSR
+        // entry that disagree produce wrong values silently, which has happened
+        // in this codebase before. The flag exists so the change can be proven
+        // output-identical before anything depends on it.
+        if split_calls() && is_call(op) && i + 1 < n && reachable[i + 1] {
+            leader[i + 1] = true;
+        }
         for t in op_jump_targets(op, i)? {
             if reachable[t] {
                 leader[t] = true;
@@ -1508,6 +1526,30 @@ fn cond_jump_offset(op: &Opcode) -> Option<i32> {
 }
 
 /// Ops that end their basic block.
+/// Whether to end a block after each call (`ASH_AIR_SPLIT_CALLS`).
+fn split_calls() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("ASH_AIR_SPLIT_CALLS").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
+/// A call in the HL opcode stream, whose resume point is the following pc.
+fn is_call(op: &Opcode) -> bool {
+    matches!(
+        op,
+        Opcode::Call0 { .. }
+            | Opcode::Call1 { .. }
+            | Opcode::Call2 { .. }
+            | Opcode::Call3 { .. }
+            | Opcode::Call4 { .. }
+            | Opcode::CallN { .. }
+            | Opcode::CallMethod { .. }
+            | Opcode::CallThis { .. }
+            | Opcode::CallClosure { .. }
+    )
+}
+
 fn is_block_ender(op: &Opcode) -> bool {
     cond_jump_offset(op).is_some()
         || matches!(

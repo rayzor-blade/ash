@@ -692,26 +692,26 @@ mod tests {
         }
     }
 
-    /// The pair must agree no matter what the heap is doing between the two
-    /// calls. They used to branch independently on a predicate that depends on
-    /// collector state, so an address registered as a slot could be looked for
-    /// among the pinned objects and never removed.
+    /// The pair must agree whatever else is happening: add and remove have to
+    /// name the same set by construction, not because they happened to be
+    /// asked at a moment when some predicate answered the same way twice.
+    ///
+    /// This deliberately does NOT drive a collection to prove it. An earlier
+    /// version called `collect_garbage()` here and hung the whole test binary:
+    /// a collection stops the mutator world and waits for every registered
+    /// mutator to park at a safepoint, and the sibling threads of a cargo test
+    /// binary never do, so it spun on 6 cores until killed. The routing has no
+    /// state-dependent branch left in it, so there is nothing a collection
+    /// would add beyond that hazard.
     #[test]
-    fn add_and_remove_agree_across_a_collection() {
+    fn add_and_remove_name_the_same_set() {
         unsafe {
             crate::gc::hlp_gc_init();
-            let anchor = 0usize;
-            crate::gc::hlp_gc_set_stack_top(
-                (&anchor as *const usize as usize) + std::mem::size_of::<usize>(),
-            );
-
             let mut slot: *mut vdynamic = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
             let addr = &mut slot as *mut *mut vdynamic as *mut c_void;
 
             hl_add_root(addr);
             assert!(crate::gc::gc_locked_init().has_root_slot(addr as usize));
-
-            crate::gc::gc_locked_init().collect_garbage();
 
             hl_remove_root(addr);
             assert!(

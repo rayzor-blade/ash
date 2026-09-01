@@ -56,8 +56,13 @@ jobs:
       - name: Build the embedded stdlib
         run: cargo build -p ash_std
 
+      # Serialised on purpose. Tests that force a collection deadlock against
+      # tests that register themselves as GC mutators: the collector's
+      # stop-the-world waits for every registered mutator to park at a
+      # safepoint, and a test thread sitting inside a prim never does. It hangs
+      # roughly one run in seven, spinning every core until killed.
       - name: Test ash_std
-        run: cargo test -p ash_std
+        run: cargo test -p ash_std -- --test-threads=1
 
       - name: Test ash_core
         run: cargo test -p ash_core --lib

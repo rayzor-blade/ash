@@ -1,0 +1,84 @@
+name: test
+
+# The crate's own unit tests. Nothing ran them before: `parity_gate` runs the
+# parity INTEGRATION tests, and `lint` only compiles tests under clippy, so a
+# `#[test]` in ash_std could fail forever without anyone noticing.
+#
+# The second job is the one that would have caught the bug this file was
+# written for. A user reported `natives resolved, 1 missing: std@hlp_gc_stats`;
+# it turned out to be 47 of HashLink's 313 primitives, and no unit test can see
+# that class -- the VM resolves primitives BY NAME from the export table, so a
+# missing or misspelled `#[no_mangle]` is a runtime failure in someone else's
+# program, never a build error here.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+
+      - name: Install LLVM 21 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
+
+      # ash_std first: its cdylib is embedded by the other crates' build
+      # scripts, same ordering the lint job needs.
+      - name: Build the embedded stdlib
+        run: cargo build -p ash_std
+
+      - name: Test ash_std
+        run: cargo test -p ash_std
+
+      - name: Test ash_core
+        run: cargo test -p ash_core --lib
+
+  primitive-exports:
+    name: primitive export gap
+    runs-on: ubuntu-24.04
+    # No LLVM install: ash_std depends on neither inkwell nor libclang, and
+    # this job builds nothing else, so it stays a fast independent signal
+    # rather than paying the toolchain install a second time.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: exports
+
+      # Source only. The comparison is against what HashLink DECLARES, so
+      # nothing on this side needs building.
+      - name: Fetch the HashLink primitive surface
+        run: git clone --depth 1 https://github.com/HaxeFoundation/hashlink /tmp/hashlink
+
+      - name: Build the embedded stdlib
+        run: cargo build -p ash_std
+
+      - name: Compare exports against DEFINE_PRIM
+        run: ./scripts/check_primitive_exports.sh /tmp/hashlink

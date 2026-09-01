@@ -571,3 +571,114 @@ pub unsafe extern "C" fn uvszprintf(
 ) -> i32 {
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hl::vdynamic;
+
+    // Both of these are pure type assertions: they never run anything, they
+    // just fail to COMPILE if a signature drifts. That is the right shape of
+    // test here, because the failure they guard against is not a wrong answer
+    // -- it is a correctly-linked call with the arguments in the wrong places,
+    // which no amount of exercising the Rust side can detect.
+
+    #[test]
+    fn hl_dyn_call_keeps_the_abi_hdlls_are_compiled_against() {
+        // libhl's hl.h declares:
+        //   vdynamic *hl_dyn_call( vclosure *c, vdynamic **args, int nargs );
+        // ash shipped `(vdynamic *, varray *)` instead. An HDLL compiled
+        // against the real header links against that happily and then passes a
+        // closure where a vdynamic is expected, so the callee reads the arg
+        // count out of an object header. Binding the symbol to the declared
+        // type is what catches it.
+        let _: unsafe extern "C" fn(*mut hl::vclosure, *mut *mut vdynamic, i32) -> *mut vdynamic =
+            hl_dyn_call;
+    }
+
+    #[test]
+    fn root_registration_keeps_the_abi_hdlls_are_compiled_against() {
+        let _: unsafe extern "C" fn(*mut c_void) = hl_add_root;
+        let _: unsafe extern "C" fn(*mut c_void) = hl_remove_root;
+    }
+
+    /// `hl_add_root` is handed the ADDRESS OF A SLOT, not the object in it --
+    /// upstream keeps `void ***gc_roots` and marks `*gc_roots[i]`. Filing that
+    /// address as an object instead marks the stack address itself (which is
+    /// not in the heap, so it marks nothing) and leaves the real object
+    /// unreachable, freeing it out from under a native library that is holding
+    /// a reference it correctly registered.
+    #[test]
+    fn add_root_files_a_slot_address_as_a_slot() {
+        unsafe {
+            crate::gc::hlp_gc_init();
+            let obj = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
+            assert!(!obj.is_null(), "allocation failed, test cannot conclude");
+
+            let mut slot: *mut vdynamic = obj;
+            let slot_addr = &mut slot as *mut *mut vdynamic as *mut c_void;
+            hl_add_root(slot_addr);
+
+            let gc = crate::gc::gc_locked_init();
+            assert!(
+                gc.has_root_slot(slot_addr as usize),
+                "the slot address was not registered as a slot"
+            );
+            assert!(
+                !gc.has_persistent(slot_addr as *mut vdynamic),
+                "the slot address was filed as an object -- this is the bug: \
+                 marking would trace the stack address instead of the object"
+            );
+            drop(gc);
+
+            hl_remove_root(slot_addr);
+            assert!(!crate::gc::gc_locked_init().has_root_slot(slot_addr as usize));
+        }
+    }
+
+    /// The `is_gc_ptr` arm of `hl_add_root` is a compatibility hedge for ash's
+    /// own older callers, and it is much narrower than it looks: `is_gc_ptr`
+    /// requires the object's LINE MARK BIT to be set, and mark bits are only
+    /// set while a collection is marking. A freshly allocated object therefore
+    /// fails it, so in practice almost every caller lands on the slot arm.
+    ///
+    /// That is the correct default -- upstream's contract is a slot address --
+    /// but it is worth pinning down, because the arm reads as though it
+    /// discriminates on "is this an object" when it really discriminates on
+    /// "is this an object the collector has already marked".
+    #[test]
+    fn a_freshly_allocated_object_is_still_treated_as_a_slot() {
+        unsafe {
+            crate::gc::hlp_gc_init();
+            let obj = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
+            assert!(!obj.is_null(), "allocation failed, test cannot conclude");
+
+            hl_add_root(obj as *mut c_void);
+
+            let gc = crate::gc::gc_locked_init();
+            assert!(
+                !gc.has_persistent(obj),
+                "is_gc_ptr now accepts an unmarked object -- if that is \
+                 deliberate, the slot arm above is no longer the default path \
+                 and hl_add_root's contract needs re-reading"
+            );
+            assert!(gc.has_root_slot(obj as usize));
+            drop(gc);
+
+            hl_remove_root(obj as *mut c_void);
+            assert!(!crate::gc::gc_locked_init().has_root_slot(obj as usize));
+        }
+    }
+
+    /// Upstream returns early on NULL rather than registering it; a null slot
+    /// in the root set would be dereferenced on every mark.
+    #[test]
+    fn a_null_root_is_ignored_by_both_directions() {
+        unsafe {
+            crate::gc::hlp_gc_init();
+            hl_add_root(ptr::null_mut());
+            hl_remove_root(ptr::null_mut());
+            assert!(!crate::gc::gc_locked_init().has_root_slot(0));
+        }
+    }
+}

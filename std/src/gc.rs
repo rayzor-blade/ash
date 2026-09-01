@@ -3487,6 +3487,19 @@ impl ImmixAllocator {
         self.roots.borrow_mut().root_slots.remove(&slot);
     }
 
+    /// Which of the two root kinds an address was filed under. The distinction
+    /// is the whole of `hl_add_root`'s contract -- a slot is dereferenced on
+    /// every mark, a persistent root is marked directly -- and filing an
+    /// address under the wrong one is silent until a collection frees a live
+    /// object, so it is worth being able to assert on.
+    pub fn has_root_slot(&self, slot: usize) -> bool {
+        self.roots.borrow().root_slots.contains(&slot)
+    }
+
+    pub fn has_persistent(&self, ptr: *mut hl::vdynamic) -> bool {
+        self.roots.borrow().persistent_roots.contains(&ptr)
+    }
+
     pub fn unregister_persistent(&mut self, ptr: *mut hl::vdynamic) {
         self.roots.borrow_mut().persistent_roots.remove(&ptr);
     }

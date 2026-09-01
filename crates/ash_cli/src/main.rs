@@ -69,11 +69,9 @@ struct Cli {
 
     /// Threshold preset for the program's shape.
     ///
-    /// script | application | game | server | benchmark | development |
-    /// interpreter. Explicit --jit-threshold / --opt-threshold override the
-    /// preset.
-    #[arg(long, value_name = "NAME")]
-    preset: Option<String>,
+    /// Explicit --jit-threshold / --opt-threshold override the preset.
+    #[arg(long, value_enum)]
+    preset: Option<Preset>,
 
     /// Invocations before promoting to the optimising tier in hybrid mode.
     ///
@@ -131,6 +129,67 @@ enum Mode {
     Jit,
     /// Hybrid mode (interpreter with JIT tier promotion)
     Hybrid,
+}
+
+/// The named presets of [`TierPreset`], as a command-line value.
+///
+/// This list is not free-standing: `every_preset_is_offered` below matches
+/// exhaustively over `TierPreset`, so a preset added there stops compiling
+/// until it is offered here too. That is deliberate. `game` existed in
+/// `TierPreset` and in `TierPreset::names()` for some time while `--preset`
+/// took a bare String and documented its own hand-written list, so the one
+/// preset shaped for a frame budget was unreachable to anyone reading --help.
+#[derive(Clone, Copy, ValueEnum)]
+enum Preset {
+    /// Short-lived programs: promote early, optimise late
+    Script,
+    /// General applications: the default shape
+    #[value(alias = "app")]
+    Application,
+    /// Frame budgets: compile during load, not during play
+    Game,
+    /// Long-lived processes, where compile cost amortises
+    Server,
+    /// Drive everything through every tier; slower on short programs
+    #[value(alias = "bench")]
+    Benchmark,
+    /// Favours iteration over peak performance
+    #[value(alias = "dev")]
+    Development,
+    /// No JIT at all
+    #[value(alias = "interp", alias = "none")]
+    Interpreter,
+}
+
+impl Preset {
+    fn to_tier(self) -> TierPreset {
+        match self {
+            Preset::Script => TierPreset::Script,
+            Preset::Application => TierPreset::Application,
+            Preset::Game => TierPreset::Game,
+            Preset::Server => TierPreset::Server,
+            Preset::Benchmark => TierPreset::Benchmark,
+            Preset::Development => TierPreset::Development,
+            Preset::Interpreter => TierPreset::Interpreter,
+        }
+    }
+}
+
+/// Compile-time guard, never called: adding a named variant to `TierPreset`
+/// fails this match until `Preset` offers it on the command line.
+#[allow(dead_code)]
+fn every_preset_is_offered(t: TierPreset) -> Option<Preset> {
+    match t {
+        TierPreset::Script => Some(Preset::Script),
+        TierPreset::Application => Some(Preset::Application),
+        TierPreset::Game => Some(Preset::Game),
+        TierPreset::Server => Some(Preset::Server),
+        TierPreset::Benchmark => Some(Preset::Benchmark),
+        TierPreset::Development => Some(Preset::Development),
+        TierPreset::Interpreter => Some(Preset::Interpreter),
+        // Built directly from a TieredConfig; it has no command-line spelling.
+        TierPreset::Custom(_) => None,
+    }
 }
 
 /// Compile the bytecode to a native object instead of running it.
@@ -1064,19 +1123,7 @@ fn run() -> Result<()> {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             // A preset supplies the thresholds; a flag the operator actually
             // typed still wins over it.
-            let preset_cfg = match cli.preset.as_deref() {
-                Some(name) => match TierPreset::parse(name) {
-                    Some(p) => Some(p.to_config()),
-                    None => {
-                        eprintln!(
-                            "unknown --preset '{name}'; expected one of: {}",
-                            TierPreset::names().join(", ")
-                        );
-                        std::process::exit(2);
-                    }
-                },
-                None => None,
-            };
+            let preset_cfg = cli.preset.map(|p| p.to_tier().to_config());
             let arg_given = |flag: &str| {
                 std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
             };

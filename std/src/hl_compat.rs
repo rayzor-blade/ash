@@ -165,9 +165,29 @@ pub unsafe extern "C" fn hl_rethrow(v: *mut vdynamic) {
     crate::error::hlp_rethrow(v);
 }
 
+/// Upstream `hl.h:678`: `vdynamic *hl_dyn_call( vclosure *c, vdynamic **args, int nargs )`.
+///
+/// This took `(vdynamic*, varray*)` and forwarded to `hlp_call_method` — two
+/// parameters where the ABI has three, and the wrong two. Every hdll calls the
+/// C spelling, so `hl_dyn_call(closure, args, 1)` had the closure read as a
+/// `vdynamic*`, the raw `vdynamic**` read as a `varray*` whose header is
+/// whatever happened to precede it, and `nargs` dropped on the floor. The size
+/// field came out of unrelated memory, which is why the symptom ranged from
+/// "Too many arguments" to silence to corruption depending on the engine and
+/// the allocation history.
+///
+/// `hlp_dyn_call` is already a faithful port of upstream's `std/fun.c:223`,
+/// including the part `hlp_call_method` alone does not do: for a BOUND
+/// closure it rebuilds an unbound one from the parent type and boxes
+/// `c->value` as argument zero. Forwarding is therefore the whole fix — the
+/// implementation was never missing, only unreachable from C.
 #[no_mangle]
-pub unsafe extern "C" fn hl_dyn_call(c: *mut vdynamic, args: *mut varray) -> *mut vdynamic {
-    crate::fun::hlp_call_method(c, args)
+pub unsafe extern "C" fn hl_dyn_call(
+    c: *mut hl::vclosure,
+    args: *mut *mut vdynamic,
+    nargs: i32,
+) -> *mut vdynamic {
+    crate::fun::hlp_dyn_call(c, args, nargs)
 }
 
 // ============================================================================
@@ -234,16 +254,49 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
     }
 }
 
+/// Upstream `hl_add_root` takes the address of a POINTER SLOT, not an object.
+///
+/// HashLink's root table is a `void***` and its mark phase does
+/// `void *p = *gc_roots[i]`, re-reading the slot every cycle, which is why
+/// every hdll is written as `hl_add_root(&h->data)` (uv) or
+/// `hl_add_root(&on_dx_error)` (directx). We registered the ARGUMENT as an
+/// object instead; `mark_roots` bounds-checks an object against the Immix
+/// arena, a malloc'd `&stash->cb` is outside it, and the root was dropped with
+/// no diagnostic. The closure then went unmarked, line recycling handed its 32
+/// bytes to the next Haxe string, and `hlp_dyn_call` read the vclosure's type
+/// field as UTF-16 text -- a crash whose fault address spells the string that
+/// overwrote it.
+///
+/// The two cases are distinguishable, which is what makes supporting both
+/// safe: a GC object is by definition inside the arena, and an hdll's
+/// `&struct->field` never is. So a heap address keeps the old object-pinning
+/// behaviour, and anything else is treated as the slot it almost certainly is.
+/// Registering a slot costs nothing if it holds null or a non-heap value --
+/// the collector's conservative read ignores those exactly as upstream does.
 #[no_mangle]
 pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
     let mut gc = crate::gc::gc_locked_init();
-    gc.register_persistent(ptr as *mut vdynamic);
+    if gc.is_gc_ptr(ptr) {
+        gc.register_persistent(ptr as *mut vdynamic);
+    } else {
+        gc.add_root_slot(ptr as usize);
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
     let mut gc = crate::gc::gc_locked_init();
-    gc.unregister_persistent(ptr as *mut vdynamic);
+    if gc.is_gc_ptr(ptr) {
+        gc.unregister_persistent(ptr as *mut vdynamic);
+    } else {
+        gc.remove_root_slot(ptr as usize);
+    }
 }
 
 // ============================================================================

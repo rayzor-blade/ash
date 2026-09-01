@@ -1785,6 +1785,17 @@ struct RootSet {
     globals: Vec<*mut hl::vdynamic>,
     stack_roots: Vec<*mut hl::vdynamic>,
     persistent_roots: HashSet<*mut hl::vdynamic>,
+    /// Addresses of POINTER SLOTS a native library asked us to keep live,
+    /// via `hl_add_root`. Not objects -- the slot is re-read at every
+    /// collection, so a library may overwrite it and the new value is rooted
+    /// from that moment without telling us again.
+    ///
+    /// This is upstream's contract, not an ash invention: HashLink's
+    /// `gc_roots` is a `void***` and its mark phase does `void *p =
+    /// *gc_roots[i]`. Every hdll is written to it -- `hl_add_root(&h->data)`
+    /// in uv, `hl_add_root(&on_dx_error)` in directx -- so a slot address is
+    /// what actually arrives here, and it is virtually never inside our heap.
+    root_slots: HashSet<usize>,
 }
 
 pub struct ImmixAllocator {
@@ -1984,6 +1995,7 @@ impl ImmixAllocator {
                 globals: Vec::new(),
                 stack_roots: Vec::new(),
                 persistent_roots: HashSet::new(),
+            root_slots: HashSet::new(),
             })),
             current_exception: None,
             exception_handler: None,
@@ -2729,7 +2741,25 @@ impl ImmixAllocator {
                 self.mark_allocation_at_line(line, &mut all_newly_marked);
             }
         }
+        // A native root is a SLOT, so read through it rather than marking the
+        // address: `&stash->cb` is malloc'd and would fail the bounds check
+        // above, which is precisely how these were silently dropped before --
+        // the closure went unmarked, line recycling handed its 32 bytes to the
+        // next Haxe string, and `hlp_dyn_call` later read the vclosure's type
+        // field as UTF-16 text.
+        //
+        // Reading it HERE, once per collection, is what makes this upstream's
+        // semantics rather than a snapshot: a slot the library overwrites
+        // between calls is still correct at the next cycle.
+        let slots: Vec<usize> = root_set.root_slots.iter().copied().collect();
         drop(root_set);
+        for slot in slots {
+            // conservative_scan_range does the read, the heap bounds check and
+            // the line marking, so a slot holding null or a non-heap value is
+            // ignored exactly as upstream ignores it.
+            let newly = self.conservative_scan_range(slot, slot + std::mem::size_of::<usize>());
+            all_newly_marked.extend(newly);
+        }
 
         // Conservative scan of globals_data
         let dbg = std::env::var("ASH_GC_DEBUG_ROOTS").is_ok();
@@ -3445,6 +3475,16 @@ impl ImmixAllocator {
 
     pub fn register_persistent(&mut self, ptr: *mut hl::vdynamic) {
         self.roots.borrow_mut().persistent_roots.insert(ptr);
+    }
+
+    /// Root the object a native slot currently points at, and keep doing so as
+    /// its contents change. See [`RootSet::root_slots`].
+    pub fn add_root_slot(&mut self, slot: usize) {
+        self.roots.borrow_mut().root_slots.insert(slot);
+    }
+
+    pub fn remove_root_slot(&mut self, slot: usize) {
+        self.roots.borrow_mut().root_slots.remove(&slot);
     }
 
     pub fn unregister_persistent(&mut self, ptr: *mut hl::vdynamic) {

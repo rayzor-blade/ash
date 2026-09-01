@@ -546,6 +546,8 @@ pub struct HLInterpreter {
     call_stack_symbols: Vec<usize>,
     /// Stack captured at the most recent non-rethrow exception origin.
     exception_stack_symbols: Vec<usize>,
+    /// Recursion OSR probes, to throttle entry-build retries.
+    recursion_osr_probes: u64,
     /// Optional tiered runtime (hybrid mode).
     tiered_runtime: Option<TieredRuntime>,
 }
@@ -884,6 +886,7 @@ impl HLInterpreter {
             stall_reported_at: std::time::Instant::now(),
             call_stack_symbols: Vec::new(),
             exception_stack_symbols: Vec::new(),
+            recursion_osr_probes: 0,
             tiered_runtime: None,
         }
     }
@@ -4898,6 +4901,51 @@ impl HLInterpreter {
                             let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
                             self.stack.last_mut().unwrap().registers.set(dst, coerced);
                             self.stack.last_mut().unwrap().pc += 1;
+
+                            // The recursion arm of OSR. A frame in a hot loop
+                            // leaves at a back-edge; a recursing frame had no
+                            // equivalent and ran to completion interpreted.
+                            //
+                            // Fires on the FIRST self-return in each frame, not
+                            // on a count mask: the back-edge mask counts within
+                            // one frame, which suits a loop going round
+                            // thousands of times and never fires for recursion,
+                            // where each frame returns into itself a couple of
+                            // times and the FUNCTION is hot across many shallow
+                            // frames.
+                            if func_of(&self.targets, findex) == Some(func_idx) {
+                                let (resume_pc, first) = {
+                                    let frame = self.stack.last_mut().unwrap();
+                                    frame.self_returns = frame.self_returns.wrapping_add(1);
+                                    (frame.pc, frame.self_returns == 1)
+                                };
+                                if first {
+                                    let rec_findex = self.bytecode_findex_of(bytecode, func_idx);
+                                    // A recursing frame reaches its first
+                                    // self-return long before the function
+                                    // crosses the promotion threshold, so the
+                                    // one attempt note_hot_loop makes lands on
+                                    // "no installed code yet". Retry on a coarse
+                                    // counter: building an entry re-optimizes
+                                    // the AIR, so it must not run per probe.
+                                    self.recursion_osr_probes =
+                                        self.recursion_osr_probes.wrapping_add(1);
+                                    if self.hot_loops.contains(&(rec_findex, resume_pc)) {
+                                        if self.recursion_osr_probes % 128 == 0 {
+                                            self.late_osr_entry(
+                                                bytecode, func_idx, rec_findex, resume_pc,
+                                            );
+                                        }
+                                    } else {
+                                        self.note_hot_loop(bytecode, func_idx, resume_pc);
+                                    }
+                                    if let Some(ret) =
+                                        self.try_osr_transfer(bytecode, func_idx, resume_pc, None)?
+                                    {
+                                        return Ok(ret);
+                                    }
+                                }
+                            }
 
                             // Check deferred hot-reload flag after native calls
                             if ash_core::reload::take_reload_pending() {

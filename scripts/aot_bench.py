@@ -118,6 +118,7 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
     t0 = time.perf_counter()
 
     emit_env = dict(env or os.environ)
+    pgo_arg: list[str] = []
     if profile:
         # A profiling run, charged to BUILD time where it belongs: this is
         # ordinary PGO, and the cost is paid once by whoever builds, not on
@@ -134,9 +135,9 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
             subprocess.run([str(ash), "--mode", "hybrid", "--quiet", str(source)],
                            capture_output=True, text=True, timeout=900, env=run_env)
             if prof.exists():
-                emit_env["ASH_AOT_PROFILE"] = str(prof)
+                pgo_arg = ["--pgo=" + str(prof)]
 
-    p = subprocess.run([str(spike), str(source), str(obj)],
+    p = subprocess.run([str(spike), str(source), str(obj), *pgo_arg],
                        capture_output=True, text=True, timeout=900, env=emit_env)
     if p.returncode != 0:
         return None, f"emit failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0

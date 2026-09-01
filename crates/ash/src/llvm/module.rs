@@ -85,6 +85,11 @@ pub struct JITModule<'ctx> {
     pub(crate) types_: Vec<HLType>,
     pub(crate) type_cache: HashMap<usize, AnyTypeEnum<'ctx>>,
     pub(crate) initialized_type_cache: HashMap<usize, BasicValueEnum<'ctx>>,
+    /// `Class.method` -> findex, built once on first use. A loaded
+    /// profile names functions that way rather than by position, so
+    /// resolving one back needs this direction.
+    pub(crate) name_to_findex: Option<HashMap<String, u32>>,
+    pub(crate) findex_to_name: Option<HashMap<u32, String>>,
     pub(crate) type_info_globals: HashMap<usize, GlobalValue<'ctx>>,
     pub(crate) findexes: HashMap<usize, FuncPtr>,
     pub(crate) func_types: Vec<*mut hl_type>,
@@ -290,6 +295,8 @@ impl<'ctx> JITModule<'ctx> {
             bytecode,
             type_cache: HashMap::new(),
             initialized_type_cache: HashMap::new(),
+            name_to_findex: None,
+            findex_to_name: None,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
@@ -704,6 +711,8 @@ impl<'ctx> JITModule<'ctx> {
             bytecode,
             type_cache: HashMap::new(),
             initialized_type_cache: HashMap::new(),
+            name_to_findex: None,
+            findex_to_name: None,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),

@@ -131,46 +131,86 @@ pub fn uniform_method_receiver(caller: u32) -> Option<(u64, u32)> {
 
 /// The same observation, in a form that survives leaving the process.
 ///
-/// The in-process record anchors a method site on the receiver's runtime
-/// `hl_type*`, which is exactly right for the JIT -- it compiles inside the
-/// process that watched the dispatch -- and useless to an ahead-of-time
-/// compiler, where that address means nothing. What does carry over is the
-/// pair of bytecode indices naming the site and the findex it resolved to,
-/// so that is all this writes. An AOT backend guards on the resolved METHOD
-/// POINTER instead of the receiver type: it has to load the vtable slot
-/// anyway, and comparing it against a function it can name is a check it can
-/// make without knowing any runtime address.
+/// Two things have to change for an observation to outlive its process.
 ///
-/// Kept in its own map rather than reusing the in-process one, so a loaded
-/// profile can never be mistaken for an observation and have its absent type
-/// pointer baked into a guard.
-fn aot_method_targets() -> &'static Mutex<HashMap<u64, u32>> {
-    static M: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
+/// The ANCHOR. In-process, a method site is keyed on the receiver's runtime
+/// `hl_type*`, which is right for the JIT -- it compiles inside the process
+/// that watched the dispatch -- and meaningless anywhere else. The AOT guard
+/// compares the vtable SLOT it already loaded against a function it can name,
+/// so no runtime address is needed.
+///
+/// The IDENTITY. A findex is a POSITION, and positions move: adding a class
+/// nobody calls shifted this benchmark's caller from 26 to 28 and silently
+/// cost the whole optimisation. So a written profile names functions by
+/// `HLFunction::compute_hash` -- a hash of the signature, register types and
+/// opcode stream, with debug info deliberately excluded so relocating a
+/// function or renumbering around it changes nothing. Two identical functions
+/// collide, which costs nothing: the emitted guard re-checks the target at run
+/// time, so a collision can only fail to fire.
+///
+/// Sites are keyed by CALLER, not by call site. The exact key is an opcode
+/// index into the flat interpreter's AIR V2 body and the LLVM backend does not
+/// flatten its CFG, so the exact form never matched anything; the caller-wide
+/// observation is what actually fires.
+fn aot_method_targets() -> &'static Mutex<HashMap<String, String>> {
+    static M: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Render the monomorphic method sites observed so far.
-///
-/// One `caller pc target` triple per line. Polymorphic and unseen sites are
-/// simply absent -- there is nothing to say about them, and saying it would
-/// only produce a guard that always misses.
-pub fn render_profile() -> String {
+static PROFILE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Every caller whose recorded method sites all agree on one target, as
+/// `(caller findex, target findex)`. Callers that disagree are omitted --
+/// there is nothing to say about them, and saying it would emit a guard that
+/// always misses.
+pub fn monomorphic_callers() -> Vec<(u32, u32)> {
     let m = method_sites().lock().expect("callsite profile mutex poisoned");
-    let mut lines: Vec<String> = m
-        .iter()
-        .filter_map(|(&k, obs)| match obs {
-            Obs::Mono(_, target) => Some(((k >> 32) as u32, k as u32, *target)),
-            Obs::Poly => None,
-        })
-        .map(|(caller, pc, target)| format!("m {caller} {pc} {target}"))
+    // Polymorphic sites are IGNORED rather than poisoning their caller.
+    //
+    // A caller whose eleven monomorphic sites agree and whose twelfth is
+    // polymorphic still has a target worth guessing at those eleven. Refusing
+    // the whole caller cost deltablue every one of its twelve guards for the
+    // sake of one site. The guard re-reads the real target at run time, so a
+    // site this guess does not fit falls into the ordinary indirect path and
+    // pays one compare -- the same price a cache miss costs anywhere.
+    let mut per_caller: HashMap<u32, Option<u32>> = HashMap::new();
+    for (&k, obs) in m.iter() {
+        let Obs::Mono(_, target) = obs else { continue };
+        per_caller
+            .entry((k >> 32) as u32)
+            .and_modify(|e| {
+                if *e != Some(*target) {
+                    *e = None; // its monomorphic sites disagree: nothing to say
+                }
+            })
+            .or_insert(Some(*target));
+    }
+    let mut out: Vec<(u32, u32)> = per_caller
+        .into_iter()
+        .filter_map(|(c, t)| t.map(|t| (c, t)))
         .collect();
-    lines.sort(); // stable output: a profile that reorders is a profile that diffs
-    lines.join("\n") + "\n"
+    out.sort_unstable();
+    out
 }
 
-/// Read what [`render_profile`] wrote. Unparseable lines are skipped rather
-/// than fatal: the record is advisory, and a guard that never fires is a far
-/// better outcome than refusing to compile.
+/// Render a profile, naming functions by the stable name `to_name` supplies.
+/// A function with no such name -- a closure, say -- is skipped rather than
+/// written by index, which would look durable and not be.
+pub fn render_profile(to_name: impl Fn(u32) -> Option<String>) -> String {
+    let mut lines: Vec<String> = monomorphic_callers()
+        .into_iter()
+        .filter_map(|(caller, target)| Some((to_name(caller)?, to_name(target)?)))
+        .map(|(c, t)| format!("m {c} {t}"))
+        .collect();
+    lines.sort(); // a profile that reorders is a profile that diffs
+    let mut s = String::from("# ash callsite profile v3 (caller target, by name)\n");
+    s.push_str(&lines.join("\n"));
+    s.push('\n');
+    s
+}
+
+/// Read what [`render_profile`] wrote. Unparseable lines are skipped: the
+/// record is advisory, and a guard that never fires beats refusing to compile.
 pub fn load_profile(text: &str) -> usize {
     let mut m = aot_method_targets()
         .lock()
@@ -181,53 +221,39 @@ pub fn load_profile(text: &str) -> usize {
         if it.next() != Some("m") {
             continue;
         }
-        let (Some(caller), Some(pc), Some(target)) = (it.next(), it.next(), it.next()) else {
+        let (Some(c), Some(t)) = (it.next(), it.next()) else {
             continue;
         };
-        let (Ok(caller), Ok(pc), Ok(target)) =
-            (caller.parse::<u32>(), pc.parse::<u32>(), target.parse::<u32>())
-        else {
-            continue;
-        };
-        m.insert(key(caller, pc), target);
+        m.insert(c.to_string(), t.to_string());
         n += 1;
     }
     n
 }
 
-/// The findex every recorded site in `caller` agreed on, or `None`.
-///
-/// The exact key is `(caller, opcode index)` into the FLAT interpreter's AIR
-/// V2 body, and the LLVM backend does not flatten its CFG, so its own opcode
-/// index is a different number for the same call. That is why the in-process
-/// arm has the same fallback: when a caller's recorded sites all resolve to
-/// one target, the site being lowered must be one of them, whatever it is
-/// numbered here.
-pub fn aot_uniform_method_target(caller: u32) -> Option<u32> {
-    let m = aot_method_targets()
+/// The target a loaded profile associates with this caller.
+pub fn aot_target_for(caller: &str) -> Option<String> {
+    let hit = aot_method_targets()
         .lock()
-        .expect("callsite profile mutex poisoned");
-    let mut found: Option<u32> = None;
-    for (&k, &target) in m.iter() {
-        if (k >> 32) as u32 != caller {
-            continue;
-        }
-        match found {
-            None => found = Some(target),
-            Some(t) if t == target => {}
-            Some(_) => return None, // the caller disagrees with itself
-        }
+        .expect("callsite profile mutex poisoned")
+        .get(caller)
+        .cloned();
+    if hit.is_some() {
+        PROFILE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    found
+    hit
 }
 
-/// The findex a loaded profile says this method site resolved to.
-pub fn aot_method_target(caller: u32, pc: u32) -> Option<u32> {
+/// How many loaded entries were asked for and found. Zero against a non-empty
+/// profile means every entry is stale -- the case that used to be silent.
+pub fn aot_profile_hits() -> usize {
+    PROFILE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn aot_profile_size() -> usize {
     aot_method_targets()
         .lock()
         .expect("callsite profile mutex poisoned")
-        .get(&key(caller, pc))
-        .copied()
+        .len()
 }
 
 #[cfg(test)]

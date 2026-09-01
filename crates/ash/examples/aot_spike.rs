@@ -8,10 +8,28 @@
 //! Usage: aot_spike <file.hl> <out.o> [triple]
 use anyhow::Result;
 
+const USAGE: &str = "usage: aot_spike <file.hl> <out.o> [triple] [--pgo[=<profile>]]";
+
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: aot_spike <file.hl> <out.o> [triple]");
-    let out = args.next().expect("usage: aot_spike <file.hl> <out.o> [triple]");
+    // --pgo, with or without a path. Bare --pgo takes the profile beside the
+    // bytecode, so the common case needs no path at all.
+    let mut pgo: Option<Option<String>> = None;
+    let mut args = Vec::new();
+    for a in std::env::args().skip(1) {
+        if a == "--pgo" {
+            pgo = Some(None);
+        } else if let Some(rest) = a.strip_prefix("--pgo=") {
+            pgo = Some(Some(rest.to_string()));
+        } else if a == "-h" || a == "--help" {
+            println!("{USAGE}");
+            return Ok(());
+        } else {
+            args.push(a);
+        }
+    }
+    let mut args = args.into_iter();
+    let path = args.next().expect(USAGE);
+    let out = args.next().expect(USAGE);
     let triple = args.next().unwrap_or_else(|| {
         inkwell::targets::TargetMachine::get_default_triple()
             .as_str()
@@ -19,15 +37,35 @@ fn main() -> Result<()> {
             .into_owned()
     });
 
-    // A profile from an earlier run, if one was left. Advisory: every guard it
-    // produces re-checks at run time, so a stale file costs a compare.
-    if let Ok(profile) = std::env::var("ASH_AOT_PROFILE") {
-        match std::fs::read_to_string(&profile) {
+    // A profile from an earlier run. Advisory: every guard it produces
+    // re-checks its target at run time, so a stale or wrong file costs a
+    // compare and never an answer.
+    let profile_path = match &pgo {
+        Some(Some(p)) => Some(p.clone()),
+        // Bare --pgo: the profile beside the bytecode, the way Go looks for
+        // default.pgo beside main.
+        Some(None) => Some(
+            std::path::Path::new(&path)
+                .with_extension("prof")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        None => std::env::var("ASH_AOT_PROFILE").ok(),
+    };
+    let mut loaded = 0usize;
+    if let Some(profile) = &profile_path {
+        match std::fs::read_to_string(profile) {
             Ok(text) => {
-                let n = ash_core::callsite_profile::load_profile(&text);
-                println!("loaded {n} profiled method site(s) from {profile}");
+                loaded = ash_core::callsite_profile::load_profile(&text);
+                println!("pgo: loaded {loaded} caller(s) from {profile}");
             }
-            Err(e) => eprintln!("could not read {profile}: {e}"),
+            Err(e) if pgo.is_some() => {
+                // Asked for explicitly and not there: say so. Silently
+                // emitting an unoptimised object is how a build loses a
+                // measured win without anyone noticing.
+                eprintln!("pgo: could not read {profile}: {e}");
+            }
+            Err(_) => {}
         }
     }
 
@@ -75,5 +113,21 @@ fn main() -> Result<()> {
     println!("emitted {out} for {triple} ({bytes} bytes)");
     println!("entrypoint findex = {}  symbol = {}",
              jit.entrypoint_findex(), jit.entrypoint_symbol());
+
+    // Whether the profile actually described THIS program. Zero matches
+    // against a non-empty profile means every entry is stale -- the failure
+    // that used to be silent, and that costs the whole optimisation.
+    if loaded > 0 {
+        let hits = ash_core::callsite_profile::aot_profile_hits();
+        if hits == 0 {
+            eprintln!(
+                "pgo: WARNING none of the {loaded} profiled caller(s) matched this \
+                 bytecode -- the profile is stale. Regenerate it with \
+                 ASH_AOT_PROFILE_OUT=<file> ash --mode hybrid <program>"
+            );
+        } else {
+            println!("pgo: {hits} of {loaded} profiled caller(s) matched");
+        }
+    }
     Ok(())
 }

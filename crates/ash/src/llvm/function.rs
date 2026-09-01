@@ -4673,10 +4673,11 @@ impl<'ctx> JITModule<'ctx> {
                     // lift the whole guard out of a dispatch loop and leave
                     // the inlined body running without it.
                     let aot_devirt = if self.aot {
-                        crate::callsite_profile::aot_method_target(f.findex as u32, i as u32)
-                            .or_else(|| {
-                                crate::callsite_profile::aot_uniform_method_target(f.findex as u32)
+                        self.function_name(f.findex as u32)
+                            .and_then(|caller| {
+                                crate::callsite_profile::aot_target_for(&caller)
                             })
+                            .and_then(|target_name| self.findex_for_name(&target_name))
                             .and_then(|target| {
                                 match self.get_or_create_function_value(target as usize) {
                                     Ok((callee, ph)) => {
@@ -7851,6 +7852,34 @@ impl<'ctx> JITModule<'ctx> {
     /// this for field ACCESS -- it computes offsets at compile time rather
     /// than calling `hlp_get_obj_rt` -- but a vtable pointer has no such
     /// oracle, because the table is built at run time.
+    /// Resolve a profile's `Class.method` back to a findex in THIS bytecode.
+    /// Built once. A name that no longer exists resolves to nothing, which
+    /// costs the guard and never correctness.
+    fn findex_for_name(&mut self, name: &str) -> Option<u32> {
+        self.ensure_name_map();
+        self.name_to_findex.as_ref().unwrap().get(name).copied()
+    }
+
+    /// `Class.method` for a findex, or `None` for a closure or the entrypoint.
+    fn function_name(&mut self, findex: u32) -> Option<String> {
+        self.ensure_name_map();
+        self.findex_to_name.as_ref().unwrap().get(&findex).cloned()
+    }
+
+    fn ensure_name_map(&mut self) {
+        if self.name_to_findex.is_some() {
+            return;
+        }
+        let by_findex =
+            crate::types::function_keys(&self.bytecode.types, &self.bytecode.functions);
+        let mut by_name = std::collections::HashMap::new();
+        for (fx, n) in &by_findex {
+            by_name.entry(n.clone()).or_insert(*fx);
+        }
+        self.name_to_findex = Some(by_name);
+        self.findex_to_name = Some(by_findex);
+    }
+
     fn vobj_proto_ptr(&mut self, type_ptr: PointerValue<'ctx>) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let function = self

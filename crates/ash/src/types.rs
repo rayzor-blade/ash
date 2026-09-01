@@ -723,3 +723,77 @@ pub struct HLConstant {
     pub global: u32,
     pub fields: Vec<i32>,
 }
+
+/// `findex -> "Class.method"` for every method a type declares.
+///
+/// The only spelling of a function that survives recompilation. A findex is a
+/// POSITION and moves when anything is added before it -- adding a class
+/// nobody calls shifted a benchmark's caller from 26 to 28 -- and
+/// `HLFunction::compute_hash` folds in `TypeRef` indices, which are positions
+/// for the same reason. `HLFunction::field_name` and `obj` look like they
+/// would answer this and are never populated by the reader; the proto table
+/// is where the association actually lives.
+///
+/// Functions with no declaring type -- closures, and the module entrypoint --
+/// are absent. A caller should skip those rather than fall back to an index,
+/// which would look durable and not be.
+pub fn function_names(types: &[HLType]) -> std::collections::HashMap<u32, String> {
+    let mut out = std::collections::HashMap::new();
+    for t in types {
+        let Some(obj) = t.obj.as_ref() else { continue };
+        if obj.name.contains(char::is_whitespace) {
+            continue; // the profile format is whitespace-separated
+        }
+        for p in &obj.proto {
+            if p.findex < 0 || p.name.contains(char::is_whitespace) {
+                continue;
+            }
+            out.entry(p.findex as u32)
+                .or_insert_with(|| format!("{}.{}", obj.name, p.name));
+        }
+        // Statics and bound methods are not in the proto table -- that holds
+        // virtuals. They arrive as `[field index, findex]` pairs, and the name
+        // is the field's. Without these a static caller such as a program's
+        // `main` has no durable name at all, which is most of the corpus.
+        for pair in obj.bindings.chunks_exact(2) {
+            let (fid, findex) = (pair[0], pair[1]);
+            if fid < 0 || findex < 0 {
+                continue;
+            }
+            let Some(field) = obj.fields.get(fid as usize) else {
+                continue;
+            };
+            if field.name.contains(char::is_whitespace) {
+                continue;
+            }
+            out.entry(findex as u32)
+                .or_insert_with(|| format!("{}.{}", obj.name, field.name));
+        }
+    }
+    out
+}
+
+/// A durable key for every function, name where there is one.
+///
+/// [`function_names`] covers what a type declares -- around four in five
+/// functions of a typical module. The rest are closures and the entrypoint,
+/// which no class lists, and Haxe puts a program's `main` among them, so
+/// dropping them would mean a profile that says nothing about a hot loop
+/// written at top level.
+///
+/// Those fall back to `#<compute_hash>`, which is weaker: the hash folds in
+/// `TypeRef` indices, so adding a type anywhere moves it. It still survives
+/// edits that do not add types, and being wrong costs only the guard -- the
+/// emitted check re-reads the real target at run time. The '#' keeps the two
+/// kinds apart so a name can never be read as a hash.
+pub fn function_keys(
+    types: &[HLType],
+    functions: &[HLFunction],
+) -> std::collections::HashMap<u32, String> {
+    let mut out = function_names(types);
+    for f in functions {
+        out.entry(f.findex as u32)
+            .or_insert_with(|| format!("#{}", f.compute_hash()));
+    }
+    out
+}

@@ -956,13 +956,35 @@ fn run() -> Result<()> {
             // Only these modes have a tiered runtime, and the record site is
             // gated on one, so `--mode interp` observes nothing to write.
             if let Ok(path) = std::env::var("ASH_AOT_PROFILE_OUT") {
-                let text = ash_core::callsite_profile::render_profile();
+                // Name functions by their semantic hash, not their index: an
+                // index is a position, and adding an unrelated class moves it.
+                let by_findex =
+                    ash_core::types::function_keys(&bytecode.types, &bytecode.functions);
+                let observed = ash_core::callsite_profile::monomorphic_callers();
+                let unnamed: Vec<u32> = observed
+                    .iter()
+                    .flat_map(|&(c, t)| [c, t])
+                    .filter(|fx| !by_findex.contains_key(fx))
+                    .collect();
+                let text = ash_core::callsite_profile::render_profile(|fx| {
+                    by_findex.get(&fx).cloned()
+                });
+                if !unnamed.is_empty() && !cli.quiet {
+                    eprintln!(
+                        "[ash] {} of {} named; {} function(s) have no Class.method name \
+                         and were skipped: {:?}",
+                        by_findex.len(),
+                        bytecode.functions.len(),
+                        unnamed.len(),
+                        &unnamed[..unnamed.len().min(6)]
+                    );
+                }
                 match std::fs::write(&path, &text) {
                     Ok(()) => {
                         if !cli.quiet {
                             eprintln!(
-                                "[ash] wrote {} monomorphic method site(s) to {path}",
-                                text.lines().count()
+                                "[ash] wrote {} monomorphic caller(s) to {path}",
+                                text.lines().filter(|l| l.starts_with("m ")).count()
                             );
                         }
                     }

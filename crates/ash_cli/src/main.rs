@@ -43,6 +43,13 @@ struct Cli {
     #[arg(long, value_name = "TRIPLE", requires = "emit_aot")]
     target: Option<String>,
 
+    /// Emit even when some functions could not be lowered (--emit-aot).
+    ///
+    /// A refused function becomes a throw. Without this, emitting stops rather
+    /// than writing a binary that aborts the moment one is reached.
+    #[arg(long, requires = "emit_aot")]
+    allow_refused: bool,
+
     /// Devirtualise from a callsite profile when emitting (--emit-aot).
     ///
     /// With no value, reads <file>.prof beside the bytecode. Produce one by
@@ -137,6 +144,7 @@ fn emit_aot(
     out: &std::path::Path,
     target: Option<String>,
     pgo: Option<String>,
+    allow_refused: bool,
     quiet: bool,
 ) -> anyhow::Result<()> {
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
@@ -181,6 +189,27 @@ fn emit_aot(
             Ok(_) => lowered += 1,
             Err(e) => refused.push((*fx, format!("{e}"))),
         }
+    }
+
+    // A refused function is not a warning: it lowers to a throw, so a binary
+    // containing one aborts the moment that path is reached -- and exiting 0
+    // after writing it means the failure surfaces at run time, on a machine
+    // that may not be this one. The commonest cause is an HDLL primitive,
+    // which resolves through dlopen and has no symbol to bind ahead of time.
+    if !refused.is_empty() && !allow_refused {
+        let mut msg = format!(
+            "{} function(s) could not be lowered; refusing to write a binary \
+             that would abort when one is reached:",
+            refused.len()
+        );
+        for (fx, e) in refused.iter().take(10) {
+            msg.push_str(&format!("\n    findex={fx}: {}", e.lines().next().unwrap_or("")));
+        }
+        if refused.len() > 10 {
+            msg.push_str(&format!("\n    ... and {} more", refused.len() - 10));
+        }
+        msg.push_str("\n  --allow-refused emits anyway, if those paths are never taken.");
+        anyhow::bail!(msg);
     }
 
     jit.finalize_aot_data()?;
@@ -956,6 +985,7 @@ fn run() -> Result<()> {
             &out,
             cli.target.clone(),
             cli.pgo.clone(),
+            cli.allow_refused,
             cli.quiet,
         );
     }

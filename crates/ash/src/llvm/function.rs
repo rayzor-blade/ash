@@ -1590,7 +1590,27 @@ impl<'ctx> JITModule<'ctx> {
             };
         }
 
-        let fiber_poll = has_polls.then(|| self.declare_native("hlp_fiber_poll", &[], None));
+        // `cold`: the poll fires when a fiber is due to yield, which on a hot
+        // loop is approximately never. Without the hint LLVM lays the call out
+        // as an equally likely successor, and the whole dispatch chain --
+        // obj->t, t->vobj_proto, the null test, the slot load -- is stranded in
+        // the loop behind a call it must assume writes all memory.
+        //
+        // Deliberately a function attribute rather than branch weights on the
+        // poll test. Weights encode a POLARITY: rewrite the branch to test the
+        // negated condition and forget to swap them, and the hint silently
+        // inverts into a pessimisation no test would catch. `cold` has no
+        // polarity, applies at one site instead of every poll branch, and
+        // survives block splitting and jump threading.
+        let fiber_poll = has_polls.then(|| {
+            let f = self.declare_native("hlp_fiber_poll", &[], None);
+            let cold = self.context.create_enum_attribute(
+                inkwell::attributes::Attribute::get_named_enum_kind_id("cold"),
+                0,
+            );
+            f.add_attribute(inkwell::attributes::AttributeLoc::Function, cold);
+            f
+        });
         self.builder.position_at_end(entry);
         let poll_epoch = if has_polls {
             let slot = self

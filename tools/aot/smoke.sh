@@ -11,9 +11,13 @@ cd "$(dirname "$0")/../.."
 tmp="${TMPDIR:-/tmp}/ash-aot-smoke"
 mkdir -p "$tmp"
 
-spike=target/debug/examples/aot_spike
-[ -x "$spike" ] || spike=target/release/examples/aot_spike
-[ -x "$spike" ] || { echo "build first: cargo build -p ash_core --example aot_spike" >&2; exit 1; }
+# The shipped command, not the example. `ash --emit-aot` is how anyone
+# actually compiles ahead of time, so it is what the gate should exercise --
+# and requiring a separate `cargo build --example` was enough to make this
+# whole step unrunnable on a machine that had only built the binary.
+spike=target/debug/ash
+[ -x "$spike" ] || spike=target/release/ash
+[ -x "$spike" ] || { echo "build first: cargo build -p ash" >&2; exit 1; }
 ash=target/debug/ash
 [ -x "$ash" ] || ash=target/release/ash
 [ -x "$ash" ] || { echo "build first: cargo build -p ash" >&2; exit 1; }
@@ -39,7 +43,7 @@ fi
 failed=0
 for hl in "${programs[@]}"; do
   name="$(basename "$hl" .hl)"
-  "$spike" "$hl" "$tmp/$name.o" > "$tmp/$name.emit" 2>&1 ||
+  "$spike" --emit-aot "$tmp/$name.o" "$hl" > "$tmp/$name.emit" 2>&1 ||
     { echo "$name: EMIT FAILED"; sed -n '1,3p' "$tmp/$name.emit"; failed=1; continue; }
   ./tools/aot/link.sh "$tmp/$name.o" "$tmp/$name" >/dev/null ||
     { echo "$name: LINK FAILED"; failed=1; continue; }

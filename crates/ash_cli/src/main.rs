@@ -745,6 +745,11 @@ unsafe extern "C" fn crash_handler_siginfo(
                 push_bytes(&mut b, &mut l, b"+0x");
                 push_hex(&mut b, &mut l, off as u64);
                 push_bytes(&mut b, &mut l, b")");
+                // Signal-safe: an index into a leaked table, no allocation.
+                if let Some(name) = ash_core::profile::static_name(findex) {
+                    push_bytes(&mut b, &mut l, b" ");
+                    push_bytes(&mut b, &mut l, name.as_bytes());
+                }
             } else {
                 #[cfg(unix)]
                 unsafe {
@@ -910,6 +915,24 @@ fn run() -> Result<()> {
         }
         ash_core::profile::set_name_resolver(move |fx| names.get(&fx).cloned());
     }
+
+    // The same mapping, flat and leaked, for the crash handler -- which cannot
+    // allocate and so cannot use the resolver above. Unconditional, unlike the
+    // profiler's copy: a crash does not announce itself in advance, and a
+    // report that says `findex=7450` and nothing else costs whoever reads it
+    // the one fact they most need. One &str per function, built once.
+    ash_core::profile::set_static_names(
+        bytecode
+            .functions
+            .iter()
+            .map(|f| (f.findex as u32, f.name().to_string()))
+            .chain(
+                bytecode
+                    .natives
+                    .iter()
+                    .map(|n| (n.findex as u32, format!("{}@{}", n.lib, n.name))),
+            ),
+    );
 
     // Discover and load external HDLL libraries from the .hl file's directory
     let search_dir = hl_path

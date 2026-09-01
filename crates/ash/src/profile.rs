@@ -448,6 +448,35 @@ pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
 type NameResolver = Box<dyn Fn(u32) -> Option<String> + Send + Sync>;
 static NAMES: OnceLock<NameResolver> = OnceLock::new();
 
+/// findex → name, flat and leaked, for readers that cannot allocate.
+///
+/// The crash handler runs in a signal context: no allocation, no lock it could
+/// deadlock against. `resolve_name` returns a String and takes a closure, so it
+/// is unusable there, which is why a crash frame printed a bare `findex=7450`
+/// and left the reader to map it by hand against a promotion log they may not
+/// have kept. This table is built once at startup and only ever read by index.
+static JIT_NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+
+/// Publish the flat table. Names are leaked deliberately: they must outlive
+/// every reader, including one running after the runtime has begun to fault.
+pub fn set_static_names(names: impl IntoIterator<Item = (u32, String)>) {
+    let mut flat: Vec<&'static str> = Vec::new();
+    for (findex, name) in names {
+        let i = findex as usize;
+        if i >= flat.len() {
+            flat.resize(i + 1, "");
+        }
+        flat[i] = Box::leak(name.into_boxed_str());
+    }
+    let _ = JIT_NAMES.set(flat);
+}
+
+/// Signal-safe: a bounds-checked index into a table that never moves.
+pub fn static_name(findex: u32) -> Option<&'static str> {
+    let name = *JIT_NAMES.get()?.get(findex as usize)?;
+    (!name.is_empty()).then_some(name)
+}
+
 /// Install the findex → name mapping used when printing sample locations.
 ///
 /// The profiler lives below the bytecode types, so the embedder supplies this

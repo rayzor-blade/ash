@@ -626,9 +626,15 @@ pub(crate) fn tiered_compile_tier(
     let took = began.elapsed();
     unsafe { ash_core::hl_bindings::hl_blocking(false) };
     if took.as_millis() >= 20 && (ctx.tier_log || env_flag!("ASH_TIER_LOG")) {
+        // Name as well as id: a bare pthread_self cannot be read as "this ran
+        // on the frame loop" without guessing, and a tier-1 compile landing on
+        // the calling thread rather than a broker is exactly the thing worth
+        // knowing. Note the name is a FALLBACK -- an unnamed thread also reads
+        // as "main" -- so the id stays alongside it.
         eprintln!(
-            "[tier] compile findex={findex} tier={tier} took {:.1}ms on thread {:#x}",
+            "[tier] compile findex={findex} tier={tier} took {:.1}ms on {} ({:#x})",
             took.as_secs_f64() * 1e3,
+            std::thread::current().name().unwrap_or("main"),
             current_thread_id()
         );
     }

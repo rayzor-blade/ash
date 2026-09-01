@@ -919,3 +919,35 @@ mod guid_name_tests {
         let _: unsafe extern "C" fn(i64, *mut super::vbyte) = hlp_register_guid_name;
     }
 }
+
+/// Instance size of an object type, or -1 for anything without one.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_type_data_size(t: *mut hl_type) -> i32 {
+    if t.is_null() {
+        return -1;
+    }
+    match (*t).kind {
+        hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
+            let rt = crate::obj::hlp_get_obj_rt(t);
+            if rt.is_null() { -1 } else { (*rt).size }
+        }
+        _ => -1,
+    }
+}
+
+#[cfg(test)]
+mod data_size_tests {
+    use super::*;
+
+    /// -1 for everything that is not an object, and never a crash on null.
+    /// Haxe reads this to decide whether a type can be laid out inline.
+    #[test]
+    fn data_size_is_negative_for_non_objects() {
+        unsafe {
+            assert_eq!(hlp_type_data_size(std::ptr::null_mut()), -1);
+            assert_eq!(hlp_type_data_size(hlt_i32()), -1);
+            assert_eq!(hlp_type_data_size(hlt_f64()), -1);
+            assert_eq!(hlp_type_data_size(hlt_bytes()), -1);
+        }
+    }
+}

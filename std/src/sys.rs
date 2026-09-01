@@ -1251,3 +1251,78 @@ mod process_memory_tests {
         assert!(f() > 0.0);
     }
 }
+
+/// A monotonic millisecond clock.
+///
+/// Monotonic, not wall time: upstream reads CLOCK_MONOTONIC, and Haxe uses
+/// this for elapsed measurements that must not jump when the system clock is
+/// adjusted. `hlp_sys_time` remains the wall clock.
+// `tv_sec` and `tv_nsec` are i64 here and long elsewhere, so the casts are
+// redundant on this target and load-bearing on others.
+#[allow(clippy::unnecessary_cast)]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) != 0 {
+        return 0; // upstream returns 0 rather than failing
+    }
+    ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+}
+
+/// Load a native plugin. Always false: ash installs no plugin hook.
+///
+/// Upstream routes this through `hl_setup.load_plugin` and returns false when
+/// the embedder left it unset, which is exactly ash's position. Answering
+/// false is upstream's own behaviour for a runtime without the hook, not a
+/// stub pretending -- and a caller that treats the result as authoritative
+/// gets a correct answer.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_load_plugin(_file: *mut crate::hl::vbyte) -> bool {
+    false
+}
+
+/// Resolve a type through the embedder's hook. Always null, for the same
+/// reason `hlp_sys_load_plugin` is always false: upstream returns NULL when
+/// `hl_setup.resolve_type` is unset.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_resolve_type(
+    _t: *mut crate::hl::hl_type,
+    _gt: *mut crate::hl::hl_type,
+) -> *mut crate::hl::vdynamic {
+    std::ptr::null_mut()
+}
+
+#[cfg(test)]
+mod new_prim_tests {
+    use super::*;
+
+    /// Monotonic, and in MILLISECONDS. A version returning seconds or
+    /// nanoseconds would pass any "is it nonzero" check and silently break
+    /// every elapsed-time measurement in Haxe.
+    #[test]
+    fn timestamp_ms_is_monotonic_and_in_milliseconds() {
+        unsafe {
+            let a = hlp_sys_timestamp_ms();
+            assert!(a > 0, "monotonic clock read as {a}");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            let b = hlp_sys_timestamp_ms();
+            assert!(b >= a, "clock went backwards: {a} -> {b}");
+            let delta = b - a;
+            // Generous either way: this asserts the UNIT, not the sleep.
+            assert!(
+                (10..5_000).contains(&delta),
+                "25ms of sleep measured as {delta}; wrong unit?"
+            );
+        }
+    }
+
+    /// Both hooks are absent in ash, and upstream's own answer for an absent
+    /// hook is false/null -- so these are the correct answers, not stubs.
+    #[test]
+    fn absent_embedder_hooks_answer_the_way_upstream_does() {
+        unsafe {
+            assert!(!hlp_sys_load_plugin(std::ptr::null_mut()));
+            assert!(hlp_sys_resolve_type(std::ptr::null_mut(), std::ptr::null_mut()).is_null());
+        }
+    }
+}

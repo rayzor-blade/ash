@@ -1004,3 +1004,66 @@ pub unsafe extern "C" fn hlp_dyn_toi64(v: *mut vdynamic) -> i64 {
     let mut slot = v;
     hlp_dyn_casti64(&mut slot as *mut _ as *mut c_void, crate::types::hlt_dyn())
 }
+
+/// The address a dynamic value stands for.
+///
+/// Mirrors upstream exactly: a boxed scalar answers with the pointer it holds,
+/// and anything already dynamic answers with itself. Haxe uses this to give an
+/// object a stable identity, so returning the box for a boxed value would make
+/// two views of one object compare unequal.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_value_address(v: *mut vdynamic) -> i64 {
+    if v.is_null() {
+        return 0;
+    }
+    let t = (*v).t;
+    let dynamic = !t.is_null()
+        && matches!(
+            (*t).kind,
+            hl::hl_type_kind_HDYN
+                | hl::hl_type_kind_HFUN
+                | hl::hl_type_kind_HOBJ
+                | hl::hl_type_kind_HARRAY
+                | hl::hl_type_kind_HVIRTUAL
+                | hl::hl_type_kind_HDYNOBJ
+                | hl::hl_type_kind_HABSTRACT
+                | hl::hl_type_kind_HENUM
+                | hl::hl_type_kind_HNULL
+                | hl::hl_type_kind_HSTRUCT
+        );
+    if dynamic {
+        v as i64
+    } else {
+        (*v).v.ptr as i64
+    }
+}
+
+#[cfg(test)]
+mod value_address_tests {
+    use super::*;
+
+    /// A boxed scalar answers with the pointer it holds; anything already
+    /// dynamic answers with itself. Getting this backwards would make two
+    /// views of one object compare unequal, which is what Haxe uses it for.
+    #[test]
+    fn value_address_unwraps_a_box_but_not_an_object() {
+        unsafe {
+            assert_eq!(hlp_value_address(std::ptr::null_mut()), 0);
+
+            crate::gc::hlp_gc_init();
+            let obj = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
+            assert!(!obj.is_null());
+            // HI32 is not a dynamic kind, so the answer is the stored pointer.
+            (*obj).v.ptr = 0x1234_5678 as *mut std::ffi::c_void;
+            assert_eq!(hlp_value_address(obj), 0x1234_5678);
+
+            let dynamic = crate::obj::hlp_alloc_dynamic(crate::types::hlt_dyn());
+            assert!(!dynamic.is_null());
+            assert_eq!(
+                hlp_value_address(dynamic),
+                dynamic as i64,
+                "a dynamic value must be its own address"
+            );
+        }
+    }
+}

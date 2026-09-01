@@ -3656,6 +3656,51 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
     }
 }
 
+/// Byte span the collector reserved for the allocation containing `ptr`.
+///
+/// Upstream answers this from a page's block size; ash's granule is the line,
+/// so a multi-line allocation reports its recorded span and a small object
+/// reports the one line it shares. Zero for anything outside the arena, which
+/// is what upstream returns for a pointer it did not hand out.
+pub(crate) unsafe fn allocation_size(ptr: *const c_void) -> usize {
+    let gc = gc_locked_init();
+    let base = gc.heap.memory.as_ptr() as usize;
+    let addr = ptr as usize;
+    if addr < base || addr >= base + gc.heap.memory.len {
+        return 0;
+    }
+    let line = (addr - base) / LINE_SIZE;
+    let mut start = line;
+    loop {
+        let b = start / LINES_PER_BLOCK;
+        if gc.blocks.get(b).is_none_or(|blk| !blk.has_span) {
+            start = line;
+            break;
+        }
+        let floor = b * LINES_PER_BLOCK;
+        while start > floor && gc.heap.alloc_sizes[start] == 0 {
+            start -= 1;
+        }
+        if gc.heap.alloc_sizes[start] != 0 || start == 0 {
+            break;
+        }
+        start -= 1;
+    }
+    let lines = gc.heap.alloc_sizes.get(start).copied().unwrap_or(0) as usize;
+    if lines == 0 { LINE_SIZE } else { lines * LINE_SIZE }
+}
+
+/// Give the collector a chance to stop this thread.
+///
+/// Upstream's `gc_safepoint` exists so a long native loop that never allocates
+/// can still be stopped by a collection. ash's own safepoint is the same
+/// rendezvous the mutator registry uses; a thread the collector was never told
+/// about passes straight through, exactly as upstream allows.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_gc_safepoint() {
+    gc_safepoint();
+}
+
 /// Initialize the garbage collector. Must be called before any allocation.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_init() {

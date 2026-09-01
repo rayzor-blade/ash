@@ -177,6 +177,49 @@ pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut s
     arr as *mut std::ffi::c_void
 }
 
+/// Move `len` elements between two C arrays of `at`.
+///
+/// A carray holds instances inline rather than pointers, so the stride is the
+/// type's runtime size and not a machine word -- which is why this cannot be
+/// `hlp_array_blit`. `memmove`, not `memcpy`: upstream permits the two arrays
+/// to be the same one, and a self-blit with overlapping ranges is the ordinary
+/// way to open or close a gap.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_carray_blit(
+    dst: *mut std::ffi::c_void,
+    at: *mut hl_type,
+    dpos: i32,
+    src: *mut std::ffi::c_void,
+    spos: i32,
+    len: i32,
+) {
+    if at.is_null()
+        || ((*at).kind != crate::hl::hl_type_kind_HOBJ && (*at).kind != crate::hl::hl_type_kind_HSTRUCT)
+    {
+        crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
+        return;
+    }
+    if dpos < 0 || spos < 0 || len < 0 {
+        crate::error::hlp_error(crate::strings::str_to_uchar_ptr(
+            "Invalid array pos or length",
+        ));
+        return;
+    }
+    let rt = crate::obj::hlp_get_obj_rt(at);
+    if rt.is_null() {
+        return;
+    }
+    let size = (*rt).size as usize;
+    if size == 0 || dst.is_null() || src.is_null() {
+        return;
+    }
+    std::ptr::copy(
+        (src as *const u8).add(spos as usize * size),
+        (dst as *mut u8).add(dpos as usize * size),
+        len as usize * size,
+    );
+}
+
 #[cfg(test)]
 mod array_bytes_tests {
     use super::*;

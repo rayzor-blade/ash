@@ -28,12 +28,11 @@ thread_local! {
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 extern "C" {
-    fn hlp_call_stack_raw(arr: *mut varray) -> i32;
+    /// Keeps its own frame pointer so the walker has a place to start; see
+    /// stack_boundary.c. Rust owns the primitive's name, because a cdylib
+    /// exports Rust symbols and hides the rest.
+    fn ash_call_stack_boundary(arr: *mut varray) -> i32;
 }
-
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-#[used]
-static KEEP_CALL_STACK_BOUNDARY: unsafe extern "C" fn(*mut varray) -> i32 = hlp_call_stack_raw;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -369,10 +368,16 @@ unsafe fn call_stack_raw(arr: *mut varray) -> i32 {
     }
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_call_stack_raw(arr: *mut varray) -> i32 {
-    call_stack_raw(arr)
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        ash_call_stack_boundary(arr)
+    }
+    #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+    {
+        call_stack_raw(arr)
+    }
 }
 
 #[no_mangle]

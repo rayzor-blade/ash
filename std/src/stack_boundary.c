@@ -9,6 +9,10 @@
  */
 extern int hlp_call_stack_raw_from_frame(void *array, void **frame);
 
-__attribute__((noinline)) int hlp_call_stack_raw(void *array) {
+/* Renamed off the primitive's own name so Rust can own the exported
+ * symbol. A cdylib publishes the Rust exports and hides everything else,
+ * so a C definition of hlp_call_stack_raw never reached the dynamic
+ * table and the primitive read as missing on exactly this platform. */
+__attribute__((noinline)) int ash_call_stack_boundary(void *array) {
     return hlp_call_stack_raw_from_frame(array, __builtin_frame_address(0));
 }

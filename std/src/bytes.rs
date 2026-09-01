@@ -952,3 +952,39 @@ mod bytes_tests {
         }
     }
 }
+
+/// Bytes the collector reserved for this block, as `hl_gc_get_memsize` does.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_bytes_get_memsize(ptr: *mut hl::vbyte) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    crate::gc::allocation_size(ptr as *const std::ffi::c_void) as i32
+}
+
+#[cfg(test)]
+mod memsize_tests {
+    use super::*;
+
+    /// Non-zero for something the collector handed out, zero for anything it
+    /// did not -- including a stack address, which must not be mistaken for a
+    /// heap block.
+    #[test]
+    fn memsize_covers_the_allocation_and_ignores_foreign_pointers() {
+        unsafe {
+            crate::gc::hlp_gc_init();
+            let b = hlp_alloc_bytes(200);
+            assert!(!b.is_null());
+            let size = hlp_bytes_get_memsize(b);
+            assert!(size >= 200, "200 bytes reported as {size}");
+
+            assert_eq!(hlp_bytes_get_memsize(std::ptr::null_mut()), 0);
+            let on_stack = 0u64;
+            assert_eq!(
+                hlp_bytes_get_memsize(&on_stack as *const u64 as *mut crate::hl::vbyte),
+                0,
+                "a stack address is not a heap block"
+            );
+        }
+    }
+}

@@ -436,19 +436,21 @@ pub(crate) fn gc_safepoint() {
     // Arriving late is the interesting case: the collector can name which
     // thread it waited on but not what that thread was doing, and only the
     // thread itself can answer that.
-    if gc_stats_enabled() {
+    //
+    // Capture the frames here, but resolve and print them after the world
+    // restarts. Symbolication takes tens of milliseconds, and this thread is
+    // holding MUTATOR_WORLD -- the lock the collector must retake to notice
+    // that we just parked. Reporting from inside it therefore lengthens the
+    // very stop being reported, and when two threads arrive late they
+    // symbolicate one behind the other. Measured on MBHaxe: two stragglers,
+    // 197.9ms and 254.7ms, for a stop whose mark and sweep together were 12ms.
+    let late = if gc_stats_enabled() {
         let asked = GC_STOP_ASKED_NS.load(Ordering::Relaxed);
-        let waited_ms = GC_EPOCH.elapsed().as_nanos() as u64 - asked;
-        let waited_ms = waited_ms as f64 / 1e6;
-        if waited_ms > 20.0 {
-            eprintln!(
-                "[gc] thread {:#x} reached a safepoint {:.1}ms after the stop was asked for; it was at:\n{}",
-                thread,
-                waited_ms,
-                std::backtrace::Backtrace::force_capture()
-            );
-        }
-    }
+        let waited_ms = (GC_EPOCH.elapsed().as_nanos() as u64 - asked) as f64 / 1e6;
+        (waited_ms > 20.0).then(|| (waited_ms, std::backtrace::Backtrace::force_capture()))
+    } else {
+        None
+    };
     MUTATOR_WORLD.changed.notify_all();
     while world.stop_requested {
         world = MUTATOR_WORLD.changed.wait(world).unwrap();
@@ -456,6 +458,13 @@ pub(crate) fn gc_safepoint() {
     if let Some(record) = world.mutators.iter_mut().find(|m| m.thread == thread) {
         record.parked = false;
         record.stopped_sp = 0;
+    }
+    drop(world);
+    if let Some((waited_ms, frames)) = late {
+        eprintln!(
+            "[gc] thread {:#x} reached a safepoint {:.1}ms after the stop was asked for; it was at:\n{}",
+            thread, waited_ms, frames
+        );
     }
 }
 
@@ -955,6 +964,17 @@ fn occupancy_stats() -> bool {
 fn no_reclaim() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| matches!(std::env::var("ASH_GC_NO_RECLAIM").as_deref(), Ok("1")))
+}
+
+/// ASH_GC_SWEEP_AUDIT=1: snapshot marks before a sweep and check, for every
+/// block about to be freed, that no root still points into it.
+///
+/// Cached like every other flag here because the freed-block branch consults
+/// it once per block: a sweep that frees 8,300 blocks took the process-wide
+/// getenv lock 8,300 times, inside the stop-the-world.
+fn sweep_audit() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("ASH_GC_SWEEP_AUDIT").is_ok())
 }
 
 fn trace_freed() -> bool {
@@ -2624,16 +2644,6 @@ impl ImmixAllocator {
         let freed_blocks = self.sweep(&stopped_world.snapshots);
         let t_sweep = t_sweep0.elapsed();
         let pause = t0.elapsed();
-        if gc_stats_enabled() {
-            let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-            eprintln!(
-                "[gc-split] stop={:.2}ms mark={:.2}ms sweep={:.2}ms total={:.2}ms",
-                ms(t_stop),
-                ms(t_mark),
-                ms(t_sweep),
-                ms(pause)
-            );
-        }
 
         let live_blocks = self.heap.used_blocks.len();
         let live_bytes = live_blocks * BLOCK_SIZE;
@@ -2665,6 +2675,24 @@ impl ImmixAllocator {
         self.heap.allocation_point = 0;
         self.heap.current_block_end = 0;
         self.heap.last_collect = Instant::now();
+
+        // Everything above mutates heap state a resumed mutator would read:
+        // the bump cursor especially, since restarting before it is cleared
+        // lets a thread allocate from a block this sweep just reclaimed. From
+        // here on nothing touches the heap, so the world can restart -- the
+        // zone walk below and the stderr writes are not reasons to keep ten
+        // threads stopped, and `pause` above has already been measured.
+        drop(stopped_world);
+        if gc_stats_enabled() {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+            eprintln!(
+                "[gc-split] stop={:.2}ms mark={:.2}ms sweep={:.2}ms total={:.2}ms",
+                ms(t_stop),
+                ms(t_mark),
+                ms(t_sweep),
+                ms(pause)
+            );
+        }
 
         // Ask the malloc zones (Rust-side allocations: Vecs, boxes, side
         // tables) to hand free pages back to the OS. Throttled — it is a
@@ -3103,7 +3131,7 @@ impl ImmixAllocator {
         // are full of stale pointers by definition and would drown the
         // signal.
         let audit_marks: Option<std::collections::HashMap<usize, [bool; LINES_PER_BLOCK]>> =
-            if std::env::var("ASH_GC_SWEEP_AUDIT").is_ok() {
+            if sweep_audit() {
                 Some(
                     used_block_addrs
                         .iter()
@@ -3116,6 +3144,11 @@ impl ImmixAllocator {
         // Hoisted: this was a linear scan of every TLAB for every swept block.
         let tlab_set: std::collections::HashSet<usize> =
             self.heap.tlab_blocks.values().copied().collect();
+        // Hoisted for the same reason: this was a fresh Vec per swept block,
+        // so a sweep over ~18,000 retained blocks did ~18,000 malloc/free
+        // pairs inside the stop-the-world. Reusing one buffer keeps the
+        // capacity across blocks and changes nothing else.
+        let mut spans: Vec<(usize, usize)> = Vec::new();
         for block_addr in used_block_addrs {
             // The mutator's live bump region: marks still reset below for
             // the next cycle, but the block is never reclaimed under the
@@ -3132,7 +3165,7 @@ impl ImmixAllocator {
             // Runs of unmarked lines, harvested in the pass that resets the
             // marks. Only for blocks this sweep KEEPS: an empty block goes
             // back whole, and the TLAB block is still being bumped through.
-            let mut spans: Vec<(usize, usize)> = Vec::new();
+            spans.clear();
             let mut run_start: Option<usize> = None;
             // Plain reads and writes, not atomics: sweep holds `&mut self`, so
             // no marker is running and `get_mut` reaches the bit directly. The
@@ -3176,7 +3209,7 @@ impl ImmixAllocator {
                 }] += 1;
             }
             if !is_empty && !is_tlab && recycle_lines() {
-                for (start, len) in spans {
+                for (start, len) in spans.drain(..) {
                     self.heap.recycle_spans.push((block_addr, start, len));
                 }
             }
@@ -3195,7 +3228,7 @@ impl ImmixAllocator {
                 // ROOT still points into it means the tracer failed; no such
                 // root means the snapshot never contained the pointer. This
                 // is the question that splits every premature-free bug.
-                if std::env::var("ASH_GC_SWEEP_AUDIT").is_ok() {
+                if sweep_audit() {
                     let base = self.heap.memory.as_ptr() as usize;
                     let lo = base + block_addr;
                     let hi = lo + BLOCK_SIZE;

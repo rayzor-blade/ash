@@ -207,6 +207,88 @@ mkdir -p "${RUN_ROOT}"
         -debug
 )
 
+# Every HDLL is built from the pinned checkout, by HashLink's own CMake.
+#
+# Copying prebuilt HDLLs in is how this fixture acquired an openal.hdll
+# exporting 93 primitives where its source declares 157: it had been compiled
+# against Apple's OpenAL.framework, which carries no EFX headers, so the whole
+# `#ifdef ALC_EXT_EFX` block vanished. The game references 33 of the missing
+# ones, and they surfaced at launch as unresolved natives -- reading like an
+# Ash resolution bug rather than a library that simply lacks them.
+#
+# Upstream's build already knows each library's sources, flags and
+# dependencies, so there is nothing to hand-derive. OPENAL_* is pinned at
+# openal-soft because CMake otherwise finds Apple's framework first and
+# reproduces exactly the defect above.
+openal_prefix=""
+for candidate in /opt/homebrew/opt/openal-soft /usr/local/opt/openal-soft; do
+    [[ -f "${candidate}/include/AL/efx.h" ]] || continue
+    [[ "$(lipo -archs "${candidate}/lib/libopenal.dylib" 2>/dev/null)" == *"${HOST_ARCH}"* ]] || continue
+    openal_prefix="${candidate}"
+    break
+done
+if [[ -z "${openal_prefix}" ]]; then
+    echo "error: no ${HOST_ARCH} openal-soft with EFX headers found." >&2
+    echo "       Apple's OpenAL.framework has no efx.h, and building against it" >&2
+    echo "       silently drops 64 primitives: brew install openal-soft" >&2
+    exit 1
+fi
+
+HL_BUILD="${WORK_ROOT}/hdll-build"
+HL_HDLLS=(fmt openal ssl ui uv)
+# -DCMAKE_FIND_FRAMEWORK=LAST is MBHaxe's own documented macOS build flag
+# (README-macOS.md), and it is load-bearing rather than cosmetic. Without it
+# CMake searches /Library/Frameworks and /System/Library/Frameworks first, so
+# FindPNG resolved png.h out of Mono.framework -- a libpng 1.2-era header with
+# no simplified read API -- while still linking Homebrew's libpng16. fmt.c
+# guards png_decode on #ifdef PNG_IMAGE_VERSION, so the whole decoder compiled
+# down to hl_error("PNG support is missing"), and the game reached its render
+# loop with no textures. Frameworks last, and each library is found whole.
+cmake -S "${SOURCE_ROOT}/hashlink-rg" -B "${HL_BUILD}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_FIND_FRAMEWORK=LAST \
+    -DCMAKE_OSX_ARCHITECTURES="${HOST_ARCH}" \
+    -DOPENAL_INCLUDE_DIR="${openal_prefix}/include/AL" \
+    -DOPENAL_LIBRARY="${openal_prefix}/lib/libopenal.dylib" \
+    -DWITH_FMT=ON -DWITH_OPENAL=ON -DWITH_SDL=OFF \
+    -DWITH_SSL=ON -DWITH_UI=ON -DWITH_UV=ON \
+    -DWITH_SQLITE=OFF -DWITH_VIDEO=OFF >/dev/null
+cmake --build "${HL_BUILD}" -j"$(sysctl -n hw.ncpu)" \
+    --target "${HL_HDLLS[@]/%/.hdll}" >/dev/null
+
+# datachannel comes from its own pinned repository rather than hashlink's, but
+# it is built here for the same reason as the rest: a prebuilt .hdll records
+# whatever its author's machine happened to have, and the differences only show
+# up as missing primitives at run time.
+#
+# Its CMakeLists says target_link_libraries(... libhl ...) with no such CMake
+# target in scope, so the linker is handed a bare -llibhl and looks for
+# liblibhl.dylib. The alias below satisfies that; the install name written into
+# the result still comes from the dylib itself, so this changes nothing but the
+# spelling the linker searches for.
+DC_BUILD="${WORK_ROOT}/dc-build"
+ln -sf libhl.dylib "${HL_BUILD}/bin/liblibhl.dylib"
+cmake -S "${SOURCE_ROOT}/hxDatachannel-rg/cpp" -B "${DC_BUILD}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_ARCHITECTURES="${HOST_ARCH}" \
+    -DHASHLINK_INCLUDE_DIR="${SOURCE_ROOT}/hashlink-rg/src" \
+    -DHASHLINK_LIBRARY_DIR="${HL_BUILD}/bin" \
+    -DBUILD_SHARED_LIBS=OFF -DNO_EXAMPLES=ON -DNO_TESTS=ON >/dev/null
+cmake --build "${DC_BUILD}" -j"$(sysctl -n hw.ncpu)" \
+    --target hxdatachannel.hdll >/dev/null
+cp "${DC_BUILD}/datachannel.hdll" "${HL_BUILD}/bin/datachannel.hdll"
+HL_HDLLS+=(datachannel)
+
+# SDL keeps this script's own recipe rather than CMake's.
+#
+# Both compile the same pinned sources. CMake's sdl.hdll was once rejected here
+# for taking every GL entry point down with a null dereference, but that
+# diagnosis was wrong: the crashes came from the absolute LC_RPATH CMake bakes
+# in, which pulled a second HashLink runtime into the process, and they are
+# fixed above for every CMake-built library. This recipe stays because it is
+# the one measured to render, not because CMake's is known to be broken --
+# switching is a live option, gated on a run that reaches the menu.
+
 read -r -a sdl_cflags <<<"$("${sdl2_pkgconfig}" --cflags sdl2)"
 read -r -a sdl_libs <<<"$("${sdl2_pkgconfig}" --libs sdl2)"
 
@@ -236,6 +318,40 @@ fi
 install_name_tool -change "${linked_ash_std}" @rpath/libhl.dylib "${RUN_ROOT}/sdl.hdll"
 install_name_tool -id @rpath/sdl.hdll "${RUN_ROOT}/sdl.hdll"
 
+for lib in "${HL_HDLLS[@]}"; do
+    built="${HL_BUILD}/bin/${lib}.hdll"
+    [[ -f "${built}" ]] || {
+        echo "error: ${lib}.hdll was not produced by the pinned build" >&2
+        exit 1
+    }
+    cp "${built}" "${RUN_ROOT}/${lib}.hdll"
+    install_name_tool -id "@rpath/${lib}.hdll" "${RUN_ROOT}/${lib}.hdll"
+    # CMake bakes an absolute LC_RPATH pointing back into the build tree, and
+    # these libraries import @rpath/libhl.1.dylib. Left alone dyld satisfies
+    # that from the build directory, loading a SECOND runtime -- the stock
+    # HashLink one -- alongside the ash_std copy staged here. The HDLLs then
+    # call into a GC that was never initialised, which surfaces as null derefs
+    # inside otherwise healthy primitives. Repoint them at the staged runtime,
+    # the way the hand-rolled recipe above already does.
+    while read -r stale_rpath; do
+        [[ -n "${stale_rpath}" ]] || continue
+        install_name_tool -delete_rpath "${stale_rpath}" "${RUN_ROOT}/${lib}.hdll"
+    done < <(otool -l "${RUN_ROOT}/${lib}.hdll" \
+        | awk '/LC_RPATH/{want=1} want && $1=="path"{print $2; want=0}')
+    install_name_tool -add_rpath @loader_path "${RUN_ROOT}/${lib}.hdll"
+    codesign --force -s - "${RUN_ROOT}/${lib}.hdll" >/dev/null 2>&1 || true
+    # Informational, never a gate: ui.c declares 36 primitives of which 18 are
+    # Windows-only, and openal has 4 behind absent extensions, so "fewer than
+    # declared" is normal. What the GAME can resolve is checked at the end.
+    case "${lib}" in
+        datachannel) lib_src="${SOURCE_ROOT}/hxDatachannel-rg/cpp/src" ;;
+        *)           lib_src="${SOURCE_ROOT}/hashlink-rg/libs/${lib}" ;;
+    esac
+    declared="$(grep -rhoE 'DEFINE_PRIM[A-Z_]*\(' "${lib_src}"/*.c 2>/dev/null | wc -l | tr -d ' ')"
+    exported="$(nm -gU "${RUN_ROOT}/${lib}.hdll" 2>/dev/null | grep -c ' T _hlp_' || true)"
+    echo "built ${lib}.hdll from source: ${exported} primitives (source declares ${declared})"
+done
+
 cp "${ASH_BIN}" "${RUN_ROOT}/ash"
 cp "${ASH_LIBHL}" "${RUN_ROOT}/libhl.dylib"
 install_name_tool -id @rpath/libhl.dylib "${RUN_ROOT}/libhl.dylib"
@@ -254,8 +370,19 @@ if [[ -n "${NATIVE_DIR}" ]]; then
         exit 1
     }
     shopt -s nullglob
+    # Only what this script cannot build from source. Everything HashLink
+    # ships is built above from the pinned checkout; accepting a prebuilt copy
+    # instead is what let a stale openal.hdll into the fixture.
     for hdll in "${NATIVE_DIR}"/*.hdll; do
-        [[ "$(basename "${hdll}")" == "sdl.hdll" ]] && continue
+        name="$(basename "${hdll}" .hdll)"
+        skip=""
+        for built in "${HL_HDLLS[@]}"; do
+            [[ "${name}" == "${built}" ]] && skip=1 && break
+        done
+        if [[ -n "${skip}" ]]; then
+            echo "note: ignoring prebuilt ${name}.hdll; built from source above" >&2
+            continue
+        fi
         cp "${hdll}" "${RUN_ROOT}/"
     done
     # The HDLLs are taken exactly as the game ships them, so their own
@@ -315,11 +442,44 @@ codesign --force -s - "${RUN_ROOT}/libhl.1.dylib" >/dev/null
 # the property the fixture exists to demonstrate.
 codesign --force -s - "${RUN_ROOT}/ash" >/dev/null
 
+# fmt guards its png, jpeg and vorbis decoders behind #ifdefs that depend on
+# which headers were found. A library found only half-way still links and still
+# starts; the decoder is simply gone. Check the symbol, not the build log.
+if ! nm -u "${RUN_ROOT}/fmt.hdll" | grep -q 'png_image_begin_read_from_memory'; then
+    echo "error: fmt.hdll has no libpng simplified-read API, so png_decode" >&2
+    echo "       compiled out and nothing will render. A stray png.h -- Mono's," >&2
+    echo "       typically -- outranked the real one during the CMake build." >&2
+    exit 1
+fi
+
+# Every staged HDLL must reach ash's runtime and no other. A second libhl in
+# the process is not a link error -- both resolve, the program starts, and the
+# only symptom is a null deref the first time an HDLL touches the GC it does
+# not share. Assert that each @rpath here can only land inside RUN_ROOT.
+for hdll in "${RUN_ROOT}"/*.hdll; do
+    otool -l "${hdll}" \
+        | awk '/LC_RPATH/{want=1} want && $1=="path"{print $2; want=0}' \
+        | while read -r rp; do
+            case "${rp}" in
+                @loader_path*|@executable_path*) ;;
+                *)
+                    echo "error: $(basename "${hdll}") keeps rpath ${rp}, which can" >&2
+                    echo "       resolve libhl outside the fixture and load a second runtime" >&2
+                    exit 1
+                    ;;
+            esac
+        done || exit 1
+done
+
 if strings "${RUN_ROOT}/sdl.hdll" | grep -Eiq 'ash_sdl|crates/ash_sdl|target/(debug|release)/deps/libsdl'; then
     echo "error: rejected sdl.hdll contaminated by the decommissioned ash_sdl crate" >&2
     exit 1
 fi
-if ! otool -L "${RUN_ROOT}/sdl.hdll" | grep -q '@rpath/libhl.dylib'; then
+# Either name is Ash's runtime: the fixture stages it as both libhl.dylib and
+# libhl.1.dylib, because HashLink's own build links the versioned name and
+# upstream HDLLs expect it. What matters is that it resolves to something this
+# directory provides, not which of the two aliases it asked for.
+if ! otool -L "${RUN_ROOT}/sdl.hdll" | grep -Eq '@rpath/libhl(\.1)?\.dylib'; then
     echo "error: sdl.hdll does not resolve the staged Ash libhl" >&2
     exit 1
 fi
@@ -348,7 +508,15 @@ if [[ -n "${NATIVE_DIR}" ]]; then
     shopt -s nullglob
     for staged in "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
         name="$(basename "${staged}")"
-        case "${name}" in sdl.hdll|libhl.dylib|libhl.1.dylib) continue ;; esac
+        case "${name}" in libhl.dylib|libhl.1.dylib) continue ;; esac
+        # Anything built from the pinned source is EXPECTED to differ from a
+        # prebuilt copy of the same name -- that difference is the point. This
+        # check exists for the libraries the fixture takes as shipped.
+        built_here=""
+        for built in "${HL_HDLLS[@]}"; do
+            [[ "${name}" == "${built}.hdll" ]] && built_here=1 && break
+        done
+        [[ -n "${built_here}" ]] && continue
         source_copy="${NATIVE_DIR}/${name}"
         [[ -e "${source_copy}" ]] || continue
         if ! cmp -s "${source_copy}" "${staged}"; then

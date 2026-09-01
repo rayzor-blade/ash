@@ -301,6 +301,14 @@ jobs:
             --gc-stats \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
+      # Profile-guided, via --aot-profile. The tiered lane gets a profile for
+      # free -- its interpreter watches every site before anything promotes --
+      # so emitting AOT without one was not neutrality, it was withholding the
+      # compiler's own information from one lane and not the other. The
+      # profiling run is charged to aot_build_ms, which the site already
+      # reports apart from run time, so its cost is visible rather than
+      # folded into the number.
+      #
       # Runs after ash's own numbers, like the HL/C lane, so compiling a
       # native object cannot disturb the measurement it sits beside. Only the
       # ash-aot lane: ash_bench.py and hl_bench.py already produce the others,
@@ -314,6 +322,7 @@ jobs:
             ./scripts/aot_bench.py \
               --benchmarks "${{ matrix.bench }}" \
               --lanes ash-aot \
+              --aot-profile \
               --iterations 7 \
               --warmups 1 \
               --out "/tmp/aot-full-${{ matrix.bench }}.json" \

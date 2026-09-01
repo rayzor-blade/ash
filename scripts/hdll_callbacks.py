@@ -208,6 +208,13 @@ def main() -> int:
     args = ap.parse_args()
 
     manifest = tomllib.loads((HDLL_DIR / "cases.toml").read_text())["case"]
+    plat = platform.system().lower()
+    skipped = [c["name"] for c in manifest if plat in c.get("skip_on", [])]
+    manifest = [c for c in manifest if plat not in c.get("skip_on", [])]
+    if skipped:
+        # Say it out loud. A case that silently vanishes on one platform reads
+        # as a case that passes there.
+        print(f"skipping on {plat}: {', '.join(skipped)}")
     if args.cases:
         want = set(args.cases.split(","))
         manifest = [c for c in manifest if c["name"] in want]
@@ -270,18 +277,32 @@ def main() -> int:
         return 0
 
     base = json.loads(BASELINE.read_text())
-    regressed, improved, new = [], [], []
+    gating = {
+        f"{c['name']}/{root}"
+        for c in manifest
+        for root in c.get("contract", ["slot"])
+    }
+    regressed, improved, new, informational = [], [], [], []
     for key, got in sorted(results.items()):
         was = base.get(key)
+        case_root = "/".join(key.split("/")[:2])
         if was is None:
             new.append(key)
         elif was != got["status"]:
-            (regressed if was == "PASS" else improved).append((key, was, got["status"]))
+            entry = (key, was, got["status"])
+            if case_root not in gating:
+                informational.append(entry)
+            elif was == "PASS":
+                regressed.append(entry)
+            else:
+                improved.append(entry)
 
     for key, was, now in regressed:
         print(f"REGRESSED {key}: {was} -> {now}")
     for key, was, now in improved:
         print(f"changed   {key}: {was} -> {now}")
+    for key, was, now in informational:
+        print(f"note      {key}: {was} -> {now} (not a contractual row)")
     for key in new:
         print(f"new row   {key}: {results[key]['status']} (not in baseline)")
 

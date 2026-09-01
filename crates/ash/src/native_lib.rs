@@ -533,7 +533,18 @@ impl NativeLibraryManager {
         #[cfg(unix)]
         let library = {
             use std::ffi::CString;
-            let path_cstr = CString::new(path.to_str().unwrap_or(""))
+            // Absolute, always. `dlopen` treats a name with NO SLASH in it as
+            // a SONAME and looks only in the cache and the library paths --
+            // never in the working directory. A program named on the command
+            // line as a bare `game.hl` has "" for its parent, so the candidate
+            // built from it is a bare `sdl.hdll`, which `Path::exists` happily
+            // resolves against the cwd and `dlopen` then refuses to find:
+            // "cannot open shared object file: No such file or directory",
+            // naming a file sitting right there. macOS resolves a relative
+            // path against the cwd and so never showed it; on Linux every
+            // HDLL beside a bytecode file failed to load.
+            let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+            let path_cstr = CString::new(absolute.to_str().unwrap_or(""))
                 .map_err(|e| anyhow!("Invalid path: {}", e))?;
             let handle =
                 unsafe { libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };

@@ -94,7 +94,8 @@ def peak_rss(cmd: list[str], timeout: float, env: dict | None) -> int | None:
 
 
 def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
-              env: dict | None = None) -> tuple[Path | None, str, float]:
+              env: dict | None = None, profile: bool = False,
+              ash: Path | None = None) -> tuple[Path | None, str, float]:
     """Emit and link one bench ahead of time. Returns (binary, detail, ms)."""
     source = tests_dir / bench["hl"]
     if not source.exists():
@@ -115,8 +116,28 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
     obj = workdir / "prog.o"
     binary = workdir / "prog"
     t0 = time.perf_counter()
+
+    emit_env = dict(env or os.environ)
+    if profile:
+        # A profiling run, charged to BUILD time where it belongs: this is
+        # ordinary PGO, and the cost is paid once by whoever builds, not on
+        # every run. Only a tiered mode observes anything -- the record site is
+        # gated on a tiered runtime -- so `--mode hybrid`, not interp.
+        # The caller's binary, already chosen newest-first. Re-deriving it
+        # here release-first picked a stale build that had never heard of
+        # ASH_AOT_PROFILE_OUT, so no profile was written and the flag looked
+        # like it simply did not work.
+        if ash is not None:
+            prof = workdir / "callsites.prof"
+            run_env = dict(os.environ)
+            run_env["ASH_AOT_PROFILE_OUT"] = str(prof)
+            subprocess.run([str(ash), "--mode", "hybrid", "--quiet", str(source)],
+                           capture_output=True, text=True, timeout=900, env=run_env)
+            if prof.exists():
+                emit_env["ASH_AOT_PROFILE"] = str(prof)
+
     p = subprocess.run([str(spike), str(source), str(obj)],
-                       capture_output=True, text=True, timeout=900, env=env)
+                       capture_output=True, text=True, timeout=900, env=emit_env)
     if p.returncode != 0:
         return None, f"emit failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0
     refused = [l for l in p.stdout.splitlines() if "refused" in l]
@@ -146,6 +167,11 @@ def main() -> int:
                          "alone, because ash_bench.py and hl_bench.py already "
                          "produce the others and running them twice would put "
                          "two different measurements of one engine on the page")
+    ap.add_argument("--aot-profile", action="store_true",
+                    help="give the AOT lane a callsite profile from a hybrid "
+                         "run first, and charge that run to build time. This "
+                         "makes the lane profile-guided, which the HL/C lane "
+                         "is not -- say so wherever the row is published.")
     ap.add_argument("--emit-partial", type=Path, default=None,
                     help="also write a merge_bench_site.py partial carrying "
                          "the ash-aot lane")
@@ -213,7 +239,8 @@ def main() -> int:
             row["lanes"]["ash-aot"] = {"status": "SKIP", "detail": "lane not selected"}
         else:
           with tempfile.TemporaryDirectory(prefix=f"aot-{name}-") as td:
-            binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td), lane_env)
+            binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td), lane_env,
+                                                 profile=args.aot_profile, ash=ash)
             if binary is None:
                 row["lanes"]["ash-aot"] = {"status": "FAIL", "detail": detail}
             else:

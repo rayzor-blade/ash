@@ -59,7 +59,7 @@ const HL_WSIZE: i32 = 8;
 /// `HBOOL` is 2, not 1. `HVOID` and `HPACKED` are 0 — the latter because a
 /// packed field's size comes from the referenced type's runtime object, which
 /// is why [`object_layout`] refuses to lay out types containing one.
-fn type_size(kind: hl_type_kind) -> i32 {
+pub(crate) fn type_size(kind: hl_type_kind) -> i32 {
     match kind {
         hl_type_kind_HVOID => 0,
         hl_type_kind_HUI8 => 1,

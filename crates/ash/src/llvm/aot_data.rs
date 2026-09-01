@@ -768,6 +768,239 @@ impl<'ctx> JITModule<'ctx> {
     /// than baked in. `hlp_get_obj_rt` computes them from the type's layout,
     /// and computing them twice -- once here, once in the runtime -- is how
     /// the two silently disagree.
+    /// Build the module's constant objects as initialised DATA.
+    ///
+    /// The startup routine used to allocate every constant with
+    /// `hlp_alloc_obj`, ask `hlp_get_obj_rt` for its field offsets, and store
+    /// each field one call at a time. None of that depends on anything only
+    /// known at run time: the offsets come from [`crate::layout`], which is
+    /// already what every compiled field access is lowered against, and the
+    /// values are string data, type descriptors and integers this module also
+    /// emits. So the objects are emitted as one initialised blob and the
+    /// loader's relocations do the work the routine was doing.
+    ///
+    /// Returns the global slots it handled; the caller leaves those out of the
+    /// startup routine. A constant is handled only when its layout can be
+    /// reproduced exactly and every field is one of the statically knowable
+    /// kinds -- a field holding a closure or a reference to another constant
+    /// still goes the old way, so this narrows the routine rather than
+    /// replacing it.
+    fn emit_static_constants(
+        &mut self,
+        type_globals: &HashMap<usize, PointerValue<'ctx>>,
+    ) -> Result<std::collections::HashSet<usize>> {
+        use inkwell::types::BasicTypeEnum;
+
+        let mut handled = std::collections::HashSet::new();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let bytecode = self.bytecode.clone();
+
+        // A field this pass can place without asking the runtime anything.
+        // Deliberately excludes HFUN/HMETHOD (needs a vclosure allocated) and
+        // HOBJ/HSTRUCT (needs another constant's address, which would make
+        // eligibility mutually recursive).
+        let placeable = |k: hl_type_kind| {
+            matches!(k, hl_type_kind_HBYTES | hl_type_kind_HTYPE)
+                || !matches!(
+                    k,
+                    hl_type_kind_HFUN
+                        | hl_type_kind_HMETHOD
+                        | hl_type_kind_HOBJ
+                        | hl_type_kind_HSTRUCT
+                )
+        };
+
+        struct Candidate {
+            global_idx: usize,
+            type_idx: usize,
+            layout: crate::layout::ObjLayout,
+            start: usize,
+            fields: Vec<i32>,
+        }
+
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for constant in &bytecode.constants {
+            let global_idx = constant.global as usize;
+            if global_idx >= bytecode.globals.len() || global_idx >= self.globals_data.len() {
+                continue;
+            }
+            let type_idx = bytecode.globals[global_idx].0;
+            let ty = &bytecode.types[type_idx];
+            if ty.kind != hl_type_kind_HOBJ && ty.kind != hl_type_kind_HSTRUCT {
+                continue;
+            }
+            if !type_globals.contains_key(&type_idx) {
+                continue;
+            }
+            let Some(obj_data) = ty.obj.as_ref() else { continue };
+            let Some(layout) = crate::layout::object_layout(&bytecode.types, type_idx) else {
+                continue; // layout says "ask the runtime", so we must
+            };
+            if constant.fields.len() > obj_data.fields.len()
+                || layout.field_offsets.len() < obj_data.fields.len()
+            {
+                continue;
+            }
+            let start = layout.field_offsets.len() - obj_data.fields.len();
+            let ok = constant.fields.iter().enumerate().all(|(j, _)| {
+                obj_data
+                    .fields
+                    .get(j)
+                    .and_then(|f| bytecode.types.get(f.type_.0))
+                    .is_some_and(|ft| placeable(ft.kind))
+            });
+            if !ok {
+                continue;
+            }
+            candidates.push(Candidate {
+                global_idx,
+                type_idx,
+                layout,
+                start,
+                fields: constant.fields.clone(),
+            });
+        }
+        if candidates.is_empty() {
+            return Ok(handled);
+        }
+
+        // Pass 1: the shape of each object, so the blob has a type before any
+        // initialiser needs to name an address inside it.
+        let mut member_types: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+        for c in &candidates {
+            let mut parts: Vec<BasicTypeEnum<'ctx>> = Vec::new();
+            let mut cursor: i32 = 0;
+            let is_obj = bytecode.types[c.type_idx].kind == hl_type_kind_HOBJ;
+            if is_obj {
+                parts.push(ptr_type.into()); // the `t` header hlp_alloc_obj writes
+                cursor = 8;
+            }
+            let obj_data = bytecode.types[c.type_idx].obj.as_ref().unwrap();
+            for j in 0..c.fields.len() {
+                let off = c.layout.field_offsets[c.start + j];
+                if off < cursor {
+                    parts.clear();
+                    break;
+                }
+                if off > cursor {
+                    parts.push(i8_type.array_type((off - cursor) as u32).into());
+                }
+                let fk = bytecode.types[obj_data.fields[j].type_.0].kind;
+                let width = match fk {
+                    hl_type_kind_HBYTES | hl_type_kind_HTYPE => {
+                        parts.push(ptr_type.into());
+                        8
+                    }
+                    _ => {
+                        // Mirrors the routine this replaces: the value is
+                        // stored as an i32 whatever the field's declared
+                        // width, and any remainder stays zero.
+                        parts.push(i32_type.into());
+                        4
+                    }
+                };
+                cursor = off + width;
+            }
+            if parts.is_empty() && !c.fields.is_empty() {
+                member_types.push(i8_type.array_type(c.layout.size.max(0) as u32).into());
+                continue;
+            }
+            if c.layout.size > cursor {
+                parts.push(i8_type.array_type((c.layout.size - cursor) as u32).into());
+            }
+            member_types.push(self.context.struct_type(&parts, true).into());
+        }
+
+        let blob_ty = self.context.struct_type(&member_types, true);
+        let blob = self.module.add_global(blob_ty, None, "ash_constants");
+        blob.set_linkage(Linkage::Internal);
+        blob.set_alignment(8);
+
+        // Pass 2: the values.
+        let mut member_values: Vec<BasicValueEnum<'ctx>> = Vec::new();
+        for (ci, c) in candidates.iter().enumerate() {
+            let BasicTypeEnum::StructType(member_ty) = member_types[ci] else {
+                member_values.push(member_types[ci].const_zero());
+                continue;
+            };
+            let mut vals: Vec<BasicValueEnum<'ctx>> = Vec::new();
+            let mut cursor: i32 = 0;
+            let is_obj = bytecode.types[c.type_idx].kind == hl_type_kind_HOBJ;
+            if is_obj {
+                vals.push(type_globals[&c.type_idx].into());
+                cursor = 8;
+            }
+            let obj_data = bytecode.types[c.type_idx].obj.as_ref().unwrap();
+            for (j, &field_value) in c.fields.iter().enumerate() {
+                let off = c.layout.field_offsets[c.start + j];
+                if off > cursor {
+                    vals.push(i8_type.array_type((off - cursor) as u32).const_zero().into());
+                }
+                let fk = bytecode.types[obj_data.fields[j].type_.0].kind;
+                let width = match fk {
+                    hl_type_kind_HBYTES => {
+                        let v = self
+                            .string_globals
+                            .get(field_value as usize)
+                            .and_then(|g| g.as_ref())
+                            .map(|g| g.as_pointer_value())
+                            .unwrap_or_else(|| ptr_type.const_null());
+                        vals.push(v.into());
+                        8
+                    }
+                    hl_type_kind_HTYPE => {
+                        let v = type_globals
+                            .get(&(field_value as usize))
+                            .copied()
+                            .unwrap_or_else(|| ptr_type.const_null());
+                        vals.push(v.into());
+                        8
+                    }
+                    _ => {
+                        let value = bytecode
+                            .ints
+                            .get(field_value as usize)
+                            .copied()
+                            .unwrap_or(field_value);
+                        vals.push(i32_type.const_int(value as u32 as u64, false).into());
+                        4
+                    }
+                };
+                cursor = off + width;
+            }
+            if c.layout.size > cursor {
+                vals.push(i8_type.array_type((c.layout.size - cursor) as u32).const_zero().into());
+            }
+            member_values.push(member_ty.const_named_struct(&vals).into());
+        }
+        blob.set_initializer(&blob_ty.const_named_struct(&member_values));
+
+        // Point the global slots at the blob, statically. These were stores
+        // executed at startup; as constant GEPs the loader resolves them.
+        if let Some(globals) = self.aot_globals {
+            let nglobals = self.bytecode.globals.len().max(1);
+            let mut slots: Vec<PointerValue<'ctx>> = vec![ptr_type.const_null(); nglobals];
+            for (ci, c) in candidates.iter().enumerate() {
+                let addr = unsafe {
+                    blob.as_pointer_value().const_in_bounds_gep(
+                        blob_ty,
+                        &[
+                            self.context.i32_type().const_zero(),
+                            self.context.i32_type().const_int(ci as u64, false),
+                        ],
+                    )
+                };
+                slots[c.global_idx] = addr;
+                handled.insert(c.global_idx);
+            }
+            globals.set_initializer(&ptr_type.const_array(&slots));
+        }
+
+        Ok(handled)
+    }
+
     pub(crate) fn emit_module_init(&mut self) -> Result<()> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
@@ -842,12 +1075,40 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
+        // Everything this can place as data is placed as data; what comes
+        // back is what still needs the routine below.
+        let statically_built = self.emit_static_constants(&type_globals)?;
+        if let Some(blob) = self.module.get_global("ash_constants") {
+            // The blob lives in a data section, which neither the conservative
+            // stack scan nor the TLAB walk reaches. Constants are immortal --
+            // outside the arena, so never marked and never swept -- but a field
+            // can be assigned a heap object later, and that pointer has to be
+            // found. One range covers every constant, where the routine needed
+            // a `hlp_gc_register_root` per object.
+            let add_scan_ty = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+            let add_scan = self.aot_symbol("hlp_gc_add_scan_root", add_scan_ty);
+            let blob_size = blob
+                .get_value_type()
+                .into_struct_type()
+                .size_of()
+                .ok_or_else(|| anyhow!("ash_constants has no size"))?;
+            self.builder.build_indirect_call(
+                add_scan_ty,
+                add_scan,
+                &[blob.as_pointer_value().into(), blob_size.into()],
+                "",
+            )?;
+        }
+
         let bytecode = self.bytecode.clone();
         let nfields_offset = std::mem::offset_of!(hl_runtime_obj, nfields) as u64;
         let indexes_offset = std::mem::offset_of!(hl_runtime_obj, fields_indexes) as u64;
 
         for constant in &bytecode.constants {
             let global_idx = constant.global as usize;
+            if statically_built.contains(&global_idx) {
+                continue;
+            }
             if global_idx >= bytecode.globals.len() || global_idx >= self.globals_data.len() {
                 continue;
             }

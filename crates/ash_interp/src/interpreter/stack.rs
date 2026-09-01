@@ -305,6 +305,16 @@ impl HLInterpreter {
     /// The public ABI treats a symbol as opaque until `resolve_symbol`; using
     /// a stable UTF-16 buffer address as the token lets that second call return
     /// the already-rendered value without exposing Rust frame storage to Haxe.
+    /// Deepest trace ash will render, matching the 256 the native walks in
+    /// `compiled_stack_functions` already impose.
+    ///
+    /// Those caps covered only the native PCs; the bridge-caller and
+    /// interpreter-frame walks below were unbounded, so a deep Haxe chain
+    /// produced an unbounded symbol list -- rebuilt, and cloned, on EVERY
+    /// throw. Nothing reads past a few dozen frames of a trace, and the cost
+    /// of the tail is paid whether or not anyone looks at it.
+    pub(super) const MAX_TRACE_FRAMES: usize = 256;
+
     pub(super) fn stack_symbols(
         &mut self,
         bytecode: &DecodedBytecode,
@@ -325,6 +335,9 @@ impl HLInterpreter {
         // Indexed rather than iterated: symbolicating borrows the interpreter
         // mutably to fill the cache.
         for i in (0..self.jit_bridge_callers.len()).rev() {
+            if symbols.len() >= Self::MAX_TRACE_FRAMES {
+                break;
+            }
             let function_index = self.jit_bridge_callers[i];
             if last == Some(function_index) {
                 continue;
@@ -335,6 +348,9 @@ impl HLInterpreter {
             }
         }
         for i in (0..self.stack.len()).rev() {
+            if symbols.len() >= Self::MAX_TRACE_FRAMES {
+                break;
+            }
             let (function_index, pc) = (self.stack[i].function_index, self.stack[i].pc);
             if last == Some(function_index) {
                 continue;

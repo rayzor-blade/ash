@@ -965,10 +965,27 @@ pub(crate) fn resolve_worker_stub(
         eprintln!("[stub] resolve findex={findex}");
     }
     let code = {
+        // Another thread may hold this across an ENTIRE compile, and this one
+        // is regularly a fiber worker -- a registered mutator. Waiting on the
+        // mutex is precisely what hl_blocking exists for: nothing here touches
+        // a GC object, and the primitive publishes this thread's stack pointer
+        // and callee-saved registers so a collection can run alongside.
+        //
+        // tiered_compile_tier below already declares the compile itself
+        // blocking, but the WAIT in front of it was not covered, so a thread
+        // queued behind someone else's compile reached no safepoint for as
+        // long as that compile took. Measured on MBHaxe: two stragglers per
+        // collection and world stops of 263ms under --preset game and 866ms
+        // under --preset application, against 0.01ms and no stragglers at all
+        // under --mode interp, where nothing compiles.
+        unsafe { ash_core::hl_bindings::hl_blocking(true) };
         let _compile = ctx
             .worker_compile_lock
             .lock()
             .expect("worker compile mutex poisoned");
+        // SAFETY: paired with the call above; the guard is held from here, so
+        // this thread is running again and must be waited for as usual.
+        unsafe { ash_core::hl_bindings::hl_blocking(false) };
         let installed = if ctx.arrays.functions_ptrs == 0 {
             std::ptr::null_mut()
         } else {

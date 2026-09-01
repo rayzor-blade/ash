@@ -94,11 +94,25 @@ pub static cache_lock: Mutex<i32> = Mutex::new(0);
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_virtual(t: *mut hl::hl_type) -> *mut hl::vvirtual {
-    // Ensure the virtual type is initialized (indexes, lookup, dataSize populated).
-    // The interpreter doesn't call hlp_init_virtual during setup, so the first
-    // allocation of a given virtual type triggers lazy initialization here.
+    // Ensure the virtual type is initialized (indexes, lookup, dataSize
+    // populated). The interpreter doesn't call hlp_init_virtual during setup,
+    // so the first allocation of a given virtual type triggers lazy
+    // initialization here.
+    //
+    // `lookup` as well as `indexes`, matching the guard in `hl_to_virtual`.
+    // Testing only `indexes` assumed the two are always set together, which
+    // holds for a type the interpreter built and not for one the AOT emitter
+    // bakes: it emits `indexes` as real data and `lookup` as a null constant,
+    // so this never fired and `lookup` stayed null for the life of the
+    // process. Every hash-keyed reach into an anonymous structure then failed
+    // -- `Reflect.field` and plain `dyn.name` returning null, `hasField`
+    // answering false, and `Std.string` dereferencing the null table -- with
+    // the same bytecode correct under the interpreter and the JIT.
     let virt = (*t).__bindgen_anon_1.virt;
-    if !virt.is_null() && (*virt).indexes.is_null() {
+    if !virt.is_null()
+        && (*virt).nfields != 0
+        && ((*virt).indexes.is_null() || (*virt).lookup.is_null())
+    {
         hlp_init_virtual(t, std::ptr::null_mut());
     }
     let mut allocator = crate::gc::gc_locked();

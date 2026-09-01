@@ -669,6 +669,15 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let mut l = vlist { v, next: stack };
 
             hlp_buffer_char(b, '{' as u16);
+            // An uninitialised virtual has no lookup table, and this is the
+            // one consumer of it with no defence: the two in obj.rs return
+            // null on a null table, while dereferencing it here abends the
+            // process. Printing nothing is the wrong answer; aborting is a
+            // worse one.
+            if (*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().lookup.is_null() {
+                hlp_buffer_str_sub(b, str_to_uchar_ptr("}"), 1);
+                return;
+            }
             for i in 0..(*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().nfields as usize {
                 let f = (*(*vv).t)
                     .__bindgen_anon_1

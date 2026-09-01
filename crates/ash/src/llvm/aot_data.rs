@@ -269,8 +269,13 @@ impl<'ctx> JITModule<'ctx> {
         global.set_initializer(&struct_type.const_named_struct(&[
             self.context.i32_type().const_int(kind as u64, false).into(),
             arm,
-            // The runtime owns both: `vobj_proto` is filled by the first
-            // `hlp_get_obj_rt`, `mark_bits` by the collector.
+            // The runtime owns both. `vobj_proto` is filled by the first
+            // `hlp_get_obj_rt`. `mark_bits` is NOT the collector's -- that is
+            // the unrelated per-block line array in gc.rs; this one is written
+            // by `hlp_get_obj_rt` for HOBJ, `hlp_init_virtual` for HVIRTUAL,
+            // and the enum path in types.rs, and read only to copy a parent's
+            // down to a child. Left null here, it is filled by whichever of
+            // those runs first.
             ptr_type.const_null().into(),
             ptr_type.const_null().into(),
         ]));

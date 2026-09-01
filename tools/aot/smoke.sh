@@ -25,6 +25,14 @@ if [ ${#programs[@]} -eq 0 ]; then
     crates/ash/test/tests/test_basic.hl
     crates/ash/test/tests/test_stdlib.hl
     crates/ash/test/tests/bench_deltablue.hl
+    # Anonymous structures. AOT baked a virtual type's `lookup` as null while
+    # baking `indexes`, so the lazy-init guard never fired and every
+    # hash-keyed field access failed -- Reflect.field and plain `dyn.name`
+    # returning null, hasField answering false, Std.string aborting -- on
+    # bytecode the interpreter and the JIT both ran correctly. Nothing in the
+    # old list touched a virtual, which is why it went unnoticed.
+    crates/ash/test/tests/test_feature_typedef_anon.hl
+    crates/ash/test/tests/test_std_reflect_type.hl
   )
 fi
 

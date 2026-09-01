@@ -1832,7 +1832,22 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                         },
                     };
                     tmp.__bindgen_anon_1.fun = &mut tf;
-                    let cast_ok = hlp_safe_cast(&mut tmp, ft);
+                    // The kind check is upstream's, restated here rather than
+                    // relied upon: hl_safe_cast returns false whenever the two
+                    // kinds differ, but ash's hlp_safe_cast deliberately treats
+                    // HFUN and HMETHOD as interchangeable. That relaxation is
+                    // wrong for THIS question. A virtual field typed HFUN holds
+                    // a closure value, and the branch below writes a bare entry
+                    // from rt->methods -- a code address, not a slot holding a
+                    // vclosure*. Readers dereference vfields[i], so the value
+                    // that comes back is the method's own instruction words.
+                    //
+                    // Interpreted runs hid it: functions_ptrs carries findex+1
+                    // sentinels there, so the bogus pointer was never a real
+                    // code address. AOT populates the table for real, and
+                    // MBHaxe faulted on String.split's prologue.
+                    let cast_ok = (*ft).kind == hl::hl_type_kind_HMETHOD
+                        && hlp_safe_cast(&mut tmp, ft);
                     if cast_ok {
                         let method_idx = (-(*f).field_index - 1) as usize;
                         let rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;

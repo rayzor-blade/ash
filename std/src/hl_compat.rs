@@ -260,17 +260,31 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
 /// `void *p = *gc_roots[i]`, re-reading the slot every cycle, which is why
 /// every hdll is written as `hl_add_root(&h->data)` (uv) or
 /// `hl_add_root(&on_dx_error)` (directx). We registered the ARGUMENT as an
-/// object instead; `mark_roots` bounds-checks an object against the Immix
-/// arena, a malloc'd `&stash->cb` is outside it, and the root was dropped with
-/// no diagnostic. The closure then went unmarked, line recycling handed its 32
-/// bytes to the next Haxe string, and `hlp_dyn_call` read the vclosure's type
-/// field as UTF-16 text -- a crash whose fault address spells the string that
-/// overwrote it.
+/// object instead, and `mark_roots` only bounds-checked it against the Immix
+/// arena, so a slot living in malloc'd memory was dropped with no diagnostic:
+/// the closure went unmarked, line recycling handed its 32 bytes to the next
+/// Haxe string, and `hlp_dyn_call` read the vclosure's type field as UTF-16
+/// text -- a crash whose fault address spells the string that overwrote it.
 ///
-/// The two cases are distinguishable, which is what makes supporting both
-/// safe: a GC object is by definition inside the arena, and an hdll's
-/// `&struct->field` never is. So a heap address keeps the old object-pinning
-/// behaviour, and anything else is treated as the slot it almost certainly is.
+/// That reached only slots OUTSIDE the arena. A slot inside it -- and
+/// `hl_gc_alloc_finalizer` is an arena allocation, so `&struct->field` on a
+/// struct an hdll allocated that way is an interior arena address -- passed
+/// the bounds check, marked the containing allocation, and was reached anyway
+/// by the transitive conservative trace. Such callers were never broken, and
+/// are not what this path fixed.
+///
+/// The two spellings are NOT told apart by arena membership, and an earlier
+/// version of this comment claiming they were was wrong. `is_gc_ptr` also
+/// requires the address's line MARK BIT, which only the collector sets and
+/// sweep clears, so during mutator execution -- when every `hl_add_root` call
+/// actually arrives -- a live object fails it too and BOTH spellings take the
+/// slot branch. That is harmless for a real slot, which is the documented
+/// contract and is read correctly. It does mean an hdll passing a bare object
+/// pointer no longer gets the object pinned: it gets a slot read of the
+/// object's first word instead. No known caller does that, and upstream does
+/// not support it either, but it is a behaviour change from the pre-fix code
+/// rather than the compatibility it was described as.
+///
 /// Registering a slot costs nothing if it holds null or a non-heap value --
 /// the collector's conservative read ignores those exactly as upstream does.
 #[no_mangle]

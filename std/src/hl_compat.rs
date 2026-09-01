@@ -236,7 +236,7 @@ pub unsafe extern "C" fn hl_buffer_val(b: *mut c_void, v: *mut vdynamic) {
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32) -> *mut c_void {
+pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32) -> *mut c_void {
     // A Mach-O HDLL binds these `hl_*` imports to its `libhl.dylib`
     // dependency by install-name ordinal, even when ash exports the same ABI
     // from the main executable. That compatibility image can therefore see
@@ -245,13 +245,36 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
     // same here instead of aborting an otherwise valid fmt/ssl call with
     // "GC not initialized".
     let mut gc = crate::gc::gc_locked_init();
-    if let Some(ptr) = gc.allocate(size as usize) {
-        let p = ptr.as_ptr() as *mut vdynamic;
-        (*p).t = t;
-        p as *mut c_void
-    } else {
-        ptr::null_mut()
+    let Some(ptr) = gc.allocate(size as usize) else {
+        return ptr::null_mut();
+    };
+    let p = ptr.as_ptr();
+
+    // Word zero belongs to the CALLER for every kind but one.
+    //
+    // Upstream's hl_gc_alloc_gen hands the block back untouched (gc.c:495-560
+    // ends in a bare `return ptr`); anything that wants a type there writes it
+    // itself, the way hl_alloc_dynamic does at gc.c:1255-1257. ash wrote the
+    // type into word zero unconditionally, which silently overwrote the first
+    // eight bytes of every block whose kind reserves them for something else:
+    // the payload of an hl_gc_alloc_noptr byte buffer (MEM_KIND_NOPTR), an
+    // hl_gc_alloc_raw struct's first field (MEM_KIND_RAW), and -- the reason
+    // this was found -- the finalizer pointer that MEM_KIND_FINALIZER puts
+    // there, which a collector would later call.
+    //
+    // `gc.allocate` zeroes, so leaving it alone gives upstream's semantics: a
+    // null finalizer slot, and a buffer that starts as the caller expects.
+    //
+    // The write is kept for MEM_KIND_DYNAMIC, whose blocks are the only ones
+    // conventionally shaped like a vdynamic. Upstream does not write even
+    // there; narrowing it further is a separate change with its own blast
+    // radius, and no reported defect turns on it.
+    const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
+    const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
+    if flags & PAGE_KIND_MASK == MEM_KIND_DYNAMIC {
+        (*(p as *mut vdynamic)).t = t;
     }
+    p as *mut c_void
 }
 
 /// Upstream `hl_add_root` takes the address of a POINTER SLOT, not an object.

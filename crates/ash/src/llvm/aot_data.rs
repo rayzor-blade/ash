@@ -1282,6 +1282,42 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
+        // Fill each HDLL primitive's slot. One dlopen per library, cached in
+        // the runtime, then a dlsym per primitive -- exactly what the
+        // interpreter does on its first call, done once here instead.
+        //
+        // A primitive that does not resolve leaves its slot null, which is
+        // deliberate: the call site raises then, so a program that references
+        // an unavailable primitive without calling it still runs.
+        if !self.aot_hdll_natives.is_empty() {
+            let resolve_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+            let resolve = self.aot_symbol("hlp_aot_native", resolve_ty);
+            let natives = self.aot_hdll_natives.clone();
+            for (lib, prim) in &natives {
+                let slot_name = format!("ash_native_{lib}_{prim}");
+                let Some(slot) = self.module.get_global(&slot_name) else {
+                    continue;
+                };
+                let lib_s = self.builder.build_global_string_ptr(lib, "aot_lib_n")?;
+                let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim_n")?;
+                let addr = self
+                    .builder
+                    .build_indirect_call(
+                        resolve_ty,
+                        resolve,
+                        &[
+                            lib_s.as_pointer_value().into(),
+                            prim_s.as_pointer_value().into(),
+                        ],
+                        "native_addr",
+                    )?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_aot_native returned void"))?;
+                self.builder.build_store(slot.as_pointer_value(), addr)?;
+            }
+        }
+
         self.builder.build_return(None)?;
         if !init.verify(true) {
             return Err(anyhow!("ash_module_init failed LLVM verification"));

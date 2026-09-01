@@ -27,9 +27,17 @@ if [ -z "$runtime" ]; then
 fi
 [ -n "$runtime" ] || { echo "no libash_std.a; run: cargo build -p ash_std" >&2; exit 1; }
 
+# An HDLL imports the runtime by its HashLink name -- @rpath/libhl.dylib on
+# Darwin, libhl.so elsewhere -- so a binary that loads one needs an rpath
+# pointing at its own directory, exactly as the `ash` executable does. Without
+# it dlopen refuses the HDLL with "no LC_RPATH's found", which reads as the
+# HDLL being missing when it is sitting right there. Programs with no HDLL are
+# unaffected: an rpath nobody consults costs nothing.
 case "$(uname -s)" in
-  Darwin) libs=(-framework CoreFoundation -framework Security -liconv -lm) ;;
-  *)      libs=(-lpthread -ldl -lm) ;;
+  Darwin) libs=(-framework CoreFoundation -framework Security -liconv -lm
+                -Wl,-rpath,@executable_path -Wl,-rpath,@loader_path) ;;
+  *)      libs=(-lpthread -ldl -lm
+                -Wl,-rpath,'$ORIGIN' -Wl,--export-dynamic) ;;
 esac
 
 # Any C driver will do -- it is here for the crt files and the libc search

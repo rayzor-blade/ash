@@ -90,6 +90,19 @@ pub struct JITModule<'ctx> {
     /// resolving one back needs this direction.
     pub(crate) name_to_findex: Option<HashMap<String, u32>>,
     pub(crate) findex_to_name: Option<HashMap<u32, String>>,
+    /// HDLL primitives this object calls, as (library, primitive).
+    /// Each has a slot the startup routine fills by dlopen/dlsym,
+    /// because there is no symbol to bind at emit time.
+    pub(crate) aot_hdll_natives: Vec<(String, String)>,
+    /// Whether this object must take the runtime as a shared library.
+    ///
+    /// Decided from the bytecode's natives BEFORE anything is lowered,
+    /// because it changes how every runtime symbol is declared and that
+    /// cannot be revised afterwards: hidden visibility makes codegen address
+    /// a symbol directly, and a direct reference to a dylib's data fails the
+    /// link with "does not have address" on arm64. Clearing the flag later
+    /// does not undo the addressing already chosen.
+    pub(crate) aot_shared_runtime: bool,
     pub(crate) type_info_globals: HashMap<usize, GlobalValue<'ctx>>,
     pub(crate) findexes: HashMap<usize, FuncPtr>,
     pub(crate) func_types: Vec<*mut hl_type>,
@@ -269,6 +282,15 @@ impl<'ctx> JITModule<'ctx> {
         init_std_library();
 
         let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+        // Any non-std native means an HDLL, which brings its own copy of the
+        // runtime unless this object shares one. Known here, before a single
+        // symbol is declared, because declaring them is what commits to a
+        // linkage.
+        let aot_shared_runtime = aot
+            && bytecode
+                .natives
+                .iter()
+                .any(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib) != "std");
         phase_timer!(timing, "decode", t);
         t = std::time::Instant::now();
 
@@ -297,6 +319,8 @@ impl<'ctx> JITModule<'ctx> {
             initialized_type_cache: HashMap::new(),
             name_to_findex: None,
             findex_to_name: None,
+            aot_hdll_natives: Vec::new(),
+            aot_shared_runtime,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),
@@ -588,6 +612,17 @@ impl<'ctx> JITModule<'ctx> {
     /// Write this module as an object file for `triple`, the AOT counterpart
     /// of `execution_engine.get_function_address`. The lowering above is
     /// target-independent; only this tail and `declare_native` are not.
+    /// Whether this object needs the runtime as a shared library.
+    ///
+    /// An HDLL imports the runtime by name and brings its own copy if the
+    /// executable does not share one -- two GCs in one process, which crashes
+    /// as soon as the collector meets an object the other allocated. So a
+    /// program that loads an HDLL must link the runtime dynamically and both
+    /// halves must bind to the same image.
+    pub fn aot_needs_shared_runtime(&self) -> bool {
+        self.aot_shared_runtime
+    }
+
     pub fn emit_object(&self, triple: &str, path: &std::path::Path) -> Result<u64> {
         use inkwell::targets::{
             CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetTriple,
@@ -713,6 +748,8 @@ impl<'ctx> JITModule<'ctx> {
             initialized_type_cache: HashMap::new(),
             name_to_findex: None,
             findex_to_name: None,
+            aot_hdll_natives: Vec::new(),
+            aot_shared_runtime: false,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
             optimized_fns: std::collections::HashSet::new(),

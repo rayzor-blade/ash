@@ -20,6 +20,7 @@
 #[macro_use]
 pub mod macros;
 
+pub mod aot_native;
 pub mod array;
 pub mod buffer;
 pub mod bytes;

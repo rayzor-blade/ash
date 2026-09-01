@@ -215,6 +215,7 @@ fn emit_aot(
     jit.finalize_aot_data()?;
     jit.emit_main()?;
     jit.optimize_module()?;
+    let shared_runtime = jit.aot_needs_shared_runtime();
     let bytes = jit.emit_object(&triple, out)?;
 
     if !quiet {
@@ -239,7 +240,26 @@ fn emit_aot(
             }
         }
         eprintln!("[ash] wrote {} ({bytes} bytes) for {triple}", out.display());
-        eprintln!("[ash] link it: tools/aot/link.sh {}", out.display());
+        if shared_runtime {
+            // An HDLL brings its own copy of the runtime unless the binary
+            // shares one, and two collectors in a process crash as soon as one
+            // meets the other's objects. So this object must take the runtime
+            // as a library, and the HDLLs must sit beside the binary.
+            eprintln!(
+                "[ash] this program loads HDLLs, so it needs the SHARED runtime:\n\
+                 [ash]   tools/aot/link.sh {} <out> <path/to/libhl.{}>\n\
+                 [ash] and the .hdll files must sit beside the binary.\n\
+                 [ash] NOTE: on macOS/arm64 that link currently fails -- the\n\
+                 [ash] object addresses runtime data directly rather than through\n\
+                 [ash] the GOT, which a dylib cannot satisfy. Linking the static\n\
+                 [ash] runtime instead builds, then crashes: the HDLL loads a\n\
+                 [ash] second copy of the runtime and the two collectors meet.",
+                out.display(),
+                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+            );
+        } else {
+            eprintln!("[ash] link it: tools/aot/link.sh {}", out.display());
+        }
     }
     Ok(())
 }

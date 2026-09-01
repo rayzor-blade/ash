@@ -8392,10 +8392,33 @@ impl<'ctx> JITModule<'ctx> {
             // in a shared library, and there is no shared library to load.
             let clean = lib.strip_prefix('?').unwrap_or(lib);
             if clean != "std" {
-                return Err(anyhow!(
-                    "cannot emit native {lib}@{} ahead of time: HDLL primitives resolve through dlopen",
-                    native_func.name
-                ));
+                // No symbol to bind: an HDLL primitive lives behind a
+                // DEFINE_PRIM table in a shared library that does not exist
+                // yet. So bind a SLOT instead and let the startup routine fill
+                // it with the same dlopen/dlsym the interpreter and the JIT
+                // do -- the indirection an HDLL call has anyway, moved from
+                // link time to load time.
+                let slot_name = format!("ash_native_{clean}_{}", native_func.name);
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let slot = match self.module.get_global(&slot_name) {
+                    Some(existing) => existing,
+                    None => {
+                        let g = self.module.add_global(ptr_type, None, &slot_name);
+                        g.set_initializer(&ptr_type.const_null());
+                        g.set_linkage(inkwell::module::Linkage::Internal);
+                        self.aot_hdll_natives
+                            .push((clean.to_string(), native_func.name.clone()));
+                        g
+                    }
+                };
+                let caller_name = format!("{}_{}_caller", lib, name);
+                return self.generate_native_caller_through_slot(
+                    &caller_name,
+                    func_type,
+                    slot,
+                    clean,
+                    &native_func.name,
+                );
             }
             let caller_name = format!("{}_{}_caller", lib, name);
             return self.generate_native_caller_to_symbol(&caller_name, func_type, &name);
@@ -8454,6 +8477,74 @@ impl<'ctx> JITModule<'ctx> {
     /// which surfaces as a fault inside `LLVMCountBasicBlocks` several
     /// functions later. A thunk with external linkage is never dead, and the
     /// inliner folds it into its callers anyway.
+    /// A caller that reaches its primitive through a slot the startup routine
+    /// filled, raising HashLink's own error if it never resolved.
+    ///
+    /// Referencing an unavailable primitive is not itself an error -- only
+    /// calling one is. Failing at emit time instead would refuse whole
+    /// programs over a primitive they never reach, which is neither what the
+    /// interpreter does nor what upstream does.
+    fn generate_native_caller_through_slot(
+        &self,
+        caller_name: &str,
+        fn_type: FunctionType<'ctx>,
+        slot: inkwell::values::GlobalValue<'ctx>,
+        lib: &str,
+        prim: &str,
+    ) -> Result<FunctionValue<'ctx>> {
+        if let Some(existing) = self.module.get_function(caller_name) {
+            return Ok(existing);
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let saved_block = self.builder.get_insert_block();
+        let function = self.module.add_function(caller_name, fn_type, None);
+        let entry = self.context.append_basic_block(function, "entry");
+        let resolved = self.context.append_basic_block(function, "native_resolved");
+        let missing = self.context.append_basic_block(function, "native_missing");
+
+        self.builder.position_at_end(entry);
+        let target = self
+            .builder
+            .build_load(ptr_type, slot.as_pointer_value(), "native")?
+            .into_pointer_value();
+        let is_null = self.builder.build_is_null(target, "native_missing_p")?;
+        self.builder
+            .build_conditional_branch(is_null, missing, resolved)?;
+
+        self.builder.position_at_end(missing);
+        let void_type = self.context.void_type();
+        let reporter = self.aot_runtime_fn(
+            "hlp_aot_native_missing",
+            void_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+        );
+        let lib_s = self.builder.build_global_string_ptr(lib, "aot_lib")?;
+        let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim")?;
+        self.builder.build_call(
+            reporter,
+            &[
+                lib_s.as_pointer_value().into(),
+                prim_s.as_pointer_value().into(),
+            ],
+            "",
+        )?;
+        self.builder.build_unreachable()?;
+
+        self.builder.position_at_end(resolved);
+        let args: Vec<BasicMetadataValueEnum> =
+            function.get_param_iter().map(|arg| arg.into()).collect();
+        let call = self
+            .builder
+            .build_indirect_call(fn_type, target, &args, "call")?;
+        match call.try_as_basic_value().basic() {
+            Some(value) => self.builder.build_return(Some(&value))?,
+            None => self.builder.build_return(None)?,
+        };
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
     fn generate_native_caller_to_symbol(
         &self,
         caller_name: &str,

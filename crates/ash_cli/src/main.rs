@@ -69,8 +69,9 @@ struct Cli {
 
     /// Threshold preset for the program's shape.
     ///
-    /// script | application | server | benchmark | development | interpreter.
-    /// Explicit --jit-threshold / --opt-threshold override the preset.
+    /// script | application | game | server | benchmark | development |
+    /// interpreter. Explicit --jit-threshold / --opt-threshold override the
+    /// preset.
     #[arg(long, value_name = "NAME")]
     preset: Option<String>,
 

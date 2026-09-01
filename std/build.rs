@@ -52,7 +52,15 @@ pub fn pin_libclang() {
 /// Without this the failure mode is hundreds of unrelated-looking type errors
 /// in files nobody touched.
 pub fn assert_bindings_usable(bindings: &str) {
-    if !bindings.contains("pub kind: hl_type_kind") {
+    // Match with whitespace removed. bindgen only formats its output when it
+    // can run rustfmt, and falls back to raw token spacing (`pub kind :
+    // hl_type_kind`) with nothing worse than a warning when it cannot. Matching
+    // the formatted spelling therefore turned "rustfmt is not installed" into a
+    // confident report that libclang was incompatible -- a two-hour wrong lead,
+    // and one that only appears on machines whose toolchain omits the
+    // component, which is to say CI and not the machine writing the check.
+    let squashed: String = bindings.chars().filter(|c| !c.is_whitespace()).collect();
+    if !squashed.contains("pubkind:hl_type_kind") {
         panic!(
             "bindgen produced an opaque `hl_type` (no `kind` field).\n\
              This means the loaded libclang is incompatible with the pinned \

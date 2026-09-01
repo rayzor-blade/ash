@@ -32,6 +32,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ash_std's build script runs bindgen, which shells out to
+          # rustfmt. lint and parity_gate both ask for it for the same
+          # reason.
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -60,17 +65,34 @@ jobs:
   primitive-exports:
     name: primitive export gap
     runs-on: ubuntu-24.04
-    # No LLVM install: ash_std depends on neither inkwell nor libclang, and
-    # this job builds nothing else, so it stays a fast independent signal
-    # rather than paying the toolchain install a second time.
+    env:
+      # ash_std pulls in no inkwell, but its build script runs bindgen, so it
+      # needs a libclang matching the pinned bindgen release just as much as a
+      # full build does.
+      LLVM_SYS_211_PREFIX: /usr/lib/llvm-21
+      LIBCLANG_PATH: /usr/lib/llvm-21/lib
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ash_std's build script runs bindgen, which shells out to
+          # rustfmt. lint and parity_gate both ask for it for the same
+          # reason.
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: exports
+
+      - name: Install LLVM 21 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gpg software-properties-common \
+            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
+          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21 all
 
       # Source only. The comparison is against what HashLink DECLARES, so
       # nothing on this side needs building.
@@ -94,6 +116,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # ash_std's build script runs bindgen, which shells out to
+          # rustfmt. lint and parity_gate both ask for it for the same
+          # reason.
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:

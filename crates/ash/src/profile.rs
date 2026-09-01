@@ -379,18 +379,25 @@ fn jit_code() -> &'static Mutex<Vec<CodeRange>> {
 pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
     // Unconditional, not sampling-gated: the crash handler symbolizes fault
     // frames against this registry, and a crash does not schedule itself for
-    // runs where the profiler happened to be on. The cost is one Vec push per
-    // PROMOTION, which is measured in dozens per process.
+    // runs where the profiler happened to be on.
+    //
+    // Kept SORTED by address, so the readers below can binary search. The cost
+    // is one insert per PROMOTION -- "dozens per process" was the estimate
+    // this registry was built on, and a game makes 1206 of them, at which
+    // point a linear scan per lookup stops being free. `describe_jit_pc` runs
+    // once per stack frame per THROW, and with every frame compiled (which is
+    // what --mode jit means) an exception that recurs each tick never finishes
+    // describing itself: measured at 81% of the whole process, wedged at 100%
+    // CPU with no forward progress.
     if addr == 0 {
         return;
     }
     if std::env::var("ASH_PROFILE_DEBUG").is_ok() {
         eprintln!("[prof-reg] findex={findex} tier={} addr={addr:#x}", tier.label());
     }
-    jit_code()
-        .lock()
-        .unwrap()
-        .push(CodeRange { addr, findex, tier });
+    let mut ranges = jit_code().lock().unwrap();
+    let at = ranges.partition_point(|r| r.addr < addr);
+    ranges.insert(at, CodeRange { addr, findex, tier });
 }
 
 /// The findex whose compiled entry is exactly `addr`, if any.
@@ -406,9 +413,12 @@ pub fn findex_at_entry(addr: usize) -> Option<u32> {
         return None;
     }
     let ranges = jit_code().lock().ok()?;
+    // Sorted by address: the first entry at `addr`, matching what the linear
+    // `find` returned when several installs share an entry point.
+    let at = ranges.partition_point(|r| r.addr < addr);
     ranges
-        .iter()
-        .find(|r| r.addr == addr)
+        .get(at)
+        .filter(|r| r.addr == addr)
         .map(|r| r.findex)
 }
 
@@ -422,13 +432,12 @@ pub fn findex_at_entry(addr: usize) -> Option<u32> {
 /// into a hang.
 pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
     let guard = jit_code().try_lock().ok()?;
-    let mut best: Option<&CodeRange> = None;
-    for r in guard.iter() {
-        if r.addr <= pc && best.map_or(true, |b| r.addr > b.addr) {
-            best = Some(r);
-        }
-    }
-    let r = best?;
+    // Nearest-entry-below, by binary search rather than a scan of every range.
+    // Where several installs share an address this takes the LAST of them --
+    // the most recent promotion, whose tier label is the one now executing --
+    // where the scan took the first.
+    let at = guard.partition_point(|r| r.addr <= pc);
+    let r = guard.get(at.checked_sub(1)?)?;
     if pc - r.addr > 2 << 20 {
         return None;
     }

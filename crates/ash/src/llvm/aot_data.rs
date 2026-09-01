@@ -1471,9 +1471,15 @@ impl<'ctx> JITModule<'ctx> {
         let function = self
             .module
             .add_function(name, signature, Some(Linkage::External));
-        function
-            .as_global_value()
-            .set_visibility(inkwell::GlobalVisibility::Hidden);
+        // Hidden is right for a static link and IMPOSSIBLE for a dynamic one:
+        // a hidden undefined symbol must be resolved inside this link unit, so
+        // no shared library can satisfy it. ELF says "undefined reference" and
+        // Mach-O says "does not have address"; both mean the same thing.
+        if !self.aot_shared_runtime {
+            function
+                .as_global_value()
+                .set_visibility(inkwell::GlobalVisibility::Hidden);
+        }
         function
     }
 
@@ -1488,7 +1494,9 @@ impl<'ctx> JITModule<'ctx> {
         }
         let global = self.module.add_global(ty, None, name);
         global.set_linkage(Linkage::External);
-        global.set_visibility(inkwell::GlobalVisibility::Hidden);
+        if !self.aot_shared_runtime {
+            global.set_visibility(inkwell::GlobalVisibility::Hidden);
+        }
         global
     }
 

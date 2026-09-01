@@ -43,9 +43,14 @@ BUILD_DIR = HDLL_DIR / "build"
 # recording one platform's answers and asserting them on another reports every
 # difference as a regression, which is what a macOS baseline did to the first
 # Linux run.
-BASELINE = HDLL_DIR / f"baseline.{platform.system().lower()}.json"
+BASELINE = HDLL_DIR / "baseline.{}-{}.json".format(
+    platform.system().lower(), platform.machine().lower())
 IS_DARWIN = platform.system() == "Darwin"
-SHLIB = "libhl.dylib" if IS_DARWIN else "libhl.so"
+IS_WINDOWS = platform.system() == "Windows"
+# What the runtime is called once staged, and what cargo actually produced.
+# Windows drops the `lib` prefix and splits the import library out.
+SHLIB = "libhl.dylib" if IS_DARWIN else ("hl.dll" if IS_WINDOWS else "libhl.so")
+CDYLIB = "libash_std.dylib" if IS_DARWIN else ("ash_std.dll" if IS_WINDOWS else "libash_std.so")
 
 # Addresses differ every run; nothing else in these transcripts does.
 PTR_RE = re.compile(r"0x[0-9a-fA-F]{4,}")
@@ -65,17 +70,32 @@ def target_dir() -> Path:
 def stage_runtime(tdir: Path) -> Path:
     """HDLLs link against a library called libhl; ash's is called ash_std."""
     staged = tdir / SHLIB
-    src = tdir / ("libash_std.dylib" if IS_DARWIN else "libash_std.so")
+    src = tdir / CDYLIB
     if not src.exists():
         sys.exit(f"missing {src}; run: cargo build -p ash_std")
     if not staged.exists() or staged.stat().st_mtime < src.stat().st_mtime:
         shutil.copy2(src, staged)
+    if IS_WINDOWS:
+        # An hdll links against the import library, not the DLL itself.
+        imp = tdir / "ash_std.dll.lib"
+        if imp.exists():
+            shutil.copy2(imp, tdir / "hl.lib")
     return staged
+
+
+def c_driver() -> str:
+    """clang on Windows: the harnesses are GCC-flavoured C and the flags below
+    (-shared, -I) are clang/gcc spellings, not cl.exe's."""
+    for cand in ("clang", "cc", "gcc"):
+        if shutil.which(cand):
+            return cand
+    sys.exit("no C driver found (tried clang, cc, gcc)")
 
 
 def build(cases, tdir: Path, verbose: bool) -> None:
     BUILD_DIR.mkdir(exist_ok=True)
     staged = stage_runtime(tdir)
+    CC = c_driver()
 
     def run(cmd, **kw):
         if verbose:
@@ -89,18 +109,20 @@ def build(cases, tdir: Path, verbose: bool) -> None:
     # the link fails on the arm64 runtime. Ask the runtime what it is.
     # cb14 spawns a foreign thread. Apple's libc carries pthread, glibc does
     # not, so the Linux link needs asking for it explicitly; -fPIC is required
-    # there for a shared object and is a no-op on Darwin.
-    extra = [] if IS_DARWIN else ["-pthread", "-fPIC"]
+    # there for a shared object and is a no-op on Darwin. Windows has neither
+    # concept.
+    extra = [] if (IS_DARWIN or IS_WINDOWS) else ["-pthread", "-fPIC"]
     arch = []
     if IS_DARWIN:
         got = subprocess.run(["lipo", "-archs", str(staged)], capture_output=True, text=True)
         if got.returncode == 0 and got.stdout.split():
             arch = ["-arch", got.stdout.split()[0]]
 
+    link_target = str(tdir / "hl.lib") if IS_WINDOWS else str(staged)
     for lib in sorted({c["lib"] for c in cases}):
         out = BUILD_DIR / f"{lib}.hdll"
-        run(["cc", *arch, *extra, "-shared", "-o", str(out), f"{lib}.c",
-             "-I", str(ROOT / "std"), str(staged)])
+        run([CC, *arch, *extra, "-shared", "-o", str(out), f"{lib}.c",
+             "-I", str(ROOT / "std"), link_target])
         if IS_DARWIN:
             # The hdll records the absolute path it linked against; point it at
             # the name ash actually loads instead.
@@ -113,6 +135,27 @@ def build(cases, tdir: Path, verbose: bool) -> None:
     for c in cases:
         run(["haxe", "-main", c["class"], "--hl", str(BUILD_DIR / f"{c['name']}.hl")])
         print(f"built {c['name']}.hl")
+
+
+# Words that mark the line worth printing. A case's first line is usually its
+# own banner, which says nothing about why it failed.
+_SIGNAL = re.compile(
+    r"error|failed|failure|missing|not found|cannot|unable|abort|panic|"
+    r"segmentation|assert|FAIL|exception",
+    re.IGNORECASE,
+)
+
+
+def diagnostic_line(out: str) -> str:
+    """The line most likely to explain a failure: the last one that reads like
+    a complaint, or failing that the last thing the program said at all."""
+    lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if _SIGNAL.search(line):
+            return line
+    return lines[-1]
 
 
 def judge(stdout: str, stderr: str, code: int, timed_out: bool) -> str:
@@ -170,7 +213,7 @@ def main() -> int:
             sys.exit("no such case")
 
     tdir = target_dir()
-    ash = tdir / "ash"
+    ash = tdir / ("ash.exe" if IS_WINDOWS else "ash")
     if not ash.exists():
         sys.exit(f"missing {ash}; run: cargo build -p ash")
 
@@ -191,9 +234,9 @@ def main() -> int:
                 results[f"{c['name']}/{root}/{mode}"] = {"status": status, "output": out}
                 row.append(f"{mode}={status}")
                 if status not in ("PASS", "NOMARK") and out:
-                    first = next((l for l in out.splitlines() if l.strip()), "")
-                    if first and first not in why:
-                        why.append(first)
+                    line = diagnostic_line(out)
+                    if line and line not in why:
+                        why.append(line)
             print(f"{c['name']:<{width}}  root={root:<6}  " + "  ".join(row))
             # A status alone cannot be acted on from a CI log. One line of what
             # the program actually said usually can.

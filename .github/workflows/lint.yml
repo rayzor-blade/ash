@@ -144,7 +144,7 @@ jobs:
           }
           Write-Host "all llvm-config --system-libs resolve under $libdir"
           "LLVM_SYS_211_PREFIX=$prefix" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-      - name: Build (expected to fail until the port lands)
+      - name: Build
         shell: bash
         run: |
           cargo build --release -p ash_std

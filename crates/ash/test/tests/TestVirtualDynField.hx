@@ -1,19 +1,16 @@
-// Reading a virtual's field when the backing object has no slot for it.
+// Reading fields of a structure backed by a Reflect-built object.
 //
-// `Field` on an HVIRTUAL takes a fast path when the field is in `vfields`, and
-// otherwise falls back to a dynamic get on the underlying value. That fallback
-// used to call `hlp_dyn_getp` for every destination -- the POINTER getter --
-// and store what it returned into whatever register `dst` is. For an Int field
-// that put 8 bytes of boxed pointer into a 4-byte slot and read back its low
-// half; for a Float field it reinterpreted a pointer as a double, which is a
-// denormal near zero rather than the number. A whole-program audit of a game
-// found 588 sites of the first shape and 292 of the second.
+// This was written to reproduce a real defect: the HVIRTUAL `Field` fallback
+// used to read every absent field with `hlp_dyn_getp` and store the boxed
+// pointer into the destination register whatever its type was. IT DOES NOT
+// REPRODUCE IT. The values come back correct on a binary from before that fix
+// as well as after, both orderings below -- populate-then-cast and
+// cast-then-populate -- so this path evidently keeps taking the fast vfields
+// route. The defect is real in the emitted IR (see the commit, and
+// ASH_CHECK_REG_STORES), but nothing here demonstrates it at run time.
 //
-// A Reflect-built object has no vfields entry for these, so assigning it to a
-// structure type forces the fallback for one Int and one Float destination.
-// Run under ASH_CHECK_REG_STORES=1 to check the emitted IR as well as the
-// values: a store into a register slot of the wrong width is reported there
-// even when this path is not taken at run time.
+// Kept only as coverage for virtual field reads over a Reflect-built object.
+// Do not read a pass here as evidence about that fallback.
 typedef Point = {
     var x : Float;
     var n : Int;

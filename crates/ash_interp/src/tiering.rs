@@ -879,7 +879,8 @@ pub(crate) fn compile_with_cranelift(
             );
             if ctx.tier_log {
                 eprintln!(
-                    "[tier] install findex={findex} tier=cranelift addr={addr:#x} ops={} in {:.2}ms on {}",
+                    "[tier] install findex={findex} name={} tier=cranelift addr={addr:#x} ops={} in {:.2}ms on {}",
+                    ash_core::profile::static_name(findex as u32).unwrap_or("?"),
                     meta.num_ops,
                     t0.elapsed().as_secs_f64() * 1e3,
                     std::thread::current().name().unwrap_or("main"),
@@ -1659,7 +1660,8 @@ pub(crate) fn compile_with_llvm(
             // install_function_address, which every promotion passes through.)
             if ctx.tier_log {
                 eprintln!(
-                    "[tier] install findex={findex} tier=llvm addr={:#x} in {:.2}ms",
+                    "[tier] install findex={findex} name={} tier=llvm addr={:#x} in {:.2}ms",
+                    ash_core::profile::static_name(findex as u32).unwrap_or("?"),
                     meta.fn_addr,
                     t0.elapsed().as_secs_f64() * 1e3
                 );

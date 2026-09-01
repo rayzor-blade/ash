@@ -623,8 +623,10 @@ impl<'ctx> JITModule<'ctx> {
 
         self.builder.clear_insertion_position();
         let promo_module = std::mem::replace(&mut self.module, host_module);
-        let target = self.func_cache.get(&findex).copied();
-        self.func_cache = host_funcs;
+        // Kept, not dropped: this is the module's findex -> value map, and it
+        // is the only exact identity for the callees it left as declarations.
+        let promo_funcs = std::mem::replace(&mut self.func_cache, host_funcs);
+        let target = promo_funcs.get(&findex).copied();
         self.int_globals = host_ints;
         self.float_globals = host_floats;
         self.string_globals = host_strings;
@@ -634,6 +636,18 @@ impl<'ctx> JITModule<'ctx> {
 
         let target =
             target.ok_or_else(|| anyhow!("promote module {modname}: no function built"))?;
+        // Rename to something only this promotion can answer to. The address
+        // below is fetched from the engine BY NAME, and `HLFunction::name` is
+        // the bare Haxe field name -- half the functions in a real program
+        // share one (810 are called `_`). Asking MCJIT for `dispose` returns
+        // whichever module defined that symbol first, so the promotion could
+        // install a different class's method for this findex and nothing
+        // would say so. Nothing refers to this symbol by name except the
+        // lookup two lines down: callers hold addresses, and everything the
+        // module leaves undefined is bound by findex.
+        target
+            .as_global_value()
+            .set_name(&format!("{modname}$entry"));
         let name = target
             .get_name()
             .to_str()
@@ -644,7 +658,7 @@ impl<'ctx> JITModule<'ctx> {
             let _phase = crate::profile::scope("llvm middle-end (promote)");
             // The module holds this promotion and nothing else, so there is
             // nothing here to park.
-            let excluded = self.shield_trap_functions_from_optimization();
+            let excluded = self.shield_trap_functions_in(&promo_funcs);
             crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
             let n = promo_module
                 .get_functions()
@@ -674,7 +688,11 @@ impl<'ctx> JITModule<'ctx> {
             return Err(anyhow!("promote module {modname} failed verification: {e}"));
         }
 
-        self.bind_module_declarations(&promo_module, &format!("promote module {modname}"))?;
+        self.bind_module_declarations(
+            &promo_module,
+            &promo_funcs,
+            &format!("promote module {modname}"),
+        )?;
 
         self.execution_engine
             .add_module(&promo_module)
@@ -707,9 +725,33 @@ impl<'ctx> JITModule<'ctx> {
         Ok(addr)
     }
 
+    /// Findexes `ASH_NO_PROMOTE` withholds from the optimising tier.
+    ///
+    /// A bisection tool, not a policy: when a program misbehaves only once
+    /// some function reaches LLVM, the question "which one" has no answer
+    /// short of trying, and the tier log names the candidates. Comma-separated
+    /// findexes; unset denies nothing.
+    fn promotion_denied(findex: usize) -> bool {
+        static DENY: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+        let deny = DENY.get_or_init(|| {
+            std::env::var("ASH_NO_PROMOTE")
+                .ok()
+                .map(|spec| {
+                    spec.split(',')
+                        .filter_map(|w| w.trim().parse().ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        deny.contains(&findex)
+    }
+
     pub fn promote_function_strict(&mut self, findex: usize) -> Result<CompiledFunctionMeta> {
         let _phase = crate::profile::scope("llvm promote");
         crate::profile::count("llvm promotions", 1);
+        if Self::promotion_denied(findex) {
+            return Err(anyhow!("promotion of findex {findex} denied by ASH_NO_PROMOTE"));
+        }
         // Promotion currently targets bytecode functions only.
         if !self.findexes.contains_key(&findex) {
             return Err(anyhow!(
@@ -1120,7 +1162,7 @@ impl<'ctx> JITModule<'ctx> {
 
         self.builder.clear_insertion_position();
         let osr_module = std::mem::replace(&mut self.module, host_module);
-        self.func_cache = host_funcs;
+        let osr_funcs = std::mem::replace(&mut self.func_cache, host_funcs);
         self.int_globals = host_ints;
         self.float_globals = host_floats;
         self.string_globals = host_strings;
@@ -1154,7 +1196,7 @@ impl<'ctx> JITModule<'ctx> {
         // a bytecode function that was never compiled has no definition, and
         // the call lands on a null pointer. Resolving them explicitly is the
         // only way a fresh module reaches the runtime symbols.
-        self.bind_module_declarations(&osr_module, &format!("osr module {name}"))?;
+        self.bind_module_declarations(&osr_module, &osr_funcs, &format!("osr module {name}"))?;
 
         self.execution_engine
             .add_module(&osr_module)
@@ -1541,7 +1583,104 @@ impl<'ctx> JITModule<'ctx> {
             cell_base,
             &included,
             AirBlockId(0),
-        )
+        )?;
+        self.audit_register_stores(source.findex as usize, function, &registers, &reg_types);
+        Ok(())
+    }
+
+    /// Report any store into a register slot whose value is the wrong width.
+    ///
+    /// LLVM cannot catch this. With opaque pointers `store double, ptr %reg`
+    /// is valid IR whatever `%reg` was allocated as, so an 8-byte value going
+    /// into a 4-byte HF32 slot verifies clean, silently reads back as the low
+    /// half of the double, and writes four bytes past the end of the slot into
+    /// whatever register LLVM placed next. That shipped as `ToSFloat` storing
+    /// its always-f64 result into an f32 register, and it reached a game as
+    /// `alSourcef(AL_GAIN, <junk>)` plus a clobbered neighbour.
+    ///
+    /// There are ~70 places that store into a register, so this checks the
+    /// emitted IR rather than trusting each of them. `ASH_CHECK_REG_STORES=1`.
+    fn audit_register_stores(
+        &self,
+        findex: usize,
+        function: FunctionValue<'ctx>,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+    ) {
+        if std::env::var_os("ASH_CHECK_REG_STORES").is_none() {
+            return;
+        }
+        use inkwell::values::InstructionOpcode;
+        for block in function.get_basic_blocks() {
+            let mut inst = block.get_first_instruction();
+            while let Some(i) = inst {
+                inst = i.get_next_instruction();
+                if i.get_opcode() != InstructionOpcode::Store {
+                    continue;
+                }
+                let (Some(val), Some(dest)) = (i.get_operand(0), i.get_operand(1)) else {
+                    continue;
+                };
+                use inkwell::values::Operand;
+                let (Operand::Value(val), Operand::Value(dest)) = (val, dest) else {
+                    continue;
+                };
+                if !dest.is_pointer_value() {
+                    continue;
+                }
+                let dest = dest.into_pointer_value();
+                let Some(slot) = registers.iter().position(|r| *r == dest) else {
+                    continue;
+                };
+                let got = val.get_type();
+                let want = reg_types[slot];
+                if got == want {
+                    continue;
+                }
+                // A mismatch only matters two ways. Either the store is WIDER
+                // than the slot, which writes past it into whatever register
+                // LLVM placed next; or something later loads the slot at its
+                // declared type and gets a reinterpreted value. A slot that is
+                // consistently written and read as one wrong type is only bad
+                // bookkeeping in `reg_types`, and says nothing about codegen.
+                let size = |t: BasicTypeEnum<'ctx>| -> u32 {
+                    match t {
+                        BasicTypeEnum::IntType(i) => i.get_bit_width().div_ceil(8),
+                        BasicTypeEnum::FloatType(f) => {
+                            if f == self.context.f32_type() { 4 } else { 8 }
+                        }
+                        _ => 8,
+                    }
+                };
+                let overruns = size(got) > size(want);
+                let mut read_as_declared = false;
+                for b2 in function.get_basic_blocks() {
+                    let mut it = b2.get_first_instruction();
+                    while let Some(l) = it {
+                        it = l.get_next_instruction();
+                        if l.get_opcode() != InstructionOpcode::Load {
+                            continue;
+                        }
+                        if let Some(Operand::Value(src)) = l.get_operand(0) {
+                            if src.is_pointer_value()
+                                && src.into_pointer_value() == dest
+                                && l.get_type() != got.as_any_type_enum()
+                            {
+                                read_as_declared = true;
+                            }
+                        }
+                    }
+                }
+                if overruns || read_as_declared {
+                    eprintln!(
+                        "[regstore] findex={findex} r{slot}: storing {got} into a {want} slot\
+                         {}{}",
+                        if overruns { " OVERRUN" } else { "" },
+                        if read_as_declared { " READBACK" } else { "" },
+                    );
+                }
+            }
+        }
     }
 
     /// Emit the selected AIR CFG region, starting at `entry_target`.
@@ -5109,8 +5248,12 @@ impl<'ctx> JITModule<'ctx> {
                 } else {
                     return Err(anyhow!("ToSFloat: unexpected source type"));
                 };
-                self.builder
-                    .build_store(registers[dst.0 as usize], result)?;
+                self.store_float_as_reg(
+                    &registers,
+                    &reg_types,
+                    dst.0 as usize,
+                    result.into_float_value(),
+                )?;
             }
 
             // --- ToUFloat ---
@@ -5141,8 +5284,12 @@ impl<'ctx> JITModule<'ctx> {
                 } else {
                     return Err(anyhow!("ToUFloat: unexpected source type"));
                 };
-                self.builder
-                    .build_store(registers[dst.0 as usize], result)?;
+                self.store_float_as_reg(
+                    &registers,
+                    &reg_types,
+                    dst.0 as usize,
+                    result.into_float_value(),
+                )?;
             }
 
             // --- ToInt ---
@@ -8171,11 +8318,38 @@ impl<'ctx> JITModule<'ctx> {
 
     /// Bind declarations in an isolated MCJIT module to code already
     /// installed by either tier.
+    ///
+    /// `module_funcs` is the module's own findex -> value map, and it is what
+    /// makes a bytecode callee resolvable at all: `HLFunction::name` is the
+    /// bare Haxe field name, so `update`, `new` and `dispose` name dozens of
+    /// unrelated functions in one program. Resolving those by symbol picked
+    /// whichever the engine happened to hold first, and a promotion then
+    /// called a different class's method with no diagnostic anywhere -- the
+    /// body was correct, only the edge was wrong. A findex is the identity the
+    /// name is not, so bytecode declarations bind through it and never fall
+    /// back to a name. Only runtime symbols -- natives, `hlp_*` helpers --
+    /// still resolve by symbol, which for them is a unique C name.
     fn bind_module_declarations(
         &self,
         module: &inkwell::module::Module<'ctx>,
+        module_funcs: &std::collections::HashMap<usize, FunctionValue<'ctx>>,
         label: &str,
     ) -> Result<()> {
+        // Symbol -> findex for the bytecode functions this module declares.
+        // Names are unique within a module, so this is injective; LLVM's own
+        // uniquifying suffix rides along because the key is taken from the
+        // value that is actually in the module.
+        let mut bytecode_findex: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for (&findex, value) in module_funcs {
+            if !matches!(self.findexes.get(&findex), Some(FuncPtr::Fun(_))) {
+                continue;
+            }
+            if let Ok(symbol) = value.get_name().to_str() {
+                bytecode_findex.insert(symbol, findex);
+            }
+        }
+
         let mut unresolved = Vec::new();
         for declaration in module.get_functions() {
             if declaration.count_basic_blocks() != 0 {
@@ -8187,14 +8361,54 @@ impl<'ctx> JITModule<'ctx> {
             if symbol.starts_with("llvm.") {
                 continue;
             }
-            let engine_addr = self.execution_engine.get_function_address(symbol).ok();
-            let tier_addr = self
-                .bytecode
-                .functions
-                .iter()
-                .find(|f| f.name() == symbol)
-                .and_then(|f| self.live_function_address(f.findex as usize));
-            match engine_addr.filter(|&addr| addr != 0).or(tier_addr) {
+            let addr = match bytecode_findex.get(symbol) {
+                // A bytecode callee: exactly this findex's installed code, or
+                // nothing. `live_function_address` already rejects a stub
+                // sentinel, so an uncompiled callee refuses the promotion
+                // instead of calling a small integer.
+                Some(&findex) => {
+                    let exact = self.live_function_address(findex);
+                    // `ASH_BIND_AUDIT=1` reports what resolving this callee by
+                    // symbol would have produced, which is what this code did
+                    // before. Read the output carefully: a DIFFERENT address is
+                    // not by itself a wrong target. A `Fun_<findex>` name is
+                    // unique, so a difference there is only the same function
+                    // at another tier -- the engine's copy in the shared module
+                    // versus whatever `functions_ptrs` currently holds. Only a
+                    // difference on a bare Haxe field name is a wrong callee.
+                    // Measured on a game: 46 differences in 90s, all of them on
+                    // `Fun_` names and none on a collidable one, so the old
+                    // resolution was ambiguous by construction but was not
+                    // actually mis-resolving that workload.
+                    if std::env::var_os("ASH_BIND_AUDIT").is_some() {
+                        let by_name = self
+                            .execution_engine
+                            .get_function_address(symbol)
+                            .ok()
+                            .filter(|&a| a != 0)
+                            .or_else(|| {
+                                self.bytecode
+                                    .functions
+                                    .iter()
+                                    .find(|f| f.name() == symbol)
+                                    .and_then(|f| self.live_function_address(f.findex as usize))
+                            });
+                        if by_name != exact {
+                            eprintln!(
+                                "[bind] {label}: callee {symbol} findex={findex} \
+                                 exact={exact:?} by_name={by_name:?} DIFFERS"
+                            );
+                        }
+                    }
+                    exact
+                }
+                None => self
+                    .execution_engine
+                    .get_function_address(symbol)
+                    .ok()
+                    .filter(|&addr| addr != 0),
+            };
+            match addr {
                 Some(addr) => self.execution_engine.add_global_mapping(&declaration, addr),
                 None => unresolved.push(symbol.to_string()),
             }
@@ -8938,6 +9152,53 @@ impl<'ctx> JITModule<'ctx> {
     ///
     /// Returns how many functions were excluded.
     pub(crate) fn shield_trap_functions_from_optimization(&self) -> usize {
+        self.shield_trap_functions_in(&self.func_cache)
+    }
+
+    /// Store a freshly computed float into `dst`, narrowing to that register's
+    /// declared width first.
+    ///
+    /// The conversion opcodes all build their result as `f64`, but an HF32
+    /// register is a 4-byte alloca. Storing the `f64` into it did two things
+    /// at once: the next `load float` read the LOW half of the double's bit
+    /// pattern -- `1.0` came back as `0.0f`, and roughly half of all values
+    /// came back with the sign bit set -- and the 8-byte store ran 4 bytes off
+    /// the end of the slot, corrupting whatever register LLVM had placed
+    /// after it. On a game this reached OpenAL as `alSourcef(AL_GAIN, <junk>)`,
+    /// which answers a negative or non-finite gain with AL_INVALID_VALUE, and
+    /// the clobbered neighbour broke unrelated float state in the same frame.
+    fn store_float_as_reg(
+        &self,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        dst: usize,
+        value: inkwell::values::FloatValue<'ctx>,
+    ) -> Result<()> {
+        let want = reg_types[dst];
+        let value = if want.is_float_type()
+            && want.into_float_type() == self.context.f32_type()
+            && value.get_type() == self.context.f64_type()
+        {
+            self.builder
+                .build_float_trunc(value, self.context.f32_type(), "narrow_f32")?
+        } else {
+            value
+        };
+        self.builder.build_store(registers[dst], value)?;
+        Ok(())
+    }
+
+    /// The same shield over a module's own findex -> value map.
+    ///
+    /// `promote_in_own_module` swaps `func_cache` back to the host's before it
+    /// optimizes, so the no-argument form shielded the host module's functions
+    /// while the promo module went through `default<O2>` unshielded: a
+    /// promoted body holding a try/catch could lose a statement or an inner
+    /// catch, and only on the own-module path.
+    pub(crate) fn shield_trap_functions_in(
+        &self,
+        cache: &std::collections::HashMap<usize, FunctionValue<'ctx>>,
+    ) -> usize {
         let noinline = self.context.create_enum_attribute(
             inkwell::attributes::Attribute::get_named_enum_kind_id("noinline"),
             0,
@@ -8947,7 +9208,7 @@ impl<'ctx> JITModule<'ctx> {
             0,
         );
         let mut n = 0;
-        for (findex, fv) in &self.func_cache {
+        for (findex, fv) in cache {
             let has_trap = match self.findexes.get(findex) {
                 Some(FuncPtr::Fun(f)) => f
                     .ops

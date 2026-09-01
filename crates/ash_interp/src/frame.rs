@@ -140,6 +140,9 @@ pub struct InterpreterFrame {
     /// what notices it. A plain `u32` on the frame keeps the probe to an
     /// increment and a compare on the interpreter's hottest path.
     pub backedges: u32,
+    /// Callee returns into this frame from a SELF-recursive call. A recursive
+    /// frame has no back-edge, so this is its only recurring transfer point.
+    pub self_returns: u32,
 }
 
 impl InterpreterFrame {
@@ -154,6 +157,7 @@ impl InterpreterFrame {
             pc: 0,
             trap_stack: Vec::new(),
             backedges: 0,
+            self_returns: 0,
         }
     }
 
@@ -173,6 +177,7 @@ impl InterpreterFrame {
             pc: 0,
             trap_stack: Vec::new(),
             backedges: 0,
+            self_returns: 0,
         }
     }
 

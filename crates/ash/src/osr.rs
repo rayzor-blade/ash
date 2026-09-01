@@ -110,13 +110,13 @@ pub fn analyze(f: &Function) -> OsrPlan {
 
     let cfg = CfgInfo::build(f);
     let forest = LoopForest::analyze(f, &cfg);
-    if forest.is_empty() {
-        refusals.push(OsrRefusal::NoBackEdge);
-        return OsrPlan {
-            refusals,
-            entry_headers: Vec::new(),
-        };
-    }
+    // A loopless function stopped here. That was scope, not capability:
+    // compile_osr_entry asks only that a site be a block start, and the hazards
+    // guarded below -- an escaping frame pointer, a live catch region, several
+    // paths carrying different state -- are properties of a BLOCK, not a loop.
+    // Recursion is the shape with no loop header and the shape the interpreter
+    // is worst at, so it is the one that most wants a way out.
+    let loopless = forest.is_empty();
 
     // Where an address of the frame is taken. Entering compiled code freezes
     // the interpreter's slots, so a pointer produced *before* arrival at a
@@ -143,6 +143,27 @@ pub fn analyze(f: &Function) -> OsrPlan {
     let ref_reaches = reachable_from(&cfg, &ref_seeds);
 
     let mut entry_headers = Vec::new();
+    if loopless {
+        // Block 0 is the ordinary entry; calling the function is already the
+        // way in. Single-predecessor is the same "one path carries state in"
+        // property MultipleLatches demands of a loop header.
+        for (i, _) in f.blocks.iter().enumerate().skip(1) {
+            if cfg.preds[i].len() != 1 {
+                continue;
+            }
+            if ref_reaches[i] {
+                if !refusals.contains(&OsrRefusal::RefTaken) {
+                    refusals.push(OsrRefusal::RefTaken);
+                }
+                continue;
+            }
+            entry_headers.push(BlockId(i as u32).0);
+        }
+        if entry_headers.is_empty() && !refusals.contains(&OsrRefusal::NoBackEdge) {
+            refusals.push(OsrRefusal::NoBackEdge);
+        }
+        return OsrPlan { refusals, entry_headers };
+    }
     for l in forest.innermost_first() {
         let lp = forest.get(l);
         if lp.latches.len() != 1 {

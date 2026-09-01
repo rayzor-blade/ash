@@ -160,7 +160,14 @@
 #	include <stdint.h>
 #endif
 
-#if defined(HL_VCC) || defined(HL_MINGW)
+/* Keyed on the PLATFORM, not the compiler vendor. HL_VCC is disqualified
+   whenever the compiler is LLVM-based (see HL_LLVM above), so building an
+   extension with clang on Windows used to fall through to the branch below
+   and declare imported DATA as plain `extern`. The linker then looked for
+   `hlt_i32` rather than `__imp_hlt_i32` and failed with LNK2019 on a symbol
+   the runtime does export. Any compiler targeting Windows needs the
+   decoration; only a static link does not. */
+#if defined(HL_VCC) || defined(HL_MINGW) || (defined(_WIN32) && !defined(LIBHL_STATIC))
 #	define EXPORT __declspec( dllexport )
 #	define IMPORT __declspec( dllimport )
 #else

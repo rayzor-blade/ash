@@ -122,9 +122,16 @@ jobs:
         with:
           shared-key: corpus-${{ matrix.os }}
 
+      # krdlab/setup-haxe has no arm64 build and fails outright on macos-14
+      # with "arm64 not supported", so Apple Silicon takes it from Homebrew.
       - uses: krdlab/setup-haxe@v1
+        if: runner.os != 'macOS'
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
+
+      - name: Install Haxe (macOS)
+        if: runner.os == 'macOS'
+        run: brew install haxe
 
       - uses: ./.github/actions/llvm21
 

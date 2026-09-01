@@ -235,8 +235,14 @@ def main() -> int:
                 status, out = run_case(c, root, mode, ash, args.timeout)
                 results[f"{c['name']}/{root}/{mode}"] = {"status": status, "output": out}
                 row.append(f"{mode}={status}")
-                if status not in ("PASS", "NOMARK") and out:
-                    line = diagnostic_line(out)
+                if status not in ("PASS", "NOMARK"):
+                    line = diagnostic_line(out) if out else (
+                        # A process that fails having printed NOTHING is the
+                        # hardest kind to act on from a CI log, and it is what
+                        # the whole Linux lane did. Say what was run.
+                        f"(no output) {ash.name} --mode {mode} {c['name']}.hl"
+                        f"  [cwd {BUILD_DIR}]"
+                    )
                     if line and line not in why:
                         why.append(line)
             print(f"{c['name']:<{width}}  root={root:<6}  " + "  ".join(row))

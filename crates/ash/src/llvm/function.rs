@@ -653,7 +653,9 @@ impl<'ctx> JITModule<'ctx> {
             crate::profile::count("middle-end functions processed", n as u64);
             crate::profile::count("middle-end functions in module", n as u64);
             let me_t0 = std::time::Instant::now();
-            super::module::run_middle_end(&promo_module)?;
+            let me_result = super::module::run_middle_end(&promo_module);
+            report_slow_promote(findex, "own", n, me_t0.elapsed().as_secs_f64() * 1e3);
+            me_result?;
             if std::env::var_os("ASH_MIDDLE_END_LOG").is_some() {
                 let globals = promo_module.get_globals().count();
                 let decls = promo_module
@@ -812,6 +814,15 @@ impl<'ctx> JITModule<'ctx> {
             let before = std::env::var_os("ASH_INLINE_LOG").is_some().then(|| root_shape(target));
             let me_t0 = std::time::Instant::now();
             let result = super::module::run_middle_end(&self.module);
+            report_slow_promote(
+                findex,
+                "shared",
+                self.module
+                    .get_functions()
+                    .filter(|f| f.count_basic_blocks() > 0)
+                    .count(),
+                me_t0.elapsed().as_secs_f64() * 1e3,
+            );
             if let Some((calls_before, instrs_before)) = before {
                 let (calls_after, instrs_after) = root_shape(target);
                 eprintln!(
@@ -9308,5 +9319,32 @@ impl<'ctx> FunctionBuilder<'ctx> {
         self.type_ = module.create_function_type(&fun).ok();
         self.value = module.create_function_value(self.fun.findex as usize).ok();
         Ok(())
+    }
+}
+
+/// Report a promotion whose middle end ran longer than `ASH_PROMOTE_SLOW_MS`
+/// (default 1000; set 0 to report every promotion).
+///
+/// One compile per run costs about a minute on a game, and no lever found so
+/// far moves it: a 200x range of promotion thresholds leaves it unchanged, and
+/// so does ASH_PROMOTE_MODULE_CAP at 1024, 256 and 64 -- which should have sent
+/// that promotion into a module of its own. It is ~76% of all compile time and
+/// it is the once-or-twice-a-run stall a player actually feels. What is missing
+/// is not another theory but the two numbers that separate them: how many
+/// bodies this promotion asked the middle end to walk, and how long the walk
+/// took. A shared module of ~2000 bodies and a single pathological function
+/// look identical from outside and want opposite fixes.
+fn report_slow_promote(findex: usize, path: &str, bodies: usize, middle_end_ms: f64) {
+    static THRESHOLD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    let limit = *THRESHOLD.get_or_init(|| {
+        std::env::var("ASH_PROMOTE_SLOW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000.0)
+    });
+    if middle_end_ms >= limit {
+        eprintln!(
+            "[promote] findex={findex} path={path} bodies={bodies} middle_end={middle_end_ms:.0}ms"
+        );
     }
 }

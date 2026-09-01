@@ -4655,6 +4655,87 @@ impl<'ctx> JITModule<'ctx> {
                         .build_load(ptr_type, method_gep, "method_ptr")?
                         .into_pointer_value();
 
+                    // Ahead-of-time devirtualisation, from a profile a
+                    // previous run left behind.
+                    //
+                    // The JIT arm above anchors its guard on the receiver's
+                    // type header, which it can do because it compiles inside
+                    // the process that watched the dispatch. AOT has no such
+                    // address, so it guards on the slot it just loaded: if the
+                    // vtable resolves to the function the profile named, call
+                    // that function directly and let the inliner take it.
+                    // Wrong or stale profiles cost one compare.
+                    //
+                    // The load is `!invariant.load` here and not in the JIT
+                    // for a real reason: promotion patches vtable SLOTS, so
+                    // there the value genuinely changes. Nothing patches
+                    // anything in a finished object, which is what lets LICM
+                    // lift the whole guard out of a dispatch loop and leave
+                    // the inlined body running without it.
+                    let aot_devirt = if self.aot {
+                        crate::callsite_profile::aot_method_target(f.findex as u32, i as u32)
+                            .or_else(|| {
+                                crate::callsite_profile::aot_uniform_method_target(f.findex as u32)
+                            })
+                            .and_then(|target| {
+                                match self.get_or_create_function_value(target as usize) {
+                                    Ok((callee, ph)) => {
+                                        if ph {
+                                            self.add_pending_compilation(target as usize);
+                                        }
+                                        (callee.get_type() == fn_type).then_some(callee)
+                                    }
+                                    Err(_) => None,
+                                }
+                            })
+                    } else {
+                        None
+                    };
+
+                    if let Some(callee) = aot_devirt {
+                        crate::profile::count("devirt method aot-arm", 1);
+                        if let Some(inst) = method_ptr.as_instruction() {
+                            let _ = inst.set_metadata(
+                                self.context.metadata_node(&[]),
+                                self.context.get_kind_id("invariant.load"),
+                            );
+                        }
+                        let hit_bb = self
+                            .context
+                            .append_basic_block(cm_function, "cm_aot_devirt_hit");
+                        let miss_bb = self
+                            .context
+                            .append_basic_block(cm_function, "cm_aot_devirt_miss");
+                        let want = callee.as_global_value().as_pointer_value();
+                        let guard = self.builder.build_int_compare(
+                            IntPredicate::EQ,
+                            self.builder.build_ptr_to_int(
+                                method_ptr,
+                                self.context.i64_type(),
+                                "cm_aot_slot",
+                            )?,
+                            self.builder.build_ptr_to_int(
+                                want,
+                                self.context.i64_type(),
+                                "cm_aot_want",
+                            )?,
+                            "cm_aot_devirt_guard",
+                        )?;
+                        self.builder
+                            .build_conditional_branch(guard, hit_bb, miss_bb)?;
+
+                        self.builder.position_at_end(hit_bb);
+                        let ret = self
+                            .builder
+                            .build_call(callee, &arg_vals, "cm_aot_devirt_call")?
+                            .try_as_basic_value();
+                        if let Some(rv) = ret.basic() {
+                            self.builder.build_store(registers[dst.0 as usize], rv)?;
+                        }
+                        self.builder.build_unconditional_branch(cm_done_bb)?;
+                        self.builder.position_at_end(miss_bb);
+                    }
+
                     // Indirect call through the vtable method pointer
                     // (stub-guarded: vobj_proto slots may hold interpreter
                     // sentinels in hybrid mode)

@@ -19,6 +19,18 @@ fn main() -> Result<()> {
             .into_owned()
     });
 
+    // A profile from an earlier run, if one was left. Advisory: every guard it
+    // produces re-checks at run time, so a stale file costs a compare.
+    if let Ok(profile) = std::env::var("ASH_AOT_PROFILE") {
+        match std::fs::read_to_string(&profile) {
+            Ok(text) => {
+                let n = ash_core::callsite_profile::load_profile(&text);
+                println!("loaded {n} profiled method site(s) from {profile}");
+            }
+            Err(e) => eprintln!("could not read {profile}: {e}"),
+        }
+    }
+
     let p = std::path::Path::new(&path);
     ash_core::native_lib::choose_std_linkage(p);
     ash_core::native_lib::init_std_library()?;

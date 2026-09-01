@@ -952,6 +952,23 @@ fn run() -> Result<()> {
                     Mode::Interp => unreachable!(),
                 }
             }
+            // Hand the ahead-of-time compiler what the interpreter watched.
+            // Only these modes have a tiered runtime, and the record site is
+            // gated on one, so `--mode interp` observes nothing to write.
+            if let Ok(path) = std::env::var("ASH_AOT_PROFILE_OUT") {
+                let text = ash_core::callsite_profile::render_profile();
+                match std::fs::write(&path, &text) {
+                    Ok(()) => {
+                        if !cli.quiet {
+                            eprintln!(
+                                "[ash] wrote {} monomorphic method site(s) to {path}",
+                                text.lines().count()
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("[ash] could not write {path}: {e}"),
+                }
+            }
             // The interpreter still hands the brokers raw handles for the
             // globals and functions_ptrs arrays (SharedArrayHandles), so it
             // is leaked rather than dropped while a chase may still be

@@ -129,6 +129,107 @@ pub fn uniform_method_receiver(caller: u32) -> Option<(u64, u32)> {
     lookup_uniform_caller(method_sites(), caller)
 }
 
+/// The same observation, in a form that survives leaving the process.
+///
+/// The in-process record anchors a method site on the receiver's runtime
+/// `hl_type*`, which is exactly right for the JIT -- it compiles inside the
+/// process that watched the dispatch -- and useless to an ahead-of-time
+/// compiler, where that address means nothing. What does carry over is the
+/// pair of bytecode indices naming the site and the findex it resolved to,
+/// so that is all this writes. An AOT backend guards on the resolved METHOD
+/// POINTER instead of the receiver type: it has to load the vtable slot
+/// anyway, and comparing it against a function it can name is a check it can
+/// make without knowing any runtime address.
+///
+/// Kept in its own map rather than reusing the in-process one, so a loaded
+/// profile can never be mistaken for an observation and have its absent type
+/// pointer baked into a guard.
+fn aot_method_targets() -> &'static Mutex<HashMap<u64, u32>> {
+    static M: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Render the monomorphic method sites observed so far.
+///
+/// One `caller pc target` triple per line. Polymorphic and unseen sites are
+/// simply absent -- there is nothing to say about them, and saying it would
+/// only produce a guard that always misses.
+pub fn render_profile() -> String {
+    let m = method_sites().lock().expect("callsite profile mutex poisoned");
+    let mut lines: Vec<String> = m
+        .iter()
+        .filter_map(|(&k, obs)| match obs {
+            Obs::Mono(_, target) => Some(((k >> 32) as u32, k as u32, *target)),
+            Obs::Poly => None,
+        })
+        .map(|(caller, pc, target)| format!("m {caller} {pc} {target}"))
+        .collect();
+    lines.sort(); // stable output: a profile that reorders is a profile that diffs
+    lines.join("\n") + "\n"
+}
+
+/// Read what [`render_profile`] wrote. Unparseable lines are skipped rather
+/// than fatal: the record is advisory, and a guard that never fires is a far
+/// better outcome than refusing to compile.
+pub fn load_profile(text: &str) -> usize {
+    let mut m = aot_method_targets()
+        .lock()
+        .expect("callsite profile mutex poisoned");
+    let mut n = 0;
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        if it.next() != Some("m") {
+            continue;
+        }
+        let (Some(caller), Some(pc), Some(target)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(caller), Ok(pc), Ok(target)) =
+            (caller.parse::<u32>(), pc.parse::<u32>(), target.parse::<u32>())
+        else {
+            continue;
+        };
+        m.insert(key(caller, pc), target);
+        n += 1;
+    }
+    n
+}
+
+/// The findex every recorded site in `caller` agreed on, or `None`.
+///
+/// The exact key is `(caller, opcode index)` into the FLAT interpreter's AIR
+/// V2 body, and the LLVM backend does not flatten its CFG, so its own opcode
+/// index is a different number for the same call. That is why the in-process
+/// arm has the same fallback: when a caller's recorded sites all resolve to
+/// one target, the site being lowered must be one of them, whatever it is
+/// numbered here.
+pub fn aot_uniform_method_target(caller: u32) -> Option<u32> {
+    let m = aot_method_targets()
+        .lock()
+        .expect("callsite profile mutex poisoned");
+    let mut found: Option<u32> = None;
+    for (&k, &target) in m.iter() {
+        if (k >> 32) as u32 != caller {
+            continue;
+        }
+        match found {
+            None => found = Some(target),
+            Some(t) if t == target => {}
+            Some(_) => return None, // the caller disagrees with itself
+        }
+    }
+    found
+}
+
+/// The findex a loaded profile says this method site resolved to.
+pub fn aot_method_target(caller: u32, pc: u32) -> Option<u32> {
+    aot_method_targets()
+        .lock()
+        .expect("callsite profile mutex poisoned")
+        .get(&key(caller, pc))
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

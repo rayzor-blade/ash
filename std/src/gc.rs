@@ -29,6 +29,8 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
+/// 64 line-claim bits to a word.
+const MARK_WORDS: usize = LINES_PER_BLOCK / 64;
 
 /// Floor and ceiling on the machine-derived heap cap.
 ///
@@ -1744,13 +1746,21 @@ struct ImmixHeap {
 }
 #[derive(Debug)]
 struct Block {
-    /// One claim bit per line. Atomic so the mark phase can run on several
-    /// threads: marking is the bulk of the pause and is pointer-chasing over
-    /// the whole live set, which is latency-bound rather than compute-bound.
-    /// Relaxed ordering throughout — the world is stopped, so the only thing
-    /// these order is the marker against itself, and a line's claim is
-    /// established by the swap alone.
-    mark_bits: [AtomicBool; LINES_PER_BLOCK],
+    /// One claim bit per line, packed 64 to a word. Atomic so the mark phase
+    /// can run on several threads: marking is the bulk of the pause and is
+    /// pointer-chasing over the whole live set, which is latency-bound rather
+    /// than compute-bound. Relaxed ordering throughout — the world is stopped,
+    /// so the only thing these order is the marker against itself, and a
+    /// line's claim is established by the fetch_or alone.
+    ///
+    /// A bool per line cost 256 BYTES per block; at the 4GiB reservation's
+    /// 131072 blocks that is 33.5MB of side table that the mark phase walks in
+    /// random order alongside the live set itself. Packed, the same 256 claims
+    /// occupy 32 bytes -- half a cache line -- and the table is 4.2MB. Mark was
+    /// measured at 91% of an in-play pause and scaled with the live set while
+    /// its per-line WORK stayed flat, which is the signature of a phase bound
+    /// by memory rather than by instructions.
+    mark_bits: [AtomicU64; MARK_WORDS],
     /// True while any multi-line allocation span is recorded in this block.
     /// The marker's walk-back only exists to find span starts; a block that
     /// never held one (every TLAB churn block) marks in O(1) instead of
@@ -1774,11 +1784,12 @@ fn claim_line(block: &Block, line_idx: usize) -> bool {
     // mark phase, and by far the commonest case is a line that is already
     // marked — the plain load settles those without one. The swap then decides
     // the race for the few that are genuinely unclaimed.
-    let bit = &block.mark_bits[line_idx];
-    if bit.load(Ordering::Relaxed) {
+    let word = &block.mark_bits[line_idx >> 6];
+    let bit = 1u64 << (line_idx & 63);
+    if word.load(Ordering::Relaxed) & bit != 0 {
         return false;
     }
-    if bit.swap(true, Ordering::Relaxed) {
+    if word.fetch_or(bit, Ordering::Relaxed) & bit != 0 {
         return false;
     }
     // Only on a successful claim, and only when not already set, so the store
@@ -1791,14 +1802,37 @@ fn claim_line(block: &Block, line_idx: usize) -> bool {
 
 #[inline]
 fn clear_marks(block: &Block) {
-    for bit in &block.mark_bits {
-        bit.store(false, Ordering::Relaxed);
+    for word in &block.mark_bits {
+        word.store(0, Ordering::Relaxed);
+    }
+}
+
+impl Block {
+    #[inline(always)]
+    fn is_marked(&self, line_idx: usize) -> bool {
+        self.mark_bits[line_idx >> 6].load(Ordering::Relaxed) & (1u64 << (line_idx & 63)) != 0
+    }
+
+    /// Set a line's bit without reporting who won: for callers that mark a
+    /// line they already know is theirs. `claim_line` is the racing form.
+    #[inline(always)]
+    fn set_mark(&self, line_idx: usize) {
+        self.mark_bits[line_idx >> 6]
+            .fetch_or(1u64 << (line_idx & 63), Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn marked_line_count(&self) -> usize {
+        self.mark_bits
+            .iter()
+            .map(|w| w.load(Ordering::Relaxed).count_ones() as usize)
+            .sum()
     }
 }
 
 /// Plain copy of a block's marks, for the sweep audit.
 fn snapshot_marks(block: &Block) -> [bool; LINES_PER_BLOCK] {
-    std::array::from_fn(|i| block.mark_bits[i].load(Ordering::Relaxed))
+    std::array::from_fn(|i| block.is_marked(i))
 }
 
 struct RootSet {
@@ -1912,7 +1946,7 @@ fn scan_line_shared(
             let child_line = (val - heap_start) / LINE_SIZE;
             let cb = child_line / LINES_PER_BLOCK;
             let cl = child_line % LINES_PER_BLOCK;
-            if cb < blocks.len() && !blocks[cb].mark_bits[cl].load(Ordering::Relaxed) {
+            if cb < blocks.len() && !blocks[cb].is_marked(cl) {
                 mark_allocation_shared(blocks, alloc_sizes, child_line, out);
             }
         }
@@ -1929,8 +1963,14 @@ fn mark_threads() -> usize {
                 return n.max(1);
             }
         }
+        // N-1, so the machine keeps a core for everything that is not
+        // marking: the promoter thread compiling in the background, the
+        // audio and display threads, the OS. `clamp(1, 8)` alone took every
+        // core on a 4-core machine and left the collection contending with
+        // the very threads it had just stopped the world to get ahead of.
+        // On a 10-core box this is unchanged at 8.
         std::thread::available_parallelism()
-            .map(|n| n.get().clamp(1, 8))
+            .map(|n| n.get().saturating_sub(1).clamp(1, 8))
             .unwrap_or(1)
     })
 }
@@ -1989,8 +2029,8 @@ impl ImmixAllocator {
         // startup work proportional to the CAP: at a 4GB cap that is ~33MB of
         // memset on a program that may touch none of it, and it cost a fixed
         // ~5ms — 7% of a 56ms benchmark. Sound because an all-zero Block is a
-        // valid Block: `mark_bits` is [AtomicBool; N], whose `false` is 0 and
-        // whose layout matches `bool`, and `has_span` likewise.
+        // valid Block: `mark_bits` is [AtomicU64; N], whose "no line claimed"
+        // is 0, and `has_span` likewise.
         let block_count = heap_size / BLOCK_SIZE;
         let blocks: Vec<Block> = unsafe {
             let layout = std::alloc::Layout::array::<Block>(block_count)
@@ -2363,7 +2403,7 @@ impl ImmixAllocator {
         let line_index = (addr % BLOCK_SIZE) / LINE_SIZE;
 
         // Check if the line is marked (i.e., in use)
-        if !self.blocks[block_index].mark_bits[line_index].load(Ordering::Relaxed) {
+        if !self.blocks[block_index].is_marked(line_index) {
             return false;
         }
 
@@ -2490,7 +2530,7 @@ impl ImmixAllocator {
                     let block_idx = line / LINES_PER_BLOCK;
                     let line_idx = line % LINES_PER_BLOCK;
                     if block_idx < this.blocks.len()
-                        && !this.blocks[block_idx].mark_bits[line_idx].load(Ordering::Relaxed)
+                        && !this.blocks[block_idx].is_marked(line_idx)
                     {
                         this.mark_allocation_at_line(line, out);
                     }
@@ -2940,8 +2980,7 @@ impl ImmixAllocator {
             let line_index = (offset % BLOCK_SIZE) / LINE_SIZE;
 
             if block_index < self.blocks.len() {
-                self.blocks[block_index].mark_bits[line_index].store(true, Ordering::Relaxed);
-            self.blocks[block_index].any_marked.store(true, Ordering::Relaxed);
+                self.blocks[block_index].set_mark(line_index);
                 self.blocks[block_index].any_marked.store(true, Ordering::Relaxed);
             }
 
@@ -2967,9 +3006,9 @@ impl ImmixAllocator {
         let line_index = (offset % BLOCK_SIZE) / LINE_SIZE;
 
         if block_index < self.blocks.len()
-            && !self.blocks[block_index].mark_bits[line_index].load(Ordering::Relaxed)
+            && !self.blocks[block_index].is_marked(line_index)
         {
-            self.blocks[block_index].mark_bits[line_index].store(true, Ordering::Relaxed);
+            self.blocks[block_index].set_mark(line_index);
 
             // Mark children based on the type of object
             unsafe {
@@ -3173,10 +3212,20 @@ impl ImmixAllocator {
             // a 680MB live set is millions of atomics for no ordering anyone
             // observes.
             if touched {
-                for (line_index, mark) in block.mark_bits.iter_mut().enumerate() {
-                    let mark = mark.get_mut();
-                    let was_marked = *mark;
-                    *mark = false;
+                for word_index in 0..MARK_WORDS {
+                    let word = std::mem::replace(block.mark_bits[word_index].get_mut(), 0);
+                    // A word of 64 unmarked lines is the common case on a
+                    // sparsely reached block; skipping it keeps the run that
+                    // `run_start` is tracking open across the whole word.
+                    if word == 0 {
+                        if run_start.is_none() {
+                            run_start = Some(word_index << 6);
+                        }
+                        continue;
+                    }
+                    for bit_index in 0..64 {
+                    let line_index = (word_index << 6) | bit_index;
+                    let was_marked = word & (1u64 << bit_index) != 0;
                     if was_marked {
                         is_empty = false;
                         marked_lines += 1;
@@ -3185,6 +3234,7 @@ impl ImmixAllocator {
                         }
                     } else if run_start.is_none() {
                         run_start = Some(line_index);
+                    }
                     }
                 }
                 if let Some(start) = run_start.take() {
@@ -4152,11 +4202,7 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     let mut used: Vec<usize> = gc.heap.used_blocks.iter().copied().collect();
     used.sort_unstable();
     for block_addr in used {
-        let live = gc.blocks[block_addr / BLOCK_SIZE]
-            .mark_bits
-            .iter()
-            .filter(|m| m.load(Ordering::Relaxed))
-            .count();
+        let live = gc.blocks[block_addr / BLOCK_SIZE].marked_line_count();
         w(format!(
             "block {:#x} {live} {}",
             heap_base + block_addr,

@@ -244,11 +244,38 @@ fn emit_aot(
         .map(|f| f.findex as usize)
         .collect();
     let (mut lowered, mut refused) = (0usize, Vec::new());
+    // Per-function timing, on the same terms the tier log reports a JIT
+    // compile. Without it the only cost figure AOT produces is the total, and a
+    // single pathological function is invisible inside it: one measured at 47s
+    // in the JIT could not be attributed here at all, and a whole-emit A/B
+    // (O1 274s vs O2 298s over 8577 functions) cannot separate one outlier
+    // from a broad shift. `ASH_AOT_SLOW_MS` sets the threshold.
+    let slow_ms: u128 = std::env::var("ASH_AOT_SLOW_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
+    let mut slowest: Vec<(u128, usize)> = Vec::new();
     for fx in &findexes {
-        match jit.promote_function_strict(*fx) {
+        let began = std::time::Instant::now();
+        let outcome = jit.promote_function_strict(*fx);
+        let took = began.elapsed().as_millis();
+        if took >= slow_ms {
+            eprintln!("[aot] findex={fx} took {took}ms");
+        }
+        slowest.push((took, *fx));
+        match outcome {
             Ok(_) => lowered += 1,
             Err(e) => refused.push((*fx, format!("{e}"))),
         }
+    }
+    slowest.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let total: u128 = slowest.iter().map(|(t, _)| t).sum();
+    eprintln!("[aot] lowering {}ms total; slowest:", total);
+    for (took, fx) in slowest.iter().take(5) {
+        eprintln!(
+            "[aot]   findex={fx} {took}ms ({:.1}% of lowering)",
+            100.0 * *took as f64 / total.max(1) as f64
+        );
     }
 
     // A refused function is not a warning: it lowers to a throw, so a binary

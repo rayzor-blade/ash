@@ -2861,6 +2861,18 @@ impl<'ctx> JITModule<'ctx> {
                     Ok(value)
                 }
             }
+            // float widths differ: fptrunc or fpext. Without this the arm
+            // below returned an f64 for an f32 target unchanged, and storing
+            // that into a 4-byte slot wrote 8 bytes and read back the low
+            // half -- see `audit_register_stores`.
+            (BasicTypeEnum::FloatType(from), BasicTypeEnum::FloatType(to)) if from != to => {
+                let fv = value.into_float_value();
+                if from == self.context.f64_type() {
+                    Ok(self.builder.build_float_trunc(fv, to, "cast_fptrunc")?.into())
+                } else {
+                    Ok(self.builder.build_float_ext(fv, to, "cast_fpext")?.into())
+                }
+            }
             // Same or compatible types: no conversion
             _ => Ok(value),
         }
@@ -2980,8 +2992,9 @@ impl<'ctx> JITModule<'ctx> {
                     int_val.as_pointer_value(),
                     "int_val",
                 )?;
+                let loaded_int = self.cast_for_call(loaded_int, reg_types[dst.0 as usize])?;
                 self.builder
-                    .build_store(registers[dst.0 as usize], loaded_int);
+                    .build_store(registers[dst.0 as usize], loaded_int)?;
             }
             Opcode::Float { dst, ptr } => {
                 let float_val = self
@@ -2992,8 +3005,10 @@ impl<'ctx> JITModule<'ctx> {
                     float_val.as_pointer_value(),
                     "float_val",
                 )?;
+                // The pool is f64; an HF32 destination is a 4-byte slot.
+                let loaded_float = self.cast_for_call(loaded_float, reg_types[dst.0 as usize])?;
                 self.builder
-                    .build_store(registers[dst.0 as usize], loaded_float);
+                    .build_store(registers[dst.0 as usize], loaded_float)?;
             }
             Opcode::Bool { dst, value } => {
                 let bool_val = self.context.bool_type().const_int(*value as u64, false);
@@ -5365,6 +5380,8 @@ impl<'ctx> JITModule<'ctx> {
                 } else {
                     return Err(anyhow!("ToInt: unexpected source type"));
                 };
+                // The conversion lands on i32 whatever the destination is.
+                let result = self.cast_for_call(result, reg_types[dst.0 as usize])?;
                 self.builder
                     .build_store(registers[dst.0 as usize], result)?;
             }

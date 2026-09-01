@@ -1279,59 +1279,6 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
-        // The poll epoch's address, from the getter rather than the symbol.
-        // See fiber_poll_epoch_ptr: it is the only DATA this object would
-        // import, and a dylib cannot satisfy a direct reference to one.
-        if self.aot_shared_runtime {
-            if let Some(slot) = self.module.get_global("ash_fiber_poll_epoch_ptr") {
-                let getter_ty = ptr_type.fn_type(&[], false);
-                let getter = self.aot_symbol("hlp_fiber_poll_epoch_address", getter_ty);
-                let addr = self
-                    .builder
-                    .build_indirect_call(getter_ty, getter, &[], "poll_epoch_addr")?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| anyhow!("hlp_fiber_poll_epoch_address returned void"))?;
-                self.builder.build_store(slot.as_pointer_value(), addr)?;
-            }
-        }
-
-        // Fill each HDLL primitive's slot. One dlopen per library, cached in
-        // the runtime, then a dlsym per primitive -- exactly what the
-        // interpreter does on its first call, done once here instead.
-        //
-        // A primitive that does not resolve leaves its slot null, which is
-        // deliberate: the call site raises then, so a program that references
-        // an unavailable primitive without calling it still runs.
-        if !self.aot_hdll_natives.is_empty() {
-            let resolve_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-            let resolve = self.aot_symbol("hlp_aot_native", resolve_ty);
-            let natives = self.aot_hdll_natives.clone();
-            for (lib, prim) in &natives {
-                let slot_name = format!("ash_native_{lib}_{prim}");
-                let Some(slot) = self.module.get_global(&slot_name) else {
-                    continue;
-                };
-                let lib_s = self.builder.build_global_string_ptr(lib, "aot_lib_n")?;
-                let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim_n")?;
-                let addr = self
-                    .builder
-                    .build_indirect_call(
-                        resolve_ty,
-                        resolve,
-                        &[
-                            lib_s.as_pointer_value().into(),
-                            prim_s.as_pointer_value().into(),
-                        ],
-                        "native_addr",
-                    )?
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| anyhow!("hlp_aot_native returned void"))?;
-                self.builder.build_store(slot.as_pointer_value(), addr)?;
-            }
-        }
-
         self.builder.build_return(None)?;
         if !init.verify(true) {
             return Err(anyhow!("ash_module_init failed LLVM verification"));
@@ -1342,6 +1289,91 @@ impl<'ctx> JITModule<'ctx> {
         self.module
             .verify()
             .map_err(|e| anyhow!("emitted module failed LLVM verification: {}", e.to_string()))?;
+        Ok(())
+    }
+
+    /// Fill the slots that only exist once every body has been lowered.
+    ///
+    /// `ash_module_init` is emitted while the module is being BUILT, before a
+    /// single function is lowered -- so neither the fiber-poll slot nor any
+    /// HDLL primitive slot exists yet, and the code that filled them there
+    /// found nothing and emitted nothing. The slots were declared, loaded in
+    /// four places, and stored to nowhere; the first poll dereferenced null.
+    /// That is why an HDLL program crashed under BOTH link modes while a
+    /// std-only one was fine: the fill is keyed on shared-runtime mode, not on
+    /// how the object is linked.
+    ///
+    /// This runs after lowering, and `main` calls it between the module init
+    /// and the entrypoint.
+    pub fn emit_late_init(&mut self) -> Result<()> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let void_type = self.context.void_type();
+        let late = self
+            .module
+            .add_function("ash_late_init", void_type.fn_type(&[], false), None);
+        late.set_linkage(Linkage::Internal);
+        let entry = self.context.append_basic_block(late, "entry");
+        self.builder.position_at_end(entry);
+
+        {
+        // The poll epoch's address, from the getter rather than the symbol.
+            // See fiber_poll_epoch_ptr: it is the only DATA this object would
+            // import, and a dylib cannot satisfy a direct reference to one.
+            if self.aot_shared_runtime {
+                if let Some(slot) = self.module.get_global("ash_fiber_poll_epoch_ptr") {
+                    let getter_ty = ptr_type.fn_type(&[], false);
+                    let getter = self.aot_symbol("hlp_fiber_poll_epoch_address", getter_ty);
+                    let addr = self
+                        .builder
+                        .build_indirect_call(getter_ty, getter, &[], "poll_epoch_addr")?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| anyhow!("hlp_fiber_poll_epoch_address returned void"))?;
+                    self.builder.build_store(slot.as_pointer_value(), addr)?;
+                }
+            }
+
+            // Fill each HDLL primitive's slot. One dlopen per library, cached in
+            // the runtime, then a dlsym per primitive -- exactly what the
+            // interpreter does on its first call, done once here instead.
+            //
+            // A primitive that does not resolve leaves its slot null, which is
+            // deliberate: the call site raises then, so a program that references
+            // an unavailable primitive without calling it still runs.
+            if !self.aot_hdll_natives.is_empty() {
+                let resolve_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+                let resolve = self.aot_symbol("hlp_aot_native", resolve_ty);
+                let natives = self.aot_hdll_natives.clone();
+                for (lib, prim) in &natives {
+                    let slot_name = format!("ash_native_{lib}_{prim}");
+                    let Some(slot) = self.module.get_global(&slot_name) else {
+                        continue;
+                    };
+                    let lib_s = self.builder.build_global_string_ptr(lib, "aot_lib_n")?;
+                    let prim_s = self.builder.build_global_string_ptr(prim, "aot_prim_n")?;
+                    let addr = self
+                        .builder
+                        .build_indirect_call(
+                            resolve_ty,
+                            resolve,
+                            &[
+                                lib_s.as_pointer_value().into(),
+                                prim_s.as_pointer_value().into(),
+                            ],
+                            "native_addr",
+                        )?
+                        .try_as_basic_value()
+                        .basic()
+                        .ok_or_else(|| anyhow!("hlp_aot_native returned void"))?;
+                    self.builder.build_store(slot.as_pointer_value(), addr)?;
+                }
+            }
+        }
+
+        self.builder.build_return(None)?;
+        if !late.verify(true) {
+            return Err(anyhow!("ash_late_init failed LLVM verification"));
+        }
         Ok(())
     }
 
@@ -1404,6 +1436,12 @@ impl<'ctx> JITModule<'ctx> {
                 &[],
                 "",
             )?;
+        // After the module's own init and before any bytecode runs: the
+        // slots it fills are read on the first fiber poll, which is inside
+        // the first loop the entrypoint reaches.
+        if let Some(late) = self.module.get_function("ash_late_init") {
+            self.builder.build_call(late, &[], "")?;
+        }
         self.builder
             .build_call(entry_fn, &[], "entrypoint")?;
         self.builder.build_return(Some(&i32_type.const_zero()))?;

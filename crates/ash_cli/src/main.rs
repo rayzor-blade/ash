@@ -213,8 +213,27 @@ fn emit_aot(
     }
 
     jit.finalize_aot_data()?;
+    jit.emit_late_init()?;
     jit.emit_main()?;
-    jit.optimize_module()?;
+    // ASH_AOT_NO_OPT leaves the module unoptimised. O3 inlines
+    // ash_module_init straight into main, so a fault during startup surfaces
+    // with no frame naming the routine it happened in -- which is exactly
+    // when you most want one.
+    if std::env::var("ASH_AOT_NO_OPT").is_err() {
+        jit.optimize_module()?;
+    }
+    // ASH_AOT_DUMP_IR=<path> writes the module beside the object. Reading the
+    // IR is how every AOT defect in this file was actually found; making it
+    // reachable only from an example was a false economy.
+    if let Ok(dir) = std::env::var("ASH_AOT_DUMP_IR") {
+        let p = std::path::Path::new(&dir);
+        let dest = if p.is_dir() { p.join("module.ll") } else { p.to_path_buf() };
+        jit.write_ir(&dest)?;
+        if !quiet {
+            eprintln!("[ash] wrote IR to {}", dest.display());
+        }
+    }
+
     let shared_runtime = jit.aot_needs_shared_runtime();
     let bytes = jit.emit_object(&triple, out)?;
 

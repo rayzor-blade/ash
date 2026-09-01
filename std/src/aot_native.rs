@@ -160,8 +160,26 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
     if handle.is_null() {
         return std::ptr::null_mut();
     }
-    // The DEFINE_PRIM protocol: a primitive `name` is exported as `hlp_name`.
-    dlsym_handle(handle, &format!("hlp_{name}"))
+    // The DEFINE_PRIM protocol, in full. `hlp_<name>` is NOT the primitive: the
+    // macro expands to
+    //
+    //   EXPORT void *hlp_<name>(const char **sign) {
+    //       *sign = <signature>; return (void*)&HL_NAME(<name>);
+    //   }
+    //
+    // a RESOLVER that reports the signature through an out-parameter and
+    // returns the real function. Storing the resolver and calling it as the
+    // primitive writes a signature string through whatever the first argument
+    // happens to be -- for a callback that is the vclosure, and the write
+    // faults on read-only memory some distance from the actual mistake.
+    let resolver = dlsym_handle(handle, &format!("hlp_{name}"));
+    if resolver.is_null() {
+        return std::ptr::null_mut();
+    }
+    type Resolver = unsafe extern "C" fn(*mut *const c_char) -> *mut c_void;
+    let resolver: Resolver = std::mem::transmute(resolver);
+    let mut sign: *const c_char = std::ptr::null();
+    resolver(&mut sign)
 }
 
 /// Raise the error HashLink's `disabled_primitive` raises.

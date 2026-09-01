@@ -113,6 +113,35 @@ impl<'ctx> JITModule<'ctx> {
     fn fiber_poll_epoch_ptr(&self) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         if self.aot {
+            if self.aot_shared_runtime {
+                // Naming the runtime's `ash_fiber_poll_epoch` is right for a
+                // static link and impossible for a dynamic one on Mach-O
+                // arm64: the object addresses it directly (ARM64_RELOC_PAGE21)
+                // and a dylib's data needs a GOT access, so the link fails
+                // with "does not have address". It is the ONLY data symbol
+                // this object imports -- the other 74 are functions, which
+                // cross the boundary fine -- so route it through the getter
+                // the runtime already exports and the JIT already calls.
+                // ash_module_init fills this once; the poll pays one extra
+                // load, and only in a build that loads HDLLs.
+                let slot = match self.module.get_global("ash_fiber_poll_epoch_ptr") {
+                    Some(existing) => existing,
+                    None => {
+                        let g = self.module.add_global(
+                            ptr_type,
+                            None,
+                            "ash_fiber_poll_epoch_ptr",
+                        );
+                        g.set_initializer(&ptr_type.const_null());
+                        g.set_linkage(inkwell::module::Linkage::Internal);
+                        g
+                    }
+                };
+                return Ok(self
+                    .builder
+                    .build_load(ptr_type, slot.as_pointer_value(), "poll_epoch")?
+                    .into_pointer_value());
+            }
             let global =
                 self.aot_runtime_global("ash_fiber_poll_epoch", self.context.i64_type());
             return Ok(global.as_pointer_value());

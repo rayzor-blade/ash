@@ -48,4 +48,22 @@ done
 [ -n "${driver:-}" ] || { echo "no C driver found (tried \$CC, cc, clang, gcc)" >&2; exit 1; }
 
 "$driver" "$obj" "$runtime" -o "$out" "${libs[@]}"
+
+# When the runtime is a shared library, the binary must name it the way an
+# HDLL does. A staged copy keeps the install name of whatever it was copied
+# from -- an absolute path into the build tree -- so the binary would load THAT
+# image while the HDLL loads @rpath/libhl.dylib, and the process ends up with
+# two runtimes and two collectors. That crashes the moment one meets the
+# other's objects.
+case "$runtime" in
+  *.dylib)
+    if [ "$(uname -s)" = "Darwin" ]; then
+      recorded="$(otool -L "$out" | awk 'NR==2{print $1}')"
+      case "$recorded" in
+        @rpath/libhl.dylib) ;;
+        *) install_name_tool -change "$recorded" "@rpath/libhl.dylib" "$out" ;;
+      esac
+    fi
+    ;;
+esac
 echo "linked $out ($(stat -f%z "$out" 2>/dev/null || stat -c%s "$out") bytes) against $runtime"

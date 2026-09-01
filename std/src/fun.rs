@@ -892,3 +892,30 @@ pub extern "C" fn hlp_is_prim_loaded(f: *mut hl::vdynamic) -> bool {
         }
     }
 }
+
+/// Install the dynamic-dispatch callbacks, without the caller naming them.
+///
+/// `hl_setup_callbacks2` takes `ash_static_call`'s ADDRESS, and an AOT object
+/// linked against the runtime as a shared library cannot take the address of
+/// one of its functions directly -- Mach-O arm64 addresses it with adrp/add
+/// and the link fails with "does not have address". Calling a function works
+/// (the linker makes a stub); taking its address does not. So the address is
+/// taken HERE, inside the library that owns it.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_install_static_call() {
+    hl_setup_callbacks2(
+        ash_static_call as *mut std::ffi::c_void,
+        std::ptr::null_mut(),
+        0,
+    );
+}
+
+/// Install the closure runner, without the caller naming it.
+///
+/// Same reason as [`hlp_install_static_call`]: this is installed BY ADDRESS,
+/// and a shared-runtime AOT object cannot take the address of one of the
+/// library's functions. Taking it here keeps the object to calls only.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_install_closure_runner() {
+    crate::fiber::hlp_set_closure_runner(crate::fiber::hlp_jit_closure_runner);
+}

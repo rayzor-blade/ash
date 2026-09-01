@@ -1055,22 +1055,19 @@ impl<'ctx> JITModule<'ctx> {
         // Dynamic dispatch (Type.createInstance, Reflect.callMethod) reaches
         // compiled code through these two, and nothing else installs them in
         // a standalone binary.
-        let setup_callbacks = self.aot_symbol("hl_setup_callbacks2", setup_callbacks_ty);
-        let static_call = self.aot_symbol("ash_static_call", void_type.fn_type(&[], false));
-        self.builder.build_indirect_call(
-            setup_callbacks_ty,
-            setup_callbacks,
-            &[
-                static_call.into(),
-                ptr_type.const_null().into(),
-                i32_type.const_zero().into(),
-            ],
-            "",
-        )?;
-        let set_runner = self.aot_symbol("hlp_set_closure_runner", set_runner_ty);
-        let runner = self.aot_symbol("hlp_jit_closure_runner", void_type.fn_type(&[], false));
-        self.builder
-            .build_indirect_call(set_runner_ty, set_runner, &[runner.into()], "")?;
+        // Through a helper rather than by naming the function: a shared-runtime
+        // object cannot take the address of one of the library's functions
+        // (Mach-O arm64 wants adrp/add, which a dylib cannot satisfy), and
+        // this callback is installed by address. Calling works; addressing
+        // does not, so the address is taken inside the library.
+        let install = self.aot_runtime_fn("hlp_install_static_call", void_type.fn_type(&[], false));
+        self.builder.build_call(install, &[], "")?;
+        let _ = (setup_callbacks_ty, i32_type);
+        // By address, so through a helper -- see hlp_install_static_call.
+        let install_runner =
+            self.aot_runtime_fn("hlp_install_closure_runner", void_type.fn_type(&[], false));
+        self.builder.build_call(install_runner, &[], "")?;
+        let _ = set_runner_ty;
 
         // type index -> the global that names its descriptor
         let mut type_globals: HashMap<usize, PointerValue<'ctx>> = HashMap::new();
@@ -1279,6 +1276,23 @@ impl<'ctx> JITModule<'ctx> {
                             .build_store(addr, i32_type.const_int(value as u32 as u64, false))?;
                     }
                 }
+            }
+        }
+
+        // The poll epoch's address, from the getter rather than the symbol.
+        // See fiber_poll_epoch_ptr: it is the only DATA this object would
+        // import, and a dylib cannot satisfy a direct reference to one.
+        if self.aot_shared_runtime {
+            if let Some(slot) = self.module.get_global("ash_fiber_poll_epoch_ptr") {
+                let getter_ty = ptr_type.fn_type(&[], false);
+                let getter = self.aot_symbol("hlp_fiber_poll_epoch_address", getter_ty);
+                let addr = self
+                    .builder
+                    .build_indirect_call(getter_ty, getter, &[], "poll_epoch_addr")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("hlp_fiber_poll_epoch_address returned void"))?;
+                self.builder.build_store(slot.as_pointer_value(), addr)?;
             }
         }
 

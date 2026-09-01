@@ -273,17 +273,20 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, _flags: i32
 /// by the transitive conservative trace. Such callers were never broken, and
 /// are not what this path fixed.
 ///
-/// The two spellings are NOT told apart by arena membership, and an earlier
-/// version of this comment claiming they were was wrong. `is_gc_ptr` also
-/// requires the address's line MARK BIT, which only the collector sets and
-/// sweep clears, so during mutator execution -- when every `hl_add_root` call
-/// actually arrives -- a live object fails it too and BOTH spellings take the
-/// slot branch. That is harmless for a real slot, which is the documented
-/// contract and is read correctly. It does mean an hdll passing a bare object
-/// pointer no longer gets the object pinned: it gets a slot read of the
-/// object's first word instead. No known caller does that, and upstream does
-/// not support it either, but it is a behaviour change from the pre-fix code
-/// rather than the compatibility it was described as.
+/// So this is unconditionally a slot registration, exactly as upstream is.
+/// An earlier version discriminated on `is_gc_ptr` to keep pinning objects for
+/// callers that passed one directly, which was wrong twice over: `is_gc_ptr`
+/// additionally requires the address's line MARK BIT -- set only while the
+/// collector marks, cleared at sweep -- so during mutator execution, when every
+/// `hl_add_root` call actually arrives, a live object fails it and took the
+/// slot branch regardless. The discrimination never fired, and because the two
+/// functions evaluated it independently at different times, an address could in
+/// principle be filed in one set and looked up in the other, stranding the
+/// entry. Dropping it makes the pair symmetric by construction.
+///
+/// Nothing internal regressed, because nothing internal came through here:
+/// ash pins its own objects with `hlp_gc_register_root` (gc.rs) and
+/// `register_persistent` (buffer.rs), never with `hl_add_root`.
 ///
 /// Registering a slot costs nothing if it holds null or a non-heap value --
 /// the collector's conservative read ignores those exactly as upstream does.
@@ -292,12 +295,7 @@ pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    let mut gc = crate::gc::gc_locked_init();
-    if gc.is_gc_ptr(ptr) {
-        gc.register_persistent(ptr as *mut vdynamic);
-    } else {
-        gc.add_root_slot(ptr as usize);
-    }
+    crate::gc::gc_locked_init().add_root_slot(ptr as usize);
 }
 
 #[no_mangle]
@@ -305,12 +303,7 @@ pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    let mut gc = crate::gc::gc_locked_init();
-    if gc.is_gc_ptr(ptr) {
-        gc.unregister_persistent(ptr as *mut vdynamic);
-    } else {
-        gc.remove_root_slot(ptr as usize);
-    }
+    crate::gc::gc_locked_init().remove_root_slot(ptr as usize);
 }
 
 // ============================================================================
@@ -650,18 +643,11 @@ mod tests {
         }
     }
 
-    /// The `is_gc_ptr` arm of `hl_add_root` is a compatibility hedge for ash's
-    /// own older callers, and it is much narrower than it looks: `is_gc_ptr`
-    /// requires the object's LINE MARK BIT to be set, and mark bits are only
-    /// set while a collection is marking. A freshly allocated object therefore
-    /// fails it, so in practice almost every caller lands on the slot arm.
-    ///
-    /// That is the correct default -- upstream's contract is a slot address --
-    /// but it is worth pinning down, because the arm reads as though it
-    /// discriminates on "is this an object" when it really discriminates on
-    /// "is this an object the collector has already marked".
+    /// Every address is a slot, whatever it points at. Upstream has no
+    /// object-pinning form of `hl_add_root`, and ash's own pinning goes through
+    /// `hlp_gc_register_root` instead, so there is nothing to discriminate for.
     #[test]
-    fn a_freshly_allocated_object_is_still_treated_as_a_slot() {
+    fn add_root_files_every_address_as_a_slot() {
         unsafe {
             crate::gc::hlp_gc_init();
             let obj = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
@@ -670,17 +656,45 @@ mod tests {
             hl_add_root(obj as *mut c_void);
 
             let gc = crate::gc::gc_locked_init();
+            assert!(gc.has_root_slot(obj as usize));
             assert!(
                 !gc.has_persistent(obj),
-                "is_gc_ptr now accepts an unmarked object -- if that is \
-                 deliberate, the slot arm above is no longer the default path \
-                 and hl_add_root's contract needs re-reading"
+                "hl_add_root pinned an object -- upstream has no such form, and \
+                 a caller wanting it should use hlp_gc_register_root"
             );
-            assert!(gc.has_root_slot(obj as usize));
             drop(gc);
 
             hl_remove_root(obj as *mut c_void);
             assert!(!crate::gc::gc_locked_init().has_root_slot(obj as usize));
+        }
+    }
+
+    /// The pair must agree no matter what the heap is doing between the two
+    /// calls. They used to branch independently on a predicate that depends on
+    /// collector state, so an address registered as a slot could be looked for
+    /// among the pinned objects and never removed.
+    #[test]
+    fn add_and_remove_agree_across_a_collection() {
+        unsafe {
+            crate::gc::hlp_gc_init();
+            let anchor = 0usize;
+            crate::gc::hlp_gc_set_stack_top(
+                (&anchor as *const usize as usize) + std::mem::size_of::<usize>(),
+            );
+
+            let mut slot: *mut vdynamic = crate::obj::hlp_alloc_dynamic(crate::types::hlt_i32());
+            let addr = &mut slot as *mut *mut vdynamic as *mut c_void;
+
+            hl_add_root(addr);
+            assert!(crate::gc::gc_locked_init().has_root_slot(addr as usize));
+
+            crate::gc::gc_locked_init().collect_garbage();
+
+            hl_remove_root(addr);
+            assert!(
+                !crate::gc::gc_locked_init().has_root_slot(addr as usize),
+                "the root survived its own removal"
+            );
         }
     }
 

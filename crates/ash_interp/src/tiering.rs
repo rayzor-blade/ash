@@ -970,6 +970,32 @@ pub(crate) fn resolve_worker_stub(
     if std::env::var_os("ASH_DBG_STUB").is_some() {
         eprintln!("[stub] resolve findex={findex}");
     }
+    // Already installed? Answer without the lock. The check used to sit INSIDE
+    // the critical section, so a function that was long since compiled still
+    // queued behind whatever compile happened to be running -- and
+    // worker_compile_lock is global, so that is every stub resolution in the
+    // process behind one compile.
+    let published = |findex: usize| -> *mut () {
+        if ctx.arrays.functions_ptrs == 0 {
+            return std::ptr::null_mut();
+        }
+        let installed =
+            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
+        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            installed.cast::<()>()
+        } else {
+            std::ptr::null_mut()
+        }
+    };
+    let early = published(findex);
+    if !early.is_null() {
+        return if prepare_worker_closure_dependencies(ctx, findex) {
+            early
+        } else {
+            std::ptr::null_mut()
+        };
+    }
+
     let code = {
         // Another thread may hold this across an ENTIRE compile, and this one
         // is regularly a fiber worker -- a registered mutator. Waiting on the
@@ -984,21 +1010,38 @@ pub(crate) fn resolve_worker_stub(
         // collection and world stops of 263ms under --preset game and 866ms
         // under --preset application, against 0.01ms and no stragglers at all
         // under --mode interp, where nothing compiles.
-        unsafe { ash_core::hl_bindings::hl_blocking(true) };
-        let _compile = ctx
-            .worker_compile_lock
-            .lock()
-            .expect("worker compile mutex poisoned");
-        // SAFETY: paired with the call above; the guard is held from here, so
-        // this thread is running again and must be waited for as usual.
-        unsafe { ash_core::hl_bindings::hl_blocking(false) };
-        let installed = if ctx.arrays.functions_ptrs == 0 {
-            std::ptr::null_mut()
+        //
+        // `may_block` decides whether waiting is allowed at all. The contract
+        // above says a false answer is acceptable at an ordinary guarded call
+        // site, which falls through to the interpreter -- but the lock was
+        // taken unconditionally, so such a caller waited out a compile it had
+        // explicitly said it did not need. That is invisible while tier 0 is
+        // Cranelift and a compile is ~1ms. Measured with LLVM at tier 0, where
+        // compiles run 1.6s and one reached 47s, it is a multi-second freeze
+        // of whichever thread happened to touch an unresolved stub.
+        let guard = if may_block {
+            unsafe { ash_core::hl_bindings::hl_blocking(true) };
+            let g = ctx
+                .worker_compile_lock
+                .lock()
+                .expect("worker compile mutex poisoned");
+            // SAFETY: paired with the call above; the guard is held from here,
+            // so this thread is running again and must be waited for as usual.
+            unsafe { ash_core::hl_bindings::hl_blocking(false) };
+            g
         } else {
-            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) }
+            match ctx.worker_compile_lock.try_lock() {
+                Ok(g) => g,
+                // Someone is compiling. Say so rather than stalling: this
+                // caller has an interpreter to fall through to, and the next
+                // invocation will find the code published.
+                Err(_) => return std::ptr::null_mut(),
+            }
         };
-        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
-            installed.cast::<()>()
+        let _compile = guard;
+        let installed = published(findex);
+        if !installed.is_null() {
+            installed
         } else {
             let bead = {
                 let mut beads = ctx

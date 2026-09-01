@@ -49,7 +49,7 @@ IS_DARWIN = platform.system() == "Darwin"
 IS_WINDOWS = platform.system() == "Windows"
 # What the runtime is called once staged, and what cargo actually produced.
 # Windows drops the `lib` prefix and splits the import library out.
-SHLIB = "libhl.dylib" if IS_DARWIN else ("hl.dll" if IS_WINDOWS else "libhl.so")
+SHLIB = "libhl.dylib" if IS_DARWIN else ("libhl.dll" if IS_WINDOWS else "libhl.so")
 CDYLIB = "libash_std.dylib" if IS_DARWIN else ("ash_std.dll" if IS_WINDOWS else "libash_std.so")
 
 # Addresses differ every run; nothing else in these transcripts does.
@@ -77,9 +77,11 @@ def stage_runtime(tdir: Path) -> Path:
         shutil.copy2(src, staged)
     if IS_WINDOWS:
         # An hdll links against the import library, not the DLL itself.
+        # An hdll imports `libhl`, the HashLink name -- the same one
+        # lint.yml's Windows job aliases ash_std.dll to.
         imp = tdir / "ash_std.dll.lib"
         if imp.exists():
-            shutil.copy2(imp, tdir / "hl.lib")
+            shutil.copy2(imp, tdir / "libhl.lib")
     return staged
 
 
@@ -118,7 +120,7 @@ def build(cases, tdir: Path, verbose: bool) -> None:
         if got.returncode == 0 and got.stdout.split():
             arch = ["-arch", got.stdout.split()[0]]
 
-    link_target = str(tdir / "hl.lib") if IS_WINDOWS else str(staged)
+    link_target = str(tdir / "libhl.lib") if IS_WINDOWS else str(staged)
     for lib in sorted({c["lib"] for c in cases}):
         out = BUILD_DIR / f"{lib}.hdll"
         run([CC, *arch, *extra, "-shared", "-o", str(out), f"{lib}.c",

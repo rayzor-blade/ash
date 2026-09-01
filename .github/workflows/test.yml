@@ -42,14 +42,7 @@ jobs:
         with:
           shared-key: test
 
-      - name: Install LLVM 21 toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common \
-            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
-          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 21 all
+      - uses: ./.github/actions/llvm21
 
       # ash_std first: its cdylib is embedded by the other crates' build
       # scripts, same ordering the lint job needs.
@@ -90,14 +83,7 @@ jobs:
         with:
           shared-key: exports
 
-      - name: Install LLVM 21 toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common \
-            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
-          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 21 all
+      - uses: ./.github/actions/llvm21
 
       # Source only. The comparison is against what HashLink DECLARES, so
       # nothing on this side needs building.
@@ -140,120 +126,19 @@ jobs:
         with:
           haxe-version: ${{ env.HAXE_VERSION }}
 
-      - name: Install LLVM 21 (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget gpg software-properties-common \
-            libzstd-dev zlib1g-dev libxml2-dev libtinfo-dev libedit-dev libffi-dev
-          wget -O /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 21 all
-          echo "LLVM_SYS_211_PREFIX=/usr/lib/llvm-21" >> "$GITHUB_ENV"
-          echo "LIBCLANG_PATH=/usr/lib/llvm-21/lib" >> "$GITHUB_ENV"
-
-      - name: Install LLVM 21 (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install zstd
-          if brew install llvm@21 && [ -x "$(brew --prefix llvm@21)/bin/llvm-config" ]; then
-            PREFIX="$(brew --prefix llvm@21)"
-          else
-            brew install llvm
-            PREFIX="$(brew --prefix llvm)"
-          fi
-          "$PREFIX/bin/llvm-config" --version | grep -q '^21\.' \
-            || { echo "::error::no LLVM 21 available from Homebrew"; exit 1; }
-          echo "LLVM_SYS_211_PREFIX=$PREFIX" >> "$GITHUB_ENV"
-          echo "LIBCLANG_PATH=$PREFIX/lib" >> "$GITHUB_ENV"
-          echo "LIBRARY_PATH=$(brew --prefix)/lib" >> "$GITHUB_ENV"
-
-      - name: Cache LLVM 21 (Windows)
-        if: runner.os == 'Windows'
-        id: llvm-cache
-        uses: actions/cache@v4
-        with:
-          path: C:\llvm21
-          key: llvm-21.1.2-x86_64-pc-windows-msvc
-
-      - name: Install LLVM 21 (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          # Disables the rich progress bars that deadlock PowerShell in CI
-          MAMBA_NO_PROGRESS: "true"
-          CI: "true"
-        run: |
-          Write-Host "Downloading Micromamba..."
-          curl.exe -fsSL -o micromamba.tar.bz2 `
-            https://micro.mamba.pm/api/micromamba/win-64/latest
-          
-          Write-Host "Extracting Micromamba using 7-Zip..."
-          # 7z extracts the .bz2 to a .tar, then un-tars it into the 'mm' directory
-          7z x micromamba.tar.bz2 -y | Out-Null
-          7z x micromamba.tar -omm -y | Out-Null
-          
-          $mm = Join-Path (Resolve-Path mm).Path 'Library\bin\micromamba.exe'
-          Write-Host "Found micromamba at $mm"
-          
-          Write-Host "Creating environment (this may take a few minutes)..."
-          # --log-level=info forces sequential text logs instead of UI spinners
-          & $mm create -y -p "$PWD\llvmenv" -c conda-forge --log-level=info `
-            "llvmdev=21.1.8" "zlib" "libxml2-devel"
-
-          # In PowerShell, native executables failing don't inherently fail the step
-          if ($LASTEXITCODE -ne 0) {
-            throw "Micromamba failed with exit code $LASTEXITCODE"
-          }
-
-          $prefix = "$PWD\llvmenv\Library"
-          if (-not (Test-Path "$prefix\bin\llvm-config.exe")) {
-            throw "llvmdev installed no llvm-config.exe under $prefix\bin"
-          }
-          
-          # Prove the reported paths point at THIS install, not the build box.
-          $libdir = & "$prefix\bin\llvm-config.exe" --libdir
-          Write-Host "llvm-config --libdir = $libdir"
-          if (-not (Test-Path $libdir)) {
-            throw "llvm-config reports a libdir that does not exist: $libdir"
-          }
-          & "$prefix\bin\llvm-config.exe" --version
-
-          # llvm-config names its system libraries by the file names LLVM was
-          # BUILT against, and conda-forge has since renamed zstd's import
-          # library. Alias it rather than pinning an old zstd, so a version
-          # bump cannot quietly take the link out again.
-          if ((Test-Path "$libdir\zstd.lib") -and
-              -not (Test-Path "$libdir\zstd.dll.lib")) {
-            Copy-Item "$libdir\zstd.lib" "$libdir\zstd.dll.lib"
-          }
-
-          # Check every library the linker will be told to open, here rather
-          # than ten minutes later at link time, where it surfaces as a bare
-          # LNK1181 naming only the first one missing. The Windows SDK supplies
-          # its own, so those are not this environment's to provide.
-          $sdk = @('psapi.lib','shell32.lib','ole32.lib','uuid.lib',
-                   'advapi32.lib','ws2_32.lib','ntdll.lib','kernel32.lib',
-                   'user32.lib','userenv.lib','dbghelp.lib','delayimp.lib',
-                   'legacy_stdio_definitions.lib')
-          $missing = @()
-          foreach ($lib in (& "$prefix\bin\llvm-config.exe" `
-                              --system-libs --link-static).Split(' ')) {
-            $lib = $lib.Trim()
-            if (-not $lib -or $sdk -contains $lib.ToLower()) { continue }
-            if (-not (Test-Path (Join-Path $libdir $lib))) { $missing += $lib }
-          }
-          if ($missing.Count) {
-            throw "llvm-config names system libraries this env does not provide: $($missing -join ', ')"
-          }
-          Write-Host "all llvm-config --system-libs resolve under $libdir"
-          "LLVM_SYS_211_PREFIX=$prefix" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - uses: ./.github/actions/llvm21
 
       - name: Build the runtime
         shell: bash
         run: |
           cargo build -p ash_std
           cargo build -p ash
+
+      # Windows cannot start the binary without these beside it.
+      - uses: ./.github/actions/llvm21-runtime-dlls
+        if: runner.os == 'Windows'
+        with:
+          into: target\debug\
 
       # A platform with no recorded baseline prints its matrix and passes: a
       # first run there is a measurement, not a verdict. It starts gating once

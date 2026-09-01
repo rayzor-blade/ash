@@ -424,13 +424,21 @@ pub fn findex_at_entry(addr: usize) -> Option<u32> {
 
 /// Which compiled function a PC falls in, for the crash handler.
 ///
-/// Nearest-entry-below, same rule the sampler uses, since neither backend
-/// reports a code size; a PC more than 2MB past the nearest entry is treated
-/// as not JIT code rather than attributed to a function it cannot belong to.
+/// Nearest-entry-below, since neither backend reports a code size -- but
+/// bounded by the NEXT registered entry, because "nearest below" alone names
+/// the wrong function with total confidence. The slack used to be a flat 2MB,
+/// and a crash 405KB above an unrelated entry was reported as that entry's
+/// findex; denying that findex simply moved the report to the next entry down,
+/// which reads exactly like the bug moving and is not. A frame past the next
+/// entry, or past `MAX_SLACK` when it is the last one, is reported as
+/// unattributed rather than as a function it cannot belong to.
+///
 /// try_lock, never lock: this is called from a signal handler, and a handler
 /// that deadlocks on the mutex its own thread holds turns a crash report
 /// into a hang.
 pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
+    /// Cap for the last entry, which has no successor to bound it.
+    const MAX_SLACK: usize = 256 << 10;
     let guard = jit_code().try_lock().ok()?;
     // Nearest-entry-below, by binary search rather than a scan of every range.
     // Where several installs share an address this takes the LAST of them --
@@ -438,10 +446,18 @@ pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
     // where the scan took the first.
     let at = guard.partition_point(|r| r.addr <= pc);
     let r = guard.get(at.checked_sub(1)?)?;
-    if pc - r.addr > 2 << 20 {
+    let offset = pc - r.addr;
+    // The next DISTINCT address above this entry ends it. Several installs can
+    // share one address (re-promotion), so skip equal addresses.
+    let bound = guard[at..]
+        .iter()
+        .find(|n| n.addr > r.addr)
+        .map(|n| n.addr - r.addr)
+        .unwrap_or(MAX_SLACK);
+    if offset >= bound.min(MAX_SLACK) {
         return None;
     }
-    Some((r.findex, r.tier.label(), pc - r.addr))
+    Some((r.findex, r.tier.label(), offset))
 }
 
 /// Resolves a findex to a human-readable function name for the report.

@@ -3655,20 +3655,64 @@ impl<'ctx> JITModule<'ctx> {
                         let field_hash = i32_type.const_int(hashed_name as u64, true);
                         let dst_type_idx = f.regs[dst.0 as usize].0;
                         let dst_kind = self.types_[dst_type_idx].kind;
+                        // Pick the getter by the DESTINATION's kind, the way
+                        // `DynGet` does. This used to call `hlp_dyn_getp`
+                        // unconditionally and store the pointer it returns
+                        // into whatever register `dst` is -- `dst_kind` was
+                        // computed right above and then never read. For an
+                        // i32 field that stored 8 bytes of boxed pointer into
+                        // a 4-byte slot and read back its low half; for an f64
+                        // field it reinterpreted a pointer as a double, which
+                        // is a denormal near zero rather than the value. The
+                        // whole-program audit found 588 of the first shape and
+                        // 292 of the second.
                         let type_ptr = self
                             .get_initialized_type(dst_type_idx)?
                             .into_pointer_value();
-                        let getter = self.declare_native(
-                            "hlp_dyn_getp",
-                            &[ptr_type.into(), i32_type.into(), ptr_type.into()],
-                            Some(ptr_type.into()),
-                        );
-                        let result = self.builder.build_call(
-                            getter,
-                            &[value_obj.into(), field_hash.into(), type_ptr.into()],
-                            "dyn_get_fb",
-                        )?;
+                        let f32_type = self.context.f32_type();
+                        let f64_type = self.context.f64_type();
+                        let i64_type = self.context.i64_type();
+                        let (getter, args, ret): (&str, Vec<_>, BasicTypeEnum) = match dst_kind {
+                            hl_type_kind_HF64 => (
+                                "hlp_dyn_getd",
+                                vec![ptr_type.into(), i32_type.into()],
+                                f64_type.into(),
+                            ),
+                            hl_type_kind_HF32 => (
+                                "hlp_dyn_getf",
+                                vec![ptr_type.into(), i32_type.into()],
+                                f32_type.into(),
+                            ),
+                            hl_type_kind_HI64 => (
+                                "hlp_dyn_geti64",
+                                vec![ptr_type.into(), i32_type.into()],
+                                i64_type.into(),
+                            ),
+                            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8
+                            | hl_type_kind_HUI16 => (
+                                "hlp_dyn_geti",
+                                vec![ptr_type.into(), i32_type.into(), ptr_type.into()],
+                                i32_type.into(),
+                            ),
+                            _ => (
+                                "hlp_dyn_getp",
+                                vec![ptr_type.into(), i32_type.into(), ptr_type.into()],
+                                ptr_type.into(),
+                            ),
+                        };
+                        let getter = self.declare_native(getter, &args, Some(ret.into()));
+                        let mut call_args: Vec<inkwell::values::BasicMetadataValueEnum> =
+                            vec![value_obj.into(), field_hash.into()];
+                        if args.len() == 3 {
+                            call_args.push(type_ptr.into());
+                        }
+                        let result = self.builder.build_call(getter, &call_args, "dyn_get_fb")?;
                         let dyn_field_value = result.try_as_basic_value().basic().unwrap();
+                        // `hlp_dyn_geti` answers every narrow integer kind as
+                        // i32, so a HBOOL/HUI8/HUI16 slot still needs the
+                        // truncation its width implies.
+                        let dyn_field_value =
+                            self.cast_for_call(dyn_field_value, reg_types[dst.0 as usize])?;
                         self.builder
                             .build_store(registers[dst.0 as usize], dyn_field_value)?;
                         self.builder.build_unconditional_branch(cont_block)?;

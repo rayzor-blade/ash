@@ -1750,8 +1750,9 @@ failures in the first 547 cases; the panics cluster on `std/src/cast.rs:137`
 (Dynamic holding a raw scalar) and `std/src/types.rs:560` (`hlp_type_enum_eq`
 walking construct offsets into a 0x1 pointer). Make this the AOT lane in CI:
 it is the only compiled-once corpus, and every AOT-only failure is a minimal
-reproducer of an LLVM lowering divergence. Remaining after the fixes is
-whatever the second sweep reports.
+reproducer of an LLVM lowering divergence. Remaining after the fixes (2026-09-03): TestExceptions and Issue10109 (empty
+exception stacks), Issue6482 (`cast("foo", Int)` must throw), Issue7335
+(Dynamic `--`), Issue2889 (SIGSEGV), Issue4436 (`cast.rs:299`).
 
 ## LLVM lowering audit: still-open divergences from the interpreter
 

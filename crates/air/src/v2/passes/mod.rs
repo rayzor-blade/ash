@@ -352,6 +352,10 @@ impl<'m> PassManager<'m> {
                 Box::new(LoopInvariantCodeMotion),
                 Box::new(FmaPeephole),
                 Box::new(DeadCodeElim),
+                // Last: widening consumes the loop the passes above shaped,
+                // and the vector forms it emits are not what GVN, LICM or
+                // SROA are written to reason about.
+                Box::new(widen::Widen { info }),
             ],
         };
         // Allocation hoisting runs after the fixed point, never inside it —

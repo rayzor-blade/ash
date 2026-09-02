@@ -72,6 +72,15 @@ pub enum Decline {
     /// A scalar operand that changes every iteration and would have to be
     /// broadcast across the lanes, which computes a different thing.
     VaryingBroadcast(ValueId),
+    /// An element so wide that VF of them exceed the widest vector the
+    /// weakest tier lowers. A 64-bit lane by four is 256 bits; Cranelift's
+    /// backends -- every ISA, not just aarch64 -- accept a vector only when
+    /// `ty.bits() <= 128` (`isa/*/inst/mod.rs`, the Wasm-SIMD set), and one
+    /// asked for more does not degrade, it refuses the whole function, which
+    /// the ladder then re-proposed without end. The game froze on exactly
+    /// this. LLVM would have split it; the rule is what every tier can take,
+    /// and on Apple silicon (NEON, no SVE) it is the hardware ceiling too.
+    LaneTooWide(TypeRef),
     NonUnitStride(i64),
     TooSmall(usize),
     /// The loop body writes a value the widening would have to keep scalar
@@ -272,11 +281,17 @@ fn check(
     // back-to-back is the element's own width -- HL scales those itself, so
     // `a[i]` on an Int array arrives here as `i << 2` and steps by 4.
     for a in &plan.accesses {
-        match a.contiguous_stride(info.type_size(a.elem)) {
+        let size = info.type_size(a.elem);
+        lanes_fit(a.elem, size)?;
+        match a.contiguous_stride(size) {
             Some(want) if want == a.stride => {}
             Some(_) => return Err(Decline::NonUnitStride(a.stride)),
             None => return Err(Decline::UnknownElementSize(a.elem)),
         }
+    }
+    for r in &plan.reductions {
+        let ty = f.value_ty(r.phi);
+        lanes_fit(ty, info.type_size(ty))?;
     }
     // A constant trip count that divides the width needs no remainder
     // handling at all. Anything else gets a scalar epilogue, which is where
@@ -458,6 +473,24 @@ fn identity_of(op: BinOp) -> Option<i32> {
     }
 }
 
+/// The widest vector every tier lowers, in bytes.
+///
+/// Cranelift's, not the machine's: its register-class table takes a vector
+/// only up to 128 bits on every ISA it has, the set Wasm SIMD needs. NEON
+/// matches that here and Apple silicon has no SVE, but the constraint that
+/// binds the IR is the tier that must lower everything.
+const MACHINE_VECTOR_BYTES: u32 = 16;
+
+/// Refuse an element that VF lanes of would overflow a machine vector, or
+/// whose width nobody can state.
+fn lanes_fit(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
+    match size {
+        Some(bytes) if bytes * VF as u32 <= MACHINE_VECTOR_BYTES => Ok(()),
+        Some(_) => Err(Decline::LaneTooWide(ty)),
+        None => Err(Decline::UnknownElementSize(ty)),
+    }
+}
+
 fn loop_blocks(f: &Function, header: BlockId) -> HashSet<BlockId> {
     let cfg = CfgInfo::build(f);
     let forest = LoopForest::analyze(f, &cfg);
@@ -563,6 +596,15 @@ fn widen_loop(
         if !grew {
             break;
         }
+    }
+
+    // Every value about to become a vector has to fit one, and this is the
+    // first point at which that set is complete -- the growth above can pull
+    // in a value no access or accumulator named. `check` screened what it
+    // could see; this screens what widening actually produces.
+    for &v in widened.keys() {
+        let ty = f.value_ty(v);
+        lanes_fit(ty, info.type_size(ty))?;
     }
 
     // The induction variable must stay scalar: it addresses the vector.

@@ -1604,3 +1604,34 @@ Fixed by matching a variant to its base. The general lesson is that a skip
 needs to be as visible in a sweep summary as a failure: the run printed
 `runs: 88 OK=72 SKIP=16` and nothing said which comparison had lost its
 subjects.
+
+### "100% lowering" has to cover types, not just instructions
+
+The Cranelift tier rejects no AIR instruction, and the game still froze on one
+(2026-09-02): the widener produced `i64x4` -- four 64-bit lanes, 256 bits on a
+128-bit NEON -- for the stdlib array-fill loop instantiated over `Array<I64>`
+(marblegame findex 94). `lane.by(4)` on an i64 lane is `None`, the backend
+refused the whole function, and nothing remembered the refusal, so a
+stub-bridge call re-lowered it on every call: 311,362 declines in 156 seconds,
+audio still playing under the frozen main thread.
+
+Both halves are closed: `lanes_fit` in `widen.rs` refuses any element whose
+width times VF exceeds one machine vector, and `tier0_refused` in `tiering.rs`
+latches a Cranelift refusal per findex the way the LLVM gate already latched
+its rejections. The invariant worth keeping is the general one: a pass may not
+construct a value no backend can name. The verifier cannot check it, because
+it has no type sizes; the widener is the only producer of vector values today
+and gates itself.
+
+Open, and not explained by reading: on that same findex the LLVM own-module
+path said `VecSplat destination is not a vector`. LLVM can legalize `<4 x
+i64>`, and `translate_air_v2` re-types every value with `lanes >= 2`, so the
+splat's destination arriving as a scalar means its lane count was lost
+somewhere on that path. Unreachable now that i64 is refused, and i32 vectors
+are proven through hybrid-llvm parity, but the mechanism is unknown. Reproduce
+by widening a wide element with the gate lifted and promoting through the
+own-module path.
+
+Follow-up, in order: a per-width VF (`f64x2`, `i64x2`) instead of refusing;
+and the 52-second LLVM compile of findex 3902 seen in the same log, which is
+the known top-tier compile-time problem, not this bug.

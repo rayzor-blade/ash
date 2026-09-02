@@ -6360,3 +6360,36 @@ fn a_reduction_over_a_varying_term_is_refused() {
         f.dump()
     );
 }
+
+/// An element two machine-vectors wide, by four lanes, is not a vector any
+/// backend can name -- and a backend handed one refuses the whole function,
+/// which the ladder re-proposes forever. The game froze on `i64x4`. The
+/// widener must decline it, whatever else about the loop is fine.
+struct WideInfo;
+impl ModuleInfo for WideInfo {
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        WidenInfo.int_value(idx)
+    }
+    fn int_pool_len(&self) -> usize {
+        WidenInfo.int_pool_len()
+    }
+    fn type_size(&self, _ty: TypeRef) -> Option<u32> {
+        Some(8)
+    }
+}
+
+#[test]
+fn a_lane_wider_than_the_machine_vector_is_refused() {
+    let (ops, regs) = widen_fixture();
+    let mut f = lower_with(&ops, &regs, &WideInfo).expect("lower");
+    let before = f.dump();
+    let pass = super::passes::widen::Widen { info: &WideInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(stats.replaced, 0, "widened an 8-byte element by 4:\n{}", f.dump());
+    assert_eq!(f.dump(), before, "a refusal must leave the function untouched");
+    let why = super::passes::widen::take_outcomes();
+    assert!(
+        why.iter().any(|(_, r)| matches!(r, Err(super::passes::widen::Decline::LaneTooWide(_)))),
+        "declined, but not for the width: {why:?}"
+    );
+}

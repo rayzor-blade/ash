@@ -614,6 +614,29 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
 /// about.
 static GATE_REJECTED: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
 
+/// Findexes the Cranelift tier has refused, so the refusal is asked once.
+///
+/// Tier-specific on purpose: the LLVM tier lowers through a different path
+/// and legitimately takes functions this one declines, so a tier-0 refusal
+/// must not stand in its way -- only in the way of asking tier 0 again.
+static TIER0_REFUSED: OnceLock<Mutex<std::collections::HashSet<usize>>> = OnceLock::new();
+
+fn tier0_refused(findex: usize) -> bool {
+    TIER0_REFUSED
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .expect("tier0 refusal set poisoned")
+        .contains(&findex)
+}
+
+fn remember_tier0_refusal(findex: usize) {
+    TIER0_REFUSED
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .expect("tier0 refusal set poisoned")
+        .insert(findex);
+}
+
 fn gate_rejected(findex: usize) -> bool {
     GATE_REJECTED
         .lock()
@@ -791,6 +814,17 @@ fn tiered_compile_tier_inner(
         if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             return installed.cast::<()>();
         }
+    }
+    // A refusal is an answer, and the same question gets the same answer.
+    // Nothing remembered a tier-0 refusal, so a function reached through the
+    // stub bridge -- called from compiled code, not yet compiled itself -- was
+    // lowered again on EVERY call: the whole AIR pipeline and the Cranelift
+    // backend, to fail the same way, 313,568 log lines in about two minutes,
+    // with the LLVM tier retrying alongside. The game froze with its audio
+    // still playing. The LLVM path already remembers its gate rejections;
+    // tier 0 now remembers its own.
+    if tier == 0 && tier0_refused(findex) {
+        return std::ptr::null_mut();
     }
     // What could LLVM win here, before paying a compile to find out? The
     // call count says the function is hot; it says nothing about whether the
@@ -1137,10 +1171,12 @@ pub(crate) fn compile_with_cranelift(
             if ctx.tier_log || msg.contains("Verifier") || msg.contains("Regalloc") {
                 eprintln!("[tier] decline findex={findex} tier=cranelift reason={msg}");
             }
+            remember_tier0_refusal(findex);
             std::ptr::null_mut()
         }
         Err(_) => {
             eprintln!("[tier] cranelift lowering panicked for findex={findex}");
+            remember_tier0_refusal(findex);
             std::ptr::null_mut()
         }
     }

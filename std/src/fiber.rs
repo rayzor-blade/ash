@@ -1217,8 +1217,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
 /// their own safe points.
 ///
 /// A safe point reached on the main stack advances each worker once. A safe
-/// point reached by a worker yields that worker back to the scheduler. There
-/// is deliberately no sleep or SDL pump here: the VM that owns the safe point
+/// point reached by a worker yields that worker back to the scheduler. The VM that owns the safe point
 /// is still runnable and remains responsible for its own frame pacing.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_poll() {

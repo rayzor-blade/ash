@@ -6042,6 +6042,46 @@ fn widen_runtime_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     (ops, regs)
 }
 
+/// The value a widened loop leaves behind is the REMAINDER's, not the vector
+/// loop's.
+///
+/// `fill` returns its induction variable, which after widening stops at
+/// `start + (n & ~3)` in the vector loop and only reaches the real limit in
+/// the scalar copy. A use past the loop that still names the original phi
+/// reads the wrong one of those two, and reads it silently -- the IR verifies
+/// either way, because both values are defined and in scope.
+#[test]
+fn the_value_after_a_widened_loop_comes_from_the_remainder() {
+    let (ops, regs) = widen_runtime_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let iv_phi = f.blocks.iter().find_map(|b| {
+        b.phis.first().map(|p| p.dst)
+    });
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(stats.replaced, 1, "not widened:\n{}", f.dump());
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+
+    let Some(iv_phi) = iv_phi else {
+        panic!("fixture has no induction phi:\n{}", f.dump())
+    };
+    // The Ret must not still be reading the vector loop's induction.
+    let returned = f
+        .blocks
+        .iter()
+        .find_map(|b| match b.term {
+            Terminator::Ret { value } => Some(value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no return:\n{}", f.dump()));
+    assert_ne!(
+        returned,
+        iv_phi,
+        "the return still names the vector loop's induction:\n{}",
+        f.dump()
+    );
+}
+
 #[test]
 fn a_runtime_length_loop_widens_with_a_scalar_epilogue() {
     let (ops, regs) = widen_runtime_fixture();

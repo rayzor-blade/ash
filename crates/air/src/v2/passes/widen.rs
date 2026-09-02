@@ -752,6 +752,29 @@ fn wire_epilogue(
             }
         }
     }
+
+    // Whatever the loop computed, the COPY is what finished computing it.
+    //
+    // Everything past the loop now runs only after the remainder, so a use of
+    // a loop value out there -- `return i`, a sum, a running pointer -- has to
+    // name the copy's version or it reads the value the vector loop stopped
+    // at, which is `vend` rather than the limit. Rewritten only in blocks the
+    // copy's exit dominates: a block reachable from the vector loop as well
+    // (a guard's throw path) still wants the value it was reached with.
+    let copy_exit = bmap[&bound.exit];
+    let cfg = CfgInfo::build(f);
+    let scope: Vec<BlockId> = (0..f.blocks.len())
+        .map(|i| BlockId(i as u32))
+        .filter(|b| cfg.dominates(copy_exit, *b))
+        .collect();
+    for b in scope {
+        for ins in &mut f.blocks[b.idx()].instrs {
+            ins.map_uses(&mut |v| *vmap.get(&v).unwrap_or(&v));
+        }
+        let mut t = f.blocks[b.idx()].term.clone();
+        t.map_uses(&mut |v| *vmap.get(&v).unwrap_or(&v));
+        f.blocks[b.idx()].term = t;
+    }
     Ok(())
 }
 

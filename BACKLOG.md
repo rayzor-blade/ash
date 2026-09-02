@@ -1551,3 +1551,41 @@ whole process reads, with indices assigned globally rather than per function,
 so `int_pool_base` stops being a per-function origin that two functions can
 both claim. Until then, a pass that mints is only safe for consumers that read
 AIR.
+
+### The OSR configuration invariant is a predicate, not a check
+
+Both sides of an OSR transfer must lower the function under the same
+`AirConfigKey`, because the entry addresses its slots `value_reg(v) * 8` and
+reads them with no bounds check, and the site is a pc into the serialized
+OPTIMIZED opcode array. `AirConfigKey` includes the level and keys the cache,
+so same key means both sides get literally the same `Arc<Optimized>` — that
+identity IS the safety mechanism.
+
+What enforces it is that every producer remembers to call
+`interpreter_config_for`, plus that function only handing the cheap config to
+back-edge-free functions. A guard now records the producer's key and image
+width and refuses a mismatched transfer, but its reach is narrow: a real
+divergence stops the pcs matching first, so nothing stages and OSR is lost
+silently rather than taken wrongly. It catches the pc-collision case only.
+
+Still unenforced, in rough order of how likely they are to bite:
+
+* `promotion_wants_full_module` (llvm/air.rs:124) lowers against a
+  `without_callees()` module while asking the cache under
+  `callees_visible: true`. Whichever caller reaches a findex first decides the
+  shared standard entry for everyone. This one is wrong today, independent of
+  any level work.
+* Hot reload already runs a second level (llvm/air.rs:29, O3 -> O2 plus callees
+  hidden) while OSR bodies for the same findex stay at
+  `interpreter_config_for`'s level. Latent, because `compile_osr_entry` takes
+  an `&Optimized` rather than calling `run_v2`.
+* Cranelift re-tier slots are allocated from the ordinary compile's
+  `Optimized` (standard) and re-mapped onto the OSR compile's `block_pcs`.
+  Safe only because a function with a re-tier site has a back edge and so gets
+  `standard()` on both sides.
+* Four CLI diagnostics and `report_hot_loop` hardcode O2, so `osr_report`
+  answers "which loops are OSR-eligible" at a level no consumer runs.
+
+The durable fix is to carry the key with the entry and compare it where the
+transfer is decided, rather than trusting every producer to ask the same
+question.

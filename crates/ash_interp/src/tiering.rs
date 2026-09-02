@@ -1507,6 +1507,16 @@ pub(crate) fn produce_cranelift_osr_entries(
     // The OSR body must be lowered exactly as the interpreter walks it: the
     // transfer is by position through `ser.block_pcs`.
     let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    // And it must be lowered WELL, which the interpreter's own configuration
+    // is not: the entry is the code that runs the hot loop, so building it
+    // without the inliner costs far more than the cheaper preparation
+    // returns -- mandelbrot ran 7.5x slower that way. A function the policy
+    // has given the cheap configuration is therefore not an OSR target at
+    // all, and saying so here is what keeps "cheap" and "never entered" the
+    // same statement rather than two hopes.
+    if cfg != ash_core::air_pipeline::AirConfigKey::standard() {
+        return 0;
+    }
     let shared = tier.ctx.air_module();
     let bare;
     let osr_module = if cfg.callees_visible {
@@ -1628,8 +1638,14 @@ pub(crate) fn osr_plan_for(
         .functions
         .iter()
         .find(|f| f.findex as usize == findex)?;
-    // Lowered as the interpreter walks it: OSR transfers by position.
+    // Lowered as the interpreter walks it: OSR transfers by position. And
+    // only for a function the policy left on the shared configuration -- see
+    // `produce_cranelift_osr_entries` for why cheap and OSR-target are
+    // mutually exclusive.
     let cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+    if cfg != ash_core::air_pipeline::AirConfigKey::standard() {
+        return None;
+    }
     let m = if cfg.callees_visible {
         ash_core::air_pipeline::AshModule::new(bytecode)
     } else {

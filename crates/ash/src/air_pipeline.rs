@@ -550,6 +550,96 @@ pub fn interpreter_level() -> OptLevel {
     })
 }
 
+/// Which functions the interpreter prepares under the SHARED configuration,
+/// rather than its own cheaper one.
+///
+/// The rule has to name every function OSR might enter, because the transfer
+/// is by position and both sides must lower the function identically. Naming
+/// more than that is pure cost: the pipeline's expense is concentrated in
+/// exactly these functions -- measured with `ASH_AIR_TIME_PASSES`, the
+/// inliner spends 8.30ms of its 8.31ms on the 17 loop-carrying functions of
+/// test_stdlib's 66, and GVN and SROA the same way -- so every function this
+/// over-names is paid for at full price and returns nothing.
+///
+/// Selected by `ASH_AIR_INTERP_POLICY`, so the three can be measured against
+/// each other rather than argued about.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterpPolicy {
+    /// A back edge means shared. The rule the tree shipped: correct, and the
+    /// most conservative of the three -- every loop is treated as an OSR
+    /// target whether or not one could ever enter it.
+    BackEdge,
+    /// A back edge AND nothing that makes `osr::analyze` refuse outright.
+    ///
+    /// A live trap region or a register whose address escaped is a permanent
+    /// refusal, not a hotness question, and both are visible in the raw
+    /// opcodes -- so a loop behind either can never be an OSR target and has
+    /// no reason to pay for the shared configuration. mandelbrot_small is the
+    /// case in hand: every one of its loops is refused for `RefTaken`, and it
+    /// still prepares its hot function at full price.
+    OsrEligible,
+    /// Cheap until the interpreter DEMONSTRATES a hot loop, then shared.
+    ///
+    /// The sharpest rule and the one with a cost the others do not have: a
+    /// frame holds its prepared body for the whole call, so the frame that
+    /// reported the hot loop keeps walking the cheap one and cannot be
+    /// transferred into -- the guard in `try_osr_transfer` refuses it on the
+    /// configuration mismatch. A function whose loop runs once, in a `main`
+    /// called once, therefore loses OSR entirely under this policy. Later
+    /// calls get it. Whether that trade pays is what the A/B is for.
+    Demand,
+}
+
+/// The policy in force, from `ASH_AIR_INTERP_POLICY` (backedge | osr-eligible
+/// | demand). Default `BackEdge`, which is what the tree did before the knob.
+pub fn interp_policy() -> InterpPolicy {
+    static CELL: OnceLock<InterpPolicy> = OnceLock::new();
+    *CELL.get_or_init(|| match std::env::var("ASH_AIR_INTERP_POLICY").as_deref() {
+        Ok("osr-eligible") => InterpPolicy::OsrEligible,
+        Ok("demand") => InterpPolicy::Demand,
+        Ok("backedge") | Err(_) | Ok("") => InterpPolicy::BackEdge,
+        Ok(other) => {
+            eprintln!(
+                "[air] ignoring ASH_AIR_INTERP_POLICY='{other}' \
+                 (expected backedge|osr-eligible|demand); using backedge"
+            );
+            InterpPolicy::BackEdge
+        }
+    })
+}
+
+/// Findexes the interpreter has shown to carry a hot loop, under
+/// [`InterpPolicy::Demand`].
+///
+/// Monotonic on purpose: a findex only ever moves from cheap to shared. If it
+/// could move back, two consumers asking at different moments would get
+/// different answers for the same function, which is the one thing the OSR
+/// transfer cannot survive.
+static OSR_DEMAND: OnceLock<Mutex<std::collections::HashSet<i32>>> = OnceLock::new();
+
+fn osr_demand() -> &'static Mutex<std::collections::HashSet<i32>> {
+    OSR_DEMAND.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Record that `findex` carries a hot loop, so it is prepared under the shared
+/// configuration from its next preparation onward.
+///
+/// Returns whether this was news, which is what tells a caller it has a cached
+/// body to drop.
+pub fn note_osr_demand(findex: i32) -> bool {
+    if interp_policy() != InterpPolicy::Demand {
+        return false;
+    }
+    osr_demand()
+        .lock()
+        .expect("osr demand mutex poisoned")
+        .insert(findex)
+}
+
+fn has_opcode(f: &HLFunction, pred: impl Fn(&air::opcodes::Opcode) -> bool) -> bool {
+    f.ops.iter().any(pred)
+}
+
 /// The configuration the interpreter walks `f` under, and the one every OSR
 /// site must lower `f` under to stay positionally compatible with it.
 ///
@@ -570,7 +660,28 @@ pub fn interpreter_config_for(f: &HLFunction) -> AirConfigKey {
         .ops
         .iter()
         .any(|op| air::opcode_info::jump_offset(op).is_some_and(|d| d < 0));
-    if has_back_edge {
+    let shared = match interp_policy() {
+        InterpPolicy::BackEdge => has_back_edge,
+        InterpPolicy::OsrEligible => {
+            // The two refusals `osr::analyze` never takes back, read off the
+            // raw opcodes so that choosing a configuration does not require
+            // the AIR the configuration produces. A `Ref` pins its register
+            // as `RefTaken`; a `Trap` is a live catch region across the
+            // transfer. Either one means no entry will ever be built here,
+            // whatever the loop does.
+            has_back_edge
+                && !has_opcode(f, |op| matches!(op, air::opcodes::Opcode::Ref { .. }))
+                && !has_opcode(f, |op| matches!(op, air::opcodes::Opcode::Trap { .. }))
+        }
+        InterpPolicy::Demand => {
+            has_back_edge
+                && osr_demand()
+                    .lock()
+                    .expect("osr demand mutex poisoned")
+                    .contains(&f.findex)
+        }
+    };
+    if shared {
         AirConfigKey::standard()
     } else {
         AirConfigKey::interpreter()

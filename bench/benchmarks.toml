@@ -31,6 +31,56 @@ binary = "ash"
 args = ["--mode", "interp"]
 description = "Pure bytecode interpreter. The parity-validated reference."
 
+# WHICH functions the interpreter keeps on the shared configuration. The rule
+# has to name every function OSR might enter, because the transfer is by
+# position; naming more than that is paid at full price for nothing, and the
+# pipeline's cost is concentrated in exactly these functions -- the inliner
+# spends 8.30ms of its 8.31ms on the 17 loop-carrying functions of
+# test_stdlib's 66.
+#
+# Pipeline cost left behind, pinned interpreter, cheap level O1:
+#   test_stdlib       backedge 28.6ms   osr-eligible 16.5ms   demand 3.5ms
+#   mandelbrot_small  backedge  3.0ms   osr-eligible  0.5ms   demand 0.2ms
+#
+# And what each gives up, measured as OSR entries staged:
+#   bench_method_call backedge 4        osr-eligible 0        demand 0
+# osr-eligible refuses any function containing a `Ref` anywhere, which is
+# coarser than `osr::analyze` (it refuses only when the ref REACHES the
+# header); demand cannot serve the frame that reported the loop, because that
+# frame holds the body it started with. Both are real losses, and the wall
+# clock decides whether the cheaper preparation pays for them.
+[[mode]]
+name = "hybrid-auto-P-osr"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_INTERP_POLICY = "osr-eligible", ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "Shared config only where OSR could plausibly enter; cheap elsewhere."
+
+[[mode]]
+name = "hybrid-auto-P-demand"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_INTERP_POLICY = "demand", ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "Cheap until a hot loop is demonstrated, then shared."
+
+[[mode]]
+name = "interp-P-osr"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_INTERP_POLICY = "osr-eligible", ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "Pinned interpreter under the osr-eligible policy."
+
+[[mode]]
+name = "interp-P-demand"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_INTERP_POLICY = "demand", ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "Pinned interpreter under the demand policy."
+
 # The SURGICAL version: a cheaper pipeline only for functions the interpreter
 # alone will ever walk. `interpreter_config_for` hands those out by one rule --
 # no back edge -- because a function with no loop is one OSR can never enter,

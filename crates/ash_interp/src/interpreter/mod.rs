@@ -3298,6 +3298,14 @@ impl HLInterpreter {
                     .or_default()
                     .push(header_pc);
             }
+            // Under the demand policy this findex has just earned the shared
+            // configuration, and the bodies cached for it were prepared under
+            // the cheap one. Dropping them here rather than at the next call
+            // keeps the decision next to the evidence for it.
+            if ash_core::air_pipeline::note_osr_demand(findex as i32) {
+                self.ssa.forget(func_idx);
+                self.air.forget(func_idx);
+            }
             self.report_hot_loop(bytecode, func_idx, findex, header_pc);
             self.late_osr_entry(bytecode, func_idx, findex, header_pc);
         }

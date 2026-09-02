@@ -325,6 +325,21 @@ impl Cache {
         self.bodies.clear();
     }
 
+    /// Drop ONE prepared body, so the next call re-prepares it.
+    ///
+    /// For the demand policy: a function that has just shown a hot loop needs
+    /// the shared configuration from now on, and the body sitting here was
+    /// prepared under the cheap one. Frames already running are unaffected --
+    /// each holds its own leaked `Prepared` for the length of its call, which
+    /// is exactly why these are leaked rather than owned here. That is also
+    /// the policy's cost: the frame that reported the loop keeps walking the
+    /// body it started with.
+    pub fn forget(&mut self, func_idx: usize) {
+        if let Some(slot) = self.bodies.get_mut(func_idx) {
+            *slot = Body::Untried;
+        }
+    }
+
     /// `(prepared, refused)` function counts, for a run summary.
     pub fn counts(&self) -> (usize, usize) {
         (self.prepared, self.refused)

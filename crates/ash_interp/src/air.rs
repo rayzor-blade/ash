@@ -463,6 +463,14 @@ impl Cache {
         self.bodies.clear();
     }
 
+    /// Drop ONE cached body, so the next call re-optimizes it. See
+    /// [`crate::ssa::Cache::forget`] for why the demand policy needs this.
+    pub fn forget(&mut self, func_idx: usize) {
+        if let Some(slot) = self.bodies.get_mut(func_idx) {
+            *slot = Body::Untried;
+        }
+    }
+
     /// `(optimized, refused)` function counts, for a run summary.
     pub fn counts(&self) -> (usize, usize) {
         (self.optimized, self.refused)

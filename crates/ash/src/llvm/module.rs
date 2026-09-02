@@ -719,9 +719,9 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Self {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
-        crate::native_lib::choose_std_linkage(path);
-        init_std_library();
-
+        // Process-global setup is NOT done here. It is `prepare_process_globals`,
+        // which the host calls on the main thread before this runs -- see that
+        // function for why the split exists.
         let bytecode = bytecode.clone();
         phase_timer!(timing, "tiered clone", t);
         t = std::time::Instant::now();
@@ -780,22 +780,26 @@ impl<'ctx> JITModule<'ctx> {
             current_findex: usize::MAX,
         };
 
-        module.create_constant_pool_globals();
+        // NOT the whole pool. Promotion is per function, and both paths that
+        // need a constant already materialize it: `create_constant_pool_
+        // globals_for` seeds the one function's own, and `ensure_*_global`
+        // creates anything the optimized body turns out to reference. The
+        // eager version built globals for a program's entire constant table
+        // on the main thread before any bytecode ran -- cold start a
+        // developer pays on every CLI call, including one that promotes
+        // nothing.
+        //
+        // This is not the GC-allocating init the main-thread prewarm exists
+        // for (constants as HL objects, obj runtimes, enum marks); it is
+        // `add_global` plus `set_initializer`, which touches no GC.
         phase_timer!(timing, "tiered const globals", t);
         t = std::time::Instant::now();
 
-        // dlopen HDLLs up front (process-global side effect) so lazily
-        // resolved natives find their symbols during promotion.
-        let search_dir = path.parent().unwrap_or(Path::new("."));
-        module
-            .native_function_resolver
-            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
-            .expect("Failed to discover HDLL libraries");
-        phase_timer!(timing, "tiered discover_libs", t);
-        t = std::time::Instant::now();
-
-        // Set up dynamic call callbacks (needed by hlp_call_method for Type.createInstance etc.)
-        module.setup_callbacks();
+        // The HDLL dlopen and callback registration that used to sit here are
+        // in `prepare_process_globals`. Both are process-global, both are
+        // already done by the host's own startup, and doing them again from
+        // here is what made this constructor unsafe to run anywhere but the
+        // main thread.
 
         // The translate path resolves natives lazily through
         // get_or_create_function_value with ONE exception: Opcode::New for
@@ -828,6 +832,36 @@ impl<'ctx> JITModule<'ctx> {
             .push(module.bytecode.entrypoint as usize);
 
         module
+    }
+
+    /// Process-global setup the JIT module needs, done once on the main
+    /// thread before any module is constructed.
+    ///
+    /// Split out because everything else in the constructor is per-module
+    /// LLVM work that can run anywhere, while these four are global and
+    /// ordered: `choose_std_linkage` and `init_std_library` pick and
+    /// initialize the runtime, `discover_and_load_libraries` dlopens the
+    /// HDLLs so lazily resolved natives find their symbols, and
+    /// `setup_callbacks` registers the dynamic-call hooks `hlp_call_method`
+    /// needs.
+    ///
+    /// The host's own startup already performs the first three. Repeating
+    /// them inside the constructor made it unsafe to build a module off the
+    /// main thread -- running the two concurrently raced the global runtime
+    /// init and truncated programs silently, with no crash to point at. With
+    /// them here, module construction is pure LLVM and can move off the
+    /// startup path.
+    pub fn prepare_process_globals(
+        path: &Path,
+        natives: &[crate::types::HLNative],
+        resolver: &mut NativeFunctionResolver,
+    ) -> Result<()> {
+        crate::native_lib::choose_std_linkage(path);
+        init_std_library();
+        let search_dir = path.parent().unwrap_or(Path::new("."));
+        resolver.discover_and_load_libraries(search_dir, natives)?;
+        Self::setup_callbacks_global(resolver);
+        Ok(())
     }
 
     /// Pre-create the native callers the translate path expects to find in
@@ -969,6 +1003,27 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         Ok(())
+    }
+
+    /// The dynamic-call hook `hlp_call_method` needs (Type.createInstance and
+    /// friends), registered once per process.
+    ///
+    /// Deliberately NOT the closure runner that `setup_callbacks` also
+    /// installs: which runner is correct depends on the host. The interpreter
+    /// installs its own; only standalone JIT execution wants the typed native
+    /// bridge. Registering that from a shared startup path would override the
+    /// interpreter's.
+    fn setup_callbacks_global(resolver: &NativeFunctionResolver) {
+        if let (Ok(setup_fn_ptr), Ok(static_call_ptr)) = (
+            resolver.resolve_function("std", "hl_setup_callbacks2"),
+            resolver.resolve_function("std", "ash_static_call"),
+        ) {
+            type FnSetupCallbacks2 = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+            let setup: FnSetupCallbacks2 = unsafe { std::mem::transmute(setup_fn_ptr) };
+            // flags=0: fun arg is the direct function pointer (not double-indirection)
+            // wrapper=null: we don't use the wrapper mechanism
+            unsafe { setup(static_call_ptr, std::ptr::null_mut(), 0) };
+        }
     }
 
     fn setup_callbacks(&mut self) {

@@ -1013,29 +1013,65 @@ impl HLInterpreter {
         if config.log_promotions {
             eprintln!("[tiered] pre-warming JIT module on main thread (one-time startup cost)...");
         }
+        // Global runtime setup: main thread, once, before any module exists.
+        // This is the half that cannot move -- it picks and initializes the
+        // runtime, dlopens the HDLLs and registers the dynamic-call hook, all
+        // process-wide and all ordered against the host's own startup.
+        // Everything after it is per-module LLVM work with no global effect,
+        // which is what lets the build move off the startup path.
+        if let Err(e) = JITModule::prepare_process_globals(
+            &hl_path,
+            &bytecode.natives,
+            &mut NativeFunctionResolver::new(),
+        ) {
+            eprintln!("[tiered] process-global setup failed: {e}; tier promotion disabled");
+        }
         let prewarm_start = std::time::Instant::now();
-        let prewarmed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let context: &'static Context = Box::leak(Box::new(Context::create()));
-            let mut jit =
-                JITModule::new_with_shared_runtime(context, &hl_path, bytecode, shared.clone());
-            jit.set_hot_reload(hot_reload);
-            jit.set_lazy_compilation(config.compiled_only);
-            Box::into_raw(Box::new(ManuallyDrop::new(jit)))
-        })) {
-            Ok(ptr) => {
-                if config.log_promotions {
-                    eprintln!(
-                        "[tiered] JIT module ready in {:.2}s",
-                        prewarm_start.elapsed().as_secs_f64()
+        let _ = prewarm_start;
+        // Built on a BACKGROUND thread. A developer's first measure of a VM is
+        // how fast it starts, and this put 4-7ms of LLVM setup ahead of every
+        // run on a fresh binary -- paid even by a program that promotes
+        // nothing.
+        //
+        // Not lazy-on-first-promotion, which was measured and is a loss:
+        // without a module ready nothing promotes promptly, and closure_call
+        // went 137-144ms to 265-268ms, trading 3.5ms of cold start for 125ms
+        // of execution. Concurrent construction gets both -- off the startup
+        // path, and finished before the first promotion, which the broker
+        // guarantees by joining.
+        //
+        // Safe now that `prepare_process_globals` has run: what remains is
+        // LLVM engine creation, native DECLARATIONS and findex tables, none of
+        // which allocates through the GC or touches process-global state.
+        // Doing it concurrently BEFORE that split raced the global runtime
+        // init and truncated programs with no crash to point at.
+        let hl_path_bg = hl_path.clone();
+        let bytecode_bg = bytecode.clone();
+        let shared_bg = shared.clone();
+        let compiled_only = config.compiled_only;
+        let building = std::thread::Builder::new()
+            .name("ash-jit-prewarm".to_string())
+            .spawn(move || {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let context: &'static Context = Box::leak(Box::new(Context::create()));
+                    let mut jit = JITModule::new_with_shared_runtime(
+                        context,
+                        &hl_path_bg,
+                        &bytecode_bg,
+                        shared_bg,
                     );
+                    jit.set_hot_reload(hot_reload);
+                    jit.set_lazy_compilation(compiled_only);
+                    Box::into_raw(Box::new(ManuallyDrop::new(jit)))
+                })) {
+                    Ok(ptr) => Some(PrewarmedJit(ptr)),
+                    Err(_) => {
+                        eprintln!("[tiered] pre-warm panicked; tier promotion disabled");
+                        None
+                    }
                 }
-                Some(PrewarmedJit(ptr))
-            }
-            Err(_) => {
-                eprintln!("[tiered] pre-warm panicked; tier promotion disabled");
-                None
-            }
-        };
+            })
+            .ok();
 
         // Beadie owns the per-tier hotness policies and one broker thread per
         // tier. Queue-ahead submits the tier-0 compile job slightly before the
@@ -1114,8 +1150,8 @@ impl HLInterpreter {
             tier_log: log_promotions || std::env::var("ASH_TIER_LOG").is_ok(),
             mode: config.tier_mode,
             compiled_only: config.compiled_only,
-            llvm: Mutex::new(match prewarmed {
-                Some(pw) => LlvmState::Pending(pw),
+            llvm: Mutex::new(match building {
+                Some(h) => LlvmState::Building(h),
                 None => LlvmState::Unavailable,
             }),
             cranelift: Mutex::new(None),

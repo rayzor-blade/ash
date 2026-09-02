@@ -334,7 +334,15 @@ unsafe impl Send for LlvmModule {}
 // large pre-warm variant would add indirection for no measurable gain.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum LlvmState {
-    /// Handed off from the main thread's pre-warm, not yet claimed.
+    /// Under construction on a background thread, not yet joined.
+    ///
+    /// Module construction is off the startup path because a developer's
+    /// measure of a VM includes how long it takes to start. It can be there
+    /// only because `prepare_process_globals` took the process-global half --
+    /// runtime selection, HDLL dlopen, dynamic-call hook -- and left this
+    /// pure LLVM work.
+    Building(std::thread::JoinHandle<Option<PrewarmedJit>>),
+    /// Built and handed off, not yet claimed.
     Pending(PrewarmedJit),
     Ready(LlvmModule),
     /// Pre-warm failed; the LLVM tier is unavailable for this run.
@@ -1721,6 +1729,17 @@ pub(crate) fn compile_with_llvm(
     } else {
         None
     };
+    // Still building? Join it. The first promotion is the first moment the
+    // module is needed, and by then it has usually finished.
+    if matches!(&*guard, LlvmState::Building(_)) {
+        let LlvmState::Building(h) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
+            unreachable!()
+        };
+        *guard = match h.join().unwrap_or(None) {
+            Some(pw) => LlvmState::Pending(pw),
+            None => LlvmState::Unavailable,
+        };
+    }
     if let LlvmState::Pending(_) = &*guard {
         let LlvmState::Pending(pw) = std::mem::replace(&mut *guard, LlvmState::Unavailable) else {
             unreachable!()

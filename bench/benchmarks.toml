@@ -81,6 +81,21 @@ env = { ASH_AIR_INTERP_POLICY = "demand", ASH_AIR_INTERP_LEVEL = "O1" }
 default = false
 description = "Pinned interpreter under the demand policy."
 
+# The shared-module rule. A promotion the own-module path refuses falls back
+# to the shared module, which re-optimizes every body promoted so far: in the
+# game a 280-byte loop-free constructor paid 52s that way and held the single
+# promoter thread for half the session. Default `high` admits only a High
+# ceiling to the shared path; `all` is what the tree did before. The corpus
+# rarely reaches the shared path (bodies stay under the 256 cap), so the row
+# that answers this is the game; this pair keeps the corpus honest.
+[[mode]]
+name = "hybrid-auto-SP-all"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_SHARED_PROMOTE = "all" }
+default = false
+description = "Shared-module promotion for any ceiling (the pre-rule behaviour)."
+
 # The SURGICAL version: a cheaper pipeline only for functions the interpreter
 # alone will ever walk. `interpreter_config_for` hands those out by one rule --
 # no back edge -- because a function with no loop is one OSR can never enter,

@@ -815,6 +815,28 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
+        // Reaching here means the shared module: either the own-module path
+        // was refused -- an unresolved callee symbol, most often -- or it was
+        // not attempted. The shared path charges for the whole module, and a
+        // ceiling below High cannot repay that. Declining leaves the function
+        // on its Cranelift code, which is what it was running on already.
+        if !self.aot {
+            if let Some(raw) = self
+                .bytecode
+                .functions
+                .iter()
+                .find(|f| f.findex as usize == findex)
+            {
+                let ceiling = super::air::llvm_ceiling(&self.bytecode, raw);
+                if !super::air::shared_promote_allows(ceiling) {
+                    return Err(anyhow!(
+                        "declined: {ceiling:?} ceiling is not worth the shared module \
+                         ({} bodies)",
+                        self.shared_module_bodies()
+                    ));
+                }
+            }
+        }
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;
         if is_placeholder {
             self.add_pending_compilation(findex);

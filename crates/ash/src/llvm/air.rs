@@ -203,6 +203,33 @@ pub enum LlvmCeiling {
 }
 
 /// `ASH_PROMOTE_GATE=0` disables the gate; unset or anything else keeps it.
+/// Whether a promotion with this ceiling may go through the SHARED module.
+///
+/// The shared path re-optimizes and re-emits every body promoted so far, so
+/// its cost is the module's, not the function's: in the game a 280-byte,
+/// loop-free constructor (findex 3902, ceiling Low) paid 52 seconds because
+/// the module had grown to 2,873 bodies -- and held the single promoter
+/// thread for half the session, so four functions reached the top tier in
+/// 103 seconds. The own-module path costs milliseconds; when it is refused,
+/// only a High ceiling is worth what the shared one charges.
+///
+/// `ASH_SHARED_PROMOTE`: `high` (default) admits High only; `all` restores
+/// the old behaviour, for the A/B.
+pub fn shared_promote_allows(ceiling: LlvmCeiling) -> bool {
+    static MIN_HIGH: OnceLock<bool> = OnceLock::new();
+    let high_only = *MIN_HIGH.get_or_init(|| {
+        match std::env::var("ASH_SHARED_PROMOTE").as_deref() {
+            Ok("all") | Ok("low") => false,
+            Ok("high") | Err(_) | Ok("") => true,
+            Ok(other) => {
+                eprintln!("[tier] ignoring ASH_SHARED_PROMOTE='{other}' (expected high|all); using high");
+                true
+            }
+        }
+    });
+    !high_only || ceiling == LlvmCeiling::High
+}
+
 pub fn promotion_gate_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("ASH_PROMOTE_GATE").map(|v| v != "0").unwrap_or(true))

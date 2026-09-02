@@ -1662,3 +1662,26 @@ Still unsized: Cranelift. beadie's backend calls `define_function` ->
 carries `code_buffer().len()`, so ash never sees the size. Harmless for
 attribution -- every Cranelift function registers, so each is bounded by the
 next start -- but a beadie change would make those ranges exact too.
+
+### The shared LLVM module charges every promotion for the whole module
+
+`promote_uses_own_module` sends a promotion to its own module once the shared
+module holds 256 bodies, and the game reached 2,873. But an own-module
+promotion is refused whenever the function's callee has no symbol in that
+module yet -- `has 1 unresolved symbol(s): Fun_6777` -- and the refusal fell
+back to the shared module for ANY function. There the middle end re-runs over
+every body and MCJIT re-emits all of them: findex 3902, a 4-block, loop-free,
+280-byte constructor, took 52 seconds on both nights (`middle_end=15.6s`, the
+rest codegen), and held the one promoter thread for 51% of a 103-second
+session, in which four functions reached the top tier.
+
+Rule now: the shared path admits only a High ceiling (`ASH_SHARED_PROMOTE`,
+default `high`; `all` restores the old behaviour). A decline latches through
+`remember_gate_rejection` so the broker stops re-proposing it, and the
+function stays on the Cranelift code it was already running.
+
+Open, and the better fix: make the own-module path not refuse on an
+unresolved callee -- bind the callee as an external declaration the way the
+shared module does for its own callees, or emit a stub-bridge call -- so the
+cheap path takes what it can and the shared module stops being a fallback.
+That would let Low ceilings tier up for milliseconds instead of never.

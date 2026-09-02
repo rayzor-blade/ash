@@ -116,6 +116,21 @@ pub struct Access {
     pub is_store: bool,
 }
 
+/// The exit test that bounds the induction variable.
+///
+/// The analysis has to find this to rule out [`Refusal::UnknownTripCount`];
+/// reporting it costs nothing and is what a transform needs to build a vector
+/// loop, which otherwise has to re-derive the same fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bound {
+    /// The block whose terminator leaves the loop.
+    pub exit: BlockId,
+    /// The loop-invariant value the induction variable is compared against.
+    pub limit: ValueId,
+    /// True when the induction variable is the first operand of the test.
+    pub iv_first: bool,
+}
+
 /// The verdict for one loop.
 #[derive(Debug, Clone)]
 pub struct LoopPlan {
@@ -125,6 +140,8 @@ pub struct LoopPlan {
     pub refusals: Vec<Refusal>,
     /// The induction variable, when there is exactly one.
     pub induction: Option<(ValueId, i64)>,
+    /// The exit test bounding it, when the trip count is knowable.
+    pub bound: Option<Bound>,
     pub reductions: Vec<Reduction>,
     pub accesses: Vec<Access>,
     /// Instructions in the body, as a first cost signal: widening a loop
@@ -201,6 +218,7 @@ fn analyze_loop(
         header,
         refusals: Vec::new(),
         induction: None,
+        bound: None,
         reductions: Vec::new(),
         accesses: Vec::new(),
         body_size,
@@ -303,8 +321,9 @@ fn analyze_loop(
 
     // ---- the exit test must bound the induction variable -------------------
     if let (Some((iv, _)), Some(&exit)) = (plan.induction, exits.first()) {
-        if !bounds_induction(f, exit, iv, &in_loop) {
-            plan.refusals.push(Refusal::UnknownTripCount);
+        match bounds_induction(f, exit, iv, &in_loop) {
+            Some(b) => plan.bound = Some(b),
+            None => plan.refusals.push(Refusal::UnknownTripCount),
         }
     }
 
@@ -405,20 +424,28 @@ fn bounds_induction(
     exit: BlockId,
     iv: ValueId,
     in_loop: &HashSet<BlockId>,
-) -> bool {
+) -> Option<Bound> {
     let Terminator::CondJump { a, b, .. } = &f.blocks[exit.idx()].term else {
-        return false;
+        return None;
     };
-    let other = match (*a == iv, b) {
-        (true, Some(o)) => *o,
-        (false, Some(o)) if *o == iv => *a,
-        _ => return false,
+    let (other, iv_first) = match (*a == iv, b) {
+        (true, Some(o)) => (*o, true),
+        (false, Some(o)) if *o == iv => (*a, false),
+        _ => return None,
     };
     // The bound must not be redefined inside the loop.
-    !f.blocks.iter().enumerate().any(|(bi, blk)| {
+    let redefined = f.blocks.iter().enumerate().any(|(bi, blk)| {
         in_loop.contains(&BlockId(bi as u32))
             && (blk.instrs.iter().any(|i| i.dst() == Some(other))
                 || blk.phis.iter().any(|p| p.dst == other))
+    });
+    if redefined {
+        return None;
+    }
+    Some(Bound {
+        exit,
+        limit: other,
+        iv_first,
     })
 }
 

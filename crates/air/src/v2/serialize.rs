@@ -50,6 +50,16 @@ pub struct Serialized {
     pub ops: Vec<Opcode>,
     pub reg_types: Vec<TypeRef>,
     pub num_regs: usize,
+    /// i32 constants this serialization needed that the pool may not hold.
+    ///
+    /// `Opcode::Int` names a POOL INDEX, not a value, and a pass cannot mint
+    /// a pool entry -- the inliner documents the same limit. Scalarizing a
+    /// vector needs `k * stride` per lane, so the values are reported here and
+    /// the caller appends them, exactly as `reg_types` already reports
+    /// registers the serializer invented. Indices are assigned as
+    /// `ints.len() + position in this vector`, which is where the caller must
+    /// place them.
+    pub new_ints: Vec<i32>,
     /// Opcode index where each block's emission begins, indexed by
     /// [`BlockId`]. For a loop header this is the pc its back-edges target
     /// (the `Label`, when one was required) — i.e. exactly the pc an
@@ -78,7 +88,24 @@ enum Entry {
     },
 }
 
+/// Serialize with the module's i32 pool length, so scalarization can name
+/// constants it has to mint (see [`Serialized::new_ints`]).
+pub fn serialize_with_int_base(f: &Function, int_base: usize) -> Result<Serialized> {
+    serialize_inner(f, int_base)
+}
+
+/// Serialize a function that needs no new constants.
+///
+/// Equivalent to [`serialize_with_int_base`] with a base of 0, which is
+/// correct for every function that holds no vector instruction -- nothing
+/// else mints. A vectorized function serialized this way reports its
+/// constants at indices from 0, which the caller must not blindly append; use
+/// the explicit form there.
 pub fn serialize(f: &Function) -> Result<Serialized> {
+    serialize_inner(f, 0)
+}
+
+fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     let nb = f.blocks.len();
     let mut reg_types = f.reg_types.clone();
 
@@ -295,6 +322,10 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     // the vectorizer touched, and bailing would have made it fail outright.
     let mut lane_regs: BTreeMap<ValueId, Vec<u32>> = BTreeMap::new();
     let mut lane_idx_tmp: Option<u32> = None;
+    // Values scalarization needs as `Opcode::Int` operands. The pool index is
+    // assigned by the caller; see `Serialized::new_ints`.
+    let mut new_ints: Vec<i32> = Vec::new();
+
 
     for (pos, entry) in entries.iter().enumerate() {
         starts[pos] = ops.len();
@@ -335,6 +366,8 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
                         &mut fma_temps,
                         &mut lane_regs,
                         &mut lane_idx_tmp,
+                        &mut new_ints,
+                        int_base,
                     )?;
                 }
                 if let Some(movs) = &inline[*b] {
@@ -486,6 +519,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     let num_regs = reg_types.len();
     let block_pcs = entry_of_block.iter().map(|&e| starts[e]).collect();
     Ok(Serialized {
+        new_ints,
         ops,
         reg_types,
         num_regs,
@@ -595,6 +629,8 @@ fn emit_instr(
     fma_temps: &mut BTreeMap<TypeRef, u32>,
     lane_regs: &mut BTreeMap<ValueId, Vec<u32>>,
     lane_idx_tmp: &mut Option<u32>,
+    new_ints: &mut Vec<i32>,
+    int_base: usize,
 ) -> Result<()> {
     // Lane registers for a vector value, allocated on first use. Fresh
     // registers, so no aliasing question with anything the body already had.
@@ -637,7 +673,7 @@ fn emit_instr(
                 r
             });
             for (k, &lr) in lanes.iter().enumerate() {
-                let idx = lane_index(ops, reg_types, rg(*index), tmp, k as u32, *stride);
+                let idx = lane_index(ops, rg(*index), tmp, k as u32, *stride, new_ints, int_base);
                 ops.push(mem_get(*kind, Reg(lr), rg(*base), idx));
             }
         }
@@ -655,7 +691,7 @@ fn emit_instr(
                 r
             });
             for (k, &lr) in lanes.iter().enumerate() {
-                let idx = lane_index(ops, reg_types, rg(*index), tmp, k as u32, *stride);
+                let idx = lane_index(ops, rg(*index), tmp, k as u32, *stride, new_ints, int_base);
                 ops.push(mem_set(*kind, rg(*base), idx, Reg(lr)));
             }
         }
@@ -1073,19 +1109,31 @@ impl Function {
 /// derive an element size from.
 fn lane_index(
     ops: &mut Vec<Opcode>,
-    reg_types: &mut Vec<TypeRef>,
     index: Reg,
     tmp: u32,
     k: u32,
     stride: u32,
+    new_ints: &mut Vec<i32>,
+    int_base: usize,
 ) -> Reg {
     if k == 0 {
         return index;
     }
-    let _ = reg_types;
+    // `RefInt` is a POOL INDEX, not a value. Minting the offset here and
+    // reporting it through `Serialized::new_ints` is the only correct way to
+    // name it; passing the value directly loads whatever constant happens to
+    // sit at that index, which is what the first version of this did.
+    let want = (k * stride) as i32;
+    let at = match new_ints.iter().position(|v| *v == want) {
+        Some(i) => int_base + i,
+        None => {
+            new_ints.push(want);
+            int_base + new_ints.len() - 1
+        }
+    };
     ops.push(Opcode::Int {
         dst: Reg(tmp),
-        ptr: crate::opcodes::RefInt((k * stride) as usize),
+        ptr: crate::opcodes::RefInt(at),
     });
     ops.push(Opcode::Add {
         dst: Reg(tmp),

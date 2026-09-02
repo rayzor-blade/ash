@@ -1265,11 +1265,12 @@ impl AirCodegen<'_, '_> {
             }
 
             Instr::Int { dst, idx } => {
-                let val = *self
-                    .ctx
-                    .bytecode()
-                    .ints
-                    .get(*idx)
+                // Past the pool means a pass minted it; `int_at` answers for
+                // both so a minted constant is indistinguishable here.
+                let bc = self.ctx.bytecode();
+                let val = self
+                    .f
+                    .int_at(*idx, |i| bc.ints.get(i).copied())
                     .ok_or_else(|| anyhow!("int constant {idx} out of range"))?;
                 let v = self.b.ins().iconst(types::I32, val as i64);
                 self.def(*dst, v)?;

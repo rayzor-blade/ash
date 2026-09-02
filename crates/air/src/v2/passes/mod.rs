@@ -49,6 +49,7 @@ pub mod licm;
 pub mod nullcheck;
 pub mod sroa;
 pub mod tre;
+pub mod widen;
 
 pub use celldse::DeadCellStoreElim;
 pub use cellfwd::CellForwarding;

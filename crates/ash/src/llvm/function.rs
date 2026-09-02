@@ -1328,6 +1328,25 @@ impl<'ctx> JITModule<'ctx> {
             .collect();
         lowering.ops.clear();
         let (mut registers, mut reg_types) = self.allocate_registers(&lowering)?;
+        // Constants a pass minted have no pool entry, so materialize their
+        // globals before anything asks for one. After this
+        // `ensure_int_global` finds them cached and the rest of lowering
+        // cannot tell them from pooled constants.
+        for (i, v) in air.pending_ints.iter().enumerate() {
+            let idx = air.int_pool_base + i;
+            if self.int_globals.get(idx).copied().flatten().is_some() {
+                continue;
+            }
+            let g = self
+                .module
+                .add_global(self.context.i32_type(), None, &format!("Int_{idx}"));
+            g.set_initializer(&self.context.i32_type().const_int(*v as u64, true));
+            g.set_constant(true);
+            if self.int_globals.len() <= idx {
+                self.int_globals.resize(idx + 1, None);
+            }
+            self.int_globals[idx] = Some(g);
+        }
         // Vector values need a slot of their real width. `allocate_registers`
         // works from `TypeRef`, which indexes the bytecode's type table and
         // has no vector entries, so the lane count on the value is the only

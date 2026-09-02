@@ -188,12 +188,22 @@ impl Default for VecOptions {
 
 /// Analyze every loop in `f`.
 pub fn analyze(f: &Function, opts: &VecOptions) -> Vec<LoopPlan> {
+    analyze_with(f, opts, &|_| None)
+}
+
+/// [`analyze`] with the embedder's i32 pool, which is what makes constant
+/// magnitudes — strides, bounds — readable rather than guessed from indices.
+pub fn analyze_with(
+    f: &Function,
+    opts: &VecOptions,
+    pool: &dyn Fn(usize) -> Option<i32>,
+) -> Vec<LoopPlan> {
     let cfg = CfgInfo::build(f);
     let forest = LoopForest::analyze(f, &cfg);
     forest
         .innermost_first()
         .into_iter()
-        .map(|l| analyze_loop(f, &cfg, &forest, l, opts))
+        .map(|l| analyze_loop(f, &cfg, &forest, l, opts, pool))
         .collect()
 }
 
@@ -203,6 +213,7 @@ fn analyze_loop(
     forest: &LoopForest,
     l: LoopId,
     opts: &VecOptions,
+    pool: &dyn Fn(usize) -> Option<i32>,
 ) -> LoopPlan {
     let lp = forest.get(l);
     let header = lp.header;
@@ -279,7 +290,7 @@ fn analyze_loop(
     // loop. An IV's incoming is `phi + constant`; anything else that closes
     // the cycle is a reduction if it is `phi op x`, and a barrier otherwise.
     let def_block = definition_blocks(f);
-    let consts = int_constants(f);
+    let consts = int_constants(f, pool);
     let mut inductions: Vec<(ValueId, i64)> = Vec::new();
 
     for phi in &f.blocks[header.idx()].phis {
@@ -657,16 +668,19 @@ fn definition_blocks(f: &Function) -> HashMap<ValueId, (usize, usize)> {
 /// itself carries — which `Instr::Int` does not (it holds a pool index). The
 /// map therefore records *which* values are integer constants, and callers
 /// treat an unknown magnitude as a non-constant stride.
-fn int_constants(f: &Function) -> HashMap<ValueId, i64> {
+fn int_constants(f: &Function, pool: &dyn Fn(usize) -> Option<i32>) -> HashMap<ValueId, i64> {
     let mut m = HashMap::new();
     for blk in &f.blocks {
         for ins in &blk.instrs {
             if let Instr::Int { dst, idx } = ins {
-                // The magnitude is the embedder's to resolve; 1 is the
-                // overwhelmingly common step and is what `UnOp::Incr`
-                // already expresses directly. Record the index so a caller
-                // with the pool can refine this.
-                m.insert(*dst, *idx as i64);
+                // The real value when the caller supplied a pool, and the
+                // index as a stand-in when it did not. The stand-in is what
+                // this did unconditionally, and it is wrong for any constant
+                // whose index differs from its value -- a step of 1 stored at
+                // index 2 reads as a stride of 2, and the loop is then
+                // refused for a non-unit stride it does not have.
+                let v = f.int_at(*idx, |i| pool(i)).map(|x| x as i64);
+                m.insert(*dst, v.unwrap_or(*idx as i64));
             }
         }
     }

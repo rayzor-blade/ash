@@ -220,6 +220,23 @@ pub trait ModuleInfo {
         None
     }
 
+    /// The value of i32 constant-pool entry `idx`.
+    ///
+    /// `Instr::Int` names a pool INDEX, not a value, so a pass that needs to
+    /// reason about a constant -- a loop bound, a stride -- has no way to see
+    /// one without this. The default answers `None`, which means a pass that
+    /// depends on it declines rather than guesses.
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        let _ = idx;
+        None
+    }
+
+    /// How many entries the i32 pool holds, so a pass can name a constant
+    /// past the end of it. See [`Function::pending_ints`](super::ir::Function).
+    fn int_pool_len(&self) -> usize {
+        0
+    }
+
     /// True when values of `ty` are HL floats (`f32`/`f64`). Float-only
     /// rewrites — notably [`Fma`](super::ir::Instr::Fma) formation — consult
     /// this and refuse when it is false.

@@ -14,7 +14,9 @@
 use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
 use super::ir::*;
 use super::lower::{lower, lower_with, ModuleBuilder};
-use super::module::{CalleeBody, ModuleTables, NativeImport, NativeTable, NoModuleInfo};
+use super::module::{
+    CalleeBody, ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo,
+};
 use super::passes::{
     DeadCodeElim, FmaPeephole, GlobalValueNumbering, Inlining, LoopInvariantCodeMotion,
     NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, ScalarReplacement,
@@ -5820,5 +5822,135 @@ fn liveness_carries_values_around_a_loop() {
             !live.live_in(BlockId(b as u32)).is_empty(),
             "b{b} closes a loop but reports nothing live on entry"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vectorization: analysis -> widening -> both backends' IR forms
+// ---------------------------------------------------------------------------
+
+/// `for (i = 0; i < 16; i++) dst[i] = k;` with `k` loop-invariant.
+///
+/// An ARRAY store: `SetMem` indexes in bytes, so stepping `i` by one would
+/// write overlapping 4-byte stores and the analysis reports a stride of 2
+/// rather than a contiguous 1. Array access indexes in elements.
+///
+/// One store and no load, so there is no pair for the alias check to refuse;
+/// no register live across the back edge except the induction variable, so
+/// there are no loop-carried values; a constant trip count of 16, which is
+/// four vectors of four lanes with no remainder.
+///
+/// The obvious `dst[i] = a[i] + a[i]` fixture is REFUSED, and correctly: the
+/// load and store are different `bytes` pointers the analysis cannot prove
+/// disjoint, and it declines rather than assume. Widening that shape needs
+/// alias analysis to separate the bases, not a change here.
+fn widen_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 dst(bytes) r1 i r2 limit r3 step r4 k
+    let regs = vec![t(13), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 3 },
+        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -4 },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    (ops, regs)
+}
+
+/// The int pool the fixture's `RefInt`s name.
+struct WidenInfo;
+impl ModuleInfo for WidenInfo {
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        [0i32, 16, 1, 7].get(idx).copied()
+    }
+    fn int_pool_len(&self) -> usize {
+        4
+    }
+}
+
+#[test]
+fn widen_reports_a_plan_for_a_constant_trip_count_loop() {
+    let (ops, regs) = widen_fixture();
+    let f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let plans = super::vectorize::analyze_with(
+        &f,
+        &super::vectorize::VecOptions::default(),
+        &|i| WidenInfo.int_value(i),
+    );
+    for p in &plans {
+        eprintln!(
+            "loop at b{}: refusals {:?} induction {:?} accesses {:?} body {}",
+            p.header.0, p.refusals, p.induction, p.accesses, p.body_size
+        );
+    }
+    let report = super::passes::widen::explain(&f, &WidenInfo);
+    assert!(
+        !report.is_empty(),
+        "no widenable loop found; the analysis refused before the transform \
+         had a say:\n{}",
+        f.dump()
+    );
+}
+
+#[test]
+fn widening_emits_vector_instructions_that_verify() {
+    let (ops, regs) = widen_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let before = f.dump();
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    if stats.replaced == 0 {
+        // Not a failure of correctness, but the reason has to be visible:
+        // a transform that silently does nothing is the thing this whole
+        // exercise is meant to avoid.
+        let why = super::passes::widen::explain(&f, &WidenInfo);
+        panic!("widened nothing; declines: {why:?}\n{before}");
+    }
+    verify(&f).unwrap_or_else(|e| panic!("verify after widen: {e}\n{}", f.dump()));
+    let has_vec = f.blocks.iter().any(|b| {
+        b.instrs.iter().any(|i| {
+            matches!(
+                i,
+                Instr::VecLoad { .. }
+                    | Instr::VecStore { .. }
+                    | Instr::VecBinOp { .. }
+                    | Instr::VecSplat { .. }
+            )
+        })
+    });
+    assert!(has_vec, "widen reported work but emitted no vector instruction");
+}
+
+#[test]
+fn a_widened_function_scalarizes_back_to_runnable_bytecode() {
+    let (ops, regs) = widen_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    if pass.run(&mut f, &PassOptions::default()).expect("widen").replaced == 0 {
+        return; // covered by the test above
+    }
+    // `--emit-optimized` has to keep working on a function the vectorizer
+    // touched: serialization unrolls the lanes back to scalar opcodes.
+    let out = serialize(&f).expect("a widened function must still serialize");
+    assert!(
+        !out.ops.is_empty(),
+        "scalarization produced no opcodes"
+    );
+    // Lane offsets are minted constants, named by index past the pool.
+    for op in &out.ops {
+        if let Opcode::Int { ptr, .. } = op {
+            let idx = ptr.0;
+            assert!(
+                idx < WidenInfo.int_pool_len() + out.new_ints.len(),
+                "opcode names int index {idx} with only {} pooled + {} minted",
+                WidenInfo.int_pool_len(),
+                out.new_ints.len()
+            );
+        }
     }
 }

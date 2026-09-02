@@ -428,6 +428,9 @@ pub fn lower_with(
     let mut func = Function::new(reg_types.to_vec());
     func.cells = cells;
     func.natives = collect_natives(ops, &reachable, info)?;
+    // Where a pass's minted constants begin. Recorded at lowering because the
+    // pool cannot grow underneath a function afterwards.
+    func.int_pool_base = info.int_pool_len();
     func.float_types = {
         let mut fts: Vec<TypeRef> = reg_types
             .iter()

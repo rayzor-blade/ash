@@ -163,6 +163,14 @@ impl<'b> ModuleInfo for AshModule<'b> {
         ))
     }
 
+    fn int_value(&self, idx: usize) -> Option<i32> {
+        self.bc.ints.get(idx).copied()
+    }
+
+    fn int_pool_len(&self) -> usize {
+        self.bc.ints.len()
+    }
+
     fn is_float(&self, ty: TypeRef) -> bool {
         self.bc
             .types

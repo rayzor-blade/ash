@@ -106,6 +106,7 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
 }
 
 fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
+    let int_base = if f.int_pool_base != 0 { f.int_pool_base } else { int_base };
     let nb = f.blocks.len();
     let mut reg_types = f.reg_types.clone();
 
@@ -324,7 +325,9 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     let mut lane_idx_tmp: Option<u32> = None;
     // Values scalarization needs as `Opcode::Int` operands. The pool index is
     // assigned by the caller; see `Serialized::new_ints`.
-    let mut new_ints: Vec<i32> = Vec::new();
+    // Constants a pass already minted come first, so the indices they were
+    // handed at IR time still name the same values here.
+    let mut new_ints: Vec<i32> = f.pending_ints.clone();
 
 
     for (pos, entry) in entries.iter().enumerate() {

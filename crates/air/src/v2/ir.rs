@@ -1156,6 +1156,19 @@ pub struct Function {
     /// this; when it is empty (no module info was supplied at lowering) those
     /// rewrites are inert.
     pub float_types: Vec<TypeRef>,
+    /// i32 constants this function needs that the module's pool does not
+    /// hold, in the order a pass minted them.
+    ///
+    /// `Instr::Int` names a pool index and a pass cannot append to the pool,
+    /// so an index at or past [`int_pool_base`](Self::int_pool_base) means
+    /// "entry `idx - int_pool_base` of this list". Every consumer -- both
+    /// backends and `serialize` -- resolves through
+    /// [`int_at`](Self::int_at), so a minted constant is indistinguishable
+    /// from a pooled one downstream.
+    pub pending_ints: Vec<i32>,
+    /// Length of the module's i32 pool when this function was lowered, which
+    /// is where [`pending_ints`](Self::pending_ints) starts.
+    pub int_pool_base: usize,
     /// This function's own index in the module's function pool, when the
     /// embedder said so.
     ///
@@ -1176,6 +1189,8 @@ impl Function {
             reg_types,
             natives: NativeTable::new(),
             float_types: Vec::new(),
+            pending_ints: Vec::new(),
+            int_pool_base: 0,
             findex: None,
         }
     }
@@ -1208,6 +1223,35 @@ impl Function {
     #[inline]
     pub fn value_lanes(&self, v: ValueId) -> u16 {
         self.values[v.idx()].lanes
+    }
+
+    /// The value at i32 pool index `idx`, whether it came from the module's
+    /// pool or from [`pending_ints`](Self::pending_ints).
+    ///
+    /// `pool` is the module's own lookup, which this function has no access
+    /// to; a caller with `ModuleInfo` passes `|i| info.int_value(i)`.
+    pub fn int_at(&self, idx: usize, pool: impl Fn(usize) -> Option<i32>) -> Option<i32> {
+        if idx >= self.int_pool_base {
+            return self.pending_ints.get(idx - self.int_pool_base).copied();
+        }
+        pool(idx)
+    }
+
+    /// A pool index naming `value`, minting one if nothing holds it yet.
+    ///
+    /// Reuses an existing pending entry rather than appending a duplicate, so
+    /// a pass that mints the same constant repeatedly does not grow the list.
+    pub fn intern_int(&mut self, value: i32, pool: impl Fn(usize) -> Option<i32>) -> usize {
+        for i in 0..self.int_pool_base {
+            if pool(i) == Some(value) {
+                return i;
+            }
+        }
+        if let Some(i) = self.pending_ints.iter().position(|v| *v == value) {
+            return self.int_pool_base + i;
+        }
+        self.pending_ints.push(value);
+        self.int_pool_base + self.pending_ints.len() - 1
     }
 
     /// The de-SSA register assignment of a value.

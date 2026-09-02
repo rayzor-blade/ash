@@ -218,7 +218,16 @@ fn compute_ceiling(bc: &DecodedBytecode, f: &HLFunction) -> LlvmCeiling {
         return LlvmCeiling::High;
     };
     let ir = &opt.ir;
-    let plans = air::v2::vectorize::analyze(ir, &air::v2::vectorize::VecOptions::default());
+    // With the int pool, so strides are the real magnitudes. Without it the
+    // analysis falls back to reading a constant's POOL INDEX as its value,
+    // which reports a step of 1 stored at index 2 as a stride of 2 and
+    // refuses the loop as non-contiguous -- the ceiling would then be Low for
+    // loops that are in fact the best candidates the tier has.
+    let plans = air::v2::vectorize::analyze_with(
+        ir,
+        &air::v2::vectorize::VecOptions::default(),
+        &|i| bc.ints.get(i).copied(),
+    );
     if plans.iter().any(|p| p.vectorizable()) {
         return LlvmCeiling::High;
     }

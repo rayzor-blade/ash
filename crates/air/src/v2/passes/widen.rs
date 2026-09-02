@@ -115,6 +115,16 @@ impl Pass for Widen<'_> {
             return Ok(stats);
         }
         let opts = VecOptions::default();
+        // A function with no back edge has no loop to widen, and finding that
+        // out through `analyze_with` costs a CFG and a loop forest -- every
+        // round, on every function. This pass measured 7.4% of the pipeline on
+        // test_stdlib while widening exactly one loop; most of that was asking
+        // the question of functions that could not answer yes.
+        if !f.blocks.iter().enumerate().any(|(i, b)| {
+            b.term.successors().iter().any(|s| s.idx() <= i)
+        }) {
+            return Ok(stats);
+        }
         let plans: Vec<_> = vectorize::analyze_with(f, &opts, &|i| self.info.int_value(i))
             .into_iter()
             .filter(|p| p.vectorizable())

@@ -27,7 +27,7 @@
 //! empty. Every path in this module goes through `lower_with(.., AshModule)`.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
@@ -612,6 +612,7 @@ pub fn optimized_with_config(
     }
     let mut opts = PassOptions::default();
     opts.fma = cfg.fma;
+    opts.time_passes = time_passes();
     // The pipeline runs outside the lock: it is the expensive part, and holding
     // a process-wide lock across it would serialize the brokers against the
     // interpreter.
@@ -621,6 +622,70 @@ pub fn optimized_with_config(
     Ok(Arc::clone(
         cache.entry(key).or_insert_with(|| Arc::clone(&entry)),
     ))
+}
+
+/// Whether to time each pass, from `ASH_AIR_TIME_PASSES`.
+///
+/// The pipeline runs per function on the mutator, so on a short program it IS
+/// most of the run -- and until this existed the only way to act on that was
+/// to drop a whole optimization level, which is one lever for a bill that
+/// nine passes share. This says which of them to look at.
+pub fn time_passes() -> bool {
+    static CELL: OnceLock<bool> = OnceLock::new();
+    *CELL.get_or_init(|| {
+        std::env::var("ASH_AIR_TIME_PASSES").is_ok_and(|v| v != "0" && !v.is_empty())
+    })
+}
+
+static PASS_TIME: OnceLock<Mutex<BTreeMap<&'static str, (u128, usize)>>> = OnceLock::new();
+
+fn record_pass_time(report: &PassReport) {
+    if report.per_pass_ns.is_empty() {
+        return;
+    }
+    let mut acc = PASS_TIME
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("pass time mutex poisoned");
+    for (name, ns) in &report.per_pass_ns {
+        let e = acc.entry(name).or_insert((0, 0));
+        e.0 += *ns;
+        e.1 += 1;
+    }
+}
+
+/// Where the pipeline spent its time this process, most expensive first.
+///
+/// Empty unless `ASH_AIR_TIME_PASSES` was set. The count is functions the
+/// pass ran on, not rounds: a pass runs once per manager round and the
+/// manager runs up to four, so the per-call figure is an average over
+/// however many rounds each function needed.
+pub fn pass_time_report() -> Vec<String> {
+    let Some(acc) = PASS_TIME.get() else {
+        return Vec::new();
+    };
+    let acc = acc.lock().expect("pass time mutex poisoned");
+    let mut rows: Vec<(&'static str, u128, usize)> =
+        acc.iter().map(|(n, (ns, c))| (*n, *ns, *c)).collect();
+    let total: u128 = rows.iter().map(|(_, ns, _)| *ns).sum();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    let mut out = vec![format!(
+        "[air] pipeline time {:.1}ms over {} function-runs",
+        total as f64 / 1e6,
+        rows.first().map(|(_, _, c)| *c).unwrap_or(0)
+    )];
+    for (name, ns, count) in rows {
+        out.push(format!(
+            "  {name:<28} {:>8.2}ms {:>5.1}%  over {count} fns",
+            ns as f64 / 1e6,
+            if total == 0 {
+                0.0
+            } else {
+                100.0 * ns as f64 / total as f64
+            },
+        ));
+    }
+    out
 }
 
 /// Drop every cached function, e.g. after a hot reload replaced the bytecode.
@@ -677,6 +742,7 @@ pub fn optimize_full(
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
+    record_pass_time(&report);
     // Inert unless ASH_DEVIRT_SURVEY asks: how reachable is each closure
     // target AFTER the passes have run, which is the IR a devirtualisation
     // pass would actually see.

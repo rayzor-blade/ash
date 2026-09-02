@@ -140,6 +140,14 @@ pub struct PassOptions {
     /// survey gets a look at the loops as the analysis sees them, since a
     /// widened loop no longer resembles one.
     pub widen: bool,
+    /// Time each pass and report it in [`PassReport::per_pass_ns`].
+    ///
+    /// Off by default because the pipeline runs per function and a clock read
+    /// per pass per round is not free at that rate. It exists because nothing
+    /// else could answer which passes a run actually spends its preparation
+    /// in -- the only lever available was dropping a whole optimization level,
+    /// which is a blunt instrument for a bill nine passes share.
+    pub time_passes: bool,
 }
 
 impl Default for PassOptions {
@@ -152,6 +160,7 @@ impl Default for PassOptions {
             inline_max_depth: 2,
             inline_max_function: 400,
             widen: true,
+            time_passes: false,
         }
     }
 }
@@ -273,6 +282,14 @@ pub struct PassReport {
     pub rounds: usize,
     /// One entry per pass, in pipeline order, summed over all rounds.
     pub per_pass: Vec<(&'static str, PassStats)>,
+    /// Nanoseconds each pass spent, summed over all rounds. Empty unless
+    /// [`PassOptions::time_passes`] asked for it.
+    ///
+    /// Deliberately not a field of [`PassStats`]: that type is compared with
+    /// `!=` to decide whether a pass changed anything, so a duration in it
+    /// would make every pass report a change and the manager would never
+    /// reach its fixed point.
+    pub per_pass_ns: Vec<(&'static str, u128)>,
 }
 
 impl PassReport {
@@ -413,6 +430,11 @@ impl<'m> PassManager<'m> {
                 .iter()
                 .map(|p| (p.name(), PassStats::default()))
                 .collect(),
+            per_pass_ns: if self.opts.time_passes {
+                self.passes.iter().map(|p| (p.name(), 0u128)).collect()
+            } else {
+                Vec::new()
+            },
         };
         if self.passes.is_empty() {
             return Ok(report);
@@ -421,7 +443,11 @@ impl<'m> PassManager<'m> {
             report.rounds += 1;
             let mut round_changed = false;
             for (i, pass) in self.passes.iter().enumerate() {
+                let started = self.opts.time_passes.then(std::time::Instant::now);
                 let stats = pass.run(f, &self.opts)?;
+                if let Some(t) = started {
+                    report.per_pass_ns[i].1 += t.elapsed().as_nanos();
+                }
                 if self.opts.verify_each {
                     super::verify::verify(f).map_err(|e| {
                         anyhow::anyhow!("{} broke the IR: {e}\n{}", pass.name(), f.dump())
@@ -437,7 +463,15 @@ impl<'m> PassManager<'m> {
 
         // The fixed point is reached; now the last-resort passes get their turn.
         for pass in &self.final_passes {
+            let started = self.opts.time_passes.then(std::time::Instant::now);
             let stats = pass.run(f, &self.opts)?;
+            if let Some(t) = started {
+                let ns = t.elapsed().as_nanos();
+                match report.per_pass_ns.iter_mut().find(|(n, _)| *n == pass.name()) {
+                    Some((_, acc)) => *acc += ns,
+                    None => report.per_pass_ns.push((pass.name(), ns)),
+                }
+            }
             if self.opts.verify_each {
                 super::verify::verify(f).map_err(|e| {
                     anyhow::anyhow!("{} broke the IR: {e}\n{}", pass.name(), f.dump())

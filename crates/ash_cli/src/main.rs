@@ -1146,6 +1146,9 @@ fn run() -> Result<()> {
                 let _p = ash_core::profile::scope("run");
                 interpreter.execute_entrypoint(&bytecode, &native_resolver)?
             };
+            for line in ash_core::air_pipeline::pass_time_report() {
+                eprintln!("{line}");
+            }
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
@@ -1225,6 +1228,13 @@ fn run() -> Result<()> {
             // something a caller can enumerate. Ownership is the fix; the
             // join was the symptom-level workaround.
             interpreter.quiesce_promotions();
+            // Where the AIR pipeline spent its time, when asked. Printed
+            // whatever the mode, because the interpreter prepares on the
+            // mutator and a pinned-interpreter run is exactly where that cost
+            // is easiest to see.
+            for line in ash_core::air_pipeline::pass_time_report() {
+                eprintln!("{line}");
+            }
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {
                     eprintln!(

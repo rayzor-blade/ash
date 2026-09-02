@@ -330,18 +330,6 @@ pub struct HLInterpreter {
     /// an incremental attach must resend the entries already installed; this
     /// is where they are remembered.
     osr_attached: std::collections::HashMap<usize, Vec<OsrEntry>>,
-    /// How wide the register image was when each findex's OSR entries were
-    /// built, so a transfer can tell that both sides still agree.
-    ///
-    /// The entry names its slots `value_reg(v) * 8` and reads them with no
-    /// bounds check, and `OsrEntry` carries only a site and an address -- no
-    /// configuration, no register count. So the whole invariant is "both
-    /// sides lowered this function under the same `AirConfigKey`", and
-    /// nothing checked it: the recorded symptom of breaking it is not a
-    /// crash but a different checksum on every run. The register-table width
-    /// is the cheapest witness of that agreement, and comparing it once per
-    /// transfer costs nothing next to the transfer.
-    osr_image_regs: std::collections::HashMap<usize, usize>,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
     /// Compiled-only functions whose AIR V2 closure dependencies have been
@@ -826,7 +814,6 @@ impl HLInterpreter {
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
-            osr_image_regs: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
             compiled_only_deps_ready: std::collections::HashSet::new(),
             reloaded_bytecode: None,

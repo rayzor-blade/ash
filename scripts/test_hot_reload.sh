@@ -2,7 +2,7 @@
 # End-to-end hot reload test.
 #
 # 1. Compiles V1 of TestHotReload to a .hl file
-# 2. Launches ash_cli in hybrid --hot-reload mode (background)
+# 2. Launches the ash binary in hybrid --hot-reload mode (background)
 # 3. Waits for "start v1" output
 # 4. Compiles V2 (overwrites the .hl file, triggering mtime change)
 # 5. Waits for ash to detect the reload and print "reloaded v2"
@@ -21,7 +21,14 @@ TEST_DIR="$REPO_ROOT/crates/ash/test/hot_reload"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-ASH_CLI="${ASH_CLI:-cargo run -p ash_cli --}"
+# The BUILT binary, not `cargo run`. Two things were wrong here: the crate
+# directory is crates/ash_cli but the package it declares is `ash`, so
+# `-p ash_cli` matched nothing and the script could not start ash at all; and
+# `cargo run` compiles on demand, which spent most of the 6s window below --
+# a window meant for ash to reach its first println, not for rustc. Both
+# failed the same way, in step 3, saying ash never started.
+ASH_BIN="${ASH_BIN:-$REPO_ROOT/target/debug/ash}"
+ASH_CLI="${ASH_CLI:-}"
 USE_DOCKER=false
 if [[ "${1:-}" == "--docker" ]]; then
     USE_DOCKER=true
@@ -50,7 +57,19 @@ echo "[1/5] Compiling V1..."
 compile_haxe "$TEST_DIR/v1" "$HL_FILE"
 
 # Step 2: Launch ash in background with hot-reload
-echo "[2/5] Starting ash_cli --hot-reload..."
+#
+# Built first, deliberately. `cargo run` compiles on demand, and the 6s window
+# below is for ash to reach its first println -- not for rustc to produce the
+# binary. A cold tree spent the whole window linking and the test reported
+# that ash never started.
+if [[ -z "$ASH_CLI" ]]; then
+    if [[ ! -x "$ASH_BIN" ]]; then
+        echo "  building $ASH_BIN first (the wait below is for ash, not rustc)"
+        cargo build -p ash --bin ash >&2
+    fi
+    ASH_CLI="$ASH_BIN"
+fi
+echo "[2/5] Starting ash --hot-reload..."
 $ASH_CLI --mode hybrid --hot-reload --quiet "$HL_FILE" > "$OUTPUT" 2>&1 &
 ASH_PID=$!
 

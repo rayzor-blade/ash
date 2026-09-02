@@ -121,14 +121,33 @@ pub(crate) fn promotion_wants_full_module(
     f: &HLFunction,
     hot_reload: bool,
 ) -> bool {
-    let m = if hot_reload {
-        AshModule::new(bc).without_callees()
-    } else {
+    // The same key `prepare_llvm` will ask under, because it is the same
+    // question about the same body. Asking `optimized` here instead meant
+    // asking the cache under `callees_visible: true` while handing it a
+    // module with the callees hidden: on a miss that stores a body lowered
+    // WITHOUT the inliner under the key every other consumer -- the
+    // interpreter, the Cranelift tier, the OSR sites -- reads for the body
+    // lowered WITH it, and whichever caller reached the findex first decided
+    // for all of them. Only reachable under --hot-reload, which is the one
+    // configuration that already runs a second level.
+    let level = match (hot_reload, level()) {
+        (true, AirOptLevel::O3) => AirOptLevel::O2,
+        (_, level) => level,
+    };
+    let callees_visible = !hot_reload;
+    let m = if callees_visible {
         AshModule::new(bc)
+    } else {
+        AshModule::new(bc).without_callees()
+    };
+    let cfg = air_pipeline::AirConfigKey {
+        level,
+        fma: pass_options().fma,
+        callees_visible,
     };
     // Undecidable means take the safe side: the shared module is what the
     // promote path did before this choice existed.
-    let Ok(opt) = air_pipeline::optimized(&m, f) else {
+    let Ok(opt) = air_pipeline::optimized_with_config(&m, f, cfg) else {
         return true;
     };
     let ir = &opt.ir;

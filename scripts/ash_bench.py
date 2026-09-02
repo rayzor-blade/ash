@@ -646,6 +646,19 @@ def first_difference(want: str, got: str, source: str) -> str:
 # ── the sweep ───────────────────────────────────────────────────────────────
 
 
+def mode_allowed(name: str, allow: list[str]) -> bool:
+    """Whether `name` is covered by a benchmark's mode allowlist.
+
+    A VARIANT counts as its base mode: `hybrid-auto-IL1` is `hybrid-auto` with
+    an environment overlay, so a benchmark that says it only makes sense under
+    `hybrid-auto` means that one too. Matching the literal name silently
+    skipped every heavy benchmark -- deltablue, nbody, fib, fib_calls -- under
+    every new variant, which is exactly the set that answers questions about
+    promotion, and the run still reported OK because a skip is not a failure.
+    """
+    return any(name == a or name.startswith(a + "-") for a in allow)
+
+
 def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
     env = dict(os.environ)
     # Strip inherited knobs so a shell that happens to export them cannot
@@ -1393,7 +1406,7 @@ def main(argv=None) -> int:
             )
 
         for mode in modes:
-            if bench.modes is not None and mode.name not in bench.modes:
+            if bench.modes is not None and not mode_allowed(mode.name, bench.modes):
                 eprint(f"[bench] {bench.name} / {mode.name} ... SKIP")
                 results.append(
                     {

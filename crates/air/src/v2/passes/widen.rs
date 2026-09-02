@@ -121,10 +121,21 @@ impl Pass for Widen<'_> {
             .filter(|p| !f.scalar_remainders.contains(&p.header))
             .collect();
         for plan in plans {
-            // `widen_loop` edits as it goes and can refuse partway -- a guard
-            // is proven and removed, then a later one turns out unprovable.
-            // Half a widening is not a slower program, it is a wrong one, so
-            // a refusal puts the function back exactly as it was.
+            // Everything `check` can answer, answered before paying for a
+            // rollback copy. Nearly every plan is refused -- a call in the
+            // body, an unprovable guard, an accumulator over a term that
+            // varies -- and cloning a whole function to discover that made
+            // this pass a cost centre on programs it vectorizes nothing in.
+            if let Err(d) = check(f, &plan, &opts, self.info) {
+                record(plan.header, Err(d));
+                continue;
+            }
+            // Past `check`, `widen_loop` edits as it goes and can still refuse
+            // partway -- a guard is proven and removed, then a later one turns
+            // out unprovable, or a widened value reaches a use the emit stage
+            // does not rewrite. Half a widening is not a slower program, it is
+            // a wrong one, so a refusal puts the function back exactly as it
+            // was, and that needs the copy.
             let backup = f.clone();
             match widen_loop(f, &plan, &opts, self.info) {
                 Ok(()) => {

@@ -475,6 +475,24 @@ pub(crate) struct TieredSharedCtx {
     /// for a single-invocation hot loop that observation comes from the
     /// back-edge ticks, at most 64 iterations later.
     pub(crate) pending_osr: Mutex<HashMap<usize, Vec<OsrEntry>>>,
+    /// What each findex's OSR entries were built from: the configuration the
+    /// function was lowered under, and how wide the register image came out.
+    ///
+    /// `OsrEntry` carries a site and an address and nothing else, so the
+    /// invariant that both sides of a transfer lowered the function the same
+    /// way is held by convention -- every producer remembers to call
+    /// `interpreter_config_for`. Breaking it does not fail closed: the entry
+    /// addresses its slots `value_reg(v) * 8` and reads them with no bounds
+    /// check, so the recorded symptom is a different checksum on every run.
+    ///
+    /// The configuration is the invariant itself and the width is a second
+    /// witness, because a pipeline difference can move a value to a different
+    /// register without changing how many there are -- the O3 inliner remaps
+    /// a whole callee register table, and SROA mints more. Checking the key
+    /// is what makes this a guard rather than a coincidence detector, and it
+    /// matters now that the level is a per-consumer choice rather than one
+    /// process-wide `OnceLock` nobody could disagree with.
+    pub(crate) osr_image_regs: Mutex<HashMap<usize, (ash_core::air_pipeline::AirConfigKey, usize)>>,
     /// Uniform-ABI entries the backends emitted, `findex -> address`. The
     /// marshaling signature is read off the bytecode at bead registration,
     /// before any compile has happened, so the address a compile produces has
@@ -1307,22 +1325,50 @@ pub(crate) fn prepare_worker_closure_dependencies(
             .iter()
             .find(|function| function.findex as usize == findex)?;
         let module = ash_core::air_pipeline::AshModule::new(bytecode);
-        let optimized = ash_core::air_pipeline::optimized(&module, raw).ok()?;
         let mut targets = Vec::new();
-        for block in &optimized.ir.blocks {
-            for instr in &block.instrs {
-                let target = match instr {
-                    air::v2::Instr::StaticClosure { fun, .. }
-                    | air::v2::Instr::InstanceClosure { fun, .. } => Some(*fun),
-                    _ => None,
-                };
-                if let Some(target) = target {
-                    let is_haxe_function = bytecode
-                        .functions
-                        .iter()
-                        .any(|function| function.findex as usize == target);
-                    if is_haxe_function && !targets.contains(&target) {
-                        targets.push(target);
+        // Every body that can MATERIALIZE a closure for this findex, not just
+        // the one the tiers compile. The interpreter walks its own
+        // configuration for a function OSR can never enter, and a closure is
+        // built by whichever body actually runs: if only the tiers' body were
+        // scanned, a closure the walker creates and the inliner had removed
+        // from that body escapes still carrying its findex sentinel, and the
+        // first call through it uses a small integer as a code address.
+        //
+        // A union, because either body can be the one that runs -- the walker
+        // before the promote, the compiled body after it -- and resolving a
+        // stub that is never needed costs nothing.
+        let mut bodies = vec![ash_core::air_pipeline::AirConfigKey::standard()];
+        let walked = ash_core::air_pipeline::interpreter_config_for(raw);
+        if walked != bodies[0] {
+            bodies.push(walked);
+        }
+        for cfg in bodies {
+            let bare;
+            let view = if cfg.callees_visible {
+                &module
+            } else {
+                bare = module.without_callees_view();
+                &bare
+            };
+            let Ok(optimized) = ash_core::air_pipeline::optimized_with_config(view, raw, cfg)
+            else {
+                return None;
+            };
+            for block in &optimized.ir.blocks {
+                for instr in &block.instrs {
+                    let target = match instr {
+                        air::v2::Instr::StaticClosure { fun, .. }
+                        | air::v2::Instr::InstanceClosure { fun, .. } => Some(*fun),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        let is_haxe_function = bytecode
+                            .functions
+                            .iter()
+                            .any(|function| function.findex as usize == target);
+                        if is_haxe_function && !targets.contains(&target) {
+                            targets.push(target);
+                        }
                     }
                 }
             }
@@ -1530,6 +1576,10 @@ pub(crate) fn produce_cranelift_osr_entries(
     // Same staging map the LLVM producer uses; the fresh-install branch
     // attaches whatever is pending when it observes the new pointer.
     let staged = entries.len();
+    ctx.osr_image_regs
+        .lock()
+        .expect("osr_image_regs mutex poisoned")
+        .insert(findex, (cfg, opt.ser.reg_types.len()));
     ctx.pending_osr
         .lock()
         .expect("pending_osr mutex poisoned")
@@ -1556,7 +1606,11 @@ pub(crate) fn produce_cranelift_osr_entries(
 pub(crate) fn osr_plan_for(
     ctx: &TieredSharedCtx,
     findex: usize,
-) -> Option<(Vec<usize>, Arc<ash_core::air_pipeline::Optimized>)> {
+) -> Option<(
+    Vec<usize>,
+    Arc<ash_core::air_pipeline::Optimized>,
+    ash_core::air_pipeline::AirConfigKey,
+)> {
     if !osr_transfer_enabled() || !ash_core::air_pipeline::air_enabled() {
         return None;
     }
@@ -1592,11 +1646,11 @@ pub(crate) fn osr_plan_for(
     if !plan.eligible() || sites.is_empty() {
         return None;
     }
-    Some((sites, optimized))
+    Some((sites, optimized, cfg))
 }
 
 pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
-    let Some((sites, optimized)) = osr_plan_for(ctx, findex) else {
+    let Some((sites, optimized, cfg)) = osr_plan_for(ctx, findex) else {
         return;
     };
 
@@ -1640,6 +1694,10 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
             if entries.len() == 1 { "y" } else { "ies" }
         );
     }
+    ctx.osr_image_regs
+        .lock()
+        .expect("osr_image_regs mutex poisoned")
+        .insert(findex, (cfg, optimized.ser.reg_types.len()));
     ctx.pending_osr
         .lock()
         .expect("pending_osr mutex poisoned")
@@ -1785,7 +1843,7 @@ pub(crate) fn compile_with_llvm(
         // the frame waited 43ms for the whole promote when the entry alone
         // was ready at ~15ms, and it ran the middle tier for every one of
         // those iterations.
-        if let Some((sites, optimized)) = osr_plan.as_ref() {
+        if let Some((sites, optimized, cfg)) = osr_plan.as_ref() {
             let mut entries: Vec<OsrEntry> = Vec::new();
             for &pc in sites.iter() {
                 match module.compile_osr_entry(findex, pc, optimized) {
@@ -1826,6 +1884,10 @@ pub(crate) fn compile_with_llvm(
                 }
                 // Interpreter frames read the staging map on the next install
                 // they observe, the same way they do for a late entry.
+                ctx.osr_image_regs
+                    .lock()
+                    .expect("osr_image_regs mutex poisoned")
+                    .insert(findex, (*cfg, optimized.ser.reg_types.len()));
                 ctx.pending_osr
                     .lock()
                     .expect("pending_osr mutex poisoned")

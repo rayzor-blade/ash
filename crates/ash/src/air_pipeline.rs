@@ -513,9 +513,41 @@ impl AirConfigKey {
     pub fn interpreter() -> Self {
         Self {
             callees_visible: false,
+            level: interpreter_level(),
             ..Self::standard()
         }
     }
+}
+
+/// The pipeline level for a function only the interpreter will ever walk.
+///
+/// Separate from [`default_level`] because the two consumers are asking
+/// different questions. A compiler tier is buying code it will run millions of
+/// times and the pipeline is the cheapest part of that; the interpreter is
+/// buying a body it may run twice, and on a program that finishes in 20ms the
+/// preparation IS the program. Measured on the NUC, `ASH_AIR_LEVEL=O1` took
+/// test_stdlib from 48.0ms to 16.1ms and jsonarr from 25.9 to 13.7 -- and cost
+/// mandelbrot_small a factor of five, because a global level also lowers what
+/// the COMPILERS consume.
+///
+/// This is only reachable through [`AirConfigKey::interpreter`], which
+/// [`interpreter_config_for`] hands out exclusively to functions with no back
+/// edge. Those are precisely the functions OSR can never enter, so nothing
+/// maps onto them by position and nothing else has to agree about how they
+/// were lowered. A loop-carrying function keeps [`AirConfigKey::standard`] and
+/// therefore keeps O3, on both sides of the transfer.
+pub fn interpreter_level() -> OptLevel {
+    static CELL: OnceLock<OptLevel> = OnceLock::new();
+    *CELL.get_or_init(|| match std::env::var("ASH_AIR_INTERP_LEVEL") {
+        Ok(s) if !s.is_empty() => parse_level(&s).unwrap_or_else(|| {
+            eprintln!(
+                "[air] ignoring ASH_AIR_INTERP_LEVEL='{s}' (expected O0|O1|O2|O3); \
+                 using the pipeline default"
+            );
+            default_level()
+        }),
+        _ => default_level(),
+    })
 }
 
 /// The configuration the interpreter walks `f` under, and the one every OSR

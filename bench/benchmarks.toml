@@ -31,6 +31,67 @@ binary = "ash"
 args = ["--mode", "interp"]
 description = "Pure bytecode interpreter. The parity-validated reference."
 
+# The SURGICAL version: a cheaper pipeline only for functions the interpreter
+# alone will ever walk. `interpreter_config_for` hands those out by one rule --
+# no back edge -- because a function with no loop is one OSR can never enter,
+# so nothing maps onto it by position and no other consumer has to agree about
+# how it was lowered. A loop-carrying function keeps O3 on both sides of the
+# transfer, which is what the global-level rows below get wrong: they lower
+# what the COMPILERS consume too, and that is the whole of mandelbrot's 5x.
+[[mode]]
+name = "interp-IL1"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "Walker; loop-free functions prepared at O1, loops still O3."
+
+[[mode]]
+name = "interp-IL2"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_INTERP_LEVEL = "O2" }
+default = false
+description = "Walker; loop-free functions prepared at O2, loops still O3."
+
+[[mode]]
+name = "hybrid-auto-IL1"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_INTERP_LEVEL = "O1" }
+default = false
+description = "The shipped ladder; loop-free functions prepared at O1."
+
+[[mode]]
+name = "hybrid-auto-IL2"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_INTERP_LEVEL = "O2" }
+default = false
+description = "The shipped ladder; loop-free functions prepared at O2."
+
+# The same question for the row users actually get. A long program PROMOTES,
+# so the interpreter's pipeline quality should stop mattering for it once the
+# ladder engages -- which is the reading the pinned-interp rows below cannot
+# test. Confound to keep in mind: ASH_AIR_LEVEL is global since the tiers were
+# unified onto one `default_level()`, so these lower the level the COMPILERS
+# consume too, not just the interpreter's.
+[[mode]]
+name = "hybrid-auto-O1"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_LEVEL = "O1" }
+default = false
+description = "The shipped ladder with a cheap AIR pipeline everywhere."
+
+[[mode]]
+name = "hybrid-auto-O2"
+binary = "ash"
+args = ["--mode", "hybrid", "--jit-tier", "auto", "--preset", "application"]
+env = { ASH_AIR_LEVEL = "O2" }
+default = false
+description = "The shipped ladder without O3's inliner, SROA and alloc hoisting."
+
 # What the pipeline COSTS the interpreter. The walker prepares each function
 # through the full O3 pipeline before running a line of it, and on a program
 # that finishes in 20ms that preparation is most of the run -- the NUC sweep

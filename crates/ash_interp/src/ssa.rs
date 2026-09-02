@@ -74,7 +74,7 @@
 use std::sync::OnceLock;
 
 use air::v2::{Function, Instr};
-use ash_core::air_pipeline::{optimized, AshModule};
+use ash_core::air_pipeline::AshModule;
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::types::{HLFunction, TypeRef};
 
@@ -133,6 +133,14 @@ pub struct Prepared {
     pub liveness: &'static air::v2::liveness::Liveness,
     /// Type of each serialized register, for encoding that state.
     pub osr_reg_types: &'static [TypeRef],
+    /// The configuration this body was lowered under.
+    ///
+    /// Carried rather than recomputed because the point of checking it is to
+    /// catch a walker that has drifted off the configuration the OSR entries
+    /// were built from -- asking `interpreter_config_for` again at the
+    /// transfer would just re-derive the answer both sides were supposed to
+    /// have used, which is the assumption under test.
+    pub cfg: ash_core::air_pipeline::AirConfigKey,
 }
 
 /// What a function executes, decided once on its first call.
@@ -200,13 +208,27 @@ impl Cache {
 
         let m = self.module.expect("module cached just above").1;
         let raw = &bc.functions[func_idx];
-        // The same entry point, and the same cached result, the tiers compile
-        // from. Preparing separately produced a different body -- different
-        // pass options, so different blocks -- and an OSR site named by this
-        // walker then did not exist in the one the entry was built from: the
-        // header this reported as pc=13 was staged at pc=12. Going through
-        // the shared cache also stops the pipeline running twice per function.
-        self.bodies[func_idx] = match optimized(m, raw).map(|o| (o.ir.clone(), o.ser.clone())) {
+        // The configuration every OSR site lowers this function under, which
+        // is the whole point: the transfer is by position through
+        // `ser.block_pcs`, so preparing separately produced a different body
+        // -- different pass options, so different blocks -- and a site this
+        // walker named then did not exist in the one the entry was built
+        // from: the header reported as pc=13 was staged at pc=12. Asking
+        // `interpreter_config_for` rather than for the tiers' own key keeps
+        // that agreement while letting a function OSR can NEVER enter -- one
+        // with no back edge -- be prepared more cheaply, which is what it is
+        // for. Both go through the same cache, so neither runs twice.
+        let air_cfg = ash_core::air_pipeline::interpreter_config_for(raw);
+        let bare;
+        let view = if air_cfg.callees_visible {
+            m
+        } else {
+            bare = m.without_callees_view();
+            &bare
+        };
+        self.bodies[func_idx] = match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg)
+            .map(|o| (o.ir.clone(), o.ser.clone()))
+        {
             Ok((ir, ser_view)) => match unsupported(&ir) {
                 Some(what) => {
                     if logging() {
@@ -269,6 +291,7 @@ impl Cache {
                         instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
                         liveness: Box::leak(Box::new(liveness)),
                         osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
+                        cfg: air_cfg,
                     })))
                 }
             },

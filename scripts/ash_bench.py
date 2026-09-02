@@ -657,6 +657,7 @@ def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
         "ASH_NO_PURE_CSE",
         "ASH_AIR",
         "ASH_AIR_LEVEL",
+        "ASH_AIR_INTERP_LEVEL",
     ):
         env.pop(k, None)
     if args.gc_heap_mb:

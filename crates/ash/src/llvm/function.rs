@@ -765,9 +765,33 @@ impl<'ctx> JITModule<'ctx> {
         // engine, which an AOT build has no use for and cannot satisfy —
         // resolving a symbol in this process is exactly what AOT must not do.
         if !self.aot && self.promote_uses_own_module(findex) {
-            let fn_addr = self.promote_in_own_module(findex)?;
-            self.install_function_address(findex, fn_addr as *mut c_void);
-            return self.compiled_meta_for(findex, fn_addr);
+            // A private module leaves its callees as declarations and binds
+            // them to code the host already has. When a callee has none --
+            // no lower tier compiled it, which is the norm with the ladder
+            // pinned to one rung -- there is nothing to bind and the
+            // promotion refuses. Fall through to the shared path, which
+            // lowers the callees beside the root, rather than propagating:
+            // the caller treats a tier failure as a reason to blacklist, so
+            // refusing here retired the function permanently and it
+            // interpreted for the rest of the run. That is what made
+            // `--jit-tier llvm` run `free_call` and `inlined_call` at
+            // interpreter speed, 66x slower than the same program on
+            // Cranelift, while reporting the LLVM tier as the engine.
+            match self.promote_in_own_module(findex) {
+                Ok(fn_addr) => {
+                    self.install_function_address(findex, fn_addr as *mut c_void);
+                    return self.compiled_meta_for(findex, fn_addr);
+                }
+                Err(e) => {
+                    if std::env::var_os("ASH_TIER_LOG").is_some() {
+                        eprintln!(
+                            "[tier] findex={findex} own-module refused ({e:#}); \
+                             retrying through the shared module"
+                        );
+                    }
+                    crate::profile::count("llvm promotions retried in shared module", 1);
+                }
+            }
         }
 
         let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;

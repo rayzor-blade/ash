@@ -554,3 +554,20 @@ slow = false
 timeout_secs = 60
 expectation = "exact"
 normalize = "default"
+
+# A Haxe throw escaping a COMPILED frame. The exception is ordinary control
+# flow, but it arrives at the interpreter as an error out of the compiled call
+# boundary, and reading that as a compile failure both retired the findex for
+# the rest of the run and re-executed the function from its first opcode --
+# duplicating every side effect the compiled attempt had already committed.
+# The checksum is `sideEffects`, which must equal the call count: the bug
+# printed 400001 in hybrid against 400000 everywhere else. This only bites
+# once the function is actually promoted, so it needs the hybrid rows.
+[[case]]
+name = "TestThrowAcrossTiers"
+main = "TestThrowAcrossTiers"
+hl = "test_throw_across_tiers.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"

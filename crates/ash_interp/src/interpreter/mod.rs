@@ -330,6 +330,18 @@ pub struct HLInterpreter {
     /// an incremental attach must resend the entries already installed; this
     /// is where they are remembered.
     osr_attached: std::collections::HashMap<usize, Vec<OsrEntry>>,
+    /// How wide the register image was when each findex's OSR entries were
+    /// built, so a transfer can tell that both sides still agree.
+    ///
+    /// The entry names its slots `value_reg(v) * 8` and reads them with no
+    /// bounds check, and `OsrEntry` carries only a site and an address -- no
+    /// configuration, no register count. So the whole invariant is "both
+    /// sides lowered this function under the same `AirConfigKey`", and
+    /// nothing checked it: the recorded symptom of breaking it is not a
+    /// crash but a different checksum on every run. The register-table width
+    /// is the cheapest witness of that agreement, and comparing it once per
+    /// transfer costs nothing next to the transfer.
+    osr_image_regs: std::collections::HashMap<usize, usize>,
     /// Loop headers seen to be hot, as `(findex, header_pc)`.
     hot_loops: std::collections::HashSet<(usize, usize)>,
     /// Compiled-only functions whose AIR V2 closure dependencies have been
@@ -814,6 +826,7 @@ impl HLInterpreter {
             reg_pool: Vec::new(),
             arg_pool: Vec::new(),
             osr_attached: std::collections::HashMap::new(),
+            osr_image_regs: std::collections::HashMap::new(),
             hot_loops: std::collections::HashSet::new(),
             compiled_only_deps_ready: std::collections::HashSet::new(),
             reloaded_bytecode: None,
@@ -1180,6 +1193,7 @@ impl HLInterpreter {
             called_from_loop: Mutex::new(std::collections::HashSet::new()),
             vtable_slots: OnceLock::new(),
             pending_osr: Mutex::new(HashMap::new()),
+            osr_image_regs: Mutex::new(HashMap::new()),
             uniform_entries: Mutex::new(HashMap::new()),
             worker_beads: Mutex::new(HashMap::new()),
             worker_compile_lock: Mutex::new(()),
@@ -3554,6 +3568,41 @@ impl HLInterpreter {
             return Ok(None);
         }
         let findex = self.bytecode_findex_of(bytecode, func_idx);
+
+        // Both sides have to have lowered this function the same way, because
+        // the entry addresses its slots `value_reg(v) * 8` and reads them with
+        // no bounds check. Nothing in `OsrEntry` says which configuration
+        // built it, so this compares the one recorded by the producer against
+        // the one this frame's body was ACTUALLY prepared under -- recomputing
+        // it would re-derive the very assumption under test.
+        //
+        // Checked before the site lookup on purpose. A configuration
+        // difference usually moves the pcs too, so the lookup would miss and
+        // return quietly; that hides the disagreement instead of naming it,
+        // and pcs are small dense integers, so a miss is not guaranteed.
+        let built = self
+            .tiered_runtime
+            .as_ref()
+            .and_then(|t| t.shared_ctx.osr_image_regs.lock().ok())
+            .and_then(|m| m.get(&findex).copied());
+        if let Some((built_cfg, _)) = built {
+            let mine = match ssa {
+                Some((prep, _, _)) => prep.cfg,
+                None => ash_core::air_pipeline::interpreter_config_for(
+                    &bytecode.functions[func_idx],
+                ),
+            };
+            if built_cfg != mine {
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] REFUSED findex={findex} pc={header_pc}: entry built under \
+                         {built_cfg:?}, this frame was prepared under {mine:?}"
+                    );
+                }
+                return Ok(None);
+            }
+        }
+
         let site = header_pc as u64;
         let addr = {
             let tiered = self.tiered_runtime.as_ref();
@@ -3579,6 +3628,30 @@ impl HLInterpreter {
             Some((prep, _, _)) => prep.osr_reg_types,
             None => &body.regs,
         };
+        // Both sides have to have lowered this function the same way, because
+        // the entry addresses its slots `value_reg(v) * 8` and reads them with
+        // no bounds check. Nothing in `OsrEntry` says which configuration
+        // built it, so the register-image width is the witness: a mismatch
+        // means the entry names different variables than this frame holds, and
+        // that does not fail closed -- it returns a different answer each run.
+        // Skipping the transfer costs one interpreted loop; taking it on a
+        // disagreement costs correctness, and silently.
+        // Second witness: a pipeline difference can move a value to another
+        // register without changing how many there are, but a differently
+        // sized image means the entry would read past the buffer this frame
+        // is about to fill.
+        if let Some((_, built_regs)) = built {
+            if built_regs != regs.len() {
+                if osr_logging() {
+                    eprintln!(
+                        "[osr] REFUSED findex={findex} pc={header_pc}: entry was built over \
+                         {built_regs} registers, this frame has {}",
+                        regs.len()
+                    );
+                }
+                return Ok(None);
+            }
+        }
         // Where each register's value sits in the walker's frame at THIS
         // header. A register no live value carries holds nothing the entry can
         // read before defining it.
@@ -3848,6 +3921,24 @@ impl HLInterpreter {
                                 tiered.stats.compiled_calls += 1;
                             }
                             return Ok(v);
+                        }
+                        Err(e) if e.is::<HLExceptionPropagation>() => {
+                            // A Haxe `throw` crossing a compiled frame is that
+                            // program running correctly, not the compiler
+                            // failing. Treating it as a failed invoke did two
+                            // wrong things at once: it retired the findex
+                            // permanently -- one throw and every later call
+                            // interprets, with the top tier's code installed
+                            // and unreachable -- and it re-entered the
+                            // function from its first opcode, so every side
+                            // effect the compiled attempt had already
+                            // committed happened twice. A counter incremented
+                            // before a throw read 400001 against the
+                            // interpreter's and the whole-module JIT's 400000.
+                            //
+                            // The compiled-only path above already says this
+                            // in its comment; the hybrid path did not.
+                            return Err(e);
                         }
                         Err(e) => {
                             self.record_tiered_fallback(

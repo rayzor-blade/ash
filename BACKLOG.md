@@ -1589,3 +1589,18 @@ Still unenforced, in rough order of how likely they are to bite:
 The durable fix is to carry the key with the entry and compare it where the
 transfer is decided, rather than trusting every producer to ask the same
 question.
+
+### A benchmark variant is not a benchmark mode
+
+`bench/benchmarks.toml` lets a benchmark name the modes it applies to, and the
+runner compared literal mode names. Any mode added as a variant of a listed
+one -- `hybrid-auto-IL1` is `hybrid-auto` plus an environment overlay -- fell
+outside the list and skipped. The four benchmarks that carry an allowlist are
+deltablue, nbody, fib and fib_calls, which is exactly the promotion-heavy set,
+so a sweep comparing tiering behaviour silently covered only the programs that
+barely promote. It reported OK throughout, because a skip is not a failure.
+
+Fixed by matching a variant to its base. The general lesson is that a skip
+needs to be as visible in a sweep summary as a failure: the run printed
+`runs: 88 OK=72 SKIP=16` and nothing said which comparison had lost its
+subjects.

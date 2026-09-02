@@ -174,6 +174,24 @@ impl<'ctx> JITModule<'ctx> {
             }
             function.as_global_value().set_linkage(Linkage::Internal);
         }
+        // The constant pool's literals are created with default linkage
+        // because a JIT promotion module resolves `Int_7` or `String_12` in
+        // the shared module by NAME. In an object file that made every
+        // literal an export -- 19,909 of them on a game -- each a symbol
+        // some other library could collide with, none referenced outside
+        // this module.
+        let mut global = self.module.get_first_global();
+        while let Some(g) = global {
+            let name = g.get_name().to_string_lossy();
+            if (name.starts_with("String_")
+                || name.starts_with("Int_")
+                || name.starts_with("Float_"))
+                && g.get_initializer().is_some()
+            {
+                g.set_linkage(Linkage::Internal);
+            }
+            global = g.get_next_global();
+        }
         Ok(())
     }
 
@@ -1051,6 +1069,44 @@ impl<'ctx> JITModule<'ctx> {
                 "",
             )?;
         }
+        // Field, method and virtual-field names. The JIT registers every one
+        // while DECODING the bytecode (`hlp_hash_gen(name, true)`), which is
+        // how `hlp_field_name(hash)` -- Reflect.fields, the JSON printer,
+        // Std.string of an anonymous object -- gets a name back. A standalone
+        // binary never decodes anything, so it printed `{??? : 5}` and JSON
+        // serialised anonymous objects with `???` keys. Register them here,
+        // once per distinct name.
+        {
+            let hash_ty = self
+                .context
+                .i32_type()
+                .fn_type(&[ptr_type.into(), self.context.bool_type().into()], false);
+            let hash_gen = self.aot_symbol("hlp_hash_gen", hash_ty);
+            let mut names: Vec<String> = Vec::new();
+            for t in &self.bytecode.types {
+                if let Some(obj) = &t.obj {
+                    names.extend(obj.fields.iter().map(|f| f.name.clone()));
+                    names.extend(obj.proto.iter().map(|p| p.name.clone()));
+                }
+                if let Some(virt) = &t.virt {
+                    names.extend(virt.fields.iter().map(|f| f.name.clone()));
+                }
+            }
+            names.sort();
+            names.dedup();
+            for name in names {
+                if name.is_empty() {
+                    continue;
+                }
+                let msg = self.utf16_message(&name)?;
+                self.builder.build_indirect_call(
+                    hash_ty,
+                    hash_gen,
+                    &[msg.into(), self.context.bool_type().const_int(1, false).into()],
+                    "",
+                )?;
+            }
+        }
 
         // Dynamic dispatch (Type.createInstance, Reflect.callMethod) reaches
         // compiled code through these two, and nothing else installs them in
@@ -1442,9 +1498,24 @@ impl<'ctx> JITModule<'ctx> {
         if let Some(late) = self.module.get_function("ash_late_init") {
             self.builder.build_call(late, &[], "")?;
         }
-        self.builder
-            .build_call(entry_fn, &[], "entrypoint")?;
-        self.builder.build_return(Some(&i32_type.const_zero()))?;
+        // The same outer exception boundary the JIT gives the entrypoint:
+        // an uncaught exception prints HashLink's "Uncaught exception: ..."
+        // report and exits 1. A bare call reached `hlp_throw` with no trap
+        // on the stack, which aborts the process instead -- the two socket
+        // parity programs diverged from the interpreter on exactly that.
+        let safe_entry = self.build_safe_entry_wrapper(entry_fn)?;
+        self.builder.position_at_end(block);
+        let status = self
+            .builder
+            .build_call(safe_entry, &[], "entrypoint")?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("safe entrypoint wrapper returned void"))?
+            .into_int_value();
+        let status = self
+            .builder
+            .build_int_truncate(status, i32_type, "exit_status")?;
+        self.builder.build_return(Some(&status))?;
         if !main.verify(true) {
             return Err(anyhow!("main failed LLVM verification"));
         }

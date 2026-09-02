@@ -571,3 +571,28 @@ slow = false
 timeout_secs = 180
 expectation = "exact"
 normalize = "default"
+
+# A virtual (interface-typed value) cast back to its class. Runs once per
+# program, so the interpreter always executed it and only a whole-module
+# compile ever runs it compiled -- which is where it read a method pointer as
+# an object and stored into code. Needs the JIT rows.
+[[case]]
+name = "TestSafeCastVirtual"
+main = "TestSafeCastVirtual"
+hl = "test_safe_cast_virtual.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+
+# A null Dynamic's type is the void type (hl_typeof(NULL)). Read by
+# Type.typeof, Reflect.isFunction and the JSON printer; runs once, so only a
+# whole-program compile executes it compiled.
+[[case]]
+name = "TestGetTypeNull"
+main = "TestGetTypeNull"
+hl = "test_gettype_null.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"

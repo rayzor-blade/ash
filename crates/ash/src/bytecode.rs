@@ -318,18 +318,26 @@ impl BytecodeDecoder {
         for t in types.iter_mut() {
             if let Some(ref mut tenum) = t.tenum {
                 for construct in tenum.constructs.iter_mut() {
-                    // venum header: hl_type*(8) + int index(4) + pad(4) = 16 bytes
-                    let mut offset: usize = 16;
+                    // HashLink's `hl_init_enum`: the header is `hl_type* t` +
+                    // `int index` = 12 bytes with NO padding after it, and each
+                    // parameter is padded to its own size (capped at a word).
+                    // The runtime's `hlp_init_enum` and every HDLL follow
+                    // that; this table started at 16, so an AOT binary --
+                    // whose compiled code reads these offsets while its
+                    // natives read the runtime's -- printed `B(0)` for `B(7)`
+                    // and compared different enum values equal. The JIT only
+                    // agreed with itself because it re-initialised its type
+                    // table through the runtime afterwards.
+                    let mut offset: usize = std::mem::size_of::<*const u8>() + std::mem::size_of::<i32>();
                     for (i, param_ref) in construct.params.iter().enumerate() {
                         let kind = kinds.get(param_ref.0).copied().unwrap_or(hl::hl_type_kind_HVOID);
                         let (size, align) = Self::type_size_align(kind);
-                        // Align to this type's natural alignment
+                        let align = align.clamp(1, std::mem::size_of::<*const u8>());
                         offset = (offset + align - 1) & !(align - 1);
                         construct.offsets[i] = offset as i32;
                         offset += size;
                     }
-                    // Compute total size (rounded up to pointer alignment)
-                    construct.size = ((offset + 7) & !7) as i32;
+                    construct.size = offset as i32;
                 }
             }
         }

@@ -274,6 +274,12 @@ impl<'ctx> JITModule<'ctx> {
     /// creation — the one choke point both the whole-module and the tiered
     /// promote paths pass through.
     fn stamp_host_cpu(&self, f: FunctionValue<'ctx>) {
+        // An object file names its CPU once, in `emit_object`, from the
+        // requested triple; stamping THIS host onto a function would bake
+        // the build machine into a cross-compiled binary.
+        if self.aot {
+            return;
+        }
         use std::sync::OnceLock;
         static HOST: OnceLock<(String, String)> = OnceLock::new();
         let (cpu, feats) = HOST.get_or_init(|| {
@@ -2699,29 +2705,40 @@ impl<'ctx> JITModule<'ctx> {
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
     ) -> Result<()> {
-        for phi in &air.blocks[to.idx()].phis {
+        // The phis of one block are a PARALLEL copy: every source is the
+        // value at the end of the predecessor, before any phi has written.
+        // After GVN folds `prev = sl; sl = sl.next` the header reads
+        // `sl = phi [.. sl.next]`, `prev = phi [.. sl]` -- one phi's source is
+        // another's destination -- and a sequential store-then-load handed
+        // `prev` the advanced cursor. Load every source first, then store.
+        let phis = &air.blocks[to.idx()].phis;
+        let mut loaded = Vec::with_capacity(phis.len());
+        for phi in phis {
             let src = phi
                 .incoming
                 .iter()
-                .find(|(pred, _)| *pred == from)
-                .map(|(_, value)| *value)
+                .find(|(b, _)| *b == from)
+                .map(|(_, v)| *v)
                 .ok_or_else(|| {
                     anyhow!(
                         "AIR phi in b{} has no incoming value from b{}",
-                        to.0,
-                        from.0
+                        to.idx(),
+                        from.idx()
                     )
                 })?;
-            let loaded = self.builder.build_load(
+            let value = self.builder.build_load(
                 reg_types[src.idx()],
                 registers[src.idx()],
                 "air_phi_src",
             )?;
-            let value = if loaded.get_type() == reg_types[phi.dst.idx()] {
-                loaded
+            let value = if value.get_type() == reg_types[phi.dst.idx()] {
+                value
             } else {
-                self.cast_for_call(loaded, reg_types[phi.dst.idx()])?
+                self.cast_for_call(value, reg_types[phi.dst.idx()])?
             };
+            loaded.push(value);
+        }
+        for (phi, value) in phis.iter().zip(loaded) {
             self.builder.build_store(registers[phi.dst.idx()], value)?;
         }
         Ok(())
@@ -2814,6 +2831,7 @@ impl<'ctx> JITModule<'ctx> {
                 if a_kind == hl_type_kind_HDYN
                     || a_kind == hl_type_kind_HNULL
                     || a_kind == hl_type_kind_HOBJ
+                    || a_kind == hl_type_kind_HVIRTUAL
                 {
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let compare = self.declare_native(
@@ -3618,12 +3636,41 @@ impl<'ctx> JITModule<'ctx> {
                     "gettype_src",
                 )?;
                 let obj_ptr = src_val.into_pointer_value();
+                // `hl_typeof(NULL)` is the void type, and `Type.typeof(null)`,
+                // `Reflect.isFunction(null)` and a JSON printer walking an
+                // object with a null field all rely on it. The interpreter
+                // returns it; this arm dereferenced null instead, which
+                // nothing but a whole-program compile ever executed.
+                let current_fn = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let null_block = self.context.append_basic_block(current_fn, "gettype_null");
+                let load_block = self.context.append_basic_block(current_fn, "gettype_load");
+                let cont_block = self.context.append_basic_block(current_fn, "gettype_cont");
+                let is_null = self.builder.build_is_null(obj_ptr, "gettype_is_null")?;
+                self.builder
+                    .build_conditional_branch(is_null, null_block, load_block)?;
+                self.builder.position_at_end(null_block);
+                let void_index = self
+                    .types_
+                    .iter()
+                    .position(|t| t.kind == hl_type_kind_HVOID)
+                    .ok_or_else(|| anyhow!("GetType: no void type in the type table"))?;
+                let void_type = self.get_initialized_type(void_index)?;
+                self.builder.build_store(registers[dst.0 as usize], void_type)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
                 // obj->t is the first field (offset 0) of vdynamic/vobj, a pointer to hl_type
                 let t_ptr = self
                     .builder
                     .build_load(ptr_type, obj_ptr, "gettype_t")?
                     .into_pointer_value();
                 self.builder.build_store(registers[dst.0 as usize], t_ptr)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
 
             Opcode::Type { dst, ty } => {
@@ -4132,6 +4179,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // --- NullCheck ---
             Opcode::NullCheck { reg } => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
                 let val = self.builder.build_load(
                     reg_types[reg.0 as usize],
                     registers[reg.0 as usize],
@@ -4154,6 +4202,21 @@ impl<'ctx> JITModule<'ctx> {
                         opcode_blocks[i + 1],
                     )?;
                     self.builder.position_at_end(throw_block);
+                    // A null here is a catchable HashLink exception, "Null
+                    // access" -- what the interpreter throws and what Haxe
+                    // code (and the unit suite) catches. A bare `unreachable`
+                    // made it a `brk` at run time and, worse, told the
+                    // optimizer the pointer is never null, so O3 could drop
+                    // the test and everything guarded by it.
+                    let err_fn_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
+                    let err_ptr = self.error_function_ptr()?;
+                    let msg_ptr = self.utf16_message("Null access")?;
+                    self.builder.build_indirect_call(
+                        err_fn_type,
+                        err_ptr,
+                        &[msg_ptr.into()],
+                        "null_access_throw",
+                    )?;
                     self.builder.build_unreachable()?;
                 }
                 // Non-pointer types are never null, fall through
@@ -5600,10 +5663,21 @@ impl<'ctx> JITModule<'ctx> {
                     "tosfloat_src",
                 )?;
                 let f64_type = self.context.f64_type();
+                let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
+                let src_unsigned =
+                    src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_int_value() {
-                    self.builder
-                        .build_signed_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
-                        .into()
+                    // A byte or short register is unsigned in HashLink (MOVZX
+                    // before CVTSI2SD); sitofp read 200 as -56.
+                    if src_unsigned {
+                        self.builder
+                            .build_unsigned_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
+                            .into()
+                    } else {
+                        self.builder
+                            .build_signed_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
+                            .into()
+                    }
                 } else if src_val.is_float_value() {
                     // Already float — just ensure it's f64
                     let fv = src_val.into_float_value();
@@ -5668,35 +5742,53 @@ impl<'ctx> JITModule<'ctx> {
                     registers[src.0 as usize],
                     "toint_src",
                 )?;
-                let i32_type = self.context.i32_type();
+                // Convert straight to the destination register's width. Going
+                // through i32 first then widening with cast_for_call (a zext)
+                // turned -1 into 4294967295 for I32 -> I64 and truncated any
+                // Float beyond 2^31 for F64 -> I64. HashLink: MOVSXD / CVTTSD2SI
+                // at the destination width. HUI8/HUI16 registers hold unsigned
+                // values (MOVZX), so those widen with zero extension.
+                let dst_ty = reg_types[dst.0 as usize];
+                let dst_int = if dst_ty.is_int_type() {
+                    dst_ty.into_int_type()
+                } else {
+                    self.context.i32_type()
+                };
+                let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
+                let src_unsigned =
+                    src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_float_value() {
                     self.builder
-                        .build_float_to_signed_int(src_val.into_float_value(), i32_type, "toint")?
+                        .build_float_to_signed_int(src_val.into_float_value(), dst_int, "toint")?
                         .into()
                 } else if src_val.is_int_value() {
-                    // Already int — truncate or extend to i32
                     let iv = src_val.into_int_value();
-                    if iv.get_type().get_bit_width() > 32 {
+                    let sw = iv.get_type().get_bit_width();
+                    let dw = dst_int.get_bit_width();
+                    if sw > dw {
                         self.builder
-                            .build_int_truncate(iv, i32_type, "toint_trunc")?
+                            .build_int_truncate(iv, dst_int, "toint_trunc")?
                             .into()
-                    } else if iv.get_type().get_bit_width() < 32 {
-                        self.builder
-                            .build_int_s_extend(iv, i32_type, "toint_ext")?
-                            .into()
+                    } else if sw < dw {
+                        if src_unsigned {
+                            self.builder
+                                .build_int_z_extend(iv, dst_int, "toint_zext")?
+                                .into()
+                        } else {
+                            self.builder
+                                .build_int_s_extend(iv, dst_int, "toint_sext")?
+                                .into()
+                        }
                     } else {
                         iv.into()
                     }
                 } else {
                     return Err(anyhow!("ToInt: unexpected source type"));
                 };
-                // The conversion lands on i32 whatever the destination is.
                 let result = self.cast_for_call(result, reg_types[dst.0 as usize])?;
                 self.builder
                     .build_store(registers[dst.0 as usize], result)?;
             }
-
-            // --- StaticClosure: allocate a vclosure wrapping the function ---
             Opcode::StaticClosure { dst, fun } => {
                 if !self.lazy_compilation {
                     let (_function, is_placeholder) = self.get_or_create_function_value(fun.0)?;
@@ -6367,7 +6459,20 @@ impl<'ctx> JITModule<'ctx> {
                         .try_as_basic_value()
                         .basic()
                         .unwrap();
-                    let unboxed = if raw.get_type() != dst_llvm_type {
+                    let unboxed = if dst_kind == hl_type_kind_HBOOL && raw.is_int_value() {
+                        // HashLink reads the box's int byte as the Bool, so any
+                        // non-zero value is true; truncating to i1 kept only
+                        // the low bit and made a boxed 2 false.
+                        let iv = raw.into_int_value();
+                        self.builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                iv,
+                                iv.get_type().const_zero(),
+                                "safecast_bool",
+                            )?
+                            .into()
+                    } else if raw.get_type() != dst_llvm_type {
                         self.cast_for_call(raw, dst_llvm_type)?
                     } else {
                         raw
@@ -6418,8 +6523,20 @@ impl<'ctx> JITModule<'ctx> {
                     )?;
                 } else if src_type_idx != dst_type_idx
                     && ((src_kind == hl_type_kind_HOBJ && dst_kind == hl_type_kind_HOBJ)
-                        || (src_kind == hl_type_kind_HSTRUCT && dst_kind == hl_type_kind_HSTRUCT))
+                        || (src_kind == hl_type_kind_HSTRUCT && dst_kind == hl_type_kind_HSTRUCT)
+                        || (src_kind == hl_type_kind_HVIRTUAL
+                            && (dst_kind == hl_type_kind_HOBJ
+                                || dst_kind == hl_type_kind_HSTRUCT
+                                || dst_kind == hl_type_kind_HVIRTUAL)))
                 {
+                    // A virtual is a WRAPPER: `vvirtual { t, value, next, fields.. }`.
+                    // Casting an interface-typed register to a class used to fall
+                    // through to the pointer copy below, so the class's field
+                    // offsets were then applied to the wrapper -- field 3 read
+                    // `vfields[1]`, a method pointer, and the next store went
+                    // into code. The interpreter unwraps `value` and runs the
+                    // class check; the runtime's castp does the same, including
+                    // the re-wrap for a virtual-to-virtual cast.
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let src_type_ptr = self
                         .get_initialized_type(src_type_idx)?
@@ -7638,16 +7755,21 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, registers[src.0 as usize], "refdata_src")?
                     .into_pointer_value();
+                // ORefData is the address of the first element: the varray
+                // header is {t, at, size, pad} = 24 bytes. Loading at +8
+                // returned the ELEMENT TYPE descriptor, so every hl.Bytes /
+                // NativeArray ref then read and WROTE through an hl_type.
+                let header = std::mem::size_of::<crate::hl_bindings::varray>() as u64;
                 let data_gep = unsafe {
                     self.builder.build_gep(
                         self.context.i8_type(),
                         obj,
-                        &[self.context.i64_type().const_int(8, false)],
+                        &[self.context.i64_type().const_int(header, false)],
                         "refdata_gep",
                     )?
                 };
-                let data = self.builder.build_load(ptr_type, data_gep, "refdata_val")?;
-                self.builder.build_store(registers[dst.0 as usize], data)?;
+                let _ = ptr_type;
+                self.builder.build_store(registers[dst.0 as usize], data_gep)?;
             }
             // --- RefOffset: pointer + byte offset ---
             Opcode::RefOffset { dst, reg, offset } => {
@@ -7728,6 +7850,7 @@ impl<'ctx> JITModule<'ctx> {
                 if a_kind == hl_type_kind_HDYN
                     || a_kind == hl_type_kind_HNULL
                     || a_kind == hl_type_kind_HOBJ
+                    || a_kind == hl_type_kind_HVIRTUAL
                 {
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let i32_type = self.context.i32_type();
@@ -8311,7 +8434,7 @@ impl<'ctx> JITModule<'ctx> {
 
     /// A NUL-terminated UTF-16 message the emitted code can hand to
     /// `hlp_error`: object data under AOT, a leaked buffer under the JIT.
-    fn utf16_message(&self, message: &str) -> Result<PointerValue<'ctx>> {
+    pub(crate) fn utf16_message(&self, message: &str) -> Result<PointerValue<'ctx>> {
         let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
         if self.aot {
             let bytes: Vec<u8> = text.iter().flat_map(|unit| unit.to_le_bytes()).collect();
@@ -9618,7 +9741,7 @@ impl<'ctx> JITModule<'ctx> {
     /// longjmping across `ExecutionEngine::run_function` would skip Rust/C++
     /// frames.  The wrapper returns 1 after printing an uncaught exception and
     /// 0 after a normal return.
-    fn build_safe_entry_wrapper(
+    pub(crate) fn build_safe_entry_wrapper(
         &self,
         entrypoint: FunctionValue<'ctx>,
     ) -> Result<FunctionValue<'ctx>> {

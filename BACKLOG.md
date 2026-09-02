@@ -3,7 +3,7 @@
 Known gaps, deferred refinements, and open defects. Code docs describe what the
 code guarantees today; anything that should change lives here.
 
-**Last updated**: 2026-08-22
+**Last updated**: 2026-09-02
 
 **Status**: Heaps Base2D renders through the real init path under
 `--mode interp`, reaching `Main.init()` in ~1.5s.
@@ -1685,3 +1685,95 @@ unresolved callee -- bind the callee as an external declaration the way the
 shared module does for its own callees, or emit a stub-bridge call -- so the
 cheap path takes what it can and the shared module stops being a fallback.
 That would let Low ceilings tier up for milliseconds instead of never.
+
+## AOT emit is single-threaded by construction (377 s for the game)
+
+`--emit-aot` on an 8,577-function program: 20 s lowering, ~357 s in
+`optimize_module` (O3) plus `emit_object`, 1.8 GB peak, one core. The emitter
+inherits the JIT's one `LLVMContext` per process; an `LLVMContext` is
+single-threaded, so one context means one module means one thread for the
+middle end and for codegen. LLVM only parallelizes across modules (that is
+how `clang -j` and ThinLTO work).
+
+The fix is to shard: N contexts and N modules on N threads, N objects linked
+together. Two things have to change for that to link: bodies are `internal`
+(so a Haxe `write` cannot take libc's symbol) and cross-shard calls need them
+visible -- make them hidden-visibility externals with a private prefix
+(`ash_f<findex>`), keeping `main`/`ash_module_init` the only default-
+visibility globals; and the tables `emit_aot_data` builds get emitted once, in
+shard 0, and declared external elsewhere. Inlining stops at shard boundaries;
+shard along the call graph and emit small hot callees `available_externally`
+into every shard that calls them. The speedup is bounded by the largest
+function's own O3 time (findexes 397/3902/7261 each take tens of seconds),
+not by the count.
+
+## No parity row compiles a body that runs once
+
+`--mode jit` is the tiered rung: a body that runs once stays in the
+interpreter, so a lowering bug in a startup-only shape (the virtual-to-class
+`SafeCast` that crashed the game's first AOT launch, 2026-09-02) passes every
+parity row and only appears when AOT compiles everything. `tools/aot/smoke.sh`
+is the only check that executes such bodies compiled, and CI does not run it.
+Add an AOT lane to the test workflow; until then, a fix in the LLVM lowering
+is only proven by the smoke script.
+
+## The AOT object's symbol contract
+
+`link.sh` documents "exactly two global symbols"; the game's object exported
+19,911 -- the constant pool's `String_N`/`Int_N`/`Float_N` literals were
+created with default linkage because JIT promotion modules resolve them by
+name. Internalized in `finalize` for AOT only; verify with `nm -g <obj>`
+after any emitter change, since a collision with a library's symbol would
+surface as a wrong constant, not a link error.
+
+## Audit: LLVM lowerings that dereference a possibly-null Dynamic
+
+Two startup crashes in the game's first AOT session (2026-09-02) had one
+shape: HashLink defines the op on null (`hl_typeof(NULL)` is the void type;
+a virtual-to-class cast of null is null), the interpreter follows the
+definition, and the LLVM lowering dereferenced without a test. Neither was
+ever executed compiled before AOT, because both bodies run once. Fixed:
+`GetType` (null -> void descriptor) and `SafeCast` from a virtual (routed to
+`hlp_dyn_castp`). Still unaudited for the same class: `GetTID` on a type
+register that could be null, `ToVirtual`/`Ref`/`Unref` on null, `EnumIndex`
+on null, `ArraySize` on null under a non-HARRAY static type, and every
+`build_load(..., obj_ptr, ...)` at offset 0 in `function.rs`. The interpreter
+is the oracle for each; `tools/aot/smoke.sh` is the detector.
+
+## AOT conformance: run the unit suite per case through the emitter
+
+`~/.cache/ash-haxe-conformance/.../tests/unit/bin/unit.hl` emits once (8,688
+functions, ~6 min at O3), links against the static runtime, and its 1,195
+cases run with `--ash-only <case>` -- argv reaches `Sys.args()` under AOT. The
+first sweep (2026-09-03, before the six lowering fixes) found ~30 AOT-only
+failures in the first 547 cases; the panics cluster on `std/src/cast.rs:137`
+(Dynamic holding a raw scalar) and `std/src/types.rs:560` (`hlp_type_enum_eq`
+walking construct offsets into a 0x1 pointer). Make this the AOT lane in CI:
+it is the only compiled-once corpus, and every AOT-only failure is a minimal
+reproducer of an LLVM lowering divergence. Remaining after the fixes is
+whatever the second sweep reports.
+
+## LLVM lowering audit: still-open divergences from the interpreter
+
+From the 2026-09-03 audit, not yet fixed: shift counts >= 32 / negative are
+poison in LLVM (`shl/lshr/ashr` unmasked; hardware masks, so only constant
+folding diverges -- mask the count `& 31`/`& 63` like the interpreter);
+Int64 shifts with an I32 count produce an ill-typed shl (widen the count);
+`EnumIndex`/`EnumField`/`SetEnumField`, `CallMethod` (HOBJ), `CallClosure`,
+`VirtualClosure`, `GetTID`, `ArraySize`, `Unref`/`Setref`, `Field` on a
+virtual, and `GetArray`/`SetArray` all dereference a possibly-null register
+without a test where the interpreter returns null/0/no-op or throws; the
+interpreter's `Incr`/`Neg`/`Mul` on HUI8/HUI16 wrap at 32 bits where HashLink
+and LLVM wrap at the byte (interpreter-side).
+
+## Every de-SSA consumer must implement a block's phis as ONE parallel copy
+
+Found 2026-09-03 by the game's per-frame shader recompile: `emit_air_phi_edge`
+in the LLVM translator stored phi destinations one at a time, so a phi whose
+source is another phi's destination in the same block (what GVN produces from
+`prev = sl; sl = sl.next`) read the already-updated value. Fixed by loading
+all sources first. The opcode serializer sequentializes parallel copies with
+cycle breaking (serialize.rs "sequentialize parallel copies") and the SSA
+walker carries phi lanes in a buffer; add a test that every consumer agrees on
+a swap phi (`a = phi[.. b]`, `b = phi[.. a]`) and a chain phi, at every AIR
+level, so the next consumer cannot regress this.

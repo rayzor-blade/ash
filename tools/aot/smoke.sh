@@ -29,6 +29,8 @@ if [ ${#programs[@]} -eq 0 ]; then
     crates/ash/test/tests/test_basic.hl
     crates/ash/test/tests/test_stdlib.hl
     crates/ash/test/tests/bench_deltablue.hl
+    crates/ash/test/tests/test_safe_cast_virtual.hl
+    crates/ash/test/tests/test_gettype_null.hl
     # Anonymous structures. AOT baked a virtual type's `lookup` as null while
     # baking `indexes`, so the lazy-init guard never fired and every
     # hash-keyed field access failed -- Reflect.field and plain `dyn.name`

@@ -354,11 +354,10 @@ fn emit_aot(
             eprintln!(
                 "[ash] this program loads HDLLs, so it needs the SHARED runtime:\n\
                  [ash]   tools/aot/link.sh {} <out> <path/to/libhl.{}>\n\
-                 [ash] and the .hdll files must sit beside the binary.\n\
-                 [ash] NOTE: on macOS/arm64 that link currently fails -- the\n\
-                 [ash] object addresses runtime data directly rather than through\n\
-                 [ash] the GOT, which a dylib cannot satisfy. Linking the static\n\
-                 [ash] runtime instead builds, then crashes: the HDLL loads a\n\
+                 [ash] and the .hdll files must sit beside the binary, with the\n\
+                 [ash] runtime staged there under both names an HDLL may import\n\
+                 [ash] (libhl and libhl.1). Do not link the STATIC runtime into a\n\
+                 [ash] program that loads HDLLs: it builds, then the HDLL loads a\n\
                  [ash] second copy of the runtime and the two collectors meet.",
                 out.display(),
                 if cfg!(target_os = "macos") { "dylib" } else { "so" }

@@ -324,17 +324,76 @@ impl HLInterpreter {
         }
 
         match ins {
-            // The AIR walker is scalar; `unsupported_instr` refuses these
-            // before a function reaches here, so this arm is the belt to that
-            // braces rather than a path anything should take.
-            I::VecLoad { .. }
-            | I::VecStore { .. }
-            | I::VecSplat { .. }
-            | I::VecBinOp { .. }
-            | I::VecReduce { .. } => {
-                return Err(anyhow::anyhow!(
-                    "AIR walker reached a vector instruction"
-                ))
+            // ---- vectors, one lane at a time ---------------------------
+            // The interpreter is scalar, so a widened value lives in the
+            // frame's lane map and every vector form is a small loop over it.
+            // Slower than the scalar loop the widening replaced -- and that is
+            // the point: the same AIR has to RUN on every tier, or a widened
+            // function could not be deoptimized back to the interpreter.
+            I::VecLoad {
+                kind,
+                dst,
+                base,
+                index,
+                stride,
+            } => {
+                let lanes = prep.ir.values[dst.0 as usize].lanes as usize;
+                let idx0 = get!(index).as_i32();
+                let mut out = Vec::with_capacity(lanes);
+                for k in 0..lanes {
+                    let at = idx0 + (k as i32) * (*stride as i32);
+                    out.push(self.vec_lane_get(
+                        bc, func, func_idx, *kind, dst.0, base.0, index.0, at,
+                    )?);
+                }
+                self.stack.last_mut().unwrap().vec_lanes.insert(dst.0, out);
+            }
+            I::VecStore {
+                kind,
+                base,
+                index,
+                src,
+                stride,
+            } => {
+                let idx0 = get!(index).as_i32();
+                let lanes = self.lanes_of(src.0)?;
+                for (k, v) in lanes.iter().enumerate() {
+                    let at = idx0 + (k as i32) * (*stride as i32);
+                    self.vec_lane_set(
+                        bc, func, func_idx, *kind, src.0, base.0, index.0, at, *v,
+                    )?;
+                }
+            }
+            I::VecSplat { dst, src } => {
+                let n = prep.ir.values[dst.0 as usize].lanes as usize;
+                let v = get!(src);
+                self.stack
+                    .last_mut()
+                    .unwrap()
+                    .vec_lanes
+                    .insert(dst.0, vec![v; n]);
+            }
+            I::VecBinOp { op, dst, a, b } => {
+                let la = self.lanes_of(a.0)?;
+                let lb = self.lanes_of(b.0)?;
+                if la.len() != lb.len() {
+                    return Err(anyhow::anyhow!("VecBinOp lane count mismatch"));
+                }
+                let mut out = Vec::with_capacity(la.len());
+                for i in 0..la.len() {
+                    out.push(Self::scalar_binop(*op, la[i], lb[i])?);
+                }
+                self.stack.last_mut().unwrap().vec_lanes.insert(dst.0, out);
+            }
+            I::VecReduce { op, dst, src } => {
+                let lanes = self.lanes_of(src.0)?;
+                let mut acc = *lanes
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("VecReduce over an empty vector"))?;
+                for v in &lanes[1..] {
+                    acc = Self::scalar_binop(*op, acc, *v)?;
+                }
+                set!(dst, acc);
             }
             // ---- values -----------------------------------------------
             I::Param { dst, reg } => {
@@ -1152,5 +1211,180 @@ impl HLInterpreter {
                 Err(e)
             }
         }
+    }
+}
+
+impl HLInterpreter {
+    /// Lanes of a widened value in the current frame.
+    fn lanes_of(&self, v: u32) -> anyhow::Result<Vec<NanBoxedValue>> {
+        self.stack
+            .last()
+            .and_then(|f| f.vec_lanes.get(&v))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("v{v} has no lanes in this frame"))
+    }
+
+    /// Read one lane through the instruction's OWN registers.
+    ///
+    /// The scalar array path takes register indices, so the lane index is
+    /// written into the instruction's index register, the scalar op runs, and
+    /// both registers are put back. Borrowing the real registers rather than
+    /// inventing scratch slots keeps this correct for any register file the
+    /// shim happens to have.
+    #[allow(clippy::too_many_arguments)]
+    fn vec_lane_get(
+        &mut self,
+        bc: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        kind: air::v2::MemAccess,
+        dst: u32,
+        base: u32,
+        index: u32,
+        at: i32,
+    ) -> anyhow::Result<NanBoxedValue> {
+        let (saved_dst, saved_idx) = {
+            let f = self.stack.last().unwrap();
+            (f.registers.get(dst), f.registers.get(index))
+        };
+        self.stack
+            .last_mut()
+            .unwrap()
+            .registers
+            .set(index, NanBoxedValue::from_i32(at));
+        let r = match kind {
+            air::v2::MemAccess::Array => {
+                self.op_get_array(bc, func, func_idx, dst, base, index).map(|_| ())
+            }
+            k => {
+                let b = self.stack.last().unwrap().registers.get(base);
+                let val = Self::read_raw_lane(b, at, k, bc, func, dst);
+                self.stack.last_mut().unwrap().registers.set(dst, val);
+                Ok(())
+            }
+        };
+        let out = self.stack.last().unwrap().registers.get(dst);
+        {
+            let f = self.stack.last_mut().unwrap();
+            f.registers.set(dst, saved_dst);
+            f.registers.set(index, saved_idx);
+        }
+        r?;
+        Ok(out)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn vec_lane_set(
+        &mut self,
+        bc: &DecodedBytecode,
+        func: &HLFunction,
+        func_idx: usize,
+        kind: air::v2::MemAccess,
+        src: u32,
+        base: u32,
+        index: u32,
+        at: i32,
+        value: NanBoxedValue,
+    ) -> anyhow::Result<()> {
+        let (saved_src, saved_idx) = {
+            let f = self.stack.last().unwrap();
+            (f.registers.get(src), f.registers.get(index))
+        };
+        {
+            let f = self.stack.last_mut().unwrap();
+            f.registers.set(src, value);
+            f.registers.set(index, NanBoxedValue::from_i32(at));
+        }
+        let r = match kind {
+            air::v2::MemAccess::Array => {
+                self.op_set_array(bc, func, func_idx, base, index, src).map(|_| ())
+            }
+            k => {
+                let b = self.stack.last().unwrap().registers.get(base);
+                Self::write_raw_lane(b, at, k, value, bc, func, src);
+                Ok(())
+            }
+        };
+        {
+            let f = self.stack.last_mut().unwrap();
+            f.registers.set(src, saved_src);
+            f.registers.set(index, saved_idx);
+        }
+        r
+    }
+
+    /// The non-array read, mirroring the scalar `MemGet` arm exactly.
+    fn read_raw_lane(
+        b: NanBoxedValue,
+        idx: i32,
+        k: air::v2::MemAccess,
+        bc: &DecodedBytecode,
+        func: &HLFunction,
+        dst: u32,
+    ) -> NanBoxedValue {
+        if b.is_null() || b.is_void() || idx < 0 {
+            return NanBoxedValue::from_i32(0);
+        }
+        let addr = (b.as_ptr() as *const u8).wrapping_add(idx as usize);
+        match k {
+            air::v2::MemAccess::I8 => NanBoxedValue::from_i32(unsafe { *addr as i32 }),
+            air::v2::MemAccess::I16 => {
+                NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
+            }
+            _ => Self::read_value_from_ptr(addr, bc.types[func.regs[dst as usize].0].kind),
+        }
+    }
+
+    /// The non-array write, mirroring the scalar `MemSet` arm.
+    fn write_raw_lane(
+        b: NanBoxedValue,
+        idx: i32,
+        k: air::v2::MemAccess,
+        value: NanBoxedValue,
+        bc: &DecodedBytecode,
+        func: &HLFunction,
+        src: u32,
+    ) {
+        if b.is_null() || b.is_void() || idx < 0 {
+            return;
+        }
+        let addr = (b.as_ptr() as *mut u8).wrapping_add(idx as usize);
+        match k {
+            air::v2::MemAccess::I8 => unsafe { *addr = value.as_i32() as u8 },
+            air::v2::MemAccess::I16 => unsafe { *(addr as *mut u16) = value.as_i32() as u16 },
+            _ => unsafe {
+                Self::write_value_at(addr, bc.types[func.regs[src as usize].0].kind, value)
+            },
+        }
+    }
+
+    /// The scalar combine used by `VecBinOp` and `VecReduce`.
+    fn scalar_binop(
+        op: air::v2::BinOp,
+        a: NanBoxedValue,
+        b: NanBoxedValue,
+    ) -> anyhow::Result<NanBoxedValue> {
+        use crate::values::{FloatBinOp, IntBinOp};
+        use air::v2::BinOp as B;
+        let r = match op {
+            B::Add => a
+                .binary_int_op(b, IntBinOp::Add)
+                .or_else(|| a.binary_float_op(b, FloatBinOp::Add)),
+            B::Sub => a
+                .binary_int_op(b, IntBinOp::Sub)
+                .or_else(|| a.binary_float_op(b, FloatBinOp::Sub)),
+            B::Mul => a
+                .binary_int_op(b, IntBinOp::Mul)
+                .or_else(|| a.binary_float_op(b, FloatBinOp::Mul)),
+            B::SDiv => a
+                .binary_int_op(b, IntBinOp::SDiv)
+                .or_else(|| a.binary_float_op(b, FloatBinOp::SDiv)),
+            B::UDiv => a.binary_int_op(b, IntBinOp::UDiv),
+            B::And => a.binary_int_op(b, IntBinOp::And),
+            B::Or => a.binary_int_op(b, IntBinOp::Or),
+            B::Xor => a.binary_int_op(b, IntBinOp::Xor),
+            other => return Err(anyhow::anyhow!("unsupported vector op {other:?}")),
+        };
+        r.ok_or_else(|| anyhow::anyhow!("vector lane operands are not numeric"))
     }
 }

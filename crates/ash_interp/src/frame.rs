@@ -129,6 +129,19 @@ pub struct InterpreterFrame {
     pub registers: RegisterFile,
     /// Program counter: current opcode index within the function's ops
     pub pc: usize,
+    /// Lanes of the vector values this frame holds, by `ValueId`.
+    ///
+    /// The register file is one `NanBoxedValue` per value and the interpreter
+    /// is scalar, so a widened value has nowhere else to live. Empty for every
+    /// frame running a function the vectorizer did not touch, which is all of
+    /// them until one is -- the map is only allocated on first use.
+    ///
+    /// Lane-at-a-time execution is slower than the scalar loop it replaces,
+    /// and that is the right trade: the interpreter must be able to RUN a
+    /// vectorized function, so the same AIR works on every tier. Refusing
+    /// instead would mean a widened function could not be interpreted, and a
+    /// function that cannot fall back cannot be deoptimized.
+    pub vec_lanes: std::collections::HashMap<u32, Vec<NanBoxedValue>>,
     /// Active exception traps: (target_pc, exc_reg).
     /// target_pc is the absolute opcode index of the catch block.
     pub trap_stack: Vec<(usize, u32)>,
@@ -155,6 +168,7 @@ impl InterpreterFrame {
                 r
             },
             pc: 0,
+            vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
             self_returns: 0,
@@ -175,6 +189,7 @@ impl InterpreterFrame {
                 r
             },
             pc: 0,
+            vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
             self_returns: 0,

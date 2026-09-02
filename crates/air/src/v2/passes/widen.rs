@@ -60,6 +60,9 @@ pub enum Decline {
     /// The loop's limit is recomputed inside the loop, so the preheader
     /// cannot compute the vector trip count from it.
     LimitNotInvariant,
+    /// A byte-indexed access whose element width the embedder cannot name, so
+    /// there is no way to tell a contiguous walk from a strided one.
+    UnknownElementSize(TypeRef),
     NonUnitStride(i64),
     TooSmall(usize),
     /// The loop body writes a value the widening would have to keep scalar
@@ -213,8 +216,16 @@ fn check(
     if plan.body_size < opts.min_body {
         return Err(Decline::TooSmall(plan.body_size));
     }
-    if let Some(a) = plan.accesses.iter().find(|a| a.stride != 1) {
-        return Err(Decline::NonUnitStride(a.stride));
+    // Contiguity, not the number 1. An `Array` access indexes in elements so
+    // a step of 1 is back-to-back; every other kind indexes in BYTES, where
+    // back-to-back is the element's own width -- HL scales those itself, so
+    // `a[i]` on an Int array arrives here as `i << 2` and steps by 4.
+    for a in &plan.accesses {
+        match a.contiguous_stride(info.type_size(a.elem)) {
+            Some(want) if want == a.stride => {}
+            Some(_) => return Err(Decline::NonUnitStride(a.stride)),
+            None => return Err(Decline::UnknownElementSize(a.elem)),
+        }
     }
     // A constant trip count that divides the width needs no remainder
     // handling at all. Anything else gets a scalar epilogue, which is where
@@ -490,6 +501,15 @@ fn widen_loop(
         .filter(|a| a.is_store)
         .map(|a| a.at)
         .collect();
+    // The step each access actually walks, which `check` has already proven
+    // is the contiguous one for its kind and element width. Taking it from
+    // the analysis rather than a table keyed on the kind is what lets a
+    // byte-indexed access carry its element's width instead of a guess.
+    let access_stride: HashMap<ValueId, u32> = plan
+        .accesses
+        .iter()
+        .map(|a| (a.at, a.stride.unsigned_abs() as u32))
+        .collect();
     for b in body.iter().copied().collect::<Vec<_>>() {
         let mut out: Vec<Instr> = Vec::new();
         for ins in f.blocks[b.idx()].instrs.clone() {
@@ -504,7 +524,7 @@ fn widen_loop(
                     dst: widened[dst],
                     base: *base,
                     index: *index,
-                    stride: lane_stride(*kind),
+                    stride: access_stride[dst],
                 }),
                 Instr::MemSet {
                     kind,
@@ -521,7 +541,7 @@ fn widen_loop(
                         base: *base,
                         index: *index,
                         src: ws,
-                        stride: lane_stride(*kind),
+                        stride: access_stride[src],
                     });
                 }
                 Instr::BinOp { op, dst, a, b: rb } if widened.contains_key(dst) => {
@@ -799,17 +819,6 @@ fn retime_induction(
             }
         }
         return;
-    }
-}
-
-/// Index units between lanes, in whatever unit the access kind indexes by.
-fn lane_stride(kind: MemAccess) -> u32 {
-    match kind {
-        MemAccess::I8 => 1,
-        MemAccess::I16 => 2,
-        // `Mem` indexes in bytes; `Array` in elements.
-        MemAccess::Mem => 4,
-        MemAccess::Array => 1,
     }
 }
 

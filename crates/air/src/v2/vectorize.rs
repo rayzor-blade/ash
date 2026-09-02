@@ -111,9 +111,32 @@ pub struct Access {
     /// identity for reporting.
     pub at: ValueId,
     pub base: ValueId,
-    /// Address step per iteration, in elements. 1 is contiguous.
+    /// Address step per iteration, in whatever unit `kind` indexes: elements
+    /// for [`MemAccess::Array`], BYTES for the rest. Contiguity is therefore
+    /// a question about the kind and the element width, not about the number
+    /// 1 — see [`Access::contiguous_stride`].
     pub stride: i64,
     pub is_store: bool,
+    /// How the address is formed, which is what says whether `stride` counts
+    /// elements or bytes.
+    pub kind: MemAccess,
+    /// The type of the value loaded or stored, for its byte width.
+    pub elem: TypeRef,
+}
+
+impl Access {
+    /// The stride this access would have if it walked its elements back to
+    /// back, given their width in bytes. `None` when the width is unknown,
+    /// which is a refusal rather than a guess: reading it wrong means a
+    /// vector that covers memory the loop never touched.
+    pub fn contiguous_stride(&self, elem_bytes: Option<u32>) -> Option<i64> {
+        match self.kind {
+            MemAccess::Array => Some(1),
+            MemAccess::I8 => Some(1),
+            MemAccess::I16 => Some(2),
+            MemAccess::Mem => elem_bytes.map(i64::from),
+        }
+    }
 }
 
 /// The exit test that bounds the induction variable.
@@ -339,7 +362,7 @@ fn analyze_loop(
     }
 
     // ---- body instructions -------------------------------------------------
-    let evo = evolutions(f, &in_loop, &plan);
+    let evo = evolutions(f, &in_loop, &plan, &consts);
     for b in &lp.blocks {
         for ins in &f.blocks[b.idx()].instrs {
             classify_instr(f, ins, &evo, &consts, &mut plan);
@@ -465,6 +488,7 @@ fn evolutions(
     f: &Function,
     in_loop: &HashSet<BlockId>,
     plan: &LoopPlan,
+    consts: &HashMap<ValueId, i64>,
 ) -> HashMap<ValueId, Evolution> {
     let mut evo: HashMap<ValueId, Evolution> = HashMap::new();
     if let Some((iv, stride)) = plan.induction {
@@ -487,7 +511,101 @@ fn evolutions(
             }
         }
     }
+
+    // Then walk the affine ones back out of Varying. An index is almost never
+    // the induction variable itself: HL scales it to bytes (`i << 2`) or
+    // offsets it (`i + k`), and treating the result as varying refused every
+    // byte-indexed array access in the corpus -- the second most common
+    // refusal after a call in the body.
+    //
+    // Only forms whose step is EXACTLY derivable are taken, and only from a
+    // step already known, so this cannot invent an affine value: repeated to
+    // a fixed point because a chain like `(i + k) << 2` needs its inner term
+    // classified first.
+    let order: Vec<(BlockId, usize)> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(bi, _)| in_loop.contains(&BlockId(*bi as u32)))
+        .flat_map(|(bi, blk)| (0..blk.instrs.len()).map(move |k| (BlockId(bi as u32), k)))
+        .collect();
+    loop {
+        let mut grew = false;
+        for &(b, k) in &order {
+            let ins = &f.blocks[b.idx()].instrs[k];
+            let Some(dst) = ins.dst() else { continue };
+            if !matches!(evo_of(&evo, dst), Evolution::Varying) {
+                continue;
+            }
+            let Some(step) = affine_step(ins, &evo, consts) else {
+                continue;
+            };
+            evo.insert(dst, Evolution::Induction { stride: step });
+            grew = true;
+        }
+        if !grew {
+            break;
+        }
+    }
     evo
+}
+
+/// The per-iteration step of `ins`'s result, when it is an exact affine
+/// function of something whose step is already known.
+///
+/// A step of 0 is invariant and a non-zero one is an induction; either way it
+/// is a value whose address arithmetic the widener can reason about. Anything
+/// not listed -- a multiply by a value that is not a known constant, a shift
+/// by a varying amount, division -- has no exact step and stays varying.
+fn affine_step(
+    ins: &Instr,
+    evo: &HashMap<ValueId, Evolution>,
+    consts: &HashMap<ValueId, i64>,
+) -> Option<i64> {
+    // The step of an operand, and its value when it is a known constant.
+    let step = |v: ValueId| match evo_of(evo, v) {
+        Evolution::Induction { stride } => Some(stride),
+        Evolution::Invariant => Some(0),
+        Evolution::Varying => None,
+    };
+    let konst = |v: ValueId| consts.get(&v).copied();
+    match ins {
+        Instr::Copy { src, .. } => step(*src),
+        Instr::UnOp {
+            op: UnOp::Incr,
+            src,
+            ..
+        } => step(*src),
+        Instr::UnOp {
+            op: UnOp::Decr,
+            src,
+            ..
+        } => step(*src),
+        Instr::UnOp {
+            op: UnOp::Neg,
+            src,
+            ..
+        } => step(*src).and_then(|s| s.checked_neg()),
+        Instr::BinOp { op, a, b, .. } => match op {
+            BinOp::Add => step(*a)?.checked_add(step(*b)?),
+            BinOp::Sub => step(*a)?.checked_sub(step(*b)?),
+            // A scale is affine only against a constant: `i * k` steps by
+            // `stride * k`, but `i * j` for a varying `j` is quadratic.
+            BinOp::Mul => match (step(*a), konst(*a), step(*b), konst(*b)) {
+                (Some(sa), _, Some(0), Some(k)) => sa.checked_mul(k),
+                (Some(0), Some(k), Some(sb), _) => sb.checked_mul(k),
+                _ => None,
+            },
+            BinOp::Shl => match (step(*a), step(*b), konst(*b)) {
+                (Some(sa), Some(0), Some(k)) if (0..63).contains(&k) => {
+                    sa.checked_mul(1i64 << k)
+                }
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn evo_of(evo: &HashMap<ValueId, Evolution>, v: ValueId) -> Evolution {
@@ -533,7 +651,10 @@ fn classify_instr(
 
         // Memory: widenable exactly when the address walks a constant stride.
         Instr::MemGet {
-            dst, base, index, ..
+            kind,
+            dst,
+            base,
+            index,
         } => {
             match address_stride(*index, evo, consts) {
                 Some(stride) => plan.accesses.push(Access {
@@ -541,18 +662,25 @@ fn classify_instr(
                     base: *base,
                     stride,
                     is_store: false,
+                    kind: *kind,
+                    elem: f.value_ty(*dst),
                 }),
                 None => plan.refusals.push(Refusal::NonAffineAccess(*dst)),
             }
         }
         Instr::MemSet {
-            base, index, src, ..
+            kind,
+            base,
+            index,
+            src,
         } => match address_stride(*index, evo, consts) {
             Some(stride) => plan.accesses.push(Access {
                 at: *src,
                 base: *base,
                 stride,
                 is_store: true,
+                kind: *kind,
+                elem: f.value_ty(*src),
             }),
             None => plan.refusals.push(Refusal::NonAffineAccess(*src)),
         },
@@ -582,7 +710,6 @@ fn classify_instr(
             .refusals
             .push(Refusal::UnwidenableInstr(instr_name(other))),
     }
-    let _ = f;
 }
 
 /// The per-iteration step of an address, when it has one.

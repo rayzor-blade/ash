@@ -245,6 +245,19 @@ pub trait ModuleInfo {
         false
     }
 
+    /// How many bytes one value of `ty` occupies in memory.
+    ///
+    /// Needed wherever an index is in BYTES and contiguity is a question
+    /// about the element width -- a `MemGet` at `i << 2` walks its elements
+    /// back to back only if they are four bytes wide. `None` -- the default
+    /// -- means the embedder cannot say, and a pass that needs it refuses
+    /// rather than assuming: assuming here means a vector that covers memory
+    /// the loop never touched.
+    fn type_size(&self, ty: TypeRef) -> Option<u32> {
+        let _ = ty;
+        None
+    }
+
     /// The function a virtual call on `ty` at proto slot `slot` reaches, when
     /// the embedder can name one.
     ///

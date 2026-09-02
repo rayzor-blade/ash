@@ -171,6 +171,18 @@ impl<'b> ModuleInfo for AshModule<'b> {
         self.bc.ints.len()
     }
 
+    fn type_size(&self, ty: TypeRef) -> Option<u32> {
+        // The array stride, not `layout::type_size`: the two differ exactly
+        // where a size is meaningless (HVOID, HPACKED, both zero there), and
+        // an element width of zero would make every lane the same address.
+        self.bc
+            .types
+            .get(ty.0 as usize)
+            .map(|t| crate::layout::array_elem_size(t.kind))
+            .filter(|n| *n > 0)
+            .map(|n| n as u32)
+    }
+
     fn is_float(&self, ty: TypeRef) -> bool {
         self.bc
             .types

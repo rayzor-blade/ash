@@ -103,8 +103,30 @@ fn main() -> anyhow::Result<()> {
                     Err(d) => *declines.entry(format!("{d:?}")).or_default() += 1,
                 }
             }
+            // ASH_VEC_ONLY=<substring>: spell out every loop of the
+            // functions whose name matches, refusals and all. The tallies
+            // answer "how much"; this answers "why not THIS loop", which is
+            // the question you have when a loop you wrote does not widen.
+            let focus = std::env::var("ASH_VEC_ONLY")
+                .ok()
+                .filter(|pat| f.name().contains(pat.as_str()));
             for p in &plans {
                 loops += 1;
+                if focus.is_some() {
+                    println!(
+                        "  [{} findex={}] loop@b{} body={} accesses={} {}",
+                        f.name(),
+                        f.findex,
+                        p.header.0,
+                        p.body_size,
+                        p.accesses.len(),
+                        if p.vectorizable() {
+                            "VECTORIZABLE".to_string()
+                        } else {
+                            format!("{:?}", p.refusals)
+                        }
+                    );
+                }
                 // Does this loop touch an HL array at all?
                 let lp_blocks = blocks_of(p.header);
                 let touches_array = lp_blocks.iter().any(|bid| {

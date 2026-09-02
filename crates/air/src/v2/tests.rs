@@ -5866,10 +5866,14 @@ fn widen_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 struct WidenInfo;
 impl ModuleInfo for WidenInfo {
     fn int_value(&self, idx: usize) -> Option<i32> {
-        [0i32, 16, 1, 7].get(idx).copied()
+        [0i32, 16, 1, 7, 2].get(idx).copied()
     }
     fn int_pool_len(&self) -> usize {
-        4
+        5
+    }
+    /// Every type in these fixtures is `t(3)`, HL's i32.
+    fn type_size(&self, _ty: TypeRef) -> Option<u32> {
+        Some(4)
     }
 }
 
@@ -6066,4 +6070,97 @@ fn a_runtime_length_loop_widens_with_a_scalar_epilogue() {
     });
     assert!(has_vec, "widened loop has no vector store:\n{}", f.dump());
     assert!(has_scalar, "no scalar remainder survived:\n{}", f.dump());
+}
+
+/// `for (i = 0; i < 16; i++) bytes[i << 2] = k;` — a BYTE-indexed store.
+///
+/// This is what an HL array write actually looks like: the index is scaled to
+/// bytes before it reaches memory, so the address steps by 4 and the value
+/// that indexes it is not the induction variable but a shift of it.
+fn widen_byte_index_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 bytes r1 i r2 limit r3 step r4 k r5 shift r6 addr
+    let regs = vec![t(9), t(3), t(3), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Int { dst: Reg(5), ptr: RefInt(4) },   // shift = 2
+        // r6 is written every iteration and read in the same one, but a
+        // register with no definition before the loop still gets a header phi
+        // -- which reads as a loop-carried value.
+        Opcode::Int { dst: Reg(6), ptr: RefInt(0) },
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 4 },
+        Opcode::Shl { dst: Reg(6), a: Reg(1), b: Reg(5) },
+        Opcode::SetMem { bytes: Reg(0), index: Reg(6), src: Reg(4) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -5 },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    (ops, regs)
+}
+
+/// Lower and clear dead code first. `r6` holds the scaled index, which SSA
+/// construction gives a header phi because the register is defined in the
+/// loop -- a phi nothing reads, and one the real pipeline deletes long before
+/// the widener sees it. Without that step this fixture measures the absence
+/// of DCE rather than the affine analysis.
+fn cleaned_byte_index_fixture(ops: &[Opcode], regs: &[TypeRef]) -> Function {
+    let mut f = lower_with(ops, regs, &WidenInfo).expect("lower");
+    let pm = super::passes::PassManager::with_passes(vec![Box::new(
+        super::passes::dce::DeadCodeElim,
+    )]);
+    pm.run(&mut f).expect("dce");
+    f
+}
+
+#[test]
+fn a_byte_scaled_index_is_affine() {
+    let (ops, regs) = widen_byte_index_fixture();
+    let f = cleaned_byte_index_fixture(&ops, &regs);
+    let plans = super::vectorize::analyze_with(
+        &f,
+        &super::vectorize::VecOptions::default(),
+        &|i| WidenInfo.int_value(i),
+    );
+    let p = plans
+        .iter()
+        .find(|p| !p.accesses.is_empty())
+        .unwrap_or_else(|| panic!("no loop with an access:\n{}", f.dump()));
+    // `i << 2` steps by 4 bytes, which for a 4-byte element is contiguous.
+    assert_eq!(p.accesses[0].stride, 4, "{:?}", p.accesses);
+    assert_eq!(
+        p.accesses[0].contiguous_stride(Some(4)),
+        Some(4),
+        "a 4-byte element walked 4 bytes at a time is contiguous"
+    );
+    assert!(p.vectorizable(), "refusals: {:?}", p.refusals);
+}
+
+#[test]
+fn a_byte_scaled_loop_widens_to_the_element_stride() {
+    let (ops, regs) = widen_byte_index_fixture();
+    let mut f = cleaned_byte_index_fixture(&ops, &regs);
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(
+        stats.replaced,
+        1,
+        "not widened; declines: {:?}\n{}",
+        super::passes::widen::explain(&f, &WidenInfo),
+        f.dump()
+    );
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+    let stride = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .find_map(|i| match i {
+            Instr::VecStore { stride, .. } => Some(*stride),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no vector store:\n{}", f.dump()));
+    // The emitted stride is the element width, not a table keyed on the kind.
+    assert_eq!(stride, 4, "{}", f.dump());
 }

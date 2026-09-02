@@ -34,6 +34,6 @@ ssh "$host" "cd $dir && \
   export PATH=\$HOME/.cargo/bin:\$HOME/haxe:/snap/bin:\$PATH \
     LLVM_SYS_211_PREFIX=/usr/lib/llvm-22 \
     LIBCLANG_PATH=/usr/lib/llvm-21/lib \
-    RUSTFLAGS='-L native=\$HOME/linkfix' \
+    RUSTFLAGS=\"-L native=\$HOME/linkfix\" \
     CARGO_BUILD_JOBS=6 && \
   cargo build -p ash_std && cargo build -p ash"

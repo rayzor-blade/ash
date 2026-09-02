@@ -691,7 +691,9 @@ pub fn install_call_counts() -> Vec<(usize, u64)> {
 /// body ten thousand times. Verifier failures already reach stderr through
 /// LLVM's own printer, but without a findex attached, so they are hard to tie
 /// to anything.
-static DECLINES: Mutex<Option<HashMap<String, (u64, HashSet<usize>)>>> = Mutex::new(None);
+/// Per reason: how many declines, and which findexes.
+type DeclineTally = HashMap<String, (u64, HashSet<usize>)>;
+static DECLINES: Mutex<Option<DeclineTally>> = Mutex::new(None);
 
 fn record_decline(findex: usize, reason: &str) {
     // The head of the message is the shape; the tail is usually a symbol list

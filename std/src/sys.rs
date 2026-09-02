@@ -1259,6 +1259,7 @@ mod process_memory_tests {
 /// adjusted. `hlp_sys_time` remains the wall clock.
 // `tv_sec` and `tv_nsec` are i64 here and long elsewhere, so the casts are
 // redundant on this target and load-bearing on others.
+#[cfg(unix)]
 #[allow(clippy::unnecessary_cast)]
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
@@ -1267,6 +1268,18 @@ pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
         return 0; // upstream returns 0 rather than failing
     }
     ts.tv_sec as i64 * 1000 + ts.tv_nsec as i64 / 1_000_000
+}
+
+/// The same clock where `libc` has no `clock_gettime` -- Windows, which
+/// failed every CI job that compiled this crate. Monotonic since the first
+/// call: the origin is arbitrary upstream too, only the differences matter.
+#[cfg(not(unix))]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_sys_timestamp_ms() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as i64
 }
 
 /// Load a native plugin. Always false: ash installs no plugin hook.

@@ -5053,7 +5053,7 @@ impl HLInterpreter {
                                     self.recursion_osr_probes =
                                         self.recursion_osr_probes.wrapping_add(1);
                                     if self.hot_loops.contains(&(rec_findex, resume_pc)) {
-                                        if self.recursion_osr_probes % 128 == 0 {
+                                        if self.recursion_osr_probes.is_multiple_of(128) {
                                             self.late_osr_entry(
                                                 bytecode, func_idx, rec_findex, resume_pc,
                                             );

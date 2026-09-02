@@ -60,8 +60,10 @@ fn main() -> anyhow::Result<()> {
         // measuring on the transformed IR reports every success as a refusal.
         // The second is the real pipeline, and reports only what the pass
         // itself recorded doing.
-        let mut no_widen = air::v2::passes::PassOptions::default();
-        no_widen.widen = false;
+        let no_widen = air::v2::passes::PassOptions {
+            widen: false,
+            ..air::v2::passes::PassOptions::default()
+        };
         let level = air_pipeline::default_level();
 
         for f in &bc.functions {

@@ -9998,7 +9998,7 @@ fn registered_bodies() -> &'static std::sync::Mutex<std::collections::HashSet<us
 /// last body of a batch has no successor here and is left unsized; the map
 /// bounds it by whatever is registered above it.
 fn register_batch(mut found: Vec<(usize, usize)>, how: &str) {
-    found.sort_by_key(|&(_, a)| a);
+    found.sort_unstable_by_key(|&(_, a)| a);
     for i in 0..found.len() {
         let (fi, a) = found[i];
         let size = found.get(i + 1).map_or(0, |&(_, n)| n - a);

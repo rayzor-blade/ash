@@ -622,6 +622,7 @@ fn cond_opcode(cond: CondKind, a: Reg, b: Option<Reg>) -> Result<Opcode> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_instr(
     f: &Function,
     ins: &Instr,

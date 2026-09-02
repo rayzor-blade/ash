@@ -485,7 +485,7 @@ const MACHINE_VECTOR_BYTES: u32 = 16;
 /// whose width nobody can state.
 fn lanes_fit(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
     match size {
-        Some(bytes) if bytes * VF as u32 <= MACHINE_VECTOR_BYTES => Ok(()),
+        Some(bytes) if u64::from(bytes) * (VF as u64) <= u64::from(MACHINE_VECTOR_BYTES) => Ok(()),
         Some(_) => Err(Decline::LaneTooWide(ty)),
         None => Err(Decline::UnknownElementSize(ty)),
     }
@@ -516,7 +516,7 @@ fn widen_loop(
     // remainder, and the remainder runs scalar. The copy has to be taken
     // BEFORE anything below touches the body -- it is a copy of the scalar
     // loop, guards and all.
-    let epilogue = if trips.map_or(true, |t| t % VF as i64 != 0) {
+    let epilogue = if !trips.is_some_and(|t| t % VF as i64 == 0) {
         Some(prepare_epilogue(f, plan, iv)?)
     } else {
         None

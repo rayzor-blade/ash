@@ -3212,8 +3212,8 @@ impl ImmixAllocator {
             // a 680MB live set is millions of atomics for no ordering anyone
             // observes.
             if touched {
-                for word_index in 0..MARK_WORDS {
-                    let word = std::mem::replace(block.mark_bits[word_index].get_mut(), 0);
+                for (word_index, slot) in block.mark_bits.iter_mut().enumerate() {
+                    let word = std::mem::replace(slot.get_mut(), 0);
                     // A word of 64 unmarked lines is the common case on a
                     // sparsely reached block; skipping it keeps the run that
                     // `run_start` is tracking open across the whole word.

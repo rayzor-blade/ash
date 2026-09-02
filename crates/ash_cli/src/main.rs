@@ -268,7 +268,7 @@ fn emit_aot(
             Err(e) => refused.push((*fx, format!("{e}"))),
         }
     }
-    slowest.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    slowest.sort_unstable_by_key(|&(t, _)| std::cmp::Reverse(t));
     let total: u128 = slowest.iter().map(|(t, _)| t).sum();
     eprintln!("[aot] lowering {}ms total; slowest:", total);
     for (took, fx) in slowest.iter().take(5) {

@@ -813,7 +813,7 @@ fn int_constants(f: &Function, pool: &dyn Fn(usize) -> Option<i32>) -> HashMap<V
                 // whose index differs from its value -- a step of 1 stored at
                 // index 2 reads as a stride of 2, and the loop is then
                 // refused for a non-unit stride it does not have.
-                let v = f.int_at(*idx, |i| pool(i)).map(|x| x as i64);
+                let v = f.int_at(*idx, pool).map(|x| x as i64);
                 m.insert(*dst, v.unwrap_or(*idx as i64));
             }
         }

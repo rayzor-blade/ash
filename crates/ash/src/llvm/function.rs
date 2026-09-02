@@ -527,20 +527,39 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// How many function bodies the shared module may hold before promotions
-    /// stop being compiled into it, or `None` to let it grow without bound.
+    /// stop being compiled into it. `ASH_PROMOTE_MODULE_CAP=off` removes it.
     ///
-    /// Off by default: capping at 1024 cut a game's shared middle end from
-    /// 61.9s to 24.4s, but the game hung twice on the capped arm and the
-    /// cause was never pinned down -- both hangs were also a second launch
-    /// seconds after a SIGKILL, with a person playing the run being timed, so
-    /// the evidence does not separate the cap from the confounds. Turning it
-    /// on wants an A/B where the game is driven the same way in both arms.
+    /// This was off by default because the game hung on the capped arm and
+    /// the cause was not known. It is known now: raising promotion throughput
+    /// reached the audio path sooner, and `ToSFloat` was storing an f64 into
+    /// a 4-byte HF32 register, which sent junk to `alSourcef(AL_GAIN)` and
+    /// threw out through the main loop (e865132). The cap was the trigger,
+    /// never the bug. With that fixed the same configuration ran a full
+    /// session clean.
     fn promote_module_cap() -> Option<usize> {
+        /// Bodies the shared module may hold before promotions stop joining it.
+        ///
+        /// The shared path re-optimizes every body already in the module, so
+        /// its cost is the module's size and not the promoted function's:
+        /// measured on deltablue, 4ms at 10 bodies and 22-30ms at 38-39, for
+        /// roots of 16 to 44 AIR instructions with no relationship between
+        /// size and time. On a game, where the module reaches thousands, one
+        /// promotion cost 60s and the run spent 128.9s of its 170s compiling.
+        /// Forcing every promotion into its own module there took that to 1.0s
+        /// while optimizing MORE functions (55 against 37), and a player felt
+        /// the difference.
+        ///
+        /// `promotion_wants_full_module` asks whether a function would benefit
+        /// from being lowered beside its callees; it has no way to know what
+        /// that costs today. This is the other half of that decision. Below
+        /// the cap the module is small enough that the walk is cheap and the
+        /// inlining is worth having; above it, it is not.
+        const DEFAULT_CAP: usize = 256;
         static CAP: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-        *CAP.get_or_init(|| {
-            std::env::var("ASH_PROMOTE_MODULE_CAP")
-                .ok()
-                .and_then(|v| v.parse().ok())
+        *CAP.get_or_init(|| match std::env::var("ASH_PROMOTE_MODULE_CAP") {
+            Ok(v) if v == "off" => None,
+            Ok(v) => v.parse().ok(),
+            Err(_) => Some(DEFAULT_CAP),
         })
     }
 

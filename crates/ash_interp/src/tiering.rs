@@ -580,6 +580,55 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
         .contains(&findex)
 }
 
+/// Why the optimising tier turned a function down, tallied by reason.
+///
+/// `failed=24488` was the whole story a run told about deltablue, and a count
+/// that large is not 24488 different problems -- it was a handful of findexes
+/// re-proposed until the program ended. A reason with a count beside it says
+/// which, and whether the tier is refusing one pathological body or the same
+/// body ten thousand times. Verifier failures already reach stderr through
+/// LLVM's own printer, but without a findex attached, so they are hard to tie
+/// to anything.
+static DECLINES: Mutex<Option<HashMap<String, (u64, HashSet<usize>)>>> = Mutex::new(None);
+
+fn record_decline(findex: usize, reason: &str) {
+    // The head of the message is the shape; the tail is usually a symbol list
+    // or an address that would make every entry unique and the tally useless.
+    let key: String = reason.split(&[':', '('][..]).next().unwrap_or(reason).trim().to_string();
+    let mut guard = match DECLINES.lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    let e = map.entry(key).or_insert((0, HashSet::new()));
+    e.0 += 1;
+    e.1.insert(findex);
+}
+
+/// Render the decline tally, most frequent first. `None` when nothing declined.
+pub fn decline_report() -> Option<String> {
+    let guard = DECLINES.lock().ok()?;
+    let map = guard.as_ref()?;
+    if map.is_empty() {
+        return None;
+    }
+    let mut rows: Vec<_> = map.iter().collect();
+    rows.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    let mut out = String::from("[tiered] declines by reason:\n");
+    for (reason, (n, fns)) in rows.iter().take(8) {
+        let mut ids: Vec<_> = fns.iter().copied().collect();
+        ids.sort_unstable();
+        let shown: Vec<String> = ids.iter().take(6).map(|f| f.to_string()).collect();
+        out.push_str(&format!(
+            "[tiered]   {n:>7} x  {reason}  ({} findex: {}{})\n",
+            ids.len(),
+            shown.join(","),
+            if ids.len() > 6 { ", ..." } else { "" }
+        ));
+    }
+    Some(out)
+}
+
 /// This thread's OS id, for the tier log below.
 ///
 /// `pthread_self` has no Windows counterpart, and the id is only ever read by
@@ -676,7 +725,25 @@ fn tiered_compile_tier_inner(
     }
     let code = match (ctx.mode, tier) {
         (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
-        (TierMode::Llvm, 0) => compile_with_llvm(ctx, 0, findex, may_block, Some(bead)),
+        (TierMode::Llvm, 0) => {
+            // Same memo the Auto tier-1 arm keeps, and for the same reason:
+            // the compile that declined once declines the same way every
+            // time. Only that arm consulted it, so with the ladder pinned to
+            // this rung a declining findex was recompiled on every proposal
+            // -- deltablue attempted 24514 promotions and failed 24488 of
+            // them, against 49 attempts and no failures on Cranelift, and the
+            // retries were most of a 1777ms wall time whose compiled code runs
+            // for a fraction of it.
+            if ctx
+                .llvm_failed
+                .lock()
+                .expect("llvm_failed mutex poisoned")
+                .contains(&findex)
+            {
+                return std::ptr::null_mut();
+            }
+            compile_with_llvm(ctx, 0, findex, may_block, Some(bead))
+        }
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
@@ -745,11 +812,24 @@ fn tiered_compile_tier_inner(
             }
             compile_with_llvm(ctx, 1, findex, may_block, Some(bead))
         }
-        _ => std::ptr::null_mut(),
+        _ => {
+            // Not a rung this mode has. With the ladder pinned there is only
+            // tier 0, but the broker proposes tier 1 anyway, and counting
+            // those as failures made the summary report 24488 of them on
+            // deltablue where exactly 13 compiles declined -- 99.8% noise, in
+            // the one number that says whether the tier is working. Return
+            // without counting: no compile was attempted, so nothing failed.
+            return std::ptr::null_mut();
+        }
     };
-    if code.is_null() {
-        ctx.failed.fetch_add(1, Ordering::Relaxed);
-    }
+    // `failed` is incremented where a compile actually declines, beside
+    // `record_decline`, NOT here. A null return also means "not now": the
+    // module lock was held, or a compile for this findex was already in
+    // flight, or the bead was retired. Counting those made deltablue report
+    // 16633 failures against 13 real declines, and the number moved with how
+    // often the broker proposed rather than with anything going wrong -- so
+    // the one metric that says whether the tier works was reporting
+    // contention.
     code
 }
 
@@ -1678,6 +1758,8 @@ pub(crate) fn compile_with_llvm(
                 .lock()
                 .expect("llvm_failed mutex poisoned")
                 .insert(findex);
+            record_decline(findex, &reason);
+            ctx.failed.fetch_add(1, Ordering::Relaxed);
             std::ptr::null_mut()
         }
     }

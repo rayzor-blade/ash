@@ -289,7 +289,7 @@ mod stack;
 use instrument::CompileBlocking;
 
 use crate::tiering::env_flag;
-pub use crate::tiering::{TierMode, TierPreset, TieredConfig, TieredStats};
+pub use crate::tiering::{decline_report, TierMode, TierPreset, TieredConfig, TieredStats};
 use crate::tiering::*;
 
 struct HlpName<'a>(&'a str);

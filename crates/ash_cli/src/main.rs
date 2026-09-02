@@ -1237,6 +1237,9 @@ fn run() -> Result<()> {
                         stats.cranelift_promotions,
                         stats.llvm_promotions
                     );
+                    if let Some(report) = ash_interp::interpreter::decline_report() {
+                        eprint!("{report}");
+                    }
                 }
             }
             if !cli.quiet {

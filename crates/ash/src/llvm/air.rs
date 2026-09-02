@@ -154,3 +154,101 @@ pub(crate) fn promotion_wants_full_module(
             .any(|b| calls_out(&ir.blocks[b.idx()], false))
     })
 }
+
+/// What the optimising tier could win on a function, before spending a
+/// compile to find out.
+///
+/// The tier decision has been driven by how often a function is CALLED, which
+/// says a function is hot but nothing about whether LLVM can do better than
+/// the tier below. Those are different questions, and measured on Linux the
+/// answer flips: LLVM beats Cranelift 2.0x on closure_call and 1.5x on
+/// method_call, and loses 8x on deltablue -- not because its code is worse
+/// there, but because the compile never amortizes. A gate needs both terms.
+///
+/// This is the first: an upper bound on what LLVM could win, from the AIR
+/// alone. It cannot see how long the program will run; the caller supplies
+/// that from invocation counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlvmCeiling {
+    /// Nothing here for LLVM that the tier below cannot do. A body with no
+    /// loop and nothing but a call is the clearest case: `GetGlobal; Call;
+    /// Ret` is three instructions whose generated code is the call. A game
+    /// spent 60 seconds promoting exactly that shape.
+    None,
+    /// Straight-line work worth optimizing, or a loop whose body is calls --
+    /// LLVM cannot see through a vtable any better than Cranelift can.
+    Low,
+    /// A loop LLVM has room to transform: licm, gvn, unrolling, and for a
+    /// vectorizable one the thing Cranelift has no answer to at all.
+    High,
+}
+
+/// `ASH_PROMOTE_GATE=0` disables the gate; unset or anything else keeps it.
+pub fn promotion_gate_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ASH_PROMOTE_GATE").map(|v| v != "0").unwrap_or(true))
+}
+
+/// The ceiling for one function, memoized: the AIR pipeline is not something
+/// to re-run per proposal, and a broker can propose the same findex tens of
+/// thousands of times.
+pub fn llvm_ceiling(bc: &DecodedBytecode, f: &HLFunction) -> LlvmCeiling {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static CACHE: Mutex<Option<HashMap<usize, LlvmCeiling>>> = Mutex::new(None);
+    let findex = f.findex as usize;
+    if let Ok(g) = CACHE.lock() {
+        if let Some(hit) = g.as_ref().and_then(|m| m.get(&findex).copied()) {
+            return hit;
+        }
+    }
+    let ceiling = compute_ceiling(bc, f);
+    if let Ok(mut g) = CACHE.lock() {
+        g.get_or_insert_with(HashMap::new).insert(findex, ceiling);
+    }
+    ceiling
+}
+
+fn compute_ceiling(bc: &DecodedBytecode, f: &HLFunction) -> LlvmCeiling {
+    use air::v2::ir::Instr;
+    // Undecidable means promote: refusing on a body we could not analyze
+    // would retire a function for a reason we cannot name, which is the
+    // failure mode the decline tally exists to make visible.
+    let Ok(opt) = air_pipeline::optimized(&AshModule::new(bc), f) else {
+        return LlvmCeiling::High;
+    };
+    let ir = &opt.ir;
+    let plans = air::v2::vectorize::analyze(ir, &air::v2::vectorize::VecOptions::default());
+    if plans.iter().any(|p| p.vectorizable()) {
+        return LlvmCeiling::High;
+    }
+    let is_call = |i: &Instr| {
+        matches!(
+            i,
+            Instr::Call { .. } | Instr::CallMethod { .. } | Instr::CallClosure { .. }
+        )
+    };
+    let instrs: usize = ir.blocks.iter().map(|b| b.instrs.len()).sum();
+    let calls: usize = ir
+        .blocks
+        .iter()
+        .map(|b| b.instrs.iter().filter(|i| is_call(i)).count())
+        .sum();
+    if plans.is_empty() {
+        // No loop. Whatever LLVM does here it does once per call, so the
+        // win is bounded by the body -- and a body that is mostly a call is
+        // bounded by the callee, which this promotion does not compile.
+        let non_call = instrs.saturating_sub(calls);
+        if non_call <= 8 {
+            return LlvmCeiling::None;
+        }
+        return LlvmCeiling::Low;
+    }
+    // A loop, but not a vectorizable one. Worth the optimiser when it has
+    // real work between the calls, not when every iteration is dispatch.
+    if calls * 3 >= instrs {
+        LlvmCeiling::Low
+    } else {
+        LlvmCeiling::High
+    }
+}

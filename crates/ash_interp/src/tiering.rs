@@ -713,6 +713,53 @@ fn tiered_compile_tier_inner(
             return installed.cast::<()>();
         }
     }
+    // What could LLVM win here, before paying a compile to find out? The
+    // call count says the function is hot; it says nothing about whether the
+    // top tier can beat the one below. A body with no loop and nothing but a
+    // call has no headroom at either tier -- a game spent 60s promoting
+    // `GetGlobal; Call; Ret`. Skipped when the ladder has no lower rung to
+    // fall back on, since interpreting it is worse than compiling it badly.
+    // Only where declining is survivable. `compiled_only` has no interpreter
+    // behind it -- every function MUST compile there, and returning null is
+    // reported as "JIT tier 0 failed to compile findex N" and kills the run,
+    // which is what the first cut of this gate did to every test in
+    // `--mode jit`.
+    if !ctx.compiled_only && (tier > 0 || ctx.mode == TierMode::Auto) {
+        // Through the same memo a declined compile uses, so a gated findex
+        // costs one lookup per proposal rather than a fresh decision. The
+        // first cut recorded a decline every time and a broker re-proposed
+        // deltablue's 21 gated functions 1051664 times -- a mutex and a
+        // string per proposal, and a tally reading a million where 21 is the
+        // number that means anything.
+        let already = ctx
+            .llvm_failed
+            .lock()
+            .map(|g| g.contains(&findex))
+            .unwrap_or(false);
+        if already {
+            return std::ptr::null_mut();
+        }
+        if ash_core::llvm::air::promotion_gate_enabled() {
+            if let Some(bc) = ctx.bytecode_ptr() {
+                if let Some(raw) = bc.functions.iter().find(|f| f.findex as usize == findex) {
+                    if ash_core::llvm::air::llvm_ceiling(bc, raw)
+                        == ash_core::llvm::air::LlvmCeiling::None
+                    {
+                        if let Ok(mut g) = ctx.llvm_failed.lock() {
+                            g.insert(findex);
+                        }
+                        record_decline(findex, "no LLVM headroom (gate)");
+                        if ctx.tier_log {
+                            eprintln!(
+                                "[tier] skip findex={findex} tier=llvm reason=no-headroom"
+                            );
+                        }
+                        return std::ptr::null_mut();
+                    }
+                }
+            }
+        }
+    }
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
     if std::env::var("ASH_TIER1_PROBE").is_ok() {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();

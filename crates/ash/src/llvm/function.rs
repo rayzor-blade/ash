@@ -1277,11 +1277,7 @@ impl<'ctx> JITModule<'ctx> {
             if let Ok(sym) = f.get_name().to_str() {
                 if let Ok(a) = self.execution_engine.get_function_address(sym) {
                     if a != 0 && a as u64 != addr as u64 {
-                        crate::profile::register_jit_code(
-                            findex as u32,
-                            crate::profile::Tier::Llvm,
-                            a as usize,
-                        );
+                        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, a as usize, 0);
                     }
                 }
             }
@@ -1291,7 +1287,7 @@ impl<'ctx> JITModule<'ctx> {
         // address range and reports the time as `unknown` -- which on nbody was
         // 59.5% of the run, i.e. all of the work OSR had just moved into
         // compiled code.
-        crate::profile::register_jit_code(findex as u32, crate::profile::Tier::Llvm, addr as usize);
+        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, addr as usize, 0);
         return Ok(addr as u64);
     }
 
@@ -9880,7 +9876,7 @@ impl<'ctx> JITModule<'ctx> {
         // Every LLVM-compiled entry point passes through here, in both the
         // whole-module and the tiered path, so this is the one place the
         // profiler needs to learn about generated code.
-        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, addr as usize, 0);
+        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::Entry, addr as usize, 0);
         if findex < self.functions_ptrs.len() {
             self.functions_ptrs[findex] = addr;
         }

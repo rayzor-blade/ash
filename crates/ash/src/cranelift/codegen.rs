@@ -89,16 +89,12 @@ pub fn reject_reason(f: &AirFunction) -> Option<String> {
 /// rather than silently miscompiling.
 fn instr_reject(i: &Instr) -> Option<&'static str> {
     match i {
-        // Cranelift has SIMD types and could take these, but the lowering is
-        // not written yet. Declining sends the function to LLVM, which is
-        // where a widened loop is worth the most anyway -- and an explicit
-        // refusal is what keeps `instr_reject` honest.
         Instr::VecLoad { .. }
         | Instr::VecStore { .. }
         | Instr::VecSplat { .. }
         | Instr::VecBinOp { .. }
-        | Instr::VecReduce { .. } => return Some("vector instruction"),
-        Instr::Param { .. }
+        | Instr::VecReduce { .. }
+        | Instr::Param { .. }
         | Instr::Copy { .. }
         | Instr::Int { .. }
         | Instr::Float { .. }
@@ -1150,9 +1146,17 @@ impl AirCodegen<'_, '_> {
 
     fn value_clif_ty(&self, v: ValueId) -> Result<Type> {
         if self.is_void(v) && self.use_counts[v.idx()] != 0 {
-            Ok(types::I64)
-        } else {
-            self.clif_ty(self.f.value_ty(v))
+            return Ok(types::I64);
+        }
+        let lane = self.clif_ty(self.f.value_ty(v))?;
+        // A vector value's machine type is its element type by its lane
+        // count. `ValueData.lanes` is 1 for everything the vectorizer has not
+        // widened, so this is the scalar answer everywhere else.
+        match self.f.value_lanes(v) {
+            0 | 1 => Ok(lane),
+            n => lane.by(n as u32).ok_or_else(|| {
+                anyhow!("no CLIF vector type for {n} lanes of {lane}")
+            }),
         }
     }
 
@@ -1436,6 +1440,28 @@ impl AirCodegen<'_, '_> {
                 self.emit_field_set(*obj, *obj_ty, *field, *src)?;
             }
 
+            Instr::VecLoad {
+                kind,
+                dst,
+                base,
+                index,
+                stride,
+            } => self.emit_vec_load(*kind, *dst, *base, *index, *stride)?,
+            Instr::VecStore {
+                kind,
+                base,
+                index,
+                src,
+                stride,
+            } => self.emit_vec_store(*kind, *base, *index, *src, *stride)?,
+            Instr::VecSplat { dst, src } => {
+                let ty = self.value_clif_ty(*dst)?;
+                let scalar = self.get(*src)?;
+                let v = self.b.ins().splat(ty, scalar);
+                self.def(*dst, v)?;
+            }
+            Instr::VecBinOp { op, dst, a, b } => self.emit_binop(*op, *dst, *a, *b)?,
+            Instr::VecReduce { op, dst, src } => self.emit_vec_reduce(*op, *dst, *src)?,
             Instr::MemGet {
                 kind,
                 dst,
@@ -1936,6 +1962,113 @@ impl AirCodegen<'_, '_> {
         })
     }
 
+    /// Address of the first lane, shared by the vector load and store.
+    ///
+    /// The vector is contiguous -- the analysis refuses anything else, and
+    /// `stride` records the step it proved -- so one wide access at the base
+    /// address covers every lane.
+    fn vec_addr(
+        &mut self,
+        kind: MemAccess,
+        base: ValueId,
+        index: ValueId,
+        elem_bits: u32,
+        stride: u32,
+    ) -> Result<(Value, i32)> {
+        let vbase = self.get(base)?;
+        let idx = self.index_as_addr(index)?;
+        Ok(match kind {
+            MemAccess::Mem | MemAccess::I8 | MemAccess::I16 => {
+                if stride as u32 != elem_bits / 8 {
+                    bail!("vector access stride {stride} is not contiguous for {elem_bits}-bit lanes");
+                }
+                (self.b.ins().iadd(vbase, idx), 0)
+            }
+            MemAccess::Array => {
+                if stride != 1 {
+                    bail!("vector array access stride {stride} is not contiguous");
+                }
+                let byte = self.b.ins().imul_imm(idx, (elem_bits / 8) as i64);
+                (
+                    self.b.ins().iadd(vbase, byte),
+                    crate::layout::VARRAY_DATA_OFFSET,
+                )
+            }
+        })
+    }
+
+    fn emit_vec_load(
+        &mut self,
+        kind: MemAccess,
+        dst: ValueId,
+        base: ValueId,
+        index: ValueId,
+        stride: u32,
+    ) -> Result<()> {
+        let ty = self.value_clif_ty(dst)?;
+        let (addr, off) = self.vec_addr(kind, base, index, ty.lane_bits(), stride)?;
+        let v = self.b.ins().load(ty, MemFlagsData::trusted(), addr, off);
+        self.def(dst, v)
+    }
+
+    fn emit_vec_store(
+        &mut self,
+        kind: MemAccess,
+        base: ValueId,
+        index: ValueId,
+        src: ValueId,
+        stride: u32,
+    ) -> Result<()> {
+        let ty = self.value_clif_ty(src)?;
+        let (addr, off) = self.vec_addr(kind, base, index, ty.lane_bits(), stride)?;
+        let v = self.get(src)?;
+        self.b.ins().store(MemFlagsData::trusted(), v, addr, off);
+        Ok(())
+    }
+
+    /// Fold a vector's lanes into a scalar by extracting and combining.
+    ///
+    /// Cranelift has no general horizontal reduction, and the extract-and-
+    /// combine tree is what its backends pattern-match anyway.
+    fn emit_vec_reduce(&mut self, op: BinOp, dst: ValueId, src: ValueId) -> Result<()> {
+        let vty = self.value_clif_ty(src)?;
+        let lanes = vty.lane_count();
+        if lanes == 0 {
+            bail!("VecReduce over an empty vector");
+        }
+        let v = self.get(src)?;
+        let mut acc = self.b.ins().extractlane(v, 0);
+        for lane in 1..lanes {
+            let e = self.b.ins().extractlane(v, lane as u8);
+            acc = self.combine_scalar(op, acc, e)?;
+        }
+        self.def(dst, acc)
+    }
+
+    /// One combine step of a reduction, on scalars.
+    fn combine_scalar(&mut self, op: BinOp, a: Value, b: Value) -> Result<Value> {
+        let ty = self.b.func.dfg.value_type(a);
+        Ok(if ty.is_float() {
+            match op {
+                BinOp::Add => self.b.ins().fadd(a, b),
+                BinOp::Sub => self.b.ins().fsub(a, b),
+                BinOp::Mul => self.b.ins().fmul(a, b),
+                BinOp::SDiv | BinOp::UDiv => self.b.ins().fdiv(a, b),
+                _ => bail!("unsupported float reduction {op:?}"),
+            }
+        } else {
+            match op {
+                BinOp::Add => self.b.ins().iadd(a, b),
+                BinOp::Sub => self.b.ins().isub(a, b),
+                BinOp::Mul => self.b.ins().imul(a, b),
+                BinOp::And => self.b.ins().band(a, b),
+                BinOp::Or => self.b.ins().bor(a, b),
+                BinOp::Xor => self.b.ins().bxor(a, b),
+                _ => bail!("unsupported integer reduction {op:?}"),
+            }
+        })
+    }
+
     fn emit_mem_get(
         &mut self,
         kind: MemAccess,
@@ -2422,7 +2555,7 @@ impl AirCodegen<'_, '_> {
         if ta != tb {
             bail!("mismatched operand types {ta}/{tb}");
         }
-        let r = if ta.is_float() {
+        let r = if ta.lane_type().is_float() {
             match op {
                 BinOp::Add => self.b.ins().fadd(va, vb),
                 BinOp::Sub => self.b.ins().fsub(va, vb),

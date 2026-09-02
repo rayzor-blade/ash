@@ -505,10 +505,12 @@ benches still reach tier=llvm, because their tier-1 queues before any attach;
 the exposure is a header that turns hot late at tier 0. The fix belongs in
 beadie: promotion state and OSR-table versioning want separate counters.
 
-### The gate abstains under ASH_AIR=v2, because it cannot see there
+### The gate abstains under the SSA interpreter, because it cannot see there
 
-`ssa_loop` counts no back-edges and probes no hot loops, so under the opt-in
-v2 interpreter none of the three signals exists. Gating on absent evidence cost
+`ssa_loop` counts no back-edges and probes no hot loops, so under that
+interpreter none of the three signals exists. It is now the DEFAULT one, so
+the gate abstains in every normal run -- what follows was written while it was
+opt-in and the abstention was a corner. Gating on absent evidence cost
 deltablue 94ms -> 400ms. Counting back-edges in the SSA dispatcher was tried
 and is not the answer either: the fix that mattered was ticking the ladder from
 loop progress, which took deltablue's tier-1 compiles from 3 to 11 and the run

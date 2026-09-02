@@ -421,6 +421,14 @@ class Mode:
         self.args: list[str] = list(raw.get("args", []))
         self.default: bool = bool(raw.get("default", True))
         self.description: str = raw.get("description", "")
+        # Per-mode environment overlay, for a configuration the CLI has no
+        # flag for. It exists so an A/B of two engine settings can be two ROWS
+        # of one sweep rather than two sweeps: the same commit swept twice
+        # differs by up to 28% on this corpus, so only within-sweep ratios
+        # mean anything. Applied under the per-bench overlay, which wins.
+        self.env: dict[str, str] = {
+            str(k): str(v) for k, v in (raw.get("env") or {}).items()
+        }
         if self.binary != "ash":
             raise SystemExit(
                 f"mode {self.name}: unknown binary {self.binary!r} — the CLI "
@@ -638,11 +646,11 @@ def first_difference(want: str, got: str, source: str) -> str:
 # ── the sweep ───────────────────────────────────────────────────────────────
 
 
-def build_env(args, instrumented: bool, bench=None) -> dict:
+def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
     env = dict(os.environ)
     # Strip inherited knobs so a shell that happens to export them cannot
     # silently change what is measured.
-    for k in ("ASH_GC_STATS", "ASH_TIER_LOG", "ASH_TIER", "ASH_NO_PURE_CSE"):
+    for k in ("ASH_GC_STATS", "ASH_TIER_LOG", "ASH_TIER", "ASH_NO_PURE_CSE", "ASH_AIR"):
         env.pop(k, None)
     if args.gc_heap_mb:
         env["ASH_GC_HEAP_MB"] = str(args.gc_heap_mb)
@@ -651,6 +659,8 @@ def build_env(args, instrumented: bool, bench=None) -> dict:
             env["ASH_GC_STATS"] = "1"
         if args.tier_log:
             env["ASH_TIER_LOG"] = "1"
+    if mode is not None:
+        env.update(mode.env)
     if bench is not None:
         env.update(bench.env)
     return env
@@ -738,7 +748,7 @@ def run_instrumented(mode: Mode, bench: Bench, binaries: dict, args, cwd: pathli
     res = exec_run(
         cmd,
         cwd,
-        build_env(args, instrumented=True, bench=bench),
+        build_env(args, instrumented=True, bench=bench, mode=mode),
         bench.timeout_secs * args.timeout_scale,
     )
     return {
@@ -759,7 +769,7 @@ def run_one(
     cwd: pathlib.Path,
 ) -> dict:
     timeout = bench.timeout_secs * args.timeout_scale
-    env = build_env(args, instrumented=False, bench=bench)
+    env = build_env(args, instrumented=False, bench=bench, mode=mode)
     cmd = command_for(mode, bench, binaries, jit_log=False)
 
     record = {

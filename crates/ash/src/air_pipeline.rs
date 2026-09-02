@@ -384,9 +384,11 @@ pub fn optimize(
 /// Every one of them was a private `OnceLock` reading the same variable to a
 /// different conclusion, which is how a flag ends up meaning four things.
 ///
-/// On unless explicitly disabled. `ASH_AIR=0` and `ASH_AIR=off` turn it off;
-/// `ASH_AIR=v2` selects the direct-SSA interpreter in `ash_interp::ssa`, which
-/// is a *consumer* choice and does not change whether AIR runs.
+/// On unless explicitly disabled. `ASH_AIR=0` and `ASH_AIR=off` turn it off.
+/// The other spellings are a *consumer* choice and do not change whether AIR
+/// runs: the direct-SSA interpreter in `ash_interp::ssa` is what an unset
+/// variable selects, and `ASH_AIR=v2-serialize` picks the older path that
+/// serializes optimized AIR back to opcodes and interprets those.
 pub fn air_enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| match std::env::var("ASH_AIR").as_deref() {

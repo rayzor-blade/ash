@@ -390,7 +390,7 @@ pub struct HLInterpreter {
     /// Inert unless `ASH_AIR=v2-serialize`; see `crate::air`.
     air: AirCache,
     /// AIR v2 SSA bodies executed directly, filled on first execution of each
-    /// function. Inert unless `ASH_AIR=v2`; see `crate::ssa`.
+    /// function. This is the default path; see `crate::ssa`.
     ssa: SsaCache,
     /// Per-native resolved function pointer cache (indexed by native array
     /// index). Backed by the process-global symbol table on first miss;

@@ -245,8 +245,8 @@ pub fn lower_function(
     }
 
     // The AIR v2 stage decides what this compile actually lowers. With
-    // `ASH_AIR` off — the default — `body` borrows the function's own arrays
-    // and nothing below can tell the difference.
+    // `ASH_AIR=off` `body` borrows the function's own arrays and nothing below
+    // can tell the difference.
     let body = super::air::body_for(ctx, func);
     let (ops, regs) = (&body.ops[..], &body.regs[..]);
 

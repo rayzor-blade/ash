@@ -43,20 +43,21 @@ use ash_core::types::{HLFunction, TypeRef};
 /// a process-wide lock (the same reason `env_flag!` exists in `interpreter`).
 pub fn enabled() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
-    // Default ON, and that has to include the variable being UNSET — which is
-    // how it is in every normal run. An earlier attempt to make v2 the default
-    // changed only the empty-string arm, a value the environment never actually
-    // produces, so the interpreter went on executing raw bytecode while the
-    // gate reported itself as on. That is exactly the failure the typo arm
-    // below was written to prevent, arriving through the one path it did not
-    // cover.
+    // Off by default: `crate::ssa` walks the IR directly and is what an
+    // unset ASH_AIR now selects. This path optimizes AIR and then serializes
+    // it back to flat opcodes to interpret those, which throws away the types
+    // and the SSA form the pipeline just built. It stays reachable as
+    // `ASH_AIR=v2-serialize` because two interpreters that must agree is how
+    // three real bugs in the walker were found, and a differential oracle you
+    // deleted is one you cannot run.
     //
-    // `v2` selects the SSA interpreter in `crate::ssa`, which executes the IR
-    // instead of serializing it; it stays reachable for differential testing
-    // but measured slower, so the flat serialized form is the default.
+    // The arms have to name UNSET explicitly. An earlier attempt to change
+    // this default touched only the empty-string arm, a value the environment
+    // never actually produces, and the gate reported itself as on while the
+    // interpreter went on executing raw bytecode.
     *CELL.get_or_init(|| match std::env::var("ASH_AIR").as_deref() {
-        Err(_) | Ok("") | Ok("v2-serialize") => true,
-        Ok("v2") | Ok("0") | Ok("off") => false,
+        Ok("v2-serialize") => true,
+        Err(_) | Ok("") | Ok("v2") | Ok("0") | Ok("off") => false,
         Ok(other) => {
             eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off");
             false

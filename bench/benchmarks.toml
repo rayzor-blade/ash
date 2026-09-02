@@ -31,6 +31,19 @@ binary = "ash"
 args = ["--mode", "interp"]
 description = "Pure bytecode interpreter. The parity-validated reference."
 
+# The interpreter tier under the OTHER consumer of AIR: the path that
+# serializes optimized AIR back to flat opcodes instead of walking the IR.
+# Off by default -- it is a diagnostic row, and its only reason to exist is
+# that "the walker is the default" is a claim someone has to be able to check
+# in one sweep rather than two.
+[[mode]]
+name = "interp-serialize"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR = "v2-serialize" }
+default = false
+description = "Interpreter running serialized AIR opcodes, not the SSA walker."
+
 [[mode]]
 name = "hybrid-auto"
 binary = "ash"

@@ -349,7 +349,7 @@ pub enum Tier {
 }
 
 impl Tier {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Tier::Cranelift => "cranelift",
             Tier::Llvm => "llvm",
@@ -357,110 +357,25 @@ impl Tier {
     }
 }
 
-struct CodeRange {
-    addr: usize,
-    findex: u32,
-    tier: Tier,
-}
-
-fn jit_code() -> &'static Mutex<Vec<CodeRange>> {
-    static C: OnceLock<Mutex<Vec<CodeRange>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-/// Record that `addr` is the entry point of compiled code for `findex`.
-///
-/// Call this from every tier's install path. Without it a sample landing in
-/// generated code can only be reported as an address, because JIT memory
-/// carries no symbols for `dladdr` to find.
-///
-/// Ranges are matched nearest-entry-below, since neither backend reports a code
-/// length; see [`classify`] for the bound that keeps that from over-claiming.
+/// Compiled-code registration and lookup live in [`crate::jit_map`] now --
+/// the one map both tiers write. These stay as the names every caller
+/// already uses; each is a thin wrapper.
 pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
-    // Unconditional, not sampling-gated: the crash handler symbolizes fault
-    // frames against this registry, and a crash does not schedule itself for
-    // runs where the profiler happened to be on.
-    //
-    // Kept SORTED by address, so the readers below can binary search. The cost
-    // is one insert per PROMOTION -- "dozens per process" was the estimate
-    // this registry was built on, and a game makes 1206 of them, at which
-    // point a linear scan per lookup stops being free. `describe_jit_pc` runs
-    // once per stack frame per THROW, and with every frame compiled (which is
-    // what --mode jit means) an exception that recurs each tick never finishes
-    // describing itself: measured at 81% of the whole process, wedged at 100%
-    // CPU with no forward progress.
-    if addr == 0 {
-        return;
-    }
     if std::env::var("ASH_PROFILE_DEBUG").is_ok() {
         eprintln!("[prof-reg] findex={findex} tier={} addr={addr:#x}", tier.label());
     }
-    let mut ranges = jit_code().lock().unwrap();
-    let at = ranges.partition_point(|r| r.addr < addr);
-    ranges.insert(at, CodeRange { addr, findex, tier });
+    crate::jit_map::register(findex, tier, crate::jit_map::CodeKind::Entry, addr, 0);
 }
 
-/// The findex whose compiled entry is exactly `addr`, if any.
-///
-/// Exact match, not nearest-below: the caller has a function POINTER (from a
-/// closure built by compiled code), not an arbitrary PC. Answering from this
-/// registry rather than from `functions_ptrs` matters because a slot in that
-/// table is overwritten on re-promotion, whereas every install pushes here —
-/// so a closure still holding a tier-0 address stays resolvable after tier 1
-/// has replaced the slot.
 pub fn findex_at_entry(addr: usize) -> Option<u32> {
-    if addr == 0 {
-        return None;
-    }
-    let ranges = jit_code().lock().ok()?;
-    // Sorted by address: the first entry at `addr`, matching what the linear
-    // `find` returned when several installs share an entry point.
-    let at = ranges.partition_point(|r| r.addr < addr);
-    ranges
-        .get(at)
-        .filter(|r| r.addr == addr)
-        .map(|r| r.findex)
+    crate::jit_map::at_start(addr)
 }
 
-/// Which compiled function a PC falls in, for the crash handler.
-///
-/// Nearest-entry-below, since neither backend reports a code size -- but
-/// bounded by the NEXT registered entry, because "nearest below" alone names
-/// the wrong function with total confidence. The slack used to be a flat 2MB,
-/// and a crash 405KB above an unrelated entry was reported as that entry's
-/// findex; denying that findex simply moved the report to the next entry down,
-/// which reads exactly like the bug moving and is not. A frame past the next
-/// entry, or past `MAX_SLACK` when it is the last one, is reported as
-/// unattributed rather than as a function it cannot belong to.
-///
-/// try_lock, never lock: this is called from a signal handler, and a handler
-/// that deadlocks on the mutex its own thread holds turns a crash report
-/// into a hang.
 pub fn describe_jit_pc(pc: usize) -> Option<(u32, &'static str, usize)> {
-    /// Cap for the last entry, which has no successor to bound it.
-    const MAX_SLACK: usize = 256 << 10;
-    let guard = jit_code().try_lock().ok()?;
-    // Nearest-entry-below, by binary search rather than a scan of every range.
-    // Where several installs share an address this takes the LAST of them --
-    // the most recent promotion, whose tier label is the one now executing --
-    // where the scan took the first.
-    let at = guard.partition_point(|r| r.addr <= pc);
-    let r = guard.get(at.checked_sub(1)?)?;
-    let offset = pc - r.addr;
-    // The next DISTINCT address above this entry ends it. Several installs can
-    // share one address (re-promotion), so skip equal addresses.
-    let bound = guard[at..]
-        .iter()
-        .find(|n| n.addr > r.addr)
-        .map(|n| n.addr - r.addr)
-        .unwrap_or(MAX_SLACK);
-    if offset >= bound.min(MAX_SLACK) {
-        return None;
-    }
-    Some((r.findex, r.tier.label(), offset))
+    let hit = crate::jit_map::lookup(pc)?;
+    Some((hit.range.findex, hit.range.tier.label(), hit.offset))
 }
 
-/// Resolves a findex to a human-readable function name for the report.
 type NameResolver = Box<dyn Fn(u32) -> Option<String> + Send + Sync>;
 static NAMES: OnceLock<NameResolver> = OnceLock::new();
 
@@ -942,7 +857,7 @@ const MAX_FUNCTION_SPAN: usize = 512 * 1024;
 /// `dladdr` first: it covers everything with a symbol table, which is the whole
 /// process except JIT memory. Only when it fails — anonymous mappings, i.e.
 /// generated code — is the JIT map consulted.
-fn classify(pc: u64, jit: &[CodeRange]) -> (Bucket, String) {
+fn classify(pc: u64, jit: &[crate::jit_map::CodeRange]) -> (Bucket, String) {
     if let Some((sym, image)) = dladdr_symbol(pc) {
         let short = image.rsplit('/').next().unwrap_or(&image).to_string();
         let name = demangle(&sym);
@@ -972,7 +887,12 @@ fn classify(pc: u64, jit: &[CodeRange]) -> (Bucket, String) {
     if let Some(r) = jit
         .iter()
         .rev()
-        .find(|r| r.addr <= pc && pc - r.addr < MAX_FUNCTION_SPAN)
+        .find(|r| {
+            // A sized range answers by containment; an unsized one by the
+            // same span rule as before.
+            let span = if r.size > 0 { r.size } else { MAX_FUNCTION_SPAN };
+            r.start <= pc && pc - r.start < span
+        })
     {
         let bucket = match r.tier {
             Tier::Llvm => Bucket::Llvm,
@@ -1326,8 +1246,9 @@ fn write_sample_profile(out: &mut String) {
         }
     }
 
-    let mut jit = jit_code().lock().unwrap();
-    jit.sort_by_key(|r| r.addr);
+    // A snapshot, not the lock: the map is consulted per sample below, and
+    // it is already in address order.
+    let jit = crate::jit_map::snapshot();
 
     let (Some(pcs), Some(tags)) = (sampler::PCS.get(), sampler::TAGS.get()) else {
         return;

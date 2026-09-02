@@ -1149,6 +1149,13 @@ fn run() -> Result<()> {
             for line in ash_core::air_pipeline::pass_time_report() {
                 eprintln!("{line}");
             }
+            if ash_core::jit_map::dump_wanted() {
+                for line in ash_core::jit_map::dump(|f| {
+                    ash_core::profile::static_name(f).map(str::to_owned)
+                }) {
+                    eprintln!("{line}");
+                }
+            }
             if !cli.quiet {
                 eprintln!("Interpreter returned: {:?}", result);
             }
@@ -1234,6 +1241,13 @@ fn run() -> Result<()> {
             // is easiest to see.
             for line in ash_core::air_pipeline::pass_time_report() {
                 eprintln!("{line}");
+            }
+            if ash_core::jit_map::dump_wanted() {
+                for line in ash_core::jit_map::dump(|f| {
+                    ash_core::profile::static_name(f).map(str::to_owned)
+                }) {
+                    eprintln!("{line}");
+                }
             }
             if let Some(stats) = interpreter.tiered_stats() {
                 if cli.jit_log {

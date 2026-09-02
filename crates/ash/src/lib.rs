@@ -28,6 +28,7 @@ pub mod native_lib;
 pub mod opcodes;
 pub mod osr;
 pub mod profile;
+pub mod jit_map;
 pub mod reachable;
 pub mod reload;
 pub mod types;

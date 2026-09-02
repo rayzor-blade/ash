@@ -1635,3 +1635,30 @@ own-module path.
 Follow-up, in order: a per-width VF (`f64x2`, `i64x2`) instead of refusing;
 and the 52-second LLVM compile of findex 3902 seen in the same log, which is
 the known top-tier compile-time problem, not this bug.
+
+### A shared-module LLVM crash is attributed to the wrong function
+
+`describe_jit_pc` names the nearest REGISTERED entry below the pc, bounded by
+the next registered entry. That is exact for an own-module promotion and wrong
+for a shared-module one: `promote_function_strict` through the shared module
+emits every pending body -- `bodies=3323` in the escape-crash run -- and only
+the promoted function calls `register_jit_code`. The 2026-09-02 escape crash
+reported `findex=6776 (llvm+0xa938)` for three frames; 6776 is a 12-opcode
+accessor and the pc is 43,320 bytes past its entry. The owner is one of the
+unregistered bodies between 6776 at 0x136f9463c and the next registered entry
+4.2MB away.
+
+Fixed by making the map both tiers write the one thing everything reads:
+`ash_core::jit_map` holds RANGES with a kind (entry, body, OSR entry), a
+lookup answers by containment when a size is known and by the next start
+otherwise, and `ASH_JIT_MAP=1` dumps it at exit. Every body a promotion
+module emits is registered under its own findex at emission, sized by where
+the next body starts; the own-module path had been labelling its inlined
+callees with the promoted findex too. `profile::register_jit_code` and its two
+readers are wrappers over the map now.
+
+Still unsized: Cranelift. beadie's backend calls `define_function` ->
+`finalize_definitions` -> `get_finalized_function` and owns the `ctx` that
+carries `code_buffer().len()`, so ash never sees the size. Harmless for
+attribution -- every Cranelift function registers, so each is bounded by the
+next start -- but a beadie change would make those ranges exact too.

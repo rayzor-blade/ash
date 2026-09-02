@@ -1592,10 +1592,12 @@ pub(crate) fn produce_cranelift_osr_entries(
                 // Without this the entry's samples land in the profiler's
                 // `unknown` bucket — 73% of a NUC mandelbrot run was an
                 // unregistered OSR entry.
-                ash_core::profile::register_jit_code(
+                ash_core::jit_map::register(
                     findex as u32,
                     ash_core::profile::Tier::Cranelift,
+                    ash_core::jit_map::CodeKind::OsrEntry,
                     addr,
+                    0,
                 );
                 entries.push(OsrEntry {
                     site: pc as u64,

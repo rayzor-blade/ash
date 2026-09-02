@@ -725,22 +725,24 @@ impl<'ctx> JITModule<'ctx> {
         if addr == 0 {
             return Err(anyhow!("promote module {modname}: zero address"));
         }
-        for f in promo_module.get_functions() {
+        // Every body in the module, under ITS OWN findex. This used to label
+        // each inlined callee body with the promoted function's findex, which
+        // is the small version of the hole the shared path had: a crash in a
+        // copied callee was reported as the function that inlined it.
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        for (&fi, f) in &promo_funcs {
             if f.count_basic_blocks() == 0 {
                 continue;
             }
             if let Ok(sym) = f.get_name().to_str() {
                 if let Ok(a) = self.execution_engine.get_function_address(sym) {
                     if a != 0 {
-                        crate::profile::register_jit_code(
-                            findex as u32,
-                            crate::profile::Tier::Llvm,
-                            a as usize,
-                        );
+                        found.push((fi, a as usize));
                     }
                 }
             }
         }
+        register_batch(found, "own");
         Ok(addr)
     }
 
@@ -998,6 +1000,14 @@ impl<'ctx> JITModule<'ctx> {
             ));
         }
         self.install_function_address(findex, fn_addr as *mut c_void);
+        // The shared module just emitted every pending body -- thousands on a
+        // game -- and only this one entry was registered. A crash in any of
+        // the others was attributed to the nearest registered entry below it:
+        // the 2026-09-02 escape crash named a 12-opcode accessor for a pc
+        // 43,320 bytes past its entry. Register them all, once each, with the
+        // size each body has by construction -- bodies of one batch are laid
+        // out back to back, so a body ends where the next one starts.
+        self.register_shared_bodies();
 
         self.compiled_meta_for(findex, fn_addr)
     }
@@ -1283,6 +1293,36 @@ impl<'ctx> JITModule<'ctx> {
         // compiled code.
         crate::profile::register_jit_code(findex as u32, crate::profile::Tier::Llvm, addr as usize);
         return Ok(addr as u64);
+    }
+
+    /// Register every compiled body the shared module holds that has not
+    /// been registered yet, each under its own findex.
+    ///
+    /// Idempotent across promotions: the set below remembers what is done,
+    /// so a batch of 3,300 bodies costs 3,300 hash probes and only the new
+    /// ones ask the engine for an address.
+    fn register_shared_bodies(&mut self) {
+        let mut fresh: Vec<(usize, String)> = Vec::new();
+        {
+            let done = registered_bodies().lock().expect("registered bodies poisoned");
+            for (&fi, f) in &self.func_cache {
+                if done.contains(&fi) || f.count_basic_blocks() == 0 {
+                    continue;
+                }
+                if let Ok(sym) = f.get_name().to_str() {
+                    fresh.push((fi, sym.to_owned()));
+                }
+            }
+        }
+        let mut found: Vec<(usize, usize)> = Vec::new();
+        for (fi, sym) in fresh {
+            if let Ok(a) = self.execution_engine.get_function_address(&sym) {
+                if a != 0 {
+                    found.push((fi, a as usize));
+                }
+            }
+        }
+        register_batch(found, "shared");
     }
 
     /// Emit an AIR V2 OSR entry into whatever module is current.
@@ -9840,7 +9880,7 @@ impl<'ctx> JITModule<'ctx> {
         // Every LLVM-compiled entry point passes through here, in both the
         // whole-module and the tiered path, so this is the one place the
         // profiler needs to learn about generated code.
-        crate::profile::register_jit_code(findex as u32, crate::profile::Tier::Llvm, addr as usize);
+        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, addr as usize, 0);
         if findex < self.functions_ptrs.len() {
             self.functions_ptrs[findex] = addr;
         }
@@ -9920,5 +9960,52 @@ fn report_slow_promote(findex: usize, path: &str, bodies: usize, middle_end_ms: 
         eprintln!(
             "[promote] findex={findex} path={path} bodies={bodies} middle_end={middle_end_ms:.0}ms"
         );
+    }
+}
+
+/// Findexes whose compiled LLVM body has been registered with the profiler,
+/// so a batch is walked once per body rather than once per promotion.
+fn registered_bodies() -> &'static std::sync::Mutex<std::collections::HashSet<usize>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Register a batch of bodies under their own findexes, each sized by where
+/// the next one starts.
+///
+/// One module's bodies are emitted back to back, so `next.start - start` is
+/// the body's size up to alignment padding -- close enough that a pc is
+/// attributed by containment rather than by the nearest entry below it. The
+/// last body of a batch has no successor here and is left unsized; the map
+/// bounds it by whatever is registered above it.
+fn register_batch(mut found: Vec<(usize, usize)>, how: &str) {
+    found.sort_by_key(|&(_, a)| a);
+    for i in 0..found.len() {
+        let (fi, a) = found[i];
+        let size = found.get(i + 1).map_or(0, |&(_, n)| n - a);
+        register_body(fi, a, size, how);
+    }
+}
+
+/// Register one compiled body under its own findex, and say so when the tier
+/// log is on -- a run can then show which bodies a crash report can name.
+fn register_body(findex: usize, addr: usize, size: usize, how: &str) {
+    if !registered_bodies()
+        .lock()
+        .expect("registered bodies poisoned")
+        .insert(findex)
+    {
+        return;
+    }
+    crate::jit_map::register(
+        findex as u32,
+        crate::profile::Tier::Llvm,
+        crate::jit_map::CodeKind::Body,
+        addr,
+        size,
+    );
+    if std::env::var_os("ASH_TIER_LOG").is_some() {
+        eprintln!("[tier] body findex={findex} tier=llvm addr={addr:#x} size={size} ({how})");
     }
 }

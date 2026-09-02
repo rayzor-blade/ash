@@ -43,6 +43,7 @@ impl HLInterpreter {
         // carry phis resolves them against the block that threw.
         let mut prev_block: Option<u32> = None;
         let mut phi_buf: Vec<(u32, NanBoxedValue)> = Vec::new();
+        let mut lane_buf: Vec<(u32, Vec<NanBoxedValue>)> = Vec::new();
 
         'blocks: loop {
             // The tiering ladder is driven by back edges, and it was the
@@ -101,17 +102,30 @@ impl HLInterpreter {
             // any destination, or `x, y = y, x` collapses into `x, y = y, y`.
             if !blk.phis.is_empty() {
                 phi_buf.clear();
+                lane_buf.clear();
                 let frame = self.stack.last().unwrap();
                 for phi in &blk.phis {
                     if let Some(pb) = prev_block {
                         if let Some(&(_, v)) = phi.incoming.iter().find(|(b, _)| b.0 == pb) {
-                            phi_buf.push((phi.dst.0, frame.registers.get(v.0)));
+                            // A vectorized accumulator is carried as a phi
+                            // like any other, and its value lives in the lane
+                            // side-table rather than in a register. Copying
+                            // only the register left the destination with no
+                            // lanes at all, which is how the widened
+                            // reduction first arrived here.
+                            match frame.vec_lanes.get(&v.0) {
+                                Some(lanes) => lane_buf.push((phi.dst.0, lanes.clone())),
+                                None => phi_buf.push((phi.dst.0, frame.registers.get(v.0))),
+                            }
                         }
                     }
                 }
                 let frame = self.stack.last_mut().unwrap();
                 for (dst, v) in phi_buf.drain(..) {
                     frame.registers.set(dst, v);
+                }
+                for (dst, lanes) in lane_buf.drain(..) {
+                    frame.vec_lanes.insert(dst, lanes);
                 }
             }
 
@@ -409,7 +423,19 @@ impl HLInterpreter {
                 let v = get!(src);
                 set!(dst, v);
             }
-            I::Int { dst, idx } => set!(dst, NanBoxedValue::from_i32(bc.ints[*idx])),
+            // Through `int_at`, not `bc.ints` directly: a pass may MINT a
+            // constant the module's pool does not hold -- the widener's
+            // identity and its `& ~(VF-1)` mask both do -- and those live in
+            // the function's own list, indexed after the pool. Indexing the
+            // pool with one of those numbers is an out-of-bounds panic, which
+            // is what this did the first time a widened loop reached here.
+            I::Int { dst, idx } => {
+                let v = prep
+                    .ir
+                    .int_at(*idx, |i| bc.ints.get(i).copied())
+                    .ok_or_else(|| anyhow!("int constant {idx} is not in the pool"))?;
+                set!(dst, NanBoxedValue::from_i32(v))
+            }
             I::Float { dst, idx } => set!(dst, NanBoxedValue::from_f64(bc.floats[*idx])),
             I::Bool { dst, value } => set!(dst, NanBoxedValue::from_bool(*value)),
             I::Bytes { dst, idx } => {

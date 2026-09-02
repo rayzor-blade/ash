@@ -187,6 +187,20 @@ fn mini_run(
             Opcode::Mul { dst, a, b } => {
                 regs[dst.0 as usize] = regs[a.0 as usize] * regs[b.0 as usize]
             }
+            // The widener's vector trip count is `(limit - start) & ~(VF-1)`,
+            // and its remainder is entered from that.
+            Opcode::And { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] & regs[b.0 as usize]
+            }
+            Opcode::Or { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] | regs[b.0 as usize]
+            }
+            Opcode::Xor { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] ^ regs[b.0 as usize]
+            }
+            Opcode::Shl { dst, a, b } => {
+                regs[dst.0 as usize] = regs[a.0 as usize] << regs[b.0 as usize]
+            }
             Opcode::Neg { dst, src } => regs[dst.0 as usize] = -regs[src.0 as usize],
             Opcode::Incr { dst } => regs[dst.0 as usize] += 1,
             Opcode::Decr { dst } => regs[dst.0 as usize] -= 1,
@@ -5531,7 +5545,14 @@ fn o3_preserves_semantics() {
     ];
     for c in cases {
         let out = optimized_round_trip_at(OptLevel::O3, &c.info, c.findex, &c.ops, &c.tys);
-        let mut m = MiniModule::new(&c.ints);
+        // A pass may mint a constant the module's pool does not hold -- the
+        // widener's identity and its `& ~(VF-1)` mask both do -- and the
+        // serializer hands those back in `new_ints`, indexed after the pool.
+        // Without appending them the evaluator reads past the end of its own
+        // table and the fixture fails on an index, not on a wrong answer.
+        let mut ints = c.ints.clone();
+        ints.extend(out.new_ints.iter().copied());
+        let mut m = MiniModule::new(&ints);
         for (findex, (cops, ctys)) in &c.callees {
             m = m.with_fun(*findex, cops, ctys.len());
         }
@@ -6146,7 +6167,7 @@ fn widen_byte_index_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 /// loop -- a phi nothing reads, and one the real pipeline deletes long before
 /// the widener sees it. Without that step this fixture measures the absence
 /// of DCE rather than the affine analysis.
-fn cleaned_byte_index_fixture(ops: &[Opcode], regs: &[TypeRef]) -> Function {
+fn lowered_and_cleaned(ops: &[Opcode], regs: &[TypeRef]) -> Function {
     let mut f = lower_with(ops, regs, &WidenInfo).expect("lower");
     let pm = super::passes::PassManager::with_passes(vec![Box::new(
         super::passes::dce::DeadCodeElim,
@@ -6158,7 +6179,7 @@ fn cleaned_byte_index_fixture(ops: &[Opcode], regs: &[TypeRef]) -> Function {
 #[test]
 fn a_byte_scaled_index_is_affine() {
     let (ops, regs) = widen_byte_index_fixture();
-    let f = cleaned_byte_index_fixture(&ops, &regs);
+    let f = lowered_and_cleaned(&ops, &regs);
     let plans = super::vectorize::analyze_with(
         &f,
         &super::vectorize::VecOptions::default(),
@@ -6181,7 +6202,7 @@ fn a_byte_scaled_index_is_affine() {
 #[test]
 fn a_byte_scaled_loop_widens_to_the_element_stride() {
     let (ops, regs) = widen_byte_index_fixture();
-    let mut f = cleaned_byte_index_fixture(&ops, &regs);
+    let mut f = lowered_and_cleaned(&ops, &regs);
     let pass = super::passes::widen::Widen { info: &WidenInfo };
     let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
     assert_eq!(
@@ -6203,4 +6224,139 @@ fn a_byte_scaled_loop_widens_to_the_element_stride() {
         .unwrap_or_else(|| panic!("no vector store:\n{}", f.dump()));
     // The emitted stride is the element width, not a table keyed on the kind.
     assert_eq!(stride, 4, "{}", f.dump());
+}
+
+/// `sum = 0; for (i = 0; i < 16; i++) sum += a[i]; return sum;`
+///
+/// The most common vectorizable loop there is, and the one the transform
+/// used to refuse outright: the accumulator is loop-carried, so widening it
+/// means VF partial sums that collapse afterwards.
+fn widen_reduction_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 src(array) r1 i r2 limit r3 step r4 sum r5 elem
+    let regs = vec![t(13), t(3), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(0) },   // sum = 0
+        Opcode::Int { dst: Reg(5), ptr: RefInt(0) },   // elem = 0
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 4 },
+        Opcode::GetArray { dst: Reg(5), array: Reg(0), index: Reg(1) },
+        Opcode::Add { dst: Reg(4), a: Reg(4), b: Reg(5) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -5 },
+        Opcode::Ret { ret: Reg(4) },
+    ];
+    (ops, regs)
+}
+
+#[test]
+fn a_sum_over_an_array_widens_into_lane_partials() {
+    let (ops, regs) = widen_reduction_fixture();
+    let mut f = lowered_and_cleaned(&ops, &regs);
+    for p in super::vectorize::analyze_with(
+        &f,
+        &super::vectorize::VecOptions::default(),
+        &|i| WidenInfo.int_value(i),
+    ) {
+        eprintln!(
+            "loop@b{} vectorizable={} refusals={:?} reductions={:?}",
+            p.header.0,
+            p.vectorizable(),
+            p.refusals,
+            p.reductions
+        );
+    }
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(
+        stats.replaced,
+        1,
+        "not widened; declines: {:?}\n{}",
+        super::passes::widen::explain(&f, &WidenInfo),
+        f.dump()
+    );
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+
+    let has = |pred: fn(&Instr) -> bool| f.blocks.iter().any(|b| b.instrs.iter().any(pred));
+    assert!(
+        has(|i| matches!(i, Instr::VecLoad { .. })),
+        "no vector load:\n{}",
+        f.dump()
+    );
+    assert!(
+        has(|i| matches!(i, Instr::VecSplat { .. })),
+        "the lanes were never seeded with the identity:\n{}",
+        f.dump()
+    );
+    assert!(
+        has(|i| matches!(i, Instr::VecReduce { op: BinOp::Add, .. })),
+        "the partials were never collapsed:\n{}",
+        f.dump()
+    );
+    // The collapse feeds the return; the vector accumulator must not.
+    let returned = f
+        .blocks
+        .iter()
+        .find_map(|b| match b.term {
+            Terminator::Ret { value } => Some(value),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no return:\n{}", f.dump()));
+    assert!(
+        f.value_lanes(returned) <= 1,
+        "the return is a vector:\n{}",
+        f.dump()
+    );
+}
+
+/// `acc += i * 3 + 1` — a reduction whose ADDEND varies with the induction.
+///
+/// The term is a scalar the widener has nothing to widen it from, so the only
+/// way to feed it to a vector accumulator is to broadcast it -- and four
+/// copies of the term at the lane-0 index is not the sum of the four terms.
+/// TestTieredHotLoop returned 497032704 instead of 1198000000 exactly this
+/// way, and the IR verified.
+fn widen_varying_addend_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 n r1 i r2 acc r3 step r4 three r5 one r6 tmp
+    let regs = vec![t(3), t(3), t(3), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(2), ptr: RefInt(0) },   // acc = 0
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(4) },   // three... (2 here)
+        Opcode::Int { dst: Reg(5), ptr: RefInt(2) },   // one
+        Opcode::Int { dst: Reg(6), ptr: RefInt(0) },   // tmp = 0
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(0), offset: 5 },
+        Opcode::Mul { dst: Reg(6), a: Reg(1), b: Reg(4) },
+        Opcode::Add { dst: Reg(6), a: Reg(6), b: Reg(5) },
+        Opcode::Add { dst: Reg(2), a: Reg(2), b: Reg(6) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -6 },
+        Opcode::Ret { ret: Reg(2) },
+    ];
+    (ops, regs)
+}
+
+#[test]
+fn a_reduction_over_a_varying_term_is_refused() {
+    let (ops, regs) = widen_varying_addend_fixture();
+    let mut f = lowered_and_cleaned(&ops, &regs);
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(
+        stats.replaced,
+        0,
+        "widened a reduction whose addend changes every iteration:\n{}",
+        f.dump()
+    );
+    assert!(
+        !f.blocks
+            .iter()
+            .any(|b| b.instrs.iter().any(|i| matches!(i, Instr::VecSplat { .. }))),
+        "a varying scalar was broadcast anyway:\n{}",
+        f.dump()
+    );
 }

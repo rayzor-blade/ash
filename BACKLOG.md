@@ -1517,3 +1517,37 @@ accounting, and `ASH_GC_STATS` / `ASH_GC_STRESS` observability
   crates.io maximum is 0.134.3). Verify the flag names the tier sets survive
   the bump: `opt_level`, `enable_probestack`, `preserve_frame_pointers`,
   `is_pic`.
+
+### Minted constants are invisible to every consumer of the serialized form
+
+`Instr::Int` names a POOL INDEX, and a pass that needs a constant the module's
+pool does not hold mints one into `Function::pending_ints` at an index past
+the pool. `Function::int_at` resolves those; `Serialized::new_ints` reports
+them so a caller can extend the pool. **Nothing outside the air crate's own
+tests reads `new_ints`.**
+
+So a widened loop -- which mints `~(VF-1)` for its vector trip count, a
+reduction identity, and one lane offset per lane in the serialized form --
+produces `Opcode::Int` indices that these read out of bounds:
+
+* the opcode interpreter, `interpreter/mod.rs`: `bytecode.ints[ptr.0]`
+* Cranelift's opcode lowering path, which consumes `opt.ser.ops` through
+  `cranelift::air::body_for`
+* `crates/air`'s own round-trip evaluator, until `o3_preserves_semantics`
+  started appending `new_ints` (2026-09-02)
+
+The AIR-consuming paths are already right: `cranelift::codegen` goes through
+`int_at`, the LLVM tier materializes `pending_ints` as globals, and the SSA
+walker was fixed on 2026-09-02 after it panicked with
+`index out of bounds: the len is 47 but the index is 47` on TestTieredHotLoop.
+
+It is LATENT rather than live: the five engine arms and the parity matrix pass
+on a program with a widened loop, in every mode including
+`ASH_AIR=v2-serialize`. That is luck about which functions each path compiles,
+not a property anything enforces.
+
+The fix is the caller side of the `new_ints` contract -- one growable pool the
+whole process reads, with indices assigned globally rather than per function,
+so `int_pool_base` stops being a per-function origin that two functions can
+both claim. Until then, a pass that mints is only safe for consumers that read
+AIR.

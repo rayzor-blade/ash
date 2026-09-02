@@ -31,7 +31,7 @@
 use super::{Pass, PassOptions, PassStats};
 use crate::v2::analysis::{CfgInfo, LoopForest};
 use crate::v2::ir::*;
-use crate::v2::vectorize::{self, LoopPlan, VecOptions};
+use crate::v2::vectorize::{self, LoopPlan, Reduction, VecOptions};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 
@@ -45,7 +45,13 @@ pub const VF: u32 = 4;
 pub enum Decline {
     TripCountNotConstant,
     TripCountNotMultiple(i64),
+    /// Kept for the surveys that name it; the transform handles integer
+    /// reductions now and refuses the rest by their own reason.
     HasReduction,
+    /// A float accumulation, which vectorizes only by reassociating it.
+    FloatReduction(ValueId),
+    /// A combining operation with no identity to seed the lanes from.
+    UnreducibleOp(BinOp),
     /// A guard whose condition this cannot prove for the whole vector range.
     /// Hoisting needs the test to be the induction variable against something
     /// loop-invariant; anything else would be assumed rather than proven.
@@ -63,6 +69,9 @@ pub enum Decline {
     /// A byte-indexed access whose element width the embedder cannot name, so
     /// there is no way to tell a contiguous walk from a strided one.
     UnknownElementSize(TypeRef),
+    /// A scalar operand that changes every iteration and would have to be
+    /// broadcast across the lanes, which computes a different thing.
+    VaryingBroadcast(ValueId),
     NonUnitStride(i64),
     TooSmall(usize),
     /// The loop body writes a value the widening would have to keep scalar
@@ -126,6 +135,18 @@ impl Pass for Widen<'_> {
                     *f = backup;
                     record(plan.header, Err(d));
                 }
+            }
+        }
+        // Replacing a scalar load with a vector one deletes its definition,
+        // and a value with no definition is not a function any more --
+        // `verify` says so, and the pipeline runs it. This never showed while
+        // the only loop the corpus widened was store-only.
+        if stats.replaced > 0 {
+            if let Err(e) = super::compact_values(f) {
+                if std::env::var_os("WIDEN_DUMP_BAD").is_some() {
+                    eprintln!("WIDEN BAD: {e}\n{}", f.dump());
+                }
+                return Err(e);
             }
         }
         Ok(stats)
@@ -205,8 +226,17 @@ fn check(
     opts: &VecOptions,
     info: &dyn crate::v2::module::ModuleInfo,
 ) -> Result<Option<i64>, Decline> {
-    if !plan.reductions.is_empty() {
-        return Err(Decline::HasReduction);
+    for r in &plan.reductions {
+        // A float accumulation vectorizes only by reassociating it, which
+        // changes the answer. The analysis already refuses those unless the
+        // caller opted in; the transform will not mint the identity for one
+        // either, because there is no float constant pool to mint it from.
+        if r.is_float {
+            return Err(Decline::FloatReduction(r.phi));
+        }
+        if identity_of(r.op).is_none() {
+            return Err(Decline::UnreducibleOp(r.op));
+        }
     }
     // Guards are hoistable, not fatal -- see `hoist_guards`. What is fatal is
     // a guard this cannot prove.
@@ -390,6 +420,23 @@ fn hoist_guards(
     Ok(())
 }
 
+/// The value that leaves `op` unchanged, which is what the lanes a reduction
+/// does not reach must hold.
+///
+/// A vector accumulator starts at the identity in every lane and the loop's
+/// own starting value is folded back in after the collapse, so the identity
+/// is the whole of what this transform needs to know about the operation.
+/// `Sub` has one on the right and not the left, and a lane-wise collapse
+/// cannot tell the difference, so it is not listed.
+fn identity_of(op: BinOp) -> Option<i32> {
+    match op {
+        BinOp::Add | BinOp::Or | BinOp::Xor => Some(0),
+        BinOp::Mul => Some(1),
+        BinOp::And => Some(-1),
+        _ => None,
+    }
+}
+
 fn loop_blocks(f: &Function, header: BlockId) -> HashSet<BlockId> {
     let cfg = CfgInfo::build(f);
     let forest = LoopForest::analyze(f, &cfg);
@@ -466,6 +513,14 @@ fn widen_loop(
         let w = f.new_vector_value(ty, reg, VF as u16);
         widened.insert(a.at, w);
     }
+    // An accumulator is a vector too: VF partial sums that collapse into one
+    // after the loop. Seeding the phi is enough -- the growth below carries
+    // it through the `acc op x` that closes the cycle.
+    for r in &plan.reductions {
+        let (ty, reg) = (f.value_ty(r.phi), f.value_reg(r.phi));
+        let w = f.new_vector_value(ty, reg, VF as u16);
+        widened.insert(r.phi, w);
+    }
     loop {
         let mut grew = false;
         for b in &body {
@@ -501,6 +556,69 @@ fn widen_loop(
         .filter(|a| a.is_store)
         .map(|a| a.at)
         .collect();
+
+    // Every use of a widened value has to be one the emit loop below rewrites
+    // into a vector form. Anything else keeps naming a value whose definition
+    // is about to be replaced -- a phi merging a load with a default (HL's
+    // bounds check is exactly that diamond), a store of it to a field, a use
+    // after the loop. Those need a lane mask or a lane extract, and until the
+    // IR has one the honest answer is to refuse rather than to leave a name
+    // with nothing behind it.
+    let reduction_phis: HashSet<ValueId> = plan.reductions.iter().map(|r| r.phi).collect();
+    for (bi, blk) in f.blocks.iter().enumerate() {
+        let inside = body.contains(&BlockId(bi as u32));
+        // An accumulator read after the loop is what `collapse_reduction`
+        // exists to answer; anywhere else it is a partial sum with no meaning.
+        let unhandled = |v: &ValueId| {
+            widened.contains_key(v) && !(!inside && reduction_phis.contains(v))
+        };
+        for phi in &blk.phis {
+            if reduction_phis.contains(&phi.dst) {
+                continue;
+            }
+            if let Some((_, v)) = phi.incoming.iter().find(|(_, v)| unhandled(v)) {
+                return Err(Decline::MixedUse(*v));
+            }
+        }
+        for ins in &blk.instrs {
+            let rewritten = inside
+                && match ins {
+                    Instr::MemGet { dst, .. } => widened.contains_key(dst),
+                    Instr::MemSet { src, .. } => store_vals.contains(src),
+                    Instr::BinOp { dst, .. } => widened.contains_key(dst),
+                    _ => false,
+                };
+            if rewritten {
+                continue;
+            }
+            if let Some(v) = ins.uses().into_iter().find(unhandled) {
+                return Err(Decline::MixedUse(v));
+            }
+        }
+        if let Some(v) = blk.term.uses().into_iter().find(unhandled) {
+            return Err(Decline::MixedUse(v));
+        }
+        if !inside {
+            continue;
+        }
+        // Anything the emit stage will BROADCAST has to hold the same value
+        // on every iteration. A scalar that varies -- `i * 3 + 1`, now that
+        // affine values are recognized -- would contribute the lane-0 term
+        // four times instead of the four terms the loop computes.
+        for ins in &blk.instrs {
+            let operands: Vec<ValueId> = match ins {
+                Instr::MemSet { src, .. } if store_vals.contains(src) => vec![*src],
+                Instr::BinOp { dst, a, b, .. } if widened.contains_key(dst) => vec![*a, *b],
+                _ => continue,
+            };
+            for v in operands {
+                if !widened.contains_key(&v) && !is_loop_invariant(f, &body, v) {
+                    return Err(Decline::VaryingBroadcast(v));
+                }
+            }
+        }
+    }
+
     // The step each access actually walks, which `check` has already proven
     // is the contiguous one for its kind and element width. Taking it from
     // the analysis rather than a table keyed on the kind is what lets a
@@ -561,10 +679,174 @@ fn widen_loop(
     }
 
     retime_induction(f, plan, iv, step, info);
+
+    // Each accumulator's header phi becomes the vector one, seeded from a
+    // splat of the identity, and the scalar total is rebuilt on the way out.
+    //
+    // The collapse needs a block of its own on the exit edge: it must run
+    // once, after the last vector iteration and before anything that reads
+    // the sum -- which with a remainder is the remainder itself, not the
+    // block the loop eventually leaves to.
+    let mut totals: HashMap<ValueId, ValueId> = HashMap::new();
+    let mut tail = plan.bound.ok_or(Decline::TripCountNotConstant)?.exit;
+    if !plan.reductions.is_empty() {
+        tail = splice_exit_block(f, plan)?;
+        for r in &plan.reductions {
+            let total = collapse_reduction(f, plan, r, &widened, tail, epilogue.is_none(), info)?;
+            totals.insert(r.phi, total);
+        }
+    }
+
     if let Some(epi) = epilogue {
-        wire_epilogue(f, plan, iv, epi, info)?;
+        wire_epilogue(f, plan, iv, &totals, tail, epi, info)?;
     }
     Ok(())
+}
+
+/// An empty block on the loop's normal exit edge, for work that must run once
+/// after the loop and before whatever follows it.
+fn splice_exit_block(f: &mut Function, plan: &LoopPlan) -> Result<BlockId, Decline> {
+    let exit = plan.bound.ok_or(Decline::TripCountNotConstant)?.exit;
+    let body = loop_blocks(f, plan.header);
+    let succ = normal_exit_of(f, exit, &body).ok_or(Decline::NoPreheader)?;
+    let mid = BlockId(f.blocks.len() as u32);
+    let handler = f.blocks[exit.idx()].handler;
+    f.blocks.push(Block {
+        phis: Vec::new(),
+        instrs: Vec::new(),
+        handler,
+        term: Terminator::Jump { target: succ },
+    });
+    if let Terminator::CondJump {
+        if_true, if_false, ..
+    } = &mut f.blocks[exit.idx()].term
+    {
+        if *if_true == succ {
+            *if_true = mid;
+        } else {
+            *if_false = mid;
+        }
+    }
+    for phi in &mut f.blocks[succ.idx()].phis {
+        for (p, _) in phi.incoming.iter_mut() {
+            if *p == exit {
+                *p = mid;
+            }
+        }
+    }
+    Ok(mid)
+}
+
+/// Turn one scalar accumulator into VF partial ones and put them back
+/// together after the loop.
+///
+/// The lanes start at the operation's identity rather than at the loop's own
+/// starting value, and that value is folded in once at the end. Splitting it
+/// that way avoids having to build a vector with one lane different from the
+/// others, which the IR has no instruction for.
+fn collapse_reduction(
+    f: &mut Function,
+    plan: &LoopPlan,
+    r: &Reduction,
+    widened: &HashMap<ValueId, ValueId>,
+    mid: BlockId,
+    finishes_here: bool,
+    info: &dyn crate::v2::module::ModuleInfo,
+) -> Result<ValueId, Decline> {
+    let vacc = *widened.get(&r.phi).ok_or(Decline::HasReduction)?;
+    let vnext = *widened.get(&r.next).ok_or(Decline::HasReduction)?;
+    let (ty, reg) = (f.value_ty(r.phi), f.value_reg(r.phi));
+    let body = loop_blocks(f, plan.header);
+
+    // What the accumulator came in as, on the edge from outside the loop.
+    let phi_pos = f.blocks[plan.header.idx()]
+        .phis
+        .iter()
+        .position(|p| p.dst == r.phi)
+        .ok_or(Decline::HasReduction)?;
+    let (entry_block, entry_val) = f.blocks[plan.header.idx()].phis[phi_pos]
+        .incoming
+        .iter()
+        .find(|(b, _)| !body.contains(b))
+        .copied()
+        .ok_or(Decline::HasReduction)?;
+
+    // The identity, splatted in the block the loop is entered from.
+    let ident = f.intern_int(
+        identity_of(r.op).ok_or(Decline::UnreducibleOp(r.op))?,
+        |i| info.int_value(i),
+    );
+    let ident_v = f.new_value(ty, reg);
+    let vinit = f.new_vector_value(ty, reg, VF as u16);
+    f.blocks[entry_block.idx()].instrs.extend([
+        Instr::Int {
+            dst: ident_v,
+            idx: ident,
+        },
+        Instr::VecSplat {
+            dst: vinit,
+            src: ident_v,
+        },
+    ]);
+
+    // The phi itself: same shape, vector values.
+    let phi = &mut f.blocks[plan.header.idx()].phis[phi_pos];
+    phi.dst = vacc;
+    for (b, v) in phi.incoming.iter_mut() {
+        *v = if body.contains(b) { vnext } else { vinit };
+    }
+
+    // Collapse on the way out, and fold the starting value back in.
+    let reduced = f.new_value(ty, reg);
+    let total = f.new_value(ty, reg);
+    f.blocks[mid.idx()].instrs.extend([
+        Instr::VecReduce {
+            op: r.op,
+            dst: reduced,
+            src: vacc,
+        },
+        Instr::BinOp {
+            op: r.op,
+            dst: total,
+            a: entry_val,
+            b: reduced,
+        },
+    ]);
+
+    // Everything past the loop was reading the scalar accumulator. When a
+    // remainder follows, THAT is what finishes the sum and the epilogue does
+    // this rewrite with its own values -- `total` is only what the remainder
+    // starts from.
+    if finishes_here {
+        let cfg = CfgInfo::build(f);
+        for b in 0..f.blocks.len() {
+            let bid = BlockId(b as u32);
+            if bid == mid || body.contains(&bid) || !cfg.dominates(mid, bid) {
+                continue;
+            }
+            for ins in &mut f.blocks[b].instrs {
+                ins.map_uses(&mut |v| if v == r.phi { total } else { v });
+            }
+            let mut t = f.blocks[b].term.clone();
+            t.map_uses(&mut |v| if v == r.phi { total } else { v });
+            f.blocks[b].term = t;
+        }
+    }
+    Ok(total)
+}
+
+/// The successor of the loop's exit test that leaves the loop.
+fn normal_exit_of(f: &Function, exit: BlockId, body: &HashSet<BlockId>) -> Option<BlockId> {
+    match f.blocks[exit.idx()].term {
+        Terminator::CondJump {
+            if_true, if_false, ..
+        } => Some(if body.contains(&if_true) {
+            if_false
+        } else {
+            if_true
+        }),
+        _ => None,
+    }
 }
 
 /// What the epilogue needs to know, captured before the body is widened.
@@ -646,6 +928,8 @@ fn wire_epilogue(
     f: &mut Function,
     plan: &LoopPlan,
     iv: ValueId,
+    totals: &HashMap<ValueId, ValueId>,
+    tail: BlockId,
     epi: Epilogue,
     info: &dyn crate::v2::module::ModuleInfo,
 ) -> Result<(), Decline> {
@@ -693,14 +977,7 @@ fn wire_epilogue(
 
     // The widened loop now tests against `vend` rather than the real limit,
     // so it stops on a whole-vector boundary and never runs a partial one.
-    let Terminator::CondJump {
-        a,
-        b,
-        if_true,
-        if_false,
-        ..
-    } = &mut f.blocks[bound.exit.idx()].term
-    else {
+    let Terminator::CondJump { a, b, .. } = &mut f.blocks[bound.exit.idx()].term else {
         return Err(Decline::NoPreheader);
     };
     if bound.iv_first {
@@ -708,31 +985,44 @@ fn wire_epilogue(
     } else {
         *a = vend;
     }
-    // Where the widened loop leaves is where the remainder begins.
-    let (if_true, if_false) = (*if_true, *if_false);
-    let normal_exit = if body.contains(&if_true) {
-        if_false
-    } else {
-        if_true
+
+    // Where the widened loop leaves is where the remainder begins -- and what
+    // leaves is `tail`, which is the exit test itself unless a reduction put
+    // its collapse on that edge.
+    let normal_exit = match f.blocks[tail.idx()].term {
+        Terminator::Jump { target } if tail != bound.exit => target,
+        Terminator::CondJump {
+            if_true, if_false, ..
+        } => {
+            if body.contains(&if_true) {
+                if_false
+            } else {
+                if_true
+            }
+        }
+        _ => return Err(Decline::NoPreheader),
     };
 
     let (bmap, vmap) = clone_blocks(f, &snap, &body);
     let epi_header = bmap[&plan.header];
 
-    if let Terminator::CondJump {
-        if_true, if_false, ..
-    } = &mut f.blocks[bound.exit.idx()].term
-    {
-        if *if_true == normal_exit {
-            *if_true = epi_header;
-        } else {
-            *if_false = epi_header;
+    match &mut f.blocks[tail.idx()].term {
+        Terminator::Jump { target } if tail != bound.exit => *target = epi_header,
+        Terminator::CondJump {
+            if_true, if_false, ..
+        } => {
+            if *if_true == normal_exit {
+                *if_true = epi_header;
+            } else {
+                *if_false = epi_header;
+            }
         }
+        _ => return Err(Decline::NoPreheader),
     }
     // The exit block lost that predecessor; it gains the copy's exit instead,
     // which `clone_blocks` has already recorded.
     for phi in &mut f.blocks[normal_exit.idx()].phis {
-        phi.incoming.retain(|(p, _)| *p != bound.exit);
+        phi.incoming.retain(|(p, _)| *p != tail);
     }
 
     // It is a remainder, so it is shorter than a vector: widening it could
@@ -742,12 +1032,21 @@ fn wire_epilogue(
 
     // The copy is entered from the widened loop's exit, counting from `vend`.
     let iv_copy = vmap[&iv];
+    // An accumulator enters the copy at the vector loop's collapsed total,
+    // for the same reason the induction enters it at `vend`: the copy
+    // continues the work rather than restarting it.
+    let acc_entry: HashMap<ValueId, ValueId> = totals
+        .iter()
+        .filter_map(|(phi, total)| vmap.get(phi).map(|copy| (*copy, *total)))
+        .collect();
     for phi in &mut f.blocks[epi_header.idx()].phis {
         for (p, v) in phi.incoming.iter_mut() {
             if *p == pre {
-                *p = bound.exit;
+                *p = tail;
                 if phi.dst == iv_copy {
                     *v = vend;
+                } else if let Some(total) = acc_entry.get(&phi.dst) {
+                    *v = *total;
                 }
             }
         }
@@ -793,6 +1092,41 @@ fn vector_operand(
     out.push(Instr::VecSplat { dst: w, src: v });
     widened.insert(v, w);
     w
+}
+
+/// Whether `v` holds the same thing on every iteration, so that broadcasting
+/// it across the lanes is the same computation the scalar loop did.
+///
+/// This is the precondition for every splat, and getting it wrong is not a
+/// missed optimization: `acc += i * 3 + 1` splats the term computed at the
+/// lane-0 index, and four copies of one term is not the sum of four terms.
+/// TestTieredHotLoop returned 497032704 instead of 1198000000 that way.
+///
+/// Conservative on purpose. A value defined outside the loop is invariant; a
+/// constant materialized inside it is too, and those are common enough that
+/// refusing them would cost most real loops. Everything else varies.
+fn is_loop_invariant(f: &Function, body: &HashSet<BlockId>, v: ValueId) -> bool {
+    for (bi, blk) in f.blocks.iter().enumerate() {
+        let inside = body.contains(&BlockId(bi as u32));
+        if blk.phis.iter().any(|p| p.dst == v) {
+            return !inside;
+        }
+        if let Some(ins) = blk.instrs.iter().find(|i| i.dst() == Some(v)) {
+            if !inside {
+                return true;
+            }
+            return matches!(
+                ins,
+                Instr::Int { .. }
+                    | Instr::Float { .. }
+                    | Instr::Bool { .. }
+                    | Instr::Null { .. }
+                    | Instr::String { .. }
+            );
+        }
+    }
+    // No definition found: a parameter, which is invariant.
+    true
 }
 
 /// Advance the induction by a whole vector per iteration.

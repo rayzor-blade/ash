@@ -31,6 +31,30 @@ binary = "ash"
 args = ["--mode", "interp"]
 description = "Pure bytecode interpreter. The parity-validated reference."
 
+# What the pipeline COSTS the interpreter. The walker prepares each function
+# through the full O3 pipeline before running a line of it, and on a program
+# that finishes in 20ms that preparation is most of the run -- the NUC sweep
+# had it 1.2-1.6x behind the serialize path on everything under 50ms and 1.46x
+# ahead on binary_trees, a gap that scales with how much code runs rather than
+# with a constant. These rows ask what a cheaper pipeline buys and what it
+# costs the long runs; O3 is what the passes that pay (inlining, scalar
+# replacement, allocation hoisting) live at, so this is a trade, not a win.
+[[mode]]
+name = "interp-O1"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_LEVEL = "O1" }
+default = false
+description = "The walker with a cheap AIR pipeline."
+
+[[mode]]
+name = "interp-O2"
+binary = "ash"
+args = ["--mode", "interp"]
+env = { ASH_AIR_LEVEL = "O2" }
+default = false
+description = "The walker without O3's inliner, SROA and allocation hoisting."
+
 # The interpreter tier under the OTHER consumer of AIR: the path that
 # serializes optimized AIR back to flat opcodes instead of walking the IR.
 # Off by default -- it is a diagnostic row, and its only reason to exist is

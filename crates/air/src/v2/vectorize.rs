@@ -409,8 +409,15 @@ fn classify_cycle(
             };
             match consts.get(&other) {
                 Some(&c) if phi_side => Cycle::Induction(if *op == BinOp::Sub { -c } else { c }),
+                // `c - phi` alternates rather than steps.
                 Some(_) => Cycle::NonConstantStride,
-                None => Cycle::NonConstantStride,
+                // Not a step this can measure -- but it is still a cycle that
+                // combines the phi with something under an associative
+                // operation, which is a REDUCTION. `sum += a[i]` arrives here,
+                // and calling it a broken induction is why the corpus appeared
+                // to contain almost none: the single most common vectorizable
+                // loop there is was being reported as an unmeasurable stride.
+                None => reduction_or_opaque(f, phi, b, k),
             }
         }
         Instr::UnOp {

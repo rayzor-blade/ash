@@ -650,7 +650,14 @@ def build_env(args, instrumented: bool, bench=None, mode=None) -> dict:
     env = dict(os.environ)
     # Strip inherited knobs so a shell that happens to export them cannot
     # silently change what is measured.
-    for k in ("ASH_GC_STATS", "ASH_TIER_LOG", "ASH_TIER", "ASH_NO_PURE_CSE", "ASH_AIR"):
+    for k in (
+        "ASH_GC_STATS",
+        "ASH_TIER_LOG",
+        "ASH_TIER",
+        "ASH_NO_PURE_CSE",
+        "ASH_AIR",
+        "ASH_AIR_LEVEL",
+    ):
         env.pop(k, None)
     if args.gc_heap_mb:
         env["ASH_GC_HEAP_MB"] = str(args.gc_heap_mb)

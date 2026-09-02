@@ -310,6 +310,14 @@ fn unsupported(f: &Function) -> Option<&'static str> {
 
 fn unsupported_instr(i: &Instr) -> Option<&'static str> {
     match i {
+        // The interpreter is scalar. A widened loop is for the backends;
+        // reaching here means a vectorized function was handed to the AIR
+        // walker, which should fall back rather than answer wrongly.
+        Instr::VecLoad { .. }
+        | Instr::VecStore { .. }
+        | Instr::VecSplat { .. }
+        | Instr::VecBinOp { .. }
+        | Instr::VecReduce { .. } => return Some("vector instruction"),
         // Every instruction below is dispatched in `step`. Listed
         // explicitly so a new AIR instruction lands here as a fallback
         // rather than as a silent wrong answer.

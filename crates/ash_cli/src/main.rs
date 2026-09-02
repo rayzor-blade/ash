@@ -1240,6 +1240,23 @@ fn run() -> Result<()> {
                     if let Some(report) = ash_interp::interpreter::decline_report() {
                         eprint!("{report}");
                     }
+                    // Did the promotions repay themselves? A compile that
+                    // lands after the function stops being called cost its
+                    // middle end and returned nothing, which on a short
+                    // program is most of what the top tier does.
+                    let installs = ash_interp::interpreter::install_call_counts();
+                    if !installs.is_empty() && std::env::var_os("ASH_TIER_LOG").is_some() {
+                        eprintln!(
+                            "[tiered] llvm installs, calls at install time ({} functions):",
+                            installs.len()
+                        );
+                        for (findex, calls) in installs.iter().take(24) {
+                            eprintln!(
+                                "[tiered]   findex={findex:<6} name={:<28} calls_at_install={calls}",
+                                ash_core::profile::static_name(*findex as u32).unwrap_or("?")
+                            );
+                        }
+                    }
                 }
             }
             if !cli.quiet {

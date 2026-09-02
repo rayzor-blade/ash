@@ -580,6 +580,59 @@ pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
         .contains(&findex)
 }
 
+/// Findexes the AIR ceiling turned down, so the decision is made once.
+///
+/// Deliberately separate from `llvm_failed`: that set means "a compile was
+/// attempted and declined", and conflating the two let a compile failure
+/// suppress the demand accounting for a function the gate had nothing to say
+/// about.
+static GATE_REJECTED: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+
+fn gate_rejected(findex: usize) -> bool {
+    GATE_REJECTED
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| s.contains(&findex)))
+        .unwrap_or(false)
+}
+
+fn remember_gate_rejection(findex: usize) {
+    if let Ok(mut g) = GATE_REJECTED.lock() {
+        g.get_or_insert_with(HashSet::new).insert(findex);
+    }
+}
+
+/// Calls a promoted function had received when its code was installed.
+///
+/// The promotion is asynchronous: the compile runs on another thread while
+/// the program keeps going, so code can land after the function has stopped
+/// being called. Then the compile was paid for and never used -- and on a
+/// short program that is most of what the tier does. Comparing this against
+/// the count at exit says which promotions repaid themselves, which is the
+/// half of the promotion decision the AIR ceiling cannot see: the ceiling
+/// bounds what LLVM COULD win, this says whether there was any run left to
+/// win it in.
+static INSTALL_CALLS: Mutex<Option<HashMap<usize, u64>>> = Mutex::new(None);
+
+fn record_install_calls(findex: usize, calls: u64) {
+    if let Ok(mut g) = INSTALL_CALLS.lock() {
+        g.get_or_insert_with(HashMap::new).entry(findex).or_insert(calls);
+    }
+}
+
+/// Snapshot for the end-of-run report: findex -> calls when installed.
+pub fn install_call_counts() -> Vec<(usize, u64)> {
+    let Ok(g) = INSTALL_CALLS.lock() else {
+        return Vec::new();
+    };
+    let Some(m) = g.as_ref() else {
+        return Vec::new();
+    };
+    let mut v: Vec<_> = m.iter().map(|(k, c)| (*k, *c)).collect();
+    v.sort_unstable();
+    v
+}
+
 /// Why the optimising tier turned a function down, tallied by reason.
 ///
 /// `failed=24488` was the whole story a run told about deltablue, and a count
@@ -724,19 +777,22 @@ fn tiered_compile_tier_inner(
     // reported as "JIT tier 0 failed to compile findex N" and kills the run,
     // which is what the first cut of this gate did to every test in
     // `--mode jit`.
-    if !ctx.compiled_only && (tier > 0 || ctx.mode == TierMode::Auto) {
-        // Through the same memo a declined compile uses, so a gated findex
-        // costs one lookup per proposal rather than a fresh decision. The
-        // first cut recorded a decline every time and a broker re-proposed
-        // deltablue's 21 gated functions 1051664 times -- a mutex and a
-        // string per proposal, and a tally reading a million where 21 is the
-        // number that means anything.
-        let already = ctx
-            .llvm_failed
-            .lock()
-            .map(|g| g.contains(&findex))
-            .unwrap_or(false);
-        if already {
+    // The Auto ladder's TOP rung only. In Auto mode tier 0 is Cranelift, so
+    // `tier > 0 || mode == Auto` gated Cranelift too -- functions AIR said had
+    // no LLVM headroom were denied the middle tier as well and stayed
+    // interpreted, which cost deltablue's hybrid-auto row 62.5ms -> 441.4ms.
+    // The question here is "does this deserve the TOP tier", never "does this
+    // deserve to be compiled".
+    if !ctx.compiled_only && tier > 0 && ctx.mode == TierMode::Auto {
+        // Its OWN memo, not `llvm_failed`. Keying this on the compile-failure
+        // set meant any function that had ever failed a compile was swallowed
+        // here, before the demand check -- which silently removed the
+        // `defer ... no-demand` accounting and changed which functions could
+        // ever reach the tier. A gate rejection and a compile failure are
+        // different facts. One lookup per proposal either way: a broker
+        // re-proposed deltablue's 21 gated functions 1051664 times, so the
+        // decision has to be remembered, just not there.
+        if gate_rejected(findex) {
             return std::ptr::null_mut();
         }
         if ash_core::llvm::air::promotion_gate_enabled() {
@@ -745,9 +801,7 @@ fn tiered_compile_tier_inner(
                     if ash_core::llvm::air::llvm_ceiling(bc, raw)
                         == ash_core::llvm::air::LlvmCeiling::None
                     {
-                        if let Ok(mut g) = ctx.llvm_failed.lock() {
-                            g.insert(findex);
-                        }
+                        remember_gate_rejection(findex);
                         record_decline(findex, "no LLVM headroom (gate)");
                         if ctx.tier_log {
                             eprintln!(
@@ -1777,6 +1831,7 @@ pub(crate) fn compile_with_llvm(
                 .expect("llvm_done mutex poisoned")
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
+            record_install_calls(findex, bead.map(|b| b.invocation_count() as u64).unwrap_or(0));
             patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
             // Headers probed only after the early build, or one that
             // declined: the standalone producer covers whatever is left.

@@ -324,6 +324,18 @@ impl HLInterpreter {
         }
 
         match ins {
+            // The AIR walker is scalar; `unsupported_instr` refuses these
+            // before a function reaches here, so this arm is the belt to that
+            // braces rather than a path anything should take.
+            I::VecLoad { .. }
+            | I::VecStore { .. }
+            | I::VecSplat { .. }
+            | I::VecBinOp { .. }
+            | I::VecReduce { .. } => {
+                return Err(anyhow::anyhow!(
+                    "AIR walker reached a vector instruction"
+                ))
+            }
             // ---- values -----------------------------------------------
             I::Param { dst, reg } => {
                 // Registers past the argument list are the HL default, which is

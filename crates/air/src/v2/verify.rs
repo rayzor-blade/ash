@@ -286,6 +286,62 @@ pub fn verify(f: &Function) -> Result<()> {
                     if f.value_ty(*src) != f.cells[cell.idx()].ty => {
                         bail!("b{}: CellSet type mismatch", b);
                     }
+                // ---- vector forms ---------------------------------------
+                // Width is carried on the value, so it is the verifier's job
+                // to keep it agreeing: a scalar reaching a lane-wise operand
+                // is the mistake that would otherwise reach a backend and
+                // become a wrong-width machine instruction.
+                Instr::VecLoad { dst, index, .. } => {
+                    if f.value_lanes(*dst) < 2 {
+                        bail!("b{}: VecLoad into scalar v{}", b, dst.0);
+                    }
+                    if f.value_lanes(*index) != 1 {
+                        bail!("b{}: VecLoad index must be scalar", b);
+                    }
+                }
+                Instr::VecStore { src, index, .. } => {
+                    if f.value_lanes(*src) < 2 {
+                        bail!("b{}: VecStore of scalar v{}", b, src.0);
+                    }
+                    if f.value_lanes(*index) != 1 {
+                        bail!("b{}: VecStore index must be scalar", b);
+                    }
+                }
+                Instr::VecSplat { dst, src } => {
+                    if f.value_lanes(*src) != 1 {
+                        bail!("b{}: VecSplat source must be scalar", b);
+                    }
+                    if f.value_lanes(*dst) < 2 {
+                        bail!("b{}: VecSplat into scalar v{}", b, dst.0);
+                    }
+                    if f.value_ty(*dst) != f.value_ty(*src) {
+                        bail!("b{}: VecSplat element type mismatch", b);
+                    }
+                }
+                Instr::VecBinOp { dst, a, b: rb, .. } => {
+                    let lanes = f.value_lanes(*dst);
+                    if lanes < 2 {
+                        bail!("b{}: VecBinOp into scalar v{}", b, dst.0);
+                    }
+                    if f.value_lanes(*a) != lanes || f.value_lanes(*rb) != lanes {
+                        bail!("b{}: VecBinOp lane count mismatch", b);
+                    }
+                    let ty = f.value_ty(*dst);
+                    if f.value_ty(*a) != ty || f.value_ty(*rb) != ty {
+                        bail!("b{}: VecBinOp element type mismatch", b);
+                    }
+                }
+                Instr::VecReduce { dst, src, .. } => {
+                    if f.value_lanes(*src) < 2 {
+                        bail!("b{}: VecReduce of scalar v{}", b, src.0);
+                    }
+                    if f.value_lanes(*dst) != 1 {
+                        bail!("b{}: VecReduce must produce a scalar", b);
+                    }
+                    if f.value_ty(*dst) != f.value_ty(*src) {
+                        bail!("b{}: VecReduce element type mismatch", b);
+                    }
+                }
                 _ => {}
             }
         }

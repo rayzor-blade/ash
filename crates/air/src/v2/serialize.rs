@@ -288,6 +288,13 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
     // split back into `Mul` + `Add`. Fresh registers are never read by
     // anything else, so the split is correct for every operand aliasing.
     let mut fma_temps: BTreeMap<TypeRef, u32> = BTreeMap::new();
+    // Scalarization state: one scalar register per lane of each vector value,
+    // plus a scratch for lane index arithmetic. HL has no vector opcode, so a
+    // widened function is serialized by unrolling it back to lanes -- the
+    // optimizer tool (`--emit-optimized`) has to keep working on a function
+    // the vectorizer touched, and bailing would have made it fail outright.
+    let mut lane_regs: BTreeMap<ValueId, Vec<u32>> = BTreeMap::new();
+    let mut lane_idx_tmp: Option<u32> = None;
 
     for (pos, entry) in entries.iter().enumerate() {
         starts[pos] = ops.len();
@@ -318,7 +325,17 @@ pub fn serialize(f: &Function) -> Result<Serialized> {
                 let blk = &f.blocks[*b];
                 for ins in &blk.instrs {
                     instr_pcs[*b].push(ops.len());
-                    emit_instr(f, ins, &rg, &cr, &mut ops, &mut reg_types, &mut fma_temps)?;
+                    emit_instr(
+                        f,
+                        ins,
+                        &rg,
+                        &cr,
+                        &mut ops,
+                        &mut reg_types,
+                        &mut fma_temps,
+                        &mut lane_regs,
+                        &mut lane_idx_tmp,
+                    )?;
                 }
                 if let Some(movs) = &inline[*b] {
                     for &(d, s) in movs {
@@ -576,8 +593,97 @@ fn emit_instr(
     ops: &mut Vec<Opcode>,
     reg_types: &mut Vec<TypeRef>,
     fma_temps: &mut BTreeMap<TypeRef, u32>,
+    lane_regs: &mut BTreeMap<ValueId, Vec<u32>>,
+    lane_idx_tmp: &mut Option<u32>,
 ) -> Result<()> {
+    // Lane registers for a vector value, allocated on first use. Fresh
+    // registers, so no aliasing question with anything the body already had.
+    macro_rules! lanes_of {
+        ($v:expr) => {{
+            let v: ValueId = $v;
+            let n = f.values[v.idx()].lanes as usize;
+            lane_regs
+                .entry(v)
+                .or_insert_with(|| {
+                    let ty = f.value_ty(v);
+                    (0..n)
+                        .map(|_| {
+                            let r = reg_types.len() as u32;
+                            reg_types.push(ty);
+                            r
+                        })
+                        .collect()
+                })
+                .clone()
+        }};
+    }
     match ins {
+        // HL bytecode has no vector opcode, so a widened function is written
+        // back one lane at a time. The result is the scalar loop again --
+        // slower than the vector form the backends get, and identical in
+        // meaning, which is what `--emit-optimized` needs: it emits an
+        // ordinary `.hl` that stock HashLink runs.
+        Instr::VecLoad {
+            kind,
+            dst,
+            base,
+            index,
+            stride,
+        } => {
+            let lanes = lanes_of!(*dst);
+            let tmp = *lane_idx_tmp.get_or_insert_with(|| {
+                let r = reg_types.len() as u32;
+                reg_types.push(f.value_ty(*index));
+                r
+            });
+            for (k, &lr) in lanes.iter().enumerate() {
+                let idx = lane_index(ops, reg_types, rg(*index), tmp, k as u32, *stride);
+                ops.push(mem_get(*kind, Reg(lr), rg(*base), idx));
+            }
+        }
+        Instr::VecStore {
+            kind,
+            base,
+            index,
+            src,
+            stride,
+        } => {
+            let lanes = lanes_of!(*src);
+            let tmp = *lane_idx_tmp.get_or_insert_with(|| {
+                let r = reg_types.len() as u32;
+                reg_types.push(f.value_ty(*index));
+                r
+            });
+            for (k, &lr) in lanes.iter().enumerate() {
+                let idx = lane_index(ops, reg_types, rg(*index), tmp, k as u32, *stride);
+                ops.push(mem_set(*kind, rg(*base), idx, Reg(lr)));
+            }
+        }
+        Instr::VecSplat { dst, src } => {
+            for &lr in &lanes_of!(*dst) {
+                ops.push(Opcode::Mov {
+                    dst: Reg(lr),
+                    src: rg(*src),
+                });
+            }
+        }
+        Instr::VecBinOp { op, dst, a, b } => {
+            let (da, db, dd) = (lanes_of!(*a), lanes_of!(*b), lanes_of!(*dst));
+            for k in 0..dd.len() {
+                ops.push(scalar_binop(*op, Reg(dd[k]), Reg(da[k]), Reg(db[k])));
+            }
+        }
+        Instr::VecReduce { op, dst, src } => {
+            let ls = lanes_of!(*src);
+            let d = rg(*dst);
+            ops.push(Opcode::Mov {
+                dst: d,
+                src: Reg(ls[0]),
+            });
+            for &lr in &ls[1..] {
+                ops.push(scalar_binop(*op, d, d, Reg(lr)));
+            }
+        }
         Instr::Param { .. } => {}
         // Back to the direct native call the bytecode had — the flat form
         // has no intrinsic opcode, the same round-trip Fma takes.
@@ -956,5 +1062,107 @@ impl Function {
     /// Convenience: `serialize(self)`.
     pub fn to_opcodes(&self) -> Result<Serialized> {
         serialize(self)
+    }
+}
+
+/// The index register for lane `k`, given the vector's base `index`.
+///
+/// Lane 0 is the base index itself, so the common case adds no opcode. Later
+/// lanes need `index + k*stride` in the unit `kind` indexes by, which is why
+/// [`Instr::VecLoad`] carries the stride: this function has no type table to
+/// derive an element size from.
+fn lane_index(
+    ops: &mut Vec<Opcode>,
+    reg_types: &mut Vec<TypeRef>,
+    index: Reg,
+    tmp: u32,
+    k: u32,
+    stride: u32,
+) -> Reg {
+    if k == 0 {
+        return index;
+    }
+    let _ = reg_types;
+    ops.push(Opcode::Int {
+        dst: Reg(tmp),
+        ptr: crate::opcodes::RefInt((k * stride) as usize),
+    });
+    ops.push(Opcode::Add {
+        dst: Reg(tmp),
+        a: index,
+        b: Reg(tmp),
+    });
+    Reg(tmp)
+}
+
+/// The scalar load matching a [`MemAccess`] kind.
+fn mem_get(kind: MemAccess, dst: Reg, base: Reg, index: Reg) -> Opcode {
+    match kind {
+        MemAccess::I8 => Opcode::GetI8 {
+            dst,
+            bytes: base,
+            index,
+        },
+        MemAccess::I16 => Opcode::GetI16 {
+            dst,
+            bytes: base,
+            index,
+        },
+        MemAccess::Mem => Opcode::GetMem {
+            dst,
+            bytes: base,
+            index,
+        },
+        MemAccess::Array => Opcode::GetArray {
+            dst,
+            array: base,
+            index,
+        },
+    }
+}
+
+/// The scalar store matching a [`MemAccess`] kind.
+fn mem_set(kind: MemAccess, base: Reg, index: Reg, src: Reg) -> Opcode {
+    match kind {
+        MemAccess::I8 => Opcode::SetI8 {
+            bytes: base,
+            index,
+            src,
+        },
+        MemAccess::I16 => Opcode::SetI16 {
+            bytes: base,
+            index,
+            src,
+        },
+        MemAccess::Mem => Opcode::SetMem {
+            bytes: base,
+            index,
+            src,
+        },
+        MemAccess::Array => Opcode::SetArray {
+            array: base,
+            index,
+            src,
+        },
+    }
+}
+
+/// The scalar opcode for one lane of a [`Instr::VecBinOp`] or the combine
+/// step of a [`Instr::VecReduce`].
+fn scalar_binop(op: BinOp, dst: Reg, a: Reg, b: Reg) -> Opcode {
+    match op {
+        BinOp::Add => Opcode::Add { dst, a, b },
+        BinOp::Sub => Opcode::Sub { dst, a, b },
+        BinOp::Mul => Opcode::Mul { dst, a, b },
+        BinOp::SDiv => Opcode::SDiv { dst, a, b },
+        BinOp::UDiv => Opcode::UDiv { dst, a, b },
+        BinOp::SMod => Opcode::SMod { dst, a, b },
+        BinOp::UMod => Opcode::UMod { dst, a, b },
+        BinOp::Shl => Opcode::Shl { dst, a, b },
+        BinOp::SShr => Opcode::SShr { dst, a, b },
+        BinOp::UShr => Opcode::UShr { dst, a, b },
+        BinOp::And => Opcode::And { dst, a, b },
+        BinOp::Or => Opcode::Or { dst, a, b },
+        BinOp::Xor => Opcode::Xor { dst, a, b },
     }
 }

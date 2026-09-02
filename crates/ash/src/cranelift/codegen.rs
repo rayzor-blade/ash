@@ -89,6 +89,15 @@ pub fn reject_reason(f: &AirFunction) -> Option<String> {
 /// rather than silently miscompiling.
 fn instr_reject(i: &Instr) -> Option<&'static str> {
     match i {
+        // Cranelift has SIMD types and could take these, but the lowering is
+        // not written yet. Declining sends the function to LLVM, which is
+        // where a widened loop is worth the most anyway -- and an explicit
+        // refusal is what keeps `instr_reject` honest.
+        Instr::VecLoad { .. }
+        | Instr::VecStore { .. }
+        | Instr::VecSplat { .. }
+        | Instr::VecBinOp { .. }
+        | Instr::VecReduce { .. } => return Some("vector instruction"),
         Instr::Param { .. }
         | Instr::Copy { .. }
         | Instr::Int { .. }

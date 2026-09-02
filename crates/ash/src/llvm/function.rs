@@ -1327,7 +1327,28 @@ impl<'ctx> JITModule<'ctx> {
             .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
             .collect();
         lowering.ops.clear();
-        let (registers, reg_types) = self.allocate_registers(&lowering)?;
+        let (mut registers, mut reg_types) = self.allocate_registers(&lowering)?;
+        // Vector values need a slot of their real width. `allocate_registers`
+        // works from `TypeRef`, which indexes the bytecode's type table and
+        // has no vector entries, so the lane count on the value is the only
+        // place the width exists -- re-type those slots here.
+        for (i, v) in air.values.iter().enumerate() {
+            if v.lanes < 2 {
+                continue;
+            }
+            let vec_ty: BasicTypeEnum = match reg_types[i] {
+                BasicTypeEnum::IntType(t) => t.vec_type(v.lanes as u32).into(),
+                BasicTypeEnum::FloatType(t) => t.vec_type(v.lanes as u32).into(),
+                other => {
+                    return Err(anyhow!(
+                        "AIR value v{i} is {} lanes of a non-scalar type {other:?}",
+                        v.lanes
+                    ))
+                }
+            };
+            reg_types[i] = vec_ty;
+            registers[i] = self.builder.build_alloca(vec_ty, &format!("vreg_{i}"))?;
+        }
         let cell_base = air.values.len();
 
         // Reconstruct every AIR value and pinned cell from the de-SSA
@@ -1958,6 +1979,13 @@ impl<'ctx> JITModule<'ctx> {
                     AirInstr::Fma { dst, a, b, c } => {
                         self.emit_air_fma(*dst, *a, *b, *c, &registers, &reg_types)?;
                     }
+                    AirInstr::VecLoad { .. }
+                    | AirInstr::VecStore { .. }
+                    | AirInstr::VecSplat { .. }
+                    | AirInstr::VecBinOp { .. }
+                    | AirInstr::VecReduce { .. } => {
+                        self.emit_air_vector(instr, &registers, &reg_types)?;
+                    }
                     AirInstr::FieldGet { obj, obj_ty, .. }
                     | AirInstr::FieldSet { obj, obj_ty, .. } => {
                         // AIR resolved the field's declaring object type once.
@@ -2033,6 +2061,160 @@ impl<'ctx> JITModule<'ctx> {
         let exit = self.context.append_basic_block(function, "air_exit");
         self.builder.position_at_end(exit);
         Ok(())
+    }
+
+    /// Emit one of the vector forms. HL has no vector opcode, so these are
+    /// built here rather than routed through `translate_opcode`.
+    ///
+    /// Lane width comes from the destination slot, which `translate_air_v2`
+    /// already re-typed from the value's lane count -- so the machine width is
+    /// whatever the transform decided, and a disagreement between operands was
+    /// rejected by the AIR verifier before reaching here.
+    fn emit_air_vector(
+        &self,
+        instr: &AirInstr,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+    ) -> Result<()> {
+        let load = |v: ValueId, name: &str| -> Result<BasicValueEnum<'ctx>> {
+            Ok(self
+                .builder
+                .build_load(reg_types[v.idx()], registers[v.idx()], name)?)
+        };
+        match instr {
+            AirInstr::VecLoad {
+                dst, base, index, ..
+            } => {
+                let base_ptr = load(*base, "vec_base")?.into_pointer_value();
+                let idx = load(*index, "vec_idx")?.into_int_value();
+                let addr = unsafe {
+                    self.builder
+                        .build_gep(self.context.i8_type(), base_ptr, &[idx], "vec_addr")?
+                };
+                let v = self
+                    .builder
+                    .build_load(reg_types[dst.idx()], addr, "vec_load")?;
+                self.builder.build_store(registers[dst.idx()], v)?;
+            }
+            AirInstr::VecStore {
+                base, index, src, ..
+            } => {
+                let base_ptr = load(*base, "vec_base")?.into_pointer_value();
+                let idx = load(*index, "vec_idx")?.into_int_value();
+                let addr = unsafe {
+                    self.builder
+                        .build_gep(self.context.i8_type(), base_ptr, &[idx], "vec_addr")?
+                };
+                let v = load(*src, "vec_val")?;
+                self.builder.build_store(addr, v)?;
+            }
+            AirInstr::VecSplat { dst, src } => {
+                // insertelement into lane 0, then a zero shuffle to fill.
+                let scalar = load(*src, "splat_src")?;
+                let BasicTypeEnum::VectorType(vec_ty) = reg_types[dst.idx()] else {
+                    return Err(anyhow!("VecSplat destination is not a vector"));
+                };
+                let lanes = vec_ty.get_size();
+                let zero = self.context.i32_type().const_zero();
+                let one = self.builder.build_insert_element(
+                    vec_ty.get_undef(),
+                    scalar,
+                    zero,
+                    "splat_ins",
+                )?;
+                let mask = self
+                    .context
+                    .i32_type()
+                    .vec_type(lanes)
+                    .const_zero();
+                let out = self.builder.build_shuffle_vector(
+                    one,
+                    vec_ty.get_undef(),
+                    mask,
+                    "splat",
+                )?;
+                self.builder.build_store(registers[dst.idx()], out)?;
+            }
+            AirInstr::VecBinOp { op, dst, a, b } => {
+                let lhs = load(*a, "vec_a")?;
+                let rhs = load(*b, "vec_b")?;
+                let out = self.emit_vector_binop(*op, lhs, rhs)?;
+                self.builder.build_store(registers[dst.idx()], out)?;
+            }
+            AirInstr::VecReduce { op, dst, src } => {
+                // Extract-and-combine rather than the reduce intrinsics: it
+                // is correct for every element type without asking whether
+                // the target has a horizontal instruction, and the backend
+                // pattern-matches the tree anyway.
+                let v = load(*src, "red_src")?;
+                let BasicTypeEnum::VectorType(vec_ty) = reg_types[src.idx()] else {
+                    return Err(anyhow!("VecReduce source is not a vector"));
+                };
+                let lanes = vec_ty.get_size();
+                if lanes == 0 {
+                    return Err(anyhow!("VecReduce over an empty vector"));
+                }
+                let i32t = self.context.i32_type();
+                let mut acc = self.builder.build_extract_element(
+                    v.into_vector_value(),
+                    i32t.const_zero(),
+                    "red0",
+                )?;
+                for lane in 1..lanes {
+                    let e = self.builder.build_extract_element(
+                        v.into_vector_value(),
+                        i32t.const_int(lane as u64, false),
+                        "rede",
+                    )?;
+                    acc = self.emit_vector_binop(*op, acc, e)?;
+                }
+                self.builder.build_store(registers[dst.idx()], acc)?;
+            }
+            other => return Err(anyhow!("not a vector instruction: {other:?}")),
+        }
+        Ok(())
+    }
+
+    /// The elementwise operation behind `VecBinOp` and the reduce's combine.
+    /// LLVM applies a scalar opcode lane-wise on vector operands, so this is
+    /// the same dispatch either way.
+    fn emit_vector_binop(
+        &self,
+        op: air::v2::ir::BinOp,
+        a: BasicValueEnum<'ctx>,
+        b: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        use air::v2::ir::BinOp as B;
+        let float = a.is_float_value() || a.is_vector_value() && b.is_vector_value() && {
+            matches!(a.into_vector_value().get_type().get_element_type(),
+                     inkwell::types::BasicTypeEnum::FloatType(_))
+        };
+        Ok(if float {
+            let (x, y) = (a.into_float_value(), b.into_float_value());
+            match op {
+                B::Add => self.builder.build_float_add(x, y, "vfadd")?.into(),
+                B::Sub => self.builder.build_float_sub(x, y, "vfsub")?.into(),
+                B::Mul => self.builder.build_float_mul(x, y, "vfmul")?.into(),
+                // HL's division is the signed integer opcode reused for
+                // floats; there is no separate float variant.
+                B::SDiv => self.builder.build_float_div(x, y, "vfdiv")?.into(),
+                _ => return Err(anyhow!("unsupported float vector op {op:?}")),
+            }
+        } else {
+            let (x, y) = (a.into_int_value(), b.into_int_value());
+            match op {
+                B::Add => self.builder.build_int_add(x, y, "viadd")?.into(),
+                B::Sub => self.builder.build_int_sub(x, y, "visub")?.into(),
+                B::Mul => self.builder.build_int_mul(x, y, "vimul")?.into(),
+                B::And => self.builder.build_and(x, y, "viand")?.into(),
+                B::Or => self.builder.build_or(x, y, "vior")?.into(),
+                B::Xor => self.builder.build_xor(x, y, "vixor")?.into(),
+                B::Shl => self.builder.build_left_shift(x, y, "vishl")?.into(),
+                B::SShr => self.builder.build_right_shift(x, y, true, "vishr")?.into(),
+                B::UShr => self.builder.build_right_shift(x, y, false, "vushr")?.into(),
+                _ => return Err(anyhow!("unsupported int vector op {op:?}")),
+            }
+        })
     }
 
     fn emit_air_fma(
@@ -2114,7 +2296,15 @@ impl<'ctx> JITModule<'ctx> {
         };
 
         let opcode = match instr {
-            AirInstr::Param { .. } | AirInstr::Fma { .. } => return Ok(None),
+            // Emitted directly, like Fma: there is no HL opcode to route
+            // through, which is the whole reason these exist in the IR.
+            AirInstr::Param { .. }
+            | AirInstr::Fma { .. }
+            | AirInstr::VecLoad { .. }
+            | AirInstr::VecStore { .. }
+            | AirInstr::VecSplat { .. }
+            | AirInstr::VecBinOp { .. }
+            | AirInstr::VecReduce { .. } => return Ok(None),
             AirInstr::Copy { dst, src } => Opcode::Mov {
                 dst: reg(*dst),
                 src: reg(*src),

@@ -65,6 +65,22 @@ pub struct ValueData {
     /// Originating HL register. `serialize` assigns the value back to this
     /// register.
     pub reg: u32,
+    /// Lanes, when this value is a vector. `1` is a scalar and is what every
+    /// value built before vectorization existed carries.
+    ///
+    /// The width lives here rather than in `ty` because `TypeRef` indexes the
+    /// bytecode's type table, which has no vector types and cannot be given
+    /// any without inventing entries no HL program refers to. A vector value
+    /// keeps its ELEMENT type and says how many of them it holds, which is
+    /// what both backends need to build `<N x elem>` anyway.
+    pub lanes: u16,
+}
+
+impl ValueData {
+    #[inline]
+    pub fn is_vector(&self) -> bool {
+        self.lanes > 1
+    }
 }
 
 /// A pinned register modeled as a memory cell.
@@ -294,6 +310,57 @@ pub enum Instr {
         dst: ValueId,
         a: ValueId,
         b: ValueId,
+    },
+    /// `dst = <lanes x elem>` loaded contiguously from `base[index ..]`.
+    ///
+    /// The vector forms below are what [`vectorize`](super::vectorize) proved
+    /// legal and what the widening transform emits. They carry their width
+    /// rather than deriving it from a type, because `TypeRef` indexes the
+    /// bytecode's type table and vectors are not in it.
+    ///
+    /// `serialize` cannot express any of these -- HL bytecode has no vector
+    /// opcode -- so a function holding them is for the backends only, exactly
+    /// as [`Fma`] already is for the fused form.
+    VecLoad {
+        kind: MemAccess,
+        dst: ValueId,
+        base: ValueId,
+        index: ValueId,
+        /// Index units between consecutive lanes, in whatever unit `kind`
+        /// indexes by -- bytes for `Mem`/`I8`/`I16`, elements for `Array`.
+        ///
+        /// Carried here so `serialize` can scalarize without re-deriving
+        /// element sizes it has no type table for, and so the backends can
+        /// check that the access really is contiguous before emitting a
+        /// single wide load.
+        stride: u32,
+    },
+    /// Store `src`'s lanes contiguously to `base[index ..]`.
+    VecStore {
+        kind: MemAccess,
+        base: ValueId,
+        index: ValueId,
+        src: ValueId,
+        stride: u32,
+    },
+    /// Broadcast a scalar across every lane: the loop-invariant operands the
+    /// analysis reports as broadcastable.
+    VecSplat {
+        dst: ValueId,
+        src: ValueId,
+    },
+    /// Elementwise `op` over two equally wide vectors.
+    VecBinOp {
+        op: BinOp,
+        dst: ValueId,
+        a: ValueId,
+        b: ValueId,
+    },
+    /// Horizontal fold of `src`'s lanes into a scalar, closing a reduction.
+    VecReduce {
+        op: BinOp,
+        dst: ValueId,
+        src: ValueId,
     },
     /// `dst = a * b + c` computed with a **single rounding** of the exact
     /// product-plus-addend, i.e. `f64::mul_add` semantics.
@@ -534,7 +601,11 @@ impl Instr {
     /// The value defined by this instruction, if any.
     pub fn dst(&self) -> Option<ValueId> {
         match self {
-            Instr::Param { dst, .. }
+            Instr::VecLoad { dst, .. }
+            | Instr::VecSplat { dst, .. }
+            | Instr::VecBinOp { dst, .. }
+            | Instr::VecReduce { dst, .. }
+            | Instr::Param { dst, .. }
             | Instr::Copy { dst, .. }
             | Instr::Int { dst, .. }
             | Instr::Float { dst, .. }
@@ -577,6 +648,7 @@ impl Instr {
             | Instr::NullCheck { .. }
             | Instr::EndTrap { .. }
             | Instr::MemSet { .. }
+            | Instr::VecStore { .. }
             | Instr::SetRef { .. }
             | Instr::SetEnumField { .. }
             | Instr::CellSet { .. }
@@ -647,6 +719,12 @@ impl Instr {
             Instr::EnumIndex { value, .. } | Instr::EnumField { value, .. } => vec![*value],
             Instr::SetEnumField { value, src, .. } => vec![*value, *src],
             Instr::Prefetch { value, .. } => vec![*value],
+            Instr::VecLoad { base, index, .. } => vec![*base, *index],
+            Instr::VecStore {
+                base, index, src, ..
+            } => vec![*base, *index, *src],
+            Instr::VecSplat { src, .. } | Instr::VecReduce { src, .. } => vec![*src],
+            Instr::VecBinOp { a, b, .. } => vec![*a, *b],
         }
     }
 
@@ -663,6 +741,11 @@ impl Instr {
             | Instr::Null { .. }
             | Instr::UnOp { .. }
             | Instr::Fma { .. }
+            // Elementwise arithmetic and a broadcast touch no memory; the
+            // reduce folds a value already in hand.
+            | Instr::VecSplat { .. }
+            | Instr::VecBinOp { .. }
+            | Instr::VecReduce { .. }
             // Pure BY CONSTRUCTION: only operations whose ash_std bodies read
             // nothing but their argument are admitted to IntrinsicKind. This
             // is the fact the FFI form discarded — one sqrt in a loop was a
@@ -690,6 +773,7 @@ impl Instr {
             Instr::GetGlobal { .. }
             | Instr::FieldGet { .. }
             | Instr::ArraySize { .. }
+            | Instr::VecLoad { .. }
             | Instr::MemGet { .. }
             | Instr::GetType { .. }
             | Instr::GetTID { .. }
@@ -707,6 +791,7 @@ impl Instr {
             Instr::SetGlobal { .. }
             | Instr::FieldSet { .. }
             | Instr::MemSet { .. }
+            | Instr::VecStore { .. }
             | Instr::SetRef { .. }
             | Instr::SetEnumField { .. }
             | Instr::CellSet { .. }
@@ -828,13 +913,33 @@ impl Instr {
                 one(src);
             }
             Instr::Prefetch { value, .. } => one(value),
+            Instr::VecLoad { base, index, .. } => {
+                one(base);
+                one(index);
+            }
+            Instr::VecStore {
+                base, index, src, ..
+            } => {
+                one(base);
+                one(index);
+                one(src);
+            }
+            Instr::VecSplat { src, .. } | Instr::VecReduce { src, .. } => one(src),
+            Instr::VecBinOp { a, b, .. } => {
+                one(a);
+                one(b);
+            }
         }
     }
 
     /// Rewrite the value this instruction defines, if any.
     pub fn map_dst(&mut self, m: &mut dyn FnMut(ValueId) -> ValueId) {
         match self {
-            Instr::Param { dst, .. }
+            Instr::VecLoad { dst, .. }
+            | Instr::VecSplat { dst, .. }
+            | Instr::VecBinOp { dst, .. }
+            | Instr::VecReduce { dst, .. }
+            | Instr::Param { dst, .. }
             | Instr::Copy { dst, .. }
             | Instr::Int { dst, .. }
             | Instr::Float { dst, .. }
@@ -877,6 +982,7 @@ impl Instr {
             | Instr::NullCheck { .. }
             | Instr::EndTrap { .. }
             | Instr::MemSet { .. }
+            | Instr::VecStore { .. }
             | Instr::SetRef { .. }
             | Instr::SetEnumField { .. }
             | Instr::CellSet { .. }
@@ -1082,13 +1188,26 @@ impl Function {
 
     pub fn new_value(&mut self, ty: TypeRef, reg: u32) -> ValueId {
         let id = ValueId(self.values.len() as u32);
-        self.values.push(ValueData { ty, reg });
+        self.values.push(ValueData { ty, reg, lanes: 1 });
+        id
+    }
+
+    /// A value holding `lanes` elements of `ty`.
+    pub fn new_vector_value(&mut self, ty: TypeRef, reg: u32, lanes: u16) -> ValueId {
+        let id = ValueId(self.values.len() as u32);
+        self.values.push(ValueData { ty, reg, lanes });
         id
     }
 
     #[inline]
     pub fn value_ty(&self, v: ValueId) -> TypeRef {
         self.values[v.idx()].ty
+    }
+
+    /// Lanes in `v`; `1` for every scalar.
+    #[inline]
+    pub fn value_lanes(&self, v: ValueId) -> u16 {
+        self.values[v.idx()].lanes
     }
 
     /// The de-SSA register assignment of a value.

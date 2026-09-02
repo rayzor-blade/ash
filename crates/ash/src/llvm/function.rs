@@ -2807,10 +2807,13 @@ impl<'ctx> JITModule<'ctx> {
             AirCondKind::SLte => (IntPredicate::SLE, FloatPredicate::OLE),
             AirCondKind::ULt => (IntPredicate::ULT, FloatPredicate::OLT),
             AirCondKind::UGte => (IntPredicate::UGE, FloatPredicate::OGE),
-            AirCondKind::NotLt => (IntPredicate::SGE, FloatPredicate::OGE),
-            AirCondKind::NotGte => (IntPredicate::SLT, FloatPredicate::OLT),
+            // The AIR path is the one every tier actually takes; the same
+            // rule as the legacy arms: NotLt/NotGte are Haxe's inverted float
+            // tests and must jump on NaN, and `nan != nan` is true.
+            AirCondKind::NotLt => (IntPredicate::SGE, FloatPredicate::UGE),
+            AirCondKind::NotGte => (IntPredicate::SLT, FloatPredicate::ULT),
             AirCondKind::Eq => (IntPredicate::EQ, FloatPredicate::OEQ),
-            AirCondKind::NotEq => (IntPredicate::NE, FloatPredicate::ONE),
+            AirCondKind::NotEq => (IntPredicate::NE, FloatPredicate::UNE),
             _ => unreachable!("unary conditions returned above"),
         };
 
@@ -4353,6 +4356,12 @@ impl<'ctx> JITModule<'ctx> {
                     opcode_blocks,
                 )?;
             }
+            // Haxe inverts every float `if` through JNotLt / JNotGte, so those
+            // two must jump when the operands are UNORDERED: `if (nan > 0)`
+            // is `JNotLt(0, nan)` skipping the body, and an ordered OGE let
+            // the body run. `nan != nan` is true, so JNotEq is UNE. JEq/JSLt/
+            // JSGte/JSGt/JSLte stay ordered: they are the non-inverted forms
+            // and a NaN operand makes them false, as in HashLink.
             Opcode::JNotLt { a, b, offset } => {
                 // !(a < b) is the same as a >= b
                 let a_kind = self.types_[f.regs[a.0 as usize].0].kind;
@@ -4363,7 +4372,7 @@ impl<'ctx> JITModule<'ctx> {
                     b,
                     a_kind,
                     IntPredicate::SGE,
-                    FloatPredicate::OGE,
+                    FloatPredicate::UGE,
                     i,
                     *offset,
                     opcode_blocks,
@@ -4379,7 +4388,7 @@ impl<'ctx> JITModule<'ctx> {
                     b,
                     a_kind,
                     IntPredicate::SLT,
-                    FloatPredicate::OLT,
+                    FloatPredicate::ULT,
                     i,
                     *offset,
                     opcode_blocks,
@@ -4409,7 +4418,7 @@ impl<'ctx> JITModule<'ctx> {
                     b,
                     a_kind,
                     IntPredicate::NE,
-                    FloatPredicate::ONE,
+                    FloatPredicate::UNE,
                     i,
                     *offset,
                     opcode_blocks,
@@ -4508,34 +4517,20 @@ impl<'ctx> JITModule<'ctx> {
             }
             Opcode::Shl { dst, a, b } => {
                 self.emit_binary_op(registers, reg_types, dst, a, b, "shl", |b, av, bv| {
-                    Ok(
-                        b.build_left_shift(av.into_int_value(), bv.into_int_value(), "shl")?
-                            .as_basic_value_enum(),
-                    )
+                    let (x, y) = Self::shift_operands(b, av.into_int_value(), bv.into_int_value())?;
+                    Ok(b.build_left_shift(x, y, "shl")?.as_basic_value_enum())
                 })?;
             }
             Opcode::SShr { dst, a, b } => {
                 self.emit_binary_op(registers, reg_types, dst, a, b, "sshr", |b, av, bv| {
-                    Ok(
-                        b.build_right_shift(
-                            av.into_int_value(),
-                            bv.into_int_value(),
-                            true,
-                            "sshr",
-                        )?
-                        .as_basic_value_enum(),
-                    )
+                    let (x, y) = Self::shift_operands(b, av.into_int_value(), bv.into_int_value())?;
+                    Ok(b.build_right_shift(x, y, true, "sshr")?.as_basic_value_enum())
                 })?;
             }
             Opcode::UShr { dst, a, b } => {
                 self.emit_binary_op(registers, reg_types, dst, a, b, "ushr", |b, av, bv| {
-                    Ok(b.build_right_shift(
-                        av.into_int_value(),
-                        bv.into_int_value(),
-                        false,
-                        "ushr",
-                    )?
-                    .as_basic_value_enum())
+                    let (x, y) = Self::shift_operands(b, av.into_int_value(), bv.into_int_value())?;
+                    Ok(b.build_right_shift(x, y, false, "ushr")?.as_basic_value_enum())
                 })?;
             }
             Opcode::And { dst, a, b } => {
@@ -5078,7 +5073,35 @@ impl<'ctx> JITModule<'ctx> {
                         .into_pointer_value();
                     if dst_kind != hl_type_kind_HVOID {
                         let dst_ty = reg_types[dst.0 as usize];
-                        let store_val: BasicValueEnum = if dst_ty.is_pointer_type() {
+                        let store_val: BasicValueEnum = if dst_kind == hl_type_kind_HVIRTUAL {
+                            // The callee returns ITS declared type. When that is
+                            // a view of another virtual type (IntMap.keys hands
+                            // back an Iterator<Int> where the caller's erased
+                            // field is Iterator<Dynamic>), storing it as-is
+                            // leaves a view whose method slots were resolved
+                            // for the other type: a later direct call read an
+                            // i32 return as a pointer. HashLink's dynamic call
+                            // casts the result to the caller's type; do the
+                            // same. hl_to_virtual returns a same-typed view
+                            // unchanged and null for null.
+                            let dst_vt = self
+                                .get_initialized_type(f.regs[dst.0 as usize].0)?
+                                .into_pointer_value();
+                            let to_virtual = self.declare_native(
+                                "hl_to_virtual",
+                                &[ptr_type.into(), ptr_type.into()],
+                                Some(ptr_type.into()),
+                            );
+                            self.builder
+                                .build_call(
+                                    to_virtual,
+                                    &[dst_vt.into(), ret_dyn.into()],
+                                    "vcall_ret_view",
+                                )?
+                                .try_as_basic_value()
+                                .basic()
+                                .unwrap()
+                        } else if dst_ty.is_pointer_type() {
                             // Objects/strings/dynamics ARE their own box; an
                             // unresolved call's null return is dst's null.
                             ret_dyn.into()
@@ -7894,6 +7917,29 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Helper: emit a binary arithmetic operation
+    /// A shift count in HashLink is masked to the operand width (x86 `shl cl`
+    /// and arm64 `lslv` both do; the interpreter does with `wrapping_shl`).
+    /// LLVM's `shl`/`lshr`/`ashr` are POISON for a count >= the width, so
+    /// `1 << 32`, `x << -1` or `Int64 << (i32 count)` constant-folded to
+    /// arbitrary values whenever the optimizer could see the count. Bring the
+    /// count to the value's width first (Int64 shifts carry an I32 count),
+    /// then mask it.
+    fn shift_operands(
+        b: &inkwell::builder::Builder<'ctx>,
+        x: inkwell::values::IntValue<'ctx>,
+        y: inkwell::values::IntValue<'ctx>,
+    ) -> Result<(inkwell::values::IntValue<'ctx>, inkwell::values::IntValue<'ctx>)> {
+        let width = x.get_type().get_bit_width();
+        let y = if y.get_type().get_bit_width() > width {
+            b.build_int_truncate(y, x.get_type(), "shift_count")?
+        } else if y.get_type().get_bit_width() < width {
+            b.build_int_z_extend(y, x.get_type(), "shift_count")?
+        } else {
+            y
+        };
+        let mask = x.get_type().const_int(u64::from(width - 1), false);
+        Ok((x, b.build_and(y, mask, "shift_mask")?))
+    }
     fn emit_binary_op<F>(
         &self,
         registers: &[PointerValue<'ctx>],

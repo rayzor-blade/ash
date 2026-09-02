@@ -1777,3 +1777,22 @@ cycle breaking (serialize.rs "sequentialize parallel copies") and the SSA
 walker carries phi lanes in a buffer; add a test that every consumer agrees on
 a swap phi (`a = phi[.. b]`, `b = phi[.. a]`) and a chain phi, at every AIR
 level, so the next consumer cannot regress this.
+
+## Dynamic-call results must be cast to the caller's static type everywhere
+
+`hlp_vcall_dyn` / `hlp_dyn_call` return the callee's declared type. HashLink's
+`hl_dyn_call_obj` casts the result to the caller's expected type; ash's LLVM
+fallback now re-wraps a HVIRTUAL destination (the erased-generic iterator case)
+but stores every other pointer destination as-is. Audit the remaining
+combinations: an HOBJ destination receiving a view (needs the value), an HDYN
+destination receiving a raw method pointer from a direct-slot call, and the
+interpreter's own op_call_method fallback for the same shapes.
+
+## AOT: exception stacks are empty
+
+`haxe.CallStack.exceptionStack()` / `e.stack` have no frames under AOT
+(TestExceptions.testExceptionStack hits a Null access, Issue10109 asserts
+`e.stack.length > 0`). The JIT records call stacks through its code map; the
+object file has symbols but no runtime registration. Either register bodies
+at init (`ash_functions` + sizes) or accept empty stacks and make CallStack
+return [] instead of null.

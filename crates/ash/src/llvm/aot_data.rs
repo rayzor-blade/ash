@@ -1092,6 +1092,23 @@ impl<'ctx> JITModule<'ctx> {
                     names.extend(virt.fields.iter().map(|f| f.name.clone()));
                 }
             }
+            // Dynamic field access carries its name as a string index; the
+            // JIT registers each one when it compiles the op, which is what
+            // lets Reflect.fields name a field that only ever existed on a
+            // Dynamic (haxe.rtti.Meta's objects, JSON-parsed objects).
+            for f in &self.bytecode.functions {
+                for op in &f.ops {
+                    match op {
+                        crate::opcodes::Opcode::DynGet { field, .. }
+                        | crate::opcodes::Opcode::DynSet { field, .. } => {
+                            if let Some(name) = self.bytecode.strings.get(field.0) {
+                                names.push(name.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
             names.sort();
             names.dedup();
             for name in names {

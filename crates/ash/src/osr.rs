@@ -223,10 +223,23 @@ mod tests {
         assert_eq!(p.entry_headers.len(), 1);
     }
 
+    /// A loopless function is NOT refused any more, and this test asserted
+    /// that it was. `analyze` gained the loopless arm above -- entry is a
+    /// block-start property, and recursion, the shape with no loop header, is
+    /// what the interpreter is worst at -- and this case was left behind
+    /// asserting the scope the arm removed.
     #[test]
-    fn a_function_without_a_loop_is_refused() {
+    fn a_function_without_a_loop_offers_its_straight_line_blocks() {
         let f = lower(&[Opcode::Ret { ret: Reg(0) }], &tys(1)).unwrap();
-        assert!(analyze(&f).refusals.contains(&OsrRefusal::NoBackEdge));
+        let p = analyze(&f);
+        assert!(p.eligible(), "refusals: {:?}", p.refusals);
+        assert!(
+            !p.refusals.contains(&OsrRefusal::NoBackEdge),
+            "refusals: {:?}",
+            p.refusals
+        );
+        // Block 0 is the ordinary entry; the way in is to call the function.
+        assert!(!p.entry_headers.contains(&0), "{:?}", p.entry_headers);
     }
 
     /// A reference taken before the loop can still be live inside it.

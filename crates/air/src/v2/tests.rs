@@ -5954,3 +5954,116 @@ fn a_widened_function_scalarizes_back_to_runnable_bytecode() {
         }
     }
 }
+
+/// `for (i = 0; i < 16; i++) { if (i >= len) throw; dst[i] = k; }`
+///
+/// A bounds-checked store: the guard leaves the loop only to a throw, which
+/// the analysis classifies as a guard rather than a second exit. A lane
+/// executes whether or not the scalar loop would have reached it, so the
+/// check has to be proven for the whole vector range before the loop and
+/// removed from the body — testing it against an induction variable that now
+/// steps by four proves nothing about lanes 1..3.
+fn widen_guarded_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 dst(bytes) r1 i r2 limit r3 step r4 k r5 len
+    let regs = vec![t(13), t(3), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Int { dst: Reg(5), ptr: RefInt(1) },   // len = 16
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 5 },  // normal exit
+        Opcode::JSLt { a: Reg(1), b: Reg(5), offset: 1 },   // guard: i < len -> ok
+        Opcode::Throw { exc: Reg(4) },                       // else throw
+        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -6 },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    (ops, regs)
+}
+
+#[test]
+fn a_bounds_checked_loop_is_widenable_once_the_guard_is_hoisted() {
+    let (ops, regs) = widen_guarded_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let plans = super::vectorize::analyze_with(
+        &f,
+        &super::vectorize::VecOptions::default(),
+        &|i| WidenInfo.int_value(i),
+    );
+    let guarded: Vec<_> = plans.iter().filter(|p| !p.guard_exits.is_empty()).collect();
+    assert!(
+        !guarded.is_empty(),
+        "no guard recognised; the analysis saw the throw edge as an ordinary \
+         exit:\n{}",
+        f.dump()
+    );
+    let before = f.dump();
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    if stats.replaced == 0 {
+        let why = super::passes::widen::explain(&f, &WidenInfo);
+        panic!("guarded loop not widened; declines: {why:?}\n{before}");
+    }
+    verify(&f).unwrap_or_else(|e| panic!("verify after guarded widen: {e}\n{}", f.dump()));
+    // The guard must be GONE from the body: left in, it would be tested
+    // against an induction variable stepping by a whole vector.
+    let hoisted = f.blocks.iter().any(|b| {
+        matches!(&b.term, Terminator::CondJump { .. }) && b.instrs.is_empty()
+    });
+    assert!(hoisted, "no hoisted pre-loop check was created:\n{}", f.dump());
+}
+
+/// `for (i = 0; i < len; i++) dst[i] = k;` — a RUNTIME length.
+///
+/// The common shape, and the one a compile-time trip count cannot cover: the
+/// loop runs `len` times, `len` is not known here, so the widened loop takes
+/// `len & ~3` iterations and a scalar copy finishes the remainder.
+fn widen_runtime_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
+    // r0 dst(array) r1 i r2 len r3 step r4 k
+    let regs = vec![t(13), t(3), t(3), t(3), t(3)];
+    let ops = vec![
+        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
+        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
+        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Label,
+        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 3 },  // i >= len -> exit
+        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
+        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JAlways { offset: -4 },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    (ops, regs)
+}
+
+#[test]
+fn a_runtime_length_loop_widens_with_a_scalar_epilogue() {
+    let (ops, regs) = widen_runtime_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let blocks_before = f.blocks.len();
+    let before = f.dump();
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    if stats.replaced == 0 {
+        let why = super::passes::widen::explain(&f, &WidenInfo);
+        panic!("runtime-length loop not widened; declines: {why:?}\n{before}");
+    }
+    verify(&f).unwrap_or_else(|e| panic!("verify after epilogue: {e}\n{}", f.dump()));
+    assert!(
+        f.blocks.len() > blocks_before,
+        "no epilogue blocks were added:\n{}",
+        f.dump()
+    );
+    // Both forms must be present: vectors in the widened loop, the original
+    // scalar store in the remainder.
+    let has_vec = f.blocks.iter().any(|b| {
+        b.instrs.iter().any(|i| matches!(i, Instr::VecStore { .. }))
+    });
+    let has_scalar = f.blocks.iter().any(|b| {
+        b.instrs.iter().any(|i| matches!(i, Instr::MemSet { .. }))
+    });
+    assert!(has_vec, "widened loop has no vector store:\n{}", f.dump());
+    assert!(has_scalar, "no scalar remainder survived:\n{}", f.dump());
+}

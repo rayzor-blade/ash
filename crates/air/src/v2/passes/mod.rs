@@ -136,6 +136,10 @@ pub struct PassOptions {
     /// starts its depth count over — which is what keeps the
     /// inlining-versus-DCE fixed point terminating. Default 400.
     pub inline_max_function: usize,
+    /// Run [`widen::Widen`]. On by default at O3; turning it off is how a
+    /// survey gets a look at the loops as the analysis sees them, since a
+    /// widened loop no longer resembles one.
+    pub widen: bool,
 }
 
 impl Default for PassOptions {
@@ -147,6 +151,7 @@ impl Default for PassOptions {
             inline_max_callee: 40,
             inline_max_depth: 2,
             inline_max_function: 400,
+            widen: true,
         }
     }
 }

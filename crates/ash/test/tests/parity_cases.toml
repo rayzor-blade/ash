@@ -539,3 +539,18 @@ expectation = "exact"
 normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
+
+# The vectorizer's remainder handling, which is where widening stops being a
+# missed optimization and becomes a wrong answer. Lengths 0..12 straddle the
+# width of 4 in every way that matters: shorter than a vector, exactly one,
+# and every offset in between, for both an int store and a float
+# read-modify-write. A widened loop that runs one vector too far or skips the
+# tail changes the checksum, and it changes it silently.
+[[case]]
+name = "TestVectorize"
+main = "TestVectorize"
+hl = "test_vectorize.hl"
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"

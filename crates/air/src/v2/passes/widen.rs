@@ -46,12 +46,45 @@ pub enum Decline {
     TripCountNotConstant,
     TripCountNotMultiple(i64),
     HasReduction,
-    HasGuardExits,
+    /// A guard whose condition this cannot prove for the whole vector range.
+    /// Hoisting needs the test to be the induction variable against something
+    /// loop-invariant; anything else would be assumed rather than proven.
+    UnprovableGuard(BlockId),
+    /// No single entry edge to put the hoisted check on.
+    NoPreheader,
+    /// A remainder loop is needed and the induction does not step by one.
+    EpilogueNeedsUnitStep(i64),
+    /// The loop has a guard to hoist but no compile-time last index to prove
+    /// it at.
+    GuardNeedsConstantTrip,
+    /// The loop's limit is recomputed inside the loop, so the preheader
+    /// cannot compute the vector trip count from it.
+    LimitNotInvariant,
     NonUnitStride(i64),
     TooSmall(usize),
     /// The loop body writes a value the widening would have to keep scalar
     /// and vector at once.
     MixedUse(ValueId),
+}
+
+// What the TRANSFORM did, loop by loop, for the surveys.
+//
+// The analysis verdict and the transform's are different questions -- a loop
+// can be vectorizable and still declined by `check` -- and re-running the
+// analysis afterwards cannot recover the second, because a widened loop no
+// longer looks like one the analysis would accept. So the pass records it.
+thread_local! {
+    static OUTCOMES: std::cell::RefCell<Vec<(BlockId, Result<(), Decline>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record(header: BlockId, r: Result<(), Decline>) {
+    OUTCOMES.with(|o| o.borrow_mut().push((header, r)));
+}
+
+/// Every outcome recorded on this thread since the last call, and clear.
+pub fn take_outcomes() -> Vec<(BlockId, Result<(), Decline>)> {
+    OUTCOMES.with(|o| std::mem::take(&mut *o.borrow_mut()))
 }
 
 /// Widen every loop that qualifies.
@@ -64,15 +97,30 @@ impl Pass for Widen<'_> {
         "widen"
     }
 
-    fn run(&self, f: &mut Function, _opts: &PassOptions) -> Result<PassStats> {
+    fn run(&self, f: &mut Function, pass_opts: &PassOptions) -> Result<PassStats> {
         let mut stats = PassStats::default();
+        if !pass_opts.widen {
+            return Ok(stats);
+        }
         let opts = VecOptions::default();
         for plan in vectorize::analyze_with(f, &opts, &|i| self.info.int_value(i))
             .into_iter()
             .filter(|p| p.vectorizable())
         {
-            if widen_loop(f, &plan, &opts, self.info).is_ok() {
-                stats.replaced += 1;
+            // `widen_loop` edits as it goes and can refuse partway -- a guard
+            // is proven and removed, then a later one turns out unprovable.
+            // Half a widening is not a slower program, it is a wrong one, so
+            // a refusal puts the function back exactly as it was.
+            let backup = f.clone();
+            match widen_loop(f, &plan, &opts, self.info) {
+                Ok(()) => {
+                    stats.replaced += 1;
+                    record(plan.header, Ok(()));
+                }
+                Err(d) => {
+                    *f = backup;
+                    record(plan.header, Err(d));
+                }
             }
         }
         Ok(stats)
@@ -83,7 +131,7 @@ impl Pass for Widen<'_> {
 pub fn explain(
     f: &Function,
     info: &dyn crate::v2::module::ModuleInfo,
-) -> Vec<(BlockId, Result<i64, Decline>)> {
+) -> Vec<(BlockId, Result<Option<i64>, Decline>)> {
     let opts = VecOptions::default();
     vectorize::analyze_with(f, &opts, &|i| info.int_value(i))
         .into_iter()
@@ -151,12 +199,14 @@ fn check(
     plan: &LoopPlan,
     opts: &VecOptions,
     info: &dyn crate::v2::module::ModuleInfo,
-) -> Result<i64, Decline> {
+) -> Result<Option<i64>, Decline> {
     if !plan.reductions.is_empty() {
         return Err(Decline::HasReduction);
     }
-    if !plan.guard_exits.is_empty() {
-        return Err(Decline::HasGuardExits);
+    // Guards are hoistable, not fatal -- see `hoist_guards`. What is fatal is
+    // a guard this cannot prove.
+    for &g in &plan.guard_exits {
+        recognize_guard(f, plan, g).ok_or(Decline::UnprovableGuard(g))?;
     }
     if plan.body_size < opts.min_body {
         return Err(Decline::TooSmall(plan.body_size));
@@ -164,11 +214,167 @@ fn check(
     if let Some(a) = plan.accesses.iter().find(|a| a.stride != 1) {
         return Err(Decline::NonUnitStride(a.stride));
     }
-    let trips = const_trip_count(f, plan, info).ok_or(Decline::TripCountNotConstant)?;
-    if trips % VF as i64 != 0 {
-        return Err(Decline::TripCountNotMultiple(trips));
+    // A constant trip count that divides the width needs no remainder
+    // handling at all. Anything else gets a scalar epilogue, which is where
+    // the leftover iterations run -- so a runtime length is no longer a
+    // refusal, but it does require the step to be 1: the epilogue's entry
+    // index is `start + (n & ~(VF-1))`, and that arithmetic is only this
+    // simple for a unit step.
+    match const_trip_count(f, plan, info) {
+        Some(t) => {
+            if t % VF as i64 != 0 {
+                plan.bound.ok_or(Decline::TripCountNotConstant)?;
+            }
+            Ok(Some(t))
+        }
+        None => {
+            let (_, step) = plan.induction.ok_or(Decline::TripCountNotConstant)?;
+            if step != 1 {
+                return Err(Decline::EpilogueNeedsUnitStep(step));
+            }
+            plan.bound.ok_or(Decline::TripCountNotConstant)?;
+            Ok(None)
+        }
     }
-    Ok(trips)
+}
+
+/// A guard this transform can prove for a whole vector range.
+///
+/// The test must be the induction variable against a loop-invariant value,
+/// which is what an HL array bounds check is. Anything else -- a test on a
+/// value that varies per iteration for another reason, a comparison of two
+/// varying values -- would have to be ASSUMED monotone in the induction
+/// variable, and assuming is how an unsound vectorizer happens.
+struct Guard {
+    block: BlockId,
+    cond: CondKind,
+    /// The side of the comparison that is the induction variable.
+    iv_first: bool,
+    limit: ValueId,
+    /// Where the guard goes when it does NOT throw.
+    ok: BlockId,
+    /// Where it throws.
+    throws: BlockId,
+}
+
+fn recognize_guard(f: &Function, plan: &LoopPlan, b: BlockId) -> Option<Guard> {
+    let (iv, _) = plan.induction?;
+    let Terminator::CondJump {
+        cond,
+        a,
+        b: rb,
+        if_true,
+        if_false,
+    } = &f.blocks[b.idx()].term
+    else {
+        return None;
+    };
+    let rb = (*rb)?;
+    let body = loop_blocks(f, plan.header);
+    // Exactly one side leaves the loop, and that side is the throw.
+    let (ok, throws) = match (body.contains(if_true), body.contains(if_false)) {
+        (true, false) => (*if_true, *if_false),
+        (false, true) => (*if_false, *if_true),
+        _ => return None,
+    };
+    let (iv_first, limit) = if *a == iv {
+        (true, rb)
+    } else if rb == iv {
+        (false, *a)
+    } else {
+        return None;
+    };
+    // The limit must not move inside the loop.
+    let moves = body.iter().any(|blk| {
+        f.blocks[blk.idx()].instrs.iter().any(|i| i.dst() == Some(limit))
+            || f.blocks[blk.idx()].phis.iter().any(|p| p.dst == limit)
+    });
+    if moves {
+        return None;
+    }
+    Some(Guard {
+        block: b,
+        cond: *cond,
+        iv_first,
+        limit,
+        ok,
+        throws,
+    })
+}
+
+/// Prove every guard once, before the loop, then take it out of the body.
+///
+/// A vector lane executes whether or not the scalar loop would have reached
+/// it, so a guard left in the body proves nothing about lanes 1..N -- it is
+/// tested against the induction variable, which now steps by a whole vector.
+/// The check therefore moves to the preheader and is evaluated at the LAST
+/// index the loop will reach: if it holds there it holds for every index the
+/// loop touches, because the induction is monotone and the limit is
+/// invariant.
+fn hoist_guards(
+    f: &mut Function,
+    plan: &LoopPlan,
+    guards: &[Guard],
+    last_index: ValueId,
+) -> Result<(), Decline> {
+    for g in guards {
+        // The preheader gets `if !guard(last) { throw }`, spliced in as the
+        // entry edge's terminator.
+        let cfg = CfgInfo::build(f);
+        let forest = LoopForest::analyze(f, &cfg);
+        let lid = forest
+            .innermost_first()
+            .into_iter()
+            .find(|l| forest.get(*l).header == plan.header)
+            .ok_or(Decline::NoPreheader)?;
+        let preds = forest.entry_preds(&cfg, lid);
+        let [pre] = preds[..] else {
+            return Err(Decline::NoPreheader);
+        };
+        let Terminator::Jump { target } = f.blocks[pre.idx()].term else {
+            return Err(Decline::NoPreheader);
+        };
+        // A fresh block carrying the hoisted test, between preheader and loop.
+        let check = BlockId(f.blocks.len() as u32);
+        let (a, b) = if g.iv_first {
+            (last_index, Some(g.limit))
+        } else {
+            (g.limit, Some(last_index))
+        };
+        // Same handler as the preheader: the hoisted check sits on that edge
+        // and must be covered by whatever trap region already covers it.
+        let handler = f.blocks[pre.idx()].handler;
+        f.blocks.push(Block {
+            phis: Vec::new(),
+            instrs: Vec::new(),
+            handler,
+            term: Terminator::CondJump {
+                cond: g.cond,
+                a,
+                b,
+                // Same polarity as the guard: the in-loop side continues.
+                if_true: target,
+                if_false: g.throws,
+            },
+        });
+        f.blocks[pre.idx()].term = Terminator::Jump { target: check };
+        // The header is now entered from the check block, not the preheader,
+        // so its phis have to name the new predecessor.
+        for phi in &mut f.blocks[target.idx()].phis {
+            for (p, _) in phi.incoming.iter_mut() {
+                if *p == pre {
+                    *p = check;
+                }
+            }
+        }
+        // The guard is proven; the body branch becomes a straight edge.
+        f.blocks[g.block.idx()].term = Terminator::Jump { target: g.ok };
+        // The throw block lost a predecessor.
+        for phi in &mut f.blocks[g.throws.idx()].phis {
+            phi.incoming.retain(|(p, _)| *p != g.block);
+        }
+    }
+    Ok(())
 }
 
 fn loop_blocks(f: &Function, header: BlockId) -> HashSet<BlockId> {
@@ -189,8 +395,54 @@ fn widen_loop(
     opts: &VecOptions,
     info: &dyn crate::v2::module::ModuleInfo,
 ) -> Result<(), Decline> {
-    check(f, plan, opts, info)?;
+    let trips = check(f, plan, opts, info)?;
     let (iv, step) = plan.induction.ok_or(Decline::TripCountNotConstant)?;
+
+    // A trip count that is not a known multiple of the width leaves a
+    // remainder, and the remainder runs scalar. The copy has to be taken
+    // BEFORE anything below touches the body -- it is a copy of the scalar
+    // loop, guards and all.
+    let epilogue = if trips.map_or(true, |t| t % VF as i64 != 0) {
+        Some(prepare_epilogue(f, plan, iv)?)
+    } else {
+        None
+    };
+
+    // Guards first: a lane executes whether or not the scalar loop would have
+    // reached it, so every bounds check has to be proven for the whole range
+    // BEFORE the body is widened, and taken out of the body so it is not
+    // re-tested against an induction variable that now steps by a vector.
+    if !plan.guard_exits.is_empty() {
+        let guards: Vec<Guard> = plan
+            .guard_exits
+            .iter()
+            .map(|&b| recognize_guard(f, plan, b).ok_or(Decline::UnprovableGuard(b)))
+            .collect::<Result<_, _>>()?;
+        // The last index the loop reaches: start + (trips - 1) * step. A
+        // constant, because `check` already established every term is one.
+        let start = induction_start(f, plan, info).ok_or(Decline::TripCountNotConstant)?;
+        // The hoisted test is evaluated at a specific index, so a loop whose
+        // length is only known at runtime has no index to name here.
+        let ct = trips.ok_or(Decline::GuardNeedsConstantTrip)?;
+        let last = start + (ct - 1) * step;
+        let idx = f.intern_int(last as i32, |i| info.int_value(i));
+        let last_val = f.new_value(f.value_ty(iv), f.value_reg(iv));
+        // Materialize it in the entry block, after the Params -- the verifier
+        // requires those to come first.
+        let at = f.blocks[0]
+            .instrs
+            .iter()
+            .position(|i| !matches!(i, Instr::Param { .. }))
+            .unwrap_or(f.blocks[0].instrs.len());
+        f.blocks[0].instrs.insert(
+            at,
+            Instr::Int {
+                dst: last_val,
+                idx,
+            },
+        );
+        hoist_guards(f, plan, &guards, last_val)?;
+    }
     let body = loop_blocks(f, plan.header);
 
     // Which values become vectors: every loaded value, and transitively every
@@ -287,6 +539,192 @@ fn widen_loop(
     }
 
     retime_induction(f, plan, iv, step, info);
+    if let Some(epi) = epilogue {
+        wire_epilogue(f, plan, iv, epi, info)?;
+    }
+    Ok(())
+}
+
+/// What the epilogue needs to know, captured before the body is widened.
+struct Epilogue {
+    /// Every block as it was BEFORE widening -- the scalar remainder is a
+    /// copy of this, not of what the transform leaves behind.
+    snap: Vec<Block>,
+    body: Vec<BlockId>,
+    /// The block the loop is entered from.
+    pre: BlockId,
+    /// The induction's value on that edge, i.e. where counting starts.
+    entry_iv: ValueId,
+}
+
+fn prepare_epilogue(f: &Function, plan: &LoopPlan, iv: ValueId) -> Result<Epilogue, Decline> {
+    let bound = plan.bound.ok_or(Decline::TripCountNotConstant)?;
+    let mut body: Vec<BlockId> = loop_blocks(f, plan.header).into_iter().collect();
+    if body.is_empty() {
+        return Err(Decline::NoPreheader);
+    }
+    body.sort_by_key(|b| b.0);
+
+    // The vector trip count is computed in the preheader, so the limit has to
+    // be a value that already exists there. A limit defined inside the loop
+    // is not one, and using it would put a use before its definition.
+    let limit_in_loop = body.iter().any(|b| {
+        f.blocks[b.idx()].phis.iter().any(|p| p.dst == bound.limit)
+            || f.blocks[b.idx()]
+                .instrs
+                .iter()
+                .any(|i| i.dst() == Some(bound.limit))
+    });
+    if limit_in_loop {
+        return Err(Decline::LimitNotInvariant);
+    }
+
+    let cfg = CfgInfo::build(f);
+    let forest = LoopForest::analyze(f, &cfg);
+    let lid = forest
+        .innermost_first()
+        .into_iter()
+        .find(|l| forest.get(*l).header == plan.header)
+        .ok_or(Decline::NoPreheader)?;
+    let preds = forest.entry_preds(&cfg, lid);
+    let [pre] = preds[..] else {
+        return Err(Decline::NoPreheader);
+    };
+
+    let entry_iv = f.blocks[plan.header.idx()]
+        .phis
+        .iter()
+        .find(|p| p.dst == iv)
+        .and_then(|p| {
+            p.incoming
+                .iter()
+                .find(|(b, _)| !body.contains(b))
+                .map(|(_, v)| *v)
+        })
+        .ok_or(Decline::TripCountNotConstant)?;
+
+    Ok(Epilogue {
+        snap: f.blocks.clone(),
+        body,
+        pre,
+        entry_iv,
+    })
+}
+
+/// Bound the widened loop at `start + (n & ~(VF-1))` and run the leftover
+/// iterations in a scalar copy of the body.
+///
+/// Without this a vectorizer only ever handles loops whose length divides the
+/// width, which on real code is almost none of them -- the whole-program
+/// survey found one widenable loop and declined it for exactly this. The
+/// epilogue is also where a wrong widening stops being a missed optimization
+/// and becomes a wrong answer, so the vector loop is bounded FIRST and the
+/// copy simply continues from where it stopped.
+fn wire_epilogue(
+    f: &mut Function,
+    plan: &LoopPlan,
+    iv: ValueId,
+    epi: Epilogue,
+    info: &dyn crate::v2::module::ModuleInfo,
+) -> Result<(), Decline> {
+    let bound = plan.bound.ok_or(Decline::TripCountNotConstant)?;
+    let Epilogue {
+        snap,
+        body,
+        pre,
+        entry_iv,
+    } = epi;
+
+    let ity = f.value_ty(iv);
+    let ireg = f.value_reg(iv);
+    let mask = f.intern_int(!(VF as i32 - 1), |i| info.int_value(i));
+
+    // n = limit - start ; vn = n & ~(VF-1) ; vend = start + vn
+    let n = f.new_value(ity, ireg);
+    let mask_v = f.new_value(ity, ireg);
+    let vn = f.new_value(ity, ireg);
+    let vend = f.new_value(ity, ireg);
+    f.blocks[pre.idx()].instrs.extend([
+        Instr::BinOp {
+            op: BinOp::Sub,
+            dst: n,
+            a: bound.limit,
+            b: entry_iv,
+        },
+        Instr::Int {
+            dst: mask_v,
+            idx: mask,
+        },
+        Instr::BinOp {
+            op: BinOp::And,
+            dst: vn,
+            a: n,
+            b: mask_v,
+        },
+        Instr::BinOp {
+            op: BinOp::Add,
+            dst: vend,
+            a: entry_iv,
+            b: vn,
+        },
+    ]);
+
+    // The widened loop now tests against `vend` rather than the real limit,
+    // so it stops on a whole-vector boundary and never runs a partial one.
+    let Terminator::CondJump {
+        a,
+        b,
+        if_true,
+        if_false,
+        ..
+    } = &mut f.blocks[bound.exit.idx()].term
+    else {
+        return Err(Decline::NoPreheader);
+    };
+    if bound.iv_first {
+        *b = Some(vend);
+    } else {
+        *a = vend;
+    }
+    // Where the widened loop leaves is where the remainder begins.
+    let (if_true, if_false) = (*if_true, *if_false);
+    let normal_exit = if body.contains(&if_true) {
+        if_false
+    } else {
+        if_true
+    };
+
+    let (bmap, vmap) = clone_blocks(f, &snap, &body);
+    let epi_header = bmap[&plan.header];
+
+    if let Terminator::CondJump {
+        if_true, if_false, ..
+    } = &mut f.blocks[bound.exit.idx()].term
+    {
+        if *if_true == normal_exit {
+            *if_true = epi_header;
+        } else {
+            *if_false = epi_header;
+        }
+    }
+    // The exit block lost that predecessor; it gains the copy's exit instead,
+    // which `clone_blocks` has already recorded.
+    for phi in &mut f.blocks[normal_exit.idx()].phis {
+        phi.incoming.retain(|(p, _)| *p != bound.exit);
+    }
+
+    // The copy is entered from the widened loop's exit, counting from `vend`.
+    let iv_copy = vmap[&iv];
+    for phi in &mut f.blocks[epi_header.idx()].phis {
+        for (p, v) in phi.incoming.iter_mut() {
+            if *p == pre {
+                *p = bound.exit;
+                if phi.dst == iv_copy {
+                    *v = vend;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -366,4 +804,98 @@ fn lane_stride(kind: MemAccess) -> u32 {
         MemAccess::Mem => 4,
         MemAccess::Array => 1,
     }
+}
+
+/// Copy a loop's blocks, giving every value and block a fresh identity.
+///
+/// The remainder loop is a second copy of the same body: the widened one runs
+/// whole vectors, this one finishes what is left. Same remapping the inliner
+/// does when it copies a callee, restricted to a set of blocks inside one
+/// Copy a set of blocks, giving every value they define a fresh identity.
+///
+/// `snap` is the block table as it was when the copy was decided on, so the
+/// copy reflects the loop before the transform edited it. Blocks outside the
+/// set are shared, and so are the values they define -- those are the same
+/// value in both copies.
+fn clone_blocks(
+    f: &mut Function,
+    snap: &[Block],
+    body: &[BlockId],
+) -> (HashMap<BlockId, BlockId>, HashMap<ValueId, ValueId>) {
+    let base = f.blocks.len();
+    let bmap: HashMap<BlockId, BlockId> = body
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| (b, BlockId((base + i) as u32)))
+        .collect();
+
+    let mut vmap: HashMap<ValueId, ValueId> = HashMap::new();
+    for &b in body {
+        let defs: Vec<ValueId> = snap[b.idx()]
+            .phis
+            .iter()
+            .map(|p| p.dst)
+            .chain(snap[b.idx()].instrs.iter().filter_map(|i| i.dst()))
+            .collect();
+        for d in defs {
+            let (ty, reg) = (f.value_ty(d), f.value_reg(d));
+            let nv = f.new_value(ty, reg);
+            vmap.insert(d, nv);
+        }
+    }
+
+    let map_v = |v: ValueId, vmap: &HashMap<ValueId, ValueId>| *vmap.get(&v).unwrap_or(&v);
+    let map_b = |b: BlockId, bmap: &HashMap<BlockId, BlockId>| *bmap.get(&b).unwrap_or(&b);
+
+    let mut cloned: Vec<Block> = Vec::with_capacity(body.len());
+    for &b in body {
+        let src = &snap[b.idx()];
+        let phis = src
+            .phis
+            .iter()
+            .map(|p| Phi {
+                dst: map_v(p.dst, &vmap),
+                incoming: p
+                    .incoming
+                    .iter()
+                    .map(|&(pb, v)| (map_b(pb, &bmap), map_v(v, &vmap)))
+                    .collect(),
+            })
+            .collect();
+        let mut instrs = src.instrs.clone();
+        for ins in &mut instrs {
+            ins.map_uses(&mut |v| map_v(v, &vmap));
+            ins.map_dst(&mut |v| map_v(v, &vmap));
+        }
+        let mut term = src.term.clone();
+        term.map_uses(&mut |v| map_v(v, &vmap));
+        term.map_targets(&mut |t| map_b(t, &bmap));
+        cloned.push(Block {
+            phis,
+            instrs,
+            term,
+            handler: src.handler,
+        });
+    }
+    f.blocks.extend(cloned);
+
+    // Blocks the copy leaves to now have an extra predecessor, and a phi that
+    // does not name every predecessor is not SSA. The value on the new edge
+    // is whatever the original edge carried, mapped into the copy.
+    for &b in body {
+        for t in snap[b.idx()].term.successors() {
+            if bmap.contains_key(&t) {
+                continue;
+            }
+            for phi in &mut f.blocks[t.idx()].phis {
+                let Some(&(_, v)) = snap[t.idx()].phis.iter().find(|p| p.dst == phi.dst).and_then(
+                    |p| p.incoming.iter().find(|(pb, _)| *pb == b),
+                ) else {
+                    continue;
+                };
+                phi.incoming.push((bmap[&b], map_v(v, &vmap)));
+            }
+        }
+    }
+    (bmap, vmap)
 }

@@ -220,8 +220,13 @@ GC_ALLOC_RE = re.compile(
 # crates/ash_interp/src/interpreter.rs, one line per installed function under
 # --jit-log / ASH_TIER_LOG=1:
 #   [tier] install findex=255 tier=cranelift addr=0x... ops=13 in 5.84ms
+# `name=` sits between findex and tier since the log started naming functions;
+# it is optional here so this keeps parsing older logs too. Losing the match
+# is silent -- every row simply reports no installs, which reads as "the tier
+# never engaged" and is the one thing this parser exists to tell apart.
 TIER_INSTALL_RE = re.compile(
-    r"^\[tier\] install findex=(\d+) tier=(\w+).*?(?:in ([\d.]+)ms)?$"
+    r"^\[tier\] install findex=(\d+)(?: name=\S+)? tier=(\w+)"
+    r"(?:.*?\bin ([\d.]+)ms)?.*$"
 )
 
 # /usr/bin/time -l (macOS, bytes) and GNU time -v (Linux, kbytes).

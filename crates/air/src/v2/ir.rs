@@ -1176,6 +1176,14 @@ pub struct Function {
     /// call apart from any other:
     /// [`tre`](super::passes::tre) is inert without it.
     pub findex: Option<usize>,
+    /// Headers of loops that are a vectorizer REMAINDER: a scalar copy that
+    /// runs fewer than one vector's worth of iterations by construction.
+    ///
+    /// Widening one can never execute a vector iteration -- its vector trip
+    /// count is `n & ~(VF-1)` where `n < VF`, so zero -- and each attempt
+    /// leaves behind another remainder for the next pass round to try again.
+    /// The widener skips these; nothing else reads them.
+    pub scalar_remainders: Vec<BlockId>,
 }
 
 impl Function {
@@ -1192,6 +1200,7 @@ impl Function {
             pending_ints: Vec::new(),
             int_pool_base: 0,
             findex: None,
+            scalar_remainders: Vec::new(),
         }
     }
 

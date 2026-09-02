@@ -103,10 +103,12 @@ impl Pass for Widen<'_> {
             return Ok(stats);
         }
         let opts = VecOptions::default();
-        for plan in vectorize::analyze_with(f, &opts, &|i| self.info.int_value(i))
+        let plans: Vec<_> = vectorize::analyze_with(f, &opts, &|i| self.info.int_value(i))
             .into_iter()
             .filter(|p| p.vectorizable())
-        {
+            .filter(|p| !f.scalar_remainders.contains(&p.header))
+            .collect();
+        for plan in plans {
             // `widen_loop` edits as it goes and can refuse partway -- a guard
             // is proven and removed, then a later one turns out unprovable.
             // Half a widening is not a slower program, it is a wrong one, so
@@ -712,6 +714,11 @@ fn wire_epilogue(
     for phi in &mut f.blocks[normal_exit.idx()].phis {
         phi.incoming.retain(|(p, _)| *p != bound.exit);
     }
+
+    // It is a remainder, so it is shorter than a vector: widening it could
+    // only produce another remainder, which is what four pass rounds did
+    // before this was recorded.
+    f.scalar_remainders.push(epi_header);
 
     // The copy is entered from the widened loop's exit, counting from `vend`.
     let iv_copy = vmap[&iv];

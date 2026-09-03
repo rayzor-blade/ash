@@ -45,8 +45,10 @@
 
 use anyhow::Result;
 
+pub mod link;
 pub mod object;
 
+pub use link::{link, LinkOptions};
 pub use object::{read, Object, Symbol, SymbolTarget};
 
 /// What a patch site held before the linker touched it, and what the symbol

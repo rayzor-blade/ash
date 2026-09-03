@@ -24,7 +24,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use wasmparser::{
     Data, DataKind, Element, ElementItems, ElementKind, Export, FuncType, Global, Import, Linking,
     LinkingSectionReader, MemoryType, Parser, Payload, RelocSectionReader, RelocationEntry,
-    SymbolInfo, TableType, TagType, ValType,
+    SymbolFlags, SymbolInfo, TableType, TagType, ValType,
 };
 
 /// What a symbol points at, once the object-local details are resolved away.
@@ -52,38 +52,49 @@ pub enum SymbolTarget {
 }
 
 /// One entry of the object's symbol table.
+///
+/// The flags are kept as `wasmparser`'s own bitflags rather than a `u32` and
+/// a set of hand-written masks. Writing those masks out by hand is how this
+/// file first got `BINDING_LOCAL` and `EXPORTED` wrong -- off by one bit each,
+/// which reads as "nothing is exported" rather than as an error.
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub name: String,
     pub target: SymbolTarget,
-    pub flags: u32,
+    pub flags: SymbolFlags,
 }
 
 impl Symbol {
-    /// Bit 0 of the flags. A weak definition loses to a strong one.
+    /// A weak definition loses to a strong one rather than colliding with it.
     pub fn is_weak(&self) -> bool {
-        self.flags & 0x1 != 0
+        self.flags.contains(SymbolFlags::BINDING_WEAK)
     }
-    /// Bit 2. A local symbol is not visible to other objects at all, so two
-    /// objects may each have one of the same name without conflicting.
+    /// A local symbol is invisible to other objects, so two objects may each
+    /// have one of the same name without conflicting.
     pub fn is_local(&self) -> bool {
-        self.flags & 0x4 != 0
+        self.flags.contains(SymbolFlags::BINDING_LOCAL)
     }
-    /// Bit 4. Undefined symbols name something another object must define.
+    pub fn is_hidden(&self) -> bool {
+        self.flags.contains(SymbolFlags::VISIBILITY_HIDDEN)
+    }
+    /// Names something another object must define.
     pub fn is_undefined(&self) -> bool {
-        self.flags & 0x10 != 0
+        self.flags.contains(SymbolFlags::UNDEFINED)
     }
-    /// Bit 6. The symbol is exported from the linked module.
+    /// Asked to be visible to the host.
     pub fn is_exported(&self) -> bool {
-        self.flags & 0x40 != 0
+        self.flags.contains(SymbolFlags::EXPORTED)
     }
-    /// Bit 7. The symbol carries an explicit name for its import.
-    pub fn has_explicit_name(&self) -> bool {
-        self.flags & 0x80 != 0
-    }
-    /// Bit 8. Do not remove, even if nothing references it.
+    /// Keep even if nothing references it.
     pub fn is_no_strip(&self) -> bool {
-        self.flags & 0x100 != 0
+        self.flags.contains(SymbolFlags::NO_STRIP)
+    }
+    pub fn is_tls(&self) -> bool {
+        self.flags.contains(SymbolFlags::TLS)
+    }
+    /// A definition this link can use: defined here, and not merely named.
+    pub fn defines(&self) -> bool {
+        !self.is_undefined() && !matches!(self.target, SymbolTarget::Undefined)
     }
 }
 
@@ -194,6 +205,41 @@ impl Object {
             .iter()
             .filter(|i| matches!(i.kind, ImportKind::Table(_)))
             .count() as u32
+    }
+
+    /// The name a symbol goes by.
+    ///
+    /// An undefined symbol usually carries no name of its own: the spec lets
+    /// it reuse the name of the import it stands for, and only sets
+    /// `EXPLICIT_NAME` when it does not. So an empty name is not a nameless
+    /// symbol, it is one whose name is written down in the import section.
+    pub fn symbol_name<'s>(&'s self, sym: &'s Symbol) -> &'s str {
+        if !sym.name.is_empty() {
+            return &sym.name;
+        }
+        let nth_import = |want: fn(&ImportKind) -> bool, index: u32| -> &str {
+            self.imports
+                .iter()
+                .filter(|i| want(&i.kind))
+                .nth(index as usize)
+                .map(|i| i.name.as_str())
+                .unwrap_or("")
+        };
+        match sym.target {
+            SymbolTarget::Function { index } => {
+                nth_import(|k| matches!(k, ImportKind::Function { .. }), index)
+            }
+            SymbolTarget::Global { index } => {
+                nth_import(|k| matches!(k, ImportKind::Global { .. }), index)
+            }
+            SymbolTarget::Table { index } => {
+                nth_import(|k| matches!(k, ImportKind::Table(_)), index)
+            }
+            SymbolTarget::Tag { index } => {
+                nth_import(|k| matches!(k, ImportKind::Tag { .. }), index)
+            }
+            _ => "",
+        }
     }
 
     pub fn imported_tags(&self) -> u32 {
@@ -517,25 +563,19 @@ fn convert_symbol(info: SymbolInfo<'_>) -> Result<Symbol> {
         SymbolInfo::Event { flags, index, name } => {
             (name.map(str::to_string), SymbolTarget::Tag { index }, flags)
         }
-        SymbolInfo::Section { flags, section } => (
-            None,
-            SymbolTarget::Section {
-                index: section,
-            },
-            flags,
-        ),
+        SymbolInfo::Section { flags, section } => {
+            (None, SymbolTarget::Section { index: section }, flags)
+        }
     };
-    let flags = flags.bits();
-    let mut symbol = Symbol {
+    let symbol = Symbol {
         name: name.unwrap_or_default(),
         target,
         flags,
     };
-    // An undefined symbol's target is whatever index space it names, but it
-    // defines nothing; saying so once here keeps every later test simple.
-    if symbol.is_undefined() {
-        symbol.target = SymbolTarget::Undefined;
-    }
+    // An undefined symbol keeps the index it occupies -- that index is how
+    // its import entry is found -- and `is_undefined` is what says it defines
+    // nothing. Flattening the target here would lose the only link between a
+    // symbol and the import it stands for.
     Ok(symbol)
 }
 

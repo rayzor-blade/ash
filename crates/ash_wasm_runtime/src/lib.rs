@@ -45,8 +45,13 @@
 //! Threads, which want a worker pool over shared memory, and the collector's
 //! rendezvous across them. Both belong here; neither is written.
 
-/// Compiled into the program. Always available, since `ash_std` depends on
-/// it for wasm and a native build still wants to read it.
+/// Compiled into the program, and only where that means something.
+///
+/// It declares an import no native target can satisfy, so compiling it
+/// elsewhere leaves an undefined symbol behind for whatever links next. That
+/// is invisible on unix, where a shared object may carry one, and fatal on
+/// Windows, where a DLL may not.
+#[cfg(target_family = "wasm")]
 pub mod guest;
 
 #[cfg(feature = "native")]

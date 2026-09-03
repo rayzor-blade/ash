@@ -6,7 +6,12 @@ description = "The wasm side of the ash runtime, and the hosts that complete it"
 publish = false
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+# A library and a binary, never a dynamic library. A cdylib would be linked
+# as a DLL on Windows, and a DLL link demands every symbol be defined --
+# which `ash_host_fiber_yield` never is, because it is a wasm import. Unix
+# tolerates an undefined symbol in a shared object and MSVC does not, so this
+# built everywhere except CI's windows job.
+crate-type = ["rlib"]
 
 [[bin]]
 name = "ash-wasm-run"

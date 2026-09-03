@@ -402,11 +402,12 @@ impl Linker {
 /// against ships `libLLVM` rather than LLD's libraries -- there is no
 /// `liblldWasm` and no `lld/Common/Driver.h` to call -- so it is spawned.
 ///
-/// Every candidate is somewhere it can honestly be: named outright, shipped
-/// beside ash by whoever packaged it, on PATH, or belonging to a Rust
-/// toolchain that is asked where it lives rather than guessed at. No
-/// build-machine paths and no package manager's layout: a path that was true
-/// where ash was compiled says nothing about where ash is running.
+/// Two candidates, and both are somewhere a Haxe developer's linker can
+/// honestly be: shipped beside ash by whoever packaged it, or on PATH. No
+/// build-machine paths, no package manager's layout, and nothing belonging to
+/// a Rust toolchain -- a path that was true where ash was compiled says
+/// nothing about where ash is running, and someone compiling Haxe has no
+/// reason to own a Rust linker.
 ///
 /// Each is run before it is used, and one that does not run is reported by
 /// name with what it said.
@@ -441,24 +442,6 @@ fn wasm_linker() -> Result<Linker> {
     if let Some(found) = on_path("wasm-ld") {
         candidates.push(found);
     }
-    // A Rust toolchain carries a self-contained LLD, which is version-matched
-    // to itself and so survives the clash above. Asked for, not guessed: if
-    // there is no rustc this costs one failed spawn.
-    if let Some(sysroot) = rustc_sysroot() {
-        if let Ok(entries) = std::fs::read_dir(sysroot.join("lib/rustlib")) {
-            for entry in entries.flatten() {
-                let lld = entry.path().join("bin").join(if cfg!(windows) {
-                    "rust-lld.exe"
-                } else {
-                    "rust-lld"
-                });
-                if lld.is_file() {
-                    candidates.push(lld);
-                }
-            }
-        }
-    }
-
     for candidate in candidates {
         if !candidate.is_file() {
             continue;
@@ -482,21 +465,6 @@ fn wasm_linker() -> Result<Linker> {
          ASH_WASM_LD. Tried: {}",
         tried.join("; ")
     )
-}
-
-/// Ask rustc where its toolchain is, if there is a rustc.
-fn rustc_sysroot() -> Option<PathBuf> {
-    let out = Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(PathBuf::from(
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    ))
 }
 
 /// The directory holding a libc for the target.

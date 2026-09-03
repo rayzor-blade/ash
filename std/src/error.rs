@@ -344,10 +344,10 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
     table.dedup_by_key(|(start, _)| *start);
     *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
     if RESOLVE_SYMBOL.load(Ordering::Acquire) == 0 {
-        RESOLVE_SYMBOL.store(aot_resolve_symbol as usize, Ordering::Release);
+        RESOLVE_SYMBOL.store(aot_resolve_symbol as *const () as usize, Ordering::Release);
     }
     if CAPTURE_STACK.load(Ordering::Acquire) == 0 {
-        CAPTURE_STACK.store(aot_capture_stack as usize, Ordering::Release);
+        CAPTURE_STACK.store(aot_capture_stack as *const () as usize, Ordering::Release);
     }
 }
 
@@ -362,8 +362,24 @@ unsafe fn aot_frame_in_program(pc: usize) -> bool {
     if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
         return false;
     }
+    // The registered table is the authority: a body's address is in it
+    // whatever its symbol is called. The sharded emitter names every body
+    // `ash_f<findex>.<name>`, so a name test alone would file the whole
+    // program under the runtime and every stack would come back empty.
+    {
+        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+        if table
+            .binary_search_by_key(&(info.dli_saddr as usize), |(s, _)| *s)
+            .is_ok()
+        {
+            return true;
+        }
+    }
     let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy();
     let name = raw.trim_start_matches('_');
+    if name.starts_with("ash_f") || name.starts_with("ash_h") {
+        return true;
+    }
     !(name.starts_with("hlp_")
         || name.starts_with("hl_")
         || name.starts_with("ash_")
@@ -416,7 +432,7 @@ unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) 
     }
     let mut written = 0i32;
     let mut depth = 0;
-    while fp != 0 && fp % 8 == 0 && depth < 256 {
+    while fp != 0 && fp.is_multiple_of(8) && depth < 256 {
         let next = *(fp as *const usize);
         let ret = *((fp + 8) as *const usize);
         if ret == 0 {

@@ -15,12 +15,12 @@ mkdir -p "$tmp"
 # actually compiles ahead of time, so it is what the gate should exercise --
 # and requiring a separate `cargo build --example` was enough to make this
 # whole step unrunnable on a machine that had only built the binary.
-spike=target/debug/ash
-[ -x "$spike" ] || spike=target/release/ash
-[ -x "$spike" ] || { echo "build first: cargo build -p ash" >&2; exit 1; }
-ash=target/debug/ash
-[ -x "$ash" ] || ash=target/release/ash
-[ -x "$ash" ] || { echo "build first: cargo build -p ash" >&2; exit 1; }
+# Newest wins, as in link.sh: a debug binary left over from weeks ago
+# emitted every row here for a whole morning while the fixes under test sat
+# in the release build, and a stale row read as a live regression.
+spike="$(ls -t target/debug/ash target/release/ash 2>/dev/null | head -1 || true)"
+[ -n "$spike" ] && [ -x "$spike" ] || { echo "build first: cargo build -p ash" >&2; exit 1; }
+ash="$spike"
 
 programs=("$@")
 if [ ${#programs[@]} -eq 0 ]; then

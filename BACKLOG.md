@@ -1688,6 +1688,30 @@ That would let Low ceilings tier up for milliseconds instead of never.
 
 ## AOT emit is single-threaded by construction (377 s for the game)
 
+**Status 2026-09-03: sharded.** `crates/ash/src/llvm/aot_shard.rs` lowers
+once, serializes the module to bitcode, and N threads each parse a copy into
+their own context, keep a contiguous findex range, carry bodies of <= 80
+instructions as `available_externally` for the inliner, strip the rest to
+declarations, run O3 and codegen on their share, and `ld -r` joins the N
+objects into the one `OUT.o` every script expects. Bodies are promoted to
+hidden externals under `ash_f<findex>.<name>` (the prefix, not hidden
+visibility, is what keeps a Haxe `write` off libc's symbol). `ASH_AOT_SHARDS`
+sets the count (default `min(cores, 8)`; `1` is the old path exactly).
+First cut on a loaded box: 148 s against 377 s, but the shard owning the
+data spent 90 s in O3 where the others spent 6 s -- the optimizer walking
+97,731 global definitions -- so data now lives in a shard of its own that
+runs no middle end, and body shards keep named constants as
+`available_externally` so literal loads still fold. Measured on a box at
+load 4 (2026-09-03): the game emits in 48.7 s against 377 s, a 7.7x cut,
+at a 6.1 GB peak against 1.8 GB; the critical path is 17 s of lowering,
+2 s of bitcode, and one shard's 10.5 s parse + 5 s O3 + 5 s codegen.
+Correctness: smoke 8/8 byte-identical to the JIT, exception stacks intact.
+Next lever: every shard parses the whole 61 MB bitcode before stripping --
+a slim stream without the 55k mutable initializers for body shards, or lazy
+materialization, would take most of that 10.5 s off the path. The
+paragraphs below are the analysis that led to it.
+
+
 `--emit-aot` on an 8,577-function program: 20 s lowering, ~357 s in
 `optimize_module` (O3) plus `emit_object`, 1.8 GB peak, one core. The emitter
 inherits the JIT's one `LLVMContext` per process; an `LLVMContext` is
@@ -1750,16 +1774,15 @@ failures in the first 547 cases; the panics cluster on `std/src/cast.rs:137`
 (Dynamic holding a raw scalar) and `std/src/types.rs:560` (`hlp_type_enum_eq`
 walking construct offsets into a 0x1 pointer). Make this the AOT lane in CI:
 it is the only compiled-once corpus, and every AOT-only failure is a minimal
-reproducer of an LLVM lowering divergence. Remaining after the fixes (2026-09-03): TestExceptions and Issue10109 (empty
-exception stacks), Issue6482 (`cast("foo", Int)` must throw), Issue7335
-(Dynamic `--`), Issue2889 (SIGSEGV), Issue4436 (`cast.rs:299`).
+reproducer of an LLVM lowering divergence. Remaining after the fixes (2026-09-03 08:38, 1063 rechecked, 0
+regressions): Issue6482 (`cast("foo", Int)` must throw), Issue7335 (Dynamic
+`--`), Issue2889 (SIGSEGV), Issue4436 (`cast.rs:299`). TestExceptions and
+Issue10109 passed once AOT throws carried a stack.
 
 ## LLVM lowering audit: still-open divergences from the interpreter
 
-From the 2026-09-03 audit, not yet fixed: shift counts >= 32 / negative are
-poison in LLVM (`shl/lshr/ashr` unmasked; hardware masks, so only constant
-folding diverges -- mask the count `& 31`/`& 63` like the interpreter);
-Int64 shifts with an I32 count produce an ill-typed shl (widen the count);
+From the 2026-09-03 audit, not yet fixed (shift-count masking and the
+Int64 shift with an I32 count are done -- `shift_operands`):
 `EnumIndex`/`EnumField`/`SetEnumField`, `CallMethod` (HOBJ), `CallClosure`,
 `VirtualClosure`, `GetTID`, `ArraySize`, `Unref`/`Setref`, `Field` on a
 virtual, and `GetArray`/`SetArray` all dereference a possibly-null register
@@ -1789,7 +1812,14 @@ combinations: an HOBJ destination receiving a view (needs the value), an HDYN
 destination receiving a raw method pointer from a direct-slot call, and the
 interpreter's own op_call_method fallback for the same shapes.
 
-## AOT: exception stacks are empty
+## AOT: exception stacks are empty -- RESOLVED 2026-09-03
+
+Resolved: every AOT function keeps its frame pointer (`"frame-pointer"="all"`
+on the function), the object carries a names table keyed by body address
+(`hlp_register_aot_symbols` from `ash_module_init`), and the runtime walks
+x29 frames and resolves each through the table, falling back to `dladdr`.
+O3 inlining shortens the stack (2 frames where O0 shows 3), which is what a
+native toolchain does too. The original note follows.
 
 `haxe.CallStack.exceptionStack()` / `e.stack` have no frames under AOT
 (TestExceptions.testExceptionStack hits a Null access, Issue10109 asserts

@@ -112,7 +112,11 @@ mod sys {
     }
 
     pub unsafe fn create(udp: bool) -> Sock {
-        let ty = if udp { libc::SOCK_DGRAM } else { libc::SOCK_STREAM };
+        let ty = if udp {
+            libc::SOCK_DGRAM
+        } else {
+            libc::SOCK_STREAM
+        };
         let s = libc::socket(libc::AF_INET, ty, 0);
         if s == INVALID {
             return INVALID;
@@ -375,13 +379,7 @@ mod sys {
         hints.ai_family = libc::AF_INET;
         hints.ai_socktype = libc::SOCK_STREAM;
         let mut res: *mut libc::addrinfo = ptr::null_mut();
-        if libc::getaddrinfo(
-            name as *const libc::c_char,
-            ptr::null(),
-            &hints,
-            &mut res,
-        ) != 0
-        {
+        if libc::getaddrinfo(name as *const libc::c_char, ptr::null(), &hints, &mut res) != 0 {
             return None;
         }
         let mut out = None;
@@ -405,11 +403,7 @@ mod sys {
     /// returned name is copied out immediately because it lives in the
     /// resolver's static buffer.
     pub unsafe fn reverse_ipv4(ip: c_int) -> Option<Vec<u8>> {
-        let h = gethostbyaddr(
-            &ip as *const c_int as *const c_void,
-            4,
-            libc::AF_INET,
-        );
+        let h = gethostbyaddr(&ip as *const c_int as *const c_void, 4, libc::AF_INET);
         if h.is_null() || (*h).h_name.is_null() {
             return None;
         }
@@ -435,19 +429,87 @@ mod sys {
     }
 }
 
-// A sandbox has no sockets. WASI preview 1 offers accept and shutdown on a
-// descriptor a host already opened, and nothing that creates one, resolves a
-// name, or selects across a set -- so there is no partial implementation to
-// give, only a complete refusal.
+// WASI preview 1 has half a socket API, and this is that half.
 //
-// The natives above still exist and still link: a program that never opens a
-// socket runs, and one that does gets a failure at the call rather than a
-// missing symbol at load. `create` returns `INVALID` for the same reason the
-// unix arm does when the kernel refuses, so every caller already has a path
-// for it.
+// A module cannot create a socket, connect one, bind, listen, resolve a name
+// or select across a set: preview 1 has no call for any of it, and Rust's own
+// `std::net` compiles on this target only to answer `Unsupported` at run time
+// (measured, including under `wasmtime -S inherit-network`). Those operations
+// refuse here, and refuse honestly.
+//
+// What preview 1 does have is `sock_accept`, `sock_recv`, `sock_send` and
+// `sock_shutdown`, on a descriptor the HOST opened and passed in -- the shape
+// a server takes when the runtime owns the listening socket. Those are
+// implemented, so a Haxe program handed a listening descriptor accepts
+// connections and talks over them.
+//
+// The natives above exist either way: a program that never opens a socket
+// runs, and one that does gets a failure at the call rather than a missing
+// symbol at load.
 #[cfg(not(any(unix, windows)))]
 mod sys {
     use std::ffi::c_int;
+
+    /// The preview 1 calls this module uses. Declared rather than taken from
+    /// a crate: it is five functions, and the alternative is a dependency
+    /// that exists to spell them.
+    #[link(wasm_import_module = "wasi_snapshot_preview1")]
+    extern "C" {
+        fn sock_accept(fd: u32, flags: u16, result: *mut u32) -> u16;
+        fn sock_recv(
+            fd: u32,
+            ri_data: *const IoVec,
+            ri_data_len: usize,
+            ri_flags: u16,
+            ro_datalen: *mut usize,
+            ro_flags: *mut u16,
+        ) -> u16;
+        fn sock_send(
+            fd: u32,
+            si_data: *const IoVec,
+            si_data_len: usize,
+            si_flags: u16,
+            so_datalen: *mut usize,
+        ) -> u16;
+        fn sock_shutdown(fd: u32, how: u8) -> u16;
+        fn fd_close(fd: u32) -> u16;
+    }
+
+    /// `__wasi_ciovec_t` and `__wasi_iovec_t` have the same shape, so one
+    /// type serves both directions.
+    #[repr(C)]
+    struct IoVec {
+        buf: *const u8,
+        len: usize,
+    }
+
+    /// The two operations preview 1 is missing, offered to whatever host
+    /// wants to supply them.
+    ///
+    /// Everything else a socket does -- send, receive, shut down, close --
+    /// preview 1 already names, so a host that implements those imports has
+    /// implemented most of a socket already. It cannot open one or connect
+    /// it, because preview 1 has no call for either, and that is the entire
+    /// gap these two fill.
+    ///
+    /// A browser is the case this exists for. `new WebSocket(url)` opens a
+    /// stream to a peer that speaks WebSocket, which is the only kind of
+    /// connection a page may make; the host hands back a descriptor, and the
+    /// WASI calls above then carry bytes over it. What a page cannot do at
+    /// all is listen, so `bind` and `listen` still refuse.
+    ///
+    /// Declared weak-by-convention: a host that does not implement them is
+    /// the ordinary case, and `open` returning a negative descriptor is how
+    /// it says so.
+    #[link(wasm_import_module = "env")]
+    extern "C" {
+        /// Open a socket, returning a descriptor or a negative errno.
+        fn ash_host_socket_open(udp: i32) -> i32;
+        /// Connect `fd` to an IPv4 address in host byte order. Returns 0, or
+        /// a positive errno -- `EAGAIN` while a connection is still being
+        /// established, which is how an asynchronous host reports progress.
+        fn ash_host_socket_connect(fd: i32, ip: i32, port: i32) -> i32;
+    }
 
     pub type Sock = c_int;
     pub const INVALID: Sock = -1;
@@ -475,18 +537,17 @@ mod sys {
     pub fn startup() {}
 
     pub fn is_valid(s: Sock) -> bool {
-        let _ = s;
-        false
+        s >= 0
     }
 
     pub fn sock_key(s: Sock) -> u64 {
         s as u64
     }
 
-    /// The errno a non-blocking socket returns when it would block. Nothing
-    /// here ever blocks, so nothing ever returns it.
+    /// `EAGAIN` in WASI's errno numbering, which is what a would-block read
+    /// or write reports.
     pub fn block_error() -> c_int {
-        -1
+        6
     }
 
     pub fn conn_reset() -> bool {
@@ -506,23 +567,53 @@ mod sys {
         (addr.sin_addr as c_int, u16::from_be(addr.sin_port) as c_int)
     }
 
+    /// Preview 1 has no call that creates a socket, so this asks the host.
+    /// A host with nothing to offer returns a negative descriptor, and the
+    /// caller sees the same refusal it would have seen from a kernel.
     pub unsafe fn create(udp: bool) -> Sock {
-        let _ = udp;
-        INVALID
+        let fd = ash_host_socket_open(i32::from(udp));
+        if fd < 0 {
+            INVALID
+        } else {
+            fd
+        }
     }
 
     pub unsafe fn close(s: Sock) {
-        let _ = s;
+        if s >= 0 {
+            fd_close(s as u32);
+        }
     }
 
     pub unsafe fn send(s: Sock, buf: *const u8, len: c_int) -> isize {
-        let _ = (s, buf, len);
-        -1
+        if s < 0 {
+            return -1;
+        }
+        let iov = IoVec {
+            buf,
+            len: len as usize,
+        };
+        let mut sent: usize = 0;
+        if sock_send(s as u32, &iov, 1, 0, &mut sent) != 0 {
+            return -1;
+        }
+        sent as isize
     }
 
     pub unsafe fn recv(s: Sock, buf: *mut u8, len: c_int) -> isize {
-        let _ = (s, buf, len);
-        -1
+        if s < 0 {
+            return -1;
+        }
+        let iov = IoVec {
+            buf: buf as *const u8,
+            len: len as usize,
+        };
+        let mut got: usize = 0;
+        let mut flags: u16 = 0;
+        if sock_recv(s as u32, &iov, 1, 0, &mut got, &mut flags) != 0 {
+            return -1;
+        }
+        got as isize
     }
 
     pub unsafe fn send_to(s: Sock, buf: *const u8, len: c_int, addr: &SockAddrIn) -> isize {
@@ -536,10 +627,15 @@ mod sys {
     }
 
     pub unsafe fn connect(s: Sock, addr: &SockAddrIn) -> bool {
-        let _ = (s, addr);
-        false
+        if s < 0 {
+            return false;
+        }
+        let (ip, port) = addr_parts(addr);
+        ash_host_socket_connect(s, ip, port) == 0
     }
 
+    /// A page cannot listen, and preview 1 cannot bind. Both stay refused
+    /// however capable the host is.
     pub unsafe fn bind(s: Sock, addr: &SockAddrIn) -> bool {
         let _ = (s, addr);
         false
@@ -550,9 +646,18 @@ mod sys {
         false
     }
 
+    /// Accept on a descriptor the host opened. This is the one operation
+    /// preview 1 offers that creates a socket, and it is why a server works
+    /// here at all.
     pub unsafe fn accept(s: Sock) -> Sock {
-        let _ = s;
-        INVALID
+        if s < 0 {
+            return INVALID;
+        }
+        let mut accepted: u32 = 0;
+        if sock_accept(s as u32, 0, &mut accepted) != 0 {
+            return INVALID;
+        }
+        accepted as Sock
     }
 
     pub unsafe fn sock_name(s: Sock) -> Option<SockAddrIn> {
@@ -566,8 +671,12 @@ mod sys {
     }
 
     pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
-        let _ = (s, read, write);
-        false
+        if s < 0 {
+            return false;
+        }
+        // The `sdflags` bits: 1 = read, 2 = write.
+        let how = u8::from(read) | (u8::from(write) << 1);
+        sock_shutdown(s as u32, how) == 0
     }
 
     pub unsafe fn set_blocking(s: Sock, b: bool) -> bool {
@@ -1131,7 +1240,11 @@ pub unsafe extern "C" fn hlp_socket_send(
         return e;
     }
     trace::io("send", r as c_int);
-    trace::message("send", buf.wrapping_offset(pos as isize) as *const u8, r as i32);
+    trace::message(
+        "send",
+        buf.wrapping_offset(pos as isize) as *const u8,
+        r as i32,
+    );
     // Upstream returns the requested `len` rather than `r`, which reports a
     // short write on a non-blocking socket as a complete one and silently
     // drops the tail. Returning the count actually sent can only ever be
@@ -1159,7 +1272,11 @@ pub unsafe extern "C" fn hlp_socket_recv(
         return e;
     }
     trace::io("recv", ret as c_int);
-    trace::message("recv", buf.wrapping_offset(pos as isize) as *const u8, ret as i32);
+    trace::message(
+        "recv",
+        buf.wrapping_offset(pos as isize) as *const u8,
+        ret as i32,
+    );
     // 0 is end-of-stream here, which `sys.net.Socket` turns into Eof.
     ret as c_int
 }
@@ -1237,7 +1354,6 @@ pub unsafe extern "C" fn hlp_host_local() -> *mut vbyte {
     }
 }
 
-
 /// Socket activity tracing, behind `ASH_TRACE_SOCKET=1`.
 ///
 /// A native library's connection failing tells you nothing on its own: the
@@ -1264,7 +1380,11 @@ mod trace {
         let b = host.to_le_bytes();
         eprintln!(
             "[sock] connect {}.{}.{}.{}:{} -> {}",
-            b[0], b[1], b[2], b[3], port,
+            b[0],
+            b[1],
+            b[2],
+            b[3],
+            port,
             if ok { "ok" } else { "FAILED" }
         );
     }

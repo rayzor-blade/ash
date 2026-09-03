@@ -42,4 +42,15 @@ js-sys = { version = "0.3", optional = true }
 [dependencies.web-sys]
 version = "0.3"
 optional = true
-features = ["console", "Crypto", "Performance", "Window", "WorkerGlobalScope"]
+features = [
+    "console",
+    "Crypto",
+    "Performance",
+    "Window",
+    "WorkerGlobalScope",
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "Event",
+    "CloseEvent",
+]

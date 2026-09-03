@@ -197,7 +197,7 @@ How the 103 errors went, for anyone doing this again on another target:
 | cause | count | what it was |
 |---|---|---|
 | two-way `cfg` with no third arm | 12, plus 54 cascading | a function written for unix and windows evaluates to `()` anywhere else; `sys.rs` failing that way took `socket.rs` with it |
-| sockets | 58 | one stub module, since a sandbox has none |
+| sockets | 58 | preview 1's half implemented, the rest asked of the host |
 | 32-bit object layout | 18 | `stackCount` exists only on 64-bit, `vdynamic` gains `__pad` on 32-bit; now behind two constructors in `types.rs` so one place knows |
 | a 4 GB constant | 1 | `HEAP_MAX_CEILING` does not fit a 32-bit `usize` |
 | the heap | 1 | no `mmap`; a bounded non-reclaiming region from the allocator instead |
@@ -318,6 +318,43 @@ It reads the module with ash's own parser rather than an external tool, so a
 build machine needs nothing installed and `cargo test -p ash --test
 wasm_target` asserts on a struct rather than on someone's text output.
 `ash-wasm-run` is the same thing plus an engine, for actually running one.
+
+### Sockets: preview 1's half, and a host for the rest
+
+A sandbox does not simply lack sockets. WASI preview 1 has `sock_accept`,
+`sock_recv`, `sock_send` and `sock_shutdown`, all on a descriptor the HOST
+opened, and nothing that creates one, connects it, binds, listens, resolves a
+name or selects across a set. Rust's own `std::net` compiles on this target
+and answers `Unsupported` to everything, measured, including under
+`wasmtime -S inherit-network`.
+
+So the guest implements the half that exists, and asks for the two calls
+preview 1 cannot express:
+
+```
+env.ash_host_socket_open(udp) -> fd
+env.ash_host_socket_connect(fd, ip, port) -> errno
+```
+
+A host with nothing to offer returns a negative descriptor and the caller
+sees the refusal a kernel would have given. `bind` and `listen` refuse
+whatever the host is, because a page cannot listen and preview 1 cannot bind.
+
+**In a browser those two are a WebSocket**, which is the only connection a
+page may open, and which a relay can bridge to TCP for a peer that speaks
+something else. `crates/ash_wasm_runtime/src/browser/sockets.rs` is that
+shim. Two places its semantics differ from TCP, both visible to a program and
+both documented at the call site: connecting does not block, so `connect`
+reports `EAGAIN` until the socket is up and a caller polls, exactly as a
+non-blocking socket behaves anywhere; and WebSocket delivers whole messages
+while `recv` hands back bytes, so messages are queued whole and drained by
+count, and a `send` does not pair with a `recv`. Neither is a surprise on
+TCP either.
+
+Under `wasmtime` the same guest works differently and better: a host that
+pre-opens a listening descriptor gets a real server, since accept, send,
+receive and shutdown are all preview 1 calls. Full outbound TCP wants
+preview 2's `wasi:sockets`, which is a different target rather than a shim.
 
 ### Phase 3 — link and run a real Ash program
 

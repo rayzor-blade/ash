@@ -52,6 +52,9 @@ pub mod guest;
 #[cfg(feature = "native")]
 pub mod native;
 
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+pub mod browser;
+
 /// Reading a module: `ash wasm` is this, and so is the emitter's own gate.
 #[cfg(feature = "validate")]
 pub mod validate;

@@ -25,6 +25,11 @@ fn is_host_supplied(module: &str, name: &str) -> bool {
         || module == "GOT.mem"
         || module == "GOT.func"
         || (module == "env" && (name == "__linear_memory" || name == "__indirect_function_table"))
+        // The exception tag a lowered `longjmp` throws. An object leaves it
+        // undefined for the same reason it leaves memory undefined; the
+        // linked module defines and exports it, so seeing it here says the
+        // trap path was lowered, not that a host has to supply anything.
+        || (module == "env" && name == "__c_longjmp")
 }
 
 /// One import, as reported.

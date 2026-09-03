@@ -175,15 +175,26 @@ fn lower_triple(triple: &str) -> String {
 
 /// Turn on the backend's setjmp/longjmp lowering, once per process.
 ///
-/// It is an LLVM command-line option rather than a target-machine setting,
+/// These are LLVM command-line options rather than target-machine settings,
 /// which is why this reaches for the option parser: there is no other way in.
 /// Harmless on a native build that never asks for a wasm target machine,
-/// because nothing else consults it.
+/// because nothing else consults them.
+///
+/// The second one is the difference between two encodings of the same
+/// exceptions proposal. LLVM still defaults to the withdrawn `try`/`catch`
+/// instructions, which every current engine refuses -- wasmtime asks for
+/// `legacy_exceptions` by name and Chrome dropped them -- while the proposal
+/// as standardised is `try_table` and `exnref`. A module built the default
+/// way is valid to nobody, so ash always asks for the standard one.
 fn enable_wasm_sjlj() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let args = [c"ash".as_ptr(), c"-wasm-enable-sjlj".as_ptr()];
+        let args = [
+            c"ash".as_ptr(),
+            c"-wasm-enable-sjlj".as_ptr(),
+            c"-wasm-use-legacy-eh=false".as_ptr(),
+        ];
         let overview = c"ash wasm codegen";
         unsafe {
             inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
@@ -193,6 +204,35 @@ fn enable_wasm_sjlj() {
             );
         }
     });
+}
+
+/// Put the machine into the exception model wasm setjmp lowering needs.
+///
+/// The option alone gets half the rewrite: see
+/// `crates/ash/cpp/wasm_exception_model.cpp`, which explains why the other
+/// half is unreachable from the C API and what the object looks like without
+/// it -- it links, it runs, and the first throw escapes the program.
+#[cfg(not(no_wasm_exception_shim))]
+fn force_wasm_exception_model(machine: &TargetMachine) -> Result<()> {
+    extern "C" {
+        fn ash_force_wasm_exception_model(
+            machine: inkwell::llvm_sys::target_machine::LLVMTargetMachineRef,
+        );
+    }
+    // Safety: the pointer is this machine's, and the call only assigns two
+    // of its fields.
+    unsafe { ash_force_wasm_exception_model(machine.as_mut_ptr()) };
+    Ok(())
+}
+
+/// Refuse rather than emit an object whose throws escape the program.
+#[cfg(no_wasm_exception_shim)]
+fn force_wasm_exception_model(_machine: &TargetMachine) -> Result<()> {
+    Err(anyhow!(
+        "this ash was built without the wasm exception-model shim (no llvm-config \
+         was found at build time), and a wasm object built without it cannot catch \
+         what it throws"
+    ))
 }
 
 pub(crate) fn target_machine(
@@ -224,6 +264,7 @@ pub(crate) fn target_machine(
     } else {
         String::new()
     };
+    let wasm = lower_triple(triple).starts_with("wasm");
     let machine = target
         .create_target_machine(
             &tt,
@@ -234,6 +275,9 @@ pub(crate) fn target_machine(
             CodeModel::Default,
         )
         .ok_or_else(|| anyhow!("could not create a TargetMachine for {triple}"))?;
+    if wasm {
+        force_wasm_exception_model(&machine)?;
+    }
     Ok((tt, machine))
 }
 

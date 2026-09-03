@@ -144,6 +144,7 @@ dependencies = [
  "beadie",
  "bindgen",
  "byteorder",
+ "cc",
  "clap",
  "cranelift-codegen 0.136.0-dev",
  "cranelift-frontend 0.136.0-dev",

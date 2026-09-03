@@ -74,7 +74,6 @@ fn generate_hl_bindings(out_dir: &Path) {
         .expect("Couldn't write HL bindings");
 }
 
-
 /// Emit a name -> address table for every native ash_std exports.
 ///
 /// ash_std is linked into this binary as an rlib, but an rlib is an archive:
@@ -188,8 +187,12 @@ fn generate_std_symbol_table(out_dir: &Path) {
         "/// The {} natives ash_std exports, resolvable without a dlopen.\n",
         names.len()
     ));
-    out.push_str("pub fn std_symbol_table() -> &'static std::collections::HashMap<&'static str, usize> {\n");
-    out.push_str("    static T: std::sync::OnceLock<std::collections::HashMap<&'static str, usize>> =\n");
+    out.push_str(
+        "pub fn std_symbol_table() -> &'static std::collections::HashMap<&'static str, usize> {\n",
+    );
+    out.push_str(
+        "    static T: std::sync::OnceLock<std::collections::HashMap<&'static str, usize>> =\n",
+    );
     out.push_str("        std::sync::OnceLock::new();\n");
     out.push_str("    T.get_or_init(|| {\n");
     out.push_str(&format!(
@@ -214,8 +217,76 @@ fn generate_std_symbol_table(out_dir: &Path) {
     fs::write(out_dir.join("std_symbols.rs"), out).expect("write std_symbols.rs");
 }
 
+/// Ask an `llvm-config` for something, preferring the LLVM inkwell is bound
+/// to. Returns `None` when no usable one is on this machine.
+fn llvm_config(args: &[&str]) -> Option<String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(prefix) = env::var_os("LLVM_SYS_211_PREFIX") {
+        candidates.push(PathBuf::from(prefix).join("bin").join("llvm-config"));
+    }
+    candidates.push(PathBuf::from("llvm-config-21"));
+    candidates.push(PathBuf::from("llvm-config"));
+    for candidate in candidates {
+        let Ok(out) = std::process::Command::new(&candidate).args(args).output() else {
+            continue;
+        };
+        if out.status.success() {
+            return Some(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        }
+    }
+    None
+}
+
+/// Compile the C++ that sets a target machine's exception model.
+///
+/// See `cpp/wasm_exception_model.cpp` for why a compiler that otherwise talks
+/// to LLVM entirely through its C API needs one C++ translation unit. Without
+/// it, a wasm build is refused rather than emitted wrong, which is what the
+/// cfg carries.
+fn build_wasm_exception_shim() {
+    let src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("cpp/wasm_exception_model.cpp");
+    println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-env-changed=LLVM_SYS_211_PREFIX");
+    println!("cargo:rustc-check-cfg=cfg(no_wasm_exception_shim)");
+
+    let Some(cxxflags) = llvm_config(&["--cxxflags"]) else {
+        println!(
+            "cargo:warning=no llvm-config found, so ash is being built without the \
+             wasm exception-model shim; --target wasm32-* will refuse to emit"
+        );
+        println!("cargo:rustc-cfg=no_wasm_exception_shim");
+        return;
+    };
+
+    let mut build = cc::Build::new();
+    // The warnings would all be LLVM's headers', reported on every build of a
+    // file that is fifteen lines long.
+    build.cpp(true).warnings(false).file(&src);
+    // Include paths, language level and the defines that decide LLVM's own
+    // ABI, all of which must match the library being linked. Warning and
+    // debug flags are dropped: they say nothing about compatibility and are
+    // the ones a different host compiler is most likely to reject.
+    for flag in cxxflags.split_whitespace() {
+        let keep = flag.starts_with("-I")
+            || flag.starts_with("/I")
+            || flag.starts_with("-D")
+            || flag.starts_with("/D")
+            || flag.starts_with("-std")
+            || flag.starts_with("/std")
+            || flag.starts_with("-stdlib")
+            || flag.starts_with("-f")
+            || flag.starts_with("/EH");
+        if keep {
+            build.flag(flag);
+        }
+    }
+    build.compile("ash_wasm_exception_model");
+}
+
 fn main() {
     pin_libclang();
+    build_wasm_exception_shim();
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target = env::var("TARGET").unwrap();
 

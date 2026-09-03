@@ -445,11 +445,56 @@ found:
 * **The count is a `usize`.** Declaring it `i64` gave `rust-lld: warning:
   function signature mismatch`, which is a warning and a corrupt call.
 
-`test_stdlib` now matches native for 38 lines -- strings, arrays, maps,
-enums, closures -- and stops in the exceptions section, printing "thrown Wasm
-exception" where native prints "caught: test error". Throwing works; what
-reaches the Haxe handler is the engine's exception rather than the HL value,
-which is the next thing to chase.
+## Exceptions: an object that links, runs, and cannot catch
+
+`test_stdlib` then reached the exceptions section and printed "thrown Wasm
+exception" where native prints "caught: test error". The throw was leaving
+the program as an engine-level exception instead of arriving at the Haxe
+handler.
+
+A trap in compiled ash code is a `setjmp`. WebAssembly has no `setjmp`, so
+the backend rewrites it into the exceptions proposal: `__wasm_setjmp` to
+register a jump target, and `__wasm_setjmp_test` inside a catch block to ask
+whether an arriving `__wasm_longjmp` belongs to this frame. Our object
+referenced the first and not the second, and **an object with only the first
+half links and runs**. Nothing warns. The program is correct until it throws.
+
+The missing half is not a flag we failed to pass but one that cannot be
+passed. `-wasm-enable-sjlj` performs the rewrite; expressing the catch side
+needs the target machine's *exception model* to be `wasm` as well, because
+`TargetPassConfig` adds `LowerInvoke` whenever the asm info reports no
+exception handling, and that pass deletes the very `invoke`s the rewrite just
+created. `llc` takes `-exception-model=wasm` and clang assigns the field
+directly. The LLVM C API does neither: `LLVMCreateTargetMachine` builds a
+default `TargetOptions` and copies only the ABI name into it, and none of the
+six `LLVMTargetMachineOptionsSet*` entry points names the exception model. It
+is absent from the C API, so it is absent from llvm-sys and from inkwell.
+
+The WebAssembly target does try to infer it -- `basicCheckForEHAndSjLj`
+promotes the model when the option is set -- but the constructor calls
+`initAsmInfo()` on the line *above*, so the asm info is built from the
+un-promoted model and keeps `ExceptionHandling::None` for the rest of its
+life. That ordering is why `llc -wasm-enable-sjlj` alone reproduces our
+broken object exactly, and why the same IR compiles correctly through clang.
+
+So ash carries one C++ translation unit,
+`crates/ash/cpp/wasm_exception_model.cpp`, which sets both fields after
+construction through public members: the option the late passes read, and the
+asm info the pass pipeline reads. Fifteen lines, compiled against the headers
+of the LLVM `llvm-config` reports. Without it a wasm build is refused rather
+than emitted wrong.
+
+One more encoding choice sits on top. LLVM still defaults to the withdrawn
+`try`/`catch` instructions, which no current engine accepts -- wasmtime
+rejected the module asking for `legacy_exceptions` by name -- while the
+proposal as standardised is `try_table` and `exnref`. ash passes
+`-wasm-use-legacy-eh=false` so the module it emits is the one engines
+implement.
+
+`test_stdlib` on wasm is now byte-identical to native across all 63 lines.
+`test_exceptions`, `test_basic`, `test_closures` and `bench_fib` match too.
+The regression is guarded in `wasm_target.rs` by asserting on *both* halves
+of the lowering, because the broken form is the one that looks fine.
 
 ### Phase 3 — link and run a real Ash program
 

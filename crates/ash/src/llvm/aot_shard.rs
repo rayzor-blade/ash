@@ -460,10 +460,11 @@ impl<'ctx> JITModule<'ctx> {
         let codegen_ms = began.elapsed().as_millis();
         // The shards are still running, and this module is now dead weight.
         release_module(&self.module);
+        crate::progress::advance(1);
         if !quiet {
-            eprintln!(
+            crate::progress::detail(&format!(
                 "[aot] data object: {stripped} bodies stripped; prepare {prepared_ms}ms, codegen {codegen_ms}ms"
-            );
+            ));
         }
         Ok(())
     }
@@ -503,11 +504,11 @@ impl<'ctx> JITModule<'ctx> {
             let _ = std::fs::remove_file(p);
         }
         if !quiet {
-            eprintln!(
+            crate::progress::detail(&format!(
                 "[aot] joined {} shards + data in {}ms",
                 shards,
                 began.elapsed().as_millis()
-            );
+            ));
         }
         Ok(std::fs::metadata(out)?.len())
     }
@@ -560,14 +561,16 @@ impl<'ctx> JITModule<'ctx> {
         // once here, every worker's own call finds them registered.
         Target::initialize_all(&InitializationConfig::default());
         if !quiet {
-            eprintln!(
+            crate::progress::detail(&format!(
                 "[aot] sharding: {} bodies, {} shards, shielded {shielded}, stream {} MB, prepared in {}ms",
                 weights.len(),
                 shards,
                 bitcode.len() >> 20,
                 began.elapsed().as_millis()
-            );
+            ));
         }
+        // One unit per shard, plus the data object this thread writes.
+        crate::progress::begin("compiling", shards as u64 + 1);
 
         let stem = out
             .file_name()
@@ -744,10 +747,11 @@ fn emit_shard(
         .write_to_file(&module, FileType::Object, part)
         .map_err(|e| anyhow!("emit {}: {e}", part.display()))?;
     let codegen_ms = began.elapsed().as_millis();
+    crate::progress::advance(1);
     if !quiet {
-        eprintln!(
+        crate::progress::detail(&format!(
             "[aot] shard {k}: kept {kept}, carried {carried}, stripped {stripped}, swept {swept}, folded {folded}, declared {declared}; prepare {prepared_ms}ms, middle end {opt_ms}ms, codegen {codegen_ms}ms"
-        );
+        ));
     }
     Ok(())
 }

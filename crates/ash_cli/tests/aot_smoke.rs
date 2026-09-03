@@ -1,7 +1,6 @@
 //! Every AOT binary must print exactly what the JIT prints.
 //!
-//! This is the gate on the emitter. It compiles a corpus with `--emit-exe`,
-//! the same one command a user runs, and compares the binary's output against
+//! This is the gate on the emitter. It compiles a corpus with `--build`, the same one command a user runs, and compares the binary's output against
 //! the same program under the JIT, byte for byte. A difference here is a
 //! lowering bug: the two tiers ran the same bytecode and disagreed.
 //!
@@ -85,7 +84,7 @@ fn every_aot_binary_matches_the_jit() {
         let (emit, ok) = run(
             &ash,
             &[
-                "--emit-exe",
+                "--build",
                 &binary.to_string_lossy(),
                 &program.to_string_lossy(),
             ],

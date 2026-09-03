@@ -31,24 +31,24 @@ struct Cli {
 
     /// Compile to a native object file instead of running.
     ///
-    /// The object still has to be linked; `--emit-exe` does both and is what
+    /// The object still has to be linked; `--build` does both and is what
     /// most callers want.
     #[arg(long, value_name = "OUT.o")]
     emit_aot: Option<PathBuf>,
 
-    /// Compile to a native executable: emit and link, in one step.
+    /// Compile the program to a native binary: emit and link, in one step.
     ///
-    /// The usual way to build a program. `--emit-aot` is the same compile
-    /// stopping at the object file, for a caller doing its own linking.
+    /// The usual way to build. `--emit-aot` is the same compile stopping at
+    /// the object file, for a caller doing its own linking.
     #[arg(long, value_name = "OUT")]
-    emit_exe: Option<PathBuf>,
+    build: Option<PathBuf>,
 
-    /// Runtime to link against (--emit-exe).
+    /// Runtime to link against (--build).
     ///
     /// By default the one beside `ash`, then the usual library directories,
     /// and for a program that loads HDLLs, failing all that, the copy `ash`
     /// carries inside itself.
-    #[arg(long, value_name = "PATH", requires = "emit_exe")]
+    #[arg(long, value_name = "PATH", requires = "build")]
     runtime: Option<PathBuf>,
 
     /// Target triple for --emit-aot. Defaults to this machine.
@@ -280,6 +280,10 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         .iter()
         .map(|f| f.findex as usize)
         .collect();
+    // A build is a minute of silence otherwise, and silence is
+    // indistinguishable from a hang.
+    ash_core::progress::enable(!quiet);
+    ash_core::progress::begin("lowering", findexes.len() as u64);
     let (mut lowered, mut refused) = (0usize, Vec::new());
     // Per-function timing, on the same terms the tier log reports a JIT
     // compile. Without it the only cost figure AOT produces is the total, and a
@@ -296,8 +300,9 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         let began = std::time::Instant::now();
         let outcome = jit.promote_function_strict(*fx);
         let took = began.elapsed().as_millis();
+        ash_core::progress::advance(1);
         if took >= slow_ms {
-            eprintln!("[aot] findex={fx} took {took}ms");
+            ash_core::progress::detail(&format!("[aot] findex={fx} took {took}ms"));
         }
         slowest.push((took, *fx));
         match outcome {
@@ -307,12 +312,12 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     }
     slowest.sort_unstable_by_key(|&(t, _)| std::cmp::Reverse(t));
     let total: u128 = slowest.iter().map(|(t, _)| t).sum();
-    eprintln!("[aot] lowering {}ms total; slowest:", total);
+    ash_core::progress::detail(&format!("[aot] lowering {}ms total; slowest:", total));
     for (took, fx) in slowest.iter().take(5) {
-        eprintln!(
+        ash_core::progress::detail(&format!(
             "[aot]   findex={fx} {took}ms ({:.1}% of lowering)",
             100.0 * *took as f64 / total.max(1) as f64
-        );
+        ));
     }
 
     // A refused function is not a warning: it lowers to a throw, so a binary
@@ -375,7 +380,10 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             let began = std::time::Instant::now();
             jit.optimize_module()?;
             if !quiet {
-                eprintln!("[aot] middle end {}ms", began.elapsed().as_millis());
+                ash_core::progress::detail(&format!(
+                    "[aot] middle end {}ms",
+                    began.elapsed().as_millis()
+                ));
             }
         }
         // ASH_AOT_DUMP_IR=<path> writes the module beside the object. Reading
@@ -390,60 +398,74 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             };
             jit.write_ir(&dest)?;
             if !quiet {
-                eprintln!("[ash] wrote IR to {}", dest.display());
+                ash_core::progress::note(&format!("[ash] wrote IR to {}", dest.display()));
             }
         }
         let began = std::time::Instant::now();
         let bytes = jit.emit_object(&triple, out)?;
         if !quiet {
-            eprintln!("[aot] codegen {}ms", began.elapsed().as_millis());
+            ash_core::progress::detail(&format!("[aot] codegen {}ms", began.elapsed().as_millis()));
         }
         bytes
     };
 
+    // The stages are over; what follows is the summary, and a bar under it
+    // would be a finished stage left on screen.
+    ash_core::progress::finish();
     if !quiet {
-        eprintln!(
+        ash_core::progress::note(&format!(
             "[ash] lowered {lowered}/{} functions, {} refused",
             findexes.len(),
             refused.len()
-        );
+        ));
         for (fx, e) in refused.iter().take(5) {
-            eprintln!("[ash]   findex={fx}: {}", e.lines().next().unwrap_or(""));
+            ash_core::progress::note(&format!(
+                "[ash]   findex={fx}: {}",
+                e.lines().next().unwrap_or("")
+            ));
         }
         if pgo.is_some() {
             let loaded = ash_core::callsite_profile::aot_profile_size();
             let hits = ash_core::callsite_profile::aot_profile_hits();
             if loaded > 0 && hits == 0 {
-                eprintln!(
+                ash_core::progress::note(&format!(
                     "[ash] pgo: WARNING none of the {loaded} profiled caller(s) matched \
                      this bytecode -- the profile is stale, regenerate it"
-                );
+                ));
             } else if loaded > 0 {
-                eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
+                ash_core::progress::note(&format!(
+                    "[ash] pgo: {hits} of {loaded} profiled caller(s) matched"
+                ));
             }
         }
         if exe.is_some() {
-            eprintln!("[ash] compiled {} object bytes for {triple}", bytes);
+            ash_core::progress::note(&format!(
+                "[ash] compiled {} object bytes for {triple}",
+                bytes
+            ));
         } else {
-            eprintln!("[ash] wrote {} ({bytes} bytes) for {triple}", out.display());
+            ash_core::progress::note(&format!(
+                "[ash] wrote {} ({bytes} bytes) for {triple}",
+                out.display()
+            ));
         }
         if shared_runtime {
             // An HDLL brings its own copy of the runtime unless the binary
             // shares one, and two collectors in a process crash as soon as one
             // meets the other's objects. So this object must take the runtime
             // as a library, and the HDLLs must sit beside the binary.
-            eprintln!(
+            ash_core::progress::note(&format!(
                 "[ash] this program loads HDLLs, so it takes the SHARED runtime, \
                  staged beside the binary. The .hdll files must sit there too. \
                  Do not link the static runtime into a program that loads HDLLs: \
                  it builds, and then the HDLL loads a second copy of the runtime \
                  and the two collectors meet."
-            );
+            ));
         } else if exe.is_none() {
-            eprintln!(
-                "[ash] this is an object; `--emit-exe {}` would have linked it too",
+            ash_core::progress::note(&format!(
+                "[ash] this is an object; `--build {}` would have linked it too",
                 out.with_extension("").display()
-            );
+            ));
         }
     }
 
@@ -457,10 +479,10 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         // The objects are scratch either way. Keeping them after a failure
         // only helps if someone is told they exist.
         if linked.is_err() {
-            eprintln!(
+            ash_core::progress::note(&format!(
                 "[ash] the objects are left beside {} for inspection",
                 exe.display()
-            );
+            ));
         } else {
             for part in &objects {
                 let _ = std::fs::remove_file(part);
@@ -1229,10 +1251,10 @@ fn run() -> Result<()> {
         }
     }
 
-    if cli.emit_aot.is_some() || cli.emit_exe.is_some() {
-        // With only `--emit-exe`, the object is scratch: it is named after the
+    if cli.emit_aot.is_some() || cli.build.is_some() {
+        // With only `--build`, the object is scratch: it is named after the
         // binary, beside it, and removed once linked.
-        let exe = cli.emit_exe.clone();
+        let exe = cli.build.clone();
         let out = cli.emit_aot.clone().unwrap_or_else(|| {
             let exe = exe.as_ref().expect("one of the two is set");
             let mut name = exe.file_name().unwrap_or_default().to_os_string();

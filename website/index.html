@@ -523,12 +523,14 @@
                 data-copy="curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:5px 0 8px">for Windows users in PowerShell:</p>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:5px 0 8px">for Windows users in PowerShell:
+          </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
               <div style="overflow-x:auto">
-                <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex</span></div>
+                <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">irm
+                    https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex</span></div>
               </div>
               <button class="copy-btn"
                 data-copy="irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex">Copy</button>
@@ -564,7 +566,8 @@
           </div>
           <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">One binary, one flag set:
             <code>--mode interp|hybrid|jit</code>, <code>--jit-tier auto|cranelift|llvm|off</code>, promotion
-            thresholds, and <code>--jit-log</code>.</p>
+            thresholds, and <code>--jit-log</code>.
+          </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
@@ -584,9 +587,26 @@
             style="margin-top:14px;padding:14px 16px;border:1px dashed rgba(34,29,26,0.2);border-radius:8px;font-size:13px;line-height:1.65;color:#5c5450">
             Building from source instead? That's the contributor path — Rust nightly and LLVM 21, with the
             <code>std/</code> rebuild steps spelled out in the <a href="https://github.com/rayzor-blade/ash#building"
-              target="_blank" rel="noopener">README</a>.</div>
+              target="_blank" rel="noopener">README</a>.
+          </div>
         </div>
-
+        <div>
+          <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px"><span
+              style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">04</span>
+            <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build a native executable</h3>
+          </div>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Ash can build a native executable AOT with the <code>--build</code> flag.
+          </p>
+          <div
+            style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+              <div style="overflow-x:auto">
+                  <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --build mygame mygame.hl</span></div>
+              </div>
+              <button class="copy-btn" data-copy="ash --build mygame mygame.hl">Copy</button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -649,10 +669,13 @@
           apart rather than as one ranking. <code>haxe -hl main.c</code> emits C for the system compiler to build;
           <code>ash</code> emits the object itself, with no C in the path. Both are built through LLVM — the HL/C
           lane is compiled with <code>clang</code> rather than the default <code>cc</code>, because ash's back end is
-          LLVM by construction and leaving that unmatched would measure two compilers as much as two designs. Both builds take one to six seconds and are
-          excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is measured in
+          LLVM by construction and leaving that unmatched would measure two compilers as much as two designs. Both
+          builds take one to six seconds and are
+          excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is
+          measured in
           its own CI job, so the engines within a row share a machine but different rows may not — compare engines
-          within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.</div>
+          within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.
+        </div>
       </div>
 
       <p id="bench-provenance"

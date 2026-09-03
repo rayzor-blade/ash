@@ -299,7 +299,7 @@ fn stage_runtime(runtime: &Path, beside: &Path, quiet: bool) -> Result<()> {
     }
     if !quiet {
         eprintln!(
-            "[ash] staged {} beside the binary as {}",
+            "\n[ash] staged {} beside the binary as {}",
             source.display(),
             staged_runtime_names().join(" and ")
         );
@@ -339,10 +339,10 @@ pub fn link_executable(
                     )
                 })?;
                 if !quiet {
-                    eprintln!(
+                    crate::progress::note(&format!(
                         "[ash] no runtime installed; wrote the embedded one to {}",
                         dest.display()
-                    );
+                    ));
                 }
                 dest
             }
@@ -371,6 +371,7 @@ pub fn link_executable(
         );
     }
 
+    crate::progress::begin("linking", 0);
     let mut cmd = Command::new(&driver.program);
     cmd.args(objects).arg(&runtime);
     match driver.dialect {

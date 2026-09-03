@@ -1,6 +1,6 @@
 # Ahead-of-time compilation
 
-`ash --emit-exe` compiles a whole HashLink program to a native binary: no
+`ash --build` compiles a whole HashLink program to a native binary: no
 bytecode file, no interpreter, no JIT, no warmup. It starts at full speed and
 stays there.
 
@@ -11,7 +11,7 @@ control it.
 ## Quick start
 
 ```
-ash --emit-exe prog prog.hl
+ash --build prog prog.hl
 ./prog
 ```
 
@@ -35,7 +35,7 @@ may import: upstream HDLLs link the versioned `libhl.1.dylib`, ash's own
 `sdl.hdll` links the bare `libhl.dylib`.
 
 ```
-ash --emit-exe game game.hl
+ash --build game game.hl
 ```
 
 The one thing left to you is the `.hdll` files. An AOT binary looks in its own
@@ -158,7 +158,7 @@ really does remove the frames. That is what a native toolchain does too.
 |---|---|---|
 | `fixup error ... does not have address` at link | a static-mode object linked against the shared runtime | link the static `libash_std.a`, or emit a program that actually loads HDLLs |
 | `Native library 'ssl' not loaded` at startup | the `.hdll` is not beside the binary or in the working directory | copy the HDLLs next to the binary |
-| `no LC_RPATH's found` when an HDLL loads | the binary has no rpath for its own directory | build with `--emit-exe`, which adds it |
+| `no LC_RPATH's found` when an HDLL loads | the binary has no rpath for its own directory | build with `--build`, which adds it |
 | garbage-collector crash soon after an HDLL loads | two runtimes in one process | link the shared runtime and stage `libhl` beside the binary |
 | `ld -r failed` | shards emitted for a foreign object format | this is guarded now; if you see it, set `ASH_AOT_SHARDS=1` and report it |
 | the build is killed, or the machine swaps | too many shards for the available memory | lower `ASH_AOT_SHARDS` |
@@ -172,5 +172,5 @@ call-site profile is advisory rather than a specialization contract. There is
 no bytecode in the binary, so nothing can be reloaded into it.
 
 `cargo test -p ash --test aot_smoke` compiles a corpus of test programs with
-`--emit-exe` and compares each binary's output against the JIT's, byte for
+`--build` and compares each binary's output against the JIT's, byte for
 byte. Run it after any change to the emitter.

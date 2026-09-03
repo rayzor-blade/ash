@@ -31,23 +31,38 @@ struct Cli {
 
     /// Compile to a native object file instead of running.
     ///
-    /// Link it with tools/aot/link.sh to get a standalone binary that needs
-    /// no bytecode, no interpreter and no JIT at run time.
+    /// The object still has to be linked; `--emit-exe` does both and is what
+    /// most callers want.
     #[arg(long, value_name = "OUT.o")]
     emit_aot: Option<PathBuf>,
+
+    /// Compile to a native executable: emit and link, in one step.
+    ///
+    /// The usual way to build a program. `--emit-aot` is the same compile
+    /// stopping at the object file, for a caller doing its own linking.
+    #[arg(long, value_name = "OUT")]
+    emit_exe: Option<PathBuf>,
+
+    /// Runtime to link against (--emit-exe).
+    ///
+    /// By default the one beside `ash`, then the usual library directories,
+    /// and for a program that loads HDLLs, failing all that, the copy `ash`
+    /// carries inside itself.
+    #[arg(long, value_name = "PATH", requires = "emit_exe")]
+    runtime: Option<PathBuf>,
 
     /// Target triple for --emit-aot. Defaults to this machine.
     ///
     /// A non-native triple is cross-compiled for a generic CPU, because the
     /// host's features cannot be assumed of a machine we cannot ask.
-    #[arg(long, value_name = "TRIPLE", requires = "emit_aot")]
+    #[arg(long, value_name = "TRIPLE")]
     target: Option<String>,
 
     /// Emit even when some functions could not be lowered (--emit-aot).
     ///
     /// A refused function becomes a throw. Without this, emitting stops rather
     /// than writing a binary that aborts the moment one is reached.
-    #[arg(long, requires = "emit_aot")]
+    #[arg(long)]
     allow_refused: bool,
 
     /// Devirtualise from a callsite profile when emitting (--emit-aot).
@@ -199,14 +214,36 @@ fn every_preset_is_offered(t: TierPreset) -> Option<Preset> {
 /// address to jump to for the JIT, a file for this. The object defines `main`
 /// and `ash_module_init` and imports the runtime by symbol, so linking it
 /// against libash_std.a produces a binary with no bytecode in it.
-fn emit_aot(
-    file: &std::path::Path,
-    out: &std::path::Path,
+/// What to build, and where to put it.
+struct AotRequest<'a> {
+    /// The bytecode to compile.
+    file: &'a std::path::Path,
+    /// The object file. Scratch, and removed, when `exe` is set.
+    out: &'a std::path::Path,
+    /// The binary to link, if this is a one-command build.
+    exe: Option<&'a std::path::Path>,
+    /// The runtime to link against, if the caller named one.
+    runtime: Option<&'a std::path::Path>,
+    /// Target triple; this machine's if absent.
     target: Option<String>,
+    /// Call-site profile to devirtualize from.
     pgo: Option<String>,
+    /// Emit even if some functions could not be lowered.
     allow_refused: bool,
     quiet: bool,
-) -> anyhow::Result<()> {
+}
+
+fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
+    let AotRequest {
+        file,
+        out,
+        exe,
+        runtime,
+        target,
+        pgo,
+        allow_refused,
+        quiet,
+    } = request;
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
     if let Some(pgo) = &pgo {
         let path = if pgo.is_empty() {
@@ -290,7 +327,10 @@ fn emit_aot(
             refused.len()
         );
         for (fx, e) in refused.iter().take(10) {
-            msg.push_str(&format!("\n    findex={fx}: {}", e.lines().next().unwrap_or("")));
+            msg.push_str(&format!(
+                "\n    findex={fx}: {}",
+                e.lines().next().unwrap_or("")
+            ));
         }
         if refused.len() > 10 {
             msg.push_str(&format!("\n    ... and {} more", refused.len() - 10));
@@ -306,8 +346,25 @@ fn emit_aot(
     // More than one shard splits the middle end and codegen across threads
     // (see `aot_shard`); one shard is the single-module path, which also
     // honours ASH_AOT_NO_OPT and ASH_AOT_DUMP_IR itself.
-    let shards = ash_core::llvm::aot_shard::shard_count();
-    let bytes = if shards > 1 {
+    let shards = ash_core::llvm::aot_shard::shard_count_for(&triple);
+    if !quiet && shards == 1 && ash_core::llvm::aot_shard::shard_count() > 1 {
+        eprintln!(
+            "[aot] cross-compiling to {triple}: one module, since `ld -r` joins the shards and reads the host's object format only"
+        );
+    }
+    // Heading for a binary, the parts go straight to the linker: it takes any
+    // number of objects, so joining them into one first would rewrite every
+    // byte for nothing.
+    let mut objects: Vec<PathBuf> = vec![out.to_path_buf()];
+    let bytes = if shards > 1 && exe.is_some() {
+        let parts = jit.emit_object_parts(&triple, out, shards, quiet)?;
+        let bytes = parts
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .sum();
+        objects = parts;
+        bytes
+    } else if shards > 1 {
         jit.emit_object_sharded(&triple, out, shards, quiet)?
     } else {
         // ASH_AOT_NO_OPT leaves the module unoptimised. O3 inlines
@@ -326,7 +383,11 @@ fn emit_aot(
         // making it reachable only from an example was a false economy.
         if let Ok(dir) = std::env::var("ASH_AOT_DUMP_IR") {
             let p = std::path::Path::new(&dir);
-            let dest = if p.is_dir() { p.join("module.ll") } else { p.to_path_buf() };
+            let dest = if p.is_dir() {
+                p.join("module.ll")
+            } else {
+                p.to_path_buf()
+            };
             jit.write_ir(&dest)?;
             if !quiet {
                 eprintln!("[ash] wrote IR to {}", dest.display());
@@ -361,26 +422,51 @@ fn emit_aot(
                 eprintln!("[ash] pgo: {hits} of {loaded} profiled caller(s) matched");
             }
         }
-        eprintln!("[ash] wrote {} ({bytes} bytes) for {triple}", out.display());
+        if exe.is_some() {
+            eprintln!("[ash] compiled {} object bytes for {triple}", bytes);
+        } else {
+            eprintln!("[ash] wrote {} ({bytes} bytes) for {triple}", out.display());
+        }
         if shared_runtime {
             // An HDLL brings its own copy of the runtime unless the binary
             // shares one, and two collectors in a process crash as soon as one
             // meets the other's objects. So this object must take the runtime
             // as a library, and the HDLLs must sit beside the binary.
             eprintln!(
-                "[ash] this program loads HDLLs, so it needs the SHARED runtime:\n\
-                 [ash]   tools/aot/link.sh {} <out> <path/to/libhl.{}>\n\
-                 [ash] and the .hdll files must sit beside the binary, with the\n\
-                 [ash] runtime staged there under both names an HDLL may import\n\
-                 [ash] (libhl and libhl.1). Do not link the STATIC runtime into a\n\
-                 [ash] program that loads HDLLs: it builds, then the HDLL loads a\n\
-                 [ash] second copy of the runtime and the two collectors meet.",
-                out.display(),
-                if cfg!(target_os = "macos") { "dylib" } else { "so" }
+                "[ash] this program loads HDLLs, so it takes the SHARED runtime, \
+                 staged beside the binary. The .hdll files must sit there too. \
+                 Do not link the static runtime into a program that loads HDLLs: \
+                 it builds, and then the HDLL loads a second copy of the runtime \
+                 and the two collectors meet."
+            );
+        } else if exe.is_none() {
+            eprintln!(
+                "[ash] this is an object; `--emit-exe {}` would have linked it too",
+                out.with_extension("").display()
+            );
+        }
+    }
+
+    if let Some(exe) = exe {
+        let kind = if shared_runtime {
+            ash_core::llvm::aot_link::Runtime::Shared
+        } else {
+            ash_core::llvm::aot_link::Runtime::Static
+        };
+        let linked = ash_core::llvm::aot_link::link_executable(&objects, exe, kind, runtime, quiet);
+        // The objects are scratch either way. Keeping them after a failure
+        // only helps if someone is told they exist.
+        if linked.is_err() {
+            eprintln!(
+                "[ash] the objects are left beside {} for inspection",
+                exe.display()
             );
         } else {
-            eprintln!("[ash] link it: tools/aot/link.sh {}", out.display());
+            for part in &objects {
+                let _ = std::fs::remove_file(part);
+            }
         }
+        linked?;
     }
     Ok(())
 }
@@ -1143,15 +1229,26 @@ fn run() -> Result<()> {
         }
     }
 
-    if let Some(out) = cli.emit_aot.clone() {
-        return emit_aot(
-            &hl_path,
-            &out,
-            cli.target.clone(),
-            cli.pgo.clone(),
-            cli.allow_refused,
-            cli.quiet,
-        );
+    if cli.emit_aot.is_some() || cli.emit_exe.is_some() {
+        // With only `--emit-exe`, the object is scratch: it is named after the
+        // binary, beside it, and removed once linked.
+        let exe = cli.emit_exe.clone();
+        let out = cli.emit_aot.clone().unwrap_or_else(|| {
+            let exe = exe.as_ref().expect("one of the two is set");
+            let mut name = exe.file_name().unwrap_or_default().to_os_string();
+            name.push(".o");
+            exe.with_file_name(name)
+        });
+        return emit_aot(AotRequest {
+            file: &hl_path,
+            out: &out,
+            exe: exe.as_deref(),
+            runtime: cli.runtime.as_deref(),
+            target: cli.target.clone(),
+            pgo: cli.pgo.clone(),
+            allow_refused: cli.allow_refused,
+            quiet: cli.quiet,
+        });
     }
 
     match cli.mode {
@@ -1319,9 +1416,8 @@ fn run() -> Result<()> {
                     .flat_map(|&(c, t)| [c, t])
                     .filter(|fx| !by_findex.contains_key(fx))
                     .collect();
-                let text = ash_core::callsite_profile::render_profile(|fx| {
-                    by_findex.get(&fx).cloned()
-                });
+                let text =
+                    ash_core::callsite_profile::render_profile(|fx| by_findex.get(&fx).cloned());
                 if !unnamed.is_empty() && !cli.quiet {
                     eprintln!(
                         "[ash] {} of {} named; {} function(s) have no Class.method name \

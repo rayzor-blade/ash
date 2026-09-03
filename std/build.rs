@@ -87,6 +87,28 @@ fn main() {
         println!("cargo:rerun-if-changed=src/stack_boundary.c");
     }
 
+    // The shared runtime answers to HashLink's name, decided here rather than
+    // rewritten later.
+    //
+    // An HDLL's import table names `@rpath/libhl.dylib` (`libhl.so`), and the
+    // loader binds by that name: a binary that linked this library under any
+    // other identity ends up in a process with TWO runtimes and two garbage
+    // collectors, which crash as soon as one meets the other's objects. The
+    // identity is a property of the library, so stamping it at build time is
+    // the whole fix -- staging a copy is then `fs::copy` and nothing else. The
+    // alternative, patching each copy afterwards with `install_name_tool`,
+    // also invalidates its signature and so drags in `codesign` behind it.
+    //
+    // Loading by an absolute path still works: `dlopen` takes the path it is
+    // given, and dyld only uses the install name to notice that an image is
+    // already loaded -- which is exactly the deduplication wanted here, since
+    // the binary and its HDLLs must share one image.
+    if target.contains("apple") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libhl.dylib");
+    } else if target.contains("linux") || target.contains("bsd") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libhl.so");
+    }
+
     // // Tell cargo to look for shared libraries in the specified directory
     // println!("cargo:rustc-link-search=/path/to/lib");
 

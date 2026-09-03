@@ -25,7 +25,6 @@ fn quiet() -> bool {
     QUIET.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-
 /// ash_std's exports, addressed directly rather than through a dynamic loader.
 ///
 /// build.rs writes this from `std/src/*.rs`: an `extern "C"` declaration per
@@ -89,9 +88,9 @@ pub fn choose_std_linkage(program: &Path) -> bool {
     // HDLLs bound to a second GC.
     #[cfg(any(target_os = "macos", windows))]
     let has_hdll = std::fs::read_dir(program_directory(program)).is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll")
-        })
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("hdll"))
     });
     #[cfg(not(any(target_os = "macos", windows)))]
     let has_hdll = false;
@@ -143,18 +142,19 @@ fn usable_system_libhl(ext: &str) -> Option<std::path::PathBuf> {
     if !system_libhl.exists() {
         return None;
     }
-    let system_ok = force == "system" || unsafe {
-        let path_cstr = std::ffi::CString::new(system_libhl.to_str().unwrap()).unwrap();
-        let probe = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
-        if probe.is_null() {
-            false
-        } else {
-            let has_canary =
-                !libc::dlsym(probe, CANARY_SYMBOL.as_ptr() as *const libc::c_char).is_null();
-            libc::dlclose(probe);
-            has_canary
-        }
-    };
+    let system_ok = force == "system"
+        || unsafe {
+            let path_cstr = std::ffi::CString::new(system_libhl.to_str().unwrap()).unwrap();
+            let probe = libc::dlopen(path_cstr.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+            if probe.is_null() {
+                false
+            } else {
+                let has_canary =
+                    !libc::dlsym(probe, CANARY_SYMBOL.as_ptr() as *const libc::c_char).is_null();
+                libc::dlclose(probe);
+                has_canary
+            }
+        };
     if system_ok {
         Some(system_libhl)
     } else {
@@ -182,6 +182,26 @@ fn usable_system_libhl(_ext: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// Write the shared runtime this binary carries to `dest`, and return it.
+///
+/// The emitter embeds the runtime so that `ash` needs nothing beside it to
+/// run a program; the same copy is what an AOT binary links against, so
+/// nobody has to have built the workspace to compile one. The bytes are the
+/// library, whatever the file they are stored under is called.
+pub fn write_embedded_runtime(dest: &Path) -> Result<()> {
+    const RUNTIME: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/libash_std.a"));
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(dest, RUNTIME)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 pub fn init_std_library() -> Result<()> {
     if std_is_static() {
         // No loader, no temp file, no codesign, no signature registration —
@@ -207,7 +227,11 @@ pub fn init_std_library() -> Result<()> {
             // ASH_LIBHL override. On Windows it always answers None.
             #[cfg(any(target_os = "macos", windows))]
             let sibling_libhl = {
-                let compat = if cfg!(windows) { "libhl.dll" } else { "libhl.dylib" };
+                let compat = if cfg!(windows) {
+                    "libhl.dll"
+                } else {
+                    "libhl.dylib"
+                };
                 std::env::current_exe()
                     .ok()
                     .and_then(|exe| exe.parent().map(|dir| dir.join(compat)))
@@ -441,7 +465,11 @@ fn describe_object_file(path: &Path) -> Option<(&'static str, &'static str, Stri
                     };
                     return Some(("PE", a, format!("a Windows PE {a} DLL")));
                 }
-                return Some(("PE", "an unknown architecture", "a Windows PE DLL".to_string()));
+                return Some((
+                    "PE",
+                    "an unknown architecture",
+                    "a Windows PE DLL".to_string(),
+                ));
             }
             None
         }
@@ -839,8 +867,13 @@ mod hdll_format_tests {
         ];
         for (name, bytes, expect) in cases {
             let p = write_temp(name, &bytes);
-            let got = describe_object_file(&p).map(|(_, _, k)| k).unwrap_or_default();
-            assert!(got.contains(expect), "{name}: expected {expect:?}, got {got:?}");
+            let got = describe_object_file(&p)
+                .map(|(_, _, k)| k)
+                .unwrap_or_default();
+            assert!(
+                got.contains(expect),
+                "{name}: expected {expect:?}, got {got:?}"
+            );
             let _ = std::fs::remove_file(&p);
         }
     }

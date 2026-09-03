@@ -352,45 +352,96 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
 }
 
 
-/// Whether a return address belongs to program code rather than to the
-/// runtime, decided by the symbol dladdr names for it. The runtime may be a
-/// separate library or linked statically into the same image, so image
-/// identity cannot tell them apart; symbol names can: the runtime's entry
-/// points are `hlp_*`/`hl_*`, and its Rust internals are mangled.
-unsafe fn aot_frame_in_program(pc: usize) -> bool {
-    let mut info: libc::Dl_info = std::mem::zeroed();
-    if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
-        return false;
+/// The largest a single compiled body is assumed to be, used to bound the
+/// last entry of the table below. Bodies run to a few tens of kilobytes; a
+/// megabyte is generous and keeps a return address in some unrelated library
+/// from being attributed to the last Haxe function in the image.
+const AOT_MAX_BODY_BYTES: usize = 1 << 20;
+
+/// The registered name of the body containing `pc`, by address.
+///
+/// The table holds every body's entry address, sorted, so the body that owns
+/// `pc` is the last entry at or below it -- bounded by the next entry, or by
+/// `AOT_MAX_BODY_BYTES` for the final one. Address is the only key that
+/// works everywhere: a sharded body is a hidden symbol, hidden symbols are
+/// not in `.dynsym`, and glibc's `dladdr` reads nothing else, so on Linux it
+/// names no program frame at all. Asking it first was the bug -- it made the
+/// table reachable only for frames that did not need it.
+fn aot_symbol_for_pc(pc: usize) -> Option<&'static str> {
+    let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+    if table.is_empty() {
+        return None;
     }
-    // The registered table is the authority: a body's address is in it
-    // whatever its symbol is called. The sharded emitter names every body
-    // `ash_f<findex>.<name>`, so a name test alone would file the whole
-    // program under the runtime and every stack would come back empty.
-    {
-        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
-        if table
-            .binary_search_by_key(&(info.dli_saddr as usize), |(s, _)| *s)
-            .is_ok()
-        {
-            return true;
-        }
+    let i = match table.binary_search_by_key(&pc, |(s, _)| *s) {
+        Ok(i) => i,
+        Err(0) => return None,
+        Err(i) => i - 1,
+    };
+    let (start, name) = table[i];
+    let end = table
+        .get(i + 1)
+        .map(|(next, _)| *next)
+        .unwrap_or(start.saturating_add(AOT_MAX_BODY_BYTES));
+    if pc < end {
+        Some(name)
+    } else {
+        None
     }
-    let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy();
-    let name = raw.trim_start_matches('_');
-    if name.starts_with("ash_f") || name.starts_with("ash_h") {
-        return true;
-    }
-    !(name.starts_with("hlp_")
+}
+
+/// Whether the symbol `dladdr` gives a frame says it belongs to the runtime
+/// rather than to the program. The runtime may be a separate library or
+/// linked statically into the same image, so image identity cannot tell them
+/// apart; names can. `ash_h*` is a helper thunk the emitter generates, which
+/// the single-module build hides too, so a stack reads the same either way.
+fn aot_name_is_runtime(name: &str) -> bool {
+    let name = name.trim_start_matches('_');
+    name.starts_with("hlp_")
         || name.starts_with("hl_")
+        || name.starts_with("ash_h")
         || name.starts_with("ash_")
         || name.starts_with("RNv")
         || name.starts_with("ZN")
         || name.starts_with("std_")
         || name == "main"
-        || name == "start")
+        || name == "start"
+}
+
+/// Whether a return address belongs to program code rather than to the
+/// runtime.
+///
+/// The table decides, because it is the only source that covers every body.
+/// `dladdr` still gets a veto where it can see: the table's ranges are
+/// inferred from entry addresses, so a runtime function sitting between two
+/// bodies would otherwise be attributed to the body before it.
+unsafe fn aot_frame_in_program(pc: usize) -> bool {
+    let mut info: libc::Dl_info = std::mem::zeroed();
+    let named = libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_sname.is_null();
+    let dl_name = if named {
+        Some(std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    if aot_symbol_for_pc(pc).is_some() {
+        return match &dl_name {
+            // `ash_f*` is what the sharded emitter calls a body, so the name
+            // agreeing with the table is not a veto.
+            Some(n) => n.trim_start_matches('_').starts_with("ash_f") || !aot_name_is_runtime(n),
+            None => true,
+        };
+    }
+    match dl_name {
+        Some(n) => !aot_name_is_runtime(&n),
+        None => false,
+    }
 }
 
 unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
+    // The table first, and by the pc itself: where dladdr is blind -- every
+    // hidden body on Linux -- it is the only thing that can name the frame.
+    if let Some(name) = aot_symbol_for_pc(pc) {
+        return Some(name.to_string());
+    }
     let mut info: libc::Dl_info = std::mem::zeroed();
     if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
         return None;
@@ -399,14 +450,8 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     // return address into whatever body absorbed the call); the registered
     // table knows that function's Haxe name. The emitter's own LLVM symbols
     // are abbreviations (`t`, `o.1234`), so they are only the last resort.
-    let start = info.dli_saddr as usize;
-    {
-        // One lock: the guard of an `if let` scrutinee lives through the
-        // body, and a second lock there deadlocked on the first frame.
-        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Ok(i) = table.binary_search_by_key(&start, |(s, _)| *s) {
-            return Some(table[i].1.to_string());
-        }
+    if let Some(name) = aot_symbol_for_pc(info.dli_saddr as usize) {
+        return Some(name.to_string());
     }
     let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy().into_owned();
     let name = raw.trim_start_matches('_');

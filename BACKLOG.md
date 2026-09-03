@@ -1706,9 +1706,14 @@ load 4 (2026-09-03): the game emits in 48.7 s against 377 s, a 7.7x cut,
 at a 6.1 GB peak against 1.8 GB; the critical path is 17 s of lowering,
 2 s of bitcode, and one shard's 10.5 s parse + 5 s O3 + 5 s codegen.
 Correctness: smoke 8/8 byte-identical to the JIT, exception stacks intact.
-Next lever: every shard parses the whole 61 MB bitcode before stripping --
-a slim stream without the 55k mutable initializers for body shards, or lazy
-materialization, would take most of that 10.5 s off the path. The
+Next lever: every shard still parses the whole stream before stripping. A
+slim stream was tried and retired -- dropping 144,111 initializers kept 57 MB
+of 61, because the module is bodies, not data. What remains is either lazy
+materialization (no C API materializes a single function, so this needs a
+hand-declared entry point or a different reader) or lowering each shard
+separately from AIR, which never builds a whole-program module at all. That
+second one is the only design that lowers peak memory rather than trading it
+against shard count. The
 paragraphs below are the analysis that led to it.
 
 

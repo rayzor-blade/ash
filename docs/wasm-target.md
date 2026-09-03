@@ -64,7 +64,7 @@ the closure guards that LICM could not hoist past a call boundary.
 
 Four programs — `bench_fib`, `test_basic`, `test_stdlib`, `bench_deltablue` —
 compile to native objects, link against `libash_std.a`, and print **byte for
-byte what the JIT prints**. `tools/aot/smoke.sh` is that check; it gates on the
+byte what the JIT prints**. the AOT smoke test (`cargo test -p ash --test aot_smoke`) is that check; it gates on the
 diff, not on the exit status, because a module that starts and runs and prints
 something slightly different is the failure worth catching. No C compiler and
 no C source is in the path: `clang` appears only as the driver that knows where

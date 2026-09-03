@@ -9,6 +9,7 @@ keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
 
 [dependencies]
 inkwell = {workspace=true}
+ash_wasm_link = { path = "../ash_wasm_link" }
 anyhow = {workspace=true}
 flexstr = {workspace=true}
 num_enum = {workspace=true}

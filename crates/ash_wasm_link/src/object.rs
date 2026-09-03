@@ -412,7 +412,14 @@ pub fn read(name: &str, bytes: &[u8]) -> Result<Object> {
         }
     }
 
-    for (target, entries) in pending_relocs {
+    for (target, mut entries) in pending_relocs {
+        // Sorted by offset, so the entries belonging to one function body are
+        // a contiguous run that can be found by bisection. LLVM emits them in
+        // order and a partial link generally preserves that, but "generally"
+        // is not a property to bisect against: an unsorted run silently
+        // returns the wrong slice, which reads as a call that was never
+        // recorded rather than as an error.
+        entries.sort_unstable_by_key(|e| e.offset);
         if Some(target) == code_section_index {
             obj.code_relocs = entries;
         } else if Some(target) == data_section_index {

@@ -7,11 +7,14 @@
 //! # What makes this small enough to trust
 //!
 //! Two inputs, not a thousand: the program and one prelinked runtime. No
-//! archives, no lazy pull. And no garbage collection -- measured, a
-//! `--no-gc-sections` link of exactly these two objects produces a module
-//! that runs correctly, so the reachability pass that a general linker needs
-//! for correctness is here only an optimisation, and is left out until it is
-//! worth its risk.
+//! archives, no lazy pull.
+//!
+//! Tree shaking is here, but it arrived second and deliberately so. A
+//! `--no-gc-sections` link of exactly these two objects was measured to run
+//! correctly first, which established that reachability is an optimisation
+//! rather than a correctness requirement -- and that meant the linker could
+//! be proven right before it was made small. It removes about a third of the
+//! module.
 //!
 //! # The rule every patch follows
 //!
@@ -37,9 +40,18 @@ pub struct LinkOptions {
     /// of this region and grows down, so an overflow runs into address zero
     /// rather than into the program's own data.
     pub stack_size: u32,
-    /// Export every defined function that is neither local nor hidden. The
-    /// host needs `main` and `ash_module_init`; the rest cost only a name.
+    /// Export every defined function that is neither local nor hidden.
+    ///
+    /// Off by default, and that is a size decision rather than a taste one:
+    /// an exported function is reachable by definition, so exporting
+    /// everything pins every function in the module and leaves tree shaking
+    /// nothing to remove.
     pub export_all_functions: bool,
+    /// Drop functions nothing can reach.
+    pub tree_shake: bool,
+    /// Names to keep whatever else happens, because the host calls them by
+    /// name and no relocation points at them.
+    pub roots: Vec<String>,
 }
 
 impl Default for LinkOptions {
@@ -48,7 +60,12 @@ impl Default for LinkOptions {
         // linker replaces was verified running with.
         Self {
             stack_size: 65536,
-            export_all_functions: true,
+            export_all_functions: false,
+            tree_shake: true,
+            roots: ["main", "ash_module_init", "_start", "_initialize"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 }
@@ -72,8 +89,9 @@ struct ImportKey {
 }
 
 struct Layout {
-    /// Output function index of each object's locally defined functions.
-    func_base: Vec<u32>,
+    /// Output index of each object's locally defined functions, or `None`
+    /// for one that tree shaking removed.
+    func_out: Vec<Vec<Option<u32>>>,
     /// Output type index for each object's local type indices.
     type_map: Vec<Vec<u32>>,
     /// Address of each object's data segments.
@@ -256,12 +274,28 @@ fn plan(
         }
     }
 
-    // --- function index space: imports, then each object's definitions ---
-    let mut func_base = Vec::with_capacity(objects.len());
+    // --- function index space: imports, then whatever survives ---
+    let kept = if opts.tree_shake {
+        mark_reachable(objects, defs, opts)?
+    } else {
+        objects
+            .iter()
+            .map(|o| vec![true; o.functions.len()])
+            .collect()
+    };
+    let mut func_out: Vec<Vec<Option<u32>>> = Vec::with_capacity(objects.len());
     let mut next = imports.len() as u32;
-    for obj in objects {
-        func_base.push(next);
-        next += obj.functions.len() as u32;
+    for keep in &kept {
+        let mut map = Vec::with_capacity(keep.len());
+        for &k in keep {
+            if k {
+                map.push(Some(next));
+                next += 1;
+            } else {
+                map.push(None);
+            }
+        }
+        func_out.push(map);
     }
 
     // --- linker-defined globals ---
@@ -314,21 +348,35 @@ fn plan(
         });
     };
     for (oi, obj) in objects.iter().enumerate() {
-        for entry in obj.code_relocs.iter().chain(obj.data_relocs.iter()) {
+        // Only the code that survived. A relocation inside a function that
+        // tree shaking removed is a slot nobody will ever read, and asking
+        // for it would resurrect the whole graph it points into.
+        let live_code = obj
+            .code_bodies
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| func_out[oi][*i].is_some())
+            .flat_map(|(_, body)| relocations_in(&obj.code_relocs, body));
+        for entry in live_code.chain(obj.data_relocs.iter()) {
             if !matches!(
                 entry.ty,
                 RelocationType::TableIndexSleb | RelocationType::TableIndexI32
             ) {
                 continue;
             }
-            let out = function_symbol(objects, defs, &func_base, &import_index, oi, entry.index)?;
+            let out = function_symbol(objects, defs, &func_out, &import_index, oi, entry.index)?;
             give_slot(out, &mut table_slot);
         }
         // Element entries too: a function listed there but never relocated is
         // reachable only through the table, and dropping it would leave a
         // hole where a call_indirect expects a body.
         for &local in &obj.elements {
-            let out = local_function(objects, defs, &func_base, &import_index, oi, local)?;
+            let Some(out) = local_function(objects, defs, &func_out, &import_index, oi, local)?
+            else {
+                // Removed by tree shaking. Nothing that survived references
+                // its slot, or it would have been kept.
+                continue;
+            };
             give_slot(out, &mut table_slot);
         }
     }
@@ -338,7 +386,7 @@ fn plan(
     Ok(Layout {
         data_base: opts.stack_size,
         data_end: address,
-        func_base,
+        func_out,
         type_map,
         segment_addr,
         table_slot,
@@ -375,6 +423,145 @@ fn undefined_function_index(sym: &crate::object::Symbol) -> Option<u32> {
     }
 }
 
+/// Which defined functions anything can reach.
+///
+/// # What is a root, and why the export list matters
+///
+/// A function is kept if the host can name it, if a kept function calls it,
+/// or if any data holds its address. The last of those is what keeps this
+/// sound for a program like ash: its compiled code reaches most functions
+/// through a table whose entries are written into *data* by relocations, not
+/// through direct calls. Data is kept whole here, so every function whose
+/// address is written anywhere is a root, and a function reached by pointer
+/// arithmetic cannot be removed by accident.
+///
+/// The cost of that soundness is real -- it keeps everything ash's own type
+/// tables point at -- and it is the right trade while the alternative is a
+/// module that validates, runs, and calls into a hole.
+fn mark_reachable(
+    objects: &[Object],
+    defs: &HashMap<String, (usize, usize)>,
+    opts: &LinkOptions,
+) -> Result<Vec<Vec<bool>>> {
+    let mut kept: Vec<Vec<bool>> = objects
+        .iter()
+        .map(|o| vec![false; o.functions.len()])
+        .collect();
+    let mut work: Vec<(usize, u32)> = Vec::new();
+
+    let root =
+        |oi: usize, defined: u32, kept: &mut Vec<Vec<bool>>, work: &mut Vec<(usize, u32)>| {
+            if let Some(slot) = kept[oi].get_mut(defined as usize) {
+                if !*slot {
+                    *slot = true;
+                    work.push((oi, defined));
+                }
+            }
+        };
+
+    // Named by the host, asked to be exported, or marked no-strip.
+    for (oi, obj) in objects.iter().enumerate() {
+        for sym in &obj.symbols {
+            let SymbolTarget::Function { index } = sym.target else {
+                continue;
+            };
+            if !sym.defines() {
+                continue;
+            }
+            let name = obj.symbol_name(sym);
+            let wanted = sym.is_exported()
+                || sym.is_no_strip()
+                || opts.roots.iter().any(|r| r == name)
+                || (opts.export_all_functions && !sym.is_local() && !sym.is_hidden());
+            if !wanted {
+                continue;
+            }
+            let imported = obj.imported_functions();
+            if index >= imported {
+                root(oi, index - imported, &mut kept, &mut work);
+            }
+        }
+        // Constructors run before anything else, so they are reachable by
+        // definition even though nothing calls them.
+        for init in &obj.init_funcs {
+            if let Some(sym) = obj.symbols.get(init.symbol as usize) {
+                let (doi, def) = definition_of(objects, defs, oi, sym);
+                if let SymbolTarget::Function { index } = def.target {
+                    let imported = objects[doi].imported_functions();
+                    if index >= imported {
+                        root(doi, index - imported, &mut kept, &mut work);
+                    }
+                }
+            }
+        }
+        // Every address written into data, because all data is kept.
+        for entry in &obj.data_relocs {
+            if !matches!(
+                entry.ty,
+                RelocationType::TableIndexSleb
+                    | RelocationType::TableIndexI32
+                    | RelocationType::FunctionIndexLeb
+            ) {
+                continue;
+            }
+            let Some(sym) = obj.symbols.get(entry.index as usize) else {
+                continue;
+            };
+            let (doi, def) = definition_of(objects, defs, oi, sym);
+            if let SymbolTarget::Function { index } = def.target {
+                let imported = objects[doi].imported_functions();
+                if index >= imported {
+                    root(doi, index - imported, &mut kept, &mut work);
+                }
+            }
+        }
+    }
+
+    // Then everything those reach, transitively.
+    while let Some((oi, defined)) = work.pop() {
+        let obj = &objects[oi];
+        let Some(body) = obj.code_bodies.get(defined as usize) else {
+            continue;
+        };
+        for entry in relocations_in(&obj.code_relocs, body) {
+            if !matches!(
+                entry.ty,
+                RelocationType::FunctionIndexLeb
+                    | RelocationType::TableIndexSleb
+                    | RelocationType::TableIndexI32
+            ) {
+                continue;
+            }
+            let Some(sym) = obj.symbols.get(entry.index as usize) else {
+                continue;
+            };
+            let (doi, def) = definition_of(objects, defs, oi, sym);
+            if let SymbolTarget::Function { index } = def.target {
+                let imported = objects[doi].imported_functions();
+                if index >= imported {
+                    root(doi, index - imported, &mut kept, &mut work);
+                }
+            }
+        }
+    }
+
+    Ok(kept)
+}
+
+/// The relocations that fall inside one function body.
+///
+/// `reloc.*` entries are emitted in ascending offset order, so the ones
+/// belonging to a body are a contiguous run and can be found by bisection
+/// rather than by scanning sixty thousand entries per function.
+fn relocations_in<'a>(
+    relocs: &'a [RelocationEntry],
+    body: &std::ops::Range<usize>,
+) -> &'a [RelocationEntry] {
+    let start = relocs.partition_point(|r| (r.offset as usize) < body.start);
+    let end = relocs.partition_point(|r| (r.offset as usize) < body.end);
+    &relocs[start..end]
+}
+
 /// Which symbol actually defines the one being referenced.
 ///
 /// The locality check is the whole point. A local symbol is private to its
@@ -404,7 +591,7 @@ fn definition_of<'a>(
 fn function_symbol(
     objects: &[Object],
     defs: &HashMap<String, (usize, usize)>,
-    func_base: &[u32],
+    func_out: &[Vec<Option<u32>>],
     import_index: &HashMap<ImportKey, u32>,
     oi: usize,
     sym_index: u32,
@@ -423,7 +610,12 @@ fn function_symbol(
     };
     let imported = objects[doi].imported_functions();
     if index >= imported {
-        return Ok(func_base[doi] + (index - imported));
+        return func_out[doi][(index - imported) as usize].ok_or_else(|| {
+            anyhow!(
+                "{} was removed by tree shaking but its address is taken",
+                objects[doi].symbol_name(def)
+            )
+        });
     }
     let func_imports = function_imports(&objects[doi]);
     let import = func_imports
@@ -443,15 +635,15 @@ fn function_symbol(
 fn local_function(
     objects: &[Object],
     defs: &HashMap<String, (usize, usize)>,
-    func_base: &[u32],
+    func_out: &[Vec<Option<u32>>],
     import_index: &HashMap<ImportKey, u32>,
     oi: usize,
     local: u32,
-) -> Result<u32> {
+) -> Result<Option<u32>> {
     let obj = &objects[oi];
     let imported = obj.imported_functions();
     if local >= imported {
-        return Ok(func_base[oi] + (local - imported));
+        return Ok(func_out[oi][(local - imported) as usize]);
     }
     // An imported slot: whatever the corresponding symbol resolves to.
     let func_imports = function_imports(obj);
@@ -463,7 +655,7 @@ fn local_function(
         if let SymbolTarget::Function { index } = def.target {
             let d_imported = objects[doi].imported_functions();
             if index >= d_imported {
-                return Ok(func_base[doi] + (index - d_imported));
+                return Ok(func_out[doi][(index - d_imported) as usize]);
             }
         }
     }
@@ -471,7 +663,7 @@ fn local_function(
         module: import.module.clone(),
         name: import.name.clone(),
     };
-    import_index.get(&key).copied().ok_or_else(|| {
+    import_index.get(&key).copied().map(Some).ok_or_else(|| {
         anyhow!(
             "{}: no import assigned for {}.{}",
             obj.name,
@@ -580,9 +772,14 @@ fn resolve_symbol(
         SymbolTarget::Function { index } => {
             let imported = objects[doi].imported_functions();
             if index >= imported {
-                Ok(Resolved::Function(
-                    layout.func_base[doi] + (index - imported),
-                ))
+                layout.func_out[doi][(index - imported) as usize]
+                    .map(Resolved::Function)
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "{} was removed by tree shaking but something calls it",
+                            objects[doi].symbol_name(def)
+                        )
+                    })
             } else {
                 let func_imports = function_imports(&objects[doi]);
                 let import = func_imports.get(index as usize).ok_or_else(|| {
@@ -659,9 +856,19 @@ fn apply_relocations(
 ) -> Result<()> {
     for oi in 0..objects.len() {
         // The payloads are taken out so the resolver can borrow the objects.
+        // Only the bodies that survived. A relocation inside a removed
+        // function points into the graph that removal was meant to drop, and
+        // resolving it would report the removal as an error.
         let code_relocs = std::mem::take(&mut objects[oi].code_relocs);
+        let live: Vec<RelocationEntry> = objects[oi]
+            .code_bodies
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| layout.func_out[oi][*i].is_some())
+            .flat_map(|(_, body)| relocations_in(&code_relocs, body).iter().copied())
+            .collect();
         let mut code = std::mem::take(&mut objects[oi].code_payload);
-        patch(objects, defs, layout, oi, &code_relocs, &mut code)
+        patch(objects, defs, layout, oi, &live, &mut code)
             .with_context(|| format!("{}: patching code", objects[oi].name))?;
         objects[oi].code_payload = code;
         objects[oi].code_relocs = code_relocs;
@@ -853,9 +1060,14 @@ fn emit(
 
     // --- functions ---
     let mut functions = FunctionSection::new();
+    let mut kept_functions: u32 = 0;
     for (oi, obj) in objects.iter().enumerate() {
-        for &local_type in &obj.functions {
+        for (i, &local_type) in obj.functions.iter().enumerate() {
+            if layout.func_out[oi][i].is_none() {
+                continue;
+            }
             functions.function(layout.type_map[oi][local_type as usize]);
+            kept_functions += 1;
         }
     }
     // One more: the constructor runner this linker synthesises.
@@ -865,11 +1077,7 @@ fn emit(
         .map(|(i, _)| *i)
         .ok_or_else(|| anyhow!("no () -> () type to give __wasm_call_ctors"))?;
     functions.function(ctor_type);
-    let ctors_index = layout.func_base.last().copied().unwrap_or(0)
-        + objects
-            .last()
-            .map(|o| o.functions.len() as u32)
-            .unwrap_or(0);
+    let ctors_index = layout.imports.len() as u32 + kept_functions;
     module.section(&functions);
 
     // --- table, memory, tag ---
@@ -931,16 +1139,25 @@ fn emit(
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
     let mut exported_names: HashMap<&str, ()> = HashMap::new();
-    if opts.export_all_functions {
+    {
         for (oi, obj) in objects.iter().enumerate() {
             for sym in &obj.symbols {
                 let name = obj.symbol_name(sym);
-                if !sym.defines() || sym.is_local() || sym.is_hidden() || name.is_empty() {
+                if !sym.defines() || name.is_empty() {
                     continue;
                 }
                 let SymbolTarget::Function { index } = sym.target else {
                     continue;
                 };
+                // The same test `mark_reachable` uses, so everything the host
+                // is told about is something tree shaking was told to keep.
+                let wanted = sym.is_exported()
+                    || sym.is_no_strip()
+                    || opts.roots.iter().any(|r| r == name)
+                    || (opts.export_all_functions && !sym.is_local() && !sym.is_hidden());
+                if !wanted {
+                    continue;
+                }
                 // Only the object that owns the definition exports it.
                 if defs.get(name).map(|&(d, _)| d) != Some(oi) {
                     continue;
@@ -952,11 +1169,10 @@ fn emit(
                 if index < imported {
                     continue;
                 }
-                exports.export(
-                    name,
-                    ExportKind::Func,
-                    layout.func_base[oi] + (index - imported),
-                );
+                let Some(out) = layout.func_out[oi][(index - imported) as usize] else {
+                    continue;
+                };
+                exports.export(name, ExportKind::Func, out);
             }
         }
     }
@@ -991,8 +1207,11 @@ fn emit(
 
     // --- code ---
     let mut code = CodeSection::new();
-    for obj in objects {
-        for body in &obj.code_bodies {
+    for (oi, obj) in objects.iter().enumerate() {
+        for (i, body) in obj.code_bodies.iter().enumerate() {
+            if layout.func_out[oi][i].is_none() {
+                continue;
+            }
             code.raw(&obj.code_payload[body.clone()]);
         }
     }

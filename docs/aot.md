@@ -120,43 +120,31 @@ Command-line flags that matter here:
 ash --build game.wasm --target wasm32-wasip1 game.hl
 ```
 
-Same command, three different things to find, and each reports itself by
-name when it is missing.
+**Nothing else has to be installed.** ash links wasm itself. There is no
+`wasm-ld` to find, no wasi sysroot to locate, and no version of either to
+match against ash's own -- the linker is `crates/ash_wasm_link`, and the libc
+it links against was joined into the runtime object when ash was built. The
+build above works with `PATH` unset.
 
-| what | where ash looks | how to say it yourself |
-|---|---|---|
-| the linker | beside `ash`, then `wasm-ld` on PATH, then the LLD in a Rust toolchain if there is one | `ASH_WASM_LD` |
-| a libc | `share/wasi-sysroot` under every prefix on your PATH, then the wasi-sdk's default | `ASH_WASM_SYSROOT`, or the wasi-sdk's own `WASI_SDK_PATH` |
-| the ash runtime | `libash_std.a` in a directory named for the triple beside `ash`, then the usual library directories | `--runtime`, or `ASH_RUNTIME` |
-
-Two notes on how that list is built, because both were mistakes first.
-
-**Nothing is hardcoded to a machine.** The sysroot is found by reading the
-prefixes off your own PATH -- whoever installed a wasi libc installed it under
-some prefix, and that prefix is on PATH because that is what installing a
-toolchain means. Naming a package manager's directories instead would be right
-on one machine and wrong on the rest, and a path baked in when `ash` was
-*compiled* says nothing about where `ash` is *running*.
-
-**A linker that exists is not a linker that works.** Each candidate is run
-before it is used. This is not defensive habit: a standalone `wasm-ld` from
-one LLVM release, resolving at load time against another release's `libLLVM`,
-aborts in dyld with a missing symbol. Ash reports that by name and moves to
-the next candidate.
+The one thing it looks for is that runtime object, `ash_runtime.o`, in a
+directory named for the target beside `ash`, then the usual library
+directories; `--runtime` or `ASH_RUNTIME` names it directly.
 
 Two things are worth knowing before the first build.
-
-**The sysroot must have `libsetjmp.a`.** An ash program's exception handling
-is `setjmp`, so a libc without it links until the first `try`. Ash says which
-libc it found and what it lacks, rather than using it silently.
 
 **The result is a library, not a command.** It exports `main` and
 `ash_module_init` and imports what only a host can answer: WASI, plus fiber
 suspension, plus sockets. A wasm module cannot switch its own stacks -- the
 call frames are the engine's, not the program's -- so an ash program running
-there is suspended by whoever embeds it. Whatever embeds the module supplies
-those; the import contract is written down in
-[`wasm-target.md`](wasm-target.md).
+there is suspended by whoever embeds it. The import contract is written down
+in [`wasm-target.md`](wasm-target.md).
+
+**Only what the program can reach is emitted.** Functions nothing calls are
+dropped, which is about a third of the module. What counts as reachable is
+deliberately generous: all data is kept, so any function whose address is
+written anywhere survives, because ash's compiled code reaches most of the
+runtime through tables built in data rather than through direct calls.
+Debug sections are dropped entirely.
 
 Build the runtime for the target the same way as any other:
 

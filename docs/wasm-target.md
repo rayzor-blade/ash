@@ -1,330 +1,344 @@
 # hl2wasm — a WebAssembly target from optimized AIR
 
-**Goal.** Turn HL bytecode into a `.wasm` module, through the AIR pipeline, so
-Heaps and other Haxe frameworks have a WebAssembly target to build against.
+**Goal.** Turn HL bytecode into a `.wasm` module through the AIR and native
+AOT pipeline, so Heaps and other Haxe frameworks have a WebAssembly target to
+build against.
 
-**Explicitly out of scope.** HDLLs. A `.hdll` is a native shared object and
-there is nowhere to load it in a wasm sandbox. Framework authors guard those
-call sites with `#if wasm`, exactly as they already do for other targets. We
-do not emulate them, stub them, or apologise for them.
+**First target.** `wasm32-wasip1`, as a command module runnable by Wasmtime.
+A browser runs the same core module through a WASI Preview 1 shim. A smaller
+`wasm32-unknown-unknown` target with a custom host ABI can follow if its size
+or embedding benefits justify maintaining a second platform surface.
+
+**HDLL boundary.** Native AOT now supports HDLLs: it detects non-`std`
+primitives, links the shared runtime, stages it beside the executable, and
+resolves `DEFINE_PRIM` entries at startup. That work is complete for native
+AOT and is not a wasm blocker. A native `.hdll` still cannot be loaded inside
+a wasm sandbox. A wasm build must reject non-`std` natives clearly; framework
+authors guard them with `#if wasm` or provide a separate wasm/host import.
 
 ---
 
-## What already exists
+## Current state
 
-Measured, not assumed:
+Measured in September 2026, not inferred from the old spike:
 
-* **The AIR pipeline already produces a shippable artifact.** `--emit-optimized`
-  (612a0b5) runs every function through AIR and writes HL bytecode back out;
-  all 68 corpus modules execute identically under stock HashLink 1.15.0, and
-  fib runs 68.3% faster there. That proves the optimized AIR is *complete and
-  correct as a program*, not merely as something our own engines can consume.
-* **LLVM here has the WebAssembly backend built** (`llvm-config
-  --targets-built` lists `WebAssembly`, LLVM 21.1.2).
-* **The AIR→LLVM lowering is target-agnostic except for one line.**
-  `llvm/module.rs:175` takes `TargetMachine::get_default_triple()`. Nothing
-  else in the lowering names the host.
-* **The runtime is not deeply 64-bit.** Four `target_pointer_width` sites in
-  `std/`, and `sys.rs:136` already carries a 32-bit branch.
-* **`ash_std` is 363 `hlp_*` natives**, the majority pure computation —
-  strings, math, JSON, arrays, maps.
+* **The AIR pipeline is whole-program capable.** `--emit-optimized` runs every
+  function through AIR and writes ordinary HL bytecode. The existing corpus
+  executes equivalently under stock HashLink.
+* **Native AOT works end to end.** `ash --build` lowers the complete program,
+  emits code and data objects, links the static runtime for `std`-only
+  programs, and links the shared runtime for programs using HDLLs. The AOT
+  smoke and benchmark lanes exercise the same CLI path users invoke.
+* **LLVM's WebAssembly backend accepts a complete Ash AOT module.** This
+  command succeeds for the full `bench_fib` program, not a hand-written LLVM
+  function:
 
-## The runtime must be statically linked
+      ash --emit-aot /tmp/ash-fib-wasi.o \
+          --target wasm32-wasip1 --quiet bench_fib.hl
 
-Today `ash_std` is a **cdylib** whose bytes are embedded with `include_bytes!`
-and written to disk at runtime for `dlopen` (`native_lib.rs:278`). The
-`libash_std.a` in `OUT_DIR` is a dylib wearing a `.a` filename — `file` says
-"Mach-O 64-bit dynamically linked shared library" — and the name is fixed only
-because `include_bytes!` needs a stable path (`build.rs:301`).
+  The result is a WebAssembly relocatable object. Linking it temporarily with
+  `--allow-undefined` produces a valid core module containing 372 defined
+  functions, a 370-entry `funcref` table, an element segment, and 110
+  `call_indirect` sites.
+* **Function-pointer lowering is substantially done.** In AOT mode,
+  `ash_functions` contains real function symbols or null and generated calls
+  do not use interpreter stub sentinels. LLVM and `wasm-ld` lower those
+  function addresses into the WebAssembly table. Dynamic closures and
+  runtime-produced callbacks still need integration tests, but an explicit
+  sentinel-to-table compiler rewrite is no longer the plan.
+* **The runtime is a real static library.** `ash_std` now builds as `staticlib`
+  as well as `cdylib` and `rlib`. The former fake-archive problem is gone.
 
-That mechanism has no analogue in either AOT target. wasm has no `dlopen`, and
-for native AOT a dylib dependency merely relocates the C-wrapper problem
-instead of removing it. So AOT needs genuine static linking, in three
-ascending forms:
+The permissively linked `bench_fib.wasm` imports 72 unresolved `hlp_*`,
+`hl_*`, and `_setjmp` functions. That is diagnostic evidence that codegen
+reached the runtime boundary, not a runnable binary: `tools/wasm/host.mjs`
+implements four host functions, not the Ash runtime.
 
-1. **`declare` + static archive.** `External` declarations in the IR — which
-   says nothing about static vs dynamic, only "not defined here" — plus a real
-   `staticlib` crate-type so the linker pulls `libash_std.a` into the output.
-2. **Whole-archive.** Natives are reached through `functions_ptrs` and closure
-   tables, so the linker cannot see they are live and will garbage-collect
-   them. Needs `--whole-archive` or an explicit retained list; `reachable.rs`
-   already answers that question for us.
-3. **Bitcode + LTO.** Emit `ash_std` as LLVM bitcode, link it into the module
-   at IR level, and run the middle end over program and runtime together.
+## Target ABI: done, and checked
 
-**Three is what "optimal AOT" means here.** `gc.rs:138` says the TLAB cursor
-and limit are exported statics "so a JIT tier can inline the bump sequence
-later" — and that was never built, because a JIT cannot see across an opaque
-native call. Under IR-level LTO it needs no new code: `hlp_alloc_obj` becomes
-inlinable at the allocation site and the bump folds into the caller. On
-binary_trees that body alone is ~12% of the run. The same argument applies to
-the closure guards that LICM could not hoist past a call boundary.
+`TargetAbi` now exists (`crates/ash/src/target_abi.rs`) and is chosen before
+anything is decoded. It carries the triple, pointer width, every HashLink
+layout derived from that width, and the target's capabilities. The decoder
+takes it (`BytecodeDecoder::decode_for_abi`), so enum offsets are computed for
+the target rather than inherited from the compiler process; lowering asks it
+for field offsets and array element sizes; the module's triple and data layout
+are set before a single body is emitted, and the middle end runs on that
+machine.
 
-## AOT works end to end
+What that produces for `bench_fib` at `wasm32-wasip1`, measured rather than
+assumed: 32-bit data layout in the IR, no `hlp_*` declaration taking a
+pointer-width `i64`, an object `wasm-tools` validates, and, linked
+permissively, a core module that also validates -- 372 functions, a 370-entry
+`funcref` table, 110 `call_indirect` sites, exports for `main` and
+`ash_module_init`, and 73 imports of which every one is an `hlp_*`, `hl_*` or
+`setjmp` symbol. `cargo test -p ash --test wasm_target` is that check, and it
+fails if an import outside the runtime's own surface ever appears.
 
-Four programs — `bench_fib`, `test_basic`, `test_stdlib`, `bench_deltablue` —
-compile to native objects, link against `libash_std.a`, and print **byte for
-byte what the JIT prints**. the AOT smoke test (`cargo test -p ash --test aot_smoke`) is that check; it gates on the
-diff, not on the exit status, because a module that starts and runs and prints
-something slightly different is the failure worth catching. No C compiler and
-no C source is in the path: `clang` appears only as the driver that knows where
-crt and libc live.
+The first thing it caught was a data symbol. `ash_fiber_poll_epoch` -- the loop
+safe point's word -- was referenced directly, and WebAssembly has no
+relocation that reaches an undefined data symbol, while `--allow-undefined`
+covers functions only. The answer is not to drop the safe point: **fibers are
+part of the wasm target, driven by the host**, and that word is what a host
+scheduler ticks. Generated code now reaches it through a pointer that
+`ash_late_init` fills from the runtime's getter, which is the same indirection
+a Mach-O dylib already needed for the same reason. `TargetAbi` records it as
+`direct_data_relocations`.
 
-    bench_fib      OK (lowered 332/332)
-    test_basic     OK (lowered 335/335)
-    test_stdlib    OK (lowered 387/387)
-    bench_deltablue OK (lowered 407/407)
+The remaining items below were the original list; those still open are marked.
 
-### The code half
+Known examples:
 
-A fork at the tail — `emit_object` where the JIT calls
-`get_function_address` — plus two corrections: natives become `External`
-declarations behind a forwarding thunk rather than baked addresses, and
-everything lowers into ONE module instead of a promo module per function.
+* ~~`layout.rs` fixes `HL_WSIZE` at 8 and fixes the `varray` payload at offset
+  24.~~ Done: word size is a parameter, and the AOT paths pass the target's.
+* ~~enum layout in `bytecode.rs` uses the compiler process's pointer size.~~
+  Done: `decode_for_abi` passes the target's pointer size.
+* AOT constants assume an eight-byte object header.
+* AOT helper signatures use `i64` where the Rust runtime takes `usize`, which
+  is `i32` on wasm32.
+* AOT data reads `hl_runtime_obj` offsets with host `offset_of!`.
+* `RefData` uses the host binding's `size_of::<varray>()`.
+* static closure emission assumes the 64-bit-only `stackCount` field and a
+  32-byte `vclosure`.
 
-Every remaining site that resolved a pointer at compile time had to become a
-symbol or a refusal, and the list is short enough to state: type descriptors,
-`functions_ptrs` slots, per-findex `HFUN` descriptors, the fiber poll epoch,
-`setjmp`, and `hlp_error`. What could not become a symbol fails the function
-rather than emitting an address — `reject_in_aot`. A refused body is then
-*sealed*: the emitter stops where it failed and leaves blocks with no
-terminator behind, which are invisible until the next middle-end run walks the
-module and dies inside `SimplifyCFG`, far from the cause.
-
-### The data half
-
-* **The type table is emitted as object data.** `aot_data.rs` walks the type
-  graph the compiler already built in memory and writes an LLVM global per
-  node, so an AOT module cannot disagree with the JIT about what the table
-  contains — there is only one builder. Layouts are checked against
-  `size_of` before anything is written; a silent drift here would be an object
-  that links, runs, and reads the wrong words.
-* **The constant pool is emitted as startup code.** `init_constants` allocates
-  and fills in the compiling process; `emit_module_init` emits the identical
-  sequence as `ash_module_init`, reading field offsets from
-  `hlp_get_obj_rt` at startup rather than baking them, because computing them
-  twice is how the two come to disagree.
-* **Globals are `ash_globals`**, a real array in the object, published to the
-  collector with `hlp_gc_set_globals` before the first allocation.
-
-Three arrays anchor the result — `ash_globals`, `ash_functions`,
-`ash_function_types` — and they are what `hl_module_context` points at, so
-reflection, bindings and closure allocation reach the same tables they do
-under the JIT.
-
-### Two findings worth keeping
-
-**Symbols collide.** A bytecode function carries its Haxe name, and in an
-object file that name competes with libc. A Haxe method called `write` linked
-ahead of `libSystem`'s, and the runtime's own `println!` jumped into Haxe code
-and faulted before a single line came out. Every bytecode body is now internal;
-the object exports exactly `main` and `ash_module_init`. Internalizing happens
-after lowering, not at creation — a not-yet-lowered callee is declared through
-the same path, and an internal declaration is invalid IR.
-
-**The trap shield is not optional.** A trap lowers to `setjmp`, and C's rule
-applies to the IR: a local that is not in memory has an indeterminate value
-after the jump. `mem2reg` alone is enough — with the shield down, a nested
-try/catch reported "none" for an exception the inner handler did catch, while
-single-level catches still worked. The JIT raises this shield before every
-promotion; AOT optimizes once, at the end, and has to raise it there.
-
-AOT optimizes once rather than per function on purpose. There is no address to
-ask for, so nothing forces codegen per body, and running the module pipeline
-per lowered function is both quadratic and destructive: it deletes emitted data
-that no lowered body happens to reference *yet*, and the next body to want that
-type finds a handle pointing at freed memory.
-
-### What AOT still cannot do
-
-* **HDLL primitives.** They resolve through a `DEFINE_PRIM` resolver in a
-  shared library, and there is no shared library to load. Refused by name.
-* **Cross-compilation is untested.** The host-CPU stamp is suppressed under
-  AOT so the target machine handed to `emit_object` decides, but only the host
-  triple has been run.
-* **`main` ignores `argc`/`argv`.** Nothing forwards them to the program yet.
-
-This is the same information HL/C writes out as C data tables, which is why its
-output needs a C compiler and ours does not. It is also **exactly what wasm
-needs** — a wasm module has no access to the compiler's heap either — so it was
-built once, against the native target where a debugger still works.
+HashLink's C ABI supports both `HL_WSIZE=4` and `HL_WSIZE=8`; these are Ash
+implementation assumptions, not limitations of HL bytecode. They must be
+replaced by one target ABI description used by decoding/layout, LLVM
+lowering, AOT data emission, and the runtime.
 
 ## Route
 
-**Take the LLVM WebAssembly backend (Route A).** AIR → LLVM IR → wasm32
-object → `wasm-ld`. It reuses `llvm/function.rs` wholesale: every opcode,
-every guard, the TBAA tree, the devirtualisation, the FMA policy. The work is
-retargeting, not rewriting.
+Keep **AIR → LLVM IR → wasm32 object → WASI link**. The experiment has now
+answered Route A's main question: LLVM's WebAssembly backend accepts the
+complete generated module and supplies the structured control-flow and
+function-table lowering.
 
-**Do not write a direct AIR→wasm emitter (Route B) first.** wasm demands
-*structured* control flow — blocks, loops, `br` to enclosing labels — while
-AIR is an arbitrary CFG. Bridging that needs a Relooper or Stackifier, which
-is a real algorithm with real bugs, and it buys nothing until Route A has
-proven the rest of the stack. Revisit only if LLVM's output disappoints or the
-toolchain dependency becomes a problem; the `bytecode_encode` writer is the
-precedent that we can emit a format directly when it is worth it.
+Do not build a direct AIR→wasm backend first. It would add CFG structuring,
+instruction selection, ABI lowering, relocations and debug metadata while
+leaving every runtime problem below untouched.
 
 ---
 
-## Phases
+## Delivery phases
 
-Each phase ends in something runnable, and each names the measurement that
-says it worked.
+Each phase has an artifact or test that decides whether it is complete.
 
-### Phase 0 — spike: one function to wasm  ✅ DONE
+### Phase 0 — full Ash IR to a wasm object ✅ DONE
 
-`crates/ash/examples/wasm_spike.rs` builds a `wasm32-unknown-unknown`
-`TargetMachine` and emits an object; `tools/wasm/` links and runs it. The
-chain works end to end:
+The old `wasm_spike` proved only that LLVM could emit a hand-written `add`
+function. Native AOT has superseded it: the CLI now lowers and emits all of
+`bench_fib` for `wasm32-wasip1`, and `wasm-ld` builds its function table and
+indirect calls.
 
-    wasm target : wasm32 (WebAssembly 32-bit)
-    emitted     : /tmp/spike.o (257 bytes)   -- WebAssembly binary, version 0x1
-    linked      : spike.wasm (265 bytes)
-    wasmtime add(2,3) = 5
-    node     add(2,3) = 5
+Keep the tiny spike only as a toolchain diagnostic. Replace its status as the
+project's wasm smoke test once Phase 3 runs a real Ash program.
 
-Two toolchain notes worth keeping:
+### Phase 1 — make the compiler target-aware ✅ SUBSTANTIALLY DONE
 
-* **Homebrew's `wasm-ld` is unusable here.** It is lld 20.1.7 resolving
-  against LLVM 21.1.2's `libLLVM` and aborts on a missing
-  `ELFAttributeParser` symbol. `tools/wasm/link.sh` uses the Rust toolchain's
-  own `rust-lld -flavor wasm`, which is version-matched to itself.
-* **The rustup wasm targets are already installed** —
-  `wasm32-unknown-unknown`, `wasm32-wasip1`, `wasm32-wasip1-threads`. Phase 1
-  has its toolchain today.
+`TargetAbi` exists and is threaded through decoding, layout, lowering and the
+middle end; the wasm32 and 64-bit layout fixtures pass, and the emitted module
+is validated by an external toolchain (see "Target ABI: done, and checked").
+What remains of this phase is the exhaustive C-header fixture: the layouts
+asserted today are the ones the emitter uses, not every structure that crosses
+the program/runtime boundary.
 
-The original Phase 0 text follows, for the part still outstanding.
+The original plan follows.
 
-### Phase 0 (remainder) — our own IR to wasm
+Create a `TargetAbi` (name provisional) before decoding or lowering. It owns:
 
-Build a `TargetMachine` for `wasm32-unknown-unknown` instead of the host
-triple and emit an object file for a single arithmetic function
-(`bench_fib`'s inner). No runtime, no GC, no calls.
+* triple, LLVM target machine and data layout;
+* pointer-sized LLVM integer type, size and alignment;
+* HashLink value, object, array, enum, virtual and closure layouts;
+* C ABI types such as `size_t`, `intptr_t` and function pointers;
+* target capabilities: WASI, threads, SJLJ/EH and native dynamic loading.
 
-*Done when:* `wasm2wat` shows a plausible function body and `wasmtime`
-executes it with the right answer.
+Set the LLVM module triple and data layout before emitting any type or body.
+Run the middle end with this target machine instead of recreating the host
+machine. Parameterise or remove every host `size_of!`, `offset_of!` and
+hard-coded pointer-width offset used by emitted code.
 
-*This phase exists to fail fast.* If LLVM's wasm backend rejects what our
-lowering emits — address-space assumptions, `inttoptr` of absolute host
-addresses, the `returns_twice` setjmp shim — we learn it in a day rather than
-after the runtime port.
+The bytecode decoder should retain semantic enum information rather than
+committing it permanently to the host layout. Native JITs can still select the
+host ABI; wasm AOT selects the wasm32 ABI.
 
-### Phase 1 — the runtime on wasm
+Add ABI fixtures compiled from `hl.h` for both 32- and 64-bit layouts. They
+must verify every structure consumed on both sides of the program/runtime
+boundary, not merely the few structures currently checked against the host
+MCJIT engine.
 
-**Target `wasm32-wasip1` first, not `wasm32-unknown-unknown`.** Attempting
-the latter fails immediately and instructively:
+*Done when:* a wasm32 layout test covers all shared structures and generated
+IR contains no host-derived layout constant or pointer-sized `i64` ABI
+parameter.
 
-    ./hl.h:206:10: fatal error: 'stdlib.h' file not found
-    panicked at std/build.rs:126: Unable to generate bindings
+### Phase 2 — build a single-threaded WASI runtime
 
-`hl.h` includes libc headers and `wasm32-unknown-unknown` has no sysroot to
-find them in. WASI does, and it also supplies the clock, randomness and
-stdout that Phase 3's host ABI would otherwise have to invent. Browsers reach
-WASI through a JS shim, which is a smaller problem than porting libc.
+Target `wasm32-wasip1` first. Rust supports it as a Tier 2 cross target and
+supplies Rust `std`, WASI libc libraries and common OS services. Building a
+Rust `staticlib`, using an external linker, and running bindgen against C
+headers still calls for a configured [WASI SDK](https://github.com/WebAssembly/wasi-sdk).
 
-So: **wasip1 for the runtime and conformance, `unknown-unknown` plus the
-custom ABI later for the smallest possible browser artifact.** Either way the
-blockers below are the same, in the order they bite:
+`cargo check -p ash_std --target wasm32-wasip1` currently stops in bindgen:
 
-1. **GC memory.** Today the heap comes from `mmap`/`VirtualAlloc`. On wasm it
-   is linear memory plus `memory.grow`, which never moves and never unmaps —
-   simpler than either host path. Immix's block structure is unaffected;
-   `release_tlab_region` and the handback path become no-ops.
-2. **Thread identity.** `thread_self_fast` reads `TPIDRRO_EL0` via inline asm
-   (`gc.rs:201`). Single-threaded wasm has exactly one mutator, so this is a
-   constant. See `foreign-thread-identity` for why returning 0 is not safe:
-   pick a non-zero constant.
-3. **Exceptions.** `hlp_throw` is `setjmp`/`longjmp`. wasm has no such
-   primitive. Two options, in preference order: the **exception-handling
-   proposal** (`try`/`catch`, now widely shipped), or lowering every HL
-   `Trap`/`EndTrap` to an explicit result-tag check in AIR. The second is
-   portable to every engine and is a pass we could reuse elsewhere; the first
-   is far less work. Decide with a spike, not in this document.
-4. **Threads and fibers — implementable, not deferred.** Ten sites reference
-   `krio-fiber` or `thread::spawn`. Both have real wasm answers:
+    ./hl.h:213:10: fatal error: 'stdlib.h' file not found
 
-   * **Threads** via the threads proposal: `wasm32-wasip1-threads` is already
-     an installed rustup target, and in a browser shared memory needs
-     cross-origin isolation (COOP/COEP headers) to get `SharedArrayBuffer`.
-     Workers then run the same module against one shared linear memory.
-   * **Stackful fibers on Workers.** A fiber is not an OS thread — it is a
-     stack plus a switch — so a Worker per fiber is a legitimate
-     implementation, with the scheduler handing off through the shared
-     memory. `krio-fiber`'s switch is the part that needs a wasm backend, not
-     the concept.
+Give bindgen the WASI SDK sysroot, or check in generated target bindings.
+Then make the runtime compile by providing or gating:
 
-   Phase 1 still *starts* single-threaded — `hl_blocking` a no-op, the fiber
-   poll compiled away, `Thread.create` raising — because it is the shortest
-   path to a running program. But the design must not paint threads out: the
-   GC in particular has to keep its mutator registry, since a single-mutator
-   shortcut would have to be unpicked to add Workers later. COEP is a
-   deployment constraint on the embedder, so it belongs in the Phase 3 host
-   documentation rather than being discovered by a framework author.
+* `HeapMemory` backed by stable linear memory; no `mmap`, `VirtualAlloc`,
+  unmap, `madvise`, or page handback;
+* one non-zero mutator identity for the initial single-threaded target;
+* WASI paths for stdout, clocks, randomness and allowed file operations;
+* explicit unsupported errors for process creation, sockets, native library
+  loading, threads and fibers;
+* target-specific dependencies so `krio-fiber` and native loader code are not
+  required by the single-threaded artifact.
 
-*Done when:* `ash_std.wasm` links and a hand-written test module can allocate
-an object, build a string, and throw and catch.
+Preserve the mutator/collector interface even when it has one member, so the
+later threads target does not require replacing the GC API.
 
-### Phase 2 — codegen and linking
+*Done when:* `ash_std` produces a wasm32 archive and a small linked fixture can
+initialise it, allocate an object, build a string, and print it under
+Wasmtime.
 
-* Parameterise the target: `ash --target wasm32 in.hl -o out.wasm`.
-* Emit one object per module and link against the runtime with `wasm-ld`.
-* Resolve the calls the JIT resolves at runtime today — `functions_ptrs`
-  entries, closure `fun` fields — through a **wasm function table** with
-  `call_indirect`. This is the piece with no host analogue: our stub-sentinel
-  trick (`findex + 1` in a pointer) has no meaning in a wasm table, so
-  closures must carry a table index. Note the divergence found in
-  `--emit-optimized`: a register whose address is taken is where ash and stock
-  HashLink already disagree, and a table index is a similar re-encoding
-  question. Expect to spend real time here.
+### Phase 3 — link and run a real Ash program
 
-*Done when:* `bench_fib.wasm` runs under `wasmtime` and prints the reference
-checksum.
+Add a wasm branch to `ash --build` instead of passing a wasm object to the
+native `cc`/`clang` driver. The link owns:
 
-### Phase 3 — the host ABI
+* program object plus wasm32 `ash_std` archive;
+* WASI libc, compiler builtins and startup objects;
+* one deliberate command entrypoint (`_start` calling `main`) and exported
+  memory;
+* section GC and an explicit import allow-list;
+* no `--allow-undefined` escape hatch in a shipping build.
 
-A small, documented import surface, and nothing more: write to stdout, read
-the clock, random bytes, and grow memory. Everything a program needs beyond
-that — canvas, WebGL, audio, input — belongs to the embedder, not to us.
-Ship a minimal JS loader that satisfies the imports so a framework author can
-`instantiate` and go.
+For the first runnable milestone, use a bounded, non-reclaiming heap or disable
+collection. That isolates ABI, startup and linking from the root-discovery
+work without pretending the result is production-ready.
 
-*Done when:* the same `.wasm` runs unmodified under `wasmtime` and in a
-browser.
+The current `main(argc, argv)` may continue ignoring arguments for this
+milestone. Argument forwarding is required before the target is declared
+complete.
 
-### Phase 4 — conformance
+*Done when:* `ash --build bench_fib.wasm --target wasm32-wasip1 bench_fib.hl`
+runs under Wasmtime, prints the reference checksum, and imports only the
+expected `wasi_snapshot_preview1` surface.
 
-Run the Haxe conformance suite against the wasm target, per-case isolated, the
-same way the interpreter is gated (`conformance-isolation`). Publish the
-number beside the existing ones. It will start low; that is the point of
-having it.
+### Phase 4 — production GC and exceptions
 
-*Done when:* the suite runs end to end and the figure is on the site.
+#### Roots
 
-### Phase 5 — Heaps
+Linear-memory allocation is not the difficult GC problem. Root discovery is.
+The current collector scans native stacks and callee-saved registers
+conservatively. WebAssembly locals and operand-stack values are not addresses
+in linear memory, so scanning the LLVM shadow stack finds only spills and
+address-taken values.
 
-Only now. Heaps needs a GL backend, and that is `#if wasm` work in Heaps
-against WebGL, not work in ash. Our deliverable to them is a language target
-that runs their non-rendering code correctly and fast.
+Add explicit roots for pointer-bearing AIR values, using LLVM's GC-root
+support or an Ash shadow-root frame. Optimisation must not promote a live
+pointer out of the root set. Runtime Rust code also needs scoped roots for raw
+pointers held across an allocating call; generated-code roots alone are not
+enough.
+
+Do not accept “works with optimisation off” as proof. The backend may still
+place values in wasm locals.
+
+#### Exceptions
+
+The old premise that wasm has no `setjmp` is stale. WebAssembly exception
+handling is part of Core 3.0, LLVM has WebAssembly SJLJ lowering, and WASI SDK
+ships optional `libsetjmp` support. Preserve the existing trap model first:
+
+* enable WebAssembly SJLJ/EH consistently for program and runtime objects;
+* link `libsetjmp`;
+* use the target's `setjmp`/`longjmp` symbols rather than native
+  `_setjmp`/`_longjmp` assumptions;
+* validate nested traps, rethrows and the outer entrypoint shield in both
+  Wasmtime and the browser engine chosen for CI.
+
+Explicit AIR result-tag lowering remains the fallback if SJLJ portability or
+cost is unacceptable.
+
+Native frame-pointer stack walking does not work on wasm. Name-section/source
+map based call stacks are separate from exception control flow and may land
+after catch/throw correctness.
+
+*Done when:* allocation-heavy programs pass with collection forced at every
+safe point, and the native AOT exception corpus passes unchanged as wasm.
+
+### Phase 5 — browser ABI and conformance
+
+Ship a small WASI Preview 1 loader for Node and browsers, covering stdout,
+clock, randomness, arguments/environment and memory. Canvas, WebGL, audio and
+input belong to an embedder/framework API rather than the language runtime.
+
+Run the Haxe conformance suite per case, as the interpreter lane does. Add
+focused wasm tests before the broad suite:
+
+* object, enum, array, virtual and closure layouts;
+* direct, indirect, dynamic and reflective calls;
+* GC stress across generated code and runtime helpers;
+* nested exceptions and uncaught reporting;
+* import allow-list and code-size checks;
+* identical program output under Wasmtime and the browser runner.
+
+*Done when:* the same `.wasm` runs unmodified under Wasmtime and the browser
+loader, and the published conformance result is reproducible in CI.
+
+### Phase 6 — threads, fibers and Heaps
+
+Threads and fibers are different problems here, and only one of them is
+deferred.
+
+**Fibers are part of the target, driven by the host.** A fiber is cooperative:
+it suspends at a point the program chose, and something outside decides when it
+resumes. On a native target that something is `krio-fiber` switching stacks; in
+a wasm module it is the host, through JavaScript Promise Integration or the
+stack-switching proposal where an engine has it, and an explicit host-driven
+scheduler where it does not. What the compiler owes either arrangement is the
+same: a safe point in every loop and a word the scheduler can tick, both of
+which the wasm build now emits (the epoch is reached through a pointer, since
+wasm cannot relocate an undefined data symbol). The backend that actually
+suspends a fiber is the outstanding work; the compiled program is already
+asking to be preempted.
+
+**Threads are deferred.** Do not make `wasm32-wasip1-threads` part of the first
+release. The target exists, but Rust still describes it as in flux, engines
+need WASI-threads support, and browser shared memory imposes COOP/COEP
+deployment requirements. A Worker is not by itself a replacement for stackful
+fiber semantics.
+
+Add threads only after single-mutator GC correctness. The work includes shared
+memory, worker startup, mutator rendezvous, fiber semantics and host deployment
+documentation.
+
+Heaps follows the single-threaded language/runtime target. Its rendering work
+is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'
+non-rendering code, allocation, exceptions, reflection and callbacks are
+correct before graphics-specific imports are introduced.
 
 ---
 
-## Risks, each with the measurement that settles it
+## Risk register
 
-| risk | why it might bite | how we find out |
+| risk | current evidence | deciding measurement |
 |---|---|---|
-| **32-bit pointers** | wasm32 is 32-bit; `vdynamic` layouts, `hl_type` fields and the closure ABI assume 8-byte pointers | Phase 0 spike plus a `size_of` audit. HL itself ships 32-bit builds, so the *format* is width-agnostic; only our implementation may not be |
-| **Exceptions** | no `setjmp` in wasm | Phase 1.3 spike: wasm EH vs an AIR result-tag lowering |
-| **Indirect calls** | stub sentinels (`findex+1`) are not table indices | Phase 2; closures carry a table index instead |
-| **GC scanning** | conservative stack scanning has no stack to scan in wasm | wasm has no readable stack. This may force a **precise** shadow stack for roots — the single largest unknown in the plan, and the one most likely to change its shape |
-| **Code size** | a whole-module AOT compile of a Haxe program plus runtime could be large | measure `bench_fib.wasm` and `test_stdlib.wasm` at the end of Phase 2 |
+| **32-bit ABI** | the full module emits, but several generated layouts still use host/8-byte constants | exhaustive C-header vs `TargetAbi` layout fixtures plus runtime allocation tests |
+| **GC roots** | native conservative scanning cannot see values kept only in wasm locals | collect at every safe point across generated and runtime code |
+| **Exceptions** | LLVM/WASI now has an SJLJ route, but Ash emits native symbol spellings and flags | unchanged nested trap/rethrow corpus on Wasmtime and browser CI |
+| **Indirect calls** | LLVM/`wasm-ld` already emits a table, element segment and `call_indirect` | closures, vtables, reflection and runtime-created callbacks |
+| **Runtime surface** | `ash_std` currently fails before compilation at bindgen; several modules have only Unix/Windows branches | wasm archive with no unintended imports, followed by stdlib/conformance lanes |
+| **Code size** | no runtime has yet been linked into a real program | stripped `bench_fib.wasm` and `test_stdlib.wasm`, with per-section accounting |
+| **Threads** | target and proposals exist, but the scheduler/fiber implementation is native | separate post-MVP worker, GC rendezvous and deployment tests |
 
-The GC row is the one to worry about. Every other risk has a known answer
-somewhere; that one may require a different collector design for this target.
-Find out in Phase 1, before Phase 2 makes it expensive.
+GC roots and the 32-bit ABI are the correctness risks. Exceptions and indirect
+calls now have credible toolchain answers, but still need Ash integration
+tests. Code size is measured only after the correct runtime links; the current
+permissive module is not representative.
 
 ## What this is not
 
-* Not a wasm *interpreter* for HL. We emit compiled wasm.
-* Not a replacement for the native tiers. This is a fourth output, beside
-  interpreter, Cranelift and LLVM.
-* Not HDLL-compatible, now or later.
+* Not a wasm interpreter for HL. It emits compiled wasm.
+* Not a replacement for the native interpreter, Cranelift, LLVM JIT or native
+  AOT outputs.
+* Not a way to load native `.hdll` files in a sandbox. A future wasm-native
+  extension/import ABI would be a different artifact and contract.

@@ -76,6 +76,9 @@ impl CompiledFunctionMeta {
 
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
+    /// ABI of the code being produced. JITs use the host; AOT may select a
+    /// cross target before decoding or lowering starts.
+    pub(crate) target_abi: crate::target_abi::TargetAbi,
     /// Alias metadata for emitted loads and stores; see [`super::tbaa`].
     pub(crate) tbaa: super::tbaa::TbaaTree<'ctx>,
     pub(crate) module: Module<'ctx>,
@@ -219,7 +222,6 @@ pub(crate) fn run_middle_end_at(
     default_spec: &str,
 ) -> Result<()> {
     use inkwell::passes::PassBuilderOptions;
-    use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target};
     use inkwell::OptimizationLevel;
 
     // O2 rather than O3: measured on this corpus O3 costs more compile time
@@ -235,20 +237,9 @@ pub(crate) fn run_middle_end_at(
         return Ok(());
     }
 
-    Target::initialize_native(&InitializationConfig::default())
-        .map_err(|e| anyhow!("target init for middle-end: {e}"))?;
-    let triple = inkwell::targets::TargetMachine::get_default_triple();
-    let target = Target::from_triple(&triple).map_err(|e| anyhow!("target from triple: {}", e))?;
-    let machine = target
-        .create_target_machine(
-            &triple,
-            &inkwell::targets::TargetMachine::get_host_cpu_name().to_string_lossy(),
-            &inkwell::targets::TargetMachine::get_host_cpu_features().to_string_lossy(),
-            OptimizationLevel::Aggressive,
-            RelocMode::Default,
-            CodeModel::JITDefault,
-        )
-        .ok_or_else(|| anyhow!("could not create target machine for middle-end"))?;
+    let triple = module.get_triple().as_str().to_string_lossy().into_owned();
+    let abi = crate::target_abi::TargetAbi::for_triple(&triple)?;
+    let (_, machine) = abi.target_machine(OptimizationLevel::Aggressive)?;
 
     module
         .run_passes(&spec, &machine, PassBuilderOptions::create())
@@ -262,7 +253,8 @@ fn timing_enabled() -> bool {
 
 impl<'ctx> JITModule<'ctx> {
     pub fn new(context: &'ctx Context, path: &Path) -> Self {
-        Self::build(context, path, false).expect("Failed to build JIT module")
+        let abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
+        Self::build(context, path, false, abi).expect("Failed to build JIT module")
     }
 
     /// The same construction, with every pointer the lowering needs expressed
@@ -272,16 +264,32 @@ impl<'ctx> JITModule<'ctx> {
     /// entrypoint is compiled during construction, and a body lowered before
     /// the switch would already have an address baked into it.
     pub fn new_aot(context: &'ctx Context, path: &Path) -> Result<Self> {
-        Self::build(context, path, true)
+        let abi = crate::target_abi::TargetAbi::host()?;
+        Self::build(context, path, true, abi)
     }
 
-    fn build(context: &'ctx Context, path: &Path, aot: bool) -> Result<Self> {
+    pub fn new_aot_for_target(
+        context: &'ctx Context,
+        path: &Path,
+        triple: &str,
+    ) -> Result<Self> {
+        let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
+        Self::build(context, path, true, abi)
+    }
+
+    fn build(
+        context: &'ctx Context,
+        path: &Path,
+        aot: bool,
+        target_abi: crate::target_abi::TargetAbi,
+    ) -> Result<Self> {
         let timing = timing_enabled();
         let mut t = std::time::Instant::now();
         crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
-        let bytecode = BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
+        let bytecode = BytecodeDecoder::decode_for_abi(path, &target_abi)
+            .expect("Failed to decode bytecode");
         // Any non-std native means an HDLL, which brings its own copy of the
         // runtime unless this object shares one. Known here, before a single
         // symbol is declared, because declaring them is what commits to a
@@ -299,6 +307,9 @@ impl<'ctx> JITModule<'ctx> {
         let execution_engine = module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Failed to initialize execution engine");
+        // MCJIT must be created while the module still names the host. AOT is
+        // retargeted immediately afterwards, before program IR is emitted.
+        target_abi.apply_to_module(&module)?;
         phase_timer!(timing, "engine", t);
         t = std::time::Instant::now();
 
@@ -310,6 +321,7 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
+            target_abi,
             tbaa: super::tbaa::TbaaTree::new(context),
             module,
             builder: context.create_builder(),
@@ -627,6 +639,8 @@ impl<'ctx> JITModule<'ctx> {
         use inkwell::targets::FileType;
         let (tt, machine) = super::aot_shard::object_target_machine(triple)?;
         self.module.set_triple(&tt);
+        self.module
+            .set_data_layout(&machine.get_target_data().get_data_layout());
         machine
             .write_to_file(&self.module, FileType::Object, path)
             .map_err(|e| anyhow!("emit {}: {e}", path.display()))?;
@@ -704,6 +718,8 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
+            target_abi: crate::target_abi::TargetAbi::host()
+                .expect("Failed to resolve host ABI"),
             tbaa: super::tbaa::TbaaTree::new(context),
             module: llvm_module,
             builder: context.create_builder(),

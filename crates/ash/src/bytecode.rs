@@ -47,6 +47,23 @@ pub struct BytecodeDecoder {
 
 impl BytecodeDecoder {
     pub fn decode(path: &Path) -> Result<DecodedBytecode, io::Error> {
+        Self::decode_with_pointer_size(path, std::mem::size_of::<*const u8>())
+    }
+
+    /// Decode bytecode for the ABI that will consume its derived layouts.
+    /// The bytecode retains enum parameter types, so these offsets can be
+    /// recomputed for a cross target instead of inheriting the compiler host.
+    pub fn decode_for_abi(
+        path: &Path,
+        abi: &crate::target_abi::TargetAbi,
+    ) -> Result<DecodedBytecode, io::Error> {
+        Self::decode_with_pointer_size(path, abi.pointer_bytes() as usize)
+    }
+
+    fn decode_with_pointer_size(
+        path: &Path,
+        pointer_size: usize,
+    ) -> Result<DecodedBytecode, io::Error> {
         let mut decoder = BytecodeDecoder::default();
         let file = std::fs::File::open(path)?;
         let mut reader = io::BufReader::with_capacity(512 * 1024, file);
@@ -98,7 +115,7 @@ impl BytecodeDecoder {
         }
 
         // Decode the rest of the file
-        match decoder._decode(&mut reader) {
+        match decoder._decode(&mut reader, pointer_size) {
             Ok(decoded) => Ok(decoded),
             Err(e) => Err(std::io::Error::new(
                 e.kind(),
@@ -186,7 +203,11 @@ impl BytecodeDecoder {
         }
     }
 
-    pub fn _decode(&mut self, r: &mut impl BufRead) -> Result<DecodedBytecode, std::io::Error> {
+    fn _decode(
+        &mut self,
+        r: &mut impl BufRead,
+        pointer_size: usize,
+    ) -> Result<DecodedBytecode, std::io::Error> {
         self.decoded.ints = self.read_ints(r)?;
         // println!("INTS {:?}", self.decoded.ints.len());
         self.decoded.floats = self.read_floats(r)?;
@@ -204,7 +225,7 @@ impl BytecodeDecoder {
         }
 
         self.decoded.types = self.read_types(r)?;
-        Self::compute_enum_offsets(&mut self.decoded.types);
+        Self::compute_enum_offsets(&mut self.decoded.types, pointer_size);
         // println!("Types {:?}", self.decoded.types.len());
         self.decoded.globals = self.read_globals(r)?;
         // println!("Globals {:?}", self.decoded.globals.len());
@@ -310,7 +331,7 @@ impl BytecodeDecoder {
     ///   offset 8: i32 index       (4 bytes)
     ///   offset 12: pad            (4 bytes)  → header = 16 bytes
     ///   offset 16...: params, each aligned to its natural alignment
-    fn compute_enum_offsets(types: &mut Vec<HLType>) {
+    fn compute_enum_offsets(types: &mut [HLType], pointer_size: usize) {
         // Build a lookup: type_index → (size, alignment) for fast access.
         // Must snapshot before mutating, so collect kinds first.
         let kinds: Vec<hl::hl_type_kind> = types.iter().map(|t| t.kind).collect();
@@ -328,11 +349,11 @@ impl BytecodeDecoder {
                     // and compared different enum values equal. The JIT only
                     // agreed with itself because it re-initialised its type
                     // table through the runtime afterwards.
-                    let mut offset: usize = std::mem::size_of::<*const u8>() + std::mem::size_of::<i32>();
+                    let mut offset = pointer_size + std::mem::size_of::<i32>();
                     for (i, param_ref) in construct.params.iter().enumerate() {
                         let kind = kinds.get(param_ref.0).copied().unwrap_or(hl::hl_type_kind_HVOID);
-                        let (size, align) = Self::type_size_align(kind);
-                        let align = align.clamp(1, std::mem::size_of::<*const u8>());
+                        let (size, align) = Self::type_size_align(kind, pointer_size);
+                        let align = align.clamp(1, pointer_size);
                         offset = (offset + align - 1) & !(align - 1);
                         construct.offsets[i] = offset as i32;
                         offset += size;
@@ -344,14 +365,15 @@ impl BytecodeDecoder {
     }
 
     /// Returns (size_bytes, alignment_bytes) for a given HL type kind.
-    fn type_size_align(kind: hl::hl_type_kind) -> (usize, usize) {
+    fn type_size_align(kind: hl::hl_type_kind, pointer_size: usize) -> (usize, usize) {
         use crate::hl::*;
         match kind {
             hl_type_kind_HBOOL | hl_type_kind_HUI8 => (1, 1),
             hl_type_kind_HUI16 => (2, 2),
             hl_type_kind_HI32 | hl_type_kind_HF32 => (4, 4),
-            // HI64, HF64, and all pointer-like types (HOBJ, HDYN, HFUN, HBYTES, etc.)
-            _ => (8, 8),
+            hl_type_kind_HI64 | hl_type_kind_HF64 => (8, 8),
+            // All remaining value kinds are pointer-like.
+            _ => (pointer_size, pointer_size),
         }
     }
 

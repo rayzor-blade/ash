@@ -278,7 +278,8 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     // exists, and this one lives until the process ends.
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
-    let mut jit = ash_core::llvm::module::JITModule::new_aot(context, file)?;
+    let mut jit =
+        ash_core::llvm::module::JITModule::new_aot_for_target(context, file, &triple)?;
 
     let findexes: Vec<usize> = jit
         .bytecode_functions()

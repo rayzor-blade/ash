@@ -91,7 +91,12 @@ impl<'ctx> JITModule<'ctx> {
         field_index: usize,
     ) {
         if let Some(inst) = inst {
-            if let Some(off) = crate::layout::field_offset(&self.types_, type_index, field_index) {
+            if let Some(off) = crate::layout::field_offset_for(
+                &self.types_,
+                type_index,
+                field_index,
+                self.target_abi.pointer_bytes() as i32,
+            ) {
                 self.tbaa.tag(inst, self.tbaa.obj_field(self.context, off));
             }
         }
@@ -113,7 +118,16 @@ impl<'ctx> JITModule<'ctx> {
     fn fiber_poll_epoch_ptr(&self) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         if self.aot {
-            if self.aot_shared_runtime {
+            // Indirect wherever the target cannot resolve a reference to an
+            // undefined data symbol. Two targets cannot, for the same reason
+            // and with different words for it: a Mach-O arm64 dylib addresses
+            // data through the GOT, so a direct `ARM64_RELOC_PAGE21` fails the
+            // link with "does not have address"; wasm has no relocation that
+            // reaches an undefined data symbol at all, and `--allow-undefined`
+            // covers functions only. Fibers themselves are not in question --
+            // on wasm they are driven by the host, and this word is what the
+            // host's scheduler ticks.
+            if self.aot_shared_runtime || !self.target_abi.direct_data_relocations {
                 // Naming the runtime's `ash_fiber_poll_epoch` is right for a
                 // static link and impossible for a dynamic one on Mach-O
                 // arm64: the object addresses it directly (ARM64_RELOC_PAGE21)
@@ -127,11 +141,9 @@ impl<'ctx> JITModule<'ctx> {
                 let slot = match self.module.get_global("ash_fiber_poll_epoch_ptr") {
                     Some(existing) => existing,
                     None => {
-                        let g = self.module.add_global(
-                            ptr_type,
-                            None,
-                            "ash_fiber_poll_epoch_ptr",
-                        );
+                        let g = self
+                            .module
+                            .add_global(ptr_type, None, "ash_fiber_poll_epoch_ptr");
                         g.set_initializer(&ptr_type.const_null());
                         g.set_linkage(inkwell::module::Linkage::Internal);
                         g
@@ -142,8 +154,7 @@ impl<'ctx> JITModule<'ctx> {
                     .build_load(ptr_type, slot.as_pointer_value(), "poll_epoch")?
                     .into_pointer_value());
             }
-            let global =
-                self.aot_runtime_global("ash_fiber_poll_epoch", self.context.i64_type());
+            let global = self.aot_runtime_global("ash_fiber_poll_epoch", self.context.i64_type());
             return Ok(global.as_pointer_value());
         }
         Ok(self
@@ -246,11 +257,7 @@ impl<'ctx> JITModule<'ctx> {
     /// not-yet-lowered callee is declared, and an internal declaration is
     /// invalid IR. `finalize_aot_data` internalizes the ones that ended up
     /// with a body.
-    fn add_body_function(
-        &self,
-        name: &str,
-        func_type: FunctionType<'ctx>,
-    ) -> FunctionValue<'ctx> {
+    fn add_body_function(&self, name: &str, func_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
         let f = self
             .module
             .add_function(name, func_type, Some(inkwell::module::Linkage::External));
@@ -281,7 +288,10 @@ impl<'ctx> JITModule<'ctx> {
         // ABI expects it anyway; the JIT's own walker uses its code map but
         // crash reports read the chain too.
         let loc = inkwell::attributes::AttributeLoc::Function;
-        f.add_attribute(loc, self.context.create_string_attribute("frame-pointer", "all"));
+        f.add_attribute(
+            loc,
+            self.context.create_string_attribute("frame-pointer", "all"),
+        );
         // An object file names its CPU once, in `emit_object`, from the
         // requested triple; stamping THIS host onto a function would bake
         // the build machine into a cross-compiled binary.
@@ -785,7 +795,9 @@ impl<'ctx> JITModule<'ctx> {
         let _phase = crate::profile::scope("llvm promote");
         crate::profile::count("llvm promotions", 1);
         if Self::promotion_denied(findex) {
-            return Err(anyhow!("promotion of findex {findex} denied by ASH_NO_PROMOTE"));
+            return Err(anyhow!(
+                "promotion of findex {findex} denied by ASH_NO_PROMOTE"
+            ));
         }
         // Promotion currently targets bytecode functions only.
         if !self.findexes.contains_key(&findex) {
@@ -923,10 +935,7 @@ impl<'ctx> JITModule<'ctx> {
                     let mut i = bb.get_first_instruction();
                     while let Some(ins) = i {
                         instrs += 1;
-                        if matches!(
-                            ins.get_opcode(),
-                            inkwell::values::InstructionOpcode::Call
-                        ) {
+                        if matches!(ins.get_opcode(), inkwell::values::InstructionOpcode::Call) {
                             calls += 1;
                         }
                         i = ins.get_next_instruction();
@@ -934,7 +943,9 @@ impl<'ctx> JITModule<'ctx> {
                 }
                 (calls, instrs)
             };
-            let before = std::env::var_os("ASH_INLINE_LOG").is_some().then(|| root_shape(target));
+            let before = std::env::var_os("ASH_INLINE_LOG")
+                .is_some()
+                .then(|| root_shape(target));
             let me_t0 = std::time::Instant::now();
             let result = super::module::run_middle_end(&self.module);
             report_slow_promote(
@@ -1313,7 +1324,13 @@ impl<'ctx> JITModule<'ctx> {
             if let Ok(sym) = f.get_name().to_str() {
                 if let Ok(a) = self.execution_engine.get_function_address(sym) {
                     if a != 0 && a as u64 != addr as u64 {
-                        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, a as usize, 0);
+                        crate::jit_map::register(
+                            findex as u32,
+                            crate::profile::Tier::Llvm,
+                            crate::jit_map::CodeKind::OsrEntry,
+                            a as usize,
+                            0,
+                        );
                     }
                 }
             }
@@ -1323,7 +1340,13 @@ impl<'ctx> JITModule<'ctx> {
         // address range and reports the time as `unknown` -- which on nbody was
         // 59.5% of the run, i.e. all of the work OSR had just moved into
         // compiled code.
-        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::OsrEntry, addr as usize, 0);
+        crate::jit_map::register(
+            findex as u32,
+            crate::profile::Tier::Llvm,
+            crate::jit_map::CodeKind::OsrEntry,
+            addr as usize,
+            0,
+        );
         return Ok(addr as u64);
     }
 
@@ -1336,7 +1359,9 @@ impl<'ctx> JITModule<'ctx> {
     fn register_shared_bodies(&mut self) {
         let mut fresh: Vec<(usize, String)> = Vec::new();
         {
-            let done = registered_bodies().lock().expect("registered bodies poisoned");
+            let done = registered_bodies()
+                .lock()
+                .expect("registered bodies poisoned");
             for (&fi, f) in &self.func_cache {
                 if done.contains(&fi) || f.count_basic_blocks() == 0 {
                     continue;
@@ -1802,7 +1827,11 @@ impl<'ctx> JITModule<'ctx> {
                     match t {
                         BasicTypeEnum::IntType(i) => i.get_bit_width().div_ceil(8),
                         BasicTypeEnum::FloatType(f) => {
-                            if f == self.context.f32_type() { 4 } else { 8 }
+                            if f == self.context.f32_type() {
+                                4
+                            } else {
+                                8
+                            }
                         }
                         _ => 8,
                     }
@@ -2213,17 +2242,10 @@ impl<'ctx> JITModule<'ctx> {
                     zero,
                     "splat_ins",
                 )?;
-                let mask = self
-                    .context
-                    .i32_type()
-                    .vec_type(lanes)
-                    .const_zero();
-                let out = self.builder.build_shuffle_vector(
-                    one,
-                    vec_ty.get_undef(),
-                    mask,
-                    "splat",
-                )?;
+                let mask = self.context.i32_type().vec_type(lanes).const_zero();
+                let out =
+                    self.builder
+                        .build_shuffle_vector(one, vec_ty.get_undef(), mask, "splat")?;
                 self.builder.build_store(registers[dst.idx()], out)?;
             }
             AirInstr::VecBinOp { op, dst, a, b } => {
@@ -2276,10 +2298,13 @@ impl<'ctx> JITModule<'ctx> {
         b: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>> {
         use air::v2::ir::BinOp as B;
-        let float = a.is_float_value() || a.is_vector_value() && b.is_vector_value() && {
-            matches!(a.into_vector_value().get_type().get_element_type(),
-                     inkwell::types::BasicTypeEnum::FloatType(_))
-        };
+        let float = a.is_float_value()
+            || a.is_vector_value() && b.is_vector_value() && {
+                matches!(
+                    a.into_vector_value().get_type().get_element_type(),
+                    inkwell::types::BasicTypeEnum::FloatType(_)
+                )
+            };
         Ok(if float {
             let (x, y) = (a.into_float_value(), b.into_float_value());
             match op {
@@ -3207,7 +3232,10 @@ impl<'ctx> JITModule<'ctx> {
             (BasicTypeEnum::FloatType(from), BasicTypeEnum::FloatType(to)) if from != to => {
                 let fv = value.into_float_value();
                 if from == self.context.f64_type() {
-                    Ok(self.builder.build_float_trunc(fv, to, "cast_fptrunc")?.into())
+                    Ok(self
+                        .builder
+                        .build_float_trunc(fv, to, "cast_fptrunc")?
+                        .into())
                 } else {
                     Ok(self.builder.build_float_ext(fv, to, "cast_fpext")?.into())
                 }
@@ -3671,7 +3699,8 @@ impl<'ctx> JITModule<'ctx> {
                     .position(|t| t.kind == hl_type_kind_HVOID)
                     .ok_or_else(|| anyhow!("GetType: no void type in the type table"))?;
                 let void_type = self.get_initialized_type(void_index)?;
-                self.builder.build_store(registers[dst.0 as usize], void_type)?;
+                self.builder
+                    .build_store(registers[dst.0 as usize], void_type)?;
                 self.builder.build_unconditional_branch(cont_block)?;
                 self.builder.position_at_end(load_block);
                 // obj->t is the first field (offset 0) of vdynamic/vobj, a pointer to hl_type
@@ -3786,7 +3815,10 @@ impl<'ctx> JITModule<'ctx> {
                             self.builder.build_gep(
                                 self.context.i8_type(),
                                 vvirt_ptr,
-                                &[self.context.i64_type().const_int(24, false)],
+                                &[self
+                                    .context
+                                    .i64_type()
+                                    .const_int(self.target_abi.vvirtual_fields_offset(), false)],
                                 "vfields_ptr",
                             )?
                         };
@@ -3888,7 +3920,10 @@ impl<'ctx> JITModule<'ctx> {
                             self.builder.build_gep(
                                 self.context.i8_type(),
                                 vvirt_ptr,
-                                &[self.context.i64_type().const_int(8, false)],
+                                &[self
+                                    .context
+                                    .i64_type()
+                                    .const_int(self.target_abi.vvirtual_value_offset(), false)],
                                 "sf_fb_value_gep",
                             )?
                         };
@@ -3956,7 +3991,10 @@ impl<'ctx> JITModule<'ctx> {
                             self.builder.build_gep(
                                 self.context.i8_type(),
                                 vvirt_ptr,
-                                &[self.context.i64_type().const_int(24, false)],
+                                &[self
+                                    .context
+                                    .i64_type()
+                                    .const_int(self.target_abi.vvirtual_fields_offset(), false)],
                                 "vfields_ptr",
                             )?
                         };
@@ -4025,7 +4063,10 @@ impl<'ctx> JITModule<'ctx> {
                             self.builder.build_gep(
                                 self.context.i8_type(),
                                 vvirt_ptr,
-                                &[self.context.i64_type().const_int(8, false)],
+                                &[self
+                                    .context
+                                    .i64_type()
+                                    .const_int(self.target_abi.vvirtual_value_offset(), false)],
                                 "fb_value_gep",
                             )?
                         };
@@ -4153,7 +4194,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         arr,
-                        &[self.context.i64_type().const_int(24, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.varray_data_offset(), false)],
                         "getarr_data",
                     )?
                 };
@@ -4163,7 +4207,10 @@ impl<'ctx> JITModule<'ctx> {
                 // tier so the two cannot index an array differently.
                 let dst_type_idx = f.regs[dst.0 as usize].0;
                 let dst_kind = self.types_[dst_type_idx].kind;
-                let elem_size: u64 = crate::layout::array_elem_size(dst_kind) as u64;
+                let elem_size = crate::layout::array_elem_size_for(
+                    dst_kind,
+                    self.target_abi.pointer_bytes() as i32,
+                ) as u64;
 
                 let elem_size_val = i32_type.const_int(elem_size, false);
                 let byte_offset =
@@ -4532,13 +4579,15 @@ impl<'ctx> JITModule<'ctx> {
             Opcode::SShr { dst, a, b } => {
                 self.emit_binary_op(registers, reg_types, dst, a, b, "sshr", |b, av, bv| {
                     let (x, y) = Self::shift_operands(b, av.into_int_value(), bv.into_int_value())?;
-                    Ok(b.build_right_shift(x, y, true, "sshr")?.as_basic_value_enum())
+                    Ok(b.build_right_shift(x, y, true, "sshr")?
+                        .as_basic_value_enum())
                 })?;
             }
             Opcode::UShr { dst, a, b } => {
                 self.emit_binary_op(registers, reg_types, dst, a, b, "ushr", |b, av, bv| {
                     let (x, y) = Self::shift_operands(b, av.into_int_value(), bv.into_int_value())?;
-                    Ok(b.build_right_shift(x, y, false, "ushr")?.as_basic_value_enum())
+                    Ok(b.build_right_shift(x, y, false, "ushr")?
+                        .as_basic_value_enum())
                 })?;
             }
             Opcode::And { dst, a, b } => {
@@ -4838,7 +4887,10 @@ impl<'ctx> JITModule<'ctx> {
                         self.builder.build_gep(
                             self.context.i8_type(),
                             vvirt,
-                            &[self.context.i64_type().const_int(8, false)],
+                            &[self
+                                .context
+                                .i64_type()
+                                .const_int(self.target_abi.vvirtual_value_offset(), false)],
                             "vvirt_value_gep",
                         )?
                     };
@@ -4848,7 +4900,8 @@ impl<'ctx> JITModule<'ctx> {
                         .into_pointer_value();
 
                     // Load vfields[field] from vvirtual offset 24 + field*8
-                    let vfield_offset = 24 + field.0 as u64 * 8;
+                    let vfield_offset = self.target_abi.vvirtual_fields_offset()
+                        + field.0 as u64 * self.target_abi.pointer_bytes() as u64;
                     let vfield_gep = unsafe {
                         self.builder.build_gep(
                             self.context.i8_type(),
@@ -5054,7 +5107,11 @@ impl<'ctx> JITModule<'ctx> {
                                 self.builder.build_gep(
                                     self.context.i8_type(),
                                     arr,
-                                    &[self.context.i64_type().const_int(24 + i as u64 * 8, false)],
+                                    &[self.context.i64_type().const_int(
+                                        self.target_abi.varray_data_offset()
+                                            + i as u64 * self.target_abi.pointer_bytes() as u64,
+                                        false,
+                                    )],
                                     "vcall_arg_gep",
                                 )?
                             };
@@ -5161,7 +5218,9 @@ impl<'ctx> JITModule<'ctx> {
                     let mut found: Option<usize> = None;
                     let mut cur = Some(obj_type_idx);
                     while let Some(ti) = cur {
-                        let Some(obj) = self.types_[ti].obj.as_ref() else { break };
+                        let Some(obj) = self.types_[ti].obj.as_ref() else {
+                            break;
+                        };
                         if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == field.0) {
                             found = Some(p.findex as usize);
                             break;
@@ -5347,9 +5406,7 @@ impl<'ctx> JITModule<'ctx> {
                     // the inlined body running without it.
                     let aot_devirt = if self.aot {
                         self.function_name(f.findex as u32)
-                            .and_then(|caller| {
-                                crate::callsite_profile::aot_target_for(&caller)
-                            })
+                            .and_then(|caller| crate::callsite_profile::aot_target_for(&caller))
                             .and_then(|target_name| self.findex_for_name(&target_name))
                             .and_then(|target| {
                                 match self.get_or_create_function_value(target as usize) {
@@ -5454,12 +5511,15 @@ impl<'ctx> JITModule<'ctx> {
                         .unwrap()
                         .into_pointer_value();
 
-                    // Load methods pointer from hl_runtime_obj (offset 32)
+                    // Load the methods pointer from the target's C layout.
                     let methods_gep = unsafe {
                         self.builder.build_gep(
                             self.context.i8_type(),
                             rt_obj,
-                            &[self.context.i64_type().const_int(32, false)],
+                            &[self
+                                .context
+                                .i64_type()
+                                .const_int(self.target_abi.hl_runtime_obj_methods_offset(), false)],
                             "methods_gep",
                         )?
                     };
@@ -5706,18 +5766,25 @@ impl<'ctx> JITModule<'ctx> {
                 )?;
                 let f64_type = self.context.f64_type();
                 let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
-                let src_unsigned =
-                    src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
+                let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_int_value() {
                     // A byte or short register is unsigned in HashLink (MOVZX
                     // before CVTSI2SD); sitofp read 200 as -56.
                     if src_unsigned {
                         self.builder
-                            .build_unsigned_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
+                            .build_unsigned_int_to_float(
+                                src_val.into_int_value(),
+                                f64_type,
+                                "tosfloat",
+                            )?
                             .into()
                     } else {
                         self.builder
-                            .build_signed_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
+                            .build_signed_int_to_float(
+                                src_val.into_int_value(),
+                                f64_type,
+                                "tosfloat",
+                            )?
                             .into()
                     }
                 } else if src_val.is_float_value() {
@@ -5797,8 +5864,7 @@ impl<'ctx> JITModule<'ctx> {
                     self.context.i32_type()
                 };
                 let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
-                let src_unsigned =
-                    src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
+                let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_float_value() {
                     self.builder
                         .build_float_to_signed_int(src_val.into_float_value(), dst_int, "toint")?
@@ -5898,7 +5964,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         raw_closure_ptr,
-                        &[self.context.i64_type().const_int(16, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_has_value_offset(), false)],
                         "closure_raw_hasvalue_gep",
                     )?
                 };
@@ -5943,7 +6012,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         raw_closure_ptr,
-                        &[self.context.i64_type().const_int(32, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_wrapper_fun_offset(), false)],
                         "closure_wrapped_fun_gep",
                     )?
                 };
@@ -5966,7 +6038,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         closure_ptr,
-                        &[self.context.i64_type().const_int(8, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_fun_offset(), false)],
                         "closure_fun_gep",
                     )?
                 };
@@ -5980,7 +6055,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         closure_ptr,
-                        &[self.context.i64_type().const_int(16, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_has_value_offset(), false)],
                         "closure_hasvalue_gep",
                     )?
                 };
@@ -5994,7 +6072,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         closure_ptr,
-                        &[self.context.i64_type().const_int(24, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_value_offset(), false)],
                         "closure_value_gep",
                     )?
                 };
@@ -6162,8 +6243,7 @@ impl<'ctx> JITModule<'ctx> {
                         .build_call(callee, &direct_args, "devirt_call")?
                         .try_as_basic_value();
                     if let Some(value) = ret.basic() {
-                        self.builder
-                            .build_store(registers[dst.0 as usize], value)?;
+                        self.builder.build_store(registers[dst.0 as usize], value)?;
                     }
                     self.builder.build_unconditional_branch(call_done_bb)?;
                     self.builder.position_at_end(signature_bb);
@@ -7306,7 +7386,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         self.context.i8_type(),
                         venum_ptr,
-                        &[self.context.i64_type().const_int(8, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.venum_index_offset(), false)],
                         "enumidx_gep",
                     )?
                 };
@@ -7597,7 +7680,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         i8_type,
                         arr,
-                        &[self.context.i64_type().const_int(24, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.varray_data_offset(), false)],
                         "setarr_data",
                     )?
                 };
@@ -7607,7 +7693,10 @@ impl<'ctx> JITModule<'ctx> {
                 // tier so the two cannot index an array differently.
                 let src_type_idx = f.regs[src.0 as usize].0;
                 let src_kind = self.types_[src_type_idx].kind;
-                let elem_size: u64 = crate::layout::array_elem_size(src_kind) as u64;
+                let elem_size = crate::layout::array_elem_size_for(
+                    src_kind,
+                    self.target_abi.pointer_bytes() as i32,
+                ) as u64;
 
                 let elem_size_val = i32_type.const_int(elem_size, false);
                 let byte_offset =
@@ -7631,7 +7720,10 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_gep(
                         self.context.i8_type(),
                         arr,
-                        &[self.context.i64_type().const_int(16, false)],
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.varray_size_offset(), false)],
                         "arrsize_gep",
                     )?
                 };
@@ -7801,7 +7893,7 @@ impl<'ctx> JITModule<'ctx> {
                 // header is {t, at, size, pad} = 24 bytes. Loading at +8
                 // returned the ELEMENT TYPE descriptor, so every hl.Bytes /
                 // NativeArray ref then read and WROTE through an hl_type.
-                let header = std::mem::size_of::<crate::hl_bindings::varray>() as u64;
+                let header = self.target_abi.varray_data_offset();
                 let data_gep = unsafe {
                     self.builder.build_gep(
                         self.context.i8_type(),
@@ -7811,7 +7903,8 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                 };
                 let _ = ptr_type;
-                self.builder.build_store(registers[dst.0 as usize], data_gep)?;
+                self.builder
+                    .build_store(registers[dst.0 as usize], data_gep)?;
             }
             // --- RefOffset: pointer + byte offset ---
             Opcode::RefOffset { dst, reg, offset } => {
@@ -7947,7 +8040,10 @@ impl<'ctx> JITModule<'ctx> {
         b: &inkwell::builder::Builder<'ctx>,
         x: inkwell::values::IntValue<'ctx>,
         y: inkwell::values::IntValue<'ctx>,
-    ) -> Result<(inkwell::values::IntValue<'ctx>, inkwell::values::IntValue<'ctx>)> {
+    ) -> Result<(
+        inkwell::values::IntValue<'ctx>,
+        inkwell::values::IntValue<'ctx>,
+    )> {
         let width = x.get_type().get_bit_width();
         let y = if y.get_type().get_bit_width() > width {
             b.build_int_truncate(y, x.get_type(), "shift_count")?
@@ -8072,7 +8168,9 @@ impl<'ctx> JITModule<'ctx> {
             // faulting on it is the honest outcome, where routing it into a
             // bridge that is not in the binary is not. Emitting the guard
             // would also bake this compiler's own addresses into the object.
-            let call = self.builder.build_indirect_call(fn_type, fn_ptr, args, name)?;
+            let call = self
+                .builder
+                .build_indirect_call(fn_type, fn_ptr, args, name)?;
             return Ok(call.try_as_basic_value().basic());
         }
 
@@ -8444,18 +8542,21 @@ impl<'ctx> JITModule<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let error_type = self.context.void_type().fn_type(&[ptr_type.into()], true);
 
-        let unsealed: Vec<(FunctionValue<'ctx>, Vec<inkwell::basic_block::BasicBlock<'ctx>>)> =
-            self.module
-                .get_functions()
-                .filter_map(|function| {
-                    let open: Vec<_> = function
-                        .get_basic_blocks()
-                        .into_iter()
-                        .filter(|block| block.get_terminator().is_none())
-                        .collect();
-                    (!open.is_empty()).then_some((function, open))
-                })
-                .collect();
+        let unsealed: Vec<(
+            FunctionValue<'ctx>,
+            Vec<inkwell::basic_block::BasicBlock<'ctx>>,
+        )> = self
+            .module
+            .get_functions()
+            .filter_map(|function| {
+                let open: Vec<_> = function
+                    .get_basic_blocks()
+                    .into_iter()
+                    .filter(|block| block.get_terminator().is_none())
+                    .collect();
+                (!open.is_empty()).then_some((function, open))
+            })
+            .collect();
 
         for (function, blocks) in unsealed {
             let name = function.get_name().to_string_lossy().into_owned();
@@ -8636,8 +8737,7 @@ impl<'ctx> JITModule<'ctx> {
         if self.name_to_findex.is_some() {
             return;
         }
-        let by_findex =
-            crate::types::function_keys(&self.bytecode.types, &self.bytecode.functions);
+        let by_findex = crate::types::function_keys(&self.bytecode.types, &self.bytecode.functions);
         let mut by_name = std::collections::HashMap::new();
         for (fx, n) in &by_findex {
             by_name.entry(n.clone()).or_insert(*fx);
@@ -8658,7 +8758,10 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.build_gep(
                 self.context.i8_type(),
                 type_ptr,
-                &[self.context.i64_type().const_int(16, false)],
+                &[self
+                    .context
+                    .i64_type()
+                    .const_int(self.target_abi.hl_type_vobj_proto_offset(), false)],
                 "vobj_proto_gep",
             )?
         };
@@ -8668,12 +8771,8 @@ impl<'ctx> JITModule<'ctx> {
             .into_pointer_value();
         let missing = self.builder.build_is_null(cached, "vobj_proto_missing")?;
 
-        let init_bb = self
-            .context
-            .append_basic_block(function, "vobj_proto_init");
-        let done_bb = self
-            .context
-            .append_basic_block(function, "vobj_proto_done");
+        let init_bb = self.context.append_basic_block(function, "vobj_proto_init");
+        let done_bb = self.context.append_basic_block(function, "vobj_proto_done");
         let cached_bb = self
             .builder
             .get_insert_block()
@@ -8735,28 +8834,20 @@ impl<'ctx> JITModule<'ctx> {
         findex: usize,
         type_ptr: PointerValue<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>> {
-        const _: () = {
-            assert!(std::mem::size_of::<crate::hl::vclosure>() == 32);
-            assert!(std::mem::offset_of!(crate::hl::_vclosure, t) == 0);
-            assert!(std::mem::offset_of!(crate::hl::_vclosure, fun) == 8);
-            assert!(std::mem::offset_of!(crate::hl::_vclosure, hasValue) == 16);
-            assert!(std::mem::offset_of!(crate::hl::_vclosure, stackCount) == 20);
-            assert!(std::mem::offset_of!(crate::hl::_vclosure, value) == 24);
-        };
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let (target, _) = self.get_or_create_function_value(findex)?;
 
-        let value = self.context.const_struct(
-            &[
-                type_ptr.into(),
-                target.as_global_value().as_pointer_value().into(),
-                i32_type.const_zero().into(), // hasValue: unbound
-                i32_type.const_zero().into(), // stackCount
-                ptr_type.const_null().into(), // value
-            ],
-            false,
-        );
+        let mut fields: Vec<BasicValueEnum<'ctx>> = vec![
+            type_ptr.into(),
+            target.as_global_value().as_pointer_value().into(),
+            i32_type.const_zero().into(), // hasValue: unbound
+        ];
+        if self.target_abi.pointer_bytes() == 8 {
+            fields.push(i32_type.const_zero().into()); // HL_64 stackCount
+        }
+        fields.push(ptr_type.const_null().into()); // value
+        let value = self.context.const_struct(&fields, false);
         let global = self
             .module
             .add_global(value.get_type(), None, "ash_closure");
@@ -8769,7 +8860,7 @@ impl<'ctx> JITModule<'ctx> {
         // object and never afterwards, so an emitted one is genuinely
         // read-only for its whole life.
         global.set_constant(true);
-        global.set_alignment(8);
+        global.set_alignment(self.target_abi.pointer_align());
         Ok(global.as_pointer_value().into())
     }
 
@@ -9006,8 +9097,12 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<PointerValue<'ctx>> {
         let i8_ty = self.context.i8_type();
 
-        if let Some(offset) = crate::layout::field_offset(&self.types_, obj_type_index, field_index)
-        {
+        if let Some(offset) = crate::layout::field_offset_for(
+            &self.types_,
+            obj_type_index,
+            field_index,
+            self.target_abi.pointer_bytes() as i32,
+        ) {
             let off = self.context.i64_type().const_int(offset as u64, false);
             return Ok(unsafe {
                 self.builder
@@ -9034,7 +9129,10 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.build_gep(
                 i8_ty,
                 rt_obj.into_pointer_value(),
-                &[self.context.i64_type().const_int(40, false)],
+                &[self.context.i64_type().const_int(
+                    self.target_abi.hl_runtime_obj_fields_indexes_offset(),
+                    false,
+                )],
                 "fields_indexes_gep",
             )?
         };
@@ -10086,7 +10184,13 @@ impl<'ctx> JITModule<'ctx> {
         // Every LLVM-compiled entry point passes through here, in both the
         // whole-module and the tiered path, so this is the one place the
         // profiler needs to learn about generated code.
-        crate::jit_map::register(findex as u32, crate::profile::Tier::Llvm, crate::jit_map::CodeKind::Entry, addr as usize, 0);
+        crate::jit_map::register(
+            findex as u32,
+            crate::profile::Tier::Llvm,
+            crate::jit_map::CodeKind::Entry,
+            addr as usize,
+            0,
+        );
         if findex < self.functions_ptrs.len() {
             self.functions_ptrs[findex] = addr;
         }

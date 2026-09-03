@@ -132,32 +132,7 @@ pub fn shard_count_for(triple: &str) -> usize {
 /// Cross-compiling keeps `generic`, which is the only safe answer for a
 /// machine we cannot ask.
 pub(crate) fn object_target_machine(triple: &str) -> Result<(TargetTriple, TargetMachine)> {
-    Target::initialize_all(&InitializationConfig::default());
-    let tt = TargetTriple::create(triple);
-    let target = Target::from_triple(&tt).map_err(|e| anyhow!("no target for {triple}: {e}"))?;
-    let host = TargetMachine::get_default_triple();
-    let native = tt == host;
-    let cpu = if native {
-        TargetMachine::get_host_cpu_name().to_string()
-    } else {
-        "generic".to_string()
-    };
-    let features = if native {
-        TargetMachine::get_host_cpu_features().to_string()
-    } else {
-        String::new()
-    };
-    let machine = target
-        .create_target_machine(
-            &tt,
-            &cpu,
-            &features,
-            inkwell::OptimizationLevel::Aggressive,
-            RelocMode::PIC,
-            CodeModel::Default,
-        )
-        .ok_or_else(|| anyhow!("could not create a TargetMachine for {triple}"))?;
-    Ok((tt, machine))
+    crate::target_abi::target_machine(triple, inkwell::OptimizationLevel::Aggressive)
 }
 
 fn instruction_count(f: FunctionValue<'_>) -> usize {
@@ -454,6 +429,8 @@ impl<'ctx> JITModule<'ctx> {
         let began = std::time::Instant::now();
         let (tt, machine) = object_target_machine(triple)?;
         self.module.set_triple(&tt);
+        self.module
+            .set_data_layout(&machine.get_target_data().get_data_layout());
         machine
             .write_to_file(&self.module, FileType::Object, part)
             .map_err(|e| anyhow!("emit {}: {e}", part.display()))?;
@@ -743,6 +720,7 @@ fn emit_shard(
     let began = std::time::Instant::now();
     let (tt, machine) = object_target_machine(triple)?;
     module.set_triple(&tt);
+    module.set_data_layout(&machine.get_target_data().get_data_layout());
     machine
         .write_to_file(&module, FileType::Object, part)
         .map_err(|e| anyhow!("emit {}: {e}", part.display()))?;

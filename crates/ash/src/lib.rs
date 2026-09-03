@@ -32,6 +32,7 @@ pub mod profile;
 pub mod jit_map;
 pub mod reachable;
 pub mod reload;
+pub mod target_abi;
 pub mod types;
 
 use hl_bindings as hl;

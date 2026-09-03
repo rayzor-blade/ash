@@ -31,8 +31,8 @@ use inkwell::module::Linkage;
 use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, GlobalValue, PointerValue};
 use inkwell::AddressSpace;
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::rc::Rc;
 
 use super::module::JITModule;
@@ -56,22 +56,20 @@ impl<'ctx> JITModule<'ctx> {
         let globals = self.module.add_global(globals_ty, None, "ash_globals");
         globals.set_initializer(&globals_ty.const_zero());
         globals.set_linkage(Linkage::Internal);
-        globals.set_alignment(8);
+        globals.set_alignment(self.target_abi.pointer_align());
         self.aot_globals = Some(globals);
 
         let funs_ty = ptr_type.array_type(nfun as u32);
         let functions = self.module.add_global(funs_ty, None, "ash_functions");
         functions.set_initializer(&funs_ty.const_zero());
         functions.set_linkage(Linkage::Internal);
-        functions.set_alignment(8);
+        functions.set_alignment(self.target_abi.pointer_align());
         self.aot_functions = Some(functions);
 
-        let ftypes = self
-            .module
-            .add_global(funs_ty, None, "ash_function_types");
+        let ftypes = self.module.add_global(funs_ty, None, "ash_function_types");
         ftypes.set_initializer(&funs_ty.const_zero());
         ftypes.set_linkage(Linkage::Internal);
-        ftypes.set_alignment(8);
+        ftypes.set_alignment(self.target_abi.pointer_align());
         self.aot_function_types = Some(ftypes);
 
         // Global slot pointers stop being addresses in this process and
@@ -206,7 +204,10 @@ impl<'ctx> JITModule<'ctx> {
         Ok(unsafe {
             globals.as_pointer_value().const_gep(
                 array,
-                &[i64_type.const_zero(), i64_type.const_int(index as u64, false)],
+                &[
+                    i64_type.const_zero(),
+                    i64_type.const_int(index as u64, false),
+                ],
             )
         })
     }
@@ -222,7 +223,10 @@ impl<'ctx> JITModule<'ctx> {
         Ok(unsafe {
             functions.as_pointer_value().const_gep(
                 array,
-                &[i64_type.const_zero(), i64_type.const_int(findex as u64, false)],
+                &[
+                    i64_type.const_zero(),
+                    i64_type.const_int(findex as u64, false),
+                ],
             )
         })
     }
@@ -258,7 +262,7 @@ impl<'ctx> JITModule<'ctx> {
         let name = format!("ash_type_{}", self.aot_types.len());
         let global = self.module.add_global(struct_type, None, &name);
         global.set_linkage(Linkage::Internal);
-        global.set_alignment(8);
+        global.set_alignment(self.target_abi.pointer_align());
         self.aot_types.insert(ptr as usize, global);
 
         let kind = unsafe { (*ptr).kind };
@@ -274,9 +278,7 @@ impl<'ctx> JITModule<'ctx> {
                 hl_type_kind_HVIRTUAL => {
                     self.emit_type_virtual((*ptr).__bindgen_anon_1.virt)?.into()
                 }
-                hl_type_kind_HABSTRACT => {
-                    self.emit_utf16((*ptr).__bindgen_anon_1.abs_name)?.into()
-                }
+                hl_type_kind_HABSTRACT => self.emit_utf16((*ptr).__bindgen_anon_1.abs_name)?.into(),
                 hl_type_kind_HNULL | hl_type_kind_HREF | hl_type_kind_HPACKED => {
                     self.emit_c_type((*ptr).__bindgen_anon_1.tparam)?.into()
                 }
@@ -633,7 +635,7 @@ impl<'ctx> JITModule<'ctx> {
             .add_global(value.get_type(), None, "ash_module_ctx");
         global.set_initializer(&value);
         global.set_linkage(Linkage::Internal);
-        global.set_alignment(8);
+        global.set_alignment(self.target_abi.pointer_align());
         self.aot_module_ctx = Some(global);
         Ok(global.as_pointer_value())
     }
@@ -642,7 +644,7 @@ impl<'ctx> JITModule<'ctx> {
         let global = self.module.add_global(value.get_type(), None, name);
         global.set_initializer(&value);
         global.set_linkage(Linkage::Internal);
-        global.set_alignment(8);
+        global.set_alignment(self.target_abi.pointer_align());
         global.as_pointer_value()
     }
 
@@ -657,12 +659,16 @@ impl<'ctx> JITModule<'ctx> {
     fn check_hl_layouts(&mut self) -> Result<()> {
         use inkwell::types::BasicType;
         let hl_type_struct = self.get_hl_type_struct_type()?;
-        let target = self.execution_engine.get_target_data();
+        let (_, machine) = self
+            .target_abi
+            .target_machine(inkwell::OptimizationLevel::Aggressive)?;
+        let target = machine.get_target_data();
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let i8_type = self.context.i8_type();
+        let p = self.target_abi.pointer_bytes() as usize;
         let checks: [(&str, inkwell::types::StructType<'ctx>, usize); 8] = [
-            ("hl_type", hl_type_struct, std::mem::size_of::<hl_type>()),
+            ("hl_type", hl_type_struct, if p == 8 { 32 } else { 16 }),
             (
                 "hl_type_obj",
                 self.context.struct_type(
@@ -681,13 +687,13 @@ impl<'ctx> JITModule<'ctx> {
                     ],
                     false,
                 ),
-                std::mem::size_of::<hl_type_obj>(),
+                if p == 8 { 80 } else { 44 },
             ),
             (
                 "hl_obj_field",
                 self.context
                     .struct_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false),
-                std::mem::size_of::<hl_obj_field>(),
+                if p == 8 { 24 } else { 12 },
             ),
             (
                 "hl_obj_proto",
@@ -700,7 +706,7 @@ impl<'ctx> JITModule<'ctx> {
                     ],
                     false,
                 ),
-                std::mem::size_of::<hl_obj_proto>(),
+                if p == 8 { 24 } else { 16 },
             ),
             (
                 "hl_type_fun",
@@ -727,7 +733,7 @@ impl<'ctx> JITModule<'ctx> {
                     ],
                     false,
                 ),
-                std::mem::size_of::<hl_type_fun>(),
+                if p == 8 { 80 } else { 40 },
             ),
             (
                 "hl_type_enum",
@@ -740,7 +746,7 @@ impl<'ctx> JITModule<'ctx> {
                     ],
                     false,
                 ),
-                std::mem::size_of::<hl_type_enum>(),
+                if p == 8 { 32 } else { 16 },
             ),
             (
                 "hl_enum_construct",
@@ -755,13 +761,13 @@ impl<'ctx> JITModule<'ctx> {
                     ],
                     false,
                 ),
-                std::mem::size_of::<hl_enum_construct>(),
+                if p == 8 { 40 } else { 24 },
             ),
             (
                 "hl_module_context",
                 self.context
                     .struct_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
-                std::mem::size_of::<hl_module_context>(),
+                p * 3,
             ),
         ];
 
@@ -857,8 +863,14 @@ impl<'ctx> JITModule<'ctx> {
             if !type_globals.contains_key(&type_idx) {
                 continue;
             }
-            let Some(obj_data) = ty.obj.as_ref() else { continue };
-            let Some(layout) = crate::layout::object_layout(&bytecode.types, type_idx) else {
+            let Some(obj_data) = ty.obj.as_ref() else {
+                continue;
+            };
+            let Some(layout) = crate::layout::object_layout_for(
+                &bytecode.types,
+                type_idx,
+                self.target_abi.pointer_bytes() as i32,
+            ) else {
                 continue; // layout says "ask the runtime", so we must
             };
             if constant.fields.len() > obj_data.fields.len()
@@ -898,7 +910,7 @@ impl<'ctx> JITModule<'ctx> {
             let is_obj = bytecode.types[c.type_idx].kind == hl_type_kind_HOBJ;
             if is_obj {
                 parts.push(ptr_type.into()); // the `t` header hlp_alloc_obj writes
-                cursor = 8;
+                cursor = self.target_abi.pointer_bytes() as i32;
             }
             let obj_data = bytecode.types[c.type_idx].obj.as_ref().unwrap();
             for j in 0..c.fields.len() {
@@ -914,7 +926,7 @@ impl<'ctx> JITModule<'ctx> {
                 let width = match fk {
                     hl_type_kind_HBYTES | hl_type_kind_HTYPE => {
                         parts.push(ptr_type.into());
-                        8
+                        self.target_abi.pointer_bytes() as i32
                     }
                     _ => {
                         // Mirrors the routine this replaces: the value is
@@ -939,7 +951,7 @@ impl<'ctx> JITModule<'ctx> {
         let blob_ty = self.context.struct_type(&member_types, true);
         let blob = self.module.add_global(blob_ty, None, "ash_constants");
         blob.set_linkage(Linkage::Internal);
-        blob.set_alignment(8);
+        blob.set_alignment(self.target_abi.pointer_align());
 
         // Pass 2: the values.
         let mut member_values: Vec<BasicValueEnum<'ctx>> = Vec::new();
@@ -953,13 +965,18 @@ impl<'ctx> JITModule<'ctx> {
             let is_obj = bytecode.types[c.type_idx].kind == hl_type_kind_HOBJ;
             if is_obj {
                 vals.push(type_globals[&c.type_idx].into());
-                cursor = 8;
+                cursor = self.target_abi.pointer_bytes() as i32;
             }
             let obj_data = bytecode.types[c.type_idx].obj.as_ref().unwrap();
             for (j, &field_value) in c.fields.iter().enumerate() {
                 let off = c.layout.field_offsets[c.start + j];
                 if off > cursor {
-                    vals.push(i8_type.array_type((off - cursor) as u32).const_zero().into());
+                    vals.push(
+                        i8_type
+                            .array_type((off - cursor) as u32)
+                            .const_zero()
+                            .into(),
+                    );
                 }
                 let fk = bytecode.types[obj_data.fields[j].type_.0].kind;
                 let width = match fk {
@@ -994,7 +1011,12 @@ impl<'ctx> JITModule<'ctx> {
                 cursor = off + width;
             }
             if c.layout.size > cursor {
-                vals.push(i8_type.array_type((c.layout.size - cursor) as u32).const_zero().into());
+                vals.push(
+                    i8_type
+                        .array_type((c.layout.size - cursor) as u32)
+                        .const_zero()
+                        .into(),
+                );
             }
             member_values.push(member_ty.const_named_struct(&vals).into());
         }
@@ -1028,6 +1050,7 @@ impl<'ctx> JITModule<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
+        let size_type = self.target_abi.pointer_int_type(self.context);
         let void_type = self.context.void_type();
         let i8_type = self.context.i8_type();
 
@@ -1041,7 +1064,7 @@ impl<'ctx> JITModule<'ctx> {
         let register_root_ty = void_type.fn_type(&[ptr_type.into()], false);
         let get_obj_rt_ty = ptr_type.fn_type(&[ptr_type.into()], false);
         let alloc_closure_ty = ptr_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
-        let set_globals_ty = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+        let set_globals_ty = void_type.fn_type(&[ptr_type.into(), size_type.into()], false);
         let setup_callbacks_ty =
             void_type.fn_type(&[ptr_type.into(), ptr_type.into(), i32_type.into()], false);
         let set_runner_ty = void_type.fn_type(&[ptr_type.into()], false);
@@ -1064,7 +1087,9 @@ impl<'ctx> JITModule<'ctx> {
                 set_globals,
                 &[
                     globals.as_pointer_value().into(),
-                    i64_type.const_int(self.bytecode.globals.len() as u64, false).into(),
+                    size_type
+                        .const_int(self.bytecode.globals.len() as u64, false)
+                        .into(),
                 ],
                 "",
             )?;
@@ -1119,7 +1144,10 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_indirect_call(
                     hash_ty,
                     hash_gen,
-                    &[msg.into(), self.context.bool_type().const_int(1, false).into()],
+                    &[
+                        msg.into(),
+                        self.context.bool_type().const_int(1, false).into(),
+                    ],
                     "",
                 )?;
             }
@@ -1145,8 +1173,10 @@ impl<'ctx> JITModule<'ctx> {
                     .map(|v| v.into_pointer_value())
                     .collect::<Vec<_>>(),
             );
-            let names_global = self.intern_global(names_arr.as_basic_value_enum(), "ash_function_names");
-            let reg_ty = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false);
+            let names_global =
+                self.intern_global(names_arr.as_basic_value_enum(), "ash_function_names");
+            let reg_ty =
+                void_type.fn_type(&[ptr_type.into(), ptr_type.into(), size_type.into()], false);
             let register = self.aot_symbol("hlp_register_aot_symbols", reg_ty);
             self.builder.build_indirect_call(
                 reg_ty,
@@ -1154,7 +1184,7 @@ impl<'ctx> JITModule<'ctx> {
                 &[
                     functions.as_pointer_value().into(),
                     names_global.into(),
-                    i64_type.const_int(nfun as u64, false).into(),
+                    size_type.const_int(nfun as u64, false).into(),
                 ],
                 "",
             )?;
@@ -1195,13 +1225,14 @@ impl<'ctx> JITModule<'ctx> {
             // can be assigned a heap object later, and that pointer has to be
             // found. One range covers every constant, where the routine needed
             // a `hlp_gc_register_root` per object.
-            let add_scan_ty = void_type.fn_type(&[ptr_type.into(), i64_type.into()], false);
+            let add_scan_ty = void_type.fn_type(&[ptr_type.into(), size_type.into()], false);
             let add_scan = self.aot_symbol("hlp_gc_add_scan_root", add_scan_ty);
-            let blob_size = blob
-                .get_value_type()
-                .into_struct_type()
-                .size_of()
-                .ok_or_else(|| anyhow!("ash_constants has no size"))?;
+            let blob_type = blob.get_value_type().into_struct_type();
+            let (_, machine) = self
+                .target_abi
+                .target_machine(inkwell::OptimizationLevel::Aggressive)?;
+            let blob_size =
+                size_type.const_int(machine.get_target_data().get_store_size(&blob_type), false);
             self.builder.build_indirect_call(
                 add_scan_ty,
                 add_scan,
@@ -1211,8 +1242,8 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         let bytecode = self.bytecode.clone();
-        let nfields_offset = std::mem::offset_of!(hl_runtime_obj, nfields) as u64;
-        let indexes_offset = std::mem::offset_of!(hl_runtime_obj, fields_indexes) as u64;
+        let nfields_offset = self.target_abi.pointer_bytes() as u64;
+        let indexes_offset = self.target_abi.hl_runtime_obj_fields_indexes_offset();
 
         for constant in &bytecode.constants {
             let global_idx = constant.global as usize;
@@ -1424,10 +1455,10 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.position_at_end(entry);
 
         {
-        // The poll epoch's address, from the getter rather than the symbol.
+            // The poll epoch's address, from the getter rather than the symbol.
             // See fiber_poll_epoch_ptr: it is the only DATA this object would
             // import, and a dylib cannot satisfy a direct reference to one.
-            if self.aot_shared_runtime {
+            if self.aot_shared_runtime || !self.target_abi.direct_data_relocations {
                 if let Some(slot) = self.module.get_global("ash_fiber_poll_epoch_ptr") {
                     let getter_ty = ptr_type.fn_type(&[], false);
                     let getter = self.aot_symbol("hlp_fiber_poll_epoch_address", getter_ty);
@@ -1489,6 +1520,7 @@ impl<'ctx> JITModule<'ctx> {
     pub fn emit_main(&mut self) -> Result<()> {
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
+        let size_type = self.target_abi.pointer_int_type(self.context);
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let void_type = self.context.void_type();
 
@@ -1523,8 +1555,8 @@ impl<'ctx> JITModule<'ctx> {
             .build_alloca(self.context.i8_type(), "stack_top")?;
         let stack_top = self
             .builder
-            .build_ptr_to_int(anchor, i64_type, "stack_top_addr")?;
-        let set_stack_top_ty = void_type.fn_type(&[i64_type.into()], false);
+            .build_ptr_to_int(anchor, size_type, "stack_top_addr")?;
+        let set_stack_top_ty = void_type.fn_type(&[size_type.into()], false);
         let set_stack_top = self.aot_symbol("hlp_gc_set_stack_top", set_stack_top_ty);
         self.builder.build_indirect_call(
             set_stack_top_ty,
@@ -1537,13 +1569,12 @@ impl<'ctx> JITModule<'ctx> {
             .module
             .get_function("ash_module_init")
             .ok_or_else(|| anyhow!("emit_main before emit_module_init"))?;
-        self.builder
-            .build_indirect_call(
-                void_type.fn_type(&[], false),
-                init.as_global_value().as_pointer_value(),
-                &[],
-                "",
-            )?;
+        self.builder.build_indirect_call(
+            void_type.fn_type(&[], false),
+            init.as_global_value().as_pointer_value(),
+            &[],
+            "",
+        )?;
         // After the module's own init and before any bytecode runs: the
         // slots it fills are read on the first fiber poll, which is inside
         // the first loop the entrypoint reaches.

@@ -31,7 +31,7 @@ Promotion is brokered by [beadie](https://github.com/darmie/beadie), which count
 | 1 | Cranelift (`opt_level=speed`) | Fast compilation (~0.04 ms/function) for warm functions |
 | 2 | LLVM 21 (MCJIT) | Full codegen for the hottest functions |
 
-A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`, or the object-model opcodes — falls through to LLVM rather than being excluded from compilation. `ash_cli --jit-tier` pins a single rung for testing.
+A function that Cranelift cannot lower — anything containing `Trap`/`EndTrap`, or the object-model opcodes — falls through to LLVM rather than being excluded from compilation. `--jit-tier` pins a single rung for testing.
 
 ## Features
 
@@ -82,30 +82,29 @@ export LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
 ## Building
 
 ```bash
-cargo build -p ash        # JIT binary
-cargo build -p ash_cli    # interpreter / hybrid runner
+cargo build -p ash        # the `ash` binary: interpreter, JIT and AOT compiler
 ```
 
 Release builds use `make` (host target with LTO) or `make all` (every installed target).
 
 ### Rebuilding after `std/` changes
 
-`ash_std` is a cdylib embedded into the binaries via `include_bytes!`, and
+`ash_std` is a cdylib embedded into `ash_core` via `include_bytes!`, and
 nothing in cargo's dependency graph records that — the embedding crate does not
 link it. So it must be built first, by hand, and `ash` must be cleaned to make
 its build script run again:
 
 ```bash
 cargo build -p ash_std
-cargo clean -p ash
-cargo build -p ash -p ash_cli
+cargo clean -p ash_core
+cargo build -p ash
 ```
 
 **Release builds need the same two steps**, and the ordering matters more:
 
 ```bash
 cargo build --release -p ash_std
-cargo build --release -p ash -p ash_cli
+cargo build --release -p ash
 ```
 
 `build.rs` prefers a cdylib matching the profile being built and falls back to
@@ -118,10 +117,10 @@ when it happens.
 
 ## CLI
 
-### `ash_cli` — interpreter and tiered runner
+### `ash` — the one binary
 
 ```
-ash_cli [OPTIONS] [<file.hl>]
+ash [OPTIONS] [<file.hl>] [PROGRAM_ARGS]...
 ```
 
 | Option | Values | Description |
@@ -134,19 +133,33 @@ ash_cli [OPTIONS] [<file.hl>]
 | `--jit-log` | flag | Log every promotion, decline and tier crossing |
 | `--hot-reload` | flag | Route direct calls through indirect dispatch so code can be swapped |
 | `--quiet` | flag | Suppress non-program output |
+| `--build` | path | Compile the program to a native binary: emit and link in one step. See [docs/aot.md](docs/aot.md) |
+| `--emit-aot` | path | The same compile, stopping at the object file |
+| `--runtime` | path | Runtime to link against, instead of searching (with `--build`) |
+| `--target` | triple | Target to compile for; defaults to this machine |
+| `--allow-refused` | flag | Emit even when a function could not be lowered; each becomes a throw |
+| `--pgo[=<profile>]` | path | Devirtualise from a call-site profile produced by `ASH_AOT_PROFILE_OUT` |
+| `--emit-optimized` | path | Run the AIR pipeline and write ordinary bytecode, then exit |
 
 ```bash
-cargo run -p ash_cli -- --mode hybrid path/to/program.hl
-cargo run -p ash_cli -- --mode hybrid --jit-tier cranelift --jit-log program.hl
+cargo run -p ash -- --mode hybrid path/to/program.hl
+cargo run -p ash -- --mode hybrid --jit-tier cranelift --jit-log program.hl
 ```
 
-### `ash` — whole-program JIT
+### Compiling ahead of time
 
-Compiles every function through LLVM before execution.
+`--build` compiles the whole program and links it into a native binary, which
+needs no bytecode, no interpreter and no JIT at run time.
 
 ```bash
-cargo run -p ash -- path/to/program.hl
+ash --build myprogram myprogram.hl
+./myprogram
 ```
+
+`--emit-aot` stops at the object file, and `--target` compiles for another
+machine. Executables are host-only, because linking one needs that platform's
+linker; a cross build asks for the object. [docs/aot.md](docs/aot.md) covers
+the runtime, the shard dial and the failure modes.
 
 ## Environment variables
 
@@ -172,9 +185,9 @@ cargo run -p ash -- path/to/program.hl
 binaries. It answers two separate questions:
 
 ```bash
-ASH_PROFILE=phases ash_cli --mode hybrid program.hl   # where startup and compilation go
-ASH_PROFILE=sample ash_cli --mode hybrid program.hl   # where the running program goes
-ASH_PROFILE=all    ash_cli --mode hybrid program.hl   # both
+ASH_PROFILE=phases ash --mode hybrid program.hl   # where startup and compilation go
+ASH_PROFILE=sample ash --mode hybrid program.hl   # where the running program goes
+ASH_PROFILE=all    ash --mode hybrid program.hl   # both
 ```
 
 **Phases** are nested named regions — decode, native resolution, each tier's
@@ -212,7 +225,7 @@ timings taken on a busy machine otherwise look like ordinary results.
 | Crate | Description |
 |-------|-------------|
 | **ash** | Core VM — bytecode decoder, LLVM and Cranelift backends, native library loading, symbol table |
-| **ash_cli** | Runner with mode and tier selection |
+| **ash** (`crates/ash_cli`) | The binary: runner, tier selection and AOT compiler |
 | **ash_interp** | Bytecode interpreter with NaN-boxed values, and the promotion hot path |
 | **air** | Intermediate representation — CFG, dominators, loops, SSA, and the optimization passes |
 | **ash_std** | HashLink standard library in Rust (cdylib, embedded into the binary) |
@@ -222,10 +235,10 @@ timings taken on a busy machine otherwise look like ordinary results.
 
 ```bash
 # One program through the interpreter
-cargo run -p ash_cli -- --mode interp crates/ash/test/tests/test_basic.hl
+cargo run -p ash -- --mode interp crates/ash/test/tests/test_basic.hl
 
 # The same program with promotion enabled
-cargo run -p ash_cli -- --mode hybrid --jit-threshold 1 crates/ash/test/tests/test_basic.hl
+cargo run -p ash -- --mode hybrid --jit-threshold 1 crates/ash/test/tests/test_basic.hl
 
 # Every program through the whole-program JIT
 for f in crates/ash/test/tests/*.hl; do cargo run -q -p ash -- "$f"; done
@@ -234,7 +247,7 @@ for f in crates/ash/test/tests/*.hl; do cargo run -q -p ash -- "$f"; done
 cargo test -p air
 
 # Interpreter/hybrid parity against a Haxe oracle
-cargo test -p ash_cli --test stdlib_matrix
+cargo test -p ash --test stdlib_matrix
 ```
 
 | Test | Covers |
@@ -294,7 +307,7 @@ ASH discovers `.hdll` files in the same directory as the `.hl` file.
 `examples/heaps_base2d/` runs a [Heaps](https://heaps.io/) Base2D application — window creation, GL context, shader compilation, the render loop and input events — through a relocatable macOS arm64 build of HashLink's SDL3 `sdl.hdll`:
 
 ```bash
-cargo run -p ash_cli -- --mode hybrid examples/heaps_base2d/bin/game.hl
+cargo run -p ash -- --mode hybrid examples/heaps_base2d/bin/game.hl
 ```
 
 See the [Heaps on Ash guide](https://rayzor-blade.github.io/ash/heaps.html) for matching haxelib versions, HDLL placement, Apple Silicon setup, and troubleshooting.

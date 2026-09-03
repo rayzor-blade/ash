@@ -75,7 +75,7 @@ fn main() -> Result<()> {
 
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
-    let mut jit = ash_core::llvm::module::JITModule::new_aot(context, p)?;
+    let mut jit = ash_core::llvm::module::JITModule::new_aot_for_target(context, p, &triple)?;
 
     let mut ok = 0usize;
     let mut failed: Vec<(usize, String)> = Vec::new();

@@ -50,9 +50,7 @@ use crate::hl::{
 };
 use crate::types::HLType;
 
-/// Machine word size. ash requires a 64-bit target (`HL_WSIZE` is 8 in
-/// `ash_std`, and NaN boxing packs a 48-bit payload into a `u64`).
-const HL_WSIZE: i32 = 8;
+const HOST_WORD_SIZE: i32 = std::mem::size_of::<usize>() as i32;
 
 /// Byte size of a value of `kind`, mirroring `T_SIZES` in `std/src/types.rs`.
 ///
@@ -60,6 +58,10 @@ const HL_WSIZE: i32 = 8;
 /// packed field's size comes from the referenced type's runtime object, which
 /// is why [`object_layout`] refuses to lay out types containing one.
 pub(crate) fn type_size(kind: hl_type_kind) -> i32 {
+    type_size_for(kind, HOST_WORD_SIZE)
+}
+
+pub(crate) fn type_size_for(kind: hl_type_kind, word_size: i32) -> i32 {
     match kind {
         hl_type_kind_HVOID => 0,
         hl_type_kind_HUI8 => 1,
@@ -70,7 +72,7 @@ pub(crate) fn type_size(kind: hl_type_kind) -> i32 {
         hl_type_kind_HF64 => 8,
         hl_type_kind_HBOOL => 2,
         hl_type_kind_HPACKED => 0,
-        _ => HL_WSIZE,
+        _ => word_size,
     }
 }
 
@@ -87,9 +89,13 @@ pub(crate) fn type_size(kind: hl_type_kind) -> i32 {
 /// copy of this table, which is the shape of bug that only shows up once the
 /// tiers disagree about one element kind on one program.
 pub fn array_elem_size(kind: hl_type_kind) -> i32 {
+    array_elem_size_for(kind, HOST_WORD_SIZE)
+}
+
+pub fn array_elem_size_for(kind: hl_type_kind, word_size: i32) -> i32 {
     match kind {
-        hl_type_kind_HVOID | hl_type_kind_HPACKED => HL_WSIZE,
-        _ => type_size(kind),
+        hl_type_kind_HVOID | hl_type_kind_HPACKED => word_size,
+        _ => type_size_for(kind, word_size),
     }
 }
 
@@ -129,7 +135,7 @@ pub fn field_name_hash(name: &str) -> i32 {
 
 /// Padding to insert before a field of `kind` at byte `size`, mirroring
 /// `hlp_pad_struct`.
-fn pad_struct(size: i32, kind: hl_type_kind) -> i32 {
+fn pad_struct(size: i32, kind: hl_type_kind, word_size: i32) -> i32 {
     let align: i32 = match kind {
         hl_type_kind_HVOID => return 0,
         hl_type_kind_HUI8 => 1,
@@ -140,7 +146,7 @@ fn pad_struct(size: i32, kind: hl_type_kind) -> i32 {
         hl_type_kind_HF64 => 8,
         // `align_of::<bool>()` is 1, even though HBOOL occupies 2 bytes.
         hl_type_kind_HBOOL => 1,
-        _ => HL_WSIZE,
+        _ => word_size,
     };
     (-(size as i64) & (align as i64 - 1)) as i32
 }
@@ -173,13 +179,30 @@ pub struct ObjLayout {
 /// `None` means "ask the runtime", never "no fields": callers must fall back to
 /// `hlp_get_obj_rt` rather than assuming an empty layout.
 pub fn object_layout(types: &[HLType], type_index: usize) -> Option<ObjLayout> {
+    object_layout_for(types, type_index, HOST_WORD_SIZE)
+}
+
+pub fn object_layout_for(
+    types: &[HLType],
+    type_index: usize,
+    word_size: i32,
+) -> Option<ObjLayout> {
     let mut memo = HashMap::new();
-    layout_memo(types, type_index, &mut memo, 0)
+    layout_memo(types, type_index, word_size, &mut memo, 0)
 }
 
 /// Byte offset of `field_index` within `type_index`, or `None` to fall back.
 pub fn field_offset(types: &[HLType], type_index: usize, field_index: usize) -> Option<i32> {
-    object_layout(types, type_index)?
+    field_offset_for(types, type_index, field_index, HOST_WORD_SIZE)
+}
+
+pub fn field_offset_for(
+    types: &[HLType],
+    type_index: usize,
+    field_index: usize,
+    word_size: i32,
+) -> Option<i32> {
+    object_layout_for(types, type_index, word_size)?
         .field_offsets
         .get(field_index)
         .copied()
@@ -194,7 +217,16 @@ pub fn field_offset_and_kind(
     type_index: usize,
     field_index: usize,
 ) -> Option<(i32, hl_type_kind)> {
-    let l = object_layout(types, type_index)?;
+    field_offset_and_kind_for(types, type_index, field_index, HOST_WORD_SIZE)
+}
+
+pub fn field_offset_and_kind_for(
+    types: &[HLType],
+    type_index: usize,
+    field_index: usize,
+    word_size: i32,
+) -> Option<(i32, hl_type_kind)> {
+    let l = object_layout_for(types, type_index, word_size)?;
     Some((
         *l.field_offsets.get(field_index)?,
         *l.field_kinds.get(field_index)?,
@@ -208,6 +240,7 @@ const MAX_SUPER_DEPTH: usize = 256;
 fn layout_memo(
     types: &[HLType],
     type_index: usize,
+    word_size: i32,
     memo: &mut HashMap<usize, Option<ObjLayout>>,
     depth: usize,
 ) -> Option<ObjLayout> {
@@ -217,7 +250,7 @@ fn layout_memo(
     if let Some(cached) = memo.get(&type_index) {
         return cached.clone();
     }
-    let computed = compute(types, type_index, memo, depth);
+    let computed = compute(types, type_index, word_size, memo, depth);
     memo.insert(type_index, computed.clone());
     computed
 }
@@ -225,6 +258,7 @@ fn layout_memo(
 fn compute(
     types: &[HLType],
     type_index: usize,
+    word_size: i32,
     memo: &mut HashMap<usize, Option<ObjLayout>>,
     depth: usize,
 ) -> Option<ObjLayout> {
@@ -237,7 +271,7 @@ fn compute(
     // A super whose layout is unknown makes this one unknown too: the child's
     // fields start where the parent's end.
     let parent = match obj.super_.as_ref() {
-        Some(s) => Some(layout_memo(types, s.0, memo, depth + 1)?),
+        Some(s) => Some(layout_memo(types, s.0, word_size, memo, depth + 1)?),
         None => None,
     };
 
@@ -249,7 +283,7 @@ fn compute(
             if t.kind == hl_type_kind_HSTRUCT {
                 0
             } else {
-                HL_WSIZE
+                word_size
             }
         }
     };
@@ -274,10 +308,10 @@ fn compute(
         if ft.kind == hl_type_kind_HPACKED {
             return None;
         }
-        size += pad_struct(size, ft.kind);
+        size += pad_struct(size, ft.kind, word_size);
         field_offsets.push(size);
         field_kinds.push(ft.kind);
-        let sz = type_size(ft.kind);
+        let sz = type_size_for(ft.kind, word_size);
         size += sz;
         if sz > largest_field as i32 {
             largest_field = sz as u8;
@@ -555,5 +589,16 @@ mod tests {
     fn varray_header_offsets() {
         assert_eq!(VARRAY_SIZE_OFFSET, 16);
         assert_eq!(VARRAY_DATA_OFFSET, 24);
+    }
+
+    #[test]
+    fn wasm32_object_layout_uses_four_byte_words() {
+        let mut types = base_types();
+        // header(4) | pointer @4 | i32 @8 | pad 4 | f64 @16
+        types.push(object("Wasm", None, &[("p", 3), ("i", 1), ("f", 0)]));
+        let l = object_layout_for(&types, 5, 4).unwrap();
+        assert_eq!(l.field_offsets, vec![4, 8, 16]);
+        assert_eq!(l.size, 24);
+        assert_eq!(array_elem_size_for(hl_type_kind_HOBJ, 4), 4);
     }
 }

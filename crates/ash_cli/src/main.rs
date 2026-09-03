@@ -514,7 +514,8 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         } else {
             ash_core::llvm::aot_link::Runtime::Static
         };
-        let linked = ash_core::llvm::aot_link::link_executable(&objects, exe, kind, runtime, quiet);
+        let linked =
+            ash_core::llvm::aot_link::link_executable(&objects, exe, &triple, kind, runtime, quiet);
         // The objects are scratch either way. Keeping them after a failure
         // only helps if someone is told they exist.
         if linked.is_err() {

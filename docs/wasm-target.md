@@ -49,10 +49,14 @@ Measured in September 2026, not inferred from the old spike:
 * **The runtime is a real static library.** `ash_std` now builds as `staticlib`
   as well as `cdylib` and `rlib`. The former fake-archive problem is gone.
 
-The permissively linked `bench_fib.wasm` imports 72 unresolved `hlp_*`,
-`hl_*`, and `_setjmp` functions. That is diagnostic evidence that codegen
-reached the runtime boundary, not a runnable binary: `tools/wasm/host.mjs`
-implements four host functions, not the Ash runtime.
+At the time, the permissively linked `bench_fib.wasm` imported 72 unresolved
+`hlp_*`, `hl_*` and `_setjmp` functions -- diagnostic evidence that codegen
+reached the runtime boundary, not a runnable binary. That is history now:
+`ash --build out.wasm --target wasm32-wasip1 prog.hl` emits and links in one
+command, against a real `libash_std.a` and a wasi sysroot, and the module it
+produces runs. The shell scripts and the four-function JavaScript host that
+stood in for a runtime have been deleted; `ash-wasm-run` is the host, and
+`crates/ash_cli/tests/wasm_target.rs` is the check.
 
 ## Target ABI: done, and checked
 

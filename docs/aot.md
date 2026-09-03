@@ -114,6 +114,41 @@ Command-line flags that matter here:
   emits re-checks its target at run time, so a stale profile costs a compare
   and never a wrong answer. The `=` is required.
 
+## WebAssembly
+
+```sh
+ash --build game.wasm --target wasm32-wasip1 game.hl
+```
+
+Same command, three different things to find, and each reports itself by
+name when it is missing.
+
+| what | where ash looks | how to say it yourself |
+|---|---|---|
+| the linker | `wasm-ld` on PATH, then the one beside the LLVM ash was built against, then `rust-lld` in a Rust toolchain | `ASH_WASM_LD` |
+| a libc | a wasi sysroot: the wasi-sdk, `/usr/local/share`, a `wasi-libc` package | `ASH_WASM_SYSROOT` |
+| the ash runtime | `libash_std.a` in a directory named for the triple beside `ash`, then the usual library directories | `--runtime`, or `ASH_RUNTIME` |
+
+Two things are worth knowing before the first build.
+
+**The sysroot must have `libsetjmp.a`.** An ash program's exception handling
+is `setjmp`, so a libc without it links until the first `try`. Rust's bundled
+wasi libc is one of these, and ash says so rather than using it silently.
+
+**The result is a library, not a command.** It exports `main` and
+`ash_module_init` and imports what only a host can answer: WASI, plus fiber
+suspension, plus sockets. A wasm module cannot switch its own stacks -- the
+call frames are the engine's, not the program's -- so an ash program running
+there is suspended by whoever embeds it. Whatever embeds the module supplies
+those; the import contract is written down in
+[`wasm-target.md`](wasm-target.md).
+
+Build the runtime for the target the same way as any other:
+
+```sh
+cargo build --release -p ash_std --target wasm32-wasip1
+```
+
 ## Reading the emitter's output
 
 ```

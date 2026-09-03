@@ -312,15 +312,291 @@ fn stage_runtime(runtime: &Path, beside: &Path, quiet: bool) -> Result<()> {
 /// With [`Runtime::Shared`] the runtime is also staged beside `out`, so the
 /// result runs from its own directory with the HDLLs next to it and nothing
 /// else to arrange.
+
+/// Whether this triple wants the wasm linker rather than a C driver.
+pub fn is_wasm_triple(triple: &str) -> bool {
+    let lower = triple.to_ascii_lowercase();
+    lower.starts_with("wasm32") || lower.starts_with("wasm64")
+}
+
+/// A wasm link needs three things a native link does not, and each can be
+/// missing on its own: a linker that speaks wasm, a libc built for it, and an
+/// ash runtime compiled for it. They are looked up separately so the error
+/// says which one is absent.
+struct WasmTools {
+    linker: PathBuf,
+    /// `rust-lld` is a multi-flavour driver and has to be told which one.
+    leading: Vec<String>,
+    /// The directory holding `libc.a` and `libsetjmp.a`.
+    sysroot_lib: PathBuf,
+}
+
+fn first_program(candidates: Vec<(PathBuf, Vec<String>)>) -> Option<(PathBuf, Vec<String>)> {
+    for (program, leading) in candidates {
+        // An absolute path is checked by existence; a bare name has to be run,
+        // because it is the PATH lookup that answers.
+        let ok = if program.is_absolute() {
+            program.is_file()
+        } else {
+            Command::new(&program)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if ok {
+            return Some((program, leading));
+        }
+    }
+    None
+}
+
+/// The wasm linker, in the order a machine is likely to have one.
+fn wasm_linker() -> Result<(PathBuf, Vec<String>)> {
+    let mut candidates: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    if let Some(explicit) = std::env::var_os("ASH_WASM_LD") {
+        candidates.push((PathBuf::from(explicit), Vec::new()));
+    }
+    candidates.push((PathBuf::from("wasm-ld"), Vec::new()));
+    candidates.push((PathBuf::from("wasm-ld-21"), Vec::new()));
+    // The one that came with the LLVM this ash was built against.
+    if let Some(prefix) = option_env!("LLVM_SYS_211_PREFIX") {
+        candidates.push((PathBuf::from(prefix).join("bin/wasm-ld"), Vec::new()));
+    }
+    // Rust ships a wasm-capable lld with every toolchain, under a name that
+    // needs to be told which linker to be.
+    if let Some(sysroot) = rustc_sysroot() {
+        let host = std::env::consts::ARCH;
+        if let Ok(entries) = std::fs::read_dir(sysroot.join("lib/rustlib")) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.contains(host) {
+                    continue;
+                }
+                candidates.push((
+                    entry.path().join("bin/rust-lld"),
+                    vec!["-flavor".into(), "wasm".into()],
+                ));
+            }
+        }
+    }
+    first_program(candidates).ok_or_else(|| {
+        anyhow!(
+            "no wasm linker found. Install one (`wasm-ld`, which comes with LLVM, \
+             or the wasi-sdk), or name it with ASH_WASM_LD"
+        )
+    })
+}
+
+fn rustc_sysroot() -> Option<PathBuf> {
+    let out = Command::new("rustc")
+        .arg("--print")
+        .arg("sysroot")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(PathBuf::from(
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
+/// The directory holding a libc for the target.
+///
+/// A wasi sysroot is what supplies it, and `libsetjmp.a` with it -- which
+/// matters more than it looks, because an ash program's exception handling
+/// IS setjmp. Rust's own bundled libc is offered last and reported for what
+/// it is: it has no `libsetjmp.a`, so a program that throws will not link.
+fn wasm_sysroot_lib(triple: &str) -> Result<PathBuf> {
+    let arch_dir = if triple.to_ascii_lowercase().contains("wasip2") {
+        "wasm32-wasip2"
+    } else {
+        "wasm32-wasip1"
+    };
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(explicit) = std::env::var_os("ASH_WASM_SYSROOT") {
+        roots.push(PathBuf::from(explicit));
+    }
+    for base in [
+        "/opt/wasi-sdk/share/wasi-sysroot",
+        "/usr/local/share/wasi-sysroot",
+        "/usr/share/wasi-sysroot",
+        "/opt/homebrew/opt/wasi-libc/share/wasi-sysroot",
+        "/usr/local/opt/wasi-libc/share/wasi-sysroot",
+    ] {
+        roots.push(PathBuf::from(base));
+    }
+
+    let mut without_setjmp: Option<PathBuf> = None;
+    for root in roots {
+        for lib in [root.join("lib").join(arch_dir), root.join("lib"), root] {
+            if !lib.join("libc.a").is_file() {
+                continue;
+            }
+            if lib.join("libsetjmp.a").is_file() {
+                return Ok(lib);
+            }
+            without_setjmp.get_or_insert(lib);
+        }
+    }
+    // Rust's bundled copy, which is a libc but not a whole sysroot.
+    if let Some(sysroot) = rustc_sysroot() {
+        let lib = sysroot
+            .join("lib/rustlib")
+            .join(arch_dir)
+            .join("lib/self-contained");
+        if lib.join("libc.a").is_file() {
+            if lib.join("libsetjmp.a").is_file() {
+                return Ok(lib);
+            }
+            without_setjmp.get_or_insert(lib);
+        }
+    }
+
+    match without_setjmp {
+        Some(lib) => bail!(
+            "the only libc found for {triple} is {}, which has no libsetjmp.a. \
+             An ash program's exception handling is setjmp, so it would fail to \
+             link. Install a full wasi sysroot (the wasi-sdk, or a wasi-libc \
+             package) and point ASH_WASM_SYSROOT at it",
+            lib.display()
+        ),
+        None => bail!(
+            "no libc found for {triple}. Install a wasi sysroot (the wasi-sdk, or \
+             a wasi-libc package) and point ASH_WASM_SYSROOT at it"
+        ),
+    }
+}
+
+/// The ash runtime built for wasm.
+///
+/// Same places as the native one, plus a subdirectory named for the target,
+/// because a machine that builds for both has two files with the same name.
+pub fn find_wasm_runtime(triple: &str) -> Result<PathBuf> {
+    if let Some(explicit) = std::env::var_os("ASH_RUNTIME") {
+        let p = PathBuf::from(explicit);
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!("ASH_RUNTIME points at {}, which is not a file", p.display());
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.join(triple));
+            roots.push(dir.to_path_buf());
+            roots.push(dir.join("../lib").join(triple));
+            roots.push(dir.join("../lib"));
+        }
+    }
+    roots.push(PathBuf::from("/usr/local/lib").join(triple));
+    roots.push(PathBuf::from("/usr/lib").join(triple));
+    newest(roots.into_iter().map(|r| r.join("libash_std.a"))).ok_or_else(|| {
+        anyhow!(
+            "no libash_std.a for {triple} found beside {}, or in the usual library \
+             directories. Build one with `cargo build --release -p ash_std --target \
+             {triple}` and put it in a directory named {triple} beside ash, or name \
+             it with ASH_RUNTIME",
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.display().to_string()))
+                .unwrap_or_else(|| ".".to_string())
+        )
+    })
+}
+
+/// Link a wasm module.
+///
+/// The result is a library rather than a command: it exports `main` and
+/// `ash_module_init` and imports what only a host can answer, because a wasm
+/// ash program cannot start itself -- it has no fibers until a host lends it
+/// suspension, and no sockets until a host lends it those. `ash-wasm-run` is
+/// one such host; a page is the other.
+fn link_wasm_module(
+    objects: &[PathBuf],
+    out: &Path,
+    triple: &str,
+    kind: Runtime,
+    runtime: Option<&Path>,
+    quiet: bool,
+) -> Result<()> {
+    // An HDLL is a dynamic library, and a wasm module cannot load one: there
+    // is no dlopen in the sandbox and no second module to load. A program
+    // that wants one links fine and fails when it asks, so say it here.
+    if kind == Runtime::Shared {
+        bail!(
+            "this program loads HDLLs, and {triple} has no dynamic loading -- \
+             nothing can supply them at run time. Build it for a native target, \
+             or build a version whose natives are compiled in"
+        );
+    }
+    let runtime = match runtime {
+        Some(p) if p.is_file() => p.to_path_buf(),
+        Some(p) => bail!("runtime {} does not exist", p.display()),
+        None => find_wasm_runtime(triple)?,
+    };
+    let (linker, leading) = wasm_linker()?;
+    let sysroot_lib = wasm_sysroot_lib(triple)?;
+    let tools = WasmTools {
+        linker,
+        leading,
+        sysroot_lib,
+    };
+
+    crate::progress::begin("linking", 0);
+    let mut cmd = Command::new(&tools.linker);
+    cmd.args(&tools.leading)
+        .arg("--no-entry")
+        .arg("--export-dynamic")
+        .arg("-L")
+        .arg(&tools.sysroot_lib)
+        .arg("-o")
+        .arg(out)
+        .args(objects)
+        .arg(&runtime)
+        // After the objects that reference them: an archive is searched for
+        // what is undefined at the point it appears.
+        .arg("-lc")
+        .arg("-lsetjmp");
+    for extra in std::env::var("ASH_LINK_ARGS")
+        .unwrap_or_default()
+        .split_whitespace()
+    {
+        cmd.arg(extra);
+    }
+    run(&mut cmd, &format!("{} (link)", tools.linker.display()))?;
+
+    if !quiet {
+        let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        eprintln!(
+            "[ash] linked {} ({bytes} bytes) against {}",
+            out.display(),
+            runtime.display()
+        );
+        crate::progress::note(
+            "[ash] this is a wasm module, not a command: it exports `main` and \
+             `ash_module_init`, and imports WASI plus the two things a sandbox \
+             cannot do for itself, suspending a fiber and opening a socket. \
+             Whatever embeds it supplies those.",
+        );
+    }
+    Ok(())
+}
+
 pub fn link_executable(
     objects: &[PathBuf],
     out: &Path,
+    triple: &str,
     kind: Runtime,
     runtime: Option<&Path>,
     quiet: bool,
 ) -> Result<()> {
     if objects.is_empty() {
         bail!("nothing to link");
+    }
+    if is_wasm_triple(triple) {
+        return link_wasm_module(objects, out, triple, kind, runtime, quiet);
     }
     let runtime = match (runtime, kind) {
         (Some(p), _) if p.is_file() => p.to_path_buf(),

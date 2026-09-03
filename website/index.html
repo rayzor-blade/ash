@@ -606,18 +606,18 @@
               <button class="copy-btn" data-copy="ash --build mygame mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Executables are built for the machine you build on.</strong> Linking one needs that platform's linker and system libraries, so <code>--build</code> is host-only. To compile for another target, ask for the object file and give the triple: any target LLVM supports with 32- or 64-bit pointers is accepted, and the layouts, calls and data are emitted for that target rather than for the host.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Executables are built for the machine you build on.</strong> Linking one needs that platform's linker and system libraries, so <code>--build</code> produces a native binary only for the host. Any target LLVM supports with 32- or 64-bit pointers can still be <em>emitted</em> with <code>--emit-aot</code> and a triple, and the layouts, calls and data come out for that target rather than for the host. WebAssembly is linked as well as emitted, because its linker is not the host's.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
               <div style="overflow-x:auto">
-                  <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --emit-aot mygame.o --target wasm32-wasip1 mygame.hl</span></div>
+                  <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --build mygame.wasm --target wasm32-wasip1 mygame.hl</span></div>
               </div>
-              <button class="copy-btn" data-copy="ash --emit-aot mygame.o --target wasm32-wasip1 mygame.hl">Copy</button>
+              <button class="copy-btn" data-copy="ash --build mygame.wasm --target wasm32-wasip1 mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">WebAssembly is the cross-target being brought up. The object validates and links into a module with its function table and indirect calls intact; the runtime it imports is not ported yet, so the module does not run. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The plan and its measurements</a>.
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">WebAssembly runs. The standard library is compiled for it, one command emits and links the module, and the stdlib suite produces output identical to the native build, exceptions included. What the module still asks a host for is the part a sandbox genuinely cannot do alone: suspending a fiber, and opening a socket. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The plan and its measurements</a>.
           </p>
         </div>
       </div>

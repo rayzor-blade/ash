@@ -951,3 +951,61 @@ mod data_size_tests {
         }
     }
 }
+
+/// Build a `vclosure` without knowing the target's word size.
+///
+/// `hl.h` gates `stackCount` on `HL_64`, so a struct literal that names it
+/// compiles for a 64-bit target and no other. Every construction site goes
+/// through here instead, and this is the one place that knows.
+#[inline]
+pub fn vclosure_new(
+    t: *mut crate::hl::hl_type,
+    fun: *mut std::ffi::c_void,
+    has_value: i32,
+    value: *mut std::ffi::c_void,
+) -> crate::hl::vclosure {
+    vclosure_new_with_stack(t, fun, has_value, value, 0)
+}
+
+/// As [`vclosure_new`], for the one caller that has a real `stackCount`.
+///
+/// On a 32-bit target the field does not exist and the count is dropped. That
+/// is not a loss: the field tells the collector how many captured values sit
+/// on the closure's stack, and a 32-bit HashLink build never recorded it,
+/// because its closures do not carry them.
+#[inline]
+pub fn vclosure_new_with_stack(
+    t: *mut crate::hl::hl_type,
+    fun: *mut std::ffi::c_void,
+    has_value: i32,
+    value: *mut std::ffi::c_void,
+    stack_count: i32,
+) -> crate::hl::vclosure {
+    let _ = stack_count;
+    crate::hl::vclosure {
+        t,
+        fun,
+        hasValue: has_value,
+        #[cfg(target_pointer_width = "64")]
+        stackCount: stack_count,
+        value,
+    }
+}
+
+/// Build a `vdynamic` without knowing the target's word size.
+///
+/// The 32-bit layout carries a `__pad` that exists only to align the value
+/// union on 16 bytes for a double; the 64-bit one does not have it. Same
+/// reasoning as [`vclosure_new`].
+#[inline]
+pub fn vdynamic_new(
+    t: *mut crate::hl::hl_type,
+    v: crate::hl::vdynamic__bindgen_ty_1,
+) -> crate::hl::vdynamic {
+    crate::hl::vdynamic {
+        t,
+        #[cfg(target_pointer_width = "32")]
+        __pad: 0,
+        v,
+    }
+}

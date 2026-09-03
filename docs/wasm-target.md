@@ -171,9 +171,49 @@ parameter.
 
 ### Phase 2 — build a single-threaded WASI runtime
 
-**Unblocked, and the work is now visible.** `cargo check -p ash_std --target
-wasm32-wasip1` reaches the crate's own code. Two gates were in the way and are
-gone:
+**DONE, except for setjmp.** `ash_std` compiles for `wasm32-wasip1`, builds as
+an archive, and a real program links against it:
+
+```
+cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
+```
+
+`bench_fib` linked against that archive is a 3.2 MB module with 3,275
+functions, a 983-entry table and 2,458 indirect call sites, and `ash wasm`
+reports **27 imports, 25 of them WASI**. The two that are not are `_setjmp`
+and `longjmp`, and they are the whole of what is left.
+
+WASI's `libsetjmp.a` does not define those names. It defines `__wasm_setjmp`,
+`__wasm_setjmp_test` and `__wasm_longjmp` -- the lowered forms LLVM's
+WebAssembly SJLJ pass rewrites a `setjmp` call into. So resolving them is not
+a linker argument but a codegen mode, and it has to be on for BOTH halves:
+`-Cllvm-args=-wasm-enable-sjlj` when rustc builds the runtime, and the same
+option on the target machine ash emits the program with. That is phase 4's
+first task rather than phase 2's last, and it is now the only thing between
+here and a module that runs.
+
+How the 103 errors went, for anyone doing this again on another target:
+
+| cause | count | what it was |
+|---|---|---|
+| two-way `cfg` with no third arm | 12, plus 54 cascading | a function written for unix and windows evaluates to `()` anywhere else; `sys.rs` failing that way took `socket.rs` with it |
+| sockets | 58 | one stub module, since a sandbox has none |
+| 32-bit object layout | 18 | `stackCount` exists only on 64-bit, `vdynamic` gains `__pad` on 32-bit; now behind two constructors in `types.rs` so one place knows |
+| a 4 GB constant | 1 | `HEAP_MAX_CEILING` does not fit a 32-bit `usize` |
+| the heap | 1 | no `mmap`; a bounded non-reclaiming region from the allocator instead |
+| NaN-boxed word scanning | 6 | the tags are 64-bit patterns typed `usize` |
+| dynamic loading, subprocesses, threads, longjmp | 7 | refusals |
+
+One of those deserves its own line, because it is a correctness gap rather
+than a refusal: **`ash_static_call` cannot work on wasm.** The native
+implementations marshal arguments into registers and jump; wasm has no
+registers and its indirect calls name a signature the validator checks, so a
+call whose shape is only known at run time cannot be assembled. The compiler
+knows every signature it emits, so the answer is a trampoline per signature
+and a lookup here. Until then reflection and `Reflect.callMethod` return null
+on this target.
+
+The two gates that were in the way before any of this are also gone:
 
 * bindgen had no C library to parse `hl.h` against. It now takes a WASI
   sysroot -- `WASI_SYSROOT`, else the usual install paths (`brew install
@@ -185,7 +225,8 @@ gone:
   It is now native-only, and `std/src/fiber_host.rs` is the wasm backend --
   same four operations, with the one that must suspend routed to the host.
 
-What remains is 114 compiler errors, and they are not evenly spread:
+What that unblocked, for the record, was 114 compiler errors spread like
+this:
 
 | file | errors | what they are |
 |---|---|---|

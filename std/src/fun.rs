@@ -37,6 +37,32 @@ pub unsafe extern "C" fn empty_static_call(
     ptr::null_mut()
 }
 
+/// Dynamic calls on a target with no registers to marshal into.
+///
+/// The native implementations place arguments in the registers a C call
+/// expects and jump. WebAssembly has neither: an indirect call names a
+/// signature the validator checks, so there is no way to assemble a call
+/// whose shape is only known at run time.
+///
+/// The real answer is for the compiler to emit one trampoline per distinct
+/// signature -- it knows them all -- and for this to become a lookup. Until
+/// then a dynamic call fails here rather than silently returning something,
+/// which costs reflection and `Reflect.callMethod`; see docs/wasm-target.md.
+///
+/// # Safety
+/// Mirrors the native signature; touches none of its arguments.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[no_mangle]
+pub unsafe extern "C" fn ash_static_call(
+    fun: *mut c_void,
+    t: *mut hl_type,
+    args: *mut *mut c_void,
+    out: *mut vdynamic,
+) -> *mut c_void {
+    let _ = (fun, t, args, out);
+    std::ptr::null_mut()
+}
+
 /// Dynamic function call for aarch64 — marshals args according to function type
 /// and calls the function pointer. Used by hlp_call_method for dynamic dispatch.
 #[cfg(target_arch = "aarch64")]
@@ -599,13 +625,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
 
     ptr::write(
         c_ptr,
-        vclosure {
-            t,
-            fun: fvalue,
-            hasValue: 0,
-            value: ptr::null_mut(),
-            stackCount: 0,
-        },
+        crate::types::vclosure_new_with_stack(t, fvalue, 0, ptr::null_mut(), 0),
     );
 
     c_ptr
@@ -642,13 +662,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
 
     ptr::write(
         c_ptr,
-        vclosure {
-            t,
-            fun,
-            hasValue: 1,
-            value: ptr,
-            stackCount: 0,
-        },
+        crate::types::vclosure_new_with_stack(t, fun, 1, ptr, 0),
     );
 
     c_ptr

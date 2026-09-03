@@ -985,13 +985,7 @@ pub unsafe extern "C" fn hlp_jit_closure_runner(
 
     // hlp_call_method expects a closure without an already-bound value and
     // receives the receiver as the first dynamic argument instead.
-    let call_closure = vclosure {
-        t: call_type,
-        fun: (*closure).fun,
-        hasValue: 0,
-        stackCount: 0,
-        value: ptr::null_mut(),
-    };
+    let call_closure = crate::types::vclosure_new(call_type, (*closure).fun, 0, ptr::null_mut());
     crate::fun::hlp_call_method(&call_closure as *const vclosure as *mut vdynamic, array)
 }
 

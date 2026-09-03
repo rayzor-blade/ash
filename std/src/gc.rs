@@ -41,7 +41,14 @@ const MARK_WORDS: usize = LINES_PER_BLOCK / 64;
 /// costs 31MB RSS and 4GB costs 60MB, with startup time unchanged at both.
 /// The ceiling is what bounds that tax on a large machine.
 const HEAP_MAX_FLOOR: usize = 512 * 1024 * 1024;
+/// Four gigabytes, where the address space has room for it. A 32-bit target
+/// cannot even name that number in a `usize`, and wasm's memory is bounded
+/// well below it anyway, so the ceiling there is what one linear memory can
+/// actually reach.
+#[cfg(target_pointer_width = "64")]
 const HEAP_MAX_CEILING: usize = 4 * 1024 * 1024 * 1024;
+#[cfg(not(target_pointer_width = "64"))]
+const HEAP_MAX_CEILING: usize = 1024 * 1024 * 1024;
 /// Share of usable RAM the heap cap defaults to.
 const HEAP_MAX_SHARE: usize = 4;
 /// First collection fires after this many bytes allocated (wren_lift
@@ -197,6 +204,12 @@ const TLAB_MAX_OBJ: usize = LINE_SIZE;
 /// difference could not produce a false positive.)
 #[inline(always)]
 fn thread_self_fast() -> u64 {
+    // One agent, one identity. A target with no threads still has to answer,
+    // and a constant is the honest answer rather than a syscall that lies.
+    #[cfg(not(any(unix, windows)))]
+    {
+        1
+    }
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     unsafe {
         let tpidrro: u64;
@@ -1413,6 +1426,26 @@ impl HeapMemory {
     }
 }
 
+impl HeapMemory {
+    /// The heap on a target whose memory is one linear address space.
+    ///
+    /// There is no `mmap` to reserve address space and no way to hand pages
+    /// back, so this asks the allocator for the whole region up front and
+    /// keeps it. That is the bounded, non-reclaiming heap the wasm plan calls
+    /// for: it separates the ABI and startup work from root discovery, and it
+    /// is honest about being a first step rather than a collector.
+    #[cfg(not(any(unix, windows)))]
+    fn new(len: usize) -> Self {
+        let layout = std::alloc::Layout::from_size_align(len, 16)
+            .expect("heap layout");
+        // Zeroed, because the collector reads a block's header before
+        // anything has written one.
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
+        assert!(!ptr.is_null(), "could not reserve {len} bytes for the heap");
+        Self { base: ptr, len }
+    }
+}
+
 impl Drop for HeapMemory {
     fn drop(&mut self) {
         #[cfg(unix)]
@@ -1426,6 +1459,11 @@ impl Drop for HeapMemory {
         #[cfg(windows)]
         unsafe {
             VirtualFree(self.base as *mut c_void, 0, MEM_RELEASE);
+        }
+        #[cfg(not(any(unix, windows)))]
+        unsafe {
+            let layout = std::alloc::Layout::from_size_align_unchecked(self.len, 16);
+            std::alloc::dealloc(self.base, layout);
         }
     }
 }
@@ -1490,6 +1528,10 @@ fn gc_thread_token() -> u64 {
 
 #[allow(dead_code)]
 fn gc_thread_token_unused() -> u64 {
+    #[cfg(not(any(unix, windows)))]
+    {
+        1
+    }
     #[cfg(unix)]
     unsafe {
         libc::pthread_self() as u64
@@ -2368,13 +2410,7 @@ impl ImmixAllocator {
         // Initialize the closure fields
         ptr::write(
             closure,
-            vclosure {
-                t,
-                fun,
-                hasValue: 1,
-                stackCount: stack,
-                value: ptr,
-            },
+            crate::types::vclosure_new_with_stack(t, fun, 1, ptr, stack),
         );
 
         closure
@@ -2539,11 +2575,19 @@ impl ImmixAllocator {
             consider(raw, self, &mut newly_marked);
             // Mirrors ash_interp::values: NAN_TAG 0x7FF8...<<48, 3-bit tag in
             // bits 48-50, payload in bits 0-47.
-            const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
-            const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
-            const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
-            if raw & NAN_MASK == NAN_TAG {
-                consider(raw & PAYLOAD_MASK, self, &mut newly_marked);
+            // A boxed value is a 64-bit word, so this decoding only means
+            // something where a machine word is one. On a 32-bit target the
+            // pattern does not fit a `usize` and the scan below would be
+            // reading half a value; roots there have to be explicit rather
+            // than found by scanning (docs/wasm-target.md, phase 4).
+            #[cfg(target_pointer_width = "64")]
+            {
+                const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
+                const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
+                const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+                if raw & NAN_MASK == NAN_TAG {
+                    consider(raw & PAYLOAD_MASK, self, &mut newly_marked);
+                }
             }
             addr += 8;
         }
@@ -3295,15 +3339,20 @@ impl ImmixAllocator {
                             // the marker decodes them (conservative_scan_range),
                             // so the auditor must too or it is blind to every
                             // register-held root.
-                            const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
-                            const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
-                            const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
-                            if w & NAN_MASK == NAN_TAG {
-                                let d = w & PAYLOAD_MASK;
-                                if (lo..hi).contains(&d) {
-                                    eprintln!(
-                                        "[gc-audit] FREED {lo:#x}..{hi:#x} but {src} @{p:#x} holds boxed {d:#x}"
-                                    );
+                            // Same 64-bit-word assumption as the marker
+                            // above, and the same reason.
+                            #[cfg(target_pointer_width = "64")]
+                            {
+                                const NAN_TAG: usize = 0x7FF8_0000_0000_0000;
+                                const NAN_MASK: usize = 0xFFF8_0000_0000_0000;
+                                const PAYLOAD_MASK: usize = 0x0000_FFFF_FFFF_FFFF;
+                                if w & NAN_MASK == NAN_TAG {
+                                    let d = w & PAYLOAD_MASK;
+                                    if (lo..hi).contains(&d) {
+                                        eprintln!(
+                                            "[gc-audit] FREED {lo:#x}..{hi:#x} but {src} @{p:#x} holds boxed {d:#x}"
+                                        );
+                                    }
                                 }
                             }
                             p += 8;

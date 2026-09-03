@@ -826,6 +826,12 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
     if let Some(handle) = crate::fiber::current_handle() {
         return handle;
     }
+    // One agent, and the identity has only to be stable and non-null: it is
+    // compared, never dereferenced.
+    #[cfg(not(any(unix, windows)))]
+    {
+        1 as *mut c_void
+    }
     #[cfg(unix)]
     {
         libc::pthread_self() as usize as *mut c_void
@@ -1081,6 +1087,10 @@ pub(crate) fn thread_info() -> *mut ThreadInfo {
 
 /// This thread's OS id, in the form `hlp_thread_current` hands out.
 fn current_os_thread_id() -> usize {
+    #[cfg(not(any(unix, windows)))]
+    {
+        1
+    }
     #[cfg(unix)]
     {
         unsafe { libc::pthread_self() as usize }

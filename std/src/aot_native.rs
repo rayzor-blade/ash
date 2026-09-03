@@ -42,6 +42,25 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// A sandbox loads no libraries. Null is what a failed `dlopen` returns, and
+/// the caller already reports the primitive as unavailable on that.
+///
+/// # Safety
+/// Mirrors the native signature; opens nothing.
+#[cfg(not(any(unix, windows)))]
+unsafe fn dlopen_path(path: &std::path::Path) -> *mut c_void {
+    let _ = path;
+    std::ptr::null_mut()
+}
+
+/// # Safety
+/// Mirrors the native signature; resolves nothing.
+#[cfg(not(any(unix, windows)))]
+unsafe fn dlsym_handle(handle: *mut c_void, symbol: &str) -> *mut c_void {
+    let _ = (handle, symbol);
+    std::ptr::null_mut()
+}
+
 #[cfg(unix)]
 unsafe fn dlopen_path(path: &std::path::Path) -> *mut c_void {
     let Ok(c) = CString::new(path.to_string_lossy().as_bytes()) else {

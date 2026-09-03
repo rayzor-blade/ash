@@ -61,6 +61,12 @@ unsafe fn pchar_to_os(p: *const vbyte) -> Option<OsString> {
     {
         Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
     }
+    // WASI paths are UTF-8 by definition, so the lossy conversion is lossless
+    // for anything the host will accept.
+    #[cfg(not(any(unix, windows)))]
+    {
+        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+    }
 }
 
 unsafe fn pchar_to_path(p: *const vbyte) -> Option<PathBuf> {
@@ -75,6 +81,10 @@ fn os_to_pbytes(s: &OsStr) -> Vec<u8> {
         s.as_bytes().to_vec()
     }
     #[cfg(windows)]
+    {
+        s.to_string_lossy().into_owned().into_bytes()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         s.to_string_lossy().into_owned().into_bytes()
     }
@@ -315,6 +325,12 @@ pub extern "C" fn hlp_sys_cpu_time() -> f64 {
         }
         (filetime_ticks(&kernel) + filetime_ticks(&user)) as f64 * 1e-7
     }
+    // WASI preview 1 has no process CPU clock. Zero is what the unix arm
+    // reports when `getrusage` fails, so a caller already handles it.
+    #[cfg(not(any(unix, windows)))]
+    {
+        0.0
+    }
 }
 
 /// Current thread's CPU time.
@@ -351,6 +367,12 @@ pub extern "C" fn hlp_sys_thread_cpu_time() -> f64 {
             return 0.0;
         }
         filetime_ticks(&user) as f64 * 1e-7
+    }
+    // No per-thread CPU clock either, and on a single-agent target there is
+    // no other thread to attribute time to.
+    #[cfg(not(any(unix, windows)))]
+    {
+        0.0
     }
 }
 
@@ -406,6 +428,13 @@ pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
     {
         !libc::setlocale(libc::LC_TIME, name.as_ptr()).is_null()
     }
+    // No C locale to set: nothing here consults one, and no hdll can be
+    // loaded to care.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = l;
+        false
+    }
 }
 
 // ============================================================================
@@ -460,6 +489,13 @@ pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte
         }
         let wval = wide(pchar_slice(value));
         SetEnvironmentVariableW(wkey.as_ptr(), wval.as_ptr()) != 0
+    }
+    // WASI hands the environment to the module at startup and offers no way
+    // to change it. False is the same answer `setenv` failing gives.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (name, value);
+        false
     }
 }
 
@@ -628,6 +664,13 @@ pub unsafe extern "C" fn hlp_sys_create_dir(path: *const vbyte, mode: i32) -> bo
         let _ = mode;
         std::fs::create_dir(p).is_ok()
     }
+    // WASI has directories, through a preopened capability rather than a
+    // path namespace, and no mode bits to set on one.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = mode;
+        std::fs::create_dir(p).is_ok()
+    }
 }
 
 #[no_mangle]
@@ -765,6 +808,33 @@ pub unsafe extern "C" fn hlp_sys_stat(path: *const vbyte) -> *mut varray {
         return std::ptr::null_mut();
     }
     let slots = hl_aptr::<i32>(a);
+    // WASI reports a file's size and times and nothing else: no owner, no
+    // device, no inode, and no mode bits worth reporting. The shape stays the
+    // same so a caller indexes it identically; the absent fields are zero,
+    // which is what the Windows arm does for the ones Windows lacks too.
+    #[cfg(not(any(unix, windows)))]
+    let fields: [i32; 11] = {
+        let secs = |t: std::io::Result<std::time::SystemTime>| -> i32 {
+            t.ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i32)
+                .unwrap_or(0)
+        };
+        [
+            0,
+            0,
+            secs(md.accessed()),
+            secs(md.modified()),
+            secs(md.created()),
+            md.len() as i32,
+            0,
+            0,
+            1,
+            0,
+            if md.is_dir() { 0o040_755 } else { 0o100_644 },
+        ]
+    };
+
     for (i, v) in fields.iter().enumerate() {
         *slots.add(i) = *v;
     }
@@ -835,6 +905,13 @@ pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
             Err(_) => -1,
         }
     }
+    // No subprocesses in a sandbox. -1 is what the unix arm returns when the
+    // shell cannot be spawned, so a caller already has a path for it.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = cmdline;
+        -1
+    }
 }
 
 #[cfg(windows)]
@@ -877,6 +954,13 @@ pub unsafe extern "C" fn hlp_sys_get_char(echo: bool) -> i32 {
         } else {
             _getch() as i32
         }
+    }
+    // Terminal control is not something a sandbox has. -1 is end of input,
+    // which is what a caller reading a closed stdin already expects.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = echo;
+        -1
     }
 }
 

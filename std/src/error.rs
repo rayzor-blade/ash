@@ -753,8 +753,19 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     // setjmp.h declares only `longjmp`, so the generated bindings differ by
     // exactly this underscore per platform. Windows longjmp never touches
     // signal masks, so the two calls are the same operation.
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_family = "wasm")))]
     hl::_longjmp(buf_copy.as_mut_ptr(), 1);
+    // WASI declares both spellings, and bindgen emits neither: `setjmp` there
+    // is exception handling rather than a function, so the header's
+    // declarations do not survive into the bindings. The symbol is real and
+    // `libsetjmp` provides it, so name it directly.
+    #[cfg(all(not(windows), target_family = "wasm"))]
+    {
+        extern "C" {
+            fn longjmp(env: *mut hl::__jmp_buf_tag, val: i32) -> !;
+        }
+        longjmp(buf_copy.as_mut_ptr(), 1);
+    }
     #[cfg(windows)]
     hl::longjmp(buf_copy.as_mut_ptr(), 1);
 }

@@ -1330,13 +1330,7 @@ unsafe fn get_field_via_stub(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
         return ptr::null_mut();
     };
 
-    let mut cl = vclosure {
-        t: (*f).t,
-        fun: fptr,
-        hasValue: 1,
-        stackCount: 0,
-        value: d as *mut c_void,
-    };
+    let mut cl = crate::types::vclosure_new((*f).t, fptr, 1, d as *mut c_void);
     let mut hash = hfield;
     let boxed_hash =
         crate::cast::hlp_make_dyn((&mut hash as *mut i32).cast(), crate::types::hlt_i32());
@@ -2027,13 +2021,7 @@ unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynam
             return method_fn(this);
         }
         if let Some(runner) = crate::fiber::closure_runner() {
-            let mut cl = vclosure {
-                t: crate::types::hlt_dyn(),
-                fun,
-                hasValue: 1,
-                stackCount: 0,
-                value: this as *mut c_void,
-            };
+            let mut cl = crate::types::vclosure_new_with_stack(crate::types::hlt_dyn(), fun, 1, this as *mut c_void, 0);
             return runner(&mut cl, ptr::null_mut(), 0);
         }
         return ptr::null_mut();
@@ -2185,13 +2173,7 @@ pub(crate) unsafe fn cast_via_stub_castfun(
     // __cast(this, toType) -> Dynamic. `this` rides in the closure, the
     // target type is the single argument; hl_type* is passed as the opaque
     // pointer the callee expects.
-    let mut cl = vclosure {
-        t: (*f).t,
-        fun: fptr,
-        hasValue: 1,
-        stackCount: 0,
-        value: obj as *mut c_void,
-    };
+    let mut cl = crate::types::vclosure_new((*f).t, fptr, 1, obj as *mut c_void);
     // The bridge's contract is an array of vdynamic*, so the target type is
     // boxed rather than passed raw: an hl_type* handed over as if it were a
     // box gets its `kind` word read as a type pointer.
@@ -2325,13 +2307,7 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
                 // Interpreter stub sentinel: the bridge decodes the findex and
                 // runs the interpreter with its own typing, boxed both ways.
                 if let Some(runner) = crate::fiber::closure_runner() {
-                    let mut cl = vclosure {
-                        t: fun_type,
-                        fun: method_ptr,
-                        hasValue: 1,
-                        stackCount: 0,
-                        value: cur as *mut c_void,
-                    };
+                    let mut cl = crate::types::vclosure_new(fun_type, method_ptr, 1, cur as *mut c_void);
                     let aptr = if nargs == 0 {
                         ptr::null_mut()
                     } else {
@@ -2355,13 +2331,7 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
                     *dst.add(i + 1) = *src.add(i);
                 }
             }
-            let mut cl = vclosure {
-                t: fun_type,
-                fun: method_ptr,
-                hasValue: 0,
-                stackCount: 0,
-                value: ptr::null_mut(),
-            };
+            let mut cl = crate::types::vclosure_new(fun_type, method_ptr, 0, ptr::null_mut());
             crate::fun::hlp_call_method(&mut cl as *mut vclosure as *mut vdynamic, call_args)
         }
         hl::hl_type_kind_HDYNOBJ => {
@@ -2534,10 +2504,7 @@ pub unsafe extern "C" fn hlp_dyn_setp(
     } else if hlp_is_dynamic(t) {
         hlp_write_dyn(addr, ft, value as *mut vdynamic, false);
     } else {
-        let mut tmp = vdynamic {
-            t,
-            v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { ptr: value }),
-        };
+        let mut tmp = crate::types::vdynamic_new(t, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { ptr: value }));
         hlp_write_dyn(addr, ft, &mut tmp as *mut vdynamic, true);
     }
 }
@@ -2552,10 +2519,7 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
     if (*t).kind == hl_type_kind_HF64 {
         *(addr as *mut f64) = value;
     } else {
-        let mut tmp = vdynamic {
-            t: f64_type,
-            v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { d: value }),
-        };
+        let mut tmp = crate::types::vdynamic_new(f64_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { d: value }));
         hlp_write_dyn(addr, t, &mut tmp, true);
     }
 }
@@ -2570,10 +2534,7 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
     if (*t).kind == hl_type_kind_HF32 {
         *(addr as *mut f32) = value;
     } else {
-        let mut tmp = vdynamic {
-            t: f32_type,
-            v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { f: value }),
-        };
+        let mut tmp = crate::types::vdynamic_new(f32_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { f: value }));
         hlp_write_dyn(addr, t, &mut tmp, true);
     }
 }
@@ -2594,10 +2555,7 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
         hl_type_kind_HF32 => *(addr as *mut f32) = value as f32,
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
-            let mut tmp = vdynamic {
-                t: i64_type,
-                v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i64_: value }),
-            };
+            let mut tmp = crate::types::vdynamic_new(i64_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i64_: value }));
             hlp_write_dyn(addr, ft, &mut tmp, true);
         }
     }
@@ -2627,10 +2585,7 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
         hl_type_kind_HF32 => *(addr as *mut f32) = value as f32,
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
-            let mut tmp = vdynamic {
-                t,
-                v: *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i: value }),
-            };
+            let mut tmp = crate::types::vdynamic_new(t, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i: value }));
             hlp_write_dyn(addr, ft, &mut tmp, true);
         }
     }

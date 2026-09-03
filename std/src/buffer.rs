@@ -157,13 +157,7 @@ unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const u
         let Some(runner) = crate::fiber::closure_runner() else {
             return ptr::null();
         };
-        let mut cl = vclosure {
-            t: crate::types::hlt_dyn(),
-            fun: f,
-            hasValue: 1,
-            stackCount: 0,
-            value: this as *mut c_void,
-        };
+        let mut cl = crate::types::vclosure_new(crate::types::hlt_dyn(), f, 1, this as *mut c_void);
         return runner(&mut cl, ptr::null_mut(), 0) as *const uchar;
     }
     let g: unsafe extern "C" fn(*mut vdynamic) -> *const uchar = std::mem::transmute(f);
@@ -392,12 +386,9 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             hlp_buffer_str(b, bytes_ptr);
         }
         hl_type_kind_HTYPE => {
-            let mut tmp = vdynamic {
-                t,
-                v: vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                },
-            };
+                });
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {
@@ -409,12 +400,9 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             );
         }
         hl_type_kind_HREF => {
-            let mut tmp = vdynamic {
-                t,
-                v: vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                },
-            };
+                });
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {
@@ -426,12 +414,9 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             );
         }
         hl_type_kind_HABSTRACT => {
-            let mut tmp = vdynamic {
-                t,
-                v: vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                },
-            };
+                });
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {

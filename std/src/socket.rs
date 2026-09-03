@@ -435,6 +435,229 @@ mod sys {
     }
 }
 
+// A sandbox has no sockets. WASI preview 1 offers accept and shutdown on a
+// descriptor a host already opened, and nothing that creates one, resolves a
+// name, or selects across a set -- so there is no partial implementation to
+// give, only a complete refusal.
+//
+// The natives above still exist and still link: a program that never opens a
+// socket runs, and one that does gets a failure at the call rather than a
+// missing symbol at load. `create` returns `INVALID` for the same reason the
+// unix arm does when the kernel refuses, so every caller already has a path
+// for it.
+#[cfg(not(any(unix, windows)))]
+mod sys {
+    use std::ffi::c_int;
+
+    pub type Sock = c_int;
+    pub const INVALID: Sock = -1;
+
+    /// The shape of an IPv4 address, kept so the code above compiles and
+    /// indexes it identically. Nothing here ever reads one back from a host.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct SockAddrIn {
+        pub sin_family: u16,
+        pub sin_port: u16,
+        pub sin_addr: u32,
+        pub sin_zero: [u8; 8],
+    }
+
+    #[allow(dead_code)]
+    pub struct Hostent {
+        pub h_name: *mut i8,
+        pub h_aliases: *mut *mut i8,
+        pub h_addrtype: c_int,
+        pub h_length: c_int,
+        pub h_addr_list: *mut *mut i8,
+    }
+
+    pub fn startup() {}
+
+    pub fn is_valid(s: Sock) -> bool {
+        let _ = s;
+        false
+    }
+
+    pub fn sock_key(s: Sock) -> u64 {
+        s as u64
+    }
+
+    /// The errno a non-blocking socket returns when it would block. Nothing
+    /// here ever blocks, so nothing ever returns it.
+    pub fn block_error() -> c_int {
+        -1
+    }
+
+    pub fn conn_reset() -> bool {
+        false
+    }
+
+    pub fn sockaddr_in(host: c_int, port: c_int) -> SockAddrIn {
+        SockAddrIn {
+            sin_family: 2,
+            sin_port: (port as u16).to_be(),
+            sin_addr: host as u32,
+            sin_zero: [0; 8],
+        }
+    }
+
+    pub fn addr_parts(addr: &SockAddrIn) -> (c_int, c_int) {
+        (addr.sin_addr as c_int, u16::from_be(addr.sin_port) as c_int)
+    }
+
+    pub unsafe fn create(udp: bool) -> Sock {
+        let _ = udp;
+        INVALID
+    }
+
+    pub unsafe fn close(s: Sock) {
+        let _ = s;
+    }
+
+    pub unsafe fn send(s: Sock, buf: *const u8, len: c_int) -> isize {
+        let _ = (s, buf, len);
+        -1
+    }
+
+    pub unsafe fn recv(s: Sock, buf: *mut u8, len: c_int) -> isize {
+        let _ = (s, buf, len);
+        -1
+    }
+
+    pub unsafe fn send_to(s: Sock, buf: *const u8, len: c_int, addr: &SockAddrIn) -> isize {
+        let _ = (s, buf, len, addr);
+        -1
+    }
+
+    pub unsafe fn recv_from(s: Sock, buf: *mut u8, len: c_int, addr: &mut SockAddrIn) -> isize {
+        let _ = (s, buf, len, addr);
+        -1
+    }
+
+    pub unsafe fn connect(s: Sock, addr: &SockAddrIn) -> bool {
+        let _ = (s, addr);
+        false
+    }
+
+    pub unsafe fn bind(s: Sock, addr: &SockAddrIn) -> bool {
+        let _ = (s, addr);
+        false
+    }
+
+    pub unsafe fn listen(s: Sock, n: c_int) -> bool {
+        let _ = (s, n);
+        false
+    }
+
+    pub unsafe fn accept(s: Sock) -> Sock {
+        let _ = s;
+        INVALID
+    }
+
+    pub unsafe fn sock_name(s: Sock) -> Option<SockAddrIn> {
+        let _ = s;
+        None
+    }
+
+    pub unsafe fn peer_name(s: Sock) -> Option<SockAddrIn> {
+        let _ = s;
+        None
+    }
+
+    pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
+        let _ = (s, read, write);
+        false
+    }
+
+    pub unsafe fn set_blocking(s: Sock, b: bool) -> bool {
+        let _ = (s, b);
+        false
+    }
+
+    pub unsafe fn set_timeout(s: Sock, t: f64) -> bool {
+        let _ = (s, t);
+        false
+    }
+
+    pub unsafe fn set_flag(s: Sock, level: c_int, name: c_int, b: bool) -> bool {
+        let _ = (s, level, name, b);
+        false
+    }
+
+    // The option names the code above passes to `set_flag`, which refuses
+    // them all. Values match the BSD numbering so a trace reads the same.
+    pub const TCP_LEVEL: c_int = 6;
+    pub const TCP_NODELAY: c_int = 1;
+    pub const SOCKET_LEVEL: c_int = 0xffff;
+    pub const SO_BROADCAST: c_int = 0x0020;
+
+    pub fn fd_size(count: c_int) -> c_int {
+        let _ = count;
+        0
+    }
+
+    pub struct FdSet;
+
+    impl FdSet {
+        /// # Safety
+        /// Takes the caller's region without reading it; there is no set to
+        /// build.
+        pub unsafe fn init(region: *mut u8, _count: usize) -> FdSet {
+            let _ = region;
+            FdSet
+        }
+
+        /// # Safety
+        /// Mirrors the platform signature; adds nothing.
+        pub unsafe fn add(&mut self, s: Sock) -> bool {
+            let _ = s;
+            false
+        }
+
+        /// # Safety
+        /// Mirrors the platform signature; contains nothing.
+        pub unsafe fn contains(&self, s: Sock) -> bool {
+            let _ = s;
+            false
+        }
+    }
+
+    /// # Safety
+    /// Mirrors the platform signature. Selecting over no sockets is an error
+    /// rather than an immediate timeout, so a caller does not spin.
+    pub unsafe fn select(
+        nfds: u64,
+        read: Option<&FdSet>,
+        write: Option<&FdSet>,
+        except: Option<&FdSet>,
+        timeout: Option<f64>,
+    ) -> c_int {
+        let _ = (nfds, read, write, except, timeout);
+        -1
+    }
+
+    /// # Safety
+    /// Mirrors the platform signature. There is no resolver.
+    pub unsafe fn resolve_ipv4(name: *const u8) -> Option<c_int> {
+        let _ = name;
+        None
+    }
+
+    /// # Safety
+    /// Mirrors the platform signature. There is no resolver.
+    pub unsafe fn reverse_ipv4(ip: c_int) -> Option<Vec<u8>> {
+        let _ = ip;
+        None
+    }
+
+    /// # Safety
+    /// Mirrors the platform signature. A sandbox has no host name.
+    pub unsafe fn local_name() -> Option<Vec<u8>> {
+        None
+    }
+}
+
 #[cfg(windows)]
 mod sys {
     use std::ffi::c_int;

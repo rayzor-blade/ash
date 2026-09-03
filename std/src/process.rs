@@ -109,6 +109,12 @@ unsafe fn pchar_to_os(p: *const vbyte) -> Option<OsString> {
     {
         Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
     }
+    // WASI paths are UTF-8, so the lossy conversion loses nothing the host
+    // would have accepted. Nothing on this target spawns anything anyway.
+    #[cfg(not(any(unix, windows)))]
+    {
+        Some(OsString::from(String::from_utf8_lossy(bytes).into_owned()))
+    }
 }
 
 unsafe fn state_of<'a>(p: *mut c_void) -> Option<&'a ProcState> {
@@ -145,6 +151,12 @@ fn read_pipe<R: Read>(r: &mut R, out: &mut [u8]) -> c_int {
 /// leaves a valid handle behind; a `pipe` or `fork` failure is what makes
 /// `hl_process_run` answer NULL. These four errnos are the ones `fork` and
 /// `pipe` raise -- everything else came from the exec.
+/// Nothing spawns here, so nothing can fail during spawn setup.
+#[cfg(not(any(unix, windows)))]
+fn spawn_setup_failed(_e: &io::Error) -> bool {
+    true
+}
+
 #[cfg(unix)]
 fn spawn_setup_failed(e: &io::Error) -> bool {
     matches!(
@@ -184,6 +196,13 @@ fn split_command_line(cmd: &str) -> Option<(String, String)> {
             None => Some((s.to_string(), String::new())),
         }
     }
+}
+
+/// No child, so no status. -1 is what the natives report when there is no
+/// process to ask.
+#[cfg(not(any(unix, windows)))]
+fn status_code(_s: ExitStatus) -> c_int {
+    -1
 }
 
 #[cfg(unix)]
@@ -261,6 +280,15 @@ pub unsafe extern "C" fn hlp_process_run(
             c.args(a);
             c
         }
+    };
+
+    // A sandbox has no subprocesses. The natives still exist and still link;
+    // this one reports the failure upstream reports when a spawn is refused,
+    // and the read/write prims below already answer -1 with no child.
+    #[cfg(not(any(unix, windows)))]
+    let mut command = {
+        let _ = (&args, detached);
+        Command::new("")
     };
 
     #[cfg(windows)]

@@ -75,6 +75,11 @@ pub enum FiberState {
     Errored,
 }
 
+// An import, not an undefined symbol. Without naming the module the linker
+// treats it as something that ought to be defined somewhere and fails; with
+// it, the function becomes `(import "env" "ash_host_fiber_yield")`, which is
+// exactly what a host binds.
+#[link(wasm_import_module = "env")]
 extern "C" {
     /// Suspend the running fiber until the host resumes it.
     fn ash_host_fiber_yield();

@@ -394,6 +394,7 @@ fn aot_symbol_for_pc(pc: usize) -> Option<&'static str> {
 /// linked statically into the same image, so image identity cannot tell them
 /// apart; names can. `ash_h*` is a helper thunk the emitter generates, which
 /// the single-module build hides too, so a stack reads the same either way.
+#[cfg(unix)]
 fn aot_name_is_runtime(name: &str) -> bool {
     let name = name.trim_start_matches('_');
     name.starts_with("hlp_")
@@ -414,6 +415,7 @@ fn aot_name_is_runtime(name: &str) -> bool {
 /// `dladdr` still gets a veto where it can see: the table's ranges are
 /// inferred from entry addresses, so a runtime function sitting between two
 /// bodies would otherwise be attributed to the body before it.
+#[cfg(unix)]
 unsafe fn aot_frame_in_program(pc: usize) -> bool {
     let mut info: libc::Dl_info = std::mem::zeroed();
     let named = libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_sname.is_null();
@@ -436,6 +438,15 @@ unsafe fn aot_frame_in_program(pc: usize) -> bool {
     }
 }
 
+/// Windows has no `dladdr`. The registered table is still enough to retain
+/// program frames; it just cannot veto a runtime function that the linker
+/// happened to place in a gap between two adjacent program bodies.
+#[cfg(not(unix))]
+unsafe fn aot_frame_in_program(pc: usize) -> bool {
+    aot_symbol_for_pc(pc).is_some()
+}
+
+#[cfg(unix)]
 unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     // The table first, and by the pc itself: where dladdr is blind -- every
     // hidden body on Linux -- it is the only thing that can name the frame.
@@ -461,6 +472,14 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     };
     Some(name.to_string())
 }
+
+/// The emitter registers every program body and its Haxe name, so platforms
+/// without `dladdr` can still resolve AOT frames directly from that table.
+#[cfg(not(unix))]
+unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
+    aot_symbol_for_pc(pc).map(str::to_owned)
+}
+
 /// Walk the frame-pointer chain from the caller. Every body the emitter
 /// produces keeps a frame pointer, and so does the runtime; the walk stops at
 /// the first frame that does not (the C entry), or at anything that fails a

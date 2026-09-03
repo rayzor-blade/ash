@@ -8,7 +8,7 @@ same corpus, same accepted answers, same timing, same judgment. It reuses
 them, because a lane timed by a different routine is not a comparison.
 
 Lanes:
-  ash-aot   the object ash emits, linked by tools/aot/link.sh, run directly.
+  ash-aot   a native binary built by `ash --build`, run directly.
             No JIT, no interpreter, no bytecode loading, no warm-up.
   ash-jit   `ash --mode jit`, which compiles the whole module and then runs.
   ash       `ash` with its default tiering, which is what CI publishes.
@@ -93,27 +93,13 @@ def peak_rss(cmd: list[str], timeout: float, env: dict | None) -> int | None:
     return parse_rss_bytes(res.stderr)
 
 
-def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
-              env: dict | None = None, profile: bool = False,
-              ash: Path | None = None) -> tuple[Path | None, str, float]:
-    """Emit and link one bench ahead of time. Returns (binary, detail, ms)."""
+def build_aot(bench: dict, tests_dir: Path, workdir: Path, ash: Path,
+              env: dict | None = None,
+              profile: bool = False) -> tuple[Path | None, str, float]:
+    """Build one bench ahead of time. Returns (binary, detail, ms)."""
     source = tests_dir / bench["hl"]
     if not source.exists():
         return None, f"no bytecode at {source}", 0.0
-    # Newest, not release-first. A stale release build sitting beside a fresh
-    # debug one silently emits an object from older compiler code -- here it
-    # produced one with no `main` at all, and the failure surfaced as a link
-    # error naming a symbol the emitter had simply stopped writing.
-    candidates = [
-        repo / "target" / profile / "examples" / "aot_spike"
-        for profile in ("release", "debug")
-    ]
-    existing = [c for c in candidates if c.exists()]
-    if not existing:
-        return None, "no aot_spike (cargo build -p ash_core --example aot_spike)", 0.0
-    spike = max(existing, key=lambda c: c.stat().st_mtime)
-
-    obj = workdir / "prog.o"
     binary = workdir / "prog"
     t0 = time.perf_counter()
 
@@ -128,27 +114,21 @@ def build_aot(bench: dict, tests_dir: Path, repo: Path, workdir: Path,
         # here release-first picked a stale build that had never heard of
         # ASH_AOT_PROFILE_OUT, so no profile was written and the flag looked
         # like it simply did not work.
-        if ash is not None:
-            prof = workdir / "callsites.prof"
-            run_env = dict(os.environ)
-            run_env["ASH_AOT_PROFILE_OUT"] = str(prof)
-            subprocess.run([str(ash), "--mode", "hybrid", "--quiet", str(source)],
-                           capture_output=True, text=True, timeout=900, env=run_env)
-            if prof.exists():
-                pgo_arg = ["--pgo=" + str(prof)]
+        prof = workdir / "callsites.prof"
+        run_env = dict(emit_env)
+        run_env["ASH_AOT_PROFILE_OUT"] = str(prof)
+        subprocess.run([str(ash), "--mode", "hybrid", "--quiet", str(source)],
+                       capture_output=True, text=True, timeout=900, env=run_env)
+        if prof.exists():
+            pgo_arg = ["--pgo=" + str(prof)]
 
-    p = subprocess.run([str(spike), str(source), str(obj), *pgo_arg],
+    p = subprocess.run([str(ash), "--build", str(binary), "--quiet",
+                        *pgo_arg, str(source)],
                        capture_output=True, text=True, timeout=900, env=emit_env)
     if p.returncode != 0:
-        return None, f"emit failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0
-    refused = [l for l in p.stdout.splitlines() if "refused" in l]
-    p = subprocess.run([str(repo / "tools" / "aot" / "link.sh"),
-                        str(obj), str(binary)],
-                       capture_output=True, text=True, timeout=300)
-    if p.returncode != 0:
-        return None, f"link failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0
+        return None, f"build failed: {(p.stderr or p.stdout).strip()[:300]}", 0.0
     ms = (time.perf_counter() - t0) * 1000.0
-    return binary, (refused[0].strip() if refused else ""), ms
+    return binary, "", ms
 
 
 def main() -> int:
@@ -240,8 +220,9 @@ def main() -> int:
             row["lanes"]["ash-aot"] = {"status": "SKIP", "detail": "lane not selected"}
         else:
           with tempfile.TemporaryDirectory(prefix=f"aot-{name}-") as td:
-            binary, detail, build_ms = build_aot(bench, tests_dir, repo, Path(td), lane_env,
-                                                 profile=args.aot_profile, ash=ash)
+            binary, detail, build_ms = build_aot(
+                bench, tests_dir, Path(td), ash, lane_env,
+                profile=args.aot_profile)
             if binary is None:
                 row["lanes"]["ash-aot"] = {"status": "FAIL", "detail": detail}
             else:

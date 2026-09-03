@@ -2,7 +2,7 @@ use anyhow::Result;
 use ash_core::bytecode::BytecodeDecoder;
 use ash_core::native_lib::{init_std_library, NativeFunctionResolver};
 use ash_interp::interpreter::{HLInterpreter, TierMode, TierPreset, TieredConfig};
-use clap::{Parser, ValueEnum};
+use clap::{ArgGroup, Parser, ValueEnum};
 use std::path::PathBuf;
 // Only the unix crash handler reads a OnceLock (the ASH_CRASH_BACKTRACE
 // latch); on Windows there is no handler and no latch.
@@ -14,6 +14,11 @@ use std::sync::OnceLock;
     name = "ash",
     about = "ASH - HashLink bytecode runtime (interp | hybrid | jit)"
 )]
+#[command(group(
+    ArgGroup::new("aot_output")
+        .args(["emit_aot", "build"])
+        .multiple(true)
+))]
 struct Cli {
     /// Path to a HashLink bytecode (.hl) file
     file: Option<PathBuf>,
@@ -51,21 +56,21 @@ struct Cli {
     #[arg(long, value_name = "PATH", requires = "build")]
     runtime: Option<PathBuf>,
 
-    /// Target triple for --emit-aot. Defaults to this machine.
+    /// Target triple for --build/--emit-aot. Defaults to this machine.
     ///
     /// A non-native triple is cross-compiled for a generic CPU, because the
     /// host's features cannot be assumed of a machine we cannot ask.
     #[arg(long, value_name = "TRIPLE")]
     target: Option<String>,
 
-    /// Emit even when some functions could not be lowered (--emit-aot).
+    /// Emit even when some functions could not be lowered (--build/--emit-aot).
     ///
     /// A refused function becomes a throw. Without this, emitting stops rather
     /// than writing a binary that aborts the moment one is reached.
     #[arg(long)]
     allow_refused: bool,
 
-    /// Devirtualise from a callsite profile when emitting (--emit-aot).
+    /// Devirtualise from a callsite profile when emitting (--build/--emit-aot).
     ///
     /// With no value, reads <file>.prof beside the bytecode. Produce one by
     /// running the program once with ASH_AOT_PROFILE_OUT set. The profile is
@@ -75,7 +80,7 @@ struct Cli {
     /// as "the profile is prog.hl" and the program argument disappears, which
     /// is a silent wrong answer rather than an error.
     #[arg(long, value_name = "PROFILE", num_args = 0..=1, require_equals = true,
-          default_missing_value = "", requires = "emit_aot")]
+          default_missing_value = "", requires = "aot_output")]
     pgo: Option<String>,
 
     /// Hot-call threshold for Cranelift promotion in hybrid mode
@@ -454,13 +459,13 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             // shares one, and two collectors in a process crash as soon as one
             // meets the other's objects. So this object must take the runtime
             // as a library, and the HDLLs must sit beside the binary.
-            ash_core::progress::note(&format!(
+            ash_core::progress::note(
                 "[ash] this program loads HDLLs, so it takes the SHARED runtime, \
                  staged beside the binary. The .hdll files must sit there too. \
                  Do not link the static runtime into a program that loads HDLLs: \
                  it builds, and then the HDLL loads a second copy of the runtime \
                  and the two collectors meet."
-            ));
+            );
         } else if exe.is_none() {
             ash_core::progress::note(&format!(
                 "[ash] this is an object; `--build {}` would have linked it too",

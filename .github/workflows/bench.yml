@@ -164,20 +164,16 @@ jobs:
 
       # One archive, so a measuring runner unpacks rather than builds. tar
       # preserves the execute bits that the artifact format does not.
-      # The AOT lane compiles each benchmark to a native object on the
-      # measuring runner, so that runner needs the emitter and the runtime to
-      # link against. Best-effort: if either is missing the lane records
-      # nothing and the page renders without the row.
-      - name: Build the AOT emitter
-        continue-on-error: true
-        run: cargo build --release -p ash_core --example aot_spike
+      # The AOT lane compiles each benchmark on the measuring runner through
+      # the same `ash --build` command users run, so it needs the CLI and the
+      # static runtime it links against. Best-effort: if the archive is
+      # missing the page renders without the row.
 
       - name: Package the toolchain
         run: |
           mkdir -p dist
           cp target/release/ash dist/
           cp target/release/libash_std.so dist/ 2>/dev/null || true
-          cp target/release/examples/aot_spike dist/ 2>/dev/null || echo "no aot_spike"
           cp target/release/libash_std.a dist/ 2>/dev/null || echo "no libash_std.a"
           tar czf dist/hashlink.tar.gz -C "$HOME" hashlink 2>/dev/null || echo "no hashlink"
           tar czf dist/hashlink-hl2.tar.gz -C "$HOME" hashlink-hl2 2>/dev/null || echo "no hl2"
@@ -239,10 +235,6 @@ jobs:
           cp dist/ash target/release/ && chmod +x target/release/ash
           cp dist/libash_std.so target/release/ 2>/dev/null || true
           cp dist/libash_std.a target/release/ 2>/dev/null || true
-          if [ -f dist/aot_spike ]; then
-            mkdir -p target/release/examples
-            cp dist/aot_spike target/release/examples/ && chmod +x target/release/examples/aot_spike
-          fi
           tar xzf dist/hashlink.tar.gz -C "$HOME" 2>/dev/null || true
           tar xzf dist/hashlink-hl2.tar.gz -C "$HOME" 2>/dev/null || true
           # The VM links libhl from beside itself.
@@ -306,18 +298,18 @@ jobs:
       # on method_call -- so a profiling run would buy nothing here while
       # costing build time and making this row no longer like-for-like with
       # HashLink/C, which is not profile-guided. --pgo stays available on
-      # `ash --emit-aot` for anyone whose workload it does help.
+      # `ash --build`/`ash --emit-aot` for anyone whose workload it does help.
       #
       # Runs after ash's own numbers, like the HL/C lane, so compiling a
       # native object cannot disturb the measurement it sits beside. Only the
       # ash-aot lane: ash_bench.py and hl_bench.py already produce the others,
       # and two measurements of one engine on one page would be worse than
-      # none. Best-effort -- a runner without the emitter publishes no AOT row
-      # rather than failing the sweep.
+      # none. Best-effort -- a runner without the static runtime publishes no
+      # AOT row rather than failing the sweep.
       - name: Bench ash AOT (${{ matrix.bench }})
         continue-on-error: true
         run: |
-          if [ -x target/release/examples/aot_spike ] && [ -f target/release/libash_std.a ]; then
+          if [ -x target/release/ash ] && [ -f target/release/libash_std.a ]; then
             ./scripts/aot_bench.py \
               --benchmarks "${{ matrix.bench }}" \
               --lanes ash-aot \
@@ -326,7 +318,7 @@ jobs:
               --out "/tmp/aot-full-${{ matrix.bench }}.json" \
               --emit-partial "parts/aot-${{ matrix.bench }}.json"
           else
-            echo "::warning::AOT emitter or static runtime missing; publishing without the Ash AOT row"
+            echo "::warning::ash or its static runtime missing; publishing without the Ash AOT row"
           fi
 
       - name: Bench HashLink (JIT, hl2-ir, HL/C) and Haxe JVM (${{ matrix.bench }})

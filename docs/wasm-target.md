@@ -307,16 +307,36 @@ input belong to an embedder/framework API rather than the language runtime.
 
 Run the Haxe conformance suite per case, as the interpreter lane does.
 
-**The denominator is measurable before the runtime exists.** A case can only
-run on wasm if every native it calls can. That set is observable: run the case
-under the interpreter with `ASH_TRACE_NATIVE=1`, which prints one line per
-native call with its library, and take the union. A case is out of scope if it
-calls a native from a library other than `std` -- an HDLL cannot be loaded in
-a sandbox -- or a `std` native owned by `socket.rs`, `process.rs`,
-`thread.rs` or `debugger.rs`, which are the 109 the sandbox cannot provide.
-Everything else is in scope, and the wasm score is reported against that
-denominator with the excluded cases listed by reason rather than quietly
-dropped.
+**The denominator is measured, and it is almost the whole suite: 1,186 of
+1,195 cases, 99.2%.**
+
+A case can only run on wasm if every native it calls can. That set is
+observable without a wasm runtime: run the case under the interpreter with
+`ASH_TRACE_NATIVE=1`, which prints one line per native call with its library,
+and take the union. Two subtractions matter, and getting them wrong moves the
+answer by an order of magnitude:
+
+* **The suite's own startup is not the case.** Running a case name that does
+  not exist gives the baseline -- 38 natives, including `hlp_ssl_init`,
+  `hlp_socket_init` and `hlp_thread_current`. Counting those against every
+  case excludes every case.
+* **A mutex is not a thread.** `hlp_mutex_*`, `hlp_lock_*`, the thread-locals
+  and the atomics are all implementable single-threaded, and wasm has atomics
+  besides. Only real thread creation, sockets, subprocesses, the debugger and
+  dynamic loading are genuinely out of reach. Treating all 109 natives of
+  `thread.rs` as impossible put the answer at 10.5%; it is 99.2%.
+
+The nine cases out of scope, and why:
+
+| case | why |
+|---|---|
+| `unit.TestMisc`, `unit.spec.TestUnicode`, `unit.spec.haxe.crypto.TestSha1`, `TestMd5`, `TestHmac`, `unit.spec.haxe.zip.TestCompress`, `unit.issues.Issue2861`, `unit.issues.Issue5090` | the `fmt` HDLL, which a sandbox cannot load |
+| `unit.spec.sys.net.TestSocket` | BSD sockets, which WASI preview 1 does not have |
+
+Those eight `fmt` cases are compression and hashing, not language semantics:
+they come back into scope the day `fmt`'s primitives are provided by the wasm
+build rather than by a native library. The score is reported against the 1,186
+with these nine named, never quietly dropped.
 
 Add focused wasm tests before the broad suite:
 

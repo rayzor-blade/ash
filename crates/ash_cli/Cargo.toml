@@ -7,6 +7,8 @@ license = "MIT"
 description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
 
 [dependencies]
+# Reading a wasm module for `ash wasm`: the parser only, no engine.
+ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["validate"] }
 ash_core = { path = "../ash" }
 ash_interp = { path = "../ash_interp" }
 anyhow = { workspace = true }

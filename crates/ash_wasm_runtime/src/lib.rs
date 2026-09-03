@@ -52,6 +52,10 @@ pub mod guest;
 #[cfg(feature = "native")]
 pub mod native;
 
+/// Reading a module: `ash wasm` is this, and so is the emitter's own gate.
+#[cfg(feature = "validate")]
+pub mod validate;
+
 /// The import a host must supply beyond WASI, named once so the two backends
 /// and the guest cannot drift apart.
 pub const FIBER_YIELD_IMPORT: (&str, &str) = ("env", "ash_host_fiber_yield");

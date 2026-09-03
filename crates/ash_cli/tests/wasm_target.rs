@@ -14,14 +14,17 @@
 //! Anything appearing there that is not an `hlp_*`, `hl_*` or `setjmp` means
 //! generated code called something only a native host provides.
 //!
-//! External tools do the validating: `wasm-tools` and, for the link, the
-//! Rust toolchain's own `rust-lld`. Homebrew's `wasm-ld` is not usable here --
-//! it is lld 20 resolving against LLVM 21's libLLVM and aborts on a missing
-//! symbol. Where a tool is absent the check it would have done is reported as
-//! skipped rather than passing quietly.
+//! The reading is done by ash's own parser, the one behind `ash wasm`, so
+//! nothing external is needed to check a module. The link still needs a
+//! linker, and that one is the Rust toolchain's own `rust-lld`: Homebrew's
+//! `wasm-ld` is lld 20 resolving against LLVM 21's libLLVM and aborts on a
+//! missing symbol. When no linker is found the checks it would have enabled
+//! are reported as skipped rather than passing quietly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use ash_wasm_runtime::validate::inspect;
 
 const TRIPLE: &str = "wasm32-wasip1";
 
@@ -31,23 +34,6 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("the crate lives two levels below the root")
         .to_path_buf()
-}
-
-fn tool(name: &str) -> Option<PathBuf> {
-    let found = Command::new("command")
-        .args(["-v", name])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
-    found.filter(|p| p.exists()).or_else(|| {
-        // `command -v` is a shell builtin in some environments; fall back to
-        // the paths a developer machine actually uses.
-        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
-            .iter()
-            .map(|d| Path::new(d).join(name))
-            .find(|p| p.exists())
-    })
 }
 
 /// The Rust toolchain ships an lld built against its own LLVM, which is the
@@ -115,12 +101,22 @@ fn wasm32_object_is_a_valid_module_with_the_expected_boundary() {
         bytes.len()
     );
 
-    let Some(wasm_tools) = tool("wasm-tools") else {
-        eprintln!("wasm-tools not installed: validation skipped");
-        return;
-    };
-    let (out, ok) = run(&wasm_tools, &["validate", &object.to_string_lossy()]);
-    assert!(ok, "the emitted object does not validate:\n{out}");
+    // ash's own parser: the object is a valid relocatable, with the table
+    // and indirect calls the program needs.
+    let object_report = inspect(&bytes);
+    assert!(
+        object_report.invalid.is_none(),
+        "the emitted object does not validate: {:?}",
+        object_report.invalid
+    );
+    assert!(
+        object_report.relocatable,
+        "an emitted object should carry a linking section"
+    );
+    assert!(
+        object_report.call_indirect_sites > 0,
+        "the object makes no indirect calls, which bench_fib does"
+    );
 
     let Some(lld) = rust_lld() else {
         eprintln!("no rust-lld found: link and module checks skipped");
@@ -142,49 +138,47 @@ fn wasm32_object_is_a_valid_module_with_the_expected_boundary() {
         ],
     );
     assert!(ok, "linking the wasm module failed:\n{out}");
-    let (out, ok) = run(&wasm_tools, &["validate", &module.to_string_lossy()]);
-    assert!(ok, "the linked module does not validate:\n{out}");
 
-    // `wasm-tools print` gives the module as text, which is enough to see the
-    // boundary and the entry points without a second tool.
-    let (wat, ok) = run(&wasm_tools, &["print", &module.to_string_lossy()]);
-    assert!(ok, "printing the module failed:\n{wat}");
-
+    let report = inspect(&std::fs::read(&module).expect("the module was written"));
+    assert!(
+        report.invalid.is_none(),
+        "the linked module does not validate: {:?}",
+        report.invalid
+    );
+    assert!(
+        !report.relocatable,
+        "a linked module should have no linking section"
+    );
     for entry in ["ash_module_init", "main"] {
         assert!(
-            wat.contains(&format!("(export \"{entry}\"")),
-            "the module does not export {entry}"
+            report.exports.iter().any(|e| e == entry),
+            "the module does not export {entry}; it exports {:?}",
+            report.exports
         );
     }
     assert!(
-        wat.contains("(table") && wat.contains("funcref"),
+        report.tables.iter().any(|t| t.initial > 0),
         "the module has no function table, so indirect calls cannot work"
     );
     assert!(
-        wat.contains("call_indirect"),
-        "the module makes no indirect calls, which bench_fib does"
+        report.call_indirect_sites > 0,
+        "the module makes no indirect calls"
     );
 
-    // Every import must be a runtime symbol. Anything else is the host ABI
-    // reaching into a cross build.
-    let mut unexpected: Vec<String> = Vec::new();
-    for line in wat.lines() {
-        let line = line.trim();
-        if !line.starts_with("(import ") {
-            continue;
-        }
-        let Some(name) = line.split('"').nth(3) else {
-            continue;
-        };
-        let bare = name.trim_start_matches('_');
-        if !(bare.starts_with("hlp_")
-            || bare.starts_with("hl_")
-            || bare.starts_with("setjmp")
-            || bare.starts_with("longjmp"))
-        {
-            unexpected.push(name.to_string());
-        }
-    }
+    // Every import a host cannot supply must be a runtime symbol. Anything
+    // else is the host ABI reaching into a cross build.
+    let unexpected: Vec<String> = report
+        .unsatisfied()
+        .iter()
+        .filter(|i| {
+            let bare = i.name.trim_start_matches('_');
+            !(bare.starts_with("hlp_")
+                || bare.starts_with("hl_")
+                || bare.starts_with("setjmp")
+                || bare.starts_with("longjmp"))
+        })
+        .map(|i| format!("{}.{}", i.module, i.name))
+        .collect();
     assert!(
         unexpected.is_empty(),
         "the module imports symbols that are not the ash runtime: {unexpected:?}"

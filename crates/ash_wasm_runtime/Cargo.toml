@@ -18,13 +18,17 @@ default = ["native"]
 # Nothing extra: the guest side is plain Rust with no dependencies, which is
 # what lets `ash_std` take it without dragging a host in.
 guest = []
+# Reading a module: what it is, and what it still needs. Light enough for the
+# compiler to depend on -- one parser, no engine.
+validate = ["dep:wasmparser"]
 # The native host: wasmtime, for the conformance lane and for CI. No
 # JavaScript anywhere in this path, and no wasm-bindgen.
-native = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow", "dep:clap", "dep:tokio"]
+native = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow", "dep:clap", "dep:tokio", "validate"]
 # The browser host: the same contract, reached through web-sys.
 browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 
 [dependencies]
+wasmparser = { version = "0.245", optional = true }
 wasmtime = { version = "43", optional = true }
 wasmtime-wasi = { version = "43", optional = true }
 anyhow = { version = "1", optional = true }

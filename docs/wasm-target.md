@@ -255,17 +255,28 @@ One import crosses the boundary today, `env.ash_host_fiber_yield`, and it has
 to: a wasm module has no addressable stack and no instruction that moves
 between two, so suspension is the one operation it cannot perform for itself.
 
-The binary is useful before any of this runs:
+### Reading a module: `ash wasm`
+
+The compiler can read back what it emitted, which during the port is the
+question actually being asked:
 
 ```
-ash-wasm-run --imports prog.wasm
+ash wasm prog.wasm             # the report
+ash wasm --validate prog.wasm  # runnable or not, and fail if not
 ```
 
-It lists the imports no host can satisfy, which during the port is the
-question actually being asked. On today's `bench_fib.wasm` -- emitted, but
-linked without the runtime -- it reports all 72 `hlp_*` symbols. When that
-list is empty, the module needs only WASI and the fiber import, and phase 3 is
-done.
+The report gives functions, indirect call sites, tables, exports, and the
+imports grouped by whether a host could supply them. `--validate` answers one
+question for a build gate and exits non-zero when the answer is no, naming
+what is missing. On today's `bench_fib.wasm` -- emitted, but linked without
+the runtime -- it reports all 72 `hlp_*` symbols as unsatisfied. When that
+list is empty, the module needs only WASI and the fiber import, and phase 3
+is done.
+
+It reads the module with ash's own parser rather than an external tool, so a
+build machine needs nothing installed and `cargo test -p ash --test
+wasm_target` asserts on a struct rather than on someone's text output.
+`ash-wasm-run` is the same thing plus an engine, for actually running one.
 
 ### Phase 3 — link and run a real Ash program
 
@@ -441,7 +452,7 @@ implement it and they trade differently:
 
 | how | needs | costs |
 |---|---|---|
-| engine suspension (JSPI, `wasmtime` async) | an engine that has it | none beyond the call; single-threaded, no headers |
+| engine suspension (JSPI, `wasmtime` async) | an engine that has it, which as of Safari 27 is all three | none beyond the call; single-threaded, no headers |
 | a worker per fiber over shared memory, parked on `Atomics.wait` | `wasm32-wasip1-threads`, and COOP/COEP in a browser | a fiber becomes an OS thread; every collection becomes a rendezvous |
 | Asyncify | nothing | roughly double the code size, and a tax on every call |
 
@@ -452,6 +463,21 @@ at a thread when ash's scheduler is M:N. Where JSPI exists it is strictly
 cheaper. So the module marks where it may be suspended, the harness decides
 how, and the choice can differ between the browser and the server without the
 program changing.
+
+**krio reached the same conclusion, and settled the engine question.** Its
+"krio Across Workers" design note records JSPI as having landed in all three
+engines -- Chrome 137+, Firefox 153+, Safari 27 beta -- which promotes engine
+suspension from a one-browser bet to the route a browser host should take by
+default, and it quotes this document's own pricing of the worker-per-fiber
+alternative back at us. It also plans `krio-fiber` as a JSPI backend at that
+tier, with two new crates beside it: `krio-parallel` for work stealing over
+`Send` tasks, and `krio-wasm` as the only crate that knows about JS, workers
+or COOP/COEP. Two consequences for ash. The backend in
+`ash_wasm_runtime::guest` is an interim: when krio's JSPI backend lands, the
+wasm build should take it and keep the shim only for hosts without JSPI. And
+the import stays as it is either way -- with JSPI a host binds
+`ash_host_fiber_yield` to a suspending function, which is exactly what that
+import is for.
 
 What the compiler owes all three is the same, and it already emits it: a safe
 point in every loop and a word the scheduler can tick, the epoch reached

@@ -9,6 +9,26 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::sync::OnceLock;
 
+/// What `ash` can do besides run bytecode.
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Read a WebAssembly module: what it is, and what it still needs.
+    ///
+    /// With no flag it reports. `--validate` answers one question instead:
+    /// is this a module a host could run, exiting non-zero when it is not,
+    /// which is what a build gate wants.
+    Wasm {
+        /// The `.wasm` module, or a relocatable object.
+        module: PathBuf,
+        /// Answer runnable-or-not, and fail if not.
+        #[arg(long)]
+        validate: bool,
+        /// The full report. The default when neither flag is given.
+        #[arg(long, visible_alias = "analyze")]
+        analyse: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "ash",
@@ -20,6 +40,10 @@ use std::sync::OnceLock;
         .multiple(true)
 ))]
 struct Cli {
+    /// Read a WebAssembly module instead of running bytecode.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Path to a HashLink bytecode (.hl) file
     file: Option<PathBuf>,
 
@@ -991,8 +1015,118 @@ unsafe extern "C" fn crash_handler_siginfo(
     libc::raise(sig);
 }
 
+/// `ash wasm`: read a module and say what it is.
+///
+/// Separate from the bytecode path because it shares nothing with it -- no
+/// runtime, no interpreter, no LLVM. It reads a file and prints.
+fn run_wasm(module: &std::path::Path, validate: bool, _analyse: bool) -> Result<()> {
+    let bytes = std::fs::read(module)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", module.display()))?;
+    let report = ash_wasm_runtime::validate::inspect(&bytes);
+
+    if validate {
+        if let Some(why) = &report.invalid {
+            anyhow::bail!("{} is not a valid WebAssembly module: {why}", module.display());
+        }
+        if report.relocatable {
+            anyhow::bail!(
+                "{} is a relocatable object, not a module: link it first",
+                module.display()
+            );
+        }
+        let unsatisfied = report.unsatisfied();
+        if !unsatisfied.is_empty() {
+            let names: Vec<String> = unsatisfied
+                .iter()
+                .take(8)
+                .map(|i| format!("{}.{}", i.module, i.name))
+                .collect();
+            anyhow::bail!(
+                "{} imports {} symbol(s) no host can supply: {}{}",
+                module.display(),
+                unsatisfied.len(),
+                names.join(", "),
+                if unsatisfied.len() > names.len() { ", ..." } else { "" }
+            );
+        }
+        println!("{}: runnable", module.display());
+        return Ok(());
+    }
+
+    // The report. Everything a reader needs to see where the port stands.
+    println!("{}", module.display());
+    match &report.invalid {
+        Some(why) => println!("  invalid: {why}"),
+        None => println!(
+            "  valid {}",
+            if report.relocatable {
+                "relocatable object (needs linking)"
+            } else {
+                "module"
+            }
+        ),
+    }
+    println!("  functions          {}", report.functions);
+    println!("  indirect calls     {}", report.call_indirect_sites);
+    println!("  data segments      {}", report.data_segments);
+    for table in &report.tables {
+        println!(
+            "  table              {} x{}{}",
+            table.element_type,
+            table.initial,
+            table
+                .maximum
+                .map(|m| format!(" (max {m})"))
+                .unwrap_or_default()
+        );
+    }
+
+    let unsatisfied = report.unsatisfied();
+    let host_supplied = report.imports.len() - unsatisfied.len();
+    println!(
+        "  imports            {} ({host_supplied} a host supplies, {} it cannot)",
+        report.imports.len(),
+        unsatisfied.len()
+    );
+    // Grouped by module, because "72 of them are env.hlp_*" is the useful
+    // shape of that list rather than 72 lines.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for import in &unsatisfied {
+        groups
+            .entry(import.module.as_str())
+            .or_default()
+            .push(import.name.as_str());
+    }
+    for (module_name, names) in &groups {
+        println!("    {module_name}: {} unsatisfied", names.len());
+        for name in names.iter().take(6) {
+            println!("      {name}");
+        }
+        if names.len() > 6 {
+            println!("      ... and {} more", names.len() - 6);
+        }
+    }
+    if !report.exports.is_empty() {
+        println!("  exports            {}", report.exports.join(", "));
+    }
+    if report.runnable() {
+        println!("  -> runnable: it needs only WASI and the fiber import");
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(Command::Wasm {
+        module,
+        validate,
+        analyse,
+    }) = &cli.command
+    {
+        return run_wasm(module, *validate, *analyse);
+    }
+
     // Startup diagnostics go to stderr, which the parity harness compares
     // against an oracle's. --quiet has to reach them.
     ash_core::native_lib::set_quiet(cli.quiet);

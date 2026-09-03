@@ -1124,6 +1124,41 @@ impl<'ctx> JITModule<'ctx> {
                 )?;
             }
         }
+        // The function table again, with a name per entry, so the runtime
+        // can walk and name a stack: `haxe.CallStack.exceptionStack()` and
+        // `haxe.Exception.stack` were empty in a standalone binary, and the
+        // error reporters that print them faulted on the null.
+        if let Some(functions) = self.aot_functions {
+            let nfun = self.functions_ptrs.len();
+            let mut name_ptrs: Vec<BasicValueEnum<'ctx>> = Vec::with_capacity(nfun);
+            for findex in 0..nfun {
+                let name = self
+                    .function_name(findex as u32)
+                    .unwrap_or_else(|| format!("Fun_{findex}"));
+                let bytes = self.context.const_string(name.as_bytes(), true);
+                let g = self.intern_global(bytes.as_basic_value_enum(), "ash_fname");
+                name_ptrs.push(g.as_basic_value_enum());
+            }
+            let names_arr = ptr_type.const_array(
+                &name_ptrs
+                    .iter()
+                    .map(|v| v.into_pointer_value())
+                    .collect::<Vec<_>>(),
+            );
+            let names_global = self.intern_global(names_arr.as_basic_value_enum(), "ash_function_names");
+            let reg_ty = void_type.fn_type(&[ptr_type.into(), ptr_type.into(), i64_type.into()], false);
+            let register = self.aot_symbol("hlp_register_aot_symbols", reg_ty);
+            self.builder.build_indirect_call(
+                reg_ty,
+                register,
+                &[
+                    functions.as_pointer_value().into(),
+                    names_global.into(),
+                    i64_type.const_int(nfun as u64, false).into(),
+                ],
+                "",
+            )?;
+        }
 
         // Dynamic dispatch (Type.createInstance, Reflect.callMethod) reaches
         // compiled code through these two, and nothing else installs them in

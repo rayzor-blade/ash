@@ -1797,3 +1797,16 @@ interpreter's own op_call_method fallback for the same shapes.
 object file has symbols but no runtime registration. Either register bodies
 at init (`ash_functions` + sizes) or accept empty stacks and make CallStack
 return [] instead of null.
+
+## Compiled-tier calls to inherited methods through a subclass receiver
+
+The LLVM `CallMethod` object path resolved the slot's `pindex` against the
+receiver's OWN proto list; a subclass's list holds only the methods it
+declares, so a call through a subclass-typed receiver to an inherited method
+found nothing and fell into a path that called nothing (the game's item
+pickup: `shape:DtsObject; shape.onMarbleInside(...)`, declared on GameObject,
+overridden by Gem). Fixed 2026-09-03 by walking the super chain. Two
+follow-ups: (1) the fall-through path must never be silent -- make it throw
+or trap, so the next slot mismatch is a crash with a name, not a no-op; (2)
+audit the Cranelift tier's CallMethod for the same own-list assumption, since
+hybrid never showed the symptom only because this body ran interpreted.

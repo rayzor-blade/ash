@@ -310,6 +310,191 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 /// public NativeStackTrace API. This is the same callback contract as
 /// `hl_setup_exception` in upstream HashLink; Ash's host installs callbacks
 /// after loading bytecode so generated PCs can be mapped back to findices.
+/// Symbols an ahead-of-time binary registers at startup: the `ash_functions`
+/// table (one code address per findex) and a parallel table of names. The JIT
+/// hands the runtime a symbolizer and a stack walker that live in the ash
+/// crate; a standalone binary links only this library, so without these two
+/// defaults every `haxe.CallStack.exceptionStack()` came back empty -- and
+/// heaps' own error reporter then faulted on the null while printing.
+static AOT_SYMBOLS: std::sync::Mutex<Vec<(usize, &'static str)>> = std::sync::Mutex::new(Vec::new());
+static AOT_SYMBOL_TEXT: std::sync::Mutex<Vec<(usize, &'static [u16])>> = std::sync::Mutex::new(Vec::new());
+
+#[no_mangle]
+pub unsafe extern "C" fn hlp_register_aot_symbols(
+    starts: *const *const c_void,
+    names: *const *const std::os::raw::c_char,
+    count: usize,
+) {
+    if starts.is_null() || names.is_null() {
+        return;
+    }
+    let mut table = Vec::with_capacity(count);
+    for i in 0..count {
+        let start = *starts.add(i) as usize;
+        let name = *names.add(i);
+        if start == 0 || name.is_null() {
+            continue;
+        }
+        let text: &'static str = Box::leak(
+            std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned().into_boxed_str(),
+        );
+        table.push((start, text));
+    }
+    table.sort_by_key(|(start, _)| *start);
+    table.dedup_by_key(|(start, _)| *start);
+    *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
+    if RESOLVE_SYMBOL.load(Ordering::Acquire) == 0 {
+        RESOLVE_SYMBOL.store(aot_resolve_symbol as usize, Ordering::Release);
+    }
+    if CAPTURE_STACK.load(Ordering::Acquire) == 0 {
+        CAPTURE_STACK.store(aot_capture_stack as usize, Ordering::Release);
+    }
+}
+
+
+/// Whether a return address belongs to program code rather than to the
+/// runtime, decided by the symbol dladdr names for it. The runtime may be a
+/// separate library or linked statically into the same image, so image
+/// identity cannot tell them apart; symbol names can: the runtime's entry
+/// points are `hlp_*`/`hl_*`, and its Rust internals are mangled.
+unsafe fn aot_frame_in_program(pc: usize) -> bool {
+    let mut info: libc::Dl_info = std::mem::zeroed();
+    if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
+        return false;
+    }
+    let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy();
+    let name = raw.trim_start_matches('_');
+    !(name.starts_with("hlp_")
+        || name.starts_with("hl_")
+        || name.starts_with("ash_")
+        || name.starts_with("RNv")
+        || name.starts_with("ZN")
+        || name.starts_with("std_")
+        || name == "main"
+        || name == "start")
+}
+
+unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
+    let mut info: libc::Dl_info = std::mem::zeroed();
+    if libc::dladdr(pc as *const c_void, &mut info) == 0 || info.dli_sname.is_null() {
+        return None;
+    }
+    // dladdr knows which function CONTAINS the address (inlining moves a
+    // return address into whatever body absorbed the call); the registered
+    // table knows that function's Haxe name. The emitter's own LLVM symbols
+    // are abbreviations (`t`, `o.1234`), so they are only the last resort.
+    let start = info.dli_saddr as usize;
+    {
+        // One lock: the guard of an `if let` scrutinee lives through the
+        // body, and a second lock there deadlocked on the first frame.
+        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(i) = table.binary_search_by_key(&start, |(s, _)| *s) {
+            return Some(table[i].1.to_string());
+        }
+    }
+    let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy().into_owned();
+    let name = raw.trim_start_matches('_');
+    let name = match name.rfind('.') {
+        Some(i) if name[i + 1..].chars().all(|c| c.is_ascii_digit()) => &name[..i],
+        _ => name,
+    };
+    Some(name.to_string())
+}
+/// Walk the frame-pointer chain from the caller. Every body the emitter
+/// produces keeps a frame pointer, and so does the runtime; the walk stops at
+/// the first frame that does not (the C entry), or at anything that fails a
+/// sanity check. With a null `output` it only counts, as the JIT walker does.
+unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
+    let mut fp: usize;
+    #[cfg(target_arch = "aarch64")]
+    core::arch::asm!("mov {}, x29", out(reg) fp, options(nomem, nostack, preserves_flags));
+    #[cfg(target_arch = "x86_64")]
+    core::arch::asm!("mov {}, rbp", out(reg) fp, options(nomem, nostack, preserves_flags));
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        fp = 0;
+    }
+    let mut written = 0i32;
+    let mut depth = 0;
+    while fp != 0 && fp % 8 == 0 && depth < 256 {
+        let next = *(fp as *const usize);
+        let ret = *((fp + 8) as *const usize);
+        if ret == 0 {
+            break;
+        }
+        // Keep the frames that belong to the program: dladdr says which
+        // image a return address lives in, and the runtime's own frames on
+        // the way to the throw are the ones in THIS library.
+        let known = aot_frame_in_program(ret);
+        if known {
+            if !output.is_null() {
+                if written >= capacity {
+                    break;
+                }
+                *output.add(written as usize) = ret as *mut c_void;
+            }
+            written += 1;
+        }
+        if next <= fp || next - fp > (1 << 24) {
+            break;
+        }
+        fp = next;
+        depth += 1;
+    }
+    written
+}
+
+/// Map a return address back to the function that contains it and hand back
+/// its name as a NUL-terminated UTF-16 string, cached per address: the
+/// JIT's resolver returns a pointer into text it owns, and the caller reads
+/// `*buffer_len` code units from it.
+unsafe extern "C" fn aot_resolve_symbol(
+    symbol: *mut c_void,
+    _buffer: *mut u8,
+    buffer_len: *mut i32,
+) -> *mut u8 {
+    let pc = symbol as usize;
+    if let Some((_, text)) = AOT_SYMBOL_TEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(addr, _)| *addr == pc)
+    {
+        if !buffer_len.is_null() {
+            *buffer_len = (text.len() - 1) as i32;
+        }
+        return text.as_ptr() as *mut u8;
+    }
+    // The exact enclosing symbol first: with inlining, a return address sits
+    // in whatever body absorbed the call, which is not necessarily a table
+    // entry, and "nearest table start below" then names a neighbour. The
+    // linker's symbol table knows every body, local ones included on
+    // Darwin; the registered table is the fallback where dladdr only sees
+    // exported symbols.
+    let name: Option<String> = aot_symbol_via_dladdr(pc).or_else(|| {
+        let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+        match table.binary_search_by_key(&pc, |(start, _)| *start) {
+            Ok(i) => Some(table[i].1.to_string()),
+            Err(0) => None,
+            Err(i) => (pc - table[i - 1].0 < (1 << 22)).then(|| table[i - 1].1.to_string()),
+        }
+    });
+    let Some(name) = name else {
+        return std::ptr::null_mut();
+    };
+    let mut units: Vec<u16> = name.encode_utf16().collect();
+    units.push(0);
+    let text: &'static [u16] = Box::leak(units.into_boxed_slice());
+    AOT_SYMBOL_TEXT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((pc, text));
+    if !buffer_len.is_null() {
+        *buffer_len = (text.len() - 1) as i32;
+    }
+    text.as_ptr() as *mut u8
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_setup_exception(
     resolve_symbol: Option<ResolveSymbol>,

@@ -257,9 +257,9 @@ impl<'ctx> JITModule<'ctx> {
         // Under AOT the object may be built for a machine that is not this
         // one, and a host-CPU stamp would make it crash there rather than run
         // slower. The target machine handed to `emit_object` decides instead.
-        if !self.aot {
-            self.stamp_host_cpu(f);
-        }
+        // Always: the frame-pointer attribute applies to every body, and the
+        // CPU stamp inside skips itself under AOT.
+        self.stamp_host_cpu(f);
         f
     }
 
@@ -274,6 +274,14 @@ impl<'ctx> JITModule<'ctx> {
     /// creation — the one choke point both the whole-module and the tiered
     /// promote paths pass through.
     fn stamp_host_cpu(&self, f: FunctionValue<'ctx>) {
+        // Every body keeps a frame pointer. LLVM's default for a raw module
+        // is to omit it, and an emitted prologue then saves x29/x30 without
+        // ever pointing x29 at the frame, which breaks the chain a stack walk
+        // follows: an exception's stack ended at the first AOT body. Apple's
+        // ABI expects it anyway; the JIT's own walker uses its code map but
+        // crash reports read the chain too.
+        let loc = inkwell::attributes::AttributeLoc::Function;
+        f.add_attribute(loc, self.context.create_string_attribute("frame-pointer", "all"));
         // An object file names its CPU once, in `emit_object`, from the
         // requested triple; stamping THIS host onto a function would bake
         // the build machine into a cross-compiled binary.
@@ -5140,17 +5148,28 @@ impl<'ctx> JITModule<'ctx> {
 
                     // Continue at merge
                     self.builder.position_at_end(merge_block);
-                } else if let Some(findex) = obj_type.obj.as_ref().and_then(|obj| {
+                } else if let Some(findex) = {
                     // field.0 is the vtable slot index (vobj_proto index).
-                    // Find the proto entry whose pindex matches field.0
-                    // to get the findex for the function signature.
-                    for p in &obj.proto {
-                        if p.pindex as usize == field.0 {
-                            return Some(p.findex as usize);
+                    // Find the proto entry whose pindex matches field.0 to
+                    // get the findex for the function signature -- walking
+                    // the SUPER chain: a subclass's own proto list holds
+                    // only the methods it declares, so a call through a
+                    // subclass-typed receiver to an inherited method found
+                    // nothing here and fell through to a path that did
+                    // nothing at all (a Gem's onMarbleInside called on a
+                    // DtsObject receiver, the game's item pickup).
+                    let mut found: Option<usize> = None;
+                    let mut cur = Some(obj_type_idx);
+                    while let Some(ti) = cur {
+                        let Some(obj) = self.types_[ti].obj.as_ref() else { break };
+                        if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == field.0) {
+                            found = Some(p.findex as usize);
+                            break;
                         }
+                        cur = obj.super_.as_ref().map(|t| t.0);
                     }
-                    None
-                }) {
+                    found
+                } {
                     // Runtime vtable dispatch for HOBJ/HSTRUCT.
                     // field.0 is the vobj_proto slot index.
                     let vtable_slot = field.0 as u64;
@@ -8608,7 +8627,7 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// `Class.method` for a findex, or `None` for a closure or the entrypoint.
-    fn function_name(&mut self, findex: u32) -> Option<String> {
+    pub(crate) fn function_name(&mut self, findex: u32) -> Option<String> {
         self.ensure_name_map();
         self.findex_to_name.as_ref().unwrap().get(&findex).cloned()
     }

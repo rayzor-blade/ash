@@ -724,6 +724,12 @@ pub fn optimized_with_config(
     let mut opts = PassOptions::default();
     opts.fma = cfg.fma;
     opts.time_passes = time_passes();
+    // The bisect switch for a wrong answer out of a loop: the vectorizer is
+    // the one O3 pass that rewrites arithmetic, so "same result with
+    // ASH_AIR_NO_WIDEN=1" separates it from the inliner and SROA.
+    if std::env::var_os("ASH_AIR_NO_WIDEN").is_some() {
+        opts.widen = false;
+    }
     // The pipeline runs outside the lock: it is the expensive part, and holding
     // a process-wide lock across it would serialize the brokers against the
     // interpreter.

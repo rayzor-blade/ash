@@ -55,7 +55,7 @@ pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {
     let r = hlp_rnd_alloc();
-    let pid = std::process::id();
+    let pid = crate::sys::process_id();
     // Upstream mixes gettimeofday's microsecond clock with the pid; SystemTime
     // is the portable spelling of that same wall clock. A clock reading before
     // the epoch seeds with 0 rather than raising: every value is a legal seed,

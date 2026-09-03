@@ -17,7 +17,10 @@ use wasmparser::{Parser, Payload, TableType, Validator};
 /// supplied yet, or something a sandbox cannot do at all.
 fn is_host_supplied(module: &str, name: &str) -> bool {
     module.starts_with("wasi_")
-        || (module, name) == crate::FIBER_YIELD_IMPORT
+        // Everything ash asks a host for beyond WASI shares this prefix, and
+        // each one is optional: a host that does not implement it says so
+        // through the call's own failure, not by refusing to instantiate.
+        || (module == "env" && name.starts_with("ash_host_"))
         // The linker's own placeholders, present in a relocatable object.
         || module == "GOT.mem"
         || module == "GOT.func"

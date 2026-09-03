@@ -649,7 +649,7 @@ mod file_error_code_tests {
     fn missing_path(tag: &str) -> String {
         let p = std::env::temp_dir().join(format!(
             "ash_file_error_{tag}_{}",
-            std::process::id()
+            crate::sys::process_id()
         ));
         let _ = std::fs::remove_file(&p);
         p.to_str().unwrap().to_string()

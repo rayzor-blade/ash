@@ -169,6 +169,32 @@ impl TargetAbi {
     }
 }
 
+fn lower_triple(triple: &str) -> String {
+    triple.to_ascii_lowercase()
+}
+
+/// Turn on the backend's setjmp/longjmp lowering, once per process.
+///
+/// It is an LLVM command-line option rather than a target-machine setting,
+/// which is why this reaches for the option parser: there is no other way in.
+/// Harmless on a native build that never asks for a wasm target machine,
+/// because nothing else consults it.
+fn enable_wasm_sjlj() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let args = [c"ash".as_ptr(), c"-wasm-enable-sjlj".as_ptr()];
+        let overview = c"ash wasm codegen";
+        unsafe {
+            inkwell::llvm_sys::support::LLVMParseCommandLineOptions(
+                args.len() as i32,
+                args.as_ptr(),
+                overview.as_ptr(),
+            );
+        }
+    });
+}
+
 pub(crate) fn target_machine(
     triple: &str,
     opt: OptimizationLevel,
@@ -185,6 +211,16 @@ pub(crate) fn target_machine(
     };
     let features = if native {
         TargetMachine::get_host_cpu_features().to_string()
+    } else if lower_triple(triple).starts_with("wasm") {
+        // ash's trap model is `setjmp`, and on WebAssembly a `setjmp` IS
+        // exception handling: the backend rewrites the call into
+        // `__wasm_setjmp` and friends, and refuses to do it without the
+        // feature enabled ("is using setjmp/longjmp but does not have
+        // +exception-handling target feature"). The runtime is built with the
+        // same two switches, and both halves have to agree or the program's
+        // calls stay unlowered while the runtime's are rewritten.
+        enable_wasm_sjlj();
+        "+exception-handling".to_string()
     } else {
         String::new()
     };

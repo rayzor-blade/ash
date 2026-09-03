@@ -60,7 +60,17 @@ pub unsafe extern "C" fn ash_static_call(
     out: *mut vdynamic,
 ) -> *mut c_void {
     let _ = (fun, t, args, out);
-    std::ptr::null_mut()
+    // Returning null would be worse than failing: the caller uses the result
+    // as a value and faults somewhere else, which is how this first showed up
+    // -- an out-of-bounds access at 0xffffffb0, four frames below the actual
+    // problem. Say what happened, where it happened.
+    panic!(
+        "ash: a dynamic call cannot be made on this target. WebAssembly checks \
+         the signature of every indirect call, so a call whose shape is only \
+         known at run time cannot be assembled; the compiler needs to emit a \
+         trampoline per signature first. Reflection, Reflect.callMethod and \
+         closure-taking stdlib calls such as Array.sort reach this."
+    )
 }
 
 /// Dynamic function call for aarch64 — marshals args according to function type

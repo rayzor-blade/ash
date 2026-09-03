@@ -44,6 +44,23 @@ unsafe fn uchar_slice<'a>(p: *const u16) -> &'a [u16] {
     std::slice::from_raw_parts(p, len)
 }
 
+/// This process's id, where there is one.
+///
+/// `std::process::id()` panics on wasi rather than returning an error: the
+/// platform has no pids, and abort is how its std says so. Nothing here needs
+/// a real one -- callers mix it into a seed, or name a temporary file with
+/// it -- so a sandbox gets a constant and the program keeps running.
+pub(crate) fn process_id() -> u32 {
+    #[cfg(not(any(unix, windows)))]
+    {
+        1
+    }
+    #[cfg(any(unix, windows))]
+    {
+        std::process::id()
+    }
+}
+
 /// The OS's own encoding for a `pchar*`. On unix the bytes are already the
 /// filesystem encoding and are taken verbatim, so a path the OS accepts but
 /// UTF-8 cannot describe still round-trips.
@@ -267,7 +284,7 @@ pub unsafe extern "C" fn hlp_sys_profile_event(code: i32, data: *mut vbyte, data
 
 #[no_mangle]
 pub extern "C" fn hlp_sys_getpid() -> i32 {
-    std::process::id() as i32
+    process_id() as i32
 }
 
 /// Upstream errors out with "Unknown sys_special key" for every key on
@@ -1223,7 +1240,7 @@ mod tests {
             assert!(hlp_sys_put_env(key.as_ptr(), std::ptr::null()));
             assert!(hlp_sys_get_env(key.as_ptr()).is_null());
 
-            let root = std::env::temp_dir().join(format!("ash_sys_rs_{}", std::process::id()));
+            let root = std::env::temp_dir().join(format!("ash_sys_rs_{}", process_id()));
             let _ = std::fs::remove_dir_all(&root);
             let root_p = pc(root.to_str().unwrap());
             assert!(hlp_sys_create_dir(root_p.as_ptr(), 0o755));

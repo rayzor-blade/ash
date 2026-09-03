@@ -543,7 +543,7 @@ mod unsupported_tooling_tests {
         let mut payload = [PATTERN; 64];
         let addr_ptr: *mut vbyte = addr.as_mut_ptr();
         let payload_ptr: *mut vbyte = payload.as_mut_ptr();
-        let pid = std::process::id() as i32;
+        let pid = crate::sys::process_id() as i32;
 
         unsafe {
             assert!(

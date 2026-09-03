@@ -11,8 +11,8 @@
 //! The last check is the one that catches a cross-compile regression. Until
 //! the wasm runtime exists (docs/wasm-target.md, phase 2) the module is linked
 //! permissively, so the imports ARE the program's runtime boundary, listed.
-//! Anything appearing there that is not an `hlp_*`, `hl_*` or `setjmp` means
-//! generated code called something only a native host provides.
+//! Anything appearing there that is not an `hlp_*`, `hl_*` or a setjmp form
+//! means generated code called something only a native host provides.
 //!
 //! The reading is done by ash's own parser, the one behind `ash wasm`, so
 //! nothing external is needed to check a module. The link still needs a
@@ -174,6 +174,11 @@ fn wasm32_object_is_a_valid_module_with_the_expected_boundary() {
             let bare = i.name.trim_start_matches('_');
             !(bare.starts_with("hlp_")
                 || bare.starts_with("hl_")
+                // The lowered forms the WebAssembly backend rewrites a
+                // `setjmp` call into; `libsetjmp` defines them, and this
+                // module is linked permissively without it.
+                || bare.starts_with("wasm_setjmp")
+                || bare.starts_with("wasm_longjmp")
                 || bare.starts_with("setjmp")
                 || bare.starts_with("longjmp"))
         })

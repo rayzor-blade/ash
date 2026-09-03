@@ -356,6 +356,56 @@ pre-opens a listening descriptor gets a real server, since accept, send,
 receive and shutdown are all preview 1 calls. Full outbound TCP wants
 preview 2's `wasi:sockets`, which is a different target rather than a shim.
 
+### It runs
+
+```
+BenchFib 102334155
+```
+
+That is `bench_fib` compiled by ash to `wasm32-wasip1`, linked against the
+wasm runtime, executed by `ash-wasm-run` under wasmtime, and it is the same
+number the native build prints. `test_basic` is identical to its native
+output line for line.
+
+The recipe, until `ash --build` learns the target:
+
+```
+RUSTFLAGS="-Cllvm-args=-wasm-enable-sjlj -Ctarget-feature=+exception-handling" \
+  cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
+
+ash --emit-aot prog.o --target wasm32-wasip1 prog.hl
+
+rust-lld -flavor wasm --no-entry --export-dynamic \
+  -L$(brew --prefix wasi-libc)/share/wasi-sysroot/lib/wasm32-wasip1 \
+  -o prog.wasm prog.o target/wasm32-wasip1/release/libash_std.a -lc -lsetjmp
+
+ash-wasm-run prog.wasm
+```
+
+Four things that each cost a cycle to find:
+
+* **`setjmp` is a codegen mode.** Both halves need
+  `-wasm-enable-sjlj` AND `+exception-handling`; the backend refuses one
+  without the other ("is using setjmp/longjmp but does not have
+  +exception-handling target feature"). The emitter sets both for a wasm
+  triple, reaching for LLVM's option parser because `-wasm-enable-sjlj` is a
+  command-line option rather than a target-machine setting.
+* **The engine needs the exceptions proposal.** A module built that way does
+  not parse without it: `wasmtime -W exceptions`, or `Config::wasm_exceptions`
+  in a host. `ash-wasm-run` sets it.
+* **`rust-lld` version matters.** Anything older than the wasi-libc installed
+  fails on `__wasm_first_page_end`, a linker-defined symbol. The newest
+  toolchain's `rust-lld` works; a 2024 nightly's does not.
+* **`std::process::id()` aborts on wasi** rather than returning an error, and
+  five places called it. One helper now answers 1 there, since every caller
+  wanted a seed or a filename rather than a real pid.
+
+`test_stdlib` runs nineteen lines and then faults inside `hlp_call_method`
+with an out-of-bounds access, reached through `hlp_jit_closure_runner`. The
+`ash_static_call` gap below is the obvious suspect and is NOT the cause: that
+function now panics with an explanation when it is reached, and the panic
+does not fire. Unidentified, and the next thing to chase.
+
 ### Phase 3 — link and run a real Ash program
 
 Add a wasm branch to `ash --build` instead of passing a wasm object to the

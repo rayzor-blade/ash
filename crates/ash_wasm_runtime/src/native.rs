@@ -39,10 +39,15 @@ impl Program {
     /// Load a module, without running it.
     pub fn load(path: &Path) -> Result<Self> {
         let mut config = Config::new();
-        // Fibers need a host function that can suspend. In this wasmtime it
-        // is the default rather than a switch, so nothing is set here; the
+        // Fibers need a host function that can suspend. In this wasmtime that
+        // is the default rather than a switch, so nothing is set for it; the
         // capability is what matters, and `func_wrap_async` below uses it.
-        let _ = &mut config;
+        //
+        // Exceptions are not the default. ash's trap model is `setjmp`, which
+        // the WebAssembly backend lowers into the exception-handling
+        // instructions, so a module built from it does not even parse without
+        // this: "exceptions proposal not enabled".
+        config.wasm_exceptions(true);
         let engine =
             Engine::new(&config).map_err(|e| anyhow!("creating the wasmtime engine: {e}"))?;
         let module = Module::from_file(&engine, path)
@@ -61,7 +66,9 @@ impl Program {
                 let module = import.module();
                 let known_wasi =
                     module.starts_with("wasi_snapshot_preview1") || module.starts_with("wasi_");
-                let known_host = module == FIBER_YIELD_MODULE && import.name() == FIBER_YIELD_NAME;
+                let known_host = module == FIBER_YIELD_MODULE
+                    && (import.name() == FIBER_YIELD_NAME
+                        || import.name().starts_with("ash_host_"));
                 !(known_wasi || known_host)
             })
             .map(|import| format!("{}.{}", import.module(), import.name()))
@@ -98,6 +105,7 @@ impl Program {
         p1::add_to_linker_async(&mut linker, |ctx: &mut WasiP1Ctx| ctx)
             .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
         install_fiber_yield(&mut linker)?;
+        install_socket_refusals(&mut linker)?;
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
@@ -149,6 +157,28 @@ impl Entry {
             Entry::Main(f) => Ok(f.call_async(store, (0, 0)).await?),
         }
     }
+}
+
+/// Sockets, which this host does not open.
+///
+/// WASI preview 1 has no call that creates or connects a socket, so the guest
+/// asks the host, and the honest answer here is no: a negative descriptor,
+/// which the guest reports as the refusal a kernel would have given. A host
+/// that wants real sockets under `wasmtime` should reach for preview 2's
+/// `wasi:sockets` rather than reimplement them behind this import.
+fn install_socket_refusals(linker: &mut Linker<WasiP1Ctx>) -> Result<()> {
+    linker
+        .func_wrap("env", "ash_host_socket_open", |_: i32| -> i32 { -1 })
+        .map_err(|e| anyhow!("installing ash_host_socket_open: {e}"))?;
+    linker
+        .func_wrap(
+            "env",
+            "ash_host_socket_connect",
+            // ENOTSUP in WASI's numbering.
+            |_: i32, _: i32, _: i32| -> i32 { 58 },
+        )
+        .map_err(|e| anyhow!("installing ash_host_socket_connect: {e}"))?;
+    Ok(())
 }
 
 const FIBER_YIELD_MODULE: &str = crate::FIBER_YIELD_IMPORT.0;

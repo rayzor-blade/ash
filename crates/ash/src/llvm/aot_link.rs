@@ -324,70 +324,167 @@ pub fn is_wasm_triple(triple: &str) -> bool {
 /// ash runtime compiled for it. They are looked up separately so the error
 /// says which one is absent.
 struct WasmTools {
-    linker: PathBuf,
-    /// `rust-lld` is a multi-flavour driver and has to be told which one.
-    leading: Vec<String>,
+    linker: Linker,
     /// The directory holding `libc.a` and `libsetjmp.a`.
     sysroot_lib: PathBuf,
 }
 
-fn first_program(candidates: Vec<(PathBuf, Vec<String>)>) -> Option<(PathBuf, Vec<String>)> {
-    for (program, leading) in candidates {
-        // An absolute path is checked by existence; a bare name has to be run,
-        // because it is the PATH lookup that answers.
-        let ok = if program.is_absolute() {
-            program.is_file()
-        } else {
-            Command::new(&program)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        };
-        if ok {
-            return Some((program, leading));
-        }
-    }
-    None
-}
-
-/// The wasm linker, in the order a machine is likely to have one.
-fn wasm_linker() -> Result<(PathBuf, Vec<String>)> {
-    let mut candidates: Vec<(PathBuf, Vec<String>)> = Vec::new();
-    if let Some(explicit) = std::env::var_os("ASH_WASM_LD") {
-        candidates.push((PathBuf::from(explicit), Vec::new()));
-    }
-    candidates.push((PathBuf::from("wasm-ld"), Vec::new()));
-    candidates.push((PathBuf::from("wasm-ld-21"), Vec::new()));
-    // The one that came with the LLVM this ash was built against.
-    if let Some(prefix) = option_env!("LLVM_SYS_211_PREFIX") {
-        candidates.push((PathBuf::from(prefix).join("bin/wasm-ld"), Vec::new()));
-    }
-    // Rust ships a wasm-capable lld with every toolchain, under a name that
-    // needs to be told which linker to be.
-    if let Some(sysroot) = rustc_sysroot() {
-        let host = std::env::consts::ARCH;
-        if let Ok(entries) = std::fs::read_dir(sysroot.join("lib/rustlib")) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.contains(host) {
-                    continue;
-                }
-                candidates.push((
-                    entry.path().join("bin/rust-lld"),
-                    vec!["-flavor".into(), "wasm".into()],
-                ));
-            }
-        }
-    }
-    first_program(candidates).ok_or_else(|| {
-        anyhow!(
-            "no wasm linker found. Install one (`wasm-ld`, which comes with LLVM, \
-             or the wasi-sdk), or name it with ASH_WASM_LD"
-        )
+/// Resolve `name` through PATH, as an absolute path.
+///
+/// Done here rather than by handing a bare name to the OS, because knowing
+/// *where* the linker came from is what locates the sysroot beside it.
+fn on_path(name: &str) -> Option<PathBuf> {
+    let file = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+        let candidate = dir.join(&file);
+        candidate.is_file().then_some(candidate)
     })
 }
 
+/// The directory a toolchain hangs off, given one of its tools:
+/// `<prefix>/bin/wasm-ld` is `<prefix>`.
+fn tool_prefix(tool: &Path) -> Option<PathBuf> {
+    tool.parent()?.parent().map(Path::to_path_buf)
+}
+
+/// A wasm linker and the arguments it needs before anything else.
+struct Linker {
+    program: PathBuf,
+    /// LLD's multi-call driver has to be told which linker to be. `wasm-ld`
+    /// is the name that already means "the wasm one"; `lld`, `ld.lld` and
+    /// `rust-lld` are the same binary and need telling.
+    flavor: Vec<String>,
+}
+
+impl Linker {
+    fn at(program: PathBuf) -> Self {
+        let named_wasm = program
+            .file_name()
+            .map(|n| n.to_string_lossy().starts_with("wasm-ld"))
+            .unwrap_or(false);
+        let flavor = if named_wasm {
+            Vec::new()
+        } else {
+            vec!["-flavor".to_string(), "wasm".to_string()]
+        };
+        Linker { program, flavor }
+    }
+
+    /// Run it. A linker that exists is not a linker that works, and the
+    /// difference is not theoretical: a standalone `wasm-ld` from one LLVM
+    /// release resolving against another release's `libLLVM` aborts in dyld
+    /// with a missing symbol. Finding out here costs one process and names
+    /// the real problem; finding out later reports a failed link.
+    fn probe(&self) -> Result<(), String> {
+        match Command::new(&self.program)
+            .args(&self.flavor)
+            .arg("--version")
+            .output()
+        {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let said = String::from_utf8_lossy(&out.stderr);
+                let first = said.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                Err(format!("ran but failed ({}): {first}", out.status))
+            }
+            Err(e) => Err(format!("could not be run: {e}")),
+        }
+    }
+}
+
+/// The wasm linker.
+///
+/// ash does not contain one. `wasm-ld` is LLD, and the LLVM ash is built
+/// against ships `libLLVM` rather than LLD's libraries -- there is no
+/// `liblldWasm` and no `lld/Common/Driver.h` to call -- so it is spawned.
+///
+/// Every candidate is somewhere it can honestly be: named outright, shipped
+/// beside ash by whoever packaged it, on PATH, or belonging to a Rust
+/// toolchain that is asked where it lives rather than guessed at. No
+/// build-machine paths and no package manager's layout: a path that was true
+/// where ash was compiled says nothing about where ash is running.
+///
+/// Each is run before it is used, and one that does not run is reported by
+/// name with what it said.
+fn wasm_linker() -> Result<Linker> {
+    let mut tried: Vec<String> = Vec::new();
+
+    if let Some(explicit) = std::env::var_os("ASH_WASM_LD") {
+        let named = Linker::at(PathBuf::from(explicit));
+        if !named.program.is_file() {
+            bail!(
+                "ASH_WASM_LD points at {}, which is not a file",
+                named.program.display()
+            );
+        }
+        // Named explicitly, so a failure is not something to work around.
+        if let Err(why) = named.probe() {
+            bail!("ASH_WASM_LD names {}, which {why}", named.program.display());
+        }
+        return Ok(named);
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(if cfg!(windows) {
+                "wasm-ld.exe"
+            } else {
+                "wasm-ld"
+            }));
+        }
+    }
+    if let Some(found) = on_path("wasm-ld") {
+        candidates.push(found);
+    }
+    // A Rust toolchain carries a self-contained LLD, which is version-matched
+    // to itself and so survives the clash above. Asked for, not guessed: if
+    // there is no rustc this costs one failed spawn.
+    if let Some(sysroot) = rustc_sysroot() {
+        if let Ok(entries) = std::fs::read_dir(sysroot.join("lib/rustlib")) {
+            for entry in entries.flatten() {
+                let lld = entry.path().join("bin").join(if cfg!(windows) {
+                    "rust-lld.exe"
+                } else {
+                    "rust-lld"
+                });
+                if lld.is_file() {
+                    candidates.push(lld);
+                }
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        let linker = Linker::at(candidate);
+        match linker.probe() {
+            Ok(()) => return Ok(linker),
+            Err(why) => tried.push(format!("{} {why}", linker.program.display())),
+        }
+    }
+
+    if tried.is_empty() {
+        bail!(
+            "no wasm-ld found beside ash or on PATH. It is LLD's WebAssembly \
+             driver and comes with LLVM and with the wasi-sdk; install either, \
+             or name one with ASH_WASM_LD"
+        )
+    }
+    bail!(
+        "found a wasm linker but none that runs. Name a working one with \
+         ASH_WASM_LD. Tried: {}",
+        tried.join("; ")
+    )
+}
+
+/// Ask rustc where its toolchain is, if there is a rustc.
 fn rustc_sysroot() -> Option<PathBuf> {
     let out = Command::new("rustc")
         .arg("--print")
@@ -404,49 +501,81 @@ fn rustc_sysroot() -> Option<PathBuf> {
 
 /// The directory holding a libc for the target.
 ///
-/// A wasi sysroot is what supplies it, and `libsetjmp.a` with it -- which
-/// matters more than it looks, because an ash program's exception handling
-/// IS setjmp. Rust's own bundled libc is offered last and reported for what
-/// it is: it has no `libsetjmp.a`, so a program that throws will not link.
-fn wasm_sysroot_lib(triple: &str) -> Result<PathBuf> {
+/// A wasi sysroot supplies it, and `libsetjmp.a` with it -- which matters
+/// more than it looks, because an ash program's exception handling IS
+/// setjmp, so a libc without it links right up until the first `try`.
+///
+/// The interesting entry is the one derived from the linker: a toolchain
+/// that puts `wasm-ld` in `<prefix>/bin` generally puts its sysroot in
+/// `<prefix>/share`. Deriving it covers whatever package manager or SDK
+/// layout is actually installed, on any platform, without this file naming
+/// one of them and being wrong everywhere else.
+fn wasm_sysroot_lib(triple: &str, linker: &Path) -> Result<PathBuf> {
     let arch_dir = if triple.to_ascii_lowercase().contains("wasip2") {
         "wasm32-wasip2"
     } else {
         "wasm32-wasip1"
     };
+
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(explicit) = std::env::var_os("ASH_WASM_SYSROOT") {
         roots.push(PathBuf::from(explicit));
     }
-    for base in [
-        "/opt/wasi-sdk/share/wasi-sysroot",
-        "/usr/local/share/wasi-sysroot",
-        "/usr/share/wasi-sysroot",
-        "/opt/homebrew/opt/wasi-libc/share/wasi-sysroot",
-        "/usr/local/opt/wasi-libc/share/wasi-sysroot",
-    ] {
-        roots.push(PathBuf::from(base));
+    // The wasi-sdk's own variable: a machine set up for wasi has already
+    // answered this question, and it did not answer it to us.
+    if let Some(sdk) = std::env::var_os("WASI_SDK_PATH") {
+        let sdk = PathBuf::from(sdk);
+        roots.push(sdk.join("share/wasi-sysroot"));
+        roots.push(sdk);
     }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.join("wasi-sysroot"));
+            roots.push(dir.join("../share/wasi-sysroot"));
+        }
+    }
+    // Beside the linker, by the path we found it at and by the path it
+    // resolves to: a symlinked tool and its sysroot usually share the first
+    // prefix and not the second.
+    for tool in [Some(linker.to_path_buf()), linker.canonicalize().ok()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(prefix) = tool_prefix(&tool) {
+            roots.push(prefix.join("share/wasi-sysroot"));
+        }
+    }
+    // Every prefix on PATH.
+    //
+    // This is the entry that finds an installed sysroot in practice, and the
+    // reason it is written this way: whoever installed a wasi libc installed
+    // it under some prefix, and that prefix is on PATH because that is what
+    // putting a toolchain on a machine means. Reading it off PATH covers
+    // every package manager, every SDK and every hand-built prefix, on every
+    // platform, without this file naming one of them and being wrong on the
+    // rest. It is also not necessarily the linker's own prefix -- the linker
+    // that runs here may come from somewhere else entirely.
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if let Some(prefix) = dir.parent() {
+                roots.push(prefix.join("share/wasi-sysroot"));
+            }
+        }
+    }
+    // The wasi-sdk's documented default, for a machine that installed one and
+    // did not put it on PATH.
+    roots.push(PathBuf::from("/opt/wasi-sdk/share/wasi-sysroot"));
 
     let mut without_setjmp: Option<PathBuf> = None;
-    for root in roots {
-        for lib in [root.join("lib").join(arch_dir), root.join("lib"), root] {
+    for root in &roots {
+        for lib in [
+            root.join("lib").join(arch_dir),
+            root.join("lib"),
+            root.clone(),
+        ] {
             if !lib.join("libc.a").is_file() {
                 continue;
             }
-            if lib.join("libsetjmp.a").is_file() {
-                return Ok(lib);
-            }
-            without_setjmp.get_or_insert(lib);
-        }
-    }
-    // Rust's bundled copy, which is a libc but not a whole sysroot.
-    if let Some(sysroot) = rustc_sysroot() {
-        let lib = sysroot
-            .join("lib/rustlib")
-            .join(arch_dir)
-            .join("lib/self-contained");
-        if lib.join("libc.a").is_file() {
             if lib.join("libsetjmp.a").is_file() {
                 return Ok(lib);
             }
@@ -457,14 +586,21 @@ fn wasm_sysroot_lib(triple: &str) -> Result<PathBuf> {
     match without_setjmp {
         Some(lib) => bail!(
             "the only libc found for {triple} is {}, which has no libsetjmp.a. \
-             An ash program's exception handling is setjmp, so it would fail to \
-             link. Install a full wasi sysroot (the wasi-sdk, or a wasi-libc \
-             package) and point ASH_WASM_SYSROOT at it",
+             An ash program's exception handling is setjmp, so it would link \
+             and then fail at the first `try`. Install a full wasi sysroot and \
+             point ASH_WASM_SYSROOT at it",
             lib.display()
         ),
         None => bail!(
-            "no libc found for {triple}. Install a wasi sysroot (the wasi-sdk, or \
-             a wasi-libc package) and point ASH_WASM_SYSROOT at it"
+            "no libc found for {triple}. Install a wasi sysroot -- the wasi-sdk \
+             is the usual one -- and point ASH_WASM_SYSROOT (or the wasi-sdk's \
+             own WASI_SDK_PATH) at it. Looked in: {}",
+            roots
+                .iter()
+                .take(8)
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
@@ -536,17 +672,16 @@ fn link_wasm_module(
         Some(p) => bail!("runtime {} does not exist", p.display()),
         None => find_wasm_runtime(triple)?,
     };
-    let (linker, leading) = wasm_linker()?;
-    let sysroot_lib = wasm_sysroot_lib(triple)?;
+    let linker = wasm_linker()?;
+    let sysroot_lib = wasm_sysroot_lib(triple, &linker.program)?;
     let tools = WasmTools {
         linker,
-        leading,
         sysroot_lib,
     };
 
     crate::progress::begin("linking", 0);
-    let mut cmd = Command::new(&tools.linker);
-    cmd.args(&tools.leading)
+    let mut cmd = Command::new(&tools.linker.program);
+    cmd.args(&tools.linker.flavor)
         .arg("--no-entry")
         .arg("--export-dynamic")
         .arg("-L")
@@ -565,7 +700,10 @@ fn link_wasm_module(
     {
         cmd.arg(extra);
     }
-    run(&mut cmd, &format!("{} (link)", tools.linker.display()))?;
+    run(
+        &mut cmd,
+        &format!("{} (link)", tools.linker.program.display()),
+    )?;
 
     if !quiet {
         let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);

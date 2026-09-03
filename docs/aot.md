@@ -125,15 +125,30 @@ name when it is missing.
 
 | what | where ash looks | how to say it yourself |
 |---|---|---|
-| the linker | `wasm-ld` on PATH, then the one beside the LLVM ash was built against, then `rust-lld` in a Rust toolchain | `ASH_WASM_LD` |
-| a libc | a wasi sysroot: the wasi-sdk, `/usr/local/share`, a `wasi-libc` package | `ASH_WASM_SYSROOT` |
+| the linker | beside `ash`, then `wasm-ld` on PATH, then the LLD in a Rust toolchain if there is one | `ASH_WASM_LD` |
+| a libc | `share/wasi-sysroot` under every prefix on your PATH, then the wasi-sdk's default | `ASH_WASM_SYSROOT`, or the wasi-sdk's own `WASI_SDK_PATH` |
 | the ash runtime | `libash_std.a` in a directory named for the triple beside `ash`, then the usual library directories | `--runtime`, or `ASH_RUNTIME` |
+
+Two notes on how that list is built, because both were mistakes first.
+
+**Nothing is hardcoded to a machine.** The sysroot is found by reading the
+prefixes off your own PATH -- whoever installed a wasi libc installed it under
+some prefix, and that prefix is on PATH because that is what installing a
+toolchain means. Naming a package manager's directories instead would be right
+on one machine and wrong on the rest, and a path baked in when `ash` was
+*compiled* says nothing about where `ash` is *running*.
+
+**A linker that exists is not a linker that works.** Each candidate is run
+before it is used. This is not defensive habit: a standalone `wasm-ld` from
+one LLVM release, resolving at load time against another release's `libLLVM`,
+aborts in dyld with a missing symbol. Ash reports that by name and moves to
+the next candidate.
 
 Two things are worth knowing before the first build.
 
 **The sysroot must have `libsetjmp.a`.** An ash program's exception handling
-is `setjmp`, so a libc without it links until the first `try`. Rust's bundled
-wasi libc is one of these, and ash says so rather than using it silently.
+is `setjmp`, so a libc without it links until the first `try`. Ash says which
+libc it found and what it lacks, rather than using it silently.
 
 **The result is a library, not a command.** It exports `main` and
 `ash_module_init` and imports what only a host can answer: WASI, plus fiber

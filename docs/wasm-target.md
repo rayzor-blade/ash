@@ -299,6 +299,46 @@ after catch/throw correctness.
 *Done when:* allocation-heavy programs pass with collection forced at every
 safe point, and the native AOT exception corpus passes unchanged as wasm.
 
+## Why the runtime does not use `web-sys`
+
+It comes up because the browser is the destination, and `web-sys` is how Rust
+talks to a browser. It is the wrong layer for this crate, for three reasons
+that are worth writing down once.
+
+**It supplies the wrong things.** `web-sys` is generated from WebIDL: the DOM,
+WebGL, `Worker`, `crypto`, `performance`. The runtime does not want those. It
+wants a clock, randomness, stdout and a filesystem -- operating-system
+services, which is what WASI is. Measured against the actual port: of the
+errors left in `ash_std` for `wasm32-wasip1`, the ones outside `socket.rs` are
+seventeen struct-layout mismatches (a 32-bit `vclosure` has no `stackCount`, a
+32-bit `vdynamic` gains padding), a heap that wants `mmap`, and cfg fallout.
+`web-sys` fixes none of them. It is not a shortcut through this work; it is
+orthogonal to it.
+
+**It costs the target.** `web-sys` rides on `wasm-bindgen`, whose supported
+target is `wasm32-unknown-unknown` -- a target with no libc and a std whose OS
+layer is stubbed out. No clock, no stdout, no files, and no `setjmp`, which is
+the trap model. Everything WASI hands over for free would have to be rebuilt
+against JavaScript, and the result would run in a browser and nowhere else:
+no `wasmtime`, so no CI lane and no server embedding. It also changes the link
+model, since `wasm-bindgen` expects to post-process a module rustc produced
+and to ship JS glue beside it, where ash links its own LLVM-emitted object
+against the runtime archive with `wasm-ld`.
+
+**The browser's extra capabilities are the harness's, not the runtime's.**
+What a browser genuinely offers beyond WASI is JSPI for suspending a fiber,
+`Worker` plus `SharedArrayBuffer` for threads, and later WebGL, audio and
+input for Heaps. Every one of those is something a host provides to the
+module, and the module already has the interfaces: one import for fiber
+suspension, the mutator interface for threads, HDLL-shaped imports for a
+framework backend. A browser host that wants to be written in Rust rather
+than JavaScript can use `web-sys` freely -- in its own crate, compiled for
+its own target, on the other side of those imports.
+
+So: one runtime, built for `wasm32-wasip1`, reaching the browser through a
+small WASI preview-1 shim (phase 5). `web-sys` belongs to the host harness and
+to the framework backend, and using it there costs the runtime nothing.
+
 ### Phase 5 — browser ABI and conformance
 
 Ship a small WASI Preview 1 loader for Node and browsers, covering stdout,

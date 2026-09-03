@@ -302,8 +302,7 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     // exists, and this one lives until the process ends.
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
-    let mut jit =
-        ash_core::llvm::module::JITModule::new_aot_for_target(context, file, &triple)?;
+    let mut jit = ash_core::llvm::module::JITModule::new_aot_for_target(context, file, &triple)?;
 
     let findexes: Vec<usize> = jit
         .bytecode_functions()
@@ -372,6 +371,16 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         }
         msg.push_str("\n  --allow-refused emits anyway, if those paths are never taken.");
         anyhow::bail!(msg);
+    }
+
+    // Every function type the program contains gets a trampoline, so a
+    // dynamic call can be looked up rather than assembled. Only a target that
+    // cannot assemble one needs them; see `aot_trampoline`.
+    if triple.to_ascii_lowercase().starts_with("wasm") {
+        let emitted = jit.emit_call_trampolines()?;
+        if !quiet {
+            eprintln!("[aot] {emitted} call trampolines");
+        }
     }
 
     jit.finalize_aot_data()?;
@@ -489,7 +498,7 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
                  staged beside the binary. The .hdll files must sit there too. \
                  Do not link the static runtime into a program that loads HDLLs: \
                  it builds, and then the HDLL loads a second copy of the runtime \
-                 and the two collectors meet."
+                 and the two collectors meet.",
             );
         } else if exe.is_none() {
             ash_core::progress::note(&format!(
@@ -1020,13 +1029,16 @@ unsafe extern "C" fn crash_handler_siginfo(
 /// Separate from the bytecode path because it shares nothing with it -- no
 /// runtime, no interpreter, no LLVM. It reads a file and prints.
 fn run_wasm(module: &std::path::Path, validate: bool, _analyse: bool) -> Result<()> {
-    let bytes = std::fs::read(module)
-        .map_err(|e| anyhow::anyhow!("reading {}: {e}", module.display()))?;
+    let bytes =
+        std::fs::read(module).map_err(|e| anyhow::anyhow!("reading {}: {e}", module.display()))?;
     let report = ash_wasm_runtime::validate::inspect(&bytes);
 
     if validate {
         if let Some(why) = &report.invalid {
-            anyhow::bail!("{} is not a valid WebAssembly module: {why}", module.display());
+            anyhow::bail!(
+                "{} is not a valid WebAssembly module: {why}",
+                module.display()
+            );
         }
         if report.relocatable {
             anyhow::bail!(
@@ -1046,7 +1058,11 @@ fn run_wasm(module: &std::path::Path, validate: bool, _analyse: bool) -> Result<
                 module.display(),
                 unsatisfied.len(),
                 names.join(", "),
-                if unsatisfied.len() > names.len() { ", ..." } else { "" }
+                if unsatisfied.len() > names.len() {
+                    ", ..."
+                } else {
+                    ""
+                }
             );
         }
         println!("{}: runnable", module.display());

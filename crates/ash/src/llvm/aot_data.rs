@@ -1477,6 +1477,41 @@ impl<'ctx> JITModule<'ctx> {
         let entry = self.context.append_basic_block(late, "entry");
         self.builder.position_at_end(entry);
 
+        // Dynamic calls, for a target that will not assemble one at run time.
+        //
+        // The trampolines were emitted before this ran; here the table is
+        // handed to the runtime, which looks a signature up in it rather than
+        // building a call out of an `hl_type`. See `aot_trampoline`.
+        if let Some((keys, fns, count)) = self.trampoline_registry {
+            let ptr_type = self.context.ptr_type(AddressSpace::default());
+            let register = self.aot_runtime_fn(
+                "hlp_register_call_trampolines",
+                // The count is a `usize` on the runtime side, which is
+                // pointer-sized: 32 bits here, and the linker says so out
+                // loud if this disagrees.
+                void_type.fn_type(
+                    &[
+                        ptr_type.into(),
+                        ptr_type.into(),
+                        self.target_abi.pointer_int_type(self.context).into(),
+                    ],
+                    false,
+                ),
+            );
+            self.builder.build_call(
+                register,
+                &[
+                    keys.into(),
+                    fns.into(),
+                    self.target_abi
+                        .pointer_int_type(self.context)
+                        .const_int(count as u64, false)
+                        .into(),
+                ],
+                "",
+            )?;
+        }
+
         {
             // The poll epoch's address, from the getter rather than the symbol.
             // See fiber_poll_epoch_ptr: it is the only DATA this object would

@@ -59,18 +59,91 @@ pub unsafe extern "C" fn ash_static_call(
     args: *mut *mut c_void,
     out: *mut vdynamic,
 ) -> *mut c_void {
-    let _ = (fun, t, args, out);
-    // Returning null would be worse than failing: the caller uses the result
-    // as a value and faults somewhere else, which is how this first showed up
-    // -- an out-of-bounds access at 0xffffffb0, four frames below the actual
-    // problem. Say what happened, where it happened.
-    panic!(
-        "ash: a dynamic call cannot be made on this target. WebAssembly checks \
-         the signature of every indirect call, so a call whose shape is only \
-         known at run time cannot be assembled; the compiler needs to emit a \
-         trampoline per signature first. Reflection, Reflect.callMethod and \
-         closure-taking stdlib calls such as Array.sort reach this."
-    )
+    let Some(ft) = (*t).__bindgen_anon_1.fun.as_ref() else {
+        panic!("ash: a dynamic call whose type is not a function type");
+    };
+    let ret_kind = (*ft.ret).kind as u32;
+    let mut arg_kinds = [0u32; HL_MAX_ARGS];
+    let nargs = (ft.nargs as usize).min(HL_MAX_ARGS);
+    for (i, slot) in arg_kinds.iter_mut().enumerate().take(nargs) {
+        *slot = (**ft.args.add(i)).kind as u32;
+    }
+    let key = signature_key(ret_kind, &arg_kinds[..nargs]);
+
+    match call_trampoline(key) {
+        Some(tramp) => tramp(fun, args, out),
+        // Every signature the program contains has one, so a miss means the
+        // call is for a shape the compiler never saw -- a closure built by a
+        // native library, say. Better to say so than to guess.
+        None => panic!(
+            "ash: no call trampoline for this signature (key {key:#018x}, {nargs} args). \
+             WebAssembly checks the signature of every indirect call, so ash emits one \
+             trampoline per signature the program contains and looks it up here; a shape \
+             that was never compiled cannot be assembled at run time."
+        ),
+    }
+}
+
+/// The key a signature is registered under.
+///
+/// FNV-1a over the return kind, the argument count and each argument kind.
+/// `crates/ash/src/llvm/aot_trampoline.rs` computes the same value while
+/// emitting, and the two must not drift; a mismatch is a lookup that misses,
+/// which reports itself rather than calling the wrong shape.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn signature_key(ret_kind: u32, arg_kinds: &[u32]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |value: u32| {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    mix(ret_kind);
+    mix(arg_kinds.len() as u32);
+    for kind in arg_kinds {
+        mix(*kind);
+    }
+    hash
+}
+
+/// What a trampoline looks like from here.
+pub type CallTrampoline =
+    unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut vdynamic) -> *mut c_void;
+
+/// Sorted by key, so a lookup is a binary search on a table the emitter
+/// already sorted.
+static CALL_TRAMPOLINES: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
+
+/// Hand the runtime the table the compiler emitted.
+///
+/// Called once from `ash_module_init`. `keys` and `fns` are parallel arrays
+/// of `count` entries.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_register_call_trampolines(
+    keys: *const u64,
+    fns: *const *const c_void,
+    count: usize,
+) {
+    if keys.is_null() || fns.is_null() {
+        return;
+    }
+    let mut table = Vec::with_capacity(count);
+    for i in 0..count {
+        let f = *fns.add(i);
+        if !f.is_null() {
+            table.push((*keys.add(i), f as usize));
+        }
+    }
+    table.sort_unstable_by_key(|(k, _)| *k);
+    *CALL_TRAMPOLINES.lock().unwrap_or_else(|e| e.into_inner()) = table;
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+unsafe fn call_trampoline(key: u64) -> Option<CallTrampoline> {
+    let table = CALL_TRAMPOLINES.lock().unwrap_or_else(|e| e.into_inner());
+    let index = table.binary_search_by_key(&key, |(k, _)| *k).ok()?;
+    Some(std::mem::transmute::<usize, CallTrampoline>(table[index].1))
 }
 
 /// Dynamic function call for aarch64 — marshals args according to function type

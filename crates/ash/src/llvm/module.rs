@@ -79,6 +79,13 @@ pub struct JITModule<'ctx> {
     /// ABI of the code being produced. JITs use the host; AOT may select a
     /// cross target before decoding or lowering starts.
     pub(crate) target_abi: crate::target_abi::TargetAbi,
+    /// The call-trampoline table, once emitted: keys, functions, count. See
+    /// `aot_trampoline`; `emit_module_init` registers it with the runtime.
+    pub(crate) trampoline_registry: Option<(
+        inkwell::values::PointerValue<'ctx>,
+        inkwell::values::PointerValue<'ctx>,
+        usize,
+    )>,
     /// Alias metadata for emitted loads and stores; see [`super::tbaa`].
     pub(crate) tbaa: super::tbaa::TbaaTree<'ctx>,
     pub(crate) module: Module<'ctx>,
@@ -231,8 +238,7 @@ pub(crate) fn run_middle_end_at(
     // Functions that can catch are excluded upstream — see
     // `shield_trap_functions_from_optimization`, which is what makes running
     // this safe at all.
-    let spec =
-        std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| default_spec.to_string());
+    let spec = std::env::var("ASH_LLVM_PASSES").unwrap_or_else(|_| default_spec.to_string());
     if spec == "off" {
         return Ok(());
     }
@@ -268,11 +274,7 @@ impl<'ctx> JITModule<'ctx> {
         Self::build(context, path, true, abi)
     }
 
-    pub fn new_aot_for_target(
-        context: &'ctx Context,
-        path: &Path,
-        triple: &str,
-    ) -> Result<Self> {
+    pub fn new_aot_for_target(context: &'ctx Context, path: &Path, triple: &str) -> Result<Self> {
         let abi = crate::target_abi::TargetAbi::for_triple(triple)?;
         Self::build(context, path, true, abi)
     }
@@ -288,8 +290,8 @@ impl<'ctx> JITModule<'ctx> {
         crate::native_lib::choose_std_linkage(path);
         init_std_library();
 
-        let bytecode = BytecodeDecoder::decode_for_abi(path, &target_abi)
-            .expect("Failed to decode bytecode");
+        let bytecode =
+            BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
         // Any non-std native means an HDLL, which brings its own copy of the
         // runtime unless this object shares one. Known here, before a single
         // symbol is declared, because declaring them is what commits to a
@@ -322,6 +324,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut module = JITModule {
             context,
             target_abi,
+            trampoline_registry: None,
             tbaa: super::tbaa::TbaaTree::new(context),
             module,
             builder: context.create_builder(),
@@ -718,8 +721,8 @@ impl<'ctx> JITModule<'ctx> {
 
         let mut module = JITModule {
             context,
-            target_abi: crate::target_abi::TargetAbi::host()
-                .expect("Failed to resolve host ABI"),
+            trampoline_registry: None,
+            target_abi: crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI"),
             tbaa: super::tbaa::TbaaTree::new(context),
             module: llvm_module,
             builder: context.create_builder(),
@@ -2064,9 +2067,9 @@ impl<'ctx> JITModule<'ctx> {
             return Some(g);
         }
         let v = *self.bytecode.floats.get(index)?;
-        let global = self
-            .module
-            .add_global(self.context.f64_type(), None, &format!("Float_{index}"));
+        let global =
+            self.module
+                .add_global(self.context.f64_type(), None, &format!("Float_{index}"));
         global.set_initializer(&self.context.f64_type().const_float(v));
         global.set_constant(true);
         if self.float_globals.len() <= index {

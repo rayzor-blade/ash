@@ -422,8 +422,34 @@ installing one, so the smoke corpus caught it immediately: the JIT run of
 `test_std_reflect_type` went silent. Whether a code pointer can be a small
 integer is a property of the target, not of what the host installed.
 
-With that fixed, `test_stdlib` reaches line 26 and stops at the real gap
-below, `ash_static_call`, which now says so rather than faulting.
+**Dynamic calls work now, by looking a shape up rather than building one.**
+`ash_static_call` places values in the registers a C call expects and jumps,
+which is a shape a run-time value can take; WebAssembly has no registers and
+checks the signature of every indirect call, so it cannot. But the compiler
+sees every function type in the program, so it emits one trampoline per
+distinct signature -- `(fun, args, out) -> ptr`, unpacking the arguments,
+making one statically-typed call, storing the result -- and registers them
+under a key the runtime computes from the `hl_type` it holds
+(`crates/ash/src/llvm/aot_trampoline.rs`). A miss reports itself by key and
+argument count rather than guessing, which is how each of the following was
+found:
+
+* **A method's closure form is not in the type table.** `hlp_get_closure_type`
+  builds one at run time by dropping `this`, so the emitter registers that
+  form for every method as well as the type itself. `(HOBJ) -> HBOOL` reached
+  the runtime and found nothing; decoding the key said which shape it was.
+* **`emit_module_init` runs during `build`**, long before the CLI asks for
+  trampolines, so the registration call was written when the table was still
+  empty and the sweep then deleted an unreferenced table. It belongs in
+  `ash_late_init`, which runs after.
+* **The count is a `usize`.** Declaring it `i64` gave `rust-lld: warning:
+  function signature mismatch`, which is a warning and a corrupt call.
+
+`test_stdlib` now matches native for 38 lines -- strings, arrays, maps,
+enums, closures -- and stops in the exceptions section, printing "thrown Wasm
+exception" where native prints "caught: test error". Throwing works; what
+reaches the Haxe handler is the engine's exception rather than the HL value,
+which is the next thing to chase.
 
 ### Phase 3 — link and run a real Ash program
 

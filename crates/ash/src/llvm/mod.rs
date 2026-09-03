@@ -2,6 +2,7 @@ pub mod air;
 pub mod aot_data;
 pub mod aot_link;
 pub mod aot_shard;
+pub mod aot_trampoline;
 pub mod function;
 pub mod module;
 pub mod object;

@@ -438,7 +438,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     // Give unbound sentinel closures the same bridge so reflection and
     // dynamic calls can re-enter AIR V2 (or observe the now-compiled slot)
     // safely.
-    if (*cl).hasValue == 0 && ((*cl).fun as usize) < 0x100000 {
+    if (*cl).hasValue == 0 && crate::fiber::is_stub_sentinel((*cl).fun as usize) {
         if let Some(runner) = crate::fiber::closure_runner() {
             let runner_args = if (*args).size == 0 {
                 ptr::null_mut()
@@ -470,7 +470,7 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
         if let Some(runner) = crate::fiber::closure_runner() {
             return runner(cl, runner_args, (*args).size);
         }
-        if (*cl).fun as usize >= 0x100000 {
+        if !crate::fiber::is_stub_sentinel((*cl).fun as usize) {
             return crate::fiber::hlp_jit_closure_runner(cl, runner_args, (*args).size);
         }
         hlp_error(str_to_uchar_ptr("Can't call closure with value"));

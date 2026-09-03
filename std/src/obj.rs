@@ -795,7 +795,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         let fptr = *(*t)
             .methods
             .offset((-((*cmp_field).field_index + 1)).try_into().unwrap());
-        if (fptr as usize) < 0x100000 {
+        if crate::fiber::is_stub_sentinel(fptr as usize) {
             None
         } else {
             Some(mem::transmute::<
@@ -812,7 +812,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             .offset((-((*cast_field).field_index + 1)).try_into().unwrap());
         // Guard: stub function pointers (findex+1) from the interpreter are
         // small integers, not valid code addresses. Treat them as None.
-        if (fptr as usize) < 0x100000 {
+        if crate::fiber::is_stub_sentinel(fptr as usize) {
             None
         } else {
             Some(mem::transmute::<
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         let fptr = *(*t)
             .methods
             .offset((-((*get_field).field_index + 1)).try_into().unwrap());
-        if (fptr as usize) < 0x100000 {
+        if crate::fiber::is_stub_sentinel(fptr as usize) {
             None
         } else {
             Some(mem::transmute::<
@@ -1101,7 +1101,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
             let fptr = *(*m).functions_ptrs.add((*pr).findex as usize);
             // `functions_ptrs` contains findex+1 sentinels until a body is
             // compiled. Never publish one as a callable compareFun.
-            if (fptr as usize) >= 0x100000 {
+            if !crate::fiber::is_stub_sentinel(fptr as usize) {
                 (*t).compareFun = Some(mem::transmute::<
                     *mut c_void,
                     unsafe extern "C" fn(*mut vdynamic, *mut vdynamic) -> c_int,
@@ -1317,7 +1317,7 @@ unsafe fn get_field_via_stub(d: *mut vdynamic, hfield: i32) -> *mut vdynamic {
     }
     let fptr = *(*rt).methods.add(idx);
     let addr = fptr as usize;
-    if addr == 0 || addr >= 0x100000 {
+    if !crate::fiber::is_stub_sentinel(addr) {
         return ptr::null_mut(); // real code is handled by getFieldFun
     }
     let resolved = crate::fiber::resolve_stub_sentinel(addr);
@@ -2013,7 +2013,7 @@ unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynam
     if addr == 0 {
         return ptr::null_mut();
     }
-    if addr < 0x100000 {
+    if crate::fiber::is_stub_sentinel(addr) {
         let resolved = crate::fiber::resolve_stub_sentinel(addr);
         if !resolved.is_null() {
             let method_fn: unsafe extern "C" fn(*mut vdynamic) -> *mut vdynamic =
@@ -2152,7 +2152,7 @@ pub(crate) unsafe fn cast_via_stub_castfun(
     }
     let fptr: *mut c_void = *(*rt).methods.add(idx);
     let addr = fptr as usize;
-    if addr == 0 || addr >= 0x100000 {
+    if !crate::fiber::is_stub_sentinel(addr) {
         return ptr::null_mut(); // real code: the castFun path owns it
     }
     let resolved = crate::fiber::resolve_stub_sentinel(addr);
@@ -2303,7 +2303,7 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
             if addr == 0 {
                 return ptr::null_mut();
             }
-            if addr < 0x100000 {
+            if crate::fiber::is_stub_sentinel(addr) {
                 // Interpreter stub sentinel: the bridge decodes the findex and
                 // runs the interpreter with its own typing, boxed both ways.
                 if let Some(runner) = crate::fiber::closure_runner() {

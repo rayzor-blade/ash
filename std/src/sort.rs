@@ -55,7 +55,7 @@ impl<'a, T: Sortable> MSort<'a, T> {
         } else {
             resolved
         };
-        let result = if address < 0x100000 && resolved.is_null() {
+        let result = if crate::fiber::is_stub_sentinel(address) && resolved.is_null() {
             // Interpreter/hybrid fallback. Worker execution is forbidden from
             // sharing the main interpreter; a compiled-only resolver failure
             // therefore fails closed instead of calling a sentinel or racing

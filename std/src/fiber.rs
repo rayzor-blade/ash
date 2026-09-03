@@ -224,8 +224,34 @@ pub unsafe extern "C" fn hlp_set_stub_resolver(resolver: StubResolver) {
     STUB_RESOLVER.store(resolver as usize, Ordering::Release);
 }
 
+/// Whether `address` is a `findex + 1` sentinel rather than a real function
+/// pointer.
+///
+/// The tiered runtime names a not-yet-compiled body by a small integer, and
+/// tells it from a real function by magnitude: on every native target a code
+/// address is far above this limit, so nothing else can look like one.
+///
+/// That reasoning does not survive the move to WebAssembly, where a function
+/// pointer IS a small integer -- an index into the module's table, below a
+/// couple of thousand in a program of this size. Every real function there
+/// answers to the magnitude test, so `hlp_call_method` hands one to the
+/// closure runner, which calls back into `hlp_call_method`, until the stack
+/// runs out; the fault surfaces as an out-of-bounds access near the top of
+/// the address space, which is the shadow stack pointer having wrapped.
+///
+/// Nothing on that target creates a sentinel in the first place: it has no
+/// interpreter and no tiers, every body is compiled before the program runs.
+/// So the answer there is no, always, and the magnitude test is left to the
+/// targets whose addresses justify it.
+pub(crate) fn is_stub_sentinel(address: usize) -> bool {
+    if cfg!(target_family = "wasm") {
+        return false;
+    }
+    address != 0 && address < STUB_SENTINEL_LIMIT
+}
+
 pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
-    if address == 0 || address >= 0x100000 {
+    if !is_stub_sentinel(address) {
         return address as *mut c_void;
     }
     let resolver = STUB_RESOLVER.load(Ordering::Acquire);

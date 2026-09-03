@@ -400,11 +400,30 @@ Four things that each cost a cycle to find:
   five places called it. One helper now answers 1 there, since every caller
   wanted a seed or a filename rather than a real pid.
 
-`test_stdlib` runs nineteen lines and then faults inside `hlp_call_method`
-with an out-of-bounds access, reached through `hlp_jit_closure_runner`. The
-`ash_static_call` gap below is the obvious suspect and is NOT the cause: that
-function now panics with an explanation when it is reached, and the panic
-does not fire. Unidentified, and the next thing to chase.
+**A function pointer is a small integer here, and that broke dispatch.** The
+tiered runtime names a not-yet-compiled body by a `findex + 1` sentinel and
+tells it from a real function by magnitude: below `0x100000` is a sentinel,
+because no native code address ever is. On WebAssembly a function pointer is
+a table index, below a couple of thousand in a program this size, so every
+real function answered the test. `hlp_call_method` handed one to the closure
+runner, the runner called back into `hlp_call_method`, and the pair recursed
+until the shadow stack pointer wrapped -- which surfaced as an out-of-bounds
+access at `0xffffffb0` and looked nothing like what it was.
+
+Ten places asked that question and now one does, in
+`fiber::is_stub_sentinel`, which answers no on wasm: nothing there creates a
+sentinel, since the target has no interpreter and no tiers. Sorting and
+mapping with closures now run and match native exactly.
+
+The first attempt at that predicate was wrong in an instructive way. It asked
+whether the interpreter's stub RESOLVER was installed, on the theory that no
+resolver means no sentinels. `--mode jit` creates sentinels without
+installing one, so the smoke corpus caught it immediately: the JIT run of
+`test_std_reflect_type` went silent. Whether a code pointer can be a small
+integer is a property of the target, not of what the host installed.
+
+With that fixed, `test_stdlib` reaches line 26 and stops at the real gap
+below, `ash_static_call`, which now says so rather than faulting.
 
 ### Phase 3 — link and run a real Ash program
 

@@ -31,8 +31,22 @@ use ash_wasm_runtime::guest::{Fiber, FiberState};
 fn yield_now_backend() {
     krio_fiber::yield_now();
 }
+
+/// On wasm, hand the host's suspend operation to krio as well as using it
+/// here.
+///
+/// krio's free functions -- `yield_now`, `should_yield_early`,
+/// `is_cancelled` -- are called from library code far from any scheduler, and
+/// on a target with no native switch they route through a suspender the host
+/// installs, panicking when there is none. Installing ours means that code
+/// suspends the same way this scheduler does, instead of each side reaching
+/// for its own mechanism.
 #[cfg(target_family = "wasm")]
 fn yield_now_backend() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        krio_fiber::set_suspender(ash_wasm_runtime::guest::yield_now);
+    });
     ash_wasm_runtime::guest::yield_now();
 }
 use std::cell::{Cell, RefCell};

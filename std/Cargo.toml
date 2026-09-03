@@ -43,8 +43,15 @@ cc = "1"
 # Native fiber stack switching. A wasm module cannot switch stacks itself --
 # there a fiber is driven by the host -- so the dependency is native-only and
 # `fiber.rs` gates on the same condition.
-[target.'cfg(not(target_family = "wasm"))'.dependencies]
-krio-fiber = { git = "https://github.com/darmie/krio" }
+# krio on every target, for different halves of itself. Natively it supplies
+# the stack switch. On wasm `Fiber::new` panics by design -- the module's
+# `__stack_pointer` names the shadow stack in linear memory while the call
+# frames live in the engine, so swapping it moves the data half and leaves the
+# control half behind -- but the free functions still compile, and
+# `set_suspender` is how library code written against `yield_now` reaches the
+# host's suspend operation.
+[dependencies.krio-fiber]
+git = "https://github.com/darmie/krio"
 
 # The wasm side of the runtime, linked in rather than imported: see that
 # crate's docs for why only fiber suspension crosses the module boundary.

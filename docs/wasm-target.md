@@ -306,6 +306,15 @@ expected `wasi_snapshot_preview1` surface.
 
 #### Roots
 
+krio now supplies the other half of the rendezvous this needs:
+`cluster.stop_the_world(agent, || ...)` guarantees no other agent is inside a
+task step while the closure runs, and the loop safepoint ash already emits is
+what an agent polls to reach the barrier. The division is the useful one --
+krio guarantees *when* it is safe to scan, ash decides *what* to scan -- and
+it leaves root discovery exactly where this section says it is: the hard part,
+and still ash's.
+
+
 Linear-memory allocation is not the difficult GC problem. Root discovery is.
 The current collector scans native stacks and callee-saved registers
 conservatively. WebAssembly locals and operand-stack values are not addresses
@@ -463,6 +472,17 @@ at a thread when ash's scheduler is M:N. Where JSPI exists it is strictly
 cheaper. So the module marks where it may be suspended, the harness decides
 how, and the choice can differ between the browser and the server without the
 program changing.
+
+**Suspension is not parallelism, and the table above is only about
+suspension.** JSPI suspends and resumes one call stack on one agent, which is
+what a cooperative fiber needs and is not what a Haxe program expecting two
+threads to make progress at once gets. A producer/consumer pair works under
+it; a program that blocks the main thread on `lock.wait()` and expects a
+worker to keep computing does not, because there is one agent and it is the
+one that blocked. Workers over shared memory are the only row that gives
+both. [`wasm-threads.md`](wasm-threads.md) is the companion that records what
+krio has built underneath that row, what it measured, and the three traps
+that cost real time to find.
 
 **krio reached the same conclusion, and settled the engine question.** Its
 "krio Across Workers" design note records JSPI as having landed in all three

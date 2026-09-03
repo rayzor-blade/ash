@@ -380,10 +380,7 @@ pub(crate) fn gc_register_current_os_thread() {
     let stack_top = unsafe {
         let mut low = 0usize;
         let mut high = 0usize;
-        windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(
-            &mut low,
-            &mut high,
-        );
+        windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits(&mut low, &mut high);
         high
     };
 
@@ -564,10 +561,7 @@ fn stop_mutator_world() -> StoppedWorld {
     if needs_stop {
         world.stop_requested = true;
         world.collector = collector;
-        GC_STOP_ASKED_NS.store(
-            GC_EPOCH.elapsed().as_nanos() as u64,
-            Ordering::Relaxed,
-        );
+        GC_STOP_ASKED_NS.store(GC_EPOCH.elapsed().as_nanos() as u64, Ordering::Relaxed);
         GC_STOP_REQUESTED.store(true, Ordering::Release);
         crate::fiber::request_fiber_poll();
         // A mutator may already be sleeping in the GC-lock slow path. Wake it
@@ -579,9 +573,11 @@ fn stop_mutator_world() -> StoppedWorld {
         // safepoint, and an untimed wait cannot answer it.
         let began = Instant::now();
         let mut reported = false;
-        while world.mutators.iter().any(|m| {
-            m.thread != collector && !m.parked && m.blocking_depth == 0
-        }) {
+        while world
+            .mutators
+            .iter()
+            .any(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
+        {
             let (guard, timed_out) = MUTATOR_WORLD
                 .changed
                 .wait_timeout(world, std::time::Duration::from_millis(20))
@@ -854,7 +850,12 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
             GC_STATS
                 .lines_recycled
                 .fetch_add(len as u64, Ordering::Relaxed);
-            adopt_tlab_region(&mut gc, rblock, base as usize + aligned, base as usize + span_bytes);
+            adopt_tlab_region(
+                &mut gc,
+                rblock,
+                base as usize + aligned,
+                base as usize + span_bytes,
+            );
             return Some(unsafe { NonNull::new_unchecked(base) });
         }
     }
@@ -876,7 +877,12 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
     GC_STATS
         .bytes_allocated
         .fetch_add(BLOCK_SIZE as u64, Ordering::Relaxed);
-    adopt_tlab_region(&mut gc, block, base as usize + aligned, base as usize + BLOCK_SIZE);
+    adopt_tlab_region(
+        &mut gc,
+        block,
+        base as usize + aligned,
+        base as usize + BLOCK_SIZE,
+    );
     Some(unsafe { NonNull::new_unchecked(base) })
 }
 
@@ -1018,12 +1024,12 @@ fn quarantine_freed() -> bool {
 static COLLECT_ORIGIN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 const ORIGIN_NAMES: [&str; 7] = [
     "?",
-    "snapshot-done",   // scan_roots_done honoring a deferred trigger
-    "tlab-safepoint",  // tlab_refill_then_alloc's maybe_collect_at_safepoint
-    "hard-pressure",   // maybe_collect past the 4x deferral bound
-    "exhaustion",      // allocate's no-free-block backstop
-    "large-exhaustion",// allocate_large fallback
-    "explicit",        // Gc.major / hlp_gc_major
+    "snapshot-done",    // scan_roots_done honoring a deferred trigger
+    "tlab-safepoint",   // tlab_refill_then_alloc's maybe_collect_at_safepoint
+    "hard-pressure",    // maybe_collect past the 4x deferral bound
+    "exhaustion",       // allocate's no-free-block backstop
+    "large-exhaustion", // allocate_large fallback
+    "explicit",         // Gc.major / hlp_gc_major
 ];
 fn set_collect_origin(o: u8) {
     COLLECT_ORIGIN.store(o, Ordering::Relaxed);
@@ -1045,8 +1051,7 @@ fn heap_max_bytes() -> usize {
     *V.get_or_init(|| {
         let bytes = match env_usize("ASH_GC_HEAP_MB") {
             Some(mb) => mb.max(32) * 1024 * 1024,
-            None => (usable_ram_bytes() / HEAP_MAX_SHARE)
-                .clamp(HEAP_MAX_FLOOR, HEAP_MAX_CEILING),
+            None => (usable_ram_bytes() / HEAP_MAX_SHARE).clamp(HEAP_MAX_FLOOR, HEAP_MAX_CEILING),
         };
         (bytes / BLOCK_SIZE) * BLOCK_SIZE
     })
@@ -1247,8 +1252,7 @@ fn usable_ram_bytes() -> usize {
 fn trigger_ceiling_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
-        (usable_ram_bytes() / TRIGGER_CEILING_SHARE)
-            .clamp(TRIGGER_CEILING_MIN, TRIGGER_CEILING_MAX)
+        (usable_ram_bytes() / TRIGGER_CEILING_SHARE).clamp(TRIGGER_CEILING_MIN, TRIGGER_CEILING_MAX)
     })
 }
 
@@ -1436,8 +1440,20 @@ impl HeapMemory {
     /// is honest about being a first step rather than a collector.
     #[cfg(not(any(unix, windows)))]
     fn new(len: usize) -> Self {
-        let layout = std::alloc::Layout::from_size_align(len, 16)
-            .expect("heap layout");
+        // Block-aligned, and that alignment is load-bearing rather than
+        // tidiness. The bump allocator finds a line boundary from the
+        // ABSOLUTE address (`p & (LINE_SIZE - 1)`) while marking and sweeping
+        // index lines from the OFFSET into the heap. Those two agree only if
+        // the base is a multiple of LINE_SIZE. `mmap` returns page-aligned
+        // memory and 4096 is a multiple of 128, so every platform with a real
+        // mmap got this by luck; asking the allocator for 16 did not, and the
+        // disagreement is `base % LINE_SIZE` bytes.
+        //
+        // What that costs: an object the bump path believes starts a line
+        // actually straddles two by the sweep's reckoning, the sweep reclaims
+        // the half nobody marked, and a live object loses its tail. No crash,
+        // no diagnostic -- an array that reports the wrong length.
+        let layout = std::alloc::Layout::from_size_align(len, BLOCK_SIZE).expect("heap layout");
         // Zeroed, because the collector reads a block's header before
         // anything has written one.
         let ptr = unsafe { std::alloc::alloc_zeroed(layout) };
@@ -1696,14 +1712,16 @@ impl std::ops::DerefMut for GcRef {
 /// Acquire the GC lock and return a handle to the (initialized) singleton.
 pub(crate) fn gc_locked() -> GcRef {
     let guard = gc_guard();
-    let gc = unsafe { (*(&raw mut GC)).get_mut().expect("GC not initialized") as *mut ImmixAllocator };
+    let gc =
+        unsafe { (*(&raw mut GC)).get_mut().expect("GC not initialized") as *mut ImmixAllocator };
     GcRef { gc, _guard: guard }
 }
 
 /// Acquire the GC lock, initializing the singleton if needed.
 pub(crate) fn gc_locked_init() -> GcRef {
     let guard = gc_guard();
-    let gc = unsafe { (*(&raw mut GC)).get_mut_or_init(ImmixAllocator::new) as *mut ImmixAllocator };
+    let gc =
+        unsafe { (*(&raw mut GC)).get_mut_or_init(ImmixAllocator::new) as *mut ImmixAllocator };
     GcRef { gc, _guard: guard }
 }
 
@@ -1859,8 +1877,7 @@ impl Block {
     /// line they already know is theirs. `claim_line` is the racing form.
     #[inline(always)]
     fn set_mark(&self, line_idx: usize) {
-        self.mark_bits[line_idx >> 6]
-            .fetch_or(1u64 << (line_idx & 63), Ordering::Relaxed);
+        self.mark_bits[line_idx >> 6].fetch_or(1u64 << (line_idx & 63), Ordering::Relaxed);
     }
 
     #[inline]
@@ -2056,7 +2073,12 @@ impl ImmixAllocator {
 
         if std::env::var("ASH_GC_TRACE_MAP").is_ok() {
             let base = heap.memory.base as usize;
-            eprintln!("[gc-map] heap reservation {:#x}..{:#x} ({} MB)", base, base + heap_size, heap_size >> 20);
+            eprintln!(
+                "[gc-map] heap reservation {:#x}..{:#x} ({} MB)",
+                base,
+                base + heap_size,
+                heap_size >> 20
+            );
         }
 
         // Reverse order so pop() hands out low addresses first — touched
@@ -2075,8 +2097,8 @@ impl ImmixAllocator {
         // is 0, and `has_span` likewise.
         let block_count = heap_size / BLOCK_SIZE;
         let blocks: Vec<Block> = unsafe {
-            let layout = std::alloc::Layout::array::<Block>(block_count)
-                .expect("block table layout");
+            let layout =
+                std::alloc::Layout::array::<Block>(block_count).expect("block table layout");
             let ptr = std::alloc::alloc_zeroed(layout) as *mut Block;
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
@@ -2097,11 +2119,10 @@ impl ImmixAllocator {
                 globals: Vec::new(),
                 stack_roots: Vec::new(),
                 persistent_roots: HashSet::new(),
-            root_slots: HashSet::new(),
+                root_slots: HashSet::new(),
             })),
             current_exception: None,
             exception_handler: None,
-
 
             fiber_stacks: Vec::new(),
             globals_range: None,
@@ -2194,7 +2215,11 @@ impl ImmixAllocator {
         clear_marks(&self.blocks[addr / BLOCK_SIZE]);
         if trace_freed() {
             let base = self.heap.memory.as_ptr() as usize;
-            eprintln!("[gc-reuse] {:#x}..{:#x}", base + addr, base + addr + BLOCK_SIZE);
+            eprintln!(
+                "[gc-reuse] {:#x}..{:#x}",
+                base + addr,
+                base + addr + BLOCK_SIZE
+            );
         }
         Some(addr)
     }
@@ -2206,7 +2231,11 @@ impl ImmixAllocator {
         if self.heap.reusable_blocks.remove(&addr) {
             if trace_map() {
                 let base = self.heap.memory.as_ptr() as usize;
-                eprintln!("[gc-map] REUSE {:#x}..{:#x}", base + addr, base + addr + BLOCK_SIZE);
+                eprintln!(
+                    "[gc-map] REUSE {:#x}..{:#x}",
+                    base + addr,
+                    base + addr + BLOCK_SIZE
+                );
             }
             #[cfg(target_os = "macos")]
             unsafe {
@@ -2366,7 +2395,8 @@ impl ImmixAllocator {
                 // Record allocation size for GC multi-line marking
                 let num_lines = size.div_ceil(LINE_SIZE);
                 let start_line = start_addr / LINE_SIZE;
-                for b in start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK
+                for b in
+                    start_line / LINES_PER_BLOCK..=(start_line + num_lines - 1) / LINES_PER_BLOCK
                 {
                     if let Some(blk) = self.blocks.get_mut(b) {
                         blk.has_span = true;
@@ -2461,9 +2491,10 @@ impl ImmixAllocator {
                 | hl::hl_type_kind_HVIRTUAL
                 | hl::hl_type_kind_HDYNOBJ
                 | hl::hl_type_kind_HBYTES
-                    if !self.is_gc_ptr(vd.v.ptr) => {
-                        return false;
-                    }
+                    if !self.is_gc_ptr(vd.v.ptr) =>
+                {
+                    return false;
+                }
                 _ => {} // Other types don't have additional pointers to check
             }
         }
@@ -2565,8 +2596,7 @@ impl ImmixAllocator {
                     let line = offset / LINE_SIZE;
                     let block_idx = line / LINES_PER_BLOCK;
                     let line_idx = line % LINES_PER_BLOCK;
-                    if block_idx < this.blocks.len()
-                        && !this.blocks[block_idx].is_marked(line_idx)
+                    if block_idx < this.blocks.len() && !this.blocks[block_idx].is_marked(line_idx)
                     {
                         this.mark_allocation_at_line(line, out);
                     }
@@ -2607,7 +2637,12 @@ impl ImmixAllocator {
             let mut worklist = initial;
             while let Some((block_idx, line_idx)) = worklist.pop() {
                 scan_line_shared(
-                    blocks, alloc_sizes, heap_start, heap_end, block_idx, line_idx,
+                    blocks,
+                    alloc_sizes,
+                    heap_start,
+                    heap_end,
+                    block_idx,
+                    line_idx,
                     &mut worklist,
                 );
             }
@@ -2668,13 +2703,17 @@ impl ImmixAllocator {
                         }
                         while let Some((block_idx, line_idx)) = local.pop() {
                             scan_line_shared(
-                                blocks, alloc_sizes, heap_start, heap_end, block_idx,
-                                line_idx, &mut local,
+                                blocks,
+                                alloc_sizes,
+                                heap_start,
+                                heap_end,
+                                block_idx,
+                                line_idx,
+                                &mut local,
                             );
                             if local.len() >= SPILL {
                                 let half = local.len() / 2;
-                                let mut work =
-                                    queue.work.lock().expect("mark queue poisoned");
+                                let mut work = queue.work.lock().expect("mark queue poisoned");
                                 work.extend(local.drain(..half));
                                 drop(work);
                                 queue.ready.notify_all();
@@ -2701,8 +2740,7 @@ impl ImmixAllocator {
         let stopped_world = stop_mutator_world();
         if trace_freed() || std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
-            let origin =
-                ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
+            let origin = ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];
             let base = self.heap.memory.as_ptr() as usize;
             eprintln!(
                 "[gc-collect] #{seq} origin={origin} heap={base:#x}..{:#x} ranges={} pending={}",
@@ -2939,10 +2977,7 @@ impl ImmixAllocator {
             let running_fiber = fiber_stacks
                 .iter()
                 .find(|f| {
-                    f.thread == mutator.thread
-                        && f.size > 0
-                        && sp >= f.base
-                        && sp < f.base + f.size
+                    f.thread == mutator.thread && f.size > 0 && sp >= f.base && sp < f.base + f.size
                 })
                 .map(|f| (f.id, f.base + f.size));
             if dbg {
@@ -3025,7 +3060,9 @@ impl ImmixAllocator {
 
             if block_index < self.blocks.len() {
                 self.blocks[block_index].set_mark(line_index);
-                self.blocks[block_index].any_marked.store(true, Ordering::Relaxed);
+                self.blocks[block_index]
+                    .any_marked
+                    .store(true, Ordering::Relaxed);
             }
 
             current_addr += LINE_SIZE;
@@ -3049,9 +3086,7 @@ impl ImmixAllocator {
         let block_index = offset / BLOCK_SIZE;
         let line_index = (offset % BLOCK_SIZE) / LINE_SIZE;
 
-        if block_index < self.blocks.len()
-            && !self.blocks[block_index].is_marked(line_index)
-        {
+        if block_index < self.blocks.len() && !self.blocks[block_index].is_marked(line_index) {
             self.blocks[block_index].set_mark(line_index);
 
             // Mark children based on the type of object
@@ -3268,17 +3303,17 @@ impl ImmixAllocator {
                         continue;
                     }
                     for bit_index in 0..64 {
-                    let line_index = (word_index << 6) | bit_index;
-                    let was_marked = word & (1u64 << bit_index) != 0;
-                    if was_marked {
-                        is_empty = false;
-                        marked_lines += 1;
-                        if let Some(start) = run_start.take() {
-                            spans.push((start, line_index - start));
+                        let line_index = (word_index << 6) | bit_index;
+                        let was_marked = word & (1u64 << bit_index) != 0;
+                        if was_marked {
+                            is_empty = false;
+                            marked_lines += 1;
+                            if let Some(start) = run_start.take() {
+                                spans.push((start, line_index - start));
+                            }
+                        } else if run_start.is_none() {
+                            run_start = Some(line_index);
                         }
-                    } else if run_start.is_none() {
-                        run_start = Some(line_index);
-                    }
                     }
                 }
                 if let Some(start) = run_start.take() {
@@ -3492,11 +3527,7 @@ impl ImmixAllocator {
         let quiet = self.heap.last_collect.elapsed() >= HEARTBEAT;
         if quiet && !freed.is_empty() {
             let resident_target = 16;
-            let surplus = self
-                .heap
-                .free_blocks
-                .len()
-                .saturating_sub(resident_target);
+            let surplus = self.heap.free_blocks.len().saturating_sub(resident_target);
             let mut hand_back: Vec<usize> = freed
                 .iter()
                 .copied()
@@ -3819,7 +3850,11 @@ pub(crate) unsafe fn allocation_size(ptr: *const c_void) -> usize {
         start -= 1;
     }
     let lines = gc.heap.alloc_sizes.get(start).copied().unwrap_or(0) as usize;
-    if lines == 0 { LINE_SIZE } else { lines * LINE_SIZE }
+    if lines == 0 {
+        LINE_SIZE
+    } else {
+        lines * LINE_SIZE
+    }
 }
 
 /// Give the collector a chance to stop this thread.
@@ -4201,8 +4236,10 @@ pub unsafe extern "C" fn hlp_gc_dump_memory(filename: *mut hl::vbyte) {
     } else {
         let mut blocks: Vec<usize> = gc.heap.tlab_blocks.values().copied().collect();
         blocks.sort_unstable();
-        let rendered: Vec<String> =
-            blocks.iter().map(|b| format!("{:#x}", heap_base + b)).collect();
+        let rendered: Vec<String> = blocks
+            .iter()
+            .map(|b| format!("{:#x}", heap_base + b))
+            .collect();
         w(format!("tlab-blocks {}", rendered.join(" ")));
     }
     w(format!("alloc-count {}", gc.heap.alloc_count));
@@ -4376,9 +4413,31 @@ pub(crate) unsafe fn gc_swap_exc_state(
 
 #[cfg(test)]
 mod tests {
+    /// The bump allocator and the sweep must agree where a line begins.
+    ///
+    /// One finds the boundary from the absolute address (`p & (LINE_SIZE-1)`)
+    /// and the other from the offset into the heap, so they agree only while
+    /// the base is a multiple of `LINE_SIZE`. Every platform with a real
+    /// `mmap` gets that from page alignment; a platform served by the plain
+    /// allocator gets whatever it asked for, and asking for too little cost a
+    /// wasm build a live array's contents with no crash and no diagnostic.
+    #[test]
+    fn the_heap_base_is_line_aligned() {
+        let heap = HeapMemory::new(BLOCK_SIZE * 4);
+        let base = heap.as_ptr() as usize;
+        assert_eq!(
+            base % LINE_SIZE,
+            0,
+            "heap base {base:#x} is not a multiple of LINE_SIZE ({LINE_SIZE}); \
+             the bump path and the sweep would disagree about line boundaries \
+             by {} bytes",
+            base % LINE_SIZE
+        );
+    }
+
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn collector_rendezvous_with_registered_os_mutator() {
@@ -4452,9 +4511,7 @@ mod tests {
         unsafe { hlp_gc_init() };
         let stack_anchor = 0usize;
         unsafe {
-            hlp_gc_set_stack_top(
-                (&stack_anchor as *const usize as usize) + mem::size_of::<usize>(),
-            )
+            hlp_gc_set_stack_top((&stack_anchor as *const usize as usize) + mem::size_of::<usize>())
         };
 
         // Both of these are process-global and have to be put back even when

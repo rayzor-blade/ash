@@ -99,6 +99,20 @@ impl Program {
         for arg in args {
             wasi.arg(arg);
         }
+        // The runtime inside the module reads its switches from the
+        // environment, exactly as the native one does -- ASH_GC_STRESS and the
+        // rest. Without this the guest sees an empty environment and every
+        // diagnostic is unreachable, which is the difference between being
+        // able to ask a question of a wasm build and not.
+        //
+        // Only ASH_ names cross. A wasm module is a sandbox and the host's
+        // environment is not its business; handing over PATH and credentials
+        // to get one debugging flag through is not a trade worth making.
+        for (key, value) in std::env::vars() {
+            if key.starts_with("ASH_") {
+                wasi.env(&key, &value);
+            }
+        }
         let mut store = Store::new(&self.engine, wasi.build_p1());
 
         let mut linker: Linker<WasiP1Ctx> = Linker::new(&self.engine);

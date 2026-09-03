@@ -4,6 +4,9 @@ members = [
   "crates/*",
   "std",
 ]
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [] }
+
 [workspace.dependencies]
 anyhow = "1.0.91"
 inkwell = { version = "0.8.0", features = ["llvm21-1-prefer-static"] }

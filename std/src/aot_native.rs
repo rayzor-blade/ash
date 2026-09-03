@@ -13,7 +13,10 @@
 //! `NativeLibraryManager` is in ash_core and is not reachable from here.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
+// Only the loading paths build C strings, and a sandbox has none.
+#[cfg(any(unix, windows, test))]
+use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -155,6 +158,44 @@ unsafe fn library(lib: &str) -> *mut c_void {
     std::ptr::null_mut()
 }
 
+/// Primitives a sandbox answers for itself.
+///
+/// This is not a general shim for missing libraries, and it is deliberately
+/// one entry long. `sys.ssl.Lib` is written as
+///
+/// ```haxe
+/// @:noDoc @:keep
+/// class Lib {
+///     static function __init__():Void { ssl_init(); }
+///     @:hlNative("ssl", "ssl_init") static function ssl_init() {};
+/// }
+/// ```
+///
+/// so `ssl_init` is called from a class initialiser, which HashLink runs
+/// before `main`, and `@:keep` means it is never eliminated. Any program that
+/// so much as mentions `haxe.Http` therefore calls it during startup -- before
+/// there is any program logic that could decide TLS is not needed.
+///
+/// On a target that can load libraries, failing there is the right answer:
+/// `ssl.hdll` is missing, and the person building can supply it. In a sandbox
+/// there is no library to supply, so the same failure kills every program that
+/// touches `haxe.Http` at the point where it is least informative -- before a
+/// line of the program has run.
+///
+/// `ssl_init` is library initialisation, not a capability. With no TLS
+/// available there is genuinely nothing to initialise, so doing nothing is the
+/// honest answer, and every other `ssl` primitive still resolves to null and
+/// raises when it is reached. The program starts, and it fails at the point
+/// where it actually asks for TLS.
+#[cfg(not(any(unix, windows)))]
+fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
+    extern "C" fn ssl_init_nothing() {}
+    match (lib, name) {
+        ("ssl", "ssl_init") => ssl_init_nothing as *mut c_void,
+        _ => std::ptr::null_mut(),
+    }
+}
+
 /// Address of `lib@name`, or null.
 ///
 /// Null is not fatal here. The emitted call site checks the slot and raises
@@ -169,12 +210,18 @@ pub unsafe extern "C" fn hlp_aot_native(lib: *const c_char, name: *const c_char)
     if lib.is_null() || name.is_null() {
         return std::ptr::null_mut();
     }
-    let (Ok(lib), Ok(name)) = (
-        CStr::from_ptr(lib).to_str(),
-        CStr::from_ptr(name).to_str(),
-    ) else {
+    let (Ok(lib), Ok(name)) = (CStr::from_ptr(lib).to_str(), CStr::from_ptr(name).to_str()) else {
         return std::ptr::null_mut();
     };
+    // Asked before the library is, because in a sandbox there is no library
+    // and the answer does not depend on one.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let built_in = sandbox_primitive(lib, name);
+        if !built_in.is_null() {
+            return built_in;
+        }
+    }
     let handle = library(lib);
     if handle.is_null() {
         return std::ptr::null_mut();

@@ -1247,7 +1247,24 @@ fn run() -> Result<()> {
         .unwrap_or_else(|| std::path::Path::new("."));
     {
         let _p = ash_core::profile::scope("load hdlls");
-        native_resolver.discover_and_load_libraries(search_dir, &bytecode.natives)?;
+        // Whether the TARGET can load a library, not whether this machine
+        // can. Cross-compiling to a sandbox, the HDLLs found here would be
+        // the host's and would never be used, so a missing one must not
+        // refuse the build.
+        let target_loads_libraries = cli
+            .target
+            .as_deref()
+            .map(|t| {
+                ash_core::target_abi::TargetAbi::for_triple(t)
+                    .map(|abi| abi.native_dynamic_loading)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        native_resolver.discover_and_load_libraries(
+            search_dir,
+            &bytecode.natives,
+            target_loads_libraries,
+        )?;
     }
 
     // Cross-check the compile-time field-offset oracle against the runtime

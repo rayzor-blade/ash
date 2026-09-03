@@ -394,7 +394,11 @@ impl<'ctx> JITModule<'ctx> {
         let search_dir = path.parent().unwrap_or(Path::new("."));
         module
             .native_function_resolver
-            .discover_and_load_libraries(search_dir, &module.bytecode.natives)
+            .discover_and_load_libraries(
+                search_dir,
+                &module.bytecode.natives,
+                module.target_abi.native_dynamic_loading,
+            )
             .expect("Failed to discover HDLL libraries");
         phase_timer!(timing, "discover_libraries", t);
         t = std::time::Instant::now();
@@ -732,8 +736,7 @@ impl<'ctx> JITModule<'ctx> {
         // the module carries no triple at all, and the middle end -- which
         // reads the triple back to pick a target machine -- fails on every
         // function it is handed.
-        let host_abi =
-            crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
+        let host_abi = crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
         host_abi
             .apply_to_module(&llvm_module)
             .expect("Failed to install the host ABI on the tiered module");
@@ -867,7 +870,9 @@ impl<'ctx> JITModule<'ctx> {
         crate::native_lib::choose_std_linkage(path);
         init_std_library();
         let search_dir = path.parent().unwrap_or(Path::new("."));
-        resolver.discover_and_load_libraries(search_dir, natives)?;
+        // This path prepares the host process, so the host's answer is the
+        // right one.
+        resolver.discover_and_load_libraries(search_dir, natives, true)?;
         Self::setup_callbacks_global(resolver);
         Ok(())
     }

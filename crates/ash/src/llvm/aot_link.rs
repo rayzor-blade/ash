@@ -383,15 +383,19 @@ fn link_wasm_module(
     runtime: Option<&Path>,
     quiet: bool,
 ) -> Result<()> {
-    // An HDLL is a dynamic library, and a wasm module cannot load one: there
-    // is no dlopen in the sandbox and no second module to load. A program
-    // that wants one links fine and fails when it asks, so say it here.
-    if kind == Runtime::Shared {
-        bail!(
-            "this program loads HDLLs, and {triple} has no dynamic loading -- \
-             nothing can supply them at run time. Build it for a native target, \
-             or build a version whose natives are compiled in"
-        );
+    // A program that names an HDLL is not refused. There is no dlopen in the
+    // sandbox and no second module to open, so its primitives resolve to the
+    // stub that raises when one is REACHED -- which is the same treatment a
+    // native binary gives a primitive whose library is missing, and it lets a
+    // program that merely mentions `haxe.Http` run.
+    //
+    // Saying so is still worth it: the failure, if it comes, arrives at a call
+    // deep in a library rather than here.
+    if kind == Runtime::Shared && !quiet {
+        crate::progress::note(&format!(
+            "[ash] this program names HDLLs and {triple} cannot load one. It will \
+             build and run; a primitive that is actually reached raises there."
+        ));
     }
     let runtime = match runtime {
         Some(p) if p.is_file() => p.to_path_buf(),
@@ -402,8 +406,7 @@ fn link_wasm_module(
     crate::progress::begin("linking", 0);
     let mut inputs = Vec::with_capacity(objects.len() + 1);
     for path in objects.iter().chain(std::iter::once(&runtime)) {
-        let bytes = std::fs::read(path)
-            .map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
+        let bytes = std::fs::read(path).map_err(|e| anyhow!("reading {}: {e}", path.display()))?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

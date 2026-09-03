@@ -1,2 +1,28 @@
 # Keep repository Cargo config platform-neutral.
 # Use local environment variables or per-user Cargo config for machine-specific settings.
+
+# WebAssembly is the exception, because these are not machine settings: they
+# are what the target IS. An ash program's exception handling is `setjmp`, and
+# WebAssembly has none, so the backend has to rewrite it into the exceptions
+# proposal. That rewrite is these two flags, and it is not optional -- built
+# without them, `ash_std` links against a plain `longjmp` that nothing
+# defines, and the module ash produces has no exception tag for a `catch` to
+# match. Both halves have to agree, and the compiler sets the same two for the
+# code it emits (crates/ash/src/target_abi.rs).
+#
+# `wasm-use-legacy-eh=false` picks the standardised `try_table`/`exnref`
+# encoding. LLVM still defaults to the withdrawn `try`/`catch` instructions,
+# which current engines refuse by name.
+[target.wasm32-wasip1]
+rustflags = [
+  "-Ctarget-feature=+exception-handling",
+  "-Cllvm-args=-wasm-enable-sjlj",
+  "-Cllvm-args=-wasm-use-legacy-eh=false",
+]
+
+[target.wasm32-wasip2]
+rustflags = [
+  "-Ctarget-feature=+exception-handling",
+  "-Cllvm-args=-wasm-enable-sjlj",
+  "-Cllvm-args=-wasm-use-legacy-eh=false",
+]

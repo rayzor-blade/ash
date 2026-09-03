@@ -622,11 +622,45 @@ impl NativeFunctionResolver {
 
     /// Discover and load external HDLL libraries referenced by bytecode natives.
     /// Searches for .hdll files in the given directory.
+    /// Load the HDLLs a program names, from `search_dir`.
+    ///
+    /// `target_loads_libraries` says whether the machine this code is being
+    /// produced FOR can load one at run time -- which is not the same question
+    /// as whether this compiler can. Cross-compiling to a sandbox, the answer
+    /// is no: there is no `dlopen` there and no second module to open, so the
+    /// libraries found here would be the host's and would never be used. A
+    /// missing one is then not an error, and requiring it would refuse to
+    /// build a program for the very target where it cannot matter.
     pub fn discover_and_load_libraries(
         &mut self,
         search_dir: &Path,
         natives: &[HLNative],
+        target_loads_libraries: bool,
     ) -> Result<()> {
+        if !target_loads_libraries {
+            // The primitives still resolve -- to the stub that raises when one
+            // is actually reached, which is what a program that merely
+            // mentions an unavailable library needs.
+            let named: HashSet<&str> = natives
+                .iter()
+                .map(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib))
+                .filter(|l| *l != "std")
+                .collect();
+            // Said once: the decode path and the module builder both ask.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            let mut first = false;
+            SAID.call_once(|| first = true);
+            if !named.is_empty() && !quiet() && first {
+                let mut names: Vec<&str> = named.into_iter().collect();
+                names.sort_unstable();
+                eprintln!(
+                    "[ash] the target cannot load libraries, so {} is not loaded; \
+                     any primitive from it raises when reached",
+                    names.join(", ")
+                );
+            }
+            return Ok(());
+        }
         let mut libs: HashSet<String> = HashSet::new();
         for native in natives {
             let clean = native.lib.strip_prefix('?').unwrap_or(&native.lib);

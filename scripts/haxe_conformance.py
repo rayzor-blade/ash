@@ -490,10 +490,84 @@ def parse_progress(out: str) -> dict:
 
 RE_ASHCASE = re.compile(r"^ASHCASE\s+(\S+)\s*$", re.M)
 
+# ---------------------------------------------------------------------------
+# The wasm engine
+#
+# wasm is ahead-of-time only: there is no interpreter inside the module and no
+# ash process around it, so "wasm" is not a mode ash has. It is a build and
+# then a host. The build is per PROGRAM and the run is per CASE, which is the
+# shape isolation already wants -- one link, then a run for each of 1195 cases
+# -- so a module is built once and remembered, and a build that fails is
+# remembered too rather than re-attempted 1195 times.
+#
+# Everything else about a case is unchanged: the same patched suite and the
+# same `--ash-only` argument, which reaches `Sys.args()` in a compiled program
+# exactly as it does under the interpreter.
+# ---------------------------------------------------------------------------
+
+WASM_TRIPLE = "wasm32-wasip1"
+_WASM_MODULES: dict[str, str] = {}
+_WASM_FAILURES: dict[str, str] = {}
+
+
+def wasm_runner(ash: str) -> str:
+    """The host that runs a module: beside ash, then on PATH."""
+    beside = pathlib.Path(ash).parent / "ash-wasm-run"
+    if beside.is_file():
+        return str(beside)
+    found = shutil.which("ash-wasm-run")
+    if found:
+        return found
+    raise RuntimeError("no ash-wasm-run found beside ash or on PATH")
+
+
+def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
+    """Build `program` to wasm, once."""
+    key = str(program)
+    if key in _WASM_FAILURES:
+        raise RuntimeError(_WASM_FAILURES[key])
+    if key in _WASM_MODULES:
+        return _WASM_MODULES[key]
+    out = program.with_suffix(".wasm")
+    # Its own budget, not the caller's. A per-case timeout is seconds and a
+    # whole-program AOT build is minutes -- the suite's main program is over a
+    # megabyte of bytecode, and a cross build compiles it in one piece because
+    # sharding is joined by the host's linker.
+    try:
+        r = run([ash, "--build", str(out), "--target", WASM_TRIPLE, str(program)],
+                cwd=str(program.parent), timeout=max(timeout, 1800))
+    except subprocess.TimeoutExpired:
+        # One error type out of here, so a caller has one thing to catch.
+        _WASM_FAILURES[key] = (
+            f"building {program.name} for {WASM_TRIPLE} did not finish in "
+            f"{max(timeout, 1800)}s")
+        raise RuntimeError(_WASM_FAILURES[key]) from None
+    if r.returncode != 0 or not out.is_file():
+        why = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+        _WASM_FAILURES[key] = (
+            f"building {program.name} for {WASM_TRIPLE} failed: "
+            + (why[-1] if why else "no output"))
+        raise RuntimeError(_WASM_FAILURES[key])
+    _WASM_MODULES[key] = str(out)
+    return str(out)
+
+
+def engine_argv(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
+    """The whole command that runs `program` under `mode`, program included.
+
+    Program-included rather than a prefix, because the wasm engine does not
+    run the `.hl` at all: it runs the module built from it.
+    """
+    if mode == "wasm":
+        return [wasm_runner(ash), wasm_module_for(ash, program, timeout)]
+    return [ash, "--mode", mode, str(program)]
+
+
+
 
 def list_cases(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
     """Ask the patched suite to name its cases."""
-    r = run([ash, "--mode", mode, str(program), "--ash-list"],
+    r = run(engine_argv(ash, program, mode, timeout) + ["--ash-list"],
             cwd=str(program.parent.parent), timeout=timeout)
     return RE_ASHCASE.findall(r.stdout or "")
 
@@ -524,7 +598,7 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
     started = time.time()
     timed_out = False
     try:
-        r = run([ash, "--mode", mode, str(program), "--ash-only", case],
+        r = run(engine_argv(ash, program, mode, timeout) + ["--ash-only", case],
                 cwd=str(program.parent.parent), timeout=timeout)
         out = (r.stdout or "") + (r.stderr or "")
         rc = r.returncode
@@ -586,7 +660,12 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
 def run_isolated(ash: str, program: pathlib.Path, mode: str, timeout: int,
                  jobs: int, limit: int | None = None) -> dict:
     """Every case, each in its own process, aggregated into one verdict."""
-    cases = list_cases(ash, program, mode, timeout)
+    try:
+        cases = list_cases(ash, program, mode, timeout)
+    except RuntimeError as e:
+        # A wasm build that failed: report it once, as this program's verdict,
+        # rather than letting it end the sweep.
+        return {"error": str(e)}
     if not cases:
         return {"error": "no cases enumerated (is the suite patched and rebuilt?)"}
     if limit:
@@ -929,9 +1008,14 @@ def run_misc_suite(src: pathlib.Path, haxe: str, ash: str, modes: list[str],
                          "detail": f"{case['program']} not produced"})
             continue
 
-        engines = [(f"ash:{m}", [ash, "--mode", m]) for m in modes]
+        try:
+            engines = [(f"ash:{m}", engine_argv(ash, p, m, timeout)) for m in modes]
+        except RuntimeError as e:
+            rows.append({"suite": "misc", "program": prog_id, "engine": "-",
+                         "bucket": "vm", "status": "SKIP", "detail": str(e)})
+            continue
         if reference:
-            engines.append(("hashlink", [reference]))
+            engines.append(("hashlink", [reference, str(p)]))
         for label, argv0 in engines:
             t0 = time.perf_counter()
             timed_out = False
@@ -939,8 +1023,7 @@ def run_misc_suite(src: pathlib.Path, haxe: str, ash: str, modes: list[str],
                 # eventLoop finishes in about a second; a hang here is a
                 # finding in its own right, not a reason to stall the run
                 # for the full suite budget.
-                res = run(argv0 + [str(p)], cwd=str(sdir),
-                          timeout=min(timeout, 120))
+                res = run(argv0, cwd=str(sdir), timeout=min(timeout, 120))
                 out = (res.stdout or "") + (res.stderr or "")
                 rc = res.returncode
             except subprocess.TimeoutExpired as e:
@@ -1180,9 +1263,16 @@ def main(argv=None) -> int:
                 continue
             stage_hdlls(p.parent, hdlls)
 
-            engines = [(f"ash:{m}", [ash, "--mode", m]) for m in modes]
+            try:
+                engines = [(f"ash:{m}", engine_argv(ash, p, m, args.timeout))
+                           for m in modes]
+            except RuntimeError as e:
+                report["results"].append({"suite": name, "program": prog,
+                                          "engine": "-", "status": "SKIP",
+                                          "detail": str(e)})
+                continue
             if args.reference:
-                engines.append(("hashlink", [args.reference]))
+                engines.append(("hashlink", [args.reference, str(p)]))
 
             if isolating:
                 for m in modes:
@@ -1256,7 +1346,7 @@ def main(argv=None) -> int:
                     # to tests/sys. Running from bin/hl manufactured failures
                     # in both Ash and the reference VM.
                     res = run(
-                        argv0 + [str(p)],
+                        argv0,
                         cwd=str(sdir),
                         timeout=args.timeout,
                         env=suite_env,

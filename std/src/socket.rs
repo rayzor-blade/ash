@@ -1213,7 +1213,10 @@ pub unsafe extern "C" fn hlp_socket_send_char(s: *mut hl_socket, c: c_int) -> c_
         return -2;
     }
     let byte = c as u8;
-    if sys::send((*s).sock, &byte, 1) < 0 {
+    hl_blocking(true);
+    let sent = sys::send((*s).sock, &byte, 1);
+    hl_blocking(false);
+    if sent < 0 {
         let e = sys::block_error();
         trace::io("send", e);
         return e;
@@ -1233,7 +1236,12 @@ pub unsafe extern "C" fn hlp_socket_send(
     if s.is_null() {
         return -2;
     }
+    // Declared blocking for the same reason `recv` is: a full send buffer
+    // parks this thread inside the kernel, and a collector that does not know
+    // that waits for it to reach a safe point it will never reach.
+    hl_blocking(true);
     let r = sys::send((*s).sock, buf.wrapping_offset(pos as isize), len);
+    hl_blocking(false);
     if r < 0 {
         let e = sys::block_error();
         trace::io("send", e);

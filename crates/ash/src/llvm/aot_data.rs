@@ -1207,6 +1207,29 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.build_call(install_runner, &[], "")?;
         let _ = set_runner_ty;
 
+        // Haxe threads get their own OS thread here.
+        //
+        // The runtime runs a thread body as a cooperative fiber unless it is
+        // told the body is compiled, because an interpreted body needs the
+        // interpreter that owns it. Only the interpreter ever said so, and an
+        // AOT binary does not have one -- so every thread in one was a fiber
+        // sharing a single OS thread, and any blocking call parked all of
+        // them inside the kernel. A `sys.net.Socket` write to a peer that had
+        // stopped reading froze the whole process: measured at zero CPU,
+        // with the main thread never reaching its next line.
+        //
+        // In an AOT binary every body is compiled by construction, which is
+        // exactly the condition this flag describes.
+        let worker_mode = self.aot_runtime_fn(
+            "hlp_set_compiled_worker_mode",
+            void_type.fn_type(&[self.context.bool_type().into()], false),
+        );
+        self.builder.build_call(
+            worker_mode,
+            &[self.context.bool_type().const_int(1, false).into()],
+            "",
+        )?;
+
         // type index -> the global that names its descriptor
         let mut type_globals: HashMap<usize, PointerValue<'ctx>> = HashMap::new();
         for (&raw, &index) in self.c_ptr_to_type_index.iter() {

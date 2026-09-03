@@ -635,6 +635,13 @@ impl<'ctx> JITModule<'ctx> {
     fn promote_in_own_module(&mut self, findex: usize) -> Result<usize> {
         let modname = format!("promote_{findex}");
         let promo_module = self.context.create_module(&modname);
+        // A fresh module names no target, and the middle end reads the triple
+        // back off the module to choose one. Leaving it unset does not produce
+        // slower code -- it fails the promotion outright, and the caller reads
+        // a tier failure as a reason to blacklist the function for the rest of
+        // the run. Every hot function, permanently, on the tier that is
+        // supposed to be the fast one.
+        self.target_abi.apply_to_module(&promo_module)?;
         self.builder.clear_insertion_position();
 
         let host_module = std::mem::replace(&mut self.module, promo_module);
@@ -1216,6 +1223,9 @@ impl<'ctx> JITModule<'ctx> {
         // rather than cleared: they are read by index and hold immutable
         // values, so a private copy is correct and a missing one is not.
         let osr_module = self.context.create_module(&name);
+        // See `promote_in_own_module`: a module with no triple cannot be
+        // optimized, and this one holds the body a hot loop actually runs.
+        self.target_abi.apply_to_module(&osr_module)?;
         // The builder is shared, and whatever it last pointed at belongs to the
         // module about to be swapped out. `generate_native_caller_with_addr`
         // opens by saving `get_insert_block()`, which asserts on anything that

@@ -141,6 +141,7 @@ dependencies = [
  "anyhow",
  "ash_macro",
  "ash_std",
+ "ash_wasm_link",
  "beadie",
  "bindgen",
  "byteorder",

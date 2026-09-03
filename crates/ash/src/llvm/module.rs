@@ -3,7 +3,7 @@ use crate::hl::*;
 use crate::native_lib::{init_std_library, NativeFunctionResolver};
 use crate::opcodes::Opcode;
 use crate::types::{HLType, HLTypeFun, HLTypeObj, TypeRef, ValueTypeKind};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use inkwell::basic_block::BasicBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -244,6 +244,20 @@ pub(crate) fn run_middle_end_at(
     }
 
     let triple = module.get_triple().as_str().to_string_lossy().into_owned();
+    // A module that names no target cannot be optimized, and the error from
+    // trying says only "no target for", which reads as an LLVM problem rather
+    // than a missing setup step. It is worth naming, because the consequence
+    // is not slower code: the middle end fails, the caller reads a tier
+    // failure as a reason to blacklist, and the function is never compiled
+    // again for the rest of the run.
+    if triple.is_empty() {
+        bail!(
+            "module {:?} has no target triple, so the middle end cannot choose a \
+             target machine. Every module handed to the optimizer must have had \
+             TargetAbi::apply_to_module called on it first",
+            module.get_name().to_string_lossy()
+        );
+    }
     let abi = crate::target_abi::TargetAbi::for_triple(&triple)?;
     let (_, machine) = abi.target_machine(OptimizationLevel::Aggressive)?;
 
@@ -713,6 +727,16 @@ impl<'ctx> JITModule<'ctx> {
         let execution_engine = llvm_module
             .create_jit_execution_engine(OptimizationLevel::Aggressive)
             .expect("Failed to initialize execution engine");
+        // Same order as the non-tiered constructor: MCJIT is created while the
+        // module still names the host, then the ABI is installed. Without this
+        // the module carries no triple at all, and the middle end -- which
+        // reads the triple back to pick a target machine -- fails on every
+        // function it is handed.
+        let host_abi =
+            crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI");
+        host_abi
+            .apply_to_module(&llvm_module)
+            .expect("Failed to install the host ABI on the tiered module");
         phase_timer!(timing, "tiered engine", t);
         t = std::time::Instant::now();
 
@@ -722,7 +746,7 @@ impl<'ctx> JITModule<'ctx> {
         let mut module = JITModule {
             context,
             trampoline_registry: None,
-            target_abi: crate::target_abi::TargetAbi::host().expect("Failed to resolve host ABI"),
+            target_abi: host_abi,
             tbaa: super::tbaa::TbaaTree::new(context),
             module: llvm_module,
             builder: context.create_builder(),

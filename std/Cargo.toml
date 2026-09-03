@@ -45,3 +45,8 @@ cc = "1"
 # `fiber.rs` gates on the same condition.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 krio-fiber = { git = "https://github.com/darmie/krio" }
+
+# The wasm side of the runtime, linked in rather than imported: see that
+# crate's docs for why only fiber suspension crosses the module boundary.
+[target.'cfg(target_family = "wasm")'.dependencies]
+ash_wasm_runtime = { path = "../crates/ash_wasm_runtime", default-features = false, features = ["guest"] }

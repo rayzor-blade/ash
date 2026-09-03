@@ -28,8 +28,6 @@ pub mod cast;
 pub mod date;
 pub mod error;
 pub mod fiber;
-#[cfg(target_family = "wasm")]
-pub mod fiber_host;
 pub mod file;
 pub mod fun;
 pub mod gc;

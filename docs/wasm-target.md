@@ -233,6 +233,40 @@ later threads target does not require replacing the GC API.
 initialise it, allocate an object, build a string, and print it under
 Wasmtime.
 
+### The host, in Rust: `crates/ash_wasm_runtime`
+
+Three parts, and which side of the module boundary each sits on is the design.
+
+`guest` is compiled **into** the program: `ash_std` depends on it when built
+for wasm, so its contents are ordinary Rust linkage and not wasm imports.
+Everything that can be done inside the sandbox belongs there, and most things
+can, because WASI already gives the standard library a clock, randomness,
+stdout and a filesystem. The fiber backend lives there now, moved out of
+`ash_std` itself.
+
+`native` is a `wasmtime` host, and it is what the conformance lane will use:
+no browser, no JavaScript, no `wasm-bindgen`. wasmtime's own fibers answer the
+suspending import, so the capability a browser gets from JSPI is available
+here without a browser. The browser host is not written yet: it will be the same
+contract behind `web-sys`, and the only JavaScript in that path will be glue
+`wasm-bindgen` generates, which is build output in the way an object file is.
+
+One import crosses the boundary today, `env.ash_host_fiber_yield`, and it has
+to: a wasm module has no addressable stack and no instruction that moves
+between two, so suspension is the one operation it cannot perform for itself.
+
+The binary is useful before any of this runs:
+
+```
+ash-wasm-run --imports prog.wasm
+```
+
+It lists the imports no host can satisfy, which during the port is the
+question actually being asked. On today's `bench_fib.wasm` -- emitted, but
+linked without the runtime -- it reports all 72 `hlp_*` symbols. When that
+list is empty, the module needs only WASI and the fiber import, and phase 3 is
+done.
+
 ### Phase 3 — link and run a real Ash program
 
 Add a wasm branch to `ash --build` instead of passing a wasm object to the

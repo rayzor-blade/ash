@@ -25,7 +25,7 @@ use crate::hl::{vclosure, vdynamic};
 #[cfg(not(target_family = "wasm"))]
 use krio_fiber::{Fiber, FiberState};
 #[cfg(target_family = "wasm")]
-use crate::fiber_host::{Fiber, FiberState};
+use ash_wasm_runtime::guest::{Fiber, FiberState};
 
 #[cfg(not(target_family = "wasm"))]
 fn yield_now_backend() {
@@ -33,7 +33,7 @@ fn yield_now_backend() {
 }
 #[cfg(target_family = "wasm")]
 fn yield_now_backend() {
-    crate::fiber_host::yield_now();
+    ash_wasm_runtime::guest::yield_now();
 }
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;

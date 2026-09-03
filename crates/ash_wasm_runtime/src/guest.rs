@@ -1,4 +1,12 @@
-//! Fibers on a target that cannot switch its own stack: WebAssembly.
+//! The wasm side of the runtime: what gets compiled INTO the program.
+//!
+//! `ash_std` depends on this module when it is built for wasm, so everything
+//! here is ordinary Rust linkage rather than a wasm import -- which is the
+//! point. The only things that have to cross the module boundary are the ones
+//! a sandbox genuinely cannot perform, and there is currently exactly one of
+//! those: suspending a fiber.
+//!
+//! # Fibers on a target that cannot switch its own stack
 //!
 //! A fiber suspends in the middle of a call and resumes there later, which on
 //! a native target means saving a stack and jumping to another one. A wasm
@@ -7,7 +15,8 @@
 //! JavaScript Promise Integration in a browser, `wasmtime`'s async support on
 //! a server, an explicit scheduler anywhere else -- so this module keeps the
 //! same interface `krio-fiber` gives a native build and routes the one
-//! operation that must suspend to the host.
+//! operation that must suspend to the host. `ash_std`'s scheduler is
+//! unchanged and does not know which backend it has.
 //!
 //! That single operation is [`yield_now`], which calls the import
 //! `ash_host_fiber_yield`. A host that can suspend does so there, and the
@@ -145,6 +154,18 @@ impl Fiber {
         };
     }
 
+    /// Where a suspended fiber's stack pointer is, which here is nowhere.
+    ///
+    /// The collector narrows its conservative scan to the live window above
+    /// this address. A wasm fiber's stack is held by the engine, outside
+    /// linear memory and outside the collector's reach, so there is no
+    /// address to report and the null it gets means "scan nothing" rather
+    /// than "scan everything" -- which is why roots on this target have to
+    /// be explicit.
+    pub fn saved_sp(&self) -> *const u8 {
+        std::ptr::null()
+    }
+
     /// No stack of its own to scan.
     ///
     /// The collector uses this range for a conservative scan of a suspended
@@ -155,4 +176,3 @@ impl Fiber {
         (std::ptr::null(), 0)
     }
 }
-

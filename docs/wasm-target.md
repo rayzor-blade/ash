@@ -171,6 +171,40 @@ parameter.
 
 ### Phase 2 — build a single-threaded WASI runtime
 
+**Unblocked, and the work is now visible.** `cargo check -p ash_std --target
+wasm32-wasip1` reaches the crate's own code. Two gates were in the way and are
+gone:
+
+* bindgen had no C library to parse `hl.h` against. It now takes a WASI
+  sysroot -- `WASI_SYSROOT`, else the usual install paths (`brew install
+  wasi-libc` supplies one in 10 MB) -- and `-mexception-handling`, without
+  which WASI's `setjmp.h` refuses to be included at all, since setjmp there
+  IS exception handling.
+* `krio-fiber` was an unconditional dependency and cannot work here: a wasm
+  module has no addressable stack and no instruction that moves between two.
+  It is now native-only, and `std/src/fiber_host.rs` is the wasm backend --
+  same four operations, with the one that must suspend routed to the host.
+
+What remains is 114 compiler errors, and they are not evenly spread:
+
+| file | errors | what they are |
+|---|---|---|
+| `socket.rs` | 58 | a facility WASI preview 1 does not have |
+| `sys.rs` | 10 | process and OS services |
+| `obj.rs` | 10 | **32-bit layout**: `stackCount` is absent from a 32-bit `vclosure`, `vdynamic` gains `__pad` |
+| `process.rs` | 9 | subprocesses |
+| `gc.rs` | 8 | the heap wants `mmap`; linear memory has no such call |
+| `fiber.rs` | 4 | what the host backend does not yet cover |
+| `buffer.rs`, `fun.rs`, `aot_native.rs`, `error.rs`, `debugger.rs` | 13 | `dlopen`, `longjmp` spelling, small ABI differences |
+
+About eighty of them are one decision rather than eighty: socket, process,
+thread and debugger are 109 natives that a sandbox cannot provide, and they
+should compile to explicit "unsupported" errors rather than be ported. The
+rest -- roughly twenty-five -- are the real work: the 32-bit object layout,
+a heap in linear memory, and the fiber backend.
+
+
+
 Target `wasm32-wasip1` first. Rust supports it as a Tier 2 cross target and
 supplies Rust `std`, WASI libc libraries and common OS services. Building a
 Rust `staticlib`, using an external linker, and running bindgen against C
@@ -271,8 +305,20 @@ Ship a small WASI Preview 1 loader for Node and browsers, covering stdout,
 clock, randomness, arguments/environment and memory. Canvas, WebGL, audio and
 input belong to an embedder/framework API rather than the language runtime.
 
-Run the Haxe conformance suite per case, as the interpreter lane does. Add
-focused wasm tests before the broad suite:
+Run the Haxe conformance suite per case, as the interpreter lane does.
+
+**The denominator is measurable before the runtime exists.** A case can only
+run on wasm if every native it calls can. That set is observable: run the case
+under the interpreter with `ASH_TRACE_NATIVE=1`, which prints one line per
+native call with its library, and take the union. A case is out of scope if it
+calls a native from a library other than `std` -- an HDLL cannot be loaded in
+a sandbox -- or a `std` native owned by `socket.rs`, `process.rs`,
+`thread.rs` or `debugger.rs`, which are the 109 the sandbox cannot provide.
+Everything else is in scope, and the wasm score is reported against that
+denominator with the excluded cases listed by reason rather than quietly
+dropped.
+
+Add focused wasm tests before the broad suite:
 
 * object, enum, array, virtual and closure layouts;
 * direct, indirect, dynamic and reflective calls;
@@ -291,15 +337,31 @@ deferred.
 
 **Fibers are part of the target, driven by the host.** A fiber is cooperative:
 it suspends at a point the program chose, and something outside decides when it
-resumes. On a native target that something is `krio-fiber` switching stacks; in
-a wasm module it is the host, through JavaScript Promise Integration or the
-stack-switching proposal where an engine has it, and an explicit host-driven
-scheduler where it does not. What the compiler owes either arrangement is the
-same: a safe point in every loop and a word the scheduler can tick, both of
-which the wasm build now emits (the epoch is reached through a pointer, since
-wasm cannot relocate an undefined data symbol). The backend that actually
-suspends a fiber is the outstanding work; the compiled program is already
-asking to be preempted.
+resumes. On a native target that something is `krio-fiber` switching stacks.
+A wasm module cannot switch its own stack, so `std/src/fiber_host.rs` is the
+backend there: the same four operations the scheduler above uses, with the one
+that must suspend routed to a single import, `ash_host_fiber_yield`.
+
+Deliberately one import and not a topology, because there are three ways to
+implement it and they trade differently:
+
+| how | needs | costs |
+|---|---|---|
+| engine suspension (JSPI, `wasmtime` async) | an engine that has it | none beyond the call; single-threaded, no headers |
+| a worker per fiber over shared memory, parked on `Atomics.wait` | `wasm32-wasip1-threads`, and COOP/COEP in a browser | a fiber becomes an OS thread; every collection becomes a rendezvous |
+| Asyncify | nothing | roughly double the code size, and a tax on every call |
+
+The middle row is the one that works with no engine feature, and it is why
+this cannot simply be declared solved by shared memory and workers: it pulls
+the whole threads target forward into the first release, and it prices a fiber
+at a thread when ash's scheduler is M:N. Where JSPI exists it is strictly
+cheaper. So the module marks where it may be suspended, the harness decides
+how, and the choice can differ between the browser and the server without the
+program changing.
+
+What the compiler owes all three is the same, and it already emits it: a safe
+point in every loop and a word the scheduler can tick, the epoch reached
+through a pointer since wasm cannot relocate an undefined data symbol.
 
 **Threads are deferred.** Do not make `wasm32-wasip1-threads` part of the first
 release. The target exists, but Rust still describes it as in flux, engines

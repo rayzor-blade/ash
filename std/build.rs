@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Pin bindgen to the same LLVM the crate graph already requires.
 ///
@@ -142,10 +142,47 @@ fn main() {
     // windows-2022 runner, where the headers are the target's own.
     let cross = env::var("HOST").unwrap_or_default() != env::var("TARGET").unwrap_or_default();
 
+    // A wasm target needs a C library to parse the header against, and the
+    // host's will not do: clang stops at `'stdlib.h' file not found`, which
+    // reads like a missing libc rather than a missing sysroot. WASI's libc
+    // supplies one. `WASI_SYSROOT` names it; otherwise the usual install
+    // locations are tried, and a clear failure beats bindings built against
+    // the wrong platform.
+    let target = env::var("TARGET").unwrap_or_default();
+    let mut wasm_clang_args: Vec<String> = Vec::new();
+    if target.starts_with("wasm32") || target.starts_with("wasm64") {
+        let sysroot = env::var("WASI_SYSROOT").ok().or_else(|| {
+            [
+                "/opt/homebrew/opt/wasi-libc/share/wasi-sysroot",
+                "/usr/local/opt/wasi-libc/share/wasi-sysroot",
+                "/opt/wasi-sdk/share/wasi-sysroot",
+            ]
+            .iter()
+            .find(|p| Path::new(p).is_dir())
+            .map(|p| (*p).to_string())
+        });
+        let sysroot = sysroot.unwrap_or_else(|| {
+            panic!(
+                "building ash_std for {target} needs WASI libc headers: install \
+                 them (brew install wasi-libc, or the WASI SDK) and set \
+                 WASI_SYSROOT to the sysroot directory"
+            )
+        });
+        println!("cargo:rerun-if-env-changed=WASI_SYSROOT");
+        wasm_clang_args.push(format!("--target={target}"));
+        wasm_clang_args.push(format!("--sysroot={sysroot}"));
+        // WASI's `setjmp.h` refuses to be included unless exception handling
+        // is on, because that is what its setjmp is lowered to. ash's trap
+        // model is setjmp, so the header is not optional and neither is the
+        // feature; this is the same switch the emitted program will need.
+        wasm_clang_args.push("-mexception-handling".to_string());
+    }
+
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
         .header("wrapper.h")
+        .clang_args(&wasm_clang_args)
         .layout_tests(!cross)
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.

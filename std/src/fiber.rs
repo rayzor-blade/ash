@@ -20,7 +20,21 @@
 
 use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
+// Native fibers switch stacks; wasm fibers are driven by the host. Same
+// four operations either way, so the scheduler below does not branch.
+#[cfg(not(target_family = "wasm"))]
 use krio_fiber::{Fiber, FiberState};
+#[cfg(target_family = "wasm")]
+use crate::fiber_host::{Fiber, FiberState};
+
+#[cfg(not(target_family = "wasm"))]
+fn yield_now_backend() {
+    krio_fiber::yield_now();
+}
+#[cfg(target_family = "wasm")]
+fn yield_now_backend() {
+    crate::fiber_host::yield_now();
+}
 use std::cell::{Cell, RefCell};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -778,7 +792,7 @@ pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
         fiber.pending_park = Some(ParkRequest { waiter, deadline });
         active.set(Some(fiber));
     });
-    krio_fiber::yield_now();
+    yield_now_backend();
     let notified = ACTIVE_FIBER.with(|active| {
         active
             .get()
@@ -973,10 +987,15 @@ unsafe fn install_fiber(id: u32, c: *mut vclosure) {
     let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
         run_closure(c_usize as *mut vclosure);
     }));
+    // A wasm fiber has no stack in linear memory, so there is nothing for the
+    // collector to scan and nothing to charge; `stack_range` returns an empty
+    // range there rather than lying about one.
     let (base, len) = fiber.stack_range();
+    #[cfg(not(target_family = "wasm"))]
     crate::gc::gc_register_fiber_stack(id, base as usize, len);
     // Charge the off-heap stack as GC allocation pressure so dead fibers'
     // stacks translate into collections (wren_lift core/fiber.rs:189-199).
+    #[cfg(not(target_family = "wasm"))]
     crate::gc::hlp_gc_track_external(len as u64);
 
     SCHEDULER.with(|scheduler| {
@@ -1226,7 +1245,7 @@ pub unsafe extern "C" fn hlp_fiber_poll() {
         return;
     }
     if ACTIVE_FIBER.with(|active| active.get().is_some()) {
-        krio_fiber::yield_now();
+        yield_now_backend();
     } else {
         schedule_step();
     }
@@ -1236,7 +1255,7 @@ pub unsafe extern "C" fn hlp_fiber_poll() {
 /// on the main context, run other fibers and take a short pacing nap.
 pub(crate) unsafe fn block_yield() {
     if ACTIVE_FIBER.with(|active| active.get().is_some()) {
-        krio_fiber::yield_now();
+        yield_now_backend();
     } else {
         crate::gc::gc_safepoint();
         schedule_step();

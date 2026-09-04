@@ -662,6 +662,26 @@ impl<'ctx> JITModule<'ctx> {
         self.module.set_triple(&tt);
         self.module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+        // `ASH_AOT_DUMP_IR` already covers the sharded emitter; an unsharded
+        // module went out with no way to read it, which is no help when the
+        // question is why the same program behaves differently on two targets.
+        // Same variable, so one name covers both paths. Written after the
+        // triple and data layout are set, so it is the module as this target
+        // sees it.
+        if let Some(spec) = std::env::var_os("ASH_AOT_DUMP_IR") {
+            let spec = spec.to_string_lossy().into_owned();
+            if !spec.is_empty() && spec != "0" {
+                let out = if spec == "1" {
+                    std::path::PathBuf::from("/tmp/ash_aot.ll")
+                } else {
+                    std::path::PathBuf::from(&spec)
+                };
+                match self.module.print_to_file(&out) {
+                    Ok(()) => eprintln!("[ash] LLVM IR written to {}", out.display()),
+                    Err(e) => eprintln!("[ash] could not write {}: {e}", out.display()),
+                }
+            }
+        }
         machine
             .write_to_file(&self.module, FileType::Object, path)
             .map_err(|e| anyhow!("emit {}: {e}", path.display()))?;

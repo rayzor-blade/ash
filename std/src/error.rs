@@ -417,10 +417,54 @@ fn aot_name_is_runtime(name: &str) -> bool {
 /// bodies would otherwise be attributed to the body before it.
 #[cfg(unix)]
 unsafe fn aot_frame_in_program(pc: usize) -> bool {
+    // Answered once per address and remembered. `dladdr` is not a lookup: it
+    // walks the containing image's symbol table linearly, and an AOT build of
+    // a game carries tens of thousands of symbols. A throw walks up to 256
+    // frames and asks about every one, so the cost is scanned-symbols x
+    // frames x throws.
+    //
+    // MBHaxe throws inside collision search on every physics tick. That put
+    // 98% of the process in dyld's findClosestSymbol and read to the player
+    // as a hard freeze -- the AOT twin of the symbol-arena freeze fixed in
+    // aa7dda2, which only ever covered the JIT walker.
+    //
+    // Caching is sound because the answer cannot change: an address either
+    // lies in program text or it does not. The table is bounded by the code
+    // actually appearing in a stack, not by the number of throws.
+    if let Some(known) = aot_frame_class_cached(pc) {
+        return known;
+    }
+    let verdict = aot_frame_in_program_uncached(pc);
+    aot_frame_class_remember(pc, verdict);
+    verdict
+}
+
+/// Sorted by address, like [`AOT_SYMBOLS`], and read the same way.
+#[cfg(unix)]
+static AOT_FRAME_CLASS: std::sync::Mutex<Vec<(usize, bool)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(unix)]
+fn aot_frame_class_cached(pc: usize) -> Option<bool> {
+    let table = AOT_FRAME_CLASS.lock().unwrap_or_else(|e| e.into_inner());
+    table.binary_search_by_key(&pc, |(addr, _)| *addr).ok().map(|i| table[i].1)
+}
+
+#[cfg(unix)]
+fn aot_frame_class_remember(pc: usize, verdict: bool) {
+    let mut table = AOT_FRAME_CLASS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(i) = table.binary_search_by_key(&pc, |(addr, _)| *addr) {
+        table.insert(i, (pc, verdict));
+    }
+}
+
+#[cfg(unix)]
+unsafe fn aot_frame_in_program_uncached(pc: usize) -> bool {
     let mut info: libc::Dl_info = std::mem::zeroed();
     let named = libc::dladdr(pc as *const c_void, &mut info) != 0 && !info.dli_sname.is_null();
+    // Borrowed, not owned: `to_string_lossy` only allocates for a name that is
+    // not valid UTF-8, and nothing here outlives the call.
     let dl_name = if named {
-        Some(std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy().into_owned())
+        Some(std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy())
     } else {
         None
     };

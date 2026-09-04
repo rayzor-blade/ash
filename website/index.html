@@ -593,9 +593,9 @@
         <div>
           <div style="display:flex;align-items:baseline;gap:14px;margin-bottom:12px"><span
               style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">04</span>
-            <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build a native executable</h3>
+            <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build an executable</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles the whole program and links it, in one command. The result needs no bytecode, no interpreter and no JIT: it starts at full speed. A program that loads HDLLs gets the shared runtime staged beside it automatically.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. The result carries no bytecode, no interpreter and no JIT &mdash; it starts at full speed.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -606,7 +606,7 @@
               <button class="copy-btn" data-copy="ash --build mygame mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Executables are built for the machine you build on.</strong> Linking one needs that platform's linker and system libraries, so <code>--build</code> produces a native binary only for the host. Any target LLVM supports with 32- or 64-bit pointers can still be <em>emitted</em> with <code>--emit-aot</code> and a triple, and the layouts, calls and data come out for that target rather than for the host. WebAssembly is linked as well as emitted, because its linker is not the host's.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:16px 0 12px"><strong style="color:#221d1a;font-weight:600">Executables are built for the machine you build on.</strong> WebAssembly is the exception, and takes the same command.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -617,7 +617,7 @@
               <button class="copy-btn" data-copy="ash --build mygame.wasm --target wasm32-wasip1 mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">WebAssembly runs. The standard library is compiled for it, one command emits and links the module, and the stdlib suite produces output identical to the native build, exceptions included. What the module still asks a host for is the part a sandbox genuinely cannot do alone: suspending a fiber, and opening a socket. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The plan and its measurements</a>.
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Nothing else has to be installed: ash carries its own wasm linker. The standard library suite runs there byte-identical to native, exceptions included. The module asks a host only for what a sandbox cannot do alone &mdash; suspending a fiber, and opening a socket. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The plan and its measurements</a>.
           </p>
         </div>
       </div>

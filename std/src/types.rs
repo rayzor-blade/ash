@@ -115,7 +115,16 @@ pub unsafe fn hl_is_ptr(t: *mut hl_type) -> bool {
     (*t).kind >= hl_type_kind_HBYTES
 }
 
-pub const HL_WSIZE: isize = 8;
+/// Width of a pointer-kind field, for the target this runtime is built for.
+///
+/// Hardcoded to 8, every reference field advanced by eight bytes on wasm32,
+/// where a pointer is four -- while the object header, taken from a real
+/// `size_of`, was four. Field offsets then came out as the 64-bit ones minus
+/// the header, and disagreed with what compiled code reads: a `dynamic`
+/// method's binding was written where nothing looked, and `haxe.Log.trace`
+/// read null on the first trace of any program. `hlp_pad_struct` below has
+/// always taken the alignment from `size_of`, so the two contradicted.
+pub const HL_WSIZE: isize = mem::size_of::<*mut std::os::raw::c_void>() as isize;
 
 pub static T_SIZES: [isize; 23] = [
     0,        // VOID

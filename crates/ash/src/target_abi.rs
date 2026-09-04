@@ -235,6 +235,35 @@ fn force_wasm_exception_model(_machine: &TargetMachine) -> Result<()> {
     ))
 }
 
+/// The features a cross target needs to be linkable, as opposed to merely
+/// faster.
+///
+/// An empty feature string means the bare base ISA, and on most targets that
+/// costs performance and nothing else. On RISC-V it decides the calling
+/// convention: with no F or D the object is emitted soft-float, and a
+/// soft-float object cannot be linked against a distribution's libraries at
+/// all -- `can't link soft-float modules with double-float modules`, with
+/// ELF flags 0x0 against their 0x5.
+///
+/// So `riscv64-unknown-linux-gnu` is given the profile that name means
+/// everywhere it is actually used: `gc`, which is what every Linux
+/// distribution builds for and what Rust spells `riscv64gc`. LLVM derives
+/// the ABI from the features when none is named, so F and D being present is
+/// what makes it `lp64d`.
+///
+/// `ASH_TARGET_FEATURES` replaces this for a target that wants something
+/// else -- a bare embedded RISC-V, say -- because the right answer there is
+/// the operator's, not a default's.
+fn default_features(triple: &str) -> String {
+    if let Ok(explicit) = std::env::var("ASH_TARGET_FEATURES") {
+        return explicit;
+    }
+    if triple.starts_with("riscv64") || triple.starts_with("riscv32") {
+        return "+m,+a,+f,+d,+c".to_string();
+    }
+    String::new()
+}
+
 pub(crate) fn target_machine(
     triple: &str,
     opt: OptimizationLevel,
@@ -262,7 +291,7 @@ pub(crate) fn target_machine(
         enable_wasm_sjlj();
         "+exception-handling".to_string()
     } else {
-        String::new()
+        default_features(&lower_triple(triple))
     };
     let wasm = lower_triple(triple).starts_with("wasm");
     let machine = target

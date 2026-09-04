@@ -529,6 +529,16 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
     if key in _WASM_MODULES:
         return _WASM_MODULES[key]
     out = program.with_suffix(".wasm")
+    # A module newer than both its bytecode and the compiler that made it is
+    # the module this build would produce. The build is minutes, so a second
+    # measurement of the same ash against the same suite should not pay it.
+    try:
+        built = out.stat().st_mtime
+        if built > program.stat().st_mtime and built > os.stat(ash).st_mtime:
+            _WASM_MODULES[key] = str(out)
+            return _WASM_MODULES[key]
+    except FileNotFoundError:
+        pass
     # Its own budget, not the caller's. A per-case timeout is seconds and a
     # whole-program AOT build is minutes -- the suite's main program is over a
     # megabyte of bytecode, and a cross build compiles it in one piece because

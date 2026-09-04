@@ -152,8 +152,19 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     }
 
     // Initialize bindings
-    if env_flag!("ASH_TRACE_BINDINGS") && (*rt).nbindings > 0 {
-        eprintln!("[alloc_obj] filling {} binding(s)", (*rt).nbindings);
+    if env_flag!("ASH_TRACE_BINDINGS") && ((*rt).nbindings > 0 || (*obj).nbindings > 0) {
+        let mut n = Vec::new();
+        let mut c = (*obj).name;
+        while !c.is_null() && *c != 0 && n.len() < 128 {
+            n.push(*c);
+            c = c.add(1);
+        }
+        eprintln!(
+            "[alloc_obj] {} rt.nbindings={} type.nbindings={}",
+            String::from_utf16_lossy(&n),
+            (*rt).nbindings,
+            (*obj).nbindings
+        );
     }
     for i in 0..(*rt).nbindings {
         let binding = (*rt).bindings.offset(i as isize);

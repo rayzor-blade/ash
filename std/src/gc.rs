@@ -1293,7 +1293,24 @@ fn usable_ram_bytes() -> usize {
             FALLBACK
         }
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    // Without this branch Windows took FALLBACK, so the cap was
+    // 2GB/HEAP_MAX_SHARE -- clamped to HEAP_MAX_FLOOR, 512MB -- on a machine
+    // with any amount of RAM. A long-running program then exhausted a heap
+    // sized for a machine it was not running on, and the failure surfaced as
+    // an allocation panic inside an `extern "C"` frame that cannot unwind.
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::SystemInformation::{
+            GlobalMemoryStatusEx, MEMORYSTATUSEX,
+        };
+        let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+        status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+        if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 && status.ullTotalPhys > 0 {
+            return status.ullTotalPhys as usize;
+        }
+        FALLBACK
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         FALLBACK
     }

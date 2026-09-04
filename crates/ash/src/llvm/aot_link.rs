@@ -367,8 +367,14 @@ pub fn find_wasm_runtime(triple: &str) -> Result<PathBuf> {
     newest(roots.into_iter().map(|r| r.join(RUNTIME_OBJECT))).ok_or_else(|| {
         anyhow!(
             "no {RUNTIME_OBJECT} for {triple} found beside {}, or in the usual library \
-             directories. It is built when ash is; put it in a directory named {triple} \
-             beside ash, or name it with ASH_RUNTIME",
+             directories. Put it in a directory named {triple} beside ash, or name it \
+             with ASH_RUNTIME. To build it:\n\n  \
+             cargo rustc -p ash_std --target {triple} --release --crate-type staticlib\n  \
+             rust-lld -flavor wasm -r -o {triple}/{RUNTIME_OBJECT} \\\n    \
+             --whole-archive target/{triple}/release/libash_std.a --no-whole-archive \\\n    \
+             -L<wasi-sysroot>/lib/{triple} -lc -lsetjmp\n\n\
+             --no-whole-archive matters: without it libc's crt1 and long-double printf \
+             come too, and the module then imports __main_argc_argv and __multc3",
             std::env::current_exe()
                 .ok()
                 .and_then(|e| e.parent().map(|d| d.display().to_string()))

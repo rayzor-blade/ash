@@ -386,6 +386,27 @@ rust-lld -flavor wasm --no-entry --export-dynamic \
 ash-wasm-run prog.wasm
 ```
 
+### Rebuilding `ash_runtime.o`
+
+`ash_runtime.o` is ash_std, a wasi libc and libsetjmp joined into one
+relocatable object. Nothing rebuilds it automatically, so it goes stale the
+moment ash_std gains an export that `ash_module_init` calls -- the module
+links, then fails at instantiate with `unknown import: env::<name>`.
+`crates/ash/tests/wasm_runtime_fresh.rs` fails instead, naming the symbol.
+
+```
+cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
+
+rust-lld -flavor wasm -r -o target/release/wasm32-wasip1/ash_runtime.o \
+  --whole-archive target/wasm32-wasip1/release/libash_std.a --no-whole-archive \
+  -L$(brew --prefix wasi-libc)/share/wasi-sysroot/lib/wasm32-wasip1 -lc -lsetjmp
+```
+
+`--no-whole-archive` is load-bearing. Without it libc's `crt1` and the
+long-double `printf` are force-included, and the module then imports
+`__main_argc_argv` and `__multc3` -- and there is no wasm compiler-rt to
+satisfy the latter. A correct object is about 6.35MB; the broken one was 6.89MB.
+
 Four things that each cost a cycle to find:
 
 * **`setjmp` is a codegen mode.** Both halves need

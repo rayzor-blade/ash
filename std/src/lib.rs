@@ -29,6 +29,7 @@ pub mod date;
 pub mod error;
 pub mod fiber;
 pub mod file;
+pub mod fmt;
 pub mod fun;
 pub mod gc;
 pub mod hl;

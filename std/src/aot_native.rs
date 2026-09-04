@@ -160,8 +160,11 @@ unsafe fn library(lib: &str) -> *mut c_void {
 
 /// Primitives a sandbox answers for itself.
 ///
-/// This is not a general shim for missing libraries, and it is deliberately
-/// one entry long. `sys.ssl.Lib` is written as
+/// Two kinds of entry. `fmt`'s digests and zlib streams are implemented in
+/// this runtime (see `fmt.rs`), because they are pure computation and a
+/// program that hashes or unzips has no other way to get them in a sandbox.
+/// The other entry is not a shim for a missing library. `sys.ssl.Lib` is
+/// written as
 ///
 /// ```haxe
 /// @:noDoc @:keep
@@ -191,6 +194,7 @@ unsafe fn library(lib: &str) -> *mut c_void {
 fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
     extern "C" fn ssl_init_nothing() {}
     match (lib, name) {
+        ("fmt", prim) => crate::fmt::primitive(prim),
         ("ssl", "ssl_init") => ssl_init_nothing as *mut c_void,
         _ => std::ptr::null_mut(),
     }

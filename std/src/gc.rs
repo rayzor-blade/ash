@@ -1107,6 +1107,33 @@ fn env_usize(name: &str) -> Option<usize> {
 /// A fixed default cannot do both: a real 3D scene carries a live
 /// set near 1GB, and a cap below it does not degrade — allocation fails and
 /// the caller has nowhere to go.
+/// Report an allocation that could not be satisfied, and stop.
+///
+/// Every caller is reached through an `extern "C"` boundary, where a panic
+/// cannot unwind: it aborts, and the trace names whichever symbol the unwinder
+/// found first. rayzor-blade#1 reported that as a wall of `ustrdup` and a
+/// second panic about not being able to unwind, which says nothing about the
+/// heap. Say what was being allocated and how full the heap was instead.
+#[cold]
+#[inline(never)]
+pub fn out_of_memory(what: &str) -> ! {
+    const MB: usize = 1024 * 1024;
+    let live = GC_STATS.live_blocks.load(Ordering::Relaxed) as usize * BLOCK_SIZE;
+    let external = GC_STATS.external_bytes.load(Ordering::Relaxed) as usize;
+    let collections = GC_STATS.collections.load(Ordering::Relaxed);
+    eprintln!(
+        "[ash] out of memory allocating {what}\n\
+         [ash]   heap cap {} MB, live {} MB, external {} MB, after {collections} collection(s)\n\
+         [ash]   ASH_GC_HEAP_MB raises the cap. A heap that fills again at a\n\
+         [ash]   higher cap is a leak rather than a heap that is too small.",
+        heap_max_bytes() / MB,
+        live / MB,
+        external / MB,
+    );
+    // Not a panic: see above.
+    std::process::exit(1);
+}
+
 fn heap_max_bytes() -> usize {
     static V: OnceLock<usize> = OnceLock::new();
     *V.get_or_init(|| {
@@ -2513,7 +2540,7 @@ impl ImmixAllocator {
         // Allocate memory for the closure
         let closure = self
             .allocate(mem::size_of::<vclosure>())
-            .expect("Failed to allocate memory for closure")
+            .unwrap_or_else(|| out_of_memory("a closure"))
             .as_ptr() as *mut vclosure;
 
         let stack = 0;

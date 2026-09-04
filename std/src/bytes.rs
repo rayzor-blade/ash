@@ -36,7 +36,7 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
     }
     let _size: usize = size as usize;
 
-    crate::gc::gc_alloc(_size).expect("Out of memory").as_ptr() as *mut hl::vbyte
+    crate::gc::gc_alloc(_size).unwrap_or_else(|| crate::gc::out_of_memory("a byte buffer")).as_ptr() as *mut hl::vbyte
 }
 
 #[no_mangle]

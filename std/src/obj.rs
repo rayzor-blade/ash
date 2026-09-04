@@ -144,7 +144,7 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     // Allocate memory — `allocate` returns zeroed memory (it memsets the
     // region against stale data in reused blocks), so zeroing again here
     // was one of the two memsets the profiler charged to every allocation.
-    let ptr = crate::gc::gc_alloc(size).expect("Out of memory");
+    let ptr = crate::gc::gc_alloc(size).unwrap_or_else(|| crate::gc::out_of_memory("an object"));
 
     let o = ptr.as_ptr() as *mut hl::vobj;
     if (*t).kind != hl::hl_type_kind_HSTRUCT {
@@ -615,7 +615,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
             .allocate_immortal(
                 std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nproto as usize,
             )
-            .expect("Failed to allocate memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
             .as_ptr() as *mut *mut std::os::raw::c_void;
         (*ot).vobj_proto = fptr;
 
@@ -654,7 +654,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
         .allocate_immortal(
             std::mem::size_of::<*mut std::os::raw::c_void>() * (*t).nmethods as usize,
         )
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut *mut std::os::raw::c_void;
 
     if !p.is_null() && (*p).nmethods > 0 {
@@ -700,7 +700,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
     }
     (*t).interfaces = allocator
         .allocate_immortal(std::mem::size_of::<i32>() * (*t).ninterfaces as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut i32;
     (*t).ninterfaces = 0;
     for i in 0..(*o).nfields as usize {
@@ -811,7 +811,7 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
                 {
                     let c = allocator
                         .allocate_immortal(std::mem::size_of::<vclosure>())
-                        .expect("Failed to allocate memory")
+                        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
                         .as_ptr() as *mut vclosure;
                     (*c).fun = *(*m).functions_ptrs.add(mid as usize);
                     (*c).t = *(*m).functions_types.add(mid as usize);
@@ -973,7 +973,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
     // conservative trace, everything they point to) as persistent roots.
     let t = gc
         .allocate_immortal(std::mem::size_of::<hl_runtime_obj>())
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut hl_runtime_obj;
     (*t).t = ot;
     (*t).nfields = (*o).nfields + if !p.is_null() { (*p).nfields } else { 0 };
@@ -1022,15 +1022,15 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
 
     (*t).lookup = gc
         .allocate_immortal(std::mem::size_of::<hl_field_lookup>() * (*t).nlookup as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut hl_field_lookup;
     (*t).fields_indexes = gc
         .allocate_immortal(std::mem::size_of::<i32>() * (*t).nfields as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut i32;
     (*t).bindings = gc
         .allocate_immortal(std::mem::size_of::<hl_runtime_binding>() * (*t).nbindings as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut hl_runtime_binding;
     (*t).toStringFun = None;
     (*t).compareFun = None;
@@ -1185,7 +1185,7 @@ pub unsafe extern "C" fn hlp_get_obj_rt(ot: *mut hl_type) -> *mut hl_runtime_obj
         let mark_size = hlp_mark_size((*t).size) as usize;
         let mark = gc
             .allocate_immortal(mark_size)
-            .expect("Failed to allocate memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
             .as_ptr() as *mut u32;
         ptr::write_bytes(mark as *mut u8, 0, mark_size);
         (*ot).mark_bits = mark;
@@ -1473,7 +1473,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
         }
         let nvalues =
             crate::gc::gc_alloc(((*o).nvalues as usize + 1) * mem::size_of::<*mut c_void>())
-                .expect("Failed to allocate memory")
+                .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
                 .as_ptr() as *mut *mut c_void;
         ptr::copy_nonoverlapping((*o).values, nvalues, (*o).nvalues as usize);
         *nvalues.add(index as usize) = ptr::null_mut();
@@ -1501,7 +1501,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
         }
 
         let new_data = crate::gc::gc_alloc(raw_size as usize + pad + size)
-            .expect("Failed to allocate memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
             .as_ptr() as *mut std::ffi::c_char;
         if raw_size == (*o).raw_size {
             ptr::copy_nonoverlapping((*o).raw_data, new_data, (*o).raw_size as usize);
@@ -1538,7 +1538,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
     // update field table
     let new_lookup =
         crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * ((*o).nfields as usize + 1))
-            .expect("Failed to allocate memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
             .as_ptr() as *mut hl_field_lookup;
     let field_pos = hlp_lookup_find_index((*o).lookup, (*o).nfields, hfield);
     ptr::copy_nonoverlapping((*o).lookup, new_lookup, field_pos as usize);
@@ -1641,7 +1641,7 @@ pub fn hlp_pad_size(size: i32, t: *mut hl::hl_type) -> i32 {
 pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
     // Allocate memory for the vdynobj structure
     let obj = crate::gc::gc_alloc(mem::size_of::<vdynobj>())
-        .expect("Failed to allocate memory for vdynobj")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a dynamic object"))
         .as_ptr() as *mut vdynobj;
 
     // Initialize the fields
@@ -1662,14 +1662,14 @@ pub unsafe extern "C" fn hlp_alloc_dynobj() -> *mut vdynobj {
     // Allocate initial memory for lookup table (we'll start with a small size)
     let initial_lookup_size = 4; // Starting with space for 4 fields
     (*obj).lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * initial_lookup_size)
-        .expect("Failed to allocate memory for lookup table")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a field lookup table"))
         .as_ptr() as *mut hl_field_lookup;
 
     // Allocate initial memory for values (we'll start with a small size)
     let initial_values_size = 4; // Starting with space for 4 values
     (*obj).values =
         crate::gc::gc_alloc(mem::size_of::<*mut std::ffi::c_void>() * initial_values_size)
-            .expect("Failed to allocate memory for values")
+            .unwrap_or_else(|| crate::gc::out_of_memory("a dynamic object's values"))
             .as_ptr() as *mut *mut std::ffi::c_void;
 
     // We don't allocate raw_data yet, as its size depends on the fields that will be added
@@ -1690,7 +1690,7 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
 
     // Copy the lookup table
     (*o).lookup = crate::gc::gc_alloc(mem::size_of::<hl_field_lookup>() * nfields as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut hl_field_lookup;
     (*o).nfields = nfields;
     ptr::copy_nonoverlapping(
@@ -1717,11 +1717,11 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
 
     // Copy the data & rebind virtual addresses
     (*o).raw_data = crate::gc::gc_alloc(raw_size as usize)
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut std::ffi::c_char;
     (*o).raw_size = raw_size;
     (*o).values = crate::gc::gc_alloc(nvalues as usize * mem::size_of::<*mut std::ffi::c_void>())
-        .expect("Failed to allocate memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime type metadata"))
         .as_ptr() as *mut *mut std::ffi::c_void;
     (*o).nvalues = nvalues;
 

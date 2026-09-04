@@ -703,7 +703,7 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
     let size = mem::size_of::<vclosure>();
 
     let c_ptr = crate::gc::gc_alloc(size)
-        .expect("Failed to allocate memory for closure")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a closure"))
         .as_ptr() as *mut vclosure;
 
     ptr::write(

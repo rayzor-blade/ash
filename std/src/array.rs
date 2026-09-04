@@ -27,7 +27,7 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
     // } | MEM_ZERO;
 
     let a = crate::gc::gc_alloc(total_size)
-        .expect("Failed to allocate array")
+        .unwrap_or_else(|| crate::gc::out_of_memory("an array"))
         .as_ptr() as *mut varray;
 
     (*a).t = crate::types::hlt_array();

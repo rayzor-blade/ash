@@ -174,7 +174,7 @@ unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
     let new_buckets = crate::gc::gc_locked()
         .allocate(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
-        .expect("Out of memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
         .as_ptr() as *mut hl::hl_free_bucket;
 
     ptr::copy_nonoverlapping((*f).buckets, new_buckets, (*f).head as usize);
@@ -381,11 +381,11 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     };
     (*m).entries = crate::gc::gc_locked()
         .allocate(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
-        .expect("Out of memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
         .as_ptr() as *mut hl::hl_hb_entry;
     (*m).values = crate::gc::gc_locked()
         .allocate(nentries as usize * mem::size_of::<hl::hl_hb_value>())
-        .expect("Out of memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
         .as_ptr() as *mut hl::hl_hb_value;
     (*m).maxentries = nentries;
 
@@ -393,7 +393,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         // simply expand
         (*m).nexts = crate::gc::gc_locked()
             .allocate(nentries as usize * ksize)
-            .expect("Out of memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
             .as_ptr() as *mut c_void;
         ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
         ptr::copy_nonoverlapping(old.values, (*m).values, old.maxentries as usize);
@@ -412,7 +412,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         // expand and remap
         (*m).cells = crate::gc::gc_locked()
             .allocate((ncells + nentries) as usize * ksize)
-            .expect("Out of memory")
+            .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
             .as_ptr() as *mut c_void;
         (*m).nexts = (*m).cells.add(ncells as usize * ksize);
         (*m).ncells = ncells;

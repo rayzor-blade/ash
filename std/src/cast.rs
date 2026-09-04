@@ -619,35 +619,35 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         match (*(*to).__bindgen_anon_1.tparam).kind {
             hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
                 let v = crate::gc::gc_alloc(std::mem::size_of::<i32>())
-                    .expect("Out of memory") // Handle this error appropriately
+                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
                     .as_ptr() as *mut i32;
                 *v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
                 return v as *mut c_void;
             }
             hl_type_kind_HI64 => {
                 let d = crate::gc::gc_alloc(std::mem::size_of::<i64>())
-                    .expect("Out of memory")
+                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
                     .as_ptr() as *mut i64;
                 *d = hlp_dyn_casti64(data, t);
                 return d as *mut c_void;
             }
             hl_type_kind_HF32 => {
                 let f = crate::gc::gc_alloc(std::mem::size_of::<f32>())
-                    .expect("Out of memory")
+                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
                     .as_ptr() as *mut f32;
                 *f = hlp_dyn_castf(data, t);
                 return f as *mut c_void;
             }
             hl_type_kind_HF64 => {
                 let d = crate::gc::gc_alloc(std::mem::size_of::<f64>())
-                    .expect("Out of memory")
+                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
                     .as_ptr() as *mut f64;
                 *d = hlp_dyn_castd(data, t);
                 return d as *mut c_void;
             }
             _ => {
                 let p = crate::gc::gc_alloc(std::mem::size_of::<*mut c_void>())
-                    .expect("Out of memory")
+                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
                     .as_ptr() as *mut *mut c_void;
                 *p = hlp_dyn_castp(data, t, (*to).__bindgen_anon_1.tparam);
                 return p as *mut c_void;

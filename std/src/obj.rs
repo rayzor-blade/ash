@@ -198,7 +198,7 @@ pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     // let flags = mem_kind | MEM_ZERO;
 
     let d = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
-        .expect("Out of memory")
+        .unwrap_or_else(|| crate::gc::out_of_memory("runtime memory"))
         .as_ptr() as *mut vdynamic;
 
     // Zero-initialize the memory

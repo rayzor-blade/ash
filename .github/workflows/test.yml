@@ -60,6 +60,15 @@ jobs:
       - name: Test ash_core
         run: cargo test -p ash_core --lib
 
+      # What ash can compile FOR, as opposed to what it runs on. Emitting an
+      # object for a 32-bit or big-endian target is the only thing that
+      # exercises those TargetAbi paths outside a wasm build, and the check is
+      # cheap: emit, then read the ELF header for word size and architecture.
+      # Nothing links or runs these -- there is no toolchain here for RISC-V
+      # or s390x -- so this gates the ABI, not the platform.
+      - name: Cross-target emission
+        run: cargo test -p ash --test cross_targets
+
   primitive-exports:
     name: primitive export gap
     runs-on: ubuntu-24.04

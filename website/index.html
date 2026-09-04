@@ -29,7 +29,7 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "Ash",
-  "operatingSystem": "macOS, Linux",
+  "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
   "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
   "url": "https://rayzor-blade.github.io/ash/",
@@ -768,7 +768,9 @@
         Supported platforms</h2>
       <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash compiles
         natively for aarch64 and x86_64. One binary per platform, with the full interpreter → Cranelift → LLVM ladder on
-        each.</p>
+        each. What it can compile <em>for</em> is wider than what it runs on, because the target ABI is chosen before any
+        bytecode is decoded: layouts, calls and constants come out for the target named rather than for the machine doing
+        the work.</p>
 
       <div
         style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">
@@ -792,15 +794,33 @@
             Linux · x86_64</div>
           <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">validated continuously in CI</div>
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px">
+        <div
+          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.08)">
           <div
             style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
             Windows</div>
           <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">x86_64</div>
         </div>
+        <div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px">
+          <div
+            style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
+            WebAssembly</div>
+          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">wasm32-wasip1 &middot; ahead-of-time only, under a WASI host</div>
+        </div>
+        <div
+          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
+          <div
+            style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
+            Objects only</div>
+          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">x86 &middot; ARM &middot; RISC-V 32 and 64 &middot; PowerPC64LE &middot; s390x</div>
+        </div>
         <div
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">
-          Benchmark numbers are published from Linux x86_64 CI.</div>
+          The last row emits and is checked in CI for word size and architecture; nothing links or runs
+          it, so treat it as the ABI working rather than as a supported platform. Benchmark numbers are
+          published from Linux x86_64 CI. A browser host is part-built: sockets are there, over WebSocket;
+          the WASI surface a page must supply and fiber suspension are not, so a module does not run in a
+          page yet.</div>
       </div>
     </section>
 

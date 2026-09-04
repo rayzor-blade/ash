@@ -28,6 +28,20 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
+/// The stride of every conservative walk, on the heap and on the stacks.
+///
+/// A machine word, not eight bytes. Every walker here reads a `usize`, so an
+/// eight-byte stride on a 32-bit target reads one slot and skips the next.
+/// On the heap that meant half the pointer fields of every object were never
+/// traced on wasm32; an object survived only while it shared a 128-byte line
+/// with one that WAS reached, which dense fresh blocks usually arranged and a
+/// TLAB carved from a recycled span usually did not -- hence a corruption
+/// that appeared only with both enabled and looked like anything but this.
+const WORD: usize = std::mem::size_of::<usize>();
+/// `a` rounded up to a word boundary.
+const fn word_align_up(a: usize) -> usize {
+    (a + WORD - 1) & !(WORD - 1)
+}
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
 /// 64 line-claim bits to a word.
 const MARK_WORDS: usize = LINES_PER_BLOCK / 64;
@@ -2107,7 +2121,7 @@ fn scan_line_shared(
     out: &mut Vec<(usize, usize)>,
 ) {
     let line_start = heap_start + block_idx * BLOCK_SIZE + line_idx * LINE_SIZE;
-    for off in (0..LINE_SIZE).step_by(8) {
+    for off in (0..LINE_SIZE).step_by(WORD) {
         let val = unsafe { *((line_start + off) as *const usize) };
         if val >= heap_start && val < heap_end {
             let child_line = (val - heap_start) / LINE_SIZE;
@@ -2689,7 +2703,6 @@ impl ImmixAllocator {
         // That is what a wasm build was faulting on. Scanning every word
         // over-retains on 64-bit only if the word is not a pointer, which is
         // the conservative contract already.
-        const WORD: usize = std::mem::size_of::<usize>();
         let mut addr = start;
         while addr + WORD <= end {
             let raw = unsafe { *(addr as *const usize) };
@@ -3094,8 +3107,8 @@ impl ImmixAllocator {
             if raw_sp == 0 {
                 continue;
             }
-            // 8-align the probe: conservative_scan_range walks 8-byte words.
-            let sp = (raw_sp + 7) & !7;
+            // Word-align the probe: conservative_scan_range walks words.
+            let sp = word_align_up(raw_sp);
             let running_fiber = fiber_stacks
                 .iter()
                 .find(|f| {
@@ -3132,7 +3145,7 @@ impl ImmixAllocator {
                 if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
                     continue;
                 }
-                let start = (f.saved_sp + 7) & !7;
+                let start = word_align_up(f.saved_sp);
                 let top = if f.size > 0 {
                     f.base + f.size
                 } else {
@@ -3484,8 +3497,8 @@ impl ImmixAllocator {
                     let lo = base + block_addr;
                     let hi = lo + BLOCK_SIZE;
                     let audit = |src: &str, start: usize, end: usize| {
-                        let mut p = start & !7;
-                        while p + 8 <= end {
+                        let mut p = start & !(WORD - 1);
+                        while p + WORD <= end {
                             let w = unsafe { *(p as *const usize) };
                             if (lo..hi).contains(&w) {
                                 eprintln!(
@@ -3512,7 +3525,7 @@ impl ImmixAllocator {
                                     }
                                 }
                             }
-                            p += 8;
+                            p += WORD;
                         }
                     };
                     if let Some((gp, count)) = self.globals_range {
@@ -3535,7 +3548,7 @@ impl ImmixAllocator {
                         if raw_sp == 0 {
                             continue;
                         }
-                        let sp = (raw_sp + 7) & !7;
+                        let sp = word_align_up(raw_sp);
                         let running = self.fiber_stacks.iter().find(|f| {
                             f.thread == mutator.thread
                                 && f.size > 0
@@ -3556,7 +3569,7 @@ impl ImmixAllocator {
                             if running.is_some_and(|active| active.id == fiber.id) {
                                 continue;
                             }
-                            let saved_sp = (fiber.saved_sp + 7) & !7;
+                            let saved_sp = word_align_up(fiber.saved_sp);
                             let saved_top = if fiber.size > 0 {
                                 fiber.base + fiber.size
                             } else {
@@ -3616,14 +3629,14 @@ impl ImmixAllocator {
                         }
                         let lo = base + block_addr + line_index * LINE_SIZE;
                         let mut p = lo;
-                        while p + 8 <= lo + LINE_SIZE {
+                        while p + WORD <= lo + LINE_SIZE {
                             let w = unsafe { *(p as *const usize) };
                             if in_freed(w) {
                                 eprintln!(
                                     "[gc-audit] #{seq} live line word @{p:#x} points into freed block ({w:#x})"
                                 );
                             }
-                            p += 8;
+                            p += WORD;
                         }
                     }
                 }

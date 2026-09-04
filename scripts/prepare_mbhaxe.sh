@@ -310,12 +310,22 @@ clang \
     -Wl,-install_name,@rpath/sdl.hdll \
     -o "${RUN_ROOT}/sdl.hdll"
 
-linked_ash_std="$(otool -L "${RUN_ROOT}/sdl.hdll" | awk '/libash_std.*dylib/ { print $1; exit }')"
+# Under either name the runtime answers to. std/build.rs now stamps
+# `@rpath/libhl.dylib` as the install name when ash_std is built, so a
+# freshly linked hdll imports that directly and never mentions libash_std --
+# which this check used to require, and so rejected a correct link.
+linked_ash_std="$(otool -L "${RUN_ROOT}/sdl.hdll" \
+    | awk '/libash_std.*dylib|@rpath\/libhl\.dylib/ { print $1; exit }')"
 if [[ -z "${linked_ash_std}" ]]; then
     echo "error: freshly built sdl.hdll did not link against Ash's compatibility runtime" >&2
+    otool -L "${RUN_ROOT}/sdl.hdll" >&2
     exit 1
 fi
-install_name_tool -change "${linked_ash_std}" @rpath/libhl.dylib "${RUN_ROOT}/sdl.hdll"
+# A no-op when the install name was already stamped; still required for a
+# runtime built before that change.
+if [[ "${linked_ash_std}" != "@rpath/libhl.dylib" ]]; then
+    install_name_tool -change "${linked_ash_std}" @rpath/libhl.dylib "${RUN_ROOT}/sdl.hdll"
+fi
 install_name_tool -id @rpath/sdl.hdll "${RUN_ROOT}/sdl.hdll"
 
 for lib in "${HL_HDLLS[@]}"; do
@@ -376,7 +386,13 @@ if [[ -n "${NATIVE_DIR}" ]]; then
     for hdll in "${NATIVE_DIR}"/*.hdll; do
         name="$(basename "${hdll}" .hdll)"
         skip=""
-        for built in "${HL_HDLLS[@]}"; do
+        # `sdl` is built above too, by its own clang line rather than through
+        # CMake, so it is not in HL_HDLLS and was being COPIED OVER by the
+        # prebuilt one -- which is how a binary from the decommissioned
+        # ash_sdl crate reached the fixture and tripped the check below. The
+        # header has always said the source directory's sdl.hdll is ignored;
+        # this is what makes that true.
+        for built in "${HL_HDLLS[@]}" sdl; do
             [[ "${name}" == "${built}" ]] && skip=1 && break
         done
         if [[ -n "${skip}" ]]; then
@@ -396,6 +412,7 @@ if [[ -n "${NATIVE_DIR}" ]]; then
         esac
         cp "${dylib}" "${RUN_ROOT}/"
     done
+
     # A copied Mach-O keeps a signature that no longer validates at its new
     # path, and anything fetched with a browser also carries a quarantine
     # attribute. Either one makes dlopen fail with "library load disallowed by
@@ -456,19 +473,33 @@ fi
 # the process is not a link error -- both resolve, the program starts, and the
 # only symptom is a null deref the first time an HDLL touches the GC it does
 # not share. Assert that each @rpath here can only land inside RUN_ROOT.
+#
+# What decides this is ORDER, not membership. dyld walks LC_RPATH entries in
+# order and takes the first hit, so a prebuilt HDLL that lists
+# @executable_path before the /usr/local/lib it was built against resolves
+# here and never reaches outside -- libhl.dylib is staged beside ash, so the
+# first entry always hits. mysql.hdll and sqlite.hdll ship exactly that way.
+#
+# Rejecting them for the trailing entry would leave only one repair: rewriting
+# load commands in a binary the game shipped, which the check below rightly
+# refuses. So require that the FIRST rpath is inside the fixture, and treat
+# what follows as unreachable rather than as a hazard.
+[[ -f "${RUN_ROOT}/libhl.dylib" ]] || {
+    echo "error: no libhl.dylib in ${RUN_ROOT}; an @executable_path rpath" >&2
+    echo "       would fall through to whatever is on the system" >&2
+    exit 1
+}
 for hdll in "${RUN_ROOT}"/*.hdll; do
-    otool -l "${hdll}" \
-        | awk '/LC_RPATH/{want=1} want && $1=="path"{print $2; want=0}' \
-        | while read -r rp; do
-            case "${rp}" in
-                @loader_path*|@executable_path*) ;;
-                *)
-                    echo "error: $(basename "${hdll}") keeps rpath ${rp}, which can" >&2
-                    echo "       resolve libhl outside the fixture and load a second runtime" >&2
-                    exit 1
-                    ;;
-            esac
-        done || exit 1
+    first_rpath="$(otool -l "${hdll}" \
+        | awk '/LC_RPATH/{want=1} want && $1=="path"{print $2; exit}')"
+    case "${first_rpath}" in
+        @loader_path*|@executable_path*) ;;
+        *)
+            echo "error: $(basename "${hdll}") searches ${first_rpath:-nothing} before the" >&2
+            echo "       fixture, so it can load a second libhl runtime" >&2
+            exit 1
+            ;;
+    esac
 done
 
 if strings "${RUN_ROOT}/sdl.hdll" | grep -Eiq 'ash_sdl|crates/ash_sdl|target/(debug|release)/deps/libsdl'; then
@@ -506,20 +537,40 @@ done
 shopt -u nullglob
 if [[ -n "${NATIVE_DIR}" ]]; then
     shopt -s nullglob
+    # Signing is not an alteration, but it does move bytes: on arm64 `codesign`
+    # pads __LINKEDIT out to a 16K page before appending, and the enlarged
+    # vmsize stays in the load command even after --remove-signature. Staging
+    # signs every prebuilt (it has to -- see above), so a staged copy can never
+    # be byte-identical to the shipped one, and comparing them directly rejects
+    # every library this check exists to wave through.
+    #
+    # So compare like with like: sign a scratch copy of the shipped file
+    # exactly as staging signed the real one, and diff those. A genuine edit --
+    # a rewritten load command, a rebuild, a patched byte -- still shows up.
+    # Only the signature stops counting as one.
+    signed_ref="$(mktemp -d)"
+    trap 'rm -rf "${signed_ref}"' EXIT
     for staged in "${RUN_ROOT}"/*.hdll "${RUN_ROOT}"/*.dylib; do
         name="$(basename "${staged}")"
         case "${name}" in libhl.dylib|libhl.1.dylib) continue ;; esac
         # Anything built from the pinned source is EXPECTED to differ from a
         # prebuilt copy of the same name -- that difference is the point. This
-        # check exists for the libraries the fixture takes as shipped.
+        # check exists for the libraries the fixture takes as shipped. `sdl` is
+        # built here too, by its own clang line rather than through CMake, so
+        # it is not in HL_HDLLS and has to be named separately.
         built_here=""
-        for built in "${HL_HDLLS[@]}"; do
+        for built in "${HL_HDLLS[@]}" sdl; do
             [[ "${name}" == "${built}.hdll" ]] && built_here=1 && break
         done
         [[ -n "${built_here}" ]] && continue
         source_copy="${NATIVE_DIR}/${name}"
         [[ -e "${source_copy}" ]] || continue
-        if ! cmp -s "${source_copy}" "${staged}"; then
+        cp "${source_copy}" "${signed_ref}/${name}"
+        codesign --force -s - "${signed_ref}/${name}" >/dev/null 2>&1 || {
+            echo "error: could not sign the reference copy of ${name}" >&2
+            exit 1
+        }
+        if ! cmp -s "${signed_ref}/${name}" "${staged}"; then
             echo "error: ${name} was altered while staging; the fixture must run" >&2
             echo "       the shipped binaries unmodified" >&2
             exit 1

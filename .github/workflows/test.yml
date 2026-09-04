@@ -105,6 +105,64 @@ jobs:
       - name: Compare exports against DEFINE_PRIM
         run: ./scripts/check_primitive_exports.sh /tmp/hashlink
 
+  aot-executable:
+    # Does the binary ash BUILDS actually run, on each machine we claim?
+    #
+    # `aot_smoke` compiles a corpus with `--build` -- the one command a user
+    # runs -- and compares each binary's output against the same program under
+    # the JIT, byte for byte. It is the only gate that executes ahead-of-time
+    # output, and it was not running in CI at all.
+    #
+    # The matrix is the point. Linking drives the platform's own C toolchain
+    # and system libraries, and every one of these disagrees about that, so a
+    # single-platform run says very little. `ubuntu-24.04-arm` is a native
+    # aarch64 Linux runner and the only place that combination gets executed:
+    # macOS covers aarch64 with a different linker and libc, Ubuntu covers
+    # that libc with a different architecture, and neither covers both.
+    #
+    # What this does NOT cover is the architectures in the cross-target gate
+    # -- RISC-V, PowerPC64LE, s390x, 32-bit x86 and ARM. GitHub has no runner
+    # for those, so reaching them means emulation plus a runtime cross-built
+    # for each, which is a larger piece of work. Until then `cross_targets`
+    # gates that they EMIT correctly, and this gates that what emits here
+    # RUNS.
+    name: aot executable (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt # bindgen pretty-prints through it
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: aot-${{ matrix.os }}
+
+      - uses: ./.github/actions/llvm21
+
+      # ash_std first: its cdylib is embedded by ash's build script.
+      - name: Build the runtime
+        shell: bash
+        run: |
+          cargo build -p ash_std
+          cargo build -p ash
+
+      # Windows cannot start the binary without these beside it.
+      - uses: ./.github/actions/llvm21-runtime-dlls
+        if: runner.os == 'Windows'
+        with:
+          into: target\debug\
+
+      - name: AOT binaries match the JIT
+        shell: bash
+        run: cargo test -p ash --test aot_smoke -- --nocapture
+
   hdll-callbacks:
     # The corpus links real shared libraries, resolves primitives by name from
     # an export table, and drives real collections -- every one of which the

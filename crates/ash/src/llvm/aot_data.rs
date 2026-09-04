@@ -423,14 +423,28 @@ impl<'ctx> JITModule<'ctx> {
                     "ash_enum_params",
                 )
             };
-            let offsets =
-                self.emit_i32_array(c.offsets, c.nparams.max(0) as usize, "ash_enum_offsets")?;
+            // The offsets and size are the TARGET's, not the host runtime's
+            // that initialised `c`: a wasm32 constructor's parameters start
+            // four bytes earlier than an aarch64 one's. Compiled code reads
+            // the decoder's target layout; what the runtime reads has to be
+            // the same table.
+            let param_kinds = (0..c.nparams.max(0) as usize)
+                .map(|j| unsafe { (**c.params.add(j)).kind });
+            let (mut target_offsets, target_size) = crate::bytecode::enum_construct_layout(
+                param_kinds,
+                self.target_abi.pointer_bytes() as usize,
+            );
+            let offsets = self.emit_i32_array(
+                target_offsets.as_mut_ptr(),
+                target_offsets.len(),
+                "ash_enum_offsets",
+            )?;
             constructs.push(self.context.const_struct(
                 &[
                     cname.into(),
                     i32_type.const_int(c.nparams as u64, false).into(),
                     params_ptr.into(),
-                    i32_type.const_int(c.size as u64, false).into(),
+                    i32_type.const_int(target_size as u64, false).into(),
                     i8_type.const_int(c.hasptr as u64, false).into(),
                     offsets.into(),
                 ],

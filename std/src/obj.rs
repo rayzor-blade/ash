@@ -152,11 +152,21 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     }
 
     // Initialize bindings
+    if env_flag!("ASH_TRACE_BINDINGS") && (*rt).nbindings > 0 {
+        eprintln!("[alloc_obj] filling {} binding(s)", (*rt).nbindings);
+    }
     for i in 0..(*rt).nbindings {
         let binding = (*rt).bindings.offset(i as isize);
         let fid = (*binding).fid;
         let field_offset = *(*rt).fields_indexes.offset(fid as isize);
         let field_ptr = (o as *mut u8).offset(field_offset as isize) as *mut *mut std::ffi::c_void;
+        if env_flag!("ASH_TRACE_BINDINGS") {
+            eprintln!(
+                "[alloc_obj]   fid={fid} offset={field_offset} closure={:?} ptr={:?}",
+                (*binding).closure,
+                (*binding).ptr
+            );
+        }
 
         if !(*binding).closure.is_null() {
             *field_ptr = crate::fun::hlp_alloc_closure_ptr(
@@ -701,6 +711,32 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
 
     // Bindings require module metadata (m) for function pointers/types.
     // Skip binding setup when m is null (e.g., interpreter-only mode).
+    //
+    // Skipping is silent, and a skipped binding is not an error anywhere: the
+    // field is simply left null, and the first sign is a "Null access" from
+    // whatever called a `dynamic function` -- `trace` being the one every
+    // program hits. `ASH_TRACE_BINDINGS=1` says so instead.
+    if env_flag!("ASH_TRACE_BINDINGS") && (*o).nbindings > 0 {
+        eprintln!(
+            "[bindings] {} wants {} binding(s): m={:?} functions_ptrs={:?}",
+            {
+                let mut n = Vec::new();
+                let mut c = (*o).name;
+                while !c.is_null() && *c != 0 && n.len() < 128 {
+                    n.push(*c);
+                    c = c.add(1);
+                }
+                String::from_utf16_lossy(&n)
+            },
+            (*o).nbindings,
+            m,
+            if m.is_null() {
+                std::ptr::null_mut()
+            } else {
+                (*m).functions_ptrs
+            },
+        );
+    }
     if !m.is_null() && !(*m).functions_ptrs.is_null() {
         for i in 0..(*o).nbindings as usize {
             let fid = *(*o).bindings.add(i * 2);
@@ -730,6 +766,29 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
 
             let _func_type_ptr = *(*m).functions_types.add(mid as usize);
             let _func_ptr = *(*m).functions_ptrs.add(mid as usize);
+            if env_flag!("ASH_TRACE_BINDINGS") {
+                let field_nargs = if (*ft).kind == hl::hl_type_kind_HFUN
+                    && !(*ft).__bindgen_anon_1.fun.is_null()
+                {
+                    (*(*ft).__bindgen_anon_1.fun).nargs
+                } else {
+                    -1
+                };
+                let fun_nargs = if !_func_type_ptr.is_null()
+                    && !(*_func_type_ptr).__bindgen_anon_1.fun.is_null()
+                {
+                    (*(*_func_type_ptr).__bindgen_anon_1.fun).nargs
+                } else {
+                    -1
+                };
+                eprintln!(
+                    "[bindings]   fid={fid} findex={mid} field_kind={} fun={:?} \
+                     field_nargs={field_nargs} fun_nargs={fun_nargs} fun_type_kind={}",
+                    (*ft).kind,
+                    _func_ptr,
+                    if _func_type_ptr.is_null() { -1 } else { (*_func_type_ptr).kind as i32 },
+                );
+            }
 
             match (*ft).kind {
                 hl::hl_type_kind_HFUN

@@ -1549,12 +1549,12 @@ dependencies = [
 [[package]]
 name = "krio-core"
 version = "0.1.0"
-source = "git+https://github.com/darmie/krio#64795ffccfb68fcc8bb9292608d486e1b03d25a4"
+source = "git+https://github.com/darmie/krio#f6da5a4ccfe579b036ea78049416dc8f172640a0"
 
 [[package]]
 name = "krio-fiber"
 version = "0.1.0"
-source = "git+https://github.com/darmie/krio#64795ffccfb68fcc8bb9292608d486e1b03d25a4"
+source = "git+https://github.com/darmie/krio#f6da5a4ccfe579b036ea78049416dc8f172640a0"
 dependencies = [
  "krio-core",
  "libc",

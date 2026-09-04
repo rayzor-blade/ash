@@ -48,6 +48,16 @@ impl Program {
         // instructions, so a module built from it does not even parse without
         // this: "exceptions proposal not enabled".
         config.wasm_exceptions(true);
+        // Compiling a module is the cost of running one: the conformance
+        // suite's module is 23MB and takes wasmtime six seconds and every
+        // core, and isolation runs it once per case. wasmtime keeps compiled
+        // code keyed by module hash in the user's cache directory, the same
+        // one its own CLI uses; with the cache a second run of the same
+        // module is a load. A cache that cannot be set up is not a reason
+        // not to run, so that failure only costs the speed.
+        if let Ok(cache) = wasmtime::Cache::from_file(None) {
+            config.cache(Some(cache));
+        }
         let engine =
             Engine::new(&config).map_err(|e| anyhow!("creating the wasmtime engine: {e}"))?;
         let module = Module::from_file(&engine, path)

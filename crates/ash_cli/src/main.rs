@@ -403,11 +403,25 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     // More than one shard splits the middle end and codegen across threads
     // (see `aot_shard`); one shard is the single-module path, which also
     // honours ASH_AOT_NO_OPT and ASH_AOT_DUMP_IR itself.
-    let shards = ash_core::llvm::aot_shard::shard_count_for(&triple);
+    // A wasm OBJECT is the one output the shards cannot make: ash's linker
+    // produces a finished module, not a relocatable one, and `ld -r` does
+    // not read wasm. Only a `--build` shards there.
+    let wasm = ash_core::llvm::aot_link::is_wasm_triple(&triple);
+    let shards = if wasm && exe.is_none() {
+        1
+    } else {
+        ash_core::llvm::aot_shard::shard_count_for(&triple)
+    };
     if !quiet && shards == 1 && ash_core::llvm::aot_shard::shard_count() > 1 {
-        eprintln!(
-            "[aot] cross-compiling to {triple}: one module, since `ld -r` joins the shards and reads the host's object format only"
-        );
+        if wasm {
+            eprintln!(
+                "[aot] one module: a wasm object cannot be sharded, since ash's linker emits a module and `ld -r` does not read wasm; `--build` would shard"
+            );
+        } else {
+            eprintln!(
+                "[aot] cross-compiling to {triple}: one module, since `ld -r` joins the shards and reads the host's object format only"
+            );
+        }
     }
     // Heading for a binary, the parts go straight to the linker: it takes any
     // number of objects, so joining them into one first would rewrite every

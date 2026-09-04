@@ -111,12 +111,20 @@ pub fn shard_count() -> usize {
 
 /// How many shards to emit for `triple`.
 ///
-/// One, always, when cross-compiling: the shards are joined by the HOST
-/// linker, and `ld -r` reads one object format only -- Apple's reads Mach-O,
-/// GNU's reads ELF. Every other step here honours the requested triple, so a
-/// cross build stays on the single-module path, which needs no linker at all.
+/// One when cross-compiling: the shards are joined by the HOST linker, and
+/// `ld -r` reads one object format only -- Apple's reads Mach-O, GNU's reads
+/// ELF. Every other step here honours the requested triple, so a cross build
+/// stays on the single-module path, which needs no linker at all.
+///
+/// wasm is the exception, because ash links wasm itself: `ash_wasm_link`
+/// takes any number of objects, so the shards go to it as they would to a
+/// native link. Without this a wasm build of the Haxe unit suite ran the
+/// optimizer over 1.7MB of bytecode as one module on one core, forty
+/// minutes against the sharded native build's four.
 pub fn shard_count_for(triple: &str) -> usize {
-    if TargetTriple::create(triple) != TargetMachine::get_default_triple() {
+    if TargetTriple::create(triple) != TargetMachine::get_default_triple()
+        && !super::aot_link::is_wasm_triple(triple)
+    {
         return 1;
     }
     shard_count()

@@ -1190,6 +1190,22 @@ impl<'ctx> JITModule<'ctx> {
             )?;
         }
 
+        // Same policy the interpreter sets, for a binary that has no
+        // interpreter to set it: a program built with debug info keeps
+        // HashLink's throw on a dynamic write to null, and a release build
+        // drops the write instead of dying where it can say nothing useful.
+        {
+            let policy_ty = void_type.fn_type(&[self.context.bool_type().into()], false);
+            let policy = self.aot_symbol("hlp_set_null_write_raises", policy_ty);
+            let raises = u64::from(self.bytecode.has_debug);
+            self.builder.build_indirect_call(
+                policy_ty,
+                policy,
+                &[self.context.bool_type().const_int(raises, false).into()],
+                "",
+            )?;
+        }
+
         // Dynamic dispatch (Type.createInstance, Reflect.callMethod) reaches
         // compiled code through these two, and nothing else installs them in
         // a standalone binary.

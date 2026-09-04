@@ -2757,10 +2757,49 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
     }
 }
 
+/// Whether a dynamic field write to a null object raises.
+///
+/// HashLink always raises (`hl_obj_set_field` -> `hl_error("Null access")`),
+/// and that is what a program built with debug info gets: the throw carries a
+/// source-anchored trace and the bug is found. A program built for release
+/// has no debug info, so the same throw is a bare message from a stack of
+/// findexes -- and in a game whose frame loop swallows exceptions it is not
+/// even that, just a frozen window. There, dropping the write is the less
+/// harmful failure.
+///
+/// The write is DROPPED, not redirected: the field a null object would have
+/// had does not exist, so there is nothing to write to, and the read side
+/// already returns null for the same reason (upstream does this too).
+static NULL_WRITE_RAISES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Set by the loader from what it knows about the program.
+#[no_mangle]
+pub extern "C" fn hlp_set_null_write_raises(raises: bool) {
+    NULL_WRITE_RAISES.store(raises, std::sync::atomic::Ordering::Release);
+}
+
+/// `ASH_NULL_WRITES=strict|tolerant` wins over whatever the loader set.
+///
+/// Read here rather than in the setter: a binary built before the loader
+/// learned to call the setter never calls it at all, and an override that
+/// only works when something else already ran is not an override.
+fn null_write_raises() -> bool {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let over = OVERRIDE.get_or_init(|| match std::env::var("ASH_NULL_WRITES").as_deref() {
+        Ok("strict") => Some(true),
+        Ok("tolerant") => Some(false),
+        _ => None,
+    });
+    over.unwrap_or_else(|| NULL_WRITE_RAISES.load(std::sync::atomic::Ordering::Acquire))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_obj_set_field(obj: *mut vdynamic, hfield: i32, v: *mut vdynamic) {
     if obj.is_null() {
-        hlp_error(str_to_uchar_ptr("Null access"));
+        if null_write_raises() {
+            hlp_error(str_to_uchar_ptr("Null access"));
+        }
         return;
     }
     if env_flag!("ASH_DYN_TRACE") {

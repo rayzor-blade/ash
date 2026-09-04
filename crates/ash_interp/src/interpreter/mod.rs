@@ -680,6 +680,24 @@ impl HLInterpreter {
         let prim_t_bytes = find_prim(&mut c_type_factory, hl::hl_type_kind_HBYTES);
         let prim_t_dyn = find_prim(&mut c_type_factory, hl::hl_type_kind_HDYN);
 
+        // How a dynamic write to a null object should fail is a property of
+        // the PROGRAM, not of the runtime: bytecode built with debug info is
+        // being debugged, so it gets HashLink's throw and the trace that now
+        // comes with it; bytecode built for release has no trace to give, so
+        // the write is dropped rather than killing a shipped game. The
+        // runtime owns the switch because the AOT path has no interpreter.
+        if let Ok(set_policy) = native_resolver.resolve_function("std", "hlp_set_null_write_raises")
+        {
+            if !set_policy.is_null() {
+                type FnPolicy = unsafe extern "C" fn(bool);
+                unsafe {
+                    std::mem::transmute::<*mut std::ffi::c_void, FnPolicy>(set_policy)(
+                        bytecode.has_debug,
+                    )
+                };
+            }
+        }
+
         // Resolve internal stdlib function pointers for object operations
         let fn_alloc_obj = native_resolver
             .resolve_function("std", "hlp_alloc_obj")

@@ -132,8 +132,25 @@ pub static mut STD_LIBRARY: Option<Library> = None;
 /// Override with ASH_LIBHL=system|embedded.
 /// Bump the canary when the stdlib ABI changes materially.
 #[cfg(unix)]
+/// A symbol ash's runtime exports and upstream HashLink does not.
+///
+/// The `hlp_` prefix alone proves nothing -- stock HashLink exports over three
+/// hundred of them.
+const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
+
+/// Whether `path` is ash's runtime rather than someone else's libhl.
+#[cfg(any(unix, windows))]
+fn is_ash_runtime(path: &std::path::Path) -> bool {
+    // Probed in its own scope so the handle is closed before the real load.
+    match unsafe { libloading::Library::new(path) } {
+        Ok(lib) => unsafe {
+            lib.get::<unsafe extern "C" fn()>(CANARY_SYMBOL).is_ok()
+        },
+        Err(_) => false,
+    }
+}
+
 fn usable_system_libhl(ext: &str) -> Option<std::path::PathBuf> {
-    const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
     let force = std::env::var("ASH_LIBHL").unwrap_or_default();
     if force == "embedded" {
         return None;
@@ -236,6 +253,30 @@ pub fn init_std_library() -> Result<()> {
                     .ok()
                     .and_then(|exe| exe.parent().map(|dir| dir.join(compat)))
                     .filter(|path| path.exists())
+                    .inspect(|path| {
+                        // Existing beside ash is not the same as BEING ash's
+                        // runtime. A HashLink install leaves its own libhl
+                        // under this exact name, and a user who declines the
+                        // "overwrite libhl?" prompt keeps it -- after which
+                        // ash adopts a foreign VM and the HDLLs bind to a GC
+                        // ash never initialised. Refuse instead: the HDLLs
+                        // import this file by name, so falling back to ash's
+                        // own copy would only split the runtime in two.
+                        if !is_ash_runtime(path) {
+                            // A misconfigured directory, not a bug in ash, so
+                            // it gets a message rather than a panic.
+                            eprintln!(
+                                "error: {} is not ash's runtime.\n\n\
+                                 It exports no {}, so it is almost certainly a stock\n\
+                                 HashLink libhl. ash and every HDLL in this directory must\n\
+                                 share one runtime, and the HDLLs import this file by name.\n\n\
+                                 Replace it with the libhl shipped beside the ash executable.",
+                                path.display(),
+                                String::from_utf8_lossy(&CANARY_SYMBOL[..CANARY_SYMBOL.len() - 1]),
+                            );
+                            std::process::exit(1);
+                        }
+                    })
             };
             #[cfg(not(any(target_os = "macos", windows)))]
             let sibling_libhl: Option<std::path::PathBuf> = None;

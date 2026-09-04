@@ -431,6 +431,29 @@ impl<'ctx> JITModule<'ctx> {
         self.module.set_triple(&tt);
         self.module
             .set_data_layout(&machine.get_target_data().get_data_layout());
+        // The data object holds every constant and the function table, and it
+        // is the one artifact `ASH_AOT_DUMP_IR` did not cover: the shards carry
+        // bodies, this carries the data those bodies read. Comparing a program
+        // across two targets is comparing this.
+        if let Some(spec) = std::env::var_os("ASH_AOT_DUMP_IR") {
+            let spec = spec.to_string_lossy().into_owned();
+            if !spec.is_empty() && spec != "0" {
+                let base = std::path::PathBuf::from(if spec == "1" {
+                    "/tmp/ash_aot.ll".to_string()
+                } else {
+                    spec
+                });
+                let stem = base
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "module".to_string());
+                let dest = base.with_file_name(format!("{stem}.data.ll"));
+                match self.module.print_to_file(&dest) {
+                    Ok(()) => eprintln!("[ash] LLVM IR written to {}", dest.display()),
+                    Err(e) => eprintln!("[ash] could not write {}: {e}", dest.display()),
+                }
+            }
+        }
         machine
             .write_to_file(&self.module, FileType::Object, part)
             .map_err(|e| anyhow!("emit {}: {e}", part.display()))?;

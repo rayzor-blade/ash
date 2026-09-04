@@ -153,7 +153,7 @@ unsafe fn call_tostring_or_stub(f: *mut c_void, this: *mut vdynamic) -> *const u
     if addr == 0 {
         return ptr::null();
     }
-    if addr < 0x100000 {
+    if crate::fiber::is_stub_sentinel(addr) {
         let Some(runner) = crate::fiber::closure_runner() else {
             return ptr::null();
         };
@@ -172,7 +172,7 @@ unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
         return ptr::null();
     }
     let addr = (*c).fun as usize;
-    if addr < 0x100000 {
+    if crate::fiber::is_stub_sentinel(addr) {
         let Some(runner) = crate::fiber::closure_runner() else {
             return ptr::null();
         };

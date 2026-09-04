@@ -529,12 +529,19 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
     if key in _WASM_MODULES:
         return _WASM_MODULES[key]
     out = program.with_suffix(".wasm")
-    # A module newer than both its bytecode and the compiler that made it is
-    # the module this build would produce. The build is minutes, so a second
-    # measurement of the same ash against the same suite should not pay it.
+    # A module newer than its bytecode, the compiler that made it and the
+    # runtime object linked into it is the module this build would produce.
+    # The build is minutes, so a second measurement of the same ash against
+    # the same suite should not pay it. The runtime object counts because it
+    # is the piece that changes without the compiler changing: a std fix is
+    # invisible to a comparison against `ash` alone.
+    runtime = pathlib.Path(ash).parent / WASM_TRIPLE / "ash_runtime.o"
     try:
         built = out.stat().st_mtime
-        if built > program.stat().st_mtime and built > os.stat(ash).st_mtime:
+        inputs = [program.stat().st_mtime, os.stat(ash).st_mtime]
+        if runtime.is_file():
+            inputs.append(runtime.stat().st_mtime)
+        if all(built > t for t in inputs):
             _WASM_MODULES[key] = str(out)
             return _WASM_MODULES[key]
     except FileNotFoundError:

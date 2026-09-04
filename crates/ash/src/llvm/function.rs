@@ -6621,6 +6621,102 @@ impl<'ctx> JITModule<'ctx> {
                     self.builder.build_unconditional_branch(done_bb)?;
 
                     self.builder.position_at_end(done_bb);
+                } else if (dst_kind == hl_type_kind_HNULL || dst_kind == hl_type_kind_HDYN)
+                    && !reg_types[src.0 as usize].is_pointer_type()
+                {
+                    // The other direction: a primitive INTO a box. Haxe spells
+                    // `Null<Int64> = 29` as OSafeCast from an I32 register, and
+                    // this arm used to fall through to the plain copy below --
+                    // the raw 29 landed in a pointer slot and every reader then
+                    // dereferenced it (unit suite Issue4436: SIGSEGV at 0x1d on
+                    // native, "Can't cast ? to i64" on wasm). Box as ToDyn
+                    // does, but at the box's own type: for Null<T> that is T,
+                    // so a 32-bit value widens first, the way ToInt widens.
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let box_type_idx = if dst_kind == hl_type_kind_HNULL {
+                        self.types_[dst_type_idx]
+                            .tparam
+                            .as_ref()
+                            .map(|t| t.0)
+                            .unwrap_or(src_type_idx)
+                    } else {
+                        src_type_idx
+                    };
+                    let box_kind = self.types_[box_type_idx].kind;
+                    let src_val = self.builder.build_load(
+                        reg_types[src.0 as usize],
+                        registers[src.0 as usize],
+                        "safecast_box_src",
+                    )?;
+                    let box_llvm_type: BasicTypeEnum = match box_kind {
+                        k if k == hl_type_kind_HF64 => self.context.f64_type().into(),
+                        k if k == hl_type_kind_HF32 => self.context.f32_type().into(),
+                        k if k == hl_type_kind_HI64 => self.context.i64_type().into(),
+                        k if k == hl_type_kind_HUI16 => self.context.i16_type().into(),
+                        k if k == hl_type_kind_HUI8 || k == hl_type_kind_HBOOL => {
+                            self.context.i8_type().into()
+                        }
+                        _ => self.context.i32_type().into(),
+                    };
+                    let src_unsigned = src_kind == hl_type_kind_HUI8
+                        || src_kind == hl_type_kind_HUI16
+                        || src_kind == hl_type_kind_HBOOL;
+                    let converted: BasicValueEnum = match (src_val, box_llvm_type) {
+                        (v, t) if v.get_type() == t => v,
+                        (v, BasicTypeEnum::IntType(t)) if v.is_int_value() => {
+                            let iv = v.into_int_value();
+                            let (sw, dw) = (iv.get_type().get_bit_width(), t.get_bit_width());
+                            if sw > dw {
+                                self.builder.build_int_truncate(iv, t, "safecast_box_trunc")?.into()
+                            } else if src_unsigned {
+                                self.builder.build_int_z_extend(iv, t, "safecast_box_zext")?.into()
+                            } else {
+                                self.builder.build_int_s_extend(iv, t, "safecast_box_sext")?.into()
+                            }
+                        }
+                        (v, BasicTypeEnum::FloatType(t)) if v.is_int_value() => {
+                            let iv = v.into_int_value();
+                            if src_unsigned {
+                                self.builder
+                                    .build_unsigned_int_to_float(iv, t, "safecast_box_uitofp")?
+                                    .into()
+                            } else {
+                                self.builder
+                                    .build_signed_int_to_float(iv, t, "safecast_box_sitofp")?
+                                    .into()
+                            }
+                        }
+                        (v, BasicTypeEnum::IntType(t)) if v.is_float_value() => self
+                            .builder
+                            .build_float_to_signed_int(v.into_float_value(), t, "safecast_box_fptosi")?
+                            .into(),
+                        (v, BasicTypeEnum::FloatType(t)) if v.is_float_value() => self
+                            .builder
+                            .build_float_cast(v.into_float_value(), t, "safecast_box_fpcast")?
+                            .into(),
+                        (v, t) => self.cast_for_call(v, t)?,
+                    };
+                    let temp = self
+                        .builder
+                        .build_alloca(box_llvm_type, "safecast_box_temp")?;
+                    self.builder.build_store(temp, converted)?;
+                    let type_ptr = self
+                        .get_initialized_type(box_type_idx)?
+                        .into_pointer_value();
+                    let make_dyn = self.declare_native(
+                        "hlp_make_dyn",
+                        &[ptr_type.into(), ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    let boxed = self.builder.build_call(
+                        make_dyn,
+                        &[temp.into(), type_ptr.into()],
+                        "safecast_box",
+                    )?;
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        boxed.try_as_basic_value().basic().unwrap(),
+                    )?;
                 } else if src_kind == hl_type_kind_HDYN || src_kind == hl_type_kind_HNULL {
                     // Dynamic-to-concrete non-primitive cast: call hlp_dyn_castp to
                     // properly extract the inner value from the vdynamic wrapper.

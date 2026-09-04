@@ -2682,8 +2682,16 @@ impl ImmixAllocator {
         let heap_end = heap_start + self.heap.memory.len;
         let mut newly_marked = Vec::new();
 
+        // Step by a machine word, not by eight. The read below is a `usize`,
+        // so on a 32-bit target an eight-byte stride reads one slot and skips
+        // the next -- half the pointers on the stack are never seen, the
+        // objects they hold are collected, and what is left is a wild address.
+        // That is what a wasm build was faulting on. Scanning every word
+        // over-retains on 64-bit only if the word is not a pointer, which is
+        // the conservative contract already.
+        const WORD: usize = std::mem::size_of::<usize>();
         let mut addr = start;
-        while addr + 8 <= end {
+        while addr + WORD <= end {
             let raw = unsafe { *(addr as *const usize) };
             // Two candidate interpretations per word: the raw value, and —
             // when the word carries the interpreter's NaN-box pattern — the
@@ -2727,7 +2735,7 @@ impl ImmixAllocator {
                     consider(raw & PAYLOAD_MASK, self, &mut newly_marked);
                 }
             }
-            addr += 8;
+            addr += WORD;
         }
         newly_marked
     }
@@ -3029,7 +3037,7 @@ impl ImmixAllocator {
         let dbg = std::env::var("ASH_GC_DEBUG_ROOTS").is_ok();
         if let Some((globals_ptr, count)) = self.globals_range {
             let start = globals_ptr as usize;
-            let end = start + count * 8;
+            let end = start + count * std::mem::size_of::<usize>();
             let newly_marked = self.conservative_scan_range(start, end);
             if dbg {
                 eprintln!("[gc-roots]   globals marked {} lines", newly_marked.len());
@@ -3508,7 +3516,7 @@ impl ImmixAllocator {
                         }
                     };
                     if let Some((gp, count)) = self.globals_range {
-                        audit("globals", gp as usize, gp as usize + count * 8);
+                        audit("globals", gp as usize, gp as usize + count * std::mem::size_of::<usize>());
                     }
                     for mutator in mutators {
                         for &(rs, sz) in &mutator.scan_ranges {

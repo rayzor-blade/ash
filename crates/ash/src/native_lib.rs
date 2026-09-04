@@ -119,6 +119,24 @@ pub fn std_symbol_addr(name: &str) -> Option<usize> {
 static STD_INIT: Once = Once::new();
 pub static mut STD_LIBRARY: Option<Library> = None;
 
+/// A symbol ash's runtime exports and upstream HashLink does not.
+///
+/// The `hlp_` prefix alone proves nothing -- stock HashLink exports over three
+/// hundred of them.
+const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
+
+/// Whether `path` is ash's runtime rather than someone else's libhl.
+///
+/// Only the platforms that adopt a sibling libhl need it.
+#[cfg(any(target_os = "macos", windows))]
+fn is_ash_runtime(path: &std::path::Path) -> bool {
+    // Probed in its own scope so the handle is closed before the real load.
+    match unsafe { libloading::Library::new(path) } {
+        Ok(lib) => unsafe { lib.get::<unsafe extern "C" fn()>(CANARY_SYMBOL).is_ok() },
+        Err(_) => false,
+    }
+}
+
 /// A system-wide libhl that is safe to prefer over the embedded ash_std, or
 /// `None` to take the embedded/on-disk path.
 ///
@@ -132,24 +150,6 @@ pub static mut STD_LIBRARY: Option<Library> = None;
 /// Override with ASH_LIBHL=system|embedded.
 /// Bump the canary when the stdlib ABI changes materially.
 #[cfg(unix)]
-/// A symbol ash's runtime exports and upstream HashLink does not.
-///
-/// The `hlp_` prefix alone proves nothing -- stock HashLink exports over three
-/// hundred of them.
-const CANARY_SYMBOL: &[u8] = b"hlp_pump_and_sleep\0";
-
-/// Whether `path` is ash's runtime rather than someone else's libhl.
-#[cfg(any(unix, windows))]
-fn is_ash_runtime(path: &std::path::Path) -> bool {
-    // Probed in its own scope so the handle is closed before the real load.
-    match unsafe { libloading::Library::new(path) } {
-        Ok(lib) => unsafe {
-            lib.get::<unsafe extern "C" fn()>(CANARY_SYMBOL).is_ok()
-        },
-        Err(_) => false,
-    }
-}
-
 fn usable_system_libhl(ext: &str) -> Option<std::path::PathBuf> {
     let force = std::env::var("ASH_LIBHL").unwrap_or_default();
     if force == "embedded" {

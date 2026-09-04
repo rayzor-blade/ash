@@ -766,11 +766,10 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Supported platforms</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash compiles
-        natively for aarch64 and x86_64. One binary per platform, with the full interpreter → Cranelift → LLVM ladder on
-        each. What it can compile <em>for</em> is wider than what it runs on, because the target ABI is chosen before any
-        bytecode is decoded: layouts, calls and constants come out for the target named rather than for the machine doing
-        the work.</p>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash <em>runs
+        on</em> aarch64 and x86_64 &mdash; one binary per platform, with the full interpreter → Cranelift → LLVM ladder
+        on each. What it <em>compiles for</em> is wider, because the target ABI is chosen before any bytecode is decoded:
+        layouts, calls and constants come out for the target named rather than for the machine doing the work.</p>
 
       <div
         style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">

@@ -319,6 +319,15 @@ static MUTATOR_WORLD: LazyLock<MutatorWorld> = LazyLock::new(|| MutatorWorld {
     changed: std::sync::Condvar::new(),
 });
 static GC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// How long the collector waits for every mutator to reach a safepoint before
+/// giving up on this collection.
+///
+/// Stopping the world is normally microseconds. This is not a budget so much
+/// as the point past which waiting is worse than not collecting: by then the
+/// program has been frozen long enough that a deferred collection is the
+/// better of two bad outcomes.
+const STOP_THE_WORLD_DEADLINE: std::time::Duration = std::time::Duration::from_millis(2000);
 /// When the current stop was asked for, as nanoseconds since the process's
 /// first collection. A thread that takes a long time to arrive reports where
 /// it was — the collector cannot walk another thread's stack, but the thread
@@ -539,6 +548,9 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
 struct StoppedWorld {
     snapshots: Vec<MutatorSnapshot>,
     requested: bool,
+    /// Whether every mutator actually stopped. False means the attempt was
+    /// abandoned, and nothing may be scanned.
+    stopped: bool,
 }
 
 impl Drop for StoppedWorld {
@@ -573,11 +585,29 @@ fn stop_mutator_world() -> StoppedWorld {
         // safepoint, and an untimed wait cannot answer it.
         let began = Instant::now();
         let mut reported = false;
+        let mut abandoned = false;
         while world
             .mutators
             .iter()
             .any(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
         {
+            // A thread inside a native call that never announced itself as
+            // blocking reaches no safepoint until that call returns, and this
+            // wait had no end. That is not a slow collection: it is the whole
+            // VM stopped for as long as some library takes.
+            //
+            // Not hypothetical. HashLink's ssl.hdll performs a blocking
+            // mbedtls read without calling hl_blocking, so a TLS read in a
+            // game froze every other thread until the peer answered -- or
+            // permanently, if it never did.
+            //
+            // A collector cannot scan a thread that is still running, so the
+            // only safe answer is to not collect. Giving up costs a deferred
+            // collection; waiting costs the program.
+            if began.elapsed() >= STOP_THE_WORLD_DEADLINE {
+                abandoned = true;
+                break;
+            }
             let (guard, timed_out) = MUTATOR_WORLD
                 .changed
                 .wait_timeout(world, std::time::Duration::from_millis(20))
@@ -605,6 +635,36 @@ fn stop_mutator_world() -> StoppedWorld {
                 "[gc] world stopped after {:.1}ms",
                 began.elapsed().as_secs_f64() * 1e3
             );
+        }
+        if abandoned {
+            let stragglers: Vec<String> = world
+                .mutators
+                .iter()
+                .filter(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
+                .map(|m| format!("{} {:#x}", m.role, m.thread))
+                .collect();
+            GC_STATS.stops_abandoned.fetch_add(1, Ordering::Relaxed);
+            // Once by default: a program that does this does it repeatedly,
+            // and a line per collection would bury everything else.
+            static SAID: std::sync::Once = std::sync::Once::new();
+            let mut first = false;
+            SAID.call_once(|| first = true);
+            if first || gc_stats_enabled() {
+                eprintln!(
+                    "[gc] gave up stopping the world after {:.0}ms; {} of {} mutators \
+                     never reached a safepoint ({}). Collection deferred. A native call \
+                     that blocks without calling hl_blocking looks exactly like this.",
+                    began.elapsed().as_secs_f64() * 1e3,
+                    stragglers.len(),
+                    world.mutators.len(),
+                    stragglers.join(", ")
+                );
+            }
+            return StoppedWorld {
+                snapshots: Vec::new(),
+                requested: needs_stop,
+                stopped: false,
+            };
         }
     }
     let snapshots = world
@@ -635,6 +695,7 @@ fn stop_mutator_world() -> StoppedWorld {
     StoppedWorld {
         snapshots,
         requested: needs_stop,
+        stopped: true,
     }
 }
 
@@ -1101,6 +1162,8 @@ struct GcStatCounters {
     live_blocks: AtomicU64,
     pause_ns_total: AtomicU64,
     pause_ns_max: AtomicU64,
+    /// Collections given up because a mutator never reached a safepoint.
+    stops_abandoned: AtomicU64,
 }
 
 static GC_STATS: GcStatCounters = GcStatCounters {
@@ -1112,6 +1175,7 @@ static GC_STATS: GcStatCounters = GcStatCounters {
     live_blocks: AtomicU64::new(0),
     pause_ns_total: AtomicU64::new(0),
     pause_ns_max: AtomicU64::new(0),
+    stops_abandoned: AtomicU64::new(0),
 };
 
 // ── Collection switch (`Gc.enable`) ─────────────────────────────────────────
@@ -2738,6 +2802,12 @@ impl ImmixAllocator {
     pub fn collect_garbage(&mut self) {
         let t0 = Instant::now();
         let stopped_world = stop_mutator_world();
+        // Nothing may be scanned while a mutator is still running: its stack
+        // is being written as it would be read. Dropping `stopped_world`
+        // releases whoever did park, and the next allocation asks again.
+        if !stopped_world.stopped {
+            return;
+        }
         if trace_freed() || std::env::var("ASH_GC_DEBUG_ROOTS").is_ok() {
             let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
             let origin = ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize];

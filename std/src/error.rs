@@ -759,6 +759,24 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
                     v,
                     String::from_utf16_lossy(&units)
                 );
+                // The first few get a stack. A message alone says which
+                // hlp_error fired, not who called it, and a storm of these
+                // is only diagnosable from the caller.
+                #[cfg(unix)]
+                {
+                    static SHOWN: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    if SHOWN.fetch_add(1, Ordering::Relaxed) < 5 {
+                        EXCEPTION_STACK.with(|saved| {
+                            for pc in saved.borrow().iter().take(12) {
+                                match aot_symbol_via_dladdr(*pc) {
+                                    Some(name) => eprintln!("[ash]     at {name}"),
+                                    None => eprintln!("[ash]     at {pc:#x}"),
+                                }
+                            }
+                        });
+                    }
+                }
             } else {
                 eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
             }

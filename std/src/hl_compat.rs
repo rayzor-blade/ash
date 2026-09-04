@@ -214,7 +214,7 @@ pub unsafe extern "C" fn hl_buffer_cstr(b: *mut c_void, s: *const u8) {
     if s.is_null() {
         return;
     }
-    let cstr = std::ffi::CStr::from_ptr(s as *const i8);
+    let cstr = std::ffi::CStr::from_ptr(s as *const std::ffi::c_char);
     if let Ok(st) = cstr.to_str() {
         let utf16 = crate::strings::str_to_uchar_ptr(st);
         crate::buffer::hlp_buffer_str(b as *mut hl_buffer, utf16);
@@ -338,7 +338,7 @@ pub unsafe extern "C" fn hl_to_utf16(str: *const u8) -> *const hl::uchar {
     if str.is_null() {
         return ptr::null();
     }
-    let cstr = std::ffi::CStr::from_ptr(str as *const i8);
+    let cstr = std::ffi::CStr::from_ptr(str as *const std::ffi::c_char);
     if let Ok(s) = cstr.to_str() {
         let ptr = crate::strings::str_to_uchar_ptr(s);
         return ptr;
@@ -447,7 +447,7 @@ pub unsafe extern "C" fn hl_alloc_strbytes(fmt: *const hl::uchar, mut args: ...)
         }
 
         let cfmt = CString::new(cfmt).expect("printf format contains NUL");
-        let mut rendered = [0i8; 128];
+        let mut rendered = [0 as std::ffi::c_char; 128];
         let written = match conversion {
             'd' if cfmt.as_bytes().contains(&b'l') => libc::snprintf(
                 rendered.as_mut_ptr(),
@@ -515,7 +515,7 @@ pub unsafe extern "C" fn hl_hash_utf8(name: *const u8) -> i32 {
     if name.is_null() {
         return 0;
     }
-    let cstr = std::ffi::CStr::from_ptr(name as *const i8);
+    let cstr = std::ffi::CStr::from_ptr(name as *const std::ffi::c_char);
     if let Ok(s) = cstr.to_str() {
         let utf16 = crate::strings::str_to_uchar_ptr(s);
         crate::obj::hlp_hash_gen(utf16, true)

@@ -1178,8 +1178,8 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
         hl::hl_type_kind_HOBJ => {
             let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
             if f.is_null() || (*f).field_index < 0 {
-                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const i8);
-                let field = CStr::from_ptr(hlp_field_name(hfield) as *const i8);
+                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char);
+                let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
 
                 hlp_error(str_to_uchar_ptr(
                     format!(
@@ -1197,8 +1197,8 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
             let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
 
             if f.is_null() || (*f).field_index < 0 {
-                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const i8);
-                let field = CStr::from_ptr(hlp_field_name(hfield) as *const i8);
+                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char);
+                let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
                 hlp_error(str_to_uchar_ptr(
                     format!(
                         "{}  not have field {}",
@@ -1407,7 +1407,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
                 .as_ptr() as *mut *mut c_void;
         ptr::copy_nonoverlapping((*o).values, nvalues, (*o).nvalues as usize);
         *nvalues.add(index as usize) = ptr::null_mut();
-        address_offset = (nvalues as *mut i8).offset_from((*o).values as *mut i8);
+        address_offset = (nvalues as *mut std::ffi::c_char).offset_from((*o).values as *mut std::ffi::c_char);
         (*o).values = nvalues;
         (*o).nvalues += 1;
     } else {
@@ -1432,7 +1432,7 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
 
         let new_data = crate::gc::gc_alloc(raw_size as usize + pad + size)
             .expect("Failed to allocate memory")
-            .as_ptr() as *mut i8;
+            .as_ptr() as *mut std::ffi::c_char;
         if raw_size == (*o).raw_size {
             ptr::copy_nonoverlapping((*o).raw_data, new_data, (*o).raw_size as usize);
         } else {
@@ -1648,7 +1648,7 @@ pub unsafe extern "C" fn hlp_virtual_make_value(v: *mut vvirtual) -> *mut vdynam
     // Copy the data & rebind virtual addresses
     (*o).raw_data = crate::gc::gc_alloc(raw_size as usize)
         .expect("Failed to allocate memory")
-        .as_ptr() as *mut i8;
+        .as_ptr() as *mut std::ffi::c_char;
     (*o).raw_size = raw_size;
     (*o).values = crate::gc::gc_alloc(nvalues as usize * mem::size_of::<*mut std::ffi::c_void>())
         .expect("Failed to allocate memory")
@@ -1983,8 +1983,8 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
         _ => {
             hlp_error(str_to_uchar_ptr(&format!(
                 "Can't cast {} to {}",
-                CStr::from_ptr(hlp_type_str((*obj).t) as *const i8).to_string_lossy(),
-                CStr::from_ptr(hlp_type_str(vt) as *const i8).to_string_lossy(),
+                CStr::from_ptr(hlp_type_str((*obj).t) as *const std::ffi::c_char).to_string_lossy(),
+                CStr::from_ptr(hlp_type_str(vt) as *const std::ffi::c_char).to_string_lossy(),
             )));
             ptr::null_mut()
         }

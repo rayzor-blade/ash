@@ -958,7 +958,7 @@ pub unsafe extern "C" fn hlp_dyn_op(op: i32, a: *mut vdynamic, b: *mut vdynamic)
         if v.is_null() || (*v).t.is_null() {
             return "null".to_string();
         }
-        CStr::from_ptr(hlp_type_str((*v).t) as *const i8)
+        CStr::from_ptr(hlp_type_str((*v).t) as *const std::ffi::c_char)
             .to_string_lossy()
             .into_owned()
     };

@@ -595,7 +595,7 @@
               style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">04</span>
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build an executable</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. The result carries no bytecode, no interpreter and no JIT &mdash; it starts at full speed.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. Linking uses your system C toolchain &mdash; <code>cc</code>, <code>clang</code> or <code>gcc</code>, MSVC on Windows &mdash; the same one a C program needs; set <code>CC</code> to pick another.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">

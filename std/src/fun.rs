@@ -549,10 +549,19 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
         hlp_error(str_to_uchar_ptr("Can't call closure with value"));
     }
 
-    if (*args).size < (*(*cl).t).__bindgen_anon_1.fun.as_ref().unwrap().nargs {
+    // A closure whose type carries no function signature cannot have its
+    // arity checked. Unwrapping here panicked, and every caller arrives
+    // through `extern "C"`, so the panic could not unwind: on wasm it
+    // surfaced as a bare `unreachable` trap with no message, which is how the
+    // conformance suite ended rather than reporting a failure and continuing.
+    let Some(sig) = (*(*cl).t).__bindgen_anon_1.fun.as_ref() else {
+        hlp_error(str_to_uchar_ptr("Can't call closure whose type is not a function"));
+        unreachable!("hlp_error does not return")
+    };
+    if (*args).size < sig.nargs {
         hlp_error(str_to_uchar_ptr(&format!(
             "Missing arguments : {} expected but {} passed",
-            (*(*cl).t).__bindgen_anon_1.fun.as_ref().unwrap().nargs,
+            sig.nargs,
             (*args).size
         )));
     }

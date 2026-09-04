@@ -743,7 +743,25 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
         if !v.is_null() {
             let t = (*v).t;
             let kind = if !t.is_null() { (*t).kind } else { 999 };
-            eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
+            // A raw HBYTES throw is the runtime's own hlp_error, and the
+            // message is the only thing that says which one. Without it a
+            // storm of these is just a count.
+            if kind == hl::hl_type_kind_HBYTES && !(*v).v.bytes.is_null() {
+                let mut units = Vec::new();
+                let mut p = (*v).v.bytes as *const u16;
+                while *p != 0 && units.len() < 200 {
+                    units.push(*p);
+                    p = p.add(1);
+                }
+                eprintln!(
+                    "[ash] hlp_throw: kind={} ptr={:p} msg={:?}",
+                    kind,
+                    v,
+                    String::from_utf16_lossy(&units)
+                );
+            } else {
+                eprintln!("[ash] hlp_throw: kind={} ptr={:p}", kind, v);
+            }
         } else {
             eprintln!("[ash] hlp_throw: null");
         }

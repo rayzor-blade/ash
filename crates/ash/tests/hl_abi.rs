@@ -67,6 +67,24 @@ fn field_offsets_match_upstream() {
     assert_eq!(offset_of!(hl::hl_field_lookup, field_index), 12);
 }
 
+/// `hl_runtime_obj` is reachable from an HDLL through `hl_get_obj_rt`, and
+/// ash adds two fields of its own to it (`pad_size`, `largest_field`).
+///
+/// They go after `hasPtr`, in padding upstream already leaves empty, so every
+/// upstream field keeps the offset an HDLL expects and the struct is the same
+/// size. Putting them before `hasPtr` -- where they started -- moved it from
+/// 28 to 30, which is silent until something reads it.
+#[test]
+fn runtime_obj_keeps_upstream_offsets() {
+    assert_eq!(size_of::<hl::hl_runtime_obj>(), 120);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, hasPtr), 28);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, methods), 32);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, fields_indexes), 40);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, bindings), 48);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, parent), 56);
+    assert_eq!(offset_of!(hl::hl_runtime_obj, toStringFun), 64);
+}
+
 /// Type kinds are a wire format: bytecode stores them as integers.
 ///
 /// They may only ever be appended to. 1.16 added `HGUID = 23`, moving `HLAST`

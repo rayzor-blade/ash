@@ -540,9 +540,12 @@ struct hl_runtime_obj {
 	int size;
 	int nmethods;
 	int nbindings;
+	bool hasPtr;
+	/* ash's own, placed AFTER hasPtr so every upstream field keeps the offset
+	   an HDLL built against upstream's header expects. They land in padding
+	   that was already there, so sizeof is unchanged too. */
 	unsigned char pad_size;
 	unsigned char largest_field;
-	bool hasPtr;
 	void **methods;
 	int *fields_indexes;
 	hl_runtime_binding *bindings;

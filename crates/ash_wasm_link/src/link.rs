@@ -436,7 +436,7 @@ fn plan(
                 // A global symbol resolves to the global itself, not a GOT
                 // entry, and needs nothing here.
                 SymbolTarget::Global { .. } => continue,
-                SymbolTarget::Undefined => match linker_address_early(&name, opts, address) {
+                SymbolTarget::Undefined | SymbolTarget::UndefinedData => match linker_address_early(&name, opts, address) {
                     Some(v) => v as i32,
                     None => continue,
                 },
@@ -662,6 +662,7 @@ fn kind_of(target: &SymbolTarget) -> Option<Kind> {
         SymbolTarget::Table { .. } => Kind::Table,
         SymbolTarget::Tag { .. } => Kind::Tag,
         SymbolTarget::Section { .. } => Kind::Section,
+        SymbolTarget::UndefinedData => Kind::Data,
         SymbolTarget::Undefined => return None,
     })
 }
@@ -962,7 +963,7 @@ fn resolve_symbol(
         SymbolTarget::Section { .. } => {
             bail!("a section symbol is referenced outside the debug sections")
         }
-        SymbolTarget::Undefined => {
+        SymbolTarget::Undefined | SymbolTarget::UndefinedData => {
             // Some addresses are the linker's to know, not any object's: an
             // object references `__heap_base` and leaves it undefined because
             // only the thing that placed the data can say where the data

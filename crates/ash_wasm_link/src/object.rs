@@ -32,6 +32,13 @@ use wasmparser::{
 pub enum SymbolTarget {
     /// A function, by index in this object's function index space.
     Function { index: u32 },
+    /// Data another object must define. An undefined function keeps the
+    /// index of its import; an undefined data symbol has no such anchor, but
+    /// its KIND still matters: the resolver looks a name up by kind, so a
+    /// reference to a data symbol defined in another object -- every
+    /// constant a body shard reads from the data shard -- is only found if
+    /// the reference says it wants data.
+    UndefinedData,
     /// Data, by segment and offset within this object.
     Data {
         segment: u32,
@@ -94,7 +101,11 @@ impl Symbol {
     }
     /// A definition this link can use: defined here, and not merely named.
     pub fn defines(&self) -> bool {
-        !self.is_undefined() && !matches!(self.target, SymbolTarget::Undefined)
+        !self.is_undefined()
+            && !matches!(
+                self.target,
+                SymbolTarget::Undefined | SymbolTarget::UndefinedData
+            )
     }
 }
 
@@ -553,7 +564,7 @@ fn convert_symbol(info: SymbolInfo<'_>) -> Result<Symbol> {
                     offset: d.offset,
                     size: d.size,
                 },
-                None => SymbolTarget::Undefined,
+                None => SymbolTarget::UndefinedData,
             };
             (Some(name.to_string()), target, flags)
         }

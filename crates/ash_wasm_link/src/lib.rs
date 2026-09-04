@@ -94,7 +94,7 @@ pub fn check_function_sites(obj: &Object) -> Result<Vec<SiteCheck>> {
         // is the index the import occupies in this object's function space.
         let expected = match symbol.target {
             SymbolTarget::Function { index } => index,
-            SymbolTarget::Undefined => continue,
+            SymbolTarget::Undefined | SymbolTarget::UndefinedData => continue,
             _ => continue,
         };
         let found = object::peek_u32_leb5(&obj.code_payload, entry.offset as usize)?;

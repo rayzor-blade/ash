@@ -72,6 +72,16 @@ struct Cli {
     #[arg(long, value_name = "OUT")]
     build: Option<PathBuf>,
 
+    /// HashLink ABI generation the HDLLs were built against.
+    ///
+    /// An HDLL imports the runtime by a versioned name -- `libhl.1.dylib` for
+    /// HashLink 1.x, `libhl.2.dylib` for 2.x -- and the loader binds to that
+    /// exact name. `--build` stages ash's runtime under it, so pick the
+    /// generation your `.hdll` files came from. The struct layouts are the
+    /// same across those releases, so one runtime serves either.
+    #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=2))]
+    abi_version: u32,
+
     /// Runtime to link against (--build).
     ///
     /// By default the one beside `ash`, then the usual library directories,
@@ -259,6 +269,8 @@ struct AotRequest<'a> {
     pgo: Option<String>,
     /// Emit even if some functions could not be lowered.
     allow_refused: bool,
+    /// HashLink generation the staged runtime must answer to.
+    abi_version: u32,
     quiet: bool,
 }
 
@@ -271,6 +283,7 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         target,
         pgo,
         allow_refused,
+        abi_version,
         quiet,
     } = request;
     // A profile, if one was asked for. Advisory: a stale file costs a compare.
@@ -515,7 +528,15 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
             ash_core::llvm::aot_link::Runtime::Static
         };
         let linked =
-            ash_core::llvm::aot_link::link_executable(&objects, exe, &triple, kind, runtime, quiet);
+            ash_core::llvm::aot_link::link_executable(
+                &objects,
+                exe,
+                &triple,
+                kind,
+                runtime,
+                abi_version,
+                quiet,
+            );
         // The objects are scratch either way. Keeping them after a failure
         // only helps if someone is told they exist.
         if linked.is_err() {
@@ -548,6 +569,55 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod trace;
 use ash_interp::interpreter::HLExceptionPropagation;
+
+/// Put ash's runtime beside `program` under the name its HDLLs import.
+///
+/// Only when the program has HDLLs to load, and never over a file that is
+/// already there: an existing `libhl` is either ash's own or something the
+/// user put there deliberately, and `native_lib` refuses the latter with a
+/// better message than a silent overwrite would give.
+fn provide_versioned_runtime(program: &std::path::Path, abi: u32) {
+    let dir = program.parent().filter(|d| !d.as_os_str().is_empty());
+    let dir = dir.unwrap_or_else(|| std::path::Path::new("."));
+
+    let has_hdll = std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("hdll"))
+    });
+    if !has_hdll {
+        return;
+    }
+
+    let name = if cfg!(windows) {
+        format!("libhl.{abi}.dll")
+    } else if cfg!(target_os = "macos") {
+        format!("libhl.{abi}.dylib")
+    } else {
+        format!("libhl.so.{abi}")
+    };
+    let dest = dir.join(&name);
+    if dest.exists() {
+        return;
+    }
+    if let Err(e) = ash_core::native_lib::write_embedded_runtime(&dest) {
+        eprintln!("[ash] could not stage {}: {e}", dest.display());
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Unsigned, a freshly written dylib is refused by dlopen.
+        let _ = std::process::Command::new("install_name_tool")
+            .args(["-id", &format!("@rpath/{name}")])
+            .arg(&dest)
+            .status();
+        let _ = std::process::Command::new("codesign")
+            .args(["-s", "-", "-f"])
+            .arg(&dest)
+            .status();
+    }
+    eprintln!("[ash] staged {} for HDLLs built against HashLink {abi}.x", dest.display());
+}
 
 fn main() {
     // The crash-reporting complex below is unix signal machinery
@@ -1170,6 +1240,13 @@ fn run() -> Result<()> {
         anyhow::bail!("Bytecode file not found: {}", hl_path.display());
     }
 
+    // An HDLL binds the runtime by a versioned name, and the loader resolves
+    // it before ash gets a chance to stage anything -- including during
+    // --build, which has to load the HDLLs to resolve their natives. So the
+    // versioned copy has to exist first, beside the program where the .hdll
+    // files are.
+    provide_versioned_runtime(&hl_path, cli.abi_version);
+
     // Hand the program its argv before any mode runs. The runtime side
     // (hlp_sys_init in ash_std) has existed for a while with no caller, so
     // Sys.args() answered from nothing. The linkage choice and init are
@@ -1455,6 +1532,7 @@ fn run() -> Result<()> {
             target: cli.target.clone(),
             pgo: cli.pgo.clone(),
             allow_refused: cli.allow_refused,
+            abi_version: cli.abi_version,
             quiet: cli.quiet,
         });
     }

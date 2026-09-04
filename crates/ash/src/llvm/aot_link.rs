@@ -268,11 +268,18 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
 ///
 /// Both are needed on Unix: upstream HDLLs link the versioned name, ash's own
 /// `sdl.hdll` links the bare one.
-fn staged_runtime_names() -> &'static [&'static str] {
+///
+/// `abi` selects that versioned name, because it tracks the HashLink
+/// generation the HDLLs were built against rather than anything about ash:
+/// 1.x HDLLs import `libhl.1.dylib`, HashLink 2.x imports `libhl.2.dylib`.
+/// The layouts are the same across those releases (see
+/// `crates/ash/tests/hl_abi.rs`), so one runtime can answer to either -- but
+/// only under the name the loader actually asks for.
+fn staged_runtime_names(abi: u32) -> Vec<String> {
     match std::env::consts::OS {
-        "macos" => &["libhl.dylib", "libhl.1.dylib"],
-        "windows" => &["libhl.dll", "libhl.1.dll"],
-        _ => &["libhl.so", "libhl.so.1"],
+        "macos" => vec!["libhl.dylib".into(), format!("libhl.{abi}.dylib")],
+        "windows" => vec!["libhl.dll".into(), format!("libhl.{abi}.dll")],
+        _ => vec!["libhl.so".into(), format!("libhl.so.{abi}")],
     }
 }
 
@@ -283,7 +290,7 @@ fn staged_runtime_names() -> &'static [&'static str] {
 /// was built carrying `@rpath/libhl.dylib` (`libhl.so`) as its own identity,
 /// so every copy already answers to the name the loader will ask for, and
 /// dyld treats them as the one image they are.
-fn stage_runtime(runtime: &Path, beside: &Path, quiet: bool) -> Result<()> {
+fn stage_runtime(runtime: &Path, beside: &Path, abi: u32, quiet: bool) -> Result<()> {
     // On Windows the linker was given an import library; the library to stage
     // is the DLL beside it.
     let source = if cfg!(target_os = "windows") {
@@ -297,7 +304,8 @@ fn stage_runtime(runtime: &Path, beside: &Path, quiet: bool) -> Result<()> {
         runtime.to_path_buf()
     };
     let dir = beside.parent().unwrap_or(Path::new("."));
-    for name in staged_runtime_names() {
+    let names = staged_runtime_names(abi);
+    for name in &names {
         let dest = dir.join(name);
         if dest == source {
             continue;
@@ -309,7 +317,7 @@ fn stage_runtime(runtime: &Path, beside: &Path, quiet: bool) -> Result<()> {
         eprintln!(
             "\n[ash] staged {} beside the binary as {}",
             source.display(),
-            staged_runtime_names().join(" and ")
+            names.join(" and ")
         );
     }
     Ok(())
@@ -447,6 +455,7 @@ pub fn link_executable(
     triple: &str,
     kind: Runtime,
     runtime: Option<&Path>,
+    abi: u32,
     quiet: bool,
 ) -> Result<()> {
     if objects.is_empty() {
@@ -519,7 +528,7 @@ pub fn link_executable(
     run(&mut cmd, &format!("{} (link)", driver.program))?;
 
     if kind == Runtime::Shared {
-        stage_runtime(&runtime, out, quiet)?;
+        stage_runtime(&runtime, out, abi, quiet)?;
     }
     if !quiet {
         let bytes = std::fs::metadata(out).map(|m| m.len()).unwrap_or(0);

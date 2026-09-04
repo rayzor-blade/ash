@@ -18,7 +18,7 @@ use std::path::Path;
 use anyhow::{anyhow, Result};
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
-use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 /// What the guest gets to see of the outside world.
 pub struct Program {
@@ -106,6 +106,14 @@ impl Program {
 
         let mut wasi = WasiCtxBuilder::new();
         wasi.inherit_stdout().inherit_stderr();
+        // The working directory, as the program's own. A native ash program
+        // can write a file beside itself; a wasm one can only reach what the
+        // host preopens, and with nothing preopened every `File.write` failed
+        // with "Can't open" while the same program ran natively. The
+        // directory is the one the host was started in, nothing above it.
+        if let Err(e) = wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
+            eprintln!("[ash-wasm-run] the working directory is not available to the program: {e}");
+        }
         for arg in args {
             wasi.arg(arg);
         }

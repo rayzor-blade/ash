@@ -11,6 +11,7 @@ description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
 ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["validate"] }
 ash_core = { path = "../ash" }
 ash_interp = { path = "../ash_interp" }
+ariadne = "0.5"
 anyhow = { workspace = true }
 inkwell = { workspace = true }
 clap = { workspace = true }

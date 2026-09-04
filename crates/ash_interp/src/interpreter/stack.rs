@@ -19,8 +19,30 @@ use crate::values::NanBoxedValue;
 
 use super::{func_of, HLInterpreter};
 
+/// One symbolicated frame, with its pieces kept apart.
+///
+/// The flat `Name(file:line)` label is what a terminal trace prints, but a
+/// renderer that wants to show the source line needs the file and the line
+/// as themselves. Formatting first and parsing back is how that goes wrong,
+/// so the label is `Display` over the parts rather than the stored form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFrame {
+    pub symbol: Arc<str>,
+    pub file: Option<Arc<str>>,
+    pub line: i32,
+}
+
+impl std::fmt::Display for TraceFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.file {
+            Some(file) => write!(f, "{}({}:{})", self.symbol, file, self.line),
+            None => write!(f, "{}", self.symbol),
+        }
+    }
+}
+
 impl HLInterpreter {
-    pub(super) fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<Arc<str>> {
+    pub(super) fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<Arc<TraceFrame>> {
         let bc = self.reloaded_bytecode.unwrap_or(bytecode);
         let names = self.function_name_table(bc);
         // Same reasoning as the UTF-16 symbols this module interns for the
@@ -32,7 +54,7 @@ impl HLInterpreter {
         // does not serve labels built against the old program.
         /// Interned frame labels for one bytecode, keyed by
         /// `(findex, file, line)`.
-        type FrameLabels = RefCell<Option<(usize, HashMap<(usize, i32, i32), Arc<str>>)>>;
+        type FrameLabels = RefCell<Option<(usize, HashMap<(usize, i32, i32), Arc<TraceFrame>>)>>;
         thread_local! {
             static FRAMES: FrameLabels = const { RefCell::new(None) };
         }
@@ -52,9 +74,13 @@ impl HLInterpreter {
                     // them, since the gap is invisible and the caller looks
                     // like the callee.
                     let Some(func) = bc.functions.get(frame.function_index) else {
-                        return Arc::from(
-                            format!("<unresolved findex {}>", frame.function_index).as_str(),
-                        );
+                        return Arc::new(TraceFrame {
+                            symbol: Arc::from(
+                                format!("<unresolved findex {}>", frame.function_index).as_str(),
+                            ),
+                            file: None,
+                            line: 0,
+                        });
                     };
                     let key = Self::stack_symbol_key(func, frame.pc);
                     Arc::clone(cache.entry(key).or_insert_with(|| {
@@ -63,15 +89,16 @@ impl HLInterpreter {
                             .get(&findex)
                             .cloned()
                             .unwrap_or_else(|| func.name());
-                        match usize::try_from(file_idx)
-                            .ok()
-                            .and_then(|i| bc.debug_files.get(i))
-                        {
-                            Some(file) => Arc::from(format!("{name}({file}:{line})").as_str()),
+                        Arc::new(TraceFrame {
+                            symbol: Arc::from(name.as_str()),
                             // No debug info (a release build): the name alone
                             // still says which function, which beats nothing.
-                            None => Arc::from(name.as_str()),
-                        }
+                            file: usize::try_from(file_idx)
+                                .ok()
+                                .and_then(|i| bc.debug_files.get(i))
+                                .map(|file| Arc::from(file.as_str())),
+                            line,
+                        })
                     }))
                 })
                 .collect()

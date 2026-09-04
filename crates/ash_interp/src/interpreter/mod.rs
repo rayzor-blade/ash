@@ -252,16 +252,16 @@ type NameTableCache = RefCell<Option<(usize, NameTable)>>;
 /// Carries a thrown HL exception value up through the Rust call stack.
 /// Distinguishable from other errors so callers can catch it via downcast.
 #[derive(Debug, Clone)]
-struct HLExceptionPropagation {
+pub struct HLExceptionPropagation {
     value: NanBoxedValue,
-    message: Option<String>,
+    pub message: Option<String>,
     /// Innermost-first call stack, captured where the exception was raised.
     ///
     /// Captured at the throw rather than rendered at the top: by the time an
     /// uncaught exception reaches the CLI the frames it came from have been
     /// popped, and "Uncaught exception: Null access" with nothing else is the
     /// report HashLink users are least able to act on.
-    stack: Vec<std::sync::Arc<str>>,
+    pub stack: Vec<std::sync::Arc<stack::TraceFrame>>,
 }
 
 impl std::fmt::Display for HLExceptionPropagation {
@@ -284,7 +284,7 @@ mod instrument;
 mod natives;
 mod ops;
 mod ssa;
-mod stack;
+pub mod stack;
 
 use instrument::CompileBlocking;
 

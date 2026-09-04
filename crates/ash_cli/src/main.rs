@@ -546,6 +546,9 @@ static CRASH_BACKTRACE: OnceLock<bool> = OnceLock::new();
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod trace;
+use ash_interp::interpreter::HLExceptionPropagation;
+
 fn main() {
     // The crash-reporting complex below is unix signal machinery
     // (sigaction/SA_SIGINFO, siginfo_t, a signal-context register walk), so
@@ -589,7 +592,16 @@ fn main() {
         // as HashLink prints it ("Uncaught exception: ..." plus its stack);
         // prefixing it with "Error:" would frame it as an ash malfunction.
         let text = format!("{e:#}");
-        if text.starts_with("Uncaught exception:") {
+        // An uncaught exception carries the frames it was thrown from. Show
+        // them over the source when the source is there, and fall back to
+        // the flat list -- which is what HashLink prints -- when it is not.
+        let rendered = e
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<HLExceptionPropagation>())
+            .and_then(|exc| exc.message.as_deref().map(|msg| (exc, msg)))
+            .is_some_and(|(exc, msg)| trace::render(msg, &exc.stack));
+        if rendered {
+        } else if text.starts_with("Uncaught exception:") {
             eprintln!("{text}");
         } else {
             eprintln!("Error: {text}");

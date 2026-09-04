@@ -70,6 +70,11 @@ impl Default for LinkOptions {
     }
 }
 
+/// The first usable table slot. Zero is left empty so that calling a null
+/// function pointer traps rather than calling whatever landed first, and
+/// `__table_base` is this same number.
+const TABLE_BASE: u32 = 1;
+
 /// Where a symbol ended up in the output.
 #[derive(Debug, Clone, Copy)]
 enum Resolved {
@@ -107,6 +112,13 @@ struct Layout {
     tag_index: Option<u32>,
     stack_pointer_global: u32,
     memory_base_global: u32,
+    table_base_global: u32,
+    /// The global that holds a symbol's address, for a symbol accessed
+    /// through the global offset table. Values are output global indices.
+    got: HashMap<(Kind, String), u32>,
+    /// What each GOT global is initialised to, in output-index order after
+    /// the three the linker defines outright.
+    got_init: Vec<i32>,
     heap_base: u32,
     memory_pages: u32,
     /// Where data starts, which is also the top of the shadow stack.
@@ -164,17 +176,21 @@ fn refuse_unsupported(objects: &[Object]) -> Result<()> {
 }
 
 /// Name to the object and symbol that defines it.
-fn resolve_definitions(objects: &[Object]) -> Result<HashMap<String, (usize, usize)>> {
-    let mut defs: HashMap<String, (usize, usize)> = HashMap::new();
+fn resolve_definitions(objects: &[Object]) -> Result<HashMap<(Kind, String), (usize, usize)>> {
+    let mut defs: HashMap<(Kind, String), (usize, usize)> = HashMap::new();
     for (oi, obj) in objects.iter().enumerate() {
         for (si, sym) in obj.symbols.iter().enumerate() {
             let name = obj.symbol_name(sym);
             if !sym.defines() || sym.is_local() || name.is_empty() {
                 continue;
             }
-            match defs.get(name) {
+            let Some(kind) = kind_of(&sym.target) else {
+                continue;
+            };
+            let key = (kind, name.to_string());
+            match defs.get(&key) {
                 None => {
-                    defs.insert(name.to_string(), (oi, si));
+                    defs.insert(key, (oi, si));
                 }
                 Some(&(poi, psi)) => {
                     let previous = &objects[poi].symbols[psi];
@@ -182,7 +198,7 @@ fn resolve_definitions(objects: &[Object]) -> Result<HashMap<String, (usize, usi
                     // definitions of the same name are a real conflict and
                     // the program cannot be linked as written.
                     if previous.is_weak() && !sym.is_weak() {
-                        defs.insert(name.to_string(), (oi, si));
+                        defs.insert(key, (oi, si));
                     } else if !previous.is_weak() && !sym.is_weak() {
                         bail!(
                             "{} is defined in both {} and {}",
@@ -209,7 +225,7 @@ fn function_imports(obj: &Object) -> Vec<&ObjImport> {
 
 fn plan(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     opts: &LinkOptions,
 ) -> Result<Layout> {
     // --- imports that nothing defines ---
@@ -241,7 +257,7 @@ fn plan(
             if !sym.is_undefined() {
                 continue;
             }
-            if defs.contains_key(obj.symbol_name(sym)) {
+            if defs.contains_key(&(Kind::Function, obj.symbol_name(sym).to_string())) {
                 continue;
             }
             // Undefined and undefinable: it has to come from the host. Only
@@ -339,7 +355,7 @@ fn plan(
     // Slot zero is left empty so that calling a null function pointer traps
     // rather than calling whatever landed first.
     let mut table_slot: HashMap<u32, u32> = HashMap::new();
-    let mut next_slot: u32 = 1;
+    let mut next_slot: u32 = TABLE_BASE;
     let mut give_slot = |out: u32, table_slot: &mut HashMap<u32, u32>| {
         table_slot.entry(out).or_insert_with(|| {
             let s = next_slot;
@@ -381,6 +397,60 @@ fn plan(
         }
     }
 
+    // --- the global offset table ---
+    //
+    // A `GLOBAL_INDEX` relocation is allowed to name a DATA symbol, and then
+    // it does not mean "this global" -- it means "the global holding that
+    // symbol's address". That is the GOT, and the object asks for it by
+    // importing `GOT.mem.<name>`. ash emits a handful for large constants.
+    //
+    // Each one becomes an ordinary immutable global initialised to the
+    // address the layout just assigned, so the code reading it needs no
+    // relocation of its own.
+    let mut got: HashMap<(Kind, String), u32> = HashMap::new();
+    let mut got_init: Vec<i32> = Vec::new();
+    let first_got = 3u32; // after __stack_pointer, __memory_base, __table_base
+    for (oi, obj) in objects.iter().enumerate() {
+        for entry in obj.code_relocs.iter().chain(obj.data_relocs.iter()) {
+            if !matches!(
+                entry.ty,
+                RelocationType::GlobalIndexLeb | RelocationType::GlobalIndexI32
+            ) {
+                continue;
+            }
+            let Some(sym) = obj.symbols.get(entry.index as usize) else {
+                continue;
+            };
+            let (doi, def) = definition_of(objects, defs, oi, sym);
+            let name = objects[doi].symbol_name(def).to_string();
+            let value = match def.target {
+                SymbolTarget::Data {
+                    segment, offset, ..
+                } => {
+                    let base = segment_addr
+                        .get(doi)
+                        .and_then(|s| s.get(segment as usize))
+                        .ok_or_else(|| anyhow!("{name}: data segment {segment} out of range"))?;
+                    (base + offset) as i32
+                }
+                // A global symbol resolves to the global itself, not a GOT
+                // entry, and needs nothing here.
+                SymbolTarget::Global { .. } => continue,
+                SymbolTarget::Undefined => match linker_address_early(&name, opts, address) {
+                    Some(v) => v as i32,
+                    None => continue,
+                },
+                _ => continue,
+            };
+            let key = (Kind::Data, name);
+            if got.contains_key(&key) {
+                continue;
+            }
+            got.insert(key, first_got + got_init.len() as u32);
+            got_init.push(value);
+        }
+    }
+
     let tag_index = objects.iter().any(|o| !o.tags.is_empty()).then_some(0);
 
     Ok(Layout {
@@ -395,6 +465,9 @@ fn plan(
         tag_index,
         stack_pointer_global,
         memory_base_global,
+        table_base_global: 2,
+        got,
+        got_init,
         heap_base,
         memory_pages,
     })
@@ -440,7 +513,7 @@ fn undefined_function_index(sym: &crate::object::Symbol) -> Option<u32> {
 /// module that validates, runs, and calls into a hole.
 fn mark_reachable(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     opts: &LinkOptions,
 ) -> Result<Vec<Vec<bool>>> {
     let mut kept: Vec<Vec<bool>> = objects
@@ -562,6 +635,43 @@ fn relocations_in<'a>(
     &relocs[start..end]
 }
 
+/// What index space a symbol lives in.
+///
+/// Part of a symbol's identity, not a detail of it. The linking format lets a
+/// data symbol and a global symbol share a name -- ash emits exactly that for
+/// a constant and the global that addresses it -- so a table keyed by name
+/// alone answers a global relocation with a data symbol. It surfaced as
+/// "Bytes_0 resolved to Data rather than a global" on a large program; had
+/// the two kinds been compatible instead of obviously wrong, it would have
+/// resolved to the wrong thing quietly.
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
+enum Kind {
+    Function,
+    Data,
+    Global,
+    Table,
+    Tag,
+    Section,
+}
+
+fn kind_of(target: &SymbolTarget) -> Option<Kind> {
+    Some(match target {
+        SymbolTarget::Function { .. } => Kind::Function,
+        SymbolTarget::Data { .. } => Kind::Data,
+        SymbolTarget::Global { .. } => Kind::Global,
+        SymbolTarget::Table { .. } => Kind::Table,
+        SymbolTarget::Tag { .. } => Kind::Tag,
+        SymbolTarget::Section { .. } => Kind::Section,
+        SymbolTarget::Undefined => return None,
+    })
+}
+
+/// The kind an undefined symbol is looking for, which its own target still
+/// records even though it defines nothing.
+fn wanted_kind(sym: &crate::object::Symbol) -> Option<Kind> {
+    kind_of(&sym.target)
+}
+
 /// Which symbol actually defines the one being referenced.
 ///
 /// The locality check is the whole point. A local symbol is private to its
@@ -573,14 +683,17 @@ fn relocations_in<'a>(
 /// returning an empty string while everything around it was correct.
 fn definition_of<'a>(
     objects: &'a [Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     oi: usize,
     sym: &'a crate::object::Symbol,
 ) -> (usize, &'a crate::object::Symbol) {
     if sym.defines() && sym.is_local() {
         return (oi, sym);
     }
-    match defs.get(objects[oi].symbol_name(sym)) {
+    let Some(kind) = wanted_kind(sym) else {
+        return (oi, sym);
+    };
+    match defs.get(&(kind, objects[oi].symbol_name(sym).to_string())) {
         Some(&(doi, dsi)) => (doi, &objects[doi].symbols[dsi]),
         None => (oi, sym),
     }
@@ -590,7 +703,7 @@ fn definition_of<'a>(
 /// layout that exist before table slots are assigned.
 fn function_symbol(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     func_out: &[Vec<Option<u32>>],
     import_index: &HashMap<ImportKey, u32>,
     oi: usize,
@@ -634,7 +747,7 @@ fn function_symbol(
 /// Map one object's local function index to the output.
 fn local_function(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     func_out: &[Vec<Option<u32>>],
     import_index: &HashMap<ImportKey, u32>,
     oi: usize,
@@ -650,7 +763,7 @@ fn local_function(
     let import = func_imports
         .get(local as usize)
         .ok_or_else(|| anyhow!("{}: function {local} is not an import", obj.name))?;
-    if let Some(&(doi, dsi)) = defs.get(import.name.as_str()) {
+    if let Some(&(doi, dsi)) = defs.get(&(Kind::Function, import.name.clone())) {
         let def = &objects[doi].symbols[dsi];
         if let SymbolTarget::Function { index } = def.target {
             let d_imported = objects[doi].imported_functions();
@@ -681,7 +794,7 @@ fn local_function(
 /// saying so all at once.
 fn report_unresolved(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
 ) -> Result<()> {
     let mut missing: Vec<String> = Vec::new();
@@ -691,7 +804,8 @@ fn report_unresolved(
                 continue;
             }
             let name = obj.symbol_name(sym);
-            if name.is_empty() || defs.contains_key(name) {
+            let known = wanted_kind(sym).is_some_and(|k| defs.contains_key(&(k, name.to_string())));
+            if name.is_empty() || known {
                 continue;
             }
             // A function can be imported from the host; an address cannot.
@@ -727,6 +841,19 @@ fn report_unresolved(
     Ok(())
 }
 
+/// The linker-defined addresses, for the one caller that needs them while the
+/// layout is still being built.
+fn linker_address_early(name: &str, opts: &LinkOptions, data_end: u32) -> Option<u32> {
+    Some(match name {
+        "__heap_base" => data_end.next_multiple_of(16),
+        "__data_end" => data_end,
+        "__global_base" | "__stack_high" => opts.stack_size,
+        "__wasm_first_page_end" => 65536,
+        "__stack_low" => 0,
+        _ => return None,
+    })
+}
+
 /// The addresses only the linker can know, because only it placed the data.
 ///
 /// These are the names LLD defines, with the same meanings, because the
@@ -755,7 +882,7 @@ fn linker_address(name: &str, layout: &Layout) -> Option<u32> {
 /// What a symbol referenced by a relocation resolves to in the output.
 fn resolve_symbol(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
     oi: usize,
     sym_index: u32,
@@ -821,6 +948,7 @@ fn resolve_symbol(
             let index = match objects[doi].symbol_name(def) {
                 "__stack_pointer" => layout.stack_pointer_global,
                 "__memory_base" => layout.memory_base_global,
+                "__table_base" => layout.table_base_global,
                 other => bail!("no definition for global {other:?}"),
             };
             Ok(Resolved::Global(index))
@@ -851,7 +979,7 @@ fn resolve_symbol(
 
 fn apply_relocations(
     objects: &mut [Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
 ) -> Result<()> {
     for oi in 0..objects.len() {
@@ -885,7 +1013,7 @@ fn apply_relocations(
 
 fn patch(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
     oi: usize,
     relocs: &[RelocationEntry],
@@ -909,6 +1037,20 @@ fn patch(
                     bail!("a function relocation names something that is not a function");
                 };
                 write_u32_leb5(buf, offset, f)?;
+            }
+            // The same slot, counted from `__table_base` rather than from
+            // zero. The base is one here -- slot zero is left empty so a null
+            // function pointer traps -- so this is the slot less one, and
+            // writing the absolute value instead would call the neighbour.
+            RelocationType::TableIndexRelSleb => {
+                let Resolved::Function(f) = resolve_symbol(objects, defs, layout, oi, entry.index)?
+                else {
+                    bail!("a table relocation names something that is not a function");
+                };
+                let slot = *layout.table_slot.get(&f).ok_or_else(|| {
+                    anyhow!("function {f} has its address taken but was given no table slot")
+                })?;
+                write_i32_leb5(buf, offset, slot as i32 - TABLE_BASE as i32)?;
             }
             RelocationType::TableIndexSleb | RelocationType::TableIndexI32 => {
                 let Resolved::Function(f) = resolve_symbol(objects, defs, layout, oi, entry.index)?
@@ -942,9 +1084,25 @@ fn patch(
                 }
             }
             RelocationType::GlobalIndexLeb | RelocationType::GlobalIndexI32 => {
-                let Resolved::Global(g) = resolve_symbol(objects, defs, layout, oi, entry.index)?
-                else {
-                    bail!("a global relocation names something that is not a global");
+                let resolved = resolve_symbol(objects, defs, layout, oi, entry.index)?;
+                let g = match resolved {
+                    Resolved::Global(g) => g,
+                    // Naming data means the GOT entry that holds its address.
+                    _ => {
+                        let sym = objects[oi].symbols.get(entry.index as usize);
+                        let name = sym
+                            .map(|s| {
+                                let (doi, def) = definition_of(objects, defs, oi, s);
+                                objects[doi].symbol_name(def).to_string()
+                            })
+                            .unwrap_or_default();
+                        *layout.got.get(&(Kind::Data, name.clone())).ok_or_else(|| {
+                            anyhow!(
+                                "a global relocation names {name:?}, which resolved to \
+                                 {resolved:?} and has no global offset table entry"
+                            )
+                        })?
+                    }
                 };
                 if entry.ty == RelocationType::GlobalIndexI32 {
                     write_u32(buf, offset, g)?;
@@ -1017,7 +1175,7 @@ fn write_u32(buf: &mut [u8], offset: usize, value: u32) -> Result<()> {
 
 fn emit(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
     opts: &LinkOptions,
 ) -> Result<Vec<u8>> {
@@ -1133,6 +1291,28 @@ fn emit(
         },
         &ConstExpr::i32_const(0),
     );
+    // `__table_base`: where this module's function pointers start in the
+    // table, which is slot one because slot zero is left empty so a null
+    // function pointer traps.
+    globals.global(
+        GlobalType {
+            val_type: ValType::I32,
+            mutable: false,
+            shared: false,
+        },
+        &ConstExpr::i32_const(TABLE_BASE as i32),
+    );
+    // Then the global offset table, in the order `plan` numbered it.
+    for value in &layout.got_init {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            },
+            &ConstExpr::i32_const(*value),
+        );
+    }
     module.section(&globals);
 
     // --- exports ---
@@ -1159,7 +1339,11 @@ fn emit(
                     continue;
                 }
                 // Only the object that owns the definition exports it.
-                if defs.get(name).map(|&(d, _)| d) != Some(oi) {
+                if defs
+                    .get(&(Kind::Function, name.to_string()))
+                    .map(|&(d, _)| d)
+                    != Some(oi)
+                {
                     continue;
                 }
                 if exported_names.insert(name, ()).is_some() {
@@ -1199,7 +1383,7 @@ fn emit(
     if !functions_in_table.is_empty() {
         elements.active(
             Some(0),
-            &ConstExpr::i32_const(1),
+            &ConstExpr::i32_const(TABLE_BASE as i32),
             Elements::Functions(functions_in_table.as_slice().into()),
         );
     }
@@ -1246,7 +1430,7 @@ fn emit(
 /// The body of `__wasm_call_ctors`: every constructor, in priority order.
 fn constructor_body(
     objects: &[Object],
-    defs: &HashMap<String, (usize, usize)>,
+    defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
 ) -> Result<Vec<u8>> {
     use wasm_encoder::{Encode, Function, Instruction};

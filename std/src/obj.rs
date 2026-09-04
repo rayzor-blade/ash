@@ -2051,10 +2051,13 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
             }
         }
         _ => {
+            // hlp_type_str is UTF-16; read as a C string it ends at the high
+            // byte of its first character, and the message was "Can't cast
+            // v to v" for every pair of types.
             hlp_error(str_to_uchar_ptr(&format!(
                 "Can't cast {} to {}",
-                CStr::from_ptr(hlp_type_str((*obj).t) as *const std::ffi::c_char).to_string_lossy(),
-                CStr::from_ptr(hlp_type_str(vt) as *const std::ffi::c_char).to_string_lossy(),
+                crate::strings::uchar_to_string(hlp_type_str((*obj).t)),
+                crate::strings::uchar_to_string(hlp_type_str(vt)),
             )));
             ptr::null_mut()
         }

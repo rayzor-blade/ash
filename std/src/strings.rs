@@ -7,6 +7,21 @@ use crate::{
     unicase::*,
 };
 
+/// A NUL-terminated UTF-16 string as a Rust `String`, for messages.
+///
+/// Bounded, because the callers are error paths and the pointer may be the
+/// thing that is wrong.
+pub unsafe fn uchar_to_string(p: *const u16) -> String {
+    if p.is_null() {
+        return "null".into();
+    }
+    let mut n = 0usize;
+    while n < 4096 && *p.add(n) != 0 {
+        n += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(p, n))
+}
+
 pub fn str_to_uchar_ptr(s: &str) -> *const u16 {
     // Convert the &str to a UTF-16 vector
     let mut utf16: Vec<u16> = s.encode_utf16().collect();

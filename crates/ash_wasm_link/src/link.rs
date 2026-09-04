@@ -1424,6 +1424,46 @@ fn emit(
     }
     module.section(&data);
 
+    // A `name` section, so a trap names the function it happened in.
+    //
+    // Without it every wasm backtrace is `<wasm function 7685>`: no
+    // symbolication, and none of the recovery a native build gets from a
+    // signal handler. The linker is the only thing that knows both the symbol
+    // names and the indices they ended up at, so it is the only thing that can
+    // write this.
+    //
+    // Last, and a custom section, so an engine that does not want it can skip
+    // it and nothing before it moves.
+    let mut names = wasm_encoder::NameMap::new();
+    let mut named: Vec<(u32, &str)> = Vec::new();
+    for (oi, obj) in objects.iter().enumerate() {
+        let imported = obj.imported_functions();
+        let mut by_fspace: HashMap<u32, &str> = HashMap::new();
+        for sym in &obj.symbols {
+            if let SymbolTarget::Function { index } = sym.target {
+                if !sym.is_undefined() {
+                    by_fspace.entry(index).or_insert(sym.name.as_str());
+                }
+            }
+        }
+        for li in 0..obj.functions.len() {
+            let Some(out) = layout.func_out[oi][li] else {
+                continue;
+            };
+            if let Some(name) = by_fspace.get(&(imported + li as u32)) {
+                named.push((out, name));
+            }
+        }
+    }
+    named.sort_by_key(|(idx, _)| *idx);
+    named.dedup_by_key(|(idx, _)| *idx);
+    for (idx, name) in &named {
+        names.append(*idx, name);
+    }
+    let mut name_section = wasm_encoder::NameSection::new();
+    name_section.functions(&names);
+    module.section(&name_section);
+
     Ok(module.finish())
 }
 

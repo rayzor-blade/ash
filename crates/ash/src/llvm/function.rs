@@ -6717,6 +6717,71 @@ impl<'ctx> JITModule<'ctx> {
                         registers[dst.0 as usize],
                         boxed.try_as_basic_value().basic().unwrap(),
                     )?;
+                } else if reg_types[src.0 as usize].is_pointer_type()
+                    && matches!(dst_kind,
+                        k if k == hl_type_kind_HBOOL || k == hl_type_kind_HI32
+                            || k == hl_type_kind_HF64 || k == hl_type_kind_HF32
+                            || k == hl_type_kind_HI64 || k == hl_type_kind_HUI8
+                            || k == hl_type_kind_HUI16)
+                {
+                    // A reference cast to a number: `cast("foo", Int)`. There is
+                    // no value to extract, so the only correct outcome is the
+                    // runtime's "Can't cast String to Int" -- which the plain
+                    // copy below never produced (unit suite Issue6482: the
+                    // exception was not raised). The dyn-cast helpers switch on
+                    // the SOURCE type and raise for anything not numeric, so
+                    // handing them the register and both types gets exactly
+                    // the interpreter's behaviour.
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let src_type_ptr = self
+                        .get_initialized_type(src_type_idx)?
+                        .into_pointer_value();
+                    let dst_type_ptr = self
+                        .get_initialized_type(dst_type_idx)?
+                        .into_pointer_value();
+                    let dst_llvm_type = reg_types[dst.0 as usize];
+                    let (helper, helper_ret): (&str, BasicTypeEnum) =
+                        if dst_kind == hl_type_kind_HF64 {
+                            ("hlp_dyn_castd", self.context.f64_type().into())
+                        } else if dst_kind == hl_type_kind_HF32 {
+                            ("hlp_dyn_castf", self.context.f32_type().into())
+                        } else if dst_kind == hl_type_kind_HI64 {
+                            ("hlp_dyn_casti64", self.context.i64_type().into())
+                        } else {
+                            ("hlp_dyn_casti", self.context.i32_type().into())
+                        };
+                    // Only the int form takes the destination type; the others
+                    // have one result width and need only the source.
+                    let mut params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into(), ptr_type.into()];
+                    let mut args: Vec<BasicMetadataValueEnum> =
+                        vec![registers[src.0 as usize].into(), src_type_ptr.into()];
+                    if helper == "hlp_dyn_casti" {
+                        params.push(ptr_type.into());
+                        args.push(dst_type_ptr.into());
+                    }
+                    let cast_fn = self.declare_native(helper, &params, Some(helper_ret));
+                    let raw = self
+                        .builder
+                        .build_call(cast_fn, &args, "safecast_ref_to_num")?
+                        .try_as_basic_value()
+                        .basic()
+                        .unwrap();
+                    let value = if dst_kind == hl_type_kind_HBOOL && raw.is_int_value() {
+                        let iv = raw.into_int_value();
+                        self.builder
+                            .build_int_compare(
+                                IntPredicate::NE,
+                                iv,
+                                iv.get_type().const_zero(),
+                                "safecast_ref_bool",
+                            )?
+                            .into()
+                    } else if raw.get_type() != dst_llvm_type {
+                        self.cast_for_call(raw, dst_llvm_type)?
+                    } else {
+                        raw
+                    };
+                    self.builder.build_store(registers[dst.0 as usize], value)?;
                 } else if src_kind == hl_type_kind_HDYN || src_kind == hl_type_kind_HNULL {
                     // Dynamic-to-concrete non-primitive cast: call hlp_dyn_castp to
                     // properly extract the inner value from the vdynamic wrapper.

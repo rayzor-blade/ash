@@ -469,13 +469,15 @@ impl<'ctx> JITModule<'ctx> {
         match c_type.kind {
             hl_type_kind_HABSTRACT => {
                 if !c_type.__bindgen_anon_1.abs_name.is_null() {
-                    let _ = CString::from_raw(c_type.__bindgen_anon_1.abs_name as *mut i8);
+                    let _ = CString::from_raw(
+                        c_type.__bindgen_anon_1.abs_name as *mut std::ffi::c_char,
+                    );
                 }
             }
             hl_type_kind_HOBJ | hl_type_kind_HSTRUCT => {
                 if !c_type.__bindgen_anon_1.obj.is_null() {
                     let c_obj = Box::from_raw(c_type.__bindgen_anon_1.obj);
-                    let _ = CString::from_raw(c_obj.name as *mut i8);
+                    let _ = CString::from_raw(c_obj.name as *mut std::ffi::c_char);
                     if !c_obj.super_.is_null() {
                         self.free_hl_type_c(c_obj.super_);
                     }
@@ -494,7 +496,7 @@ impl<'ctx> JITModule<'ctx> {
             hl_type_kind_HENUM => {
                 if !c_type.__bindgen_anon_1.tenum.is_null() {
                     let c_enum = Box::from_raw(c_type.__bindgen_anon_1.tenum);
-                    let _ = CString::from_raw(c_enum.name as *mut i8);
+                    let _ = CString::from_raw(c_enum.name as *mut std::ffi::c_char);
                     self.free_constructs_c(c_enum.constructs, c_enum.nconstructs);
                 }
             }
@@ -516,7 +518,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         for i in 0..nfields as isize {
             let field = &mut *fields.offset(i);
-            let _ = CString::from_raw(field.name as *mut i8);
+            let _ = CString::from_raw(field.name as *mut std::ffi::c_char);
             self.free_hl_type_c(field.t);
         }
         free(fields as *mut c_void);
@@ -528,7 +530,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         for i in 0..nproto as isize {
             let p = &mut *proto.offset(i);
-            let _ = CString::from_raw(p.name as *mut i8);
+            let _ = CString::from_raw(p.name as *mut std::ffi::c_char);
         }
         free(proto as *mut c_void);
     }
@@ -556,7 +558,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         for i in 0..nconstructs as isize {
             let construct = &mut *constructs.offset(i);
-            let _ = CString::from_raw(construct.name as *mut i8);
+            let _ = CString::from_raw(construct.name as *mut std::ffi::c_char);
             self.free_type_refs_c(construct.params, construct.nparams);
         }
         free(constructs as *mut c_void);
@@ -595,7 +597,7 @@ impl<'ctx> JITModule<'ctx> {
             hl_type_kind_HABSTRACT => {
                 if !c_type.__bindgen_anon_1.abs_name.is_null() {
                     self.types_[type_index].abs_name = Some(
-                        CStr::from_ptr(c_type.__bindgen_anon_1.abs_name as *const i8)
+                        CStr::from_ptr(c_type.__bindgen_anon_1.abs_name as *const std::ffi::c_char)
                             .to_str()?
                             .to_string(),
                     );
@@ -645,7 +647,7 @@ impl<'ctx> JITModule<'ctx> {
         c_obj: &hl_type_obj,
     ) -> Result<HLTypeObj> {
         let mut rust_obj = HLTypeObj::default(); //rust_obj.get_or_insert_with(Default::default);
-        rust_obj.name = CStr::from_ptr(c_obj.name as *const i8)
+        rust_obj.name = CStr::from_ptr(c_obj.name as *const std::ffi::c_char)
             .to_str()?
             .to_string();
         rust_obj.super_ = if !c_obj.super_.is_null() {
@@ -709,7 +711,7 @@ impl<'ctx> JITModule<'ctx> {
         for i in 0..nfields {
             let c_field = &*c_fields.offset(i as isize);
             fields.push(HLObjField {
-                name: CStr::from_ptr(c_field.name as *const i8)
+                name: CStr::from_ptr(c_field.name as *const std::ffi::c_char)
                     .to_str()?
                     .to_string(),
                 type_: self.convert_from_c_type(c_field.t)?,
@@ -728,7 +730,9 @@ impl<'ctx> JITModule<'ctx> {
         for i in 0..nproto {
             let c_p = &*c_proto.offset(i as isize);
             proto.push(HLObjProto {
-                name: CStr::from_ptr(c_p.name as *const i8).to_str()?.to_string(),
+                name: CStr::from_ptr(c_p.name as *const std::ffi::c_char)
+                    .to_str()?
+                    .to_string(),
                 findex: c_p.findex,
                 pindex: c_p.pindex,
                 hashed_name: c_p.hashed_name,

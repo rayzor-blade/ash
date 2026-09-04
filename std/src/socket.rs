@@ -527,11 +527,11 @@ mod sys {
 
     #[allow(dead_code)]
     pub struct Hostent {
-        pub h_name: *mut i8,
-        pub h_aliases: *mut *mut i8,
+        pub h_name: *mut std::ffi::c_char,
+        pub h_aliases: *mut *mut std::ffi::c_char,
         pub h_addrtype: c_int,
         pub h_length: c_int,
-        pub h_addr_list: *mut *mut i8,
+        pub h_addr_list: *mut *mut std::ffi::c_char,
     }
 
     pub fn startup() {}

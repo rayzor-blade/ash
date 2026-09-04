@@ -1307,7 +1307,8 @@ impl<'ctx> JITModule<'ctx> {
                             if !__field.is_null() {
                                 let ff = unsafe { __field.read() };
                                 let name = unsafe {
-                                    CStr::from_ptr(ff.name as *const i8).to_string_lossy()
+                                    CStr::from_ptr(ff.name as *const std::ffi::c_char)
+                                        .to_string_lossy()
                                 };
 
                                 match (*ff.t).kind {

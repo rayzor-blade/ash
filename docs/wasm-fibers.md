@@ -582,3 +582,40 @@ Behaviour is unmoved: across the 63 test programs, interp, jit and AOT agree on
 58, and the five that differ are the two mandelbrots — the documented
 FP-contraction difference, with AOT matching clang's `-ffp-contract=on` value
 exactly — and three socket tests with nothing to connect to.
+
+## 17. The transform against the conformance suite
+
+The transform had been checked on eight modules. It has now been run against
+the Haxe suite, both arms in one pass so nothing about the machine differs
+between them: `--modes wasm,wasm-fibers`, per-case isolation, 1,195 cases.
+
+| | `wasm` | `wasm-fibers` |
+| --- | --- | --- |
+| cases attempted | 1,069 | 1,069 |
+| passed | **1,069 (100%)** | **1,069 (100%)** |
+| failed / crashed / timed out | 0 / 0 / 0 | 0 / 0 / 0 |
+| assertions | 10,971 / 10,971 | 10,971 / 10,971 |
+| empty on this target | 126 | 126 |
+| module | 27,118,878 bytes | 34,291,810 (+26.4%) |
+
+Not one case changed answer, and the 126 the harness records as not-OK are
+`EMPTY` — utest reporting no runnable tests on this target — the same 126 in
+both arms. The threads suite times out identically under both (120,015ms and
+120,018ms), which is the pre-existing hang in
+`testShutdown_finishesSubmittedTasks` and not something the transform
+introduced.
+
+`scripts/compare_conformance_arms.py` is what says that, and it exists because
+the summary cannot: two arms can both report 100% while failing different
+cases. It compares the tallies and the not-OK *sets* per program.
+
+On that evidence the arm is now in CI, last in `--modes`. Last matters: the
+headline is the first mode with a summary and every top-level number derives
+from it, so a new arm at the front silently redefines what the site publishes.
+
+What this does and does not establish. It establishes that instrumenting every
+function in the suspend set is inert when nothing suspends — which is the
+property every non-fiber program relies on, and the one that would have been
+violated by a mis-renumbered branch or a spill that clobbered a live value. It
+establishes nothing about suspending, because with the state global at zero no
+fiber ever does. That still needs the runtime.

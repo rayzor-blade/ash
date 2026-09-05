@@ -259,11 +259,21 @@ jobs:
           # utest prints its tally once, at the end — so the published figure
           # could never leave 0% until the last crash was fixed, however much
           # of the suite actually passed.
-          # Three engines: the interpreter (the headline), a native AOT
-          # binary, and a wasm32 module under ash-wasm-run. Each gets its own
+          # Four engines: the interpreter (the headline), a native AOT
+          # binary, a wasm32 module under ash-wasm-run, and the same module
+          # with the link-time fiber transform applied. Each gets its own
           # summary in the JSON, and the site and README badges read them.
+          #
+          # wasm-fibers goes LAST. The headline is the first mode that has a
+          # summary, and everything at the top level of the JSON derives from
+          # it, so putting a new arm first silently redefines the numbers the
+          # site publishes. It also costs one more whole-program wasm link per
+          # program, which is minutes; it is here because the transform is
+          # inert with its state global at zero, so the arm answers whether
+          # instrumenting every function in the suspend set changes an answer
+          # — something validation cannot say and a summary percentage hides.
           ./scripts/haxe_conformance.py \
-            --modes interp,aot,wasm --isolate --isolate-jobs 4 \
+            --modes interp,aot,wasm,wasm-fibers --isolate --isolate-jobs 4 \
             "${HD[@]}" "${REF[@]}" "${BASE[@]}" \
             --json conformance.json \
             | tee conformance.log

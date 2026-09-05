@@ -619,3 +619,67 @@ property every non-fiber program relies on, and the one that would have been
 violated by a mis-renumbered branch or a spill that clobbered a live value. It
 establishes nothing about suspending, because with the state global at zero no
 fiber ever does. That still needs the runtime.
+
+## 18. A Haxe thread suspends on wasm
+
+```
+A worker started
+B main got 1
+C worker resumed with 9
+D main got 2
+```
+
+A `sys.thread` worker blocks inside `Deque.pop(true)`, main runs and sends it a
+value, and the worker resumes at the point it stopped. That is byte for byte
+what the interpreter prints natively. The same program built without the
+transform prints its first line and exits: the worker blocks, nothing can take
+it off the stack, and main never wakes. The program is in
+`scratchpad/fibtest/T2.hx` in shape and is worth keeping, because it is the
+smallest thing that a run-to-completion backend cannot fake — a worker that
+must be resumed *in the middle* rather than started at a convenient moment.
+
+At suite scale, the Haxe threads suite:
+
+| | `wasm` | `wasm-fibers` |
+| --- | --- | --- |
+| result | TIMEOUT at 120,012ms | **PASS in 11,378ms** |
+| cases reached | 4 | 9 |
+| tests passed | **0 of 8** | **22 of 22** |
+
+Four things had to meet, and three of them were only discovered by running it.
+
+**`ash_fiber_enter` must not be inlined.** It is the edge an unwind stops at,
+and its body is one call, so LLVM inlines it into `Fiber::resume` given the
+chance — taking with it the frame the whole design rests on and the name the
+linker looks it up by. `#[inline(never)]` is load-bearing, not a hint.
+
+**Refusal had to become about liveness, not presence.** A reference cannot be
+written to linear memory, and refusing every function holding one refused the
+worker's own body: LLVM's setjmp lowering leaves an `exnref` local in almost
+every compiled Haxe closure. Refusing only where one might still hold something
+*across a resume point* — approximated by the span between a local's first
+write and its last read, which is a superset of real liveness and so errs the
+safe way — takes `threads.wasm` from 21 refusals and 445 traps to none of
+either. That also settles the question §14 left open: LLVM does not leave an
+`exnref` live across a call.
+
+**Each fiber needs its own shadow stack**, and the linker exports
+`__stack_pointer` when fibers are on so the runtime can swap it. The transform
+deliberately leaves a suspended frame's shadow allocation in place, which is
+right for one coroutine and wrong for two: the frames between the suspend and
+the scheduler return, restore the pointer *above* the suspended fiber's frames,
+and the next allocation writes over them. It presented as an out-of-bounds read
+at a wild address three lines into the test, and it is the hazard §15 named.
+
+**The state has to be reachable from the guest.** A global the linker adds
+after the guest is compiled has no name the guest can refer to, so
+`ash_host_fiber_state` and `ash_host_fiber_arm` are imports and the host reads
+and writes the globals on the guest's behalf. `arm` also swaps the shadow stack
+and hands back the pointer it replaced, which is how a fiber gets its own
+region and gives the caller's back.
+
+The side stack and the shadow stack share one allocation, so the collector has
+one range to scan and a side stack running into the shadow stack is caught by
+the bounds check the transform already emits. Both are registered as GC roots
+on wasm now: a suspended fiber's locals are in linear memory and may be the
+only reference to an object.

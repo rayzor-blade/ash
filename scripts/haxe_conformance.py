@@ -538,14 +538,38 @@ def wasm_runner(ash: str) -> str:
     raise RuntimeError("no ash-wasm-run found beside ash or on PATH")
 
 
-def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
-    """Build `program` to wasm, once."""
-    key = str(program)
+# Extra environment a wasm arm builds under, keyed by arm name. The base arm
+# builds under nothing; another arm asks the linker for something. The
+# environment belongs to the BUILD and not to the run, which is why it lives
+# here and not in engine_env.
+WASM_ARMS = {
+    "wasm": {},
+    # The link-time fiber transform (docs/wasm-fibers.md). Reporting-only: it
+    # says whether instrumenting every function in the suspend set changes any
+    # answer, which validation cannot.
+    "wasm-fibers": {"ASH_WASM_FIBERS": "1"},
+}
+
+
+def wasm_module_for(ash: str, program: pathlib.Path, timeout: int,
+                    arm: str = "wasm") -> str:
+    """Build `program` to wasm, once per arm.
+
+    Keyed by arm as well as program, and written to a per-arm path. Sharing
+    either would hand the second arm the first arm's module and publish a
+    duplicate of one column under the other's name -- a wrong answer with
+    nothing to report it.
+    """
+    extra = WASM_ARMS.get(arm)
+    if extra is None:
+        raise RuntimeError(f"unknown wasm arm {arm!r}")
+    key = f"{arm}:{program}"
     if key in _WASM_FAILURES:
         raise RuntimeError(_WASM_FAILURES[key])
     if key in _WASM_MODULES:
         return _WASM_MODULES[key]
-    out = program.with_suffix(".wasm")
+    suffix = ".wasm" if arm == "wasm" else f".{arm}.wasm"
+    out = program.with_suffix(suffix)
     # A module newer than its bytecode, the compiler that made it and the
     # runtime object linked into it is the module this build would produce.
     # The build is minutes, so a second measurement of the same ash against
@@ -567,9 +591,11 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
     # whole-program AOT build is minutes -- the suite's main program is over a
     # megabyte of bytecode, and a cross build compiles it in one piece because
     # sharding is joined by the host's linker.
+    env = os.environ.copy()
+    env.update(extra)
     try:
         r = run([ash, "--build", str(out), "--target", WASM_TRIPLE, str(program)],
-                cwd=str(program.parent), timeout=max(timeout, 1800))
+                cwd=str(program.parent), timeout=max(timeout, 1800), env=env)
     except subprocess.TimeoutExpired:
         # One error type out of here, so a caller has one thing to catch.
         _WASM_FAILURES[key] = (
@@ -661,8 +687,8 @@ def engine_argv(ash: str, program: pathlib.Path, mode: str, timeout: int) -> lis
     Program-included rather than a prefix, because the wasm and aot engines do
     not run the `.hl` at all: they run what was built from it.
     """
-    if mode == "wasm":
-        return [wasm_runner(ash), wasm_module_for(ash, program, timeout)]
+    if mode in WASM_ARMS:
+        return [wasm_runner(ash), wasm_module_for(ash, program, timeout, mode)]
     if mode == "aot":
         return [aot_binary_for(ash, program, timeout)]
     return [ash, "--mode", mode, str(program)]
@@ -1218,7 +1244,9 @@ def main(argv=None) -> int:
     ap.add_argument("--modes", default="interp",
                     help="engines to run, comma-separated: interp, hybrid, jit "
                          "(ash modes), aot (a native binary built with --build), "
-                         "wasm (a module built for wasm32-wasip1, run by ash-wasm-run)")
+                         "wasm (a module built for wasm32-wasip1, run by ash-wasm-run), "
+                         "wasm-fibers (the same module with the link-time fiber "
+                         "transform on)")
     ap.add_argument("--reference", default=None,
                     help="a stock HashLink `hl` binary, to separate ash bugs from suite bugs")
     ap.add_argument("--timeout", type=int, default=900)

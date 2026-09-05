@@ -477,3 +477,72 @@ across a call, rather than all of them. It would shrink both the side-stack
 frame (51 bytes average) and the save sequence, and it is the same analysis
 that would turn the 21 EH refusals into a handful. Neither is needed for
 correctness.
+
+## 15. Wiring it in, and what the runtime must do next
+
+The transform is behind `LinkOptions::fibers` (default false) and reached by
+`ASH_WASM_FIBERS=1` at the one place ash calls the linker. The gate is
+structural rather than disciplinary: with the flag off, `link` returns exactly
+what `emit` produced and nothing in `fiber.rs` runs, so the byte-identical
+guarantee §6 asked for needs no CI check to hold. `fiber::instrument` is the
+one definition of what the transform is, and `link` only decides whether to
+call it.
+
+It refuses twice rather than doing half a job. A module that does not import
+`env.ash_host_fiber_yield` has no suspend point, so instrumenting it would
+cost every function in the suspend set to produce a program that can never
+suspend. And a module already exporting one of the three global names would be
+invalid at instantiation, with nothing pointing at the cause.
+
+One detail is load-bearing and was nearly got wrong: the globals are
+**appended**, past the GOT block. GOT global indices start at 3
+(`link.rs:412`) and are already written into patch sites by
+`apply_relocations`. Inserting three globals there gives every GOT reference a
+wrong address in a module that validates perfectly — this crate's signature
+failure. Appending renumbers nothing.
+
+`scripts/haxe_conformance.py` gains a `wasm-fibers` arm, keyed and pathed
+separately from `wasm`. That separation is the point: the module cache and
+output path were keyed on the program alone, so a second wasm-shaped arm
+sharing them would be handed the first arm's module and publish a duplicate of
+one column under the other's name. It is not in CI: it is a full wasm link per
+program, and the transform has not yet earned that.
+
+### The four things the runtime has to get right
+
+The linker's half is done. None of the following is:
+
+**The side stack must be a GC root.** This is the one that produces a wrong
+answer rather than a failure. `Fiber::stack_range` currently returns
+`(null, 0)` and says, correctly for today, that "a wasm module's stack lives in
+the engine, not in linear memory, so there is nothing here to scan". The
+transform makes that false: a suspended fiber's locals are written into linear
+memory, and any of them may be an object pointer. Left unscanned, an object
+reachable only from a suspended fiber is collected and the fiber resumes onto
+freed memory. `stack_range` is already the hook — it has to start returning the
+fiber's side-stack window.
+
+**The side stack must come from the guest, not the host.** The unit tests here
+pick the literal addresses 1024 and 8192, which is fine for a module with no
+data and wrong for every real one: `__heap_base` and `__heap_end` are baked in
+at link time and guest memory is grown by the guest's own allocator. A host
+that picks addresses will eventually write over data.
+
+**Each fiber needs its own shadow stack.** The linker gives exactly one, 65,536
+bytes, and the transform deliberately leaves a suspended frame's shadow
+allocation in place — correct for one coroutine, wrong for N on one
+`__stack_pointer`. Two fibers deep in different call chains and the second
+allocates over the first's live frames. `__stack_pointer` is global 0 and is
+not exported today; exporting it hands every host arbitrary write access to the
+guest's stack pointer, so it should be gated on the fibers flag or replaced
+with a pair of synthesized accessors.
+
+**A fiber must not suspend under a trap.** The transform emits a trap in every
+function it could not instrument but which the analysis says can be on the
+stack at a suspend: 37 places in `t.wasm`, 445 in `threads.wasm`, and 6,855 in
+the unit suite. Those are honest — they turn a wrong answer into a report — but
+a scheduler that drives a fiber into one gets an abort, not a suspension.
+
+And one question nobody has answered: whether ash's wasm setjmp lowering keeps
+module-global state of its own. If it does, it is per-call-stack and has to be
+saved and restored per fiber alongside `__stack_pointer`.

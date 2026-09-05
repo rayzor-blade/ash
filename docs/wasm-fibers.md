@@ -546,3 +546,39 @@ a scheduler that drives a fiber into one gets an abort, not a suspension.
 And one question nobody has answered: whether ash's wasm setjmp lowering keeps
 module-global state of its own. If it does, it is per-call-stack and has to be
 saved and restored per fiber alongside `__stack_pointer`.
+
+## 16. The gate turned out not to be checkable, and now is
+
+§6 asked for the fibers gate to be enforced by a byte-diff of a linked `t.wasm`
+with the flag off. Checking that revealed the check could not have worked:
+**ash did not build the same program to the same bytes.** Three builds of one
+program with one compiler gave three different objects — identical size, about
+a hundred bytes apart, a different result every process — in the shared AOT
+path, so native binaries too.
+
+The cause was one map read six ways. `c_ptr_to_type_index` was many-to-one:
+the `HPACKED`/`HNULL`/`HREF` arm converted its type parameter through a path
+that did not consult the shared cache, and the index is not registered until
+the enclosing conversion returns, so a parameter reached mid-recursion had a
+second descriptor boxed for it — exactly three per program, the primitives
+under `Null<...>`. Six places then asked that map the reverse question, which
+descriptor represents this index, by scanning it. A `HashMap` scan answers in
+hash order, seeded per process, and the winner reached the object: a constant's
+type header, a `safe_cast` operand, an `HNULL`'s `tparam`.
+
+Both halves are fixed. Reverse lookups go through a canonical index-to-
+descriptor map (first-wins, deterministic because the build order is), and the
+duplicate is no longer created. Sorting would not have worked, and this is
+worth remembering: the map's keys are heap addresses, so any pointer-derived
+ordering is still allocator-dependent.
+
+Builds are now byte-reproducible — five of five objects and three of three
+linked modules identical — the objects are 126 bytes smaller for the
+descriptors no longer emitted, and `ASH_WASM_FIBERS=0` produces a module byte-
+identical to an unset build. The gate §6 asked for is now a thing that can be
+checked rather than a thing that would have passed for the wrong reason.
+
+Behaviour is unmoved: across the 63 test programs, interp, jit and AOT agree on
+58, and the five that differ are the two mandelbrots — the documented
+FP-contraction difference, with AOT matching clang's `-ffp-contract=on` value
+exactly — and three socket tests with nothing to connect to.

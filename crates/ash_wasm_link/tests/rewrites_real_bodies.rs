@@ -207,3 +207,51 @@ fn yield_imports(bytes: &[u8]) -> std::collections::BTreeSet<u32> {
     }
     found
 }
+
+/// The rewind dispatch over a real module: every instrumented function given
+/// a way to resume at any of its call sites.
+///
+/// With the resume global left at zero the added code is inert, so this is
+/// also the check that the ladders cost nothing on the path every non-fiber
+/// program takes -- and, run through `ash-wasm-run`, that the program still
+/// does what it did.
+#[test]
+fn the_rewind_dispatch_on_a_real_module() {
+    let Some(bytes) = module() else {
+        eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to build a real dispatch");
+        return;
+    };
+    let (with_global, resume) =
+        ash_wasm_link::fiber::add_i32_global(&bytes, 0).expect("adding the resume global");
+    let program =
+        ash_wasm_link::suspend::program_from_module(&with_global).expect("reading the module");
+    let seeds = yield_imports(&with_global);
+    let set = program.suspend_closure(&seeds, ash_wasm_link::suspend::Policy::TypedTable);
+
+    let (out, report) = ash_wasm_link::fiber::add_rewind_dispatch(
+        &with_global,
+        &|i| set.contains(&i),
+        ash_wasm_link::fiber::Resume::Global(resume),
+    )
+    .expect("dispatch");
+    eprintln!(
+        "{} functions given a dispatch, {} refused; {} ladders, {} blocks, {} br_table entries; \
+         {} resume points free, {} needed a spill; {} -> {} bytes ({:+.1}%)",
+        report.functions,
+        report.refused,
+        report.ladders,
+        report.blocks,
+        report.table_entries,
+        report.free,
+        report.spilled,
+        bytes.len(),
+        out.len(),
+        100.0 * (out.len() as f64 - bytes.len() as f64) / bytes.len() as f64
+    );
+    validate(&out).unwrap_or_else(|e| panic!("the dispatched module does not validate: {e}"));
+
+    if let Ok(path) = std::env::var("ASH_LINK_TEST_OUT") {
+        std::fs::write(&path, &out).unwrap_or_else(|e| panic!("writing {path}: {e}"));
+        eprintln!("wrote the dispatched module to {path}");
+    }
+}

@@ -11,5 +11,10 @@ wasmparser = "0.258"
 # left to workspace feature unification, so the crate still builds alone.
 wasm-encoder = { version = "0.258", features = ["wasmparser"] }
 
+[dev-dependencies]
+# A rewritten module that validates can still jump to the wrong place, so the
+# tests for the fiber transform run what they build.
+wasmtime = "43"
+
 [lints]
 workspace = true

@@ -308,6 +308,19 @@ pub struct Dispatch {
 /// The function frame, which has no opening instruction of its own.
 const FUNCTION_FRAME: usize = usize::MAX;
 
+/// The first operator inside a frame, which is where its ladder opens.
+///
+/// A split there needs no ladder arm: landing on it is landing where ordinary
+/// entry already lands, so the arm and the default would go to the same
+/// place.
+fn first_operator_of(key: usize) -> usize {
+    if key == FUNCTION_FRAME {
+        0
+    } else {
+        key + 1
+    }
+}
+
 /// One entry of the frame chain during a walk.
 #[derive(Debug, Clone, Copy)]
 struct Enclosing {
@@ -711,12 +724,20 @@ pub fn add_rewind_dispatch(
             .is_some();
         if land {
             let b = p.boundaries.get(&at).copied().unwrap_or_default();
-            let slots = if b.spill > 0 {
+            // A split at the frame's own entry has no ladder arm, so there is
+            // no boundary to make an empty stack for -- but the resume value
+            // still has to be cleared there, since a rewind reaches it by
+            // entering the frame rather than by jumping.
+            let key = chain.last().map(|f| f.key).unwrap_or(FUNCTION_FRAME);
+            let has_block = at != first_operator_of(key);
+            let slots = if has_block && b.spill > 0 {
                 spill_stack(c, &pool, b.spill)?
             } else {
                 Vec::new()
             };
-            c.close_block()?;
+            if has_block {
+                c.close_block()?;
+            }
             if b.is_call {
                 // Later calls in this function must run normally.
                 c.emit_new(&Instruction::I32Const(0));
@@ -732,7 +753,9 @@ pub fn add_rewind_dispatch(
             }
             if let Some(f) = chain.last_mut() {
                 f.passed += 1;
-                f.open -= 1;
+                if has_block {
+                    f.open -= 1;
+                }
             }
         }
 
@@ -834,7 +857,16 @@ fn open_ladder(
     let Some(frame) = plan.frames.get(&key) else {
         return Ok(0);
     };
-    let m = frame.splits.len();
+    // Splits are ascending and distinct, so at most the first can sit at the
+    // frame's own entry, and an arm for it would duplicate the default.
+    let leading = usize::from(frame.splits.first() == Some(&first_operator_of(key)));
+    let splits = &frame.splits[leading..];
+    let through = &frame.through[leading..];
+    if splits.is_empty() {
+        // Every way into this frame is the way in it already had.
+        return Ok(0);
+    }
+    let m = splits.len();
     for _ in 0..=m {
         c.open_block(wasm_encoder::BlockType::Empty);
     }
@@ -850,14 +882,14 @@ fn open_ladder(
     // entry per call per enclosing frame, which is quadratic in a way this
     // is not.
     let (lo, hi) = match (
-        frame.through.iter().flatten().copied().min(),
-        frame.through.iter().flatten().copied().max(),
+        through.iter().flatten().copied().min(),
+        through.iter().flatten().copied().max(),
     ) {
         (Some(lo), Some(hi)) => (lo, hi),
         _ => bail!("a frame has a ladder but no call reaches it"),
     };
     let mut targets = vec![1u32; (hi - lo + 1) as usize];
-    for (i, ordinals) in frame.through.iter().enumerate() {
+    for (i, ordinals) in through.iter().enumerate() {
         for &o in ordinals {
             targets[(o - lo) as usize] = i as u32 + 2;
         }

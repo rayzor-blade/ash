@@ -105,11 +105,11 @@
 
 pub mod analysis;
 pub mod ir;
+pub mod liveness;
 pub mod lower;
 pub mod module;
 pub mod passes;
 pub mod serialize;
-pub mod liveness;
 pub mod vectorize;
 pub mod verify;
 

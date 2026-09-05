@@ -194,7 +194,8 @@ pub unsafe extern "C" fn hlp_carray_blit(
     len: i32,
 ) {
     if at.is_null()
-        || ((*at).kind != crate::hl::hl_type_kind_HOBJ && (*at).kind != crate::hl::hl_type_kind_HSTRUCT)
+        || ((*at).kind != crate::hl::hl_type_kind_HOBJ
+            && (*at).kind != crate::hl::hl_type_kind_HSTRUCT)
     {
         crate::error::hlp_error(crate::strings::str_to_uchar_ptr("Invalid array type"));
         return;

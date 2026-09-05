@@ -173,7 +173,10 @@ impl Default for PassOptions {
 /// which form: a single reaching `StaticClosure` can be rewritten to a direct
 /// call for free, several need a guard, and anything else is out of reach
 /// without runtime feedback.
-pub fn survey_closure_targets(f: &Function, m: &dyn crate::v2::module::ModuleInfo) -> (usize, usize, usize) {
+pub fn survey_closure_targets(
+    f: &Function,
+    m: &dyn crate::v2::module::ModuleInfo,
+) -> (usize, usize, usize) {
     use crate::v2::ir::Instr;
     if std::env::var("ASH_DEVIRT_SURVEY").is_err() {
         return (0, 0, 0);
@@ -216,7 +219,9 @@ pub fn survey_closure_targets(f: &Function, m: &dyn crate::v2::module::ModuleInf
     let (mut single, mut multi, mut unknown) = (0, 0, 0);
     for b in &f.blocks {
         for ins in &b.instrs {
-            let Instr::CallClosure { fun, .. } = ins else { continue };
+            let Instr::CallClosure { fun, .. } = ins else {
+                continue;
+            };
             if def_static.contains_key(&fun.0) {
                 single += 1;
             } else if let Some(inc) = phi_incoming.get(&fun.0) {
@@ -235,7 +240,9 @@ pub fn survey_closure_targets(f: &Function, m: &dyn crate::v2::module::ModuleInf
             "[devirt-survey] fn={} single={single} phi-all-static={multi} \
              unresolved={unknown} method-sites={method_sites} \
              method-resolved={method_resolved} method-distinct={}",
-            f.findex.map(|n| n.to_string()).unwrap_or_else(|| "?".into()),
+            f.findex
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into()),
             methods.len()
         );
     }
@@ -467,7 +474,11 @@ impl<'m> PassManager<'m> {
             let stats = pass.run(f, &self.opts)?;
             if let Some(t) = started {
                 let ns = t.elapsed().as_nanos();
-                match report.per_pass_ns.iter_mut().find(|(n, _)| *n == pass.name()) {
+                match report
+                    .per_pass_ns
+                    .iter_mut()
+                    .find(|(n, _)| *n == pass.name())
+                {
                     Some((_, acc)) => *acc += ns,
                     None => report.per_pass_ns.push((pass.name(), ns)),
                 }

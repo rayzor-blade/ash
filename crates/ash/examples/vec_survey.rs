@@ -173,7 +173,9 @@ fn main() -> anyhow::Result<()> {
                                                 .map(|g| format!("fn {}", g.name()))
                                         })
                                         .unwrap_or_else(|| format!("fn #{fun}")),
-                                    air::v2::ir::Instr::CallMethod { .. } => "method (vtable)".into(),
+                                    air::v2::ir::Instr::CallMethod { .. } => {
+                                        "method (vtable)".into()
+                                    }
                                     air::v2::ir::Instr::CallClosure { .. } => "closure".into(),
                                     _ => continue,
                                 };

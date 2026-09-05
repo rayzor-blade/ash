@@ -362,7 +362,10 @@ impl Tier {
 /// already uses; each is a thin wrapper.
 pub fn register_jit_code(findex: u32, tier: Tier, addr: usize) {
     if std::env::var("ASH_PROFILE_DEBUG").is_ok() {
-        eprintln!("[prof-reg] findex={findex} tier={} addr={addr:#x}", tier.label());
+        eprintln!(
+            "[prof-reg] findex={findex} tier={} addr={addr:#x}",
+            tier.label()
+        );
     }
     crate::jit_map::register(findex, tier, crate::jit_map::CodeKind::Entry, addr, 0);
 }
@@ -534,9 +537,7 @@ mod sampler {
                 type ThreadList = unsafe extern "C" fn(*mut u64, usize) -> usize;
                 let list: Option<ThreadList> = if all_threads {
                     let name = c"hlp_gc_registered_threads";
-                    let sym = unsafe {
-                        libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr())
-                    };
+                    let sym = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
                     if sym.is_null() {
                         eprintln!(
                             "[profile] ASH_PROFILE_THREADS=all: the runtime exports no \
@@ -808,9 +809,11 @@ mod sampler {
     }
 
     pub(super) fn start() -> Result<(), String> {
-        Err("the sampling profiler is unix-only (SIGPROF + pthread_kill); \
+        Err(
+            "the sampling profiler is unix-only (SIGPROF + pthread_kill); \
              the phase tree (ASH_PROFILE=phases) still works on this platform"
-            .to_string())
+                .to_string(),
+        )
     }
 
     pub(super) fn stop() {}
@@ -884,16 +887,16 @@ fn classify(pc: u64, jit: &[crate::jit_map::CodeRange]) -> (Bucket, String) {
 
     // No symbol: either JIT-generated code or an unmapped address.
     let pc = pc as usize;
-    if let Some(r) = jit
-        .iter()
-        .rev()
-        .find(|r| {
-            // A sized range answers by containment; an unsized one by the
-            // same span rule as before.
-            let span = if r.size > 0 { r.size } else { MAX_FUNCTION_SPAN };
-            r.start <= pc && pc - r.start < span
-        })
-    {
+    if let Some(r) = jit.iter().rev().find(|r| {
+        // A sized range answers by containment; an unsized one by the
+        // same span rule as before.
+        let span = if r.size > 0 {
+            r.size
+        } else {
+            MAX_FUNCTION_SPAN
+        };
+        r.start <= pc && pc - r.start < span
+    }) {
         let bucket = match r.tier {
             Tier::Llvm => Bucket::Llvm,
             Tier::Cranelift => Bucket::Cranelift,

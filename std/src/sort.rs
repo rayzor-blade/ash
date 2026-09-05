@@ -72,20 +72,19 @@ impl<'a, T: Sortable> MSort<'a, T> {
             };
             let mut lhs = self.arr[a].clone();
             let mut rhs = self.arr[b].clone();
-            let lhs = crate::cast::hlp_make_dyn(
-                (&mut lhs as *mut T).cast::<c_void>(),
-                T::hl_type(),
-            );
-            let rhs = crate::cast::hlp_make_dyn(
-                (&mut rhs as *mut T).cast::<c_void>(),
-                T::hl_type(),
-            );
+            let lhs =
+                crate::cast::hlp_make_dyn((&mut lhs as *mut T).cast::<c_void>(), T::hl_type());
+            let rhs =
+                crate::cast::hlp_make_dyn((&mut rhs as *mut T).cast::<c_void>(), T::hl_type());
             let mut args = [lhs, rhs];
             let result = runner(self.cmp.cast_mut(), args.as_mut_ptr(), 2);
-            if result.is_null() { 0 } else { (*result).v.i }
+            if result.is_null() {
+                0
+            } else {
+                (*result).v.i
+            }
         } else if cmp.hasValue != 0 {
-            let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 =
-                mem::transmute(fun);
+            let fun: unsafe extern "C" fn(*mut std::ffi::c_void, T, T) -> i32 = mem::transmute(fun);
             fun(cmp.value, self.arr[a].clone(), self.arr[b].clone())
         } else {
             let fun: unsafe extern "C" fn(T, T) -> i32 = mem::transmute(fun);

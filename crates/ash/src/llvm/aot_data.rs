@@ -428,8 +428,8 @@ impl<'ctx> JITModule<'ctx> {
             // four bytes earlier than an aarch64 one's. Compiled code reads
             // the decoder's target layout; what the runtime reads has to be
             // the same table.
-            let param_kinds = (0..c.nparams.max(0) as usize)
-                .map(|j| unsafe { (**c.params.add(j)).kind });
+            let param_kinds =
+                (0..c.nparams.max(0) as usize).map(|j| unsafe { (**c.params.add(j)).kind });
             let (mut target_offsets, target_size) = crate::bytecode::enum_construct_layout(
                 param_kinds,
                 self.target_abi.pointer_bytes() as usize,

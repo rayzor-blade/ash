@@ -41,7 +41,10 @@ fn resolve(file: &str, roots: &[PathBuf]) -> Option<PathBuf> {
     if direct.is_absolute() && direct.is_file() {
         return Some(direct.to_path_buf());
     }
-    roots.iter().map(|root| root.join(direct)).find(|p| p.is_file())
+    roots
+        .iter()
+        .map(|root| root.join(direct))
+        .find(|p| p.is_file())
 }
 
 /// Byte range of `line` (1-based) in `text`, trimmed of leading indentation
@@ -55,7 +58,11 @@ fn line_span(text: &str, line: i32) -> Option<std::ops::Range<usize>> {
             let indent = content.len() - content.trim_start().len();
             let start = offset + indent;
             let end = offset + content.len();
-            return Some(if start < end { start..end } else { offset..offset + raw.len() });
+            return Some(if start < end {
+                start..end
+            } else {
+                offset..offset + raw.len()
+            });
         }
         offset += raw.len();
     }
@@ -105,18 +112,20 @@ fn render_inner(message: &str, frames: &[Arc<TraceFrame>]) -> Option<bool> {
     // Colour is for a terminal. Piped into a file or a CI log it is noise
     // that hides the text it decorates.
     .with_config(Config::default().with_color(colour))
-        .with_message(message)
-        .with_label(
-            Label::new((id(&head_path), head_span))
-                .with_message(format!("thrown in {}", head.symbol))
-                .with_color(Color::Red)
-                .with_order(0),
-        );
+    .with_message(message)
+    .with_label(
+        Label::new((id(&head_path), head_span))
+            .with_message(format!("thrown in {}", head.symbol))
+            .with_color(Color::Red)
+            .with_order(0),
+    );
 
     // Callers, outward. `with_order` keeps them in call order rather than in
     // whatever order the spans happen to sort into.
     for (i, (frame, path, text)) in located.iter().enumerate().skip(1) {
-        let Some(span) = line_span(text, frame.line) else { continue };
+        let Some(span) = line_span(text, frame.line) else {
+            continue;
+        };
         report = report.with_label(
             Label::new((id(path), span))
                 .with_message(format!("called from {}", frame.symbol))

@@ -665,7 +665,9 @@ static INSTALL_CALLS: Mutex<Option<HashMap<usize, u64>>> = Mutex::new(None);
 
 fn record_install_calls(findex: usize, calls: u64) {
     if let Ok(mut g) = INSTALL_CALLS.lock() {
-        g.get_or_insert_with(HashMap::new).entry(findex).or_insert(calls);
+        g.get_or_insert_with(HashMap::new)
+            .entry(findex)
+            .or_insert(calls);
     }
 }
 
@@ -698,7 +700,12 @@ static DECLINES: Mutex<Option<DeclineTally>> = Mutex::new(None);
 fn record_decline(findex: usize, reason: &str) {
     // The head of the message is the shape; the tail is usually a symbol list
     // or an address that would make every entry unique and the tally useless.
-    let key: String = reason.split(&[':', '('][..]).next().unwrap_or(reason).trim().to_string();
+    let key: String = reason
+        .split(&[':', '('][..])
+        .next()
+        .unwrap_or(reason)
+        .trim()
+        .to_string();
     let mut guard = match DECLINES.lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -811,8 +818,7 @@ fn tiered_compile_tier_inner(
     // function needed compiling -- deltablue built 52 bodies for 45 distinct
     // (function, tier) pairs, main and beadie-broker each producing one.
     if tier == 0 && ctx.arrays.functions_ptrs != 0 {
-        let installed =
-            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
+        let installed = unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
         if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             return installed.cast::<()>();
         }
@@ -866,9 +872,7 @@ fn tiered_compile_tier_inner(
                         remember_gate_rejection(findex);
                         record_decline(findex, "no LLVM headroom (gate)");
                         if ctx.tier_log {
-                            eprintln!(
-                                "[tier] skip findex={findex} tier=llvm reason=no-headroom"
-                            );
+                            eprintln!("[tier] skip findex={findex} tier=llvm reason=no-headroom");
                         }
                         return std::ptr::null_mut();
                     }
@@ -1225,8 +1229,7 @@ pub(crate) fn resolve_worker_stub(
         if ctx.arrays.functions_ptrs == 0 {
             return std::ptr::null_mut();
         }
-        let installed =
-            unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
+        let installed = unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
         if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             installed.cast::<()>()
         } else {
@@ -1563,8 +1566,7 @@ pub(crate) fn produce_cranelift_osr_entries(
         bare = shared.without_callees_view();
         &bare
     };
-    let Ok(opt) = ash_core::air_pipeline::optimized_with_config(osr_module, raw, cfg)
-    else {
+    let Ok(opt) = ash_core::air_pipeline::optimized_with_config(osr_module, raw, cfg) else {
         return 0;
     };
     let plan = ash_core::osr::analyze(&opt.ir);
@@ -1968,7 +1970,10 @@ pub(crate) fn compile_with_llvm(
                 .expect("llvm_done mutex poisoned")
                 .insert(findex);
             ctx.llvm_promotions.fetch_add(1, Ordering::Relaxed);
-            record_install_calls(findex, bead.map(|b| b.invocation_count() as u64).unwrap_or(0));
+            record_install_calls(
+                findex,
+                bead.map(|b| b.invocation_count() as u64).unwrap_or(0),
+            );
             patch_vtable_slots(ctx, findex, meta.fn_addr as *mut c_void);
             // Headers probed only after the early build, or one that
             // declined: the standalone producer covers whatever is left.

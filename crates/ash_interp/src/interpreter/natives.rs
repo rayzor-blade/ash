@@ -19,9 +19,7 @@ use ash_core::types::{HLFunction, ValueTypeKind};
 use crate::tiering::env_flag;
 use crate::values::NanBoxedValue;
 
-use super::{
-    func_of, kind_u32, native_of, FnGetObjRt, run_with_hl_trap, HLInterpreter, HlpName,
-};
+use super::{func_of, kind_u32, native_of, run_with_hl_trap, FnGetObjRt, HLInterpreter, HlpName};
 
 impl HLInterpreter {
     /// Call a native function via FFI.
@@ -1621,7 +1619,10 @@ impl HLInterpreter {
     ///
     /// # Safety contract
     /// `type_ptr` must be a live `hl_type` (it came from an object header).
-    pub(super) unsafe fn find_runtime_proto_findex(type_ptr: *mut hl_type, pindex: usize) -> Option<usize> {
+    pub(super) unsafe fn find_runtime_proto_findex(
+        type_ptr: *mut hl_type,
+        pindex: usize,
+    ) -> Option<usize> {
         let mut t = type_ptr;
         while !t.is_null()
             && ((*t).kind == hl::hl_type_kind_HOBJ || (*t).kind == hl::hl_type_kind_HSTRUCT)

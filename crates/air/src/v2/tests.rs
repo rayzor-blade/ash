@@ -623,7 +623,10 @@ fn lower_positions_mark_blocks_and_line_changes() {
     let f = lower_with_positions(&ops, &tys, &NoModuleInfo, Some(&debug)).unwrap();
     verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
     assert!(
-        f.blocks[0].instrs.iter().all(|i| !matches!(i, Instr::Pos { .. })),
+        f.blocks[0]
+            .instrs
+            .iter()
+            .all(|i| !matches!(i, Instr::Pos { .. })),
         "the synthetic entry emits no code and carries no position"
     );
     let firsts: Vec<(u32, u32)> = f.blocks[1..]
@@ -3676,7 +3679,15 @@ fn pass_manager_reports_per_pass_statistics() {
     verify(&f).unwrap();
     assert_eq!(
         pm.pass_names(),
-        vec!["cellfwd", "celldse", "null-check-elim", "gvn", "licm", "fma", "dce"]
+        vec![
+            "cellfwd",
+            "celldse",
+            "null-check-elim",
+            "gvn",
+            "licm",
+            "fma",
+            "dce"
+        ]
     );
     assert_eq!(report.stats_for("null-check-elim").eliminated, 1);
     assert_eq!(report.stats_for("gvn").eliminated, 1);
@@ -4736,7 +4747,12 @@ fn inline_retains_frames_that_transitively_capture_a_stack() {
     let mut f = lower(&ops, &tys).expect("lower");
     let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
     assert_eq!(stats.inlined, 0, "{}", f.dump());
-    assert_eq!(any_call(&f), 1, "stack-sensitive call must remain\n{}", f.dump());
+    assert_eq!(
+        any_call(&f),
+        1,
+        "stack-sensitive call must remain\n{}",
+        f.dump()
+    );
 }
 
 #[test]
@@ -5930,14 +5946,38 @@ fn widen_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 dst(bytes) r1 i r2 limit r3 step r4 k
     let regs = vec![t(13), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(1),
+        }, // limit = 16
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(3),
+        }, // k = 7
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 3 },
-        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(2),
+            offset: 3,
+        },
+        Opcode::SetArray {
+            array: Reg(0),
+            index: Reg(1),
+            src: Reg(4),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -4 },
         Opcode::Ret { ret: Reg(1) },
     ];
@@ -5963,11 +6003,10 @@ impl ModuleInfo for WidenInfo {
 fn widen_reports_a_plan_for_a_constant_trip_count_loop() {
     let (ops, regs) = widen_fixture();
     let f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
-    let plans = super::vectorize::analyze_with(
-        &f,
-        &super::vectorize::VecOptions::default(),
-        &|i| WidenInfo.int_value(i),
-    );
+    let plans =
+        super::vectorize::analyze_with(&f, &super::vectorize::VecOptions::default(), &|i| {
+            WidenInfo.int_value(i)
+        });
     for p in &plans {
         eprintln!(
             "loop at b{}: refusals {:?} induction {:?} accesses {:?} body {}",
@@ -6009,7 +6048,10 @@ fn widening_emits_vector_instructions_that_verify() {
             )
         })
     });
-    assert!(has_vec, "widen reported work but emitted no vector instruction");
+    assert!(
+        has_vec,
+        "widen reported work but emitted no vector instruction"
+    );
 }
 
 #[test]
@@ -6017,16 +6059,18 @@ fn a_widened_function_scalarizes_back_to_runnable_bytecode() {
     let (ops, regs) = widen_fixture();
     let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
     let pass = super::passes::widen::Widen { info: &WidenInfo };
-    if pass.run(&mut f, &PassOptions::default()).expect("widen").replaced == 0 {
+    if pass
+        .run(&mut f, &PassOptions::default())
+        .expect("widen")
+        .replaced
+        == 0
+    {
         return; // covered by the test above
     }
     // `--emit-optimized` has to keep working on a function the vectorizer
     // touched: serialization unrolls the lanes back to scalar opcodes.
     let out = serialize(&f).expect("a widened function must still serialize");
-    assert!(
-        !out.ops.is_empty(),
-        "scalarization produced no opcodes"
-    );
+    assert!(!out.ops.is_empty(), "scalarization produced no opcodes");
     // Lane offsets are minted constants, named by index past the pool.
     for op in &out.ops {
         if let Opcode::Int { ptr, .. } = op {
@@ -6053,17 +6097,48 @@ fn widen_guarded_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 dst(bytes) r1 i r2 limit r3 step r4 k r5 len
     let regs = vec![t(13), t(3), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
-        Opcode::Int { dst: Reg(5), ptr: RefInt(1) },   // len = 16
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(1),
+        }, // limit = 16
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(3),
+        }, // k = 7
+        Opcode::Int {
+            dst: Reg(5),
+            ptr: RefInt(1),
+        }, // len = 16
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 5 },  // normal exit
-        Opcode::JSLt { a: Reg(1), b: Reg(5), offset: 1 },   // guard: i < len -> ok
-        Opcode::Throw { exc: Reg(4) },                       // else throw
-        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(2),
+            offset: 5,
+        }, // normal exit
+        Opcode::JSLt {
+            a: Reg(1),
+            b: Reg(5),
+            offset: 1,
+        }, // guard: i < len -> ok
+        Opcode::Throw { exc: Reg(4) }, // else throw
+        Opcode::SetArray {
+            array: Reg(0),
+            index: Reg(1),
+            src: Reg(4),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -6 },
         Opcode::Ret { ret: Reg(1) },
     ];
@@ -6074,11 +6149,10 @@ fn widen_guarded_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 fn a_bounds_checked_loop_is_widenable_once_the_guard_is_hoisted() {
     let (ops, regs) = widen_guarded_fixture();
     let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
-    let plans = super::vectorize::analyze_with(
-        &f,
-        &super::vectorize::VecOptions::default(),
-        &|i| WidenInfo.int_value(i),
-    );
+    let plans =
+        super::vectorize::analyze_with(&f, &super::vectorize::VecOptions::default(), &|i| {
+            WidenInfo.int_value(i)
+        });
     let guarded: Vec<_> = plans.iter().filter(|p| !p.guard_exits.is_empty()).collect();
     assert!(
         !guarded.is_empty(),
@@ -6096,10 +6170,15 @@ fn a_bounds_checked_loop_is_widenable_once_the_guard_is_hoisted() {
     verify(&f).unwrap_or_else(|e| panic!("verify after guarded widen: {e}\n{}", f.dump()));
     // The guard must be GONE from the body: left in, it would be tested
     // against an induction variable stepping by a whole vector.
-    let hoisted = f.blocks.iter().any(|b| {
-        matches!(&b.term, Terminator::CondJump { .. }) && b.instrs.is_empty()
-    });
-    assert!(hoisted, "no hoisted pre-loop check was created:\n{}", f.dump());
+    let hoisted = f
+        .blocks
+        .iter()
+        .any(|b| matches!(&b.term, Terminator::CondJump { .. }) && b.instrs.is_empty());
+    assert!(
+        hoisted,
+        "no hoisted pre-loop check was created:\n{}",
+        f.dump()
+    );
 }
 
 /// `for (i = 0; i < len; i++) dst[i] = k;` — a RUNTIME length.
@@ -6111,13 +6190,34 @@ fn widen_runtime_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 dst(array) r1 i r2 len r3 step r4 k
     let regs = vec![t(13), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(3),
+        }, // k = 7
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 3 },  // i >= len -> exit
-        Opcode::SetArray { array: Reg(0), index: Reg(1), src: Reg(4) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(2),
+            offset: 3,
+        }, // i >= len -> exit
+        Opcode::SetArray {
+            array: Reg(0),
+            index: Reg(1),
+            src: Reg(4),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -4 },
         Opcode::Ret { ret: Reg(1) },
     ];
@@ -6136,9 +6236,7 @@ fn widen_runtime_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 fn the_value_after_a_widened_loop_comes_from_the_remainder() {
     let (ops, regs) = widen_runtime_fixture();
     let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
-    let iv_phi = f.blocks.iter().find_map(|b| {
-        b.phis.first().map(|p| p.dst)
-    });
+    let iv_phi = f.blocks.iter().find_map(|b| b.phis.first().map(|p| p.dst));
     let pass = super::passes::widen::Widen { info: &WidenInfo };
     let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
     assert_eq!(stats.replaced, 1, "not widened:\n{}", f.dump());
@@ -6184,12 +6282,14 @@ fn a_runtime_length_loop_widens_with_a_scalar_epilogue() {
     );
     // Both forms must be present: vectors in the widened loop, the original
     // scalar store in the remainder.
-    let has_vec = f.blocks.iter().any(|b| {
-        b.instrs.iter().any(|i| matches!(i, Instr::VecStore { .. }))
-    });
-    let has_scalar = f.blocks.iter().any(|b| {
-        b.instrs.iter().any(|i| matches!(i, Instr::MemSet { .. }))
-    });
+    let has_vec = f
+        .blocks
+        .iter()
+        .any(|b| b.instrs.iter().any(|i| matches!(i, Instr::VecStore { .. })));
+    let has_scalar = f
+        .blocks
+        .iter()
+        .any(|b| b.instrs.iter().any(|i| matches!(i, Instr::MemSet { .. })));
     assert!(has_vec, "widened loop has no vector store:\n{}", f.dump());
     assert!(has_scalar, "no scalar remainder survived:\n{}", f.dump());
 }
@@ -6203,20 +6303,54 @@ fn widen_byte_index_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 bytes r1 i r2 limit r3 step r4 k r5 shift r6 addr
     let regs = vec![t(9), t(3), t(3), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(3) },   // k = 7
-        Opcode::Int { dst: Reg(5), ptr: RefInt(4) },   // shift = 2
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(1),
+        }, // limit = 16
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(3),
+        }, // k = 7
+        Opcode::Int {
+            dst: Reg(5),
+            ptr: RefInt(4),
+        }, // shift = 2
         // r6 is written every iteration and read in the same one, but a
         // register with no definition before the loop still gets a header phi
         // -- which reads as a loop-carried value.
-        Opcode::Int { dst: Reg(6), ptr: RefInt(0) },
+        Opcode::Int {
+            dst: Reg(6),
+            ptr: RefInt(0),
+        },
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 4 },
-        Opcode::Shl { dst: Reg(6), a: Reg(1), b: Reg(5) },
-        Opcode::SetMem { bytes: Reg(0), index: Reg(6), src: Reg(4) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(2),
+            offset: 4,
+        },
+        Opcode::Shl {
+            dst: Reg(6),
+            a: Reg(1),
+            b: Reg(5),
+        },
+        Opcode::SetMem {
+            bytes: Reg(0),
+            index: Reg(6),
+            src: Reg(4),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -5 },
         Opcode::Ret { ret: Reg(1) },
     ];
@@ -6230,9 +6364,8 @@ fn widen_byte_index_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 /// of DCE rather than the affine analysis.
 fn lowered_and_cleaned(ops: &[Opcode], regs: &[TypeRef]) -> Function {
     let mut f = lower_with(ops, regs, &WidenInfo).expect("lower");
-    let pm = super::passes::PassManager::with_passes(vec![Box::new(
-        super::passes::dce::DeadCodeElim,
-    )]);
+    let pm =
+        super::passes::PassManager::with_passes(vec![Box::new(super::passes::dce::DeadCodeElim)]);
     pm.run(&mut f).expect("dce");
     f
 }
@@ -6241,11 +6374,10 @@ fn lowered_and_cleaned(ops: &[Opcode], regs: &[TypeRef]) -> Function {
 fn a_byte_scaled_index_is_affine() {
     let (ops, regs) = widen_byte_index_fixture();
     let f = lowered_and_cleaned(&ops, &regs);
-    let plans = super::vectorize::analyze_with(
-        &f,
-        &super::vectorize::VecOptions::default(),
-        &|i| WidenInfo.int_value(i),
-    );
+    let plans =
+        super::vectorize::analyze_with(&f, &super::vectorize::VecOptions::default(), &|i| {
+            WidenInfo.int_value(i)
+        });
     let p = plans
         .iter()
         .find(|p| !p.accesses.is_empty())
@@ -6296,16 +6428,47 @@ fn widen_reduction_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 src(array) r1 i r2 limit r3 step r4 sum r5 elem
     let regs = vec![t(13), t(3), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(2), ptr: RefInt(1) },   // limit = 16
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(0) },   // sum = 0
-        Opcode::Int { dst: Reg(5), ptr: RefInt(0) },   // elem = 0
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(1),
+        }, // limit = 16
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(0),
+        }, // sum = 0
+        Opcode::Int {
+            dst: Reg(5),
+            ptr: RefInt(0),
+        }, // elem = 0
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(2), offset: 4 },
-        Opcode::GetArray { dst: Reg(5), array: Reg(0), index: Reg(1) },
-        Opcode::Add { dst: Reg(4), a: Reg(4), b: Reg(5) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(2),
+            offset: 4,
+        },
+        Opcode::GetArray {
+            dst: Reg(5),
+            array: Reg(0),
+            index: Reg(1),
+        },
+        Opcode::Add {
+            dst: Reg(4),
+            a: Reg(4),
+            b: Reg(5),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -5 },
         Opcode::Ret { ret: Reg(4) },
     ];
@@ -6316,11 +6479,9 @@ fn widen_reduction_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
 fn a_sum_over_an_array_widens_into_lane_partials() {
     let (ops, regs) = widen_reduction_fixture();
     let mut f = lowered_and_cleaned(&ops, &regs);
-    for p in super::vectorize::analyze_with(
-        &f,
-        &super::vectorize::VecOptions::default(),
-        &|i| WidenInfo.int_value(i),
-    ) {
+    for p in super::vectorize::analyze_with(&f, &super::vectorize::VecOptions::default(), &|i| {
+        WidenInfo.int_value(i)
+    }) {
         eprintln!(
             "loop@b{} vectorizable={} refusals={:?} reductions={:?}",
             p.header.0,
@@ -6383,18 +6544,56 @@ fn widen_varying_addend_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     // r0 n r1 i r2 acc r3 step r4 three r5 one r6 tmp
     let regs = vec![t(3), t(3), t(3), t(3), t(3), t(3), t(3)];
     let ops = vec![
-        Opcode::Int { dst: Reg(1), ptr: RefInt(0) },   // i = 0
-        Opcode::Int { dst: Reg(2), ptr: RefInt(0) },   // acc = 0
-        Opcode::Int { dst: Reg(3), ptr: RefInt(2) },   // step = 1
-        Opcode::Int { dst: Reg(4), ptr: RefInt(4) },   // three... (2 here)
-        Opcode::Int { dst: Reg(5), ptr: RefInt(2) },   // one
-        Opcode::Int { dst: Reg(6), ptr: RefInt(0) },   // tmp = 0
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(0),
+        }, // acc = 0
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Int {
+            dst: Reg(4),
+            ptr: RefInt(4),
+        }, // three... (2 here)
+        Opcode::Int {
+            dst: Reg(5),
+            ptr: RefInt(2),
+        }, // one
+        Opcode::Int {
+            dst: Reg(6),
+            ptr: RefInt(0),
+        }, // tmp = 0
         Opcode::Label,
-        Opcode::JSGte { a: Reg(1), b: Reg(0), offset: 5 },
-        Opcode::Mul { dst: Reg(6), a: Reg(1), b: Reg(4) },
-        Opcode::Add { dst: Reg(6), a: Reg(6), b: Reg(5) },
-        Opcode::Add { dst: Reg(2), a: Reg(2), b: Reg(6) },
-        Opcode::Add { dst: Reg(1), a: Reg(1), b: Reg(3) },
+        Opcode::JSGte {
+            a: Reg(1),
+            b: Reg(0),
+            offset: 5,
+        },
+        Opcode::Mul {
+            dst: Reg(6),
+            a: Reg(1),
+            b: Reg(4),
+        },
+        Opcode::Add {
+            dst: Reg(6),
+            a: Reg(6),
+            b: Reg(5),
+        },
+        Opcode::Add {
+            dst: Reg(2),
+            a: Reg(2),
+            b: Reg(6),
+        },
+        Opcode::Add {
+            dst: Reg(1),
+            a: Reg(1),
+            b: Reg(3),
+        },
         Opcode::JAlways { offset: -6 },
         Opcode::Ret { ret: Reg(2) },
     ];
@@ -6446,11 +6645,21 @@ fn a_lane_wider_than_the_machine_vector_is_refused() {
     let before = f.dump();
     let pass = super::passes::widen::Widen { info: &WideInfo };
     let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
-    assert_eq!(stats.replaced, 0, "widened an 8-byte element by 4:\n{}", f.dump());
-    assert_eq!(f.dump(), before, "a refusal must leave the function untouched");
+    assert_eq!(
+        stats.replaced,
+        0,
+        "widened an 8-byte element by 4:\n{}",
+        f.dump()
+    );
+    assert_eq!(
+        f.dump(),
+        before,
+        "a refusal must leave the function untouched"
+    );
     let why = super::passes::widen::take_outcomes();
     assert!(
-        why.iter().any(|(_, r)| matches!(r, Err(super::passes::widen::Decline::LaneTooWide(_)))),
+        why.iter()
+            .any(|(_, r)| matches!(r, Err(super::passes::widen::Decline::LaneTooWide(_)))),
         "declined, but not for the width: {why:?}"
     );
 }

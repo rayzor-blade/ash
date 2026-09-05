@@ -69,7 +69,6 @@ pub unsafe extern "C" fn hlp_ucs2length(s: *const hl::uchar, pos: i32) -> usize 
         return 0;
     }
 
-
     hlp_utf16_length(s.wrapping_add(pos as usize))
 }
 
@@ -106,7 +105,11 @@ pub(crate) fn format_g(d: f64, p: i32) -> String {
     }
     if d == 0.0 {
         // C prints the sign of a negative zero.
-        return if d.is_sign_negative() { "-0".into() } else { "0".into() };
+        return if d.is_sign_negative() {
+            "-0".into()
+        } else {
+            "0".into()
+        };
     }
     // Take the exponent from the value *after* rounding to `p` significant
     // digits, so a value that rounds up into the next decade (999999999999999.9

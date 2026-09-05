@@ -36,7 +36,9 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
     }
     let _size: usize = size as usize;
 
-    crate::gc::gc_alloc(_size).unwrap_or_else(|| crate::gc::out_of_memory("a byte buffer")).as_ptr() as *mut hl::vbyte
+    crate::gc::gc_alloc(_size)
+        .unwrap_or_else(|| crate::gc::out_of_memory("a byte buffer"))
+        .as_ptr() as *mut hl::vbyte
 }
 
 #[no_mangle]
@@ -665,14 +667,23 @@ mod bytes_tests {
         unsafe {
             let hay = b"abcXabc";
             let needle = b"abc";
-            assert_eq!(prim::hlp_bytes_rfind(hay.as_ptr(), 7, needle.as_ptr(), 3), 4);
+            assert_eq!(
+                prim::hlp_bytes_rfind(hay.as_ptr(), 7, needle.as_ptr(), 3),
+                4
+            );
             assert_eq!(
                 prim::hlp_bytes_rfind(hay.as_ptr(), 6, needle.as_ptr(), 3),
                 0,
                 "the trailing match no longer fits inside len"
             );
-            assert_eq!(prim::hlp_bytes_rfind(hay.as_ptr(), 5, needle.as_ptr(), 3), 0);
-            assert_eq!(prim::hlp_bytes_rfind(hay.as_ptr(), 4, needle.as_ptr(), 3), 0);
+            assert_eq!(
+                prim::hlp_bytes_rfind(hay.as_ptr(), 5, needle.as_ptr(), 3),
+                0
+            );
+            assert_eq!(
+                prim::hlp_bytes_rfind(hay.as_ptr(), 4, needle.as_ptr(), 3),
+                0
+            );
             assert_eq!(
                 prim::hlp_bytes_rfind(hay.as_ptr(), 2, needle.as_ptr(), 3),
                 -1,
@@ -750,7 +761,10 @@ mod bytes_tests {
             assert_eq!(prim::hlp_bytes_subtract(base.add(63), base), 63);
             assert_eq!(prim::hlp_bytes_subtract(base, base.add(63)), -63);
             // Null is just an address here, as it is in C.
-            assert_eq!(prim::hlp_bytes_subtract(std::ptr::null(), std::ptr::null()), 0);
+            assert_eq!(
+                prim::hlp_bytes_subtract(std::ptr::null(), std::ptr::null()),
+                0
+            );
 
             std::hint::black_box(&buf); // the buffer outlives every assertion
         }
@@ -841,7 +855,10 @@ mod bytes_tests {
     #[test]
     fn from_address_zero_extends_both_halves() {
         unsafe {
-            assert_eq!(prim::hlp_bytes_from_address(-1, 0) as usize as u64, 0xFFFF_FFFF);
+            assert_eq!(
+                prim::hlp_bytes_from_address(-1, 0) as usize as u64,
+                0xFFFF_FFFF
+            );
             assert_eq!(
                 prim::hlp_bytes_from_address(i32::MIN, 0) as usize as u64,
                 0x8000_0000,
@@ -888,7 +905,10 @@ mod bytes_tests {
             } else {
                 // The zero-extension the implementation notes: a 32-bit host's
                 // high addresses must not arrive as a negative i64.
-                assert!(v > 0 && v <= u32::MAX as i64, "zero-extended, not sign-extended");
+                assert!(
+                    v > 0 && v <= u32::MAX as i64,
+                    "zero-extended, not sign-extended"
+                );
             }
 
             let back = prim::hlp_bytes_from_address64(v);

@@ -892,9 +892,7 @@ impl Instr {
             }
             Instr::Call { args, .. }
             | Instr::CallMethod { args, .. }
-            | Instr::Intrinsic { args, .. } => {
-                args.iter_mut().for_each(one)
-            }
+            | Instr::Intrinsic { args, .. } => args.iter_mut().for_each(one),
             Instr::CallClosure { fun, args, .. } => {
                 one(fun);
                 args.iter_mut().for_each(one);

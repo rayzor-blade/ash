@@ -12,7 +12,9 @@
 use std::collections::{HashMap, HashSet};
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args().nth(1).expect("usage: survey_cells <file.hl>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: survey_cells <file.hl>");
     ash_core::native_lib::init_std_library()?;
     let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
     let module = ash_core::air_pipeline::AshModule::new(&bc);

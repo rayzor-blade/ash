@@ -179,8 +179,7 @@ unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
         return runner(c, ptr::null_mut(), 0) as *const uchar;
     }
     if (*c).hasValue != 0 {
-        let f: unsafe extern "C" fn(*mut c_void) -> *const uchar =
-            std::mem::transmute((*c).fun);
+        let f: unsafe extern "C" fn(*mut c_void) -> *const uchar = std::mem::transmute((*c).fun);
         f((*c).value)
     } else {
         let f: unsafe extern "C" fn() -> *const uchar = std::mem::transmute((*c).fun);
@@ -386,9 +385,12 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             hlp_buffer_str(b, bytes_ptr);
         }
         hl_type_kind_HTYPE => {
-            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(
+                t,
+                vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                });
+                },
+            );
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {
@@ -400,9 +402,12 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             );
         }
         hl_type_kind_HREF => {
-            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(
+                t,
+                vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                });
+                },
+            );
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {
@@ -414,9 +419,12 @@ pub unsafe extern "C" fn hlp_buffer_addr(
             );
         }
         hl_type_kind_HABSTRACT => {
-            let mut tmp = crate::types::vdynamic_new(t, vdynamic__bindgen_ty_1 {
+            let mut tmp = crate::types::vdynamic_new(
+                t,
+                vdynamic__bindgen_ty_1 {
                     ptr: *(data as *mut *mut c_void),
-                });
+                },
+            );
             hlp_buffer_rec(
                 b,
                 if !tmp.v.ptr.is_null() {
@@ -659,7 +667,14 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             // null on a null table, while dereferencing it here abends the
             // process. Printing nothing is the wrong answer; aborting is a
             // worse one.
-            if (*(*vv).t).__bindgen_anon_1.virt.as_ref().unwrap().lookup.is_null() {
+            if (*(*vv).t)
+                .__bindgen_anon_1
+                .virt
+                .as_ref()
+                .unwrap()
+                .lookup
+                .is_null()
+            {
                 hlp_buffer_str_sub(b, str_to_uchar_ptr("}"), 1);
                 return;
             }

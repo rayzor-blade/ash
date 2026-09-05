@@ -26,9 +26,9 @@ use std::io::{self, Write};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
+use crate::bytecode::DecodedBytecode;
 use crate::hl::{self, *};
 use crate::opcodes::Opcode;
-use crate::bytecode::DecodedBytecode;
 use crate::types::{HLType, OP_NARGS};
 
 /// Encode `bc` as HashLink bytecode of `version` (4 or 5).
@@ -51,7 +51,12 @@ impl<'b> Encoder<'b> {
         for (i, s) in bc.strings.iter().enumerate() {
             string_index.entry(s.as_str()).or_insert(i);
         }
-        Encoder { bc, version, out: Vec::new(), string_index }
+        Encoder {
+            bc,
+            version,
+            out: Vec::new(),
+            string_index,
+        }
     }
 
     // ── primitives ──────────────────────────────────────────────────────────
@@ -240,7 +245,11 @@ impl<'b> Encoder<'b> {
                 self.type_ref(&fun.ret);
             }
             hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
-                let o = t.obj.as_ref().ok_or_else(|| bad("HOBJ without obj"))?.clone();
+                let o = t
+                    .obj
+                    .as_ref()
+                    .ok_or_else(|| bad("HOBJ without obj"))?
+                    .clone();
                 self.string_ref(&o.name)?;
                 self.var_int(o.super_.map(|s| s.0 as i32).unwrap_or(-1));
                 self.var_u(o.global_value);
@@ -261,10 +270,18 @@ impl<'b> Encoder<'b> {
                 }
             }
             hl::hl_type_kind_HREF | hl::hl_type_kind_HNULL | hl::hl_type_kind_HPACKED => {
-                self.type_ref(&t.tparam.clone().ok_or_else(|| bad("wrapper without tparam"))?);
+                self.type_ref(
+                    &t.tparam
+                        .clone()
+                        .ok_or_else(|| bad("wrapper without tparam"))?,
+                );
             }
             hl::hl_type_kind_HVIRTUAL => {
-                let v = t.virt.as_ref().ok_or_else(|| bad("HVIRTUAL without virt"))?.clone();
+                let v = t
+                    .virt
+                    .as_ref()
+                    .ok_or_else(|| bad("HVIRTUAL without virt"))?
+                    .clone();
                 self.var_u(v.fields.len() as u32);
                 for f in &v.fields {
                     self.string_ref(&f.name)?;
@@ -272,7 +289,11 @@ impl<'b> Encoder<'b> {
                 }
             }
             hl::hl_type_kind_HENUM => {
-                let e = t.tenum.as_ref().ok_or_else(|| bad("HENUM without tenum"))?.clone();
+                let e = t
+                    .tenum
+                    .as_ref()
+                    .ok_or_else(|| bad("HENUM without tenum"))?
+                    .clone();
                 self.string_ref(&e.name)?;
                 self.var_int(e.global_value as i32);
                 self.var_u(e.constructs.len() as u32);
@@ -285,7 +306,10 @@ impl<'b> Encoder<'b> {
                 }
             }
             hl::hl_type_kind_HABSTRACT => {
-                let n = t.abs_name.clone().ok_or_else(|| bad("HABSTRACT without name"))?;
+                let n = t
+                    .abs_name
+                    .clone()
+                    .ok_or_else(|| bad("HABSTRACT without name"))?;
                 self.string_ref(&n)?;
             }
             _ => {}
@@ -366,141 +390,492 @@ impl<'b> Encoder<'b> {
             Opcode::Mov { dst, src } => (hl_op_OMov, dst.0 as i32, src.0 as i32, 0, Vec::new()),
             Opcode::Int { dst, ptr } => (hl_op_OInt, dst.0 as i32, ptr.0 as i32, 0, Vec::new()),
             Opcode::Float { dst, ptr } => (hl_op_OFloat, dst.0 as i32, ptr.0 as i32, 0, Vec::new()),
-            Opcode::Bool { dst, value } => (hl_op_OBool, dst.0 as i32, if *value { 1 } else { 0 }, 0, Vec::new()),
+            Opcode::Bool { dst, value } => (
+                hl_op_OBool,
+                dst.0 as i32,
+                if *value { 1 } else { 0 },
+                0,
+                Vec::new(),
+            ),
             Opcode::Bytes { dst, ptr } => (hl_op_OBytes, dst.0 as i32, ptr.0 as i32, 0, Vec::new()),
-            Opcode::String { dst, ptr } => (hl_op_OString, dst.0 as i32, ptr.0 as i32, 0, Vec::new()),
+            Opcode::String { dst, ptr } => {
+                (hl_op_OString, dst.0 as i32, ptr.0 as i32, 0, Vec::new())
+            }
             Opcode::Null { dst } => (hl_op_ONull, dst.0 as i32, 0, 0, Vec::new()),
-            Opcode::Add { dst, a, b } => (hl_op_OAdd, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::Sub { dst, a, b } => (hl_op_OSub, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::Mul { dst, a, b } => (hl_op_OMul, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::SDiv { dst, a, b } => (hl_op_OSDiv, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::UDiv { dst, a, b } => (hl_op_OUDiv, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::SMod { dst, a, b } => (hl_op_OSMod, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::UMod { dst, a, b } => (hl_op_OUMod, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::Shl { dst, a, b } => (hl_op_OShl, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::SShr { dst, a, b } => (hl_op_OSShr, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::UShr { dst, a, b } => (hl_op_OUShr, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::And { dst, a, b } => (hl_op_OAnd, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::Or { dst, a, b } => (hl_op_OOr, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
-            Opcode::Xor { dst, a, b } => (hl_op_OXor, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new()),
+            Opcode::Add { dst, a, b } => {
+                (hl_op_OAdd, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::Sub { dst, a, b } => {
+                (hl_op_OSub, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::Mul { dst, a, b } => {
+                (hl_op_OMul, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::SDiv { dst, a, b } => (
+                hl_op_OSDiv,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::UDiv { dst, a, b } => (
+                hl_op_OUDiv,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SMod { dst, a, b } => (
+                hl_op_OSMod,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::UMod { dst, a, b } => (
+                hl_op_OUMod,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::Shl { dst, a, b } => {
+                (hl_op_OShl, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::SShr { dst, a, b } => (
+                hl_op_OSShr,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::UShr { dst, a, b } => (
+                hl_op_OUShr,
+                dst.0 as i32,
+                a.0 as i32,
+                b.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::And { dst, a, b } => {
+                (hl_op_OAnd, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::Or { dst, a, b } => {
+                (hl_op_OOr, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
+            Opcode::Xor { dst, a, b } => {
+                (hl_op_OXor, dst.0 as i32, a.0 as i32, b.0 as i32, Vec::new())
+            }
             Opcode::Neg { dst, src } => (hl_op_ONeg, dst.0 as i32, src.0 as i32, 0, Vec::new()),
             Opcode::Not { dst, src } => (hl_op_ONot, dst.0 as i32, src.0 as i32, 0, Vec::new()),
             Opcode::Incr { dst } => (hl_op_OIncr, dst.0 as i32, 0, 0, Vec::new()),
             Opcode::Decr { dst } => (hl_op_ODecr, dst.0 as i32, 0, 0, Vec::new()),
             Opcode::Call0 { dst, fun } => (hl_op_OCall0, dst.0 as i32, fun.0 as i32, 0, Vec::new()),
-            Opcode::Call1 { dst, fun, arg0 } => (hl_op_OCall1, dst.0 as i32, fun.0 as i32, arg0.0 as i32, Vec::new()),
-            Opcode::StaticClosure { dst, fun } => (hl_op_OStaticClosure, dst.0 as i32, fun.0 as i32, 0, Vec::new()),
-            Opcode::InstanceClosure { dst, fun, obj } => (hl_op_OInstanceClosure, dst.0 as i32, fun.0 as i32, obj.0 as i32, Vec::new()),
-            Opcode::VirtualClosure { dst, obj, field } => (hl_op_OVirtualClosure, dst.0 as i32, obj.0 as i32, field.0 as i32, Vec::new()),
-            Opcode::GetGlobal { dst, global } => (hl_op_OGetGlobal, dst.0 as i32, global.0 as i32, 0, Vec::new()),
-            Opcode::SetGlobal { global, src } => (hl_op_OSetGlobal, global.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::Field { dst, obj, field } => (hl_op_OField, dst.0 as i32, obj.0 as i32, field.0 as i32, Vec::new()),
-            Opcode::SetField { obj, field, src } => (hl_op_OSetField, obj.0 as i32, field.0 as i32, src.0 as i32, Vec::new()),
-            Opcode::GetThis { dst, field } => (hl_op_OGetThis, dst.0 as i32, field.0 as i32, 0, Vec::new()),
-            Opcode::SetThis { field, src } => (hl_op_OSetThis, field.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::DynGet { dst, obj, field } => (hl_op_ODynGet, dst.0 as i32, obj.0 as i32, field.0 as i32, Vec::new()),
-            Opcode::DynSet { obj, field, src } => (hl_op_ODynSet, obj.0 as i32, field.0 as i32, src.0 as i32, Vec::new()),
-            Opcode::JTrue { cond, offset } => (hl_op_OJTrue, cond.0 as i32, *offset as i32, 0, Vec::new()),
-            Opcode::JFalse { cond, offset } => (hl_op_OJFalse, cond.0 as i32, *offset as i32, 0, Vec::new()),
-            Opcode::JNull { reg, offset } => (hl_op_OJNull, reg.0 as i32, *offset as i32, 0, Vec::new()),
-            Opcode::JNotNull { reg, offset } => (hl_op_OJNotNull, reg.0 as i32, *offset as i32, 0, Vec::new()),
-            Opcode::JSLt { a, b, offset } => (hl_op_OJSLt, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JSGte { a, b, offset } => (hl_op_OJSGte, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JSGt { a, b, offset } => (hl_op_OJSGt, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JSLte { a, b, offset } => (hl_op_OJSLte, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JULt { a, b, offset } => (hl_op_OJULt, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JUGte { a, b, offset } => (hl_op_OJUGte, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JNotLt { a, b, offset } => (hl_op_OJNotLt, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JNotGte { a, b, offset } => (hl_op_OJNotGte, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JEq { a, b, offset } => (hl_op_OJEq, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
-            Opcode::JNotEq { a, b, offset } => (hl_op_OJNotEq, a.0 as i32, b.0 as i32, *offset as i32, Vec::new()),
+            Opcode::Call1 { dst, fun, arg0 } => (
+                hl_op_OCall1,
+                dst.0 as i32,
+                fun.0 as i32,
+                arg0.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::StaticClosure { dst, fun } => (
+                hl_op_OStaticClosure,
+                dst.0 as i32,
+                fun.0 as i32,
+                0,
+                Vec::new(),
+            ),
+            Opcode::InstanceClosure { dst, fun, obj } => (
+                hl_op_OInstanceClosure,
+                dst.0 as i32,
+                fun.0 as i32,
+                obj.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::VirtualClosure { dst, obj, field } => (
+                hl_op_OVirtualClosure,
+                dst.0 as i32,
+                obj.0 as i32,
+                field.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::GetGlobal { dst, global } => (
+                hl_op_OGetGlobal,
+                dst.0 as i32,
+                global.0 as i32,
+                0,
+                Vec::new(),
+            ),
+            Opcode::SetGlobal { global, src } => (
+                hl_op_OSetGlobal,
+                global.0 as i32,
+                src.0 as i32,
+                0,
+                Vec::new(),
+            ),
+            Opcode::Field { dst, obj, field } => (
+                hl_op_OField,
+                dst.0 as i32,
+                obj.0 as i32,
+                field.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SetField { obj, field, src } => (
+                hl_op_OSetField,
+                obj.0 as i32,
+                field.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::GetThis { dst, field } => {
+                (hl_op_OGetThis, dst.0 as i32, field.0 as i32, 0, Vec::new())
+            }
+            Opcode::SetThis { field, src } => {
+                (hl_op_OSetThis, field.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::DynGet { dst, obj, field } => (
+                hl_op_ODynGet,
+                dst.0 as i32,
+                obj.0 as i32,
+                field.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::DynSet { obj, field, src } => (
+                hl_op_ODynSet,
+                obj.0 as i32,
+                field.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::JTrue { cond, offset } => {
+                (hl_op_OJTrue, cond.0 as i32, *offset as i32, 0, Vec::new())
+            }
+            Opcode::JFalse { cond, offset } => {
+                (hl_op_OJFalse, cond.0 as i32, *offset as i32, 0, Vec::new())
+            }
+            Opcode::JNull { reg, offset } => {
+                (hl_op_OJNull, reg.0 as i32, *offset as i32, 0, Vec::new())
+            }
+            Opcode::JNotNull { reg, offset } => {
+                (hl_op_OJNotNull, reg.0 as i32, *offset as i32, 0, Vec::new())
+            }
+            Opcode::JSLt { a, b, offset } => (
+                hl_op_OJSLt,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JSGte { a, b, offset } => (
+                hl_op_OJSGte,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JSGt { a, b, offset } => (
+                hl_op_OJSGt,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JSLte { a, b, offset } => (
+                hl_op_OJSLte,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JULt { a, b, offset } => (
+                hl_op_OJULt,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JUGte { a, b, offset } => (
+                hl_op_OJUGte,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JNotLt { a, b, offset } => (
+                hl_op_OJNotLt,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JNotGte { a, b, offset } => (
+                hl_op_OJNotGte,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JEq { a, b, offset } => (
+                hl_op_OJEq,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
+            Opcode::JNotEq { a, b, offset } => (
+                hl_op_OJNotEq,
+                a.0 as i32,
+                b.0 as i32,
+                *offset as i32,
+                Vec::new(),
+            ),
             Opcode::JAlways { offset } => (hl_op_OJAlways, *offset as i32, 0, 0, Vec::new()),
             Opcode::ToDyn { dst, src } => (hl_op_OToDyn, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::ToSFloat { dst, src } => (hl_op_OToSFloat, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::ToUFloat { dst, src } => (hl_op_OToUFloat, dst.0 as i32, src.0 as i32, 0, Vec::new()),
+            Opcode::ToSFloat { dst, src } => {
+                (hl_op_OToSFloat, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::ToUFloat { dst, src } => {
+                (hl_op_OToUFloat, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
             Opcode::ToInt { dst, src } => (hl_op_OToInt, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::SafeCast { dst, src } => (hl_op_OSafeCast, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::UnsafeCast { dst, src } => (hl_op_OUnsafeCast, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::ToVirtual { dst, src } => (hl_op_OToVirtual, dst.0 as i32, src.0 as i32, 0, Vec::new()),
+            Opcode::SafeCast { dst, src } => {
+                (hl_op_OSafeCast, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::UnsafeCast { dst, src } => {
+                (hl_op_OUnsafeCast, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::ToVirtual { dst, src } => {
+                (hl_op_OToVirtual, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
             Opcode::Label => (hl_op_OLabel, 0, 0, 0, Vec::new()),
             Opcode::Ret { ret } => (hl_op_ORet, ret.0 as i32, 0, 0, Vec::new()),
             Opcode::Throw { exc } => (hl_op_OThrow, exc.0 as i32, 0, 0, Vec::new()),
             Opcode::Rethrow { exc } => (hl_op_ORethrow, exc.0 as i32, 0, 0, Vec::new()),
             Opcode::NullCheck { reg } => (hl_op_ONullCheck, reg.0 as i32, 0, 0, Vec::new()),
-            Opcode::Trap { exc, offset } => (hl_op_OTrap, exc.0 as i32, *offset as i32, 0, Vec::new()),
+            Opcode::Trap { exc, offset } => {
+                (hl_op_OTrap, exc.0 as i32, *offset as i32, 0, Vec::new())
+            }
             Opcode::EndTrap { exc } => (hl_op_OEndTrap, exc.0 as i32, 0, 0, Vec::new()),
-            Opcode::GetI8 { dst, bytes, index } => (hl_op_OGetI8, dst.0 as i32, bytes.0 as i32, index.0 as i32, Vec::new()),
-            Opcode::GetI16 { dst, bytes, index } => (hl_op_OGetI16, dst.0 as i32, bytes.0 as i32, index.0 as i32, Vec::new()),
-            Opcode::GetMem { dst, bytes, index } => (hl_op_OGetMem, dst.0 as i32, bytes.0 as i32, index.0 as i32, Vec::new()),
-            Opcode::GetArray { dst, array, index } => (hl_op_OGetArray, dst.0 as i32, array.0 as i32, index.0 as i32, Vec::new()),
-            Opcode::SetI8 { bytes, index, src } => (hl_op_OSetI8, bytes.0 as i32, index.0 as i32, src.0 as i32, Vec::new()),
-            Opcode::SetI16 { bytes, index, src } => (hl_op_OSetI16, bytes.0 as i32, index.0 as i32, src.0 as i32, Vec::new()),
-            Opcode::SetMem { bytes, index, src } => (hl_op_OSetMem, bytes.0 as i32, index.0 as i32, src.0 as i32, Vec::new()),
-            Opcode::SetArray { array, index, src } => (hl_op_OSetArray, array.0 as i32, index.0 as i32, src.0 as i32, Vec::new()),
+            Opcode::GetI8 { dst, bytes, index } => (
+                hl_op_OGetI8,
+                dst.0 as i32,
+                bytes.0 as i32,
+                index.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::GetI16 { dst, bytes, index } => (
+                hl_op_OGetI16,
+                dst.0 as i32,
+                bytes.0 as i32,
+                index.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::GetMem { dst, bytes, index } => (
+                hl_op_OGetMem,
+                dst.0 as i32,
+                bytes.0 as i32,
+                index.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::GetArray { dst, array, index } => (
+                hl_op_OGetArray,
+                dst.0 as i32,
+                array.0 as i32,
+                index.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SetI8 { bytes, index, src } => (
+                hl_op_OSetI8,
+                bytes.0 as i32,
+                index.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SetI16 { bytes, index, src } => (
+                hl_op_OSetI16,
+                bytes.0 as i32,
+                index.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SetMem { bytes, index, src } => (
+                hl_op_OSetMem,
+                bytes.0 as i32,
+                index.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
+            Opcode::SetArray { array, index, src } => (
+                hl_op_OSetArray,
+                array.0 as i32,
+                index.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
             Opcode::New { dst } => (hl_op_ONew, dst.0 as i32, 0, 0, Vec::new()),
-            Opcode::ArraySize { dst, array } => (hl_op_OArraySize, dst.0 as i32, array.0 as i32, 0, Vec::new()),
+            Opcode::ArraySize { dst, array } => (
+                hl_op_OArraySize,
+                dst.0 as i32,
+                array.0 as i32,
+                0,
+                Vec::new(),
+            ),
             Opcode::Type { dst, ty } => (hl_op_OType, dst.0 as i32, ty.0 as i32, 0, Vec::new()),
-            Opcode::GetType { dst, src } => (hl_op_OGetType, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::GetTID { dst, src } => (hl_op_OGetTID, dst.0 as i32, src.0 as i32, 0, Vec::new()),
+            Opcode::GetType { dst, src } => {
+                (hl_op_OGetType, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::GetTID { dst, src } => {
+                (hl_op_OGetTID, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
             Opcode::Ref { dst, src } => (hl_op_ORef, dst.0 as i32, src.0 as i32, 0, Vec::new()),
             Opcode::Unref { dst, src } => (hl_op_OUnref, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::Setref { dst, value } => (hl_op_OSetref, dst.0 as i32, value.0 as i32, 0, Vec::new()),
-            Opcode::EnumAlloc { dst, construct } => (hl_op_OEnumAlloc, dst.0 as i32, construct.0 as i32, 0, Vec::new()),
-            Opcode::EnumIndex { dst, value } => (hl_op_OEnumIndex, dst.0 as i32, value.0 as i32, 0, Vec::new()),
-            Opcode::SetEnumField { value, field, src } => (hl_op_OSetEnumField, value.0 as i32, field.0 as i32, src.0 as i32, Vec::new()),
+            Opcode::Setref { dst, value } => {
+                (hl_op_OSetref, dst.0 as i32, value.0 as i32, 0, Vec::new())
+            }
+            Opcode::EnumAlloc { dst, construct } => (
+                hl_op_OEnumAlloc,
+                dst.0 as i32,
+                construct.0 as i32,
+                0,
+                Vec::new(),
+            ),
+            Opcode::EnumIndex { dst, value } => (
+                hl_op_OEnumIndex,
+                dst.0 as i32,
+                value.0 as i32,
+                0,
+                Vec::new(),
+            ),
+            Opcode::SetEnumField { value, field, src } => (
+                hl_op_OSetEnumField,
+                value.0 as i32,
+                field.0 as i32,
+                src.0 as i32,
+                Vec::new(),
+            ),
             Opcode::Assert => (hl_op_OAssert, 0, 0, 0, Vec::new()),
-            Opcode::RefData { dst, src } => (hl_op_ORefData, dst.0 as i32, src.0 as i32, 0, Vec::new()),
-            Opcode::RefOffset { dst, reg, offset } => (hl_op_ORefOffset, dst.0 as i32, reg.0 as i32, offset.0 as i32, Vec::new()),
+            Opcode::RefData { dst, src } => {
+                (hl_op_ORefData, dst.0 as i32, src.0 as i32, 0, Vec::new())
+            }
+            Opcode::RefOffset { dst, reg, offset } => (
+                hl_op_ORefOffset,
+                dst.0 as i32,
+                reg.0 as i32,
+                offset.0 as i32,
+                Vec::new(),
+            ),
             Opcode::Nop => (hl_op_ONop, 0, 0, 0, Vec::new()),
-            Opcode::Prefetch { value, field, mode } => (hl_op_OPrefetch, value.0 as i32, field.0 as i32, *mode, Vec::new()),
+            Opcode::Prefetch { value, field, mode } => (
+                hl_op_OPrefetch,
+                value.0 as i32,
+                field.0 as i32,
+                *mode,
+                Vec::new(),
+            ),
 
             // Variable-argument shapes. `read_opcode` reads these under
             // `nargs == -1`, with the count in `p3` (or `p2` for `Switch`)
             // followed by that many entries, so the inverse writes the count
             // and then the entries.
-            Opcode::Call2 { dst, fun, arg0, arg1 } => (
-                hl_op_OCall2, dst.0 as i32, fun.0 as i32, arg0.0 as i32,
+            Opcode::Call2 {
+                dst,
+                fun,
+                arg0,
+                arg1,
+            } => (
+                hl_op_OCall2,
+                dst.0 as i32,
+                fun.0 as i32,
+                arg0.0 as i32,
                 vec![arg1.0 as i32],
             ),
-            Opcode::Call3 { dst, fun, arg0, arg1, arg2 } => (
-                hl_op_OCall3, dst.0 as i32, fun.0 as i32, arg0.0 as i32,
+            Opcode::Call3 {
+                dst,
+                fun,
+                arg0,
+                arg1,
+                arg2,
+            } => (
+                hl_op_OCall3,
+                dst.0 as i32,
+                fun.0 as i32,
+                arg0.0 as i32,
                 vec![arg1.0 as i32, arg2.0 as i32],
             ),
-            Opcode::Call4 { dst, fun, arg0, arg1, arg2, arg3 } => (
-                hl_op_OCall4, dst.0 as i32, fun.0 as i32, arg0.0 as i32,
+            Opcode::Call4 {
+                dst,
+                fun,
+                arg0,
+                arg1,
+                arg2,
+                arg3,
+            } => (
+                hl_op_OCall4,
+                dst.0 as i32,
+                fun.0 as i32,
+                arg0.0 as i32,
                 vec![arg1.0 as i32, arg2.0 as i32, arg3.0 as i32],
             ),
             Opcode::CallN { dst, fun, args } => (
-                hl_op_OCallN, dst.0 as i32, fun.0 as i32, args.len() as i32,
+                hl_op_OCallN,
+                dst.0 as i32,
+                fun.0 as i32,
+                args.len() as i32,
                 args.iter().map(|a| a.0 as i32).collect(),
             ),
             Opcode::CallMethod { dst, field, args } => (
-                hl_op_OCallMethod, dst.0 as i32, field.0 as i32, args.len() as i32,
+                hl_op_OCallMethod,
+                dst.0 as i32,
+                field.0 as i32,
+                args.len() as i32,
                 args.iter().map(|a| a.0 as i32).collect(),
             ),
             Opcode::CallThis { dst, field, args } => (
-                hl_op_OCallThis, dst.0 as i32, field.0 as i32, args.len() as i32,
+                hl_op_OCallThis,
+                dst.0 as i32,
+                field.0 as i32,
+                args.len() as i32,
                 args.iter().map(|a| a.0 as i32).collect(),
             ),
             Opcode::CallClosure { dst, fun, args } => (
-                hl_op_OCallClosure, dst.0 as i32, fun.0 as i32, args.len() as i32,
+                hl_op_OCallClosure,
+                dst.0 as i32,
+                fun.0 as i32,
+                args.len() as i32,
                 args.iter().map(|a| a.0 as i32).collect(),
             ),
-            Opcode::MakeEnum { dst, construct, args } => (
-                hl_op_OMakeEnum, dst.0 as i32, construct.0 as i32, args.len() as i32,
+            Opcode::MakeEnum {
+                dst,
+                construct,
+                args,
+            } => (
+                hl_op_OMakeEnum,
+                dst.0 as i32,
+                construct.0 as i32,
+                args.len() as i32,
                 args.iter().map(|a| a.0 as i32).collect(),
             ),
             Opcode::Switch { reg, offsets, end } => (
-                hl_op_OSwitch, reg.0 as i32, offsets.len() as i32, *end,
+                hl_op_OSwitch,
+                reg.0 as i32,
+                offsets.len() as i32,
+                *end,
                 offsets.iter().map(|o| *o as i32).collect(),
             ),
-            Opcode::EnumField { dst, value, construct, field } => (
-                hl_op_OEnumField, dst.0 as i32, value.0 as i32, construct.0 as i32,
+            Opcode::EnumField {
+                dst,
+                value,
+                construct,
+                field,
+            } => (
+                hl_op_OEnumField,
+                dst.0 as i32,
+                value.0 as i32,
+                construct.0 as i32,
                 vec![field.0 as i32],
             ),
-            Opcode::Asm { mode, value, reg } => (
-                hl_op_OAsm, *mode, *value, reg.0 as i32, Vec::new(),
-            ),
+            Opcode::Asm { mode, value, reg } => {
+                (hl_op_OAsm, *mode, *value, reg.0 as i32, Vec::new())
+            }
             // Ash-internal: emitted only under hot reload, where a direct call
             // would bake in an address the next version will not live at. It
             // has no HashLink encoding, so a module carrying one cannot be
@@ -511,7 +886,6 @@ impl<'b> Encoder<'b> {
             }
         })
     }
-
 }
 
 fn bad(msg: &str) -> io::Error {

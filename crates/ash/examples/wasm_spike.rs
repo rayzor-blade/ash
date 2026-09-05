@@ -21,10 +21,13 @@ fn main() -> anyhow::Result<()> {
     println!("host triple : {}", triple.as_str().to_string_lossy());
 
     let wasm = inkwell::targets::TargetTriple::create("wasm32-unknown-unknown");
-    let target = Target::from_triple(&wasm)
-        .map_err(|e| anyhow::anyhow!("no wasm32 target: {e}"))?;
-    println!("wasm target : {} ({})", target.get_name().to_string_lossy(),
-             target.get_description().to_string_lossy());
+    let target =
+        Target::from_triple(&wasm).map_err(|e| anyhow::anyhow!("no wasm32 target: {e}"))?;
+    println!(
+        "wasm target : {} ({})",
+        target.get_name().to_string_lossy(),
+        target.get_description().to_string_lossy()
+    );
 
     let machine = target
         .create_target_machine(
@@ -44,7 +47,11 @@ fn main() -> anyhow::Result<()> {
     let module = ctx.create_module("spike");
     module.set_triple(&wasm);
     let i32t = ctx.i32_type();
-    let f = module.add_function("add", i32t.fn_type(&[i32t.into(), i32t.into()], false), None);
+    let f = module.add_function(
+        "add",
+        i32t.fn_type(&[i32t.into(), i32t.into()], false),
+        None,
+    );
     let bb = ctx.append_basic_block(f, "entry");
     let b = ctx.create_builder();
     b.position_at_end(bb);

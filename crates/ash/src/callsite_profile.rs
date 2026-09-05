@@ -164,7 +164,9 @@ static PROFILE_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 /// there is nothing to say about them, and saying it would emit a guard that
 /// always misses.
 pub fn monomorphic_callers() -> Vec<(u32, u32)> {
-    let m = method_sites().lock().expect("callsite profile mutex poisoned");
+    let m = method_sites()
+        .lock()
+        .expect("callsite profile mutex poisoned");
     // Polymorphic sites are IGNORED rather than poisoning their caller.
     //
     // A caller whose eleven monomorphic sites agree and whose twelfth is

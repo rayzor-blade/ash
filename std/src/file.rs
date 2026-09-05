@@ -647,10 +647,8 @@ mod file_error_code_tests {
     }
 
     fn missing_path(tag: &str) -> String {
-        let p = std::env::temp_dir().join(format!(
-            "ash_file_error_{tag}_{}",
-            crate::sys::process_id()
-        ));
+        let p =
+            std::env::temp_dir().join(format!("ash_file_error_{tag}_{}", crate::sys::process_id()));
         let _ = std::fs::remove_file(&p);
         p.to_str().unwrap().to_string()
     }
@@ -660,7 +658,10 @@ mod file_error_code_tests {
     #[test]
     fn it_reports_the_errno_of_the_last_failing_call() {
         unsafe {
-            assert_eq!(errno_after_failed_open(&missing_path("enoent")), libc::ENOENT);
+            assert_eq!(
+                errno_after_failed_open(&missing_path("enoent")),
+                libc::ENOENT
+            );
 
             // A different failure gives a different number, so the value is
             // being read rather than returned as a constant. Opening a
@@ -696,7 +697,10 @@ mod file_error_code_tests {
 
             // A second, different failure replaces it -- nothing is held on
             // behalf of the first, and no handle is consulted.
-            assert_eq!(errno_after_failed_open(&missing_path("latch")), libc::ENOENT);
+            assert_eq!(
+                errno_after_failed_open(&missing_path("latch")),
+                libc::ENOENT
+            );
 
             // Reading does not consume the value either.
             assert_eq!(hlp_file_error_code(), libc::ENOENT);

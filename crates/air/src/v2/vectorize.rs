@@ -317,11 +317,7 @@ fn analyze_loop(
     let mut inductions: Vec<(ValueId, i64)> = Vec::new();
 
     for phi in &f.blocks[header.idx()].phis {
-        let Some(&(_, back)) = phi
-            .incoming
-            .iter()
-            .find(|(p, _)| in_loop.contains(p))
-        else {
+        let Some(&(_, back)) = phi.incoming.iter().find(|(p, _)| in_loop.contains(p)) else {
             continue; // no back-edge source: not loop-carried
         };
         match classify_cycle(f, phi.dst, back, &def_block, &in_loop, &consts) {
@@ -348,9 +344,7 @@ fn analyze_loop(
     match inductions.len() {
         0 => plan.refusals.push(Refusal::NoInductionVariable),
         1 => plan.induction = Some(inductions[0]),
-        _ => plan
-            .refusals
-            .push(Refusal::MultipleInductionVariables),
+        _ => plan.refusals.push(Refusal::MultipleInductionVariables),
     }
 
     // ---- the exit test must bound the induction variable -------------------
@@ -439,9 +433,7 @@ fn classify_cycle(
 /// associative operation.
 fn reduction_or_opaque(f: &Function, phi: ValueId, b: usize, k: usize) -> Cycle {
     match &f.blocks[b].instrs[k] {
-        Instr::BinOp { op, a, b: rhs, .. }
-            if (*a == phi || *rhs == phi) && is_associative(*op) =>
-        {
+        Instr::BinOp { op, a, b: rhs, .. } if (*a == phi || *rhs == phi) && is_associative(*op) => {
             Cycle::Reduction(*op)
         }
         _ => Cycle::Opaque,
@@ -589,9 +581,7 @@ fn affine_step(
             ..
         } => step(*src),
         Instr::UnOp {
-            op: UnOp::Neg,
-            src,
-            ..
+            op: UnOp::Neg, src, ..
         } => step(*src).and_then(|s| s.checked_neg()),
         Instr::BinOp { op, a, b, .. } => match op {
             BinOp::Add => step(*a)?.checked_add(step(*b)?),
@@ -604,9 +594,7 @@ fn affine_step(
                 _ => None,
             },
             BinOp::Shl => match (step(*a), step(*b), konst(*b)) {
-                (Some(sa), Some(0), Some(k)) if (0..63).contains(&k) => {
-                    sa.checked_mul(1i64 << k)
-                }
+                (Some(sa), Some(0), Some(k)) if (0..63).contains(&k) => sa.checked_mul(1i64 << k),
                 _ => None,
             },
             _ => None,

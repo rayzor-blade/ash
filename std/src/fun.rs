@@ -555,7 +555,9 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     // surfaced as a bare `unreachable` trap with no message, which is how the
     // conformance suite ended rather than reporting a failure and continuing.
     let Some(sig) = (*(*cl).t).__bindgen_anon_1.fun.as_ref() else {
-        hlp_error(str_to_uchar_ptr("Can't call closure whose type is not a function"));
+        hlp_error(str_to_uchar_ptr(
+            "Can't call closure whose type is not a function",
+        ));
         unreachable!("hlp_error does not return")
     };
     if (*args).size < sig.nargs {

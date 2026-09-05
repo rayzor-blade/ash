@@ -69,9 +69,12 @@ impl HLInterpreter {
                             // Promotion swaps a pointer, which only the next
                             // call observes; a loop entered once would keep
                             // interpreting past its own compile without this.
-                            if let Some(ret) =
-                                self.try_osr_transfer(bc, func_idx, header_pc, Some((prep, block, prev_block)))?
-                            {
+                            if let Some(ret) = self.try_osr_transfer(
+                                bc,
+                                func_idx,
+                                header_pc,
+                                Some((prep, block, prev_block)),
+                            )? {
                                 return Ok(ret);
                             }
                         }
@@ -95,8 +98,7 @@ impl HLInterpreter {
             // this reads it as a pc -- a trace resolves it against the debug
             // table, which numbered lines by opcode. Publishing the index put
             // a frame on whatever line happened to share its number.
-            self.stack.last_mut().unwrap().pc =
-                prep.block_pcs.get(block).copied().unwrap_or(block);
+            self.stack.last_mut().unwrap().pc = prep.block_pcs.get(block).copied().unwrap_or(block);
 
             // A phi group is a parallel copy. Read every source before writing
             // any destination, or `x, y = y, x` collapses into `x, y = y, y`.
@@ -356,9 +358,9 @@ impl HLInterpreter {
                 let mut out = Vec::with_capacity(lanes);
                 for k in 0..lanes {
                     let at = idx0 + (k as i32) * (*stride as i32);
-                    out.push(self.vec_lane_get(
-                        bc, func, func_idx, *kind, dst.0, base.0, index.0, at,
-                    )?);
+                    out.push(
+                        self.vec_lane_get(bc, func, func_idx, *kind, dst.0, base.0, index.0, at)?,
+                    );
                 }
                 self.stack.last_mut().unwrap().vec_lanes.insert(dst.0, out);
             }
@@ -373,9 +375,7 @@ impl HLInterpreter {
                 let lanes = self.lanes_of(src.0)?;
                 for (k, v) in lanes.iter().enumerate() {
                     let at = idx0 + (k as i32) * (*stride as i32);
-                    self.vec_lane_set(
-                        bc, func, func_idx, *kind, src.0, base.0, index.0, at, *v,
-                    )?;
+                    self.vec_lane_set(bc, func, func_idx, *kind, src.0, base.0, index.0, at, *v)?;
                 }
             }
             I::VecSplat { dst, src } => {
@@ -1282,9 +1282,9 @@ impl HLInterpreter {
             .registers
             .set(index, NanBoxedValue::from_i32(at));
         let r = match kind {
-            air::v2::MemAccess::Array => {
-                self.op_get_array(bc, func, func_idx, dst, base, index).map(|_| ())
-            }
+            air::v2::MemAccess::Array => self
+                .op_get_array(bc, func, func_idx, dst, base, index)
+                .map(|_| ()),
             k => {
                 let b = self.stack.last().unwrap().registers.get(base);
                 let val = Self::read_raw_lane(b, at, k, bc, func, dst);
@@ -1325,9 +1325,9 @@ impl HLInterpreter {
             f.registers.set(index, NanBoxedValue::from_i32(at));
         }
         let r = match kind {
-            air::v2::MemAccess::Array => {
-                self.op_set_array(bc, func, func_idx, base, index, src).map(|_| ())
-            }
+            air::v2::MemAccess::Array => self
+                .op_set_array(bc, func, func_idx, base, index, src)
+                .map(|_| ()),
             k => {
                 let b = self.stack.last().unwrap().registers.get(base);
                 Self::write_raw_lane(b, at, k, value, bc, func, src);

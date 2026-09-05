@@ -22,10 +22,10 @@ use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
 // Native fibers switch stacks; wasm fibers are driven by the host. Same
 // four operations either way, so the scheduler below does not branch.
-#[cfg(not(target_family = "wasm"))]
-use krio_fiber::{Fiber, FiberState};
 #[cfg(target_family = "wasm")]
 use ash_wasm_runtime::guest::{Fiber, FiberState};
+#[cfg(not(target_family = "wasm"))]
+use krio_fiber::{Fiber, FiberState};
 
 #[cfg(not(target_family = "wasm"))]
 fn yield_now_backend() {
@@ -551,8 +551,7 @@ fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {
 }
 
 fn can_dispatch_to_worker() -> bool {
-    COMPILED_WORKERS_ENABLED.load(Ordering::Acquire)
-        && configured_worker_count() != 0
+    COMPILED_WORKERS_ENABLED.load(Ordering::Acquire) && configured_worker_count() != 0
 }
 
 fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
@@ -875,22 +874,16 @@ pub(crate) unsafe fn update_gc_blocking_depth(blocking: bool) -> bool {
         });
     }
     SCHEDULER.with(|scheduler| {
-        update_blocking_depth(
-            &mut scheduler.borrow_mut().main_gc_blocking_depth,
-            blocking,
-        )
+        update_blocking_depth(&mut scheduler.borrow_mut().main_gc_blocking_depth, blocking)
     })
 }
 
 pub(crate) unsafe fn is_gc_blocking() -> bool {
-    ACTIVE_FIBER.with(|active| {
-        active
-            .get()
-            .map(|fiber| fiber.gc_blocking_depth != 0)
-    })
-    .unwrap_or_else(|| {
-        SCHEDULER.with(|scheduler| scheduler.borrow().main_gc_blocking_depth != 0)
-    })
+    ACTIVE_FIBER
+        .with(|active| active.get().map(|fiber| fiber.gc_blocking_depth != 0))
+        .unwrap_or_else(|| {
+            SCHEDULER.with(|scheduler| scheduler.borrow().main_gc_blocking_depth != 0)
+        })
 }
 
 fn update_blocking_depth(depth: &mut u32, blocking: bool) -> bool {
@@ -913,11 +906,7 @@ fn update_blocking_depth(depth: &mut u32, blocking: bool) -> bool {
 /// exception and may terminate the fiber.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_is_root_closure(c: *mut vclosure) -> bool {
-    ACTIVE_FIBER.with(|active| {
-        active
-            .get()
-            .is_some_and(|fiber| fiber.closure == c)
-    })
+    ACTIVE_FIBER.with(|active| active.get().is_some_and(|fiber| fiber.closure == c))
 }
 
 unsafe fn notify_switch(from: u32, to: u32) {
@@ -1030,7 +1019,11 @@ pub unsafe extern "C" fn hlp_jit_closure_runner(
 }
 
 unsafe fn install_fiber(id: u32, c: *mut vclosure) {
-    worker_trace("install", id as u64, SCHEDULER.with(|scheduler| scheduler.borrow().id));
+    worker_trace(
+        "install",
+        id as u64,
+        SCHEDULER.with(|scheduler| scheduler.borrow().id),
+    );
     let c_usize = c as usize;
     let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
         run_closure(c_usize as *mut vclosure);
@@ -1104,7 +1097,9 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
             .map_or(-1, |fun| fun.nargs);
         eprintln!(
             "[fiber] create closure={c:p} fun={:p} has_value={} value={:p} nargs={nargs}",
-            (*c).fun, (*c).hasValue, (*c).value
+            (*c).fun,
+            (*c).hasValue,
+            (*c).value
         );
     }
     if can_dispatch_to_worker() {

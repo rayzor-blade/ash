@@ -1341,9 +1341,7 @@ fn usable_ram_bytes() -> usize {
     // an allocation panic inside an `extern "C"` frame that cannot unwind.
     #[cfg(target_os = "windows")]
     {
-        use windows_sys::Win32::System::SystemInformation::{
-            GlobalMemoryStatusEx, MEMORYSTATUSEX,
-        };
+        use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
         let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
         status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
         if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 && status.ullTotalPhys > 0 {
@@ -3540,7 +3538,11 @@ impl ImmixAllocator {
                         }
                     };
                     if let Some((gp, count)) = self.globals_range {
-                        audit("globals", gp as usize, gp as usize + count * std::mem::size_of::<usize>());
+                        audit(
+                            "globals",
+                            gp as usize,
+                            gp as usize + count * std::mem::size_of::<usize>(),
+                        );
                     }
                     for mutator in mutators {
                         for &(rs, sz) in &mutator.scan_ranges {

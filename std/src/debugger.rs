@@ -675,7 +675,10 @@ mod unsupported_tooling_tests {
         // Nothing was attached, so nothing detaches: the queries answer exactly
         // as they did before.
         unsafe {
-            assert!(!hlp_debug_start(1), "debug_start still refuses after a stop");
+            assert!(
+                !hlp_debug_start(1),
+                "debug_start still refuses after a stop"
+            );
             assert_eq!(
                 hlp_debug_wait(1, std::ptr::null_mut(), 0),
                 0,
@@ -890,7 +893,13 @@ mod unsupported_tooling_tests {
                         let mut count = SENTINEL;
                         let mut info = SENTINEL;
                         assert_eq!(
-                            hlp_track_entry(round as i32, &mut t, &mut count, &mut info, &mut stack),
+                            hlp_track_entry(
+                                round as i32,
+                                &mut t,
+                                &mut count,
+                                &mut info,
+                                &mut stack
+                            ),
                             -1
                         );
                         assert!(t.is_null());
@@ -902,7 +911,8 @@ mod unsupported_tooling_tests {
         }
 
         for h in handles {
-            h.join().expect("a stub answered something other than \"unavailable\"");
+            h.join()
+                .expect("a stub answered something other than \"unavailable\"");
         }
     }
 }

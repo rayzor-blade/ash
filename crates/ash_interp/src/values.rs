@@ -114,12 +114,7 @@ impl NanBoxedValue {
             debug_assert_eq!(ptr & 7, 0);
             let compressed_ptr = ptr >> 3;
             debug_assert_eq!(compressed_ptr & !(Self::I64_SPILL_PTR_MASK as usize), 0);
-            Self(
-                Self::NAN_TAG
-                    | Self::TAG_I64
-                    | Self::I64_SPILL_MARK
-                    | compressed_ptr as u64,
-            )
+            Self(Self::NAN_TAG | Self::TAG_I64 | Self::I64_SPILL_MARK | compressed_ptr as u64)
         }
     }
 

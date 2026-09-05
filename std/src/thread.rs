@@ -1346,7 +1346,11 @@ mod foreign_thread_tests {
                 super::hlp_mutex_acquire(m);
                 let head = HEAD.load(Ordering::Relaxed) as *mut Node;
                 assert!(!head.is_null(), "a permit outlived its node");
-                assert_eq!((*head).magic, MAGIC, "node observed before it was published");
+                assert_eq!(
+                    (*head).magic,
+                    MAGIC,
+                    "node observed before it was published"
+                );
                 assert_eq!((*head).payload.len(), 64);
                 let seq = (*head).seq;
                 assert!(!seen[seq], "node {seq} was drained twice");

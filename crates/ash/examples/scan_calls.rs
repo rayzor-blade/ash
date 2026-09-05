@@ -37,7 +37,10 @@ fn main() -> anyhow::Result<()> {
 
     for n in &bc.natives {
         if n.findex as usize == want {
-            println!("=== target findex={want} is NATIVE {}@{} ===", n.lib, n.name);
+            println!(
+                "=== target findex={want} is NATIVE {}@{} ===",
+                n.lib, n.name
+            );
         }
     }
 

@@ -59,8 +59,9 @@ impl Pass for DeadCodeElim {
             }
             let mut live: std::collections::HashSet<ValueId> = std::collections::HashSet::new();
             let mut work: Vec<ValueId> = Vec::new();
-            let seed = |v: ValueId, live: &mut std::collections::HashSet<ValueId>,
-                            work: &mut Vec<ValueId>| {
+            let seed = |v: ValueId,
+                        live: &mut std::collections::HashSet<ValueId>,
+                        work: &mut Vec<ValueId>| {
                 if incoming.contains_key(&v) && live.insert(v) {
                     work.push(v);
                 }

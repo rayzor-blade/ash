@@ -13,7 +13,9 @@ fn main() -> anyhow::Result<()> {
         let bc = ash_core::bytecode::BytecodeDecoder::decode(std::path::Path::new(&path))?;
         let m = ash_core::air_pipeline::AshModule::new(&bc);
         for f in &bc.functions {
-            let Ok(opt) = ash_core::air_pipeline::optimized(&m, f) else { continue };
+            let Ok(opt) = ash_core::air_pipeline::optimized(&m, f) else {
+                continue;
+            };
             total += 1;
             match ash_core::cranelift::codegen::reject_reason(&opt.ir) {
                 None => ok += 1,
@@ -21,8 +23,10 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    println!("{ok}/{total} functions compilable by the Cranelift tier ({:.1}%)",
-             100.0 * ok as f64 / total.max(1) as f64);
+    println!(
+        "{ok}/{total} functions compilable by the Cranelift tier ({:.1}%)",
+        100.0 * ok as f64 / total.max(1) as f64
+    );
     let mut rows: Vec<_> = hist.into_iter().collect();
     rows.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
     for (why, n) in rows.iter().take(20) {

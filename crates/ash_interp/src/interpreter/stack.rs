@@ -85,10 +85,7 @@ impl HLInterpreter {
                     let key = Self::stack_symbol_key(func, frame.pc);
                     Arc::clone(cache.entry(key).or_insert_with(|| {
                         let (findex, file_idx, line) = key;
-                        let name = names
-                            .get(&findex)
-                            .cloned()
-                            .unwrap_or_else(|| func.name());
+                        let name = names.get(&findex).cloned().unwrap_or_else(|| func.name());
                         Arc::new(TraceFrame {
                             symbol: Arc::from(name.as_str()),
                             // No debug info (a release build): the name alone
@@ -169,9 +166,7 @@ impl HLInterpreter {
         // opcodes and carries the debug table built for them. `air.body` is
         // the right answer only for the path that executes those opcodes.
         let key = match self.ssa.body(function_index) {
-            Some(prep) if !prep.shim.debug.is_empty() => {
-                Self::stack_symbol_key(prep.shim, pc)
-            }
+            Some(prep) if !prep.shim.debug.is_empty() => Self::stack_symbol_key(prep.shim, pc),
             _ => Self::stack_symbol_key(self.air.body(bytecode, function_index), pc),
         };
         Some(self.intern_stack_symbol(bytecode, key))
@@ -408,7 +403,11 @@ impl HLInterpreter {
         self.call_stack_symbols.len()
     }
 
-    pub(super) unsafe fn write_call_stack(&mut self, output: *mut *mut c_void, capacity: i32) -> i32 {
+    pub(super) unsafe fn write_call_stack(
+        &mut self,
+        output: *mut *mut c_void,
+        capacity: i32,
+    ) -> i32 {
         if !output.is_null() {
             for (index, symbol) in self
                 .call_stack_symbols
@@ -460,5 +459,4 @@ impl HLInterpreter {
         }
         Ok(NanBoxedValue::from_i32(symbols.len() as i32))
     }
-
 }

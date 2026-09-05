@@ -182,11 +182,7 @@ pub fn object_layout(types: &[HLType], type_index: usize) -> Option<ObjLayout> {
     object_layout_for(types, type_index, HOST_WORD_SIZE)
 }
 
-pub fn object_layout_for(
-    types: &[HLType],
-    type_index: usize,
-    word_size: i32,
-) -> Option<ObjLayout> {
+pub fn object_layout_for(types: &[HLType], type_index: usize, word_size: i32) -> Option<ObjLayout> {
     let mut memo = HashMap::new();
     layout_memo(types, type_index, word_size, &mut memo, 0)
 }
@@ -575,11 +571,7 @@ mod tests {
     /// name the same address.
     #[test]
     fn array_strides_are_never_zero() {
-        for kind in [
-            hl_type_kind_HVOID,
-            hl_type_kind_HPACKED,
-            hl_type_kind_HOBJ,
-        ] {
+        for kind in [hl_type_kind_HVOID, hl_type_kind_HPACKED, hl_type_kind_HOBJ] {
             assert_eq!(array_elem_size(kind), 8, "kind {kind}");
         }
     }

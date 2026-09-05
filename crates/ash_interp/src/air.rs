@@ -59,7 +59,9 @@ pub fn enabled() -> bool {
         Ok("v2-serialize") => true,
         Err(_) | Ok("") | Ok("v2") | Ok("0") | Ok("off") => false,
         Ok(other) => {
-            eprintln!("[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off");
+            eprintln!(
+                "[air] ignoring ASH_AIR='{other}' (expected v2|v2-serialize|off); AIR is off"
+            );
             false
         }
     })
@@ -79,7 +81,11 @@ fn logging() -> bool {
 /// one function's before and after so that question can be answered directly.
 fn dump_findex() -> Option<i32> {
     static CELL: OnceLock<Option<i32>> = OnceLock::new();
-    *CELL.get_or_init(|| std::env::var("ASH_AIR_DUMP").ok().and_then(|v| v.trim().parse().ok()))
+    *CELL.get_or_init(|| {
+        std::env::var("ASH_AIR_DUMP")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+    })
 }
 
 /// Opcodes whose source location can become part of a Haxe stack trace.
@@ -254,7 +260,6 @@ enum Body {
     Ready(&'static HLFunction),
     /// The pipeline refused this one; its raw opcodes run from here on.
     Raw,
-
 }
 
 /// Per-function optimized bodies, plus the module view they were lowered
@@ -279,7 +284,6 @@ pub struct Cache {
     optimized: usize,
     refused: usize,
 }
-
 
 /// Whether a function with no back edge skips the AIR pipeline entirely.
 ///
@@ -332,8 +336,7 @@ impl Cache {
             let without: &AshModule<'_> = Box::leak(Box::new(built.without_callees_view()));
             let with: &AshModule<'_> = Box::leak(Box::new(built));
             let with: &'static AshModule<'static> = unsafe { std::mem::transmute(with) };
-            let without: &'static AshModule<'static> =
-                unsafe { std::mem::transmute(without) };
+            let without: &'static AshModule<'static> = unsafe { std::mem::transmute(without) };
             self.bodies.clear();
             self.module = Some((key, with, without));
         }
@@ -345,8 +348,7 @@ impl Cache {
             return;
         }
 
-        let (_, with_callees, without_callees) =
-            self.module.expect("module cached just above");
+        let (_, with_callees, without_callees) = self.module.expect("module cached just above");
         let raw = &bc.functions[func_idx];
 
         // A function with no back edge cannot loop, so the only work it will
@@ -418,7 +420,11 @@ impl Cache {
                     for (i, op) in raw.ops.iter().enumerate() {
                         eprintln!("[air] raw {i:4}  {op:?}");
                     }
-                    eprintln!("[air] === findex={} {} optimized ===", raw.findex, raw.name());
+                    eprintln!(
+                        "[air] === findex={} {} optimized ===",
+                        raw.findex,
+                        raw.name()
+                    );
                     for (i, op) in opt.ops.iter().enumerate() {
                         let file = opt.debug.get(i * 2).copied().unwrap_or(-1);
                         let line = opt.debug.get(i * 2 + 1).copied().unwrap_or(0);

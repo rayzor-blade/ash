@@ -217,22 +217,27 @@ pub enum LlvmCeiling {
 /// the old behaviour, for the A/B.
 pub fn shared_promote_allows(ceiling: LlvmCeiling) -> bool {
     static MIN_HIGH: OnceLock<bool> = OnceLock::new();
-    let high_only = *MIN_HIGH.get_or_init(|| {
-        match std::env::var("ASH_SHARED_PROMOTE").as_deref() {
+    let high_only =
+        *MIN_HIGH.get_or_init(|| match std::env::var("ASH_SHARED_PROMOTE").as_deref() {
             Ok("all") | Ok("low") => false,
             Ok("high") | Err(_) | Ok("") => true,
             Ok(other) => {
-                eprintln!("[tier] ignoring ASH_SHARED_PROMOTE='{other}' (expected high|all); using high");
+                eprintln!(
+                    "[tier] ignoring ASH_SHARED_PROMOTE='{other}' (expected high|all); using high"
+                );
                 true
             }
-        }
-    });
+        });
     !high_only || ceiling == LlvmCeiling::High
 }
 
 pub fn promotion_gate_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ASH_PROMOTE_GATE").map(|v| v != "0").unwrap_or(true))
+    *ON.get_or_init(|| {
+        std::env::var("ASH_PROMOTE_GATE")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    })
 }
 
 /// The ceiling for one function, memoized: the AIR pipeline is not something
@@ -269,11 +274,10 @@ fn compute_ceiling(bc: &DecodedBytecode, f: &HLFunction) -> LlvmCeiling {
     // which reports a step of 1 stored at index 2 as a stride of 2 and
     // refuses the loop as non-contiguous -- the ceiling would then be Low for
     // loops that are in fact the best candidates the tier has.
-    let plans = air::v2::vectorize::analyze_with(
-        ir,
-        &air::v2::vectorize::VecOptions::default(),
-        &|i| bc.ints.get(i).copied(),
-    );
+    let plans =
+        air::v2::vectorize::analyze_with(ir, &air::v2::vectorize::VecOptions::default(), &|i| {
+            bc.ints.get(i).copied()
+        });
     if plans.iter().any(|p| p.vectorizable()) {
         return LlvmCeiling::High;
     }

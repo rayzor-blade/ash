@@ -309,7 +309,9 @@ pub unsafe extern "C" fn hlp_safe_cast(t: *mut hl::hl_type, to: *mut hl::hl_type
                     return false;
                 }
                 let sup = (*o).super_;
-                if (sup as usize) < 0x10000 || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>()) {
+                if (sup as usize) < 0x10000
+                    || !(sup as usize).is_multiple_of(std::mem::align_of::<usize>())
+                {
                     return false;
                 }
                 if (*sup).kind != hl::hl_type_kind_HOBJ && (*sup).kind != hl::hl_type_kind_HSTRUCT {
@@ -491,7 +493,6 @@ pub unsafe extern "C" fn hlp_type_args_count(t: *mut hl::hl_type) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut venum {
-
     let tenum = (*t).__bindgen_anon_1.tenum;
     if tenum.is_null() {
         return ptr::null_mut();
@@ -866,9 +867,7 @@ mod guid_name_tests {
         const GUID: i64 = 0x0a51_7e57_0000_0005;
         unsafe {
             // "ab\0cd\0": everything after the first NUL must be ignored.
-            let buf: Vec<u16> = vec![
-                'a' as u16, 'b' as u16, 0, 'c' as u16, 'd' as u16, 0,
-            ];
+            let buf: Vec<u16> = vec!['a' as u16, 'b' as u16, 0, 'c' as u16, 'd' as u16, 0];
             hlp_register_guid_name(GUID, buf.as_ptr() as *mut _);
             assert_eq!(stored(GUID).as_deref(), Some(want("ab").as_slice()));
 
@@ -883,7 +882,10 @@ mod guid_name_tests {
             // Non-ASCII survives as UTF-16 code units rather than bytes.
             let uni = u16z("\u{00e9}\u{4e2d}");
             hlp_register_guid_name(GUID, uni.as_ptr() as *mut _);
-            assert_eq!(stored(GUID).as_deref(), Some(want("\u{00e9}\u{4e2d}").as_slice()));
+            assert_eq!(
+                stored(GUID).as_deref(),
+                Some(want("\u{00e9}\u{4e2d}").as_slice())
+            );
 
             hlp_register_guid_name(GUID, std::ptr::null_mut());
             assert_eq!(stored(GUID), None);
@@ -938,7 +940,11 @@ pub unsafe extern "C" fn hlp_type_data_size(t: *mut hl_type) -> i32 {
     match (*t).kind {
         hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
             let rt = crate::obj::hlp_get_obj_rt(t);
-            if rt.is_null() { -1 } else { (*rt).size }
+            if rt.is_null() {
+                -1
+            } else {
+                (*rt).size
+            }
         }
         _ => -1,
     }

@@ -110,10 +110,7 @@ pub unsafe extern "C" fn hlp_regexp_match(
     // `pos`.  Anchors are relative to the subject in PCRE2: slicing made `^`
     // spuriously match after every zero-width global match, because each new
     // offset appeared to be the start of a fresh string.
-    if let Ok(Some(caps)) = state
-        .regex
-        .captures_from_pos(visible_subject, start_byte)
-    {
+    if let Ok(Some(caps)) = state.regex.captures_from_pos(visible_subject, start_byte) {
         let mut groups = Vec::with_capacity(caps.len());
         for i in 0..caps.len() {
             if let Some(m) = caps.get(i) {

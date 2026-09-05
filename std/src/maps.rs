@@ -55,7 +55,6 @@ impl ImmixAllocator {
 
         NonNull::new(map_ptr.as_ptr() as *mut hl::hl_hb_map)
     }
-
 }
 
 unsafe fn hl_freelist_add_range(f: *mut hl::hl_free_list, pos: i32, count: i32) {
@@ -249,7 +248,9 @@ impl HbMapExt for *mut hl::hl_hb_map {
     fn m_index(&self, ckey: u32) -> i32 {
         unsafe {
             if (**self).maxentries < _MLIMIT {
-                ((*(*self)).cells as *const std::ffi::c_char).add(ckey as usize).read() as i32
+                ((*(*self)).cells as *const std::ffi::c_char)
+                    .add(ckey as usize)
+                    .read() as i32
             } else {
                 ((*(*self)).cells as *const i32).add(ckey as usize).read()
             }
@@ -259,7 +260,9 @@ impl HbMapExt for *mut hl::hl_hb_map {
     fn m_next(&self, ckey: u32) -> i32 {
         unsafe {
             if (**self).maxentries < _MLIMIT {
-                ((*(*self)).nexts as *const std::ffi::c_char).add(ckey as usize).read() as i32
+                ((*(*self)).nexts as *const std::ffi::c_char)
+                    .add(ckey as usize)
+                    .read() as i32
             } else {
                 ((*(*self)).nexts as *const i32).add(ckey as usize).read()
             }
@@ -293,12 +296,21 @@ pub unsafe extern "C" fn hlp_hbset(
 ) {
     use hl_hb::HbMap;
     if env_flag!("ASH_MAP_TRACE") {
-        let k = if key.is_null() { String::new() } else {
-            let mut out = String::new(); let mut p = key;
-            while *p != 0 { out.push(char::from_u32(*p as u32).unwrap_or('?')); p = p.add(1); }
+        let k = if key.is_null() {
+            String::new()
+        } else {
+            let mut out = String::new();
+            let mut p = key;
+            while *p != 0 {
+                out.push(char::from_u32(*p as u32).unwrap_or('?'));
+                p = p.add(1);
+            }
             out
         };
-        eprintln!("[hbset] map={:#x} key={k:?} val={:#x}", m as usize, value as usize);
+        eprintln!(
+            "[hbset] map={:#x} key={k:?} val={:#x}",
+            m as usize, value as usize
+        );
     }
 
     let mut c;
@@ -328,15 +340,15 @@ pub unsafe extern "C" fn hlp_hbset(
         let src = ((*m).cells as *const std::ffi::c_char).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut std::ffi::c_char).wrapping_add(c as usize);
         ptr::write(dst, ptr::read(src));
-        ptr::write(((*m).cells as *mut std::ffi::c_char).wrapping_add(ckey as usize), c as std::ffi::c_char);
+        ptr::write(
+            ((*m).cells as *mut std::ffi::c_char).wrapping_add(ckey as usize),
+            c as std::ffi::c_char,
+        );
     } else {
         let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
         ptr::write(dst, ptr::read(src));
-        ptr::write(
-            ((*m).cells as *mut i32).wrapping_add(ckey as usize),
-            c,
-        );
+        ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), c);
     }
     (*(*m).values.wrapping_add(c as usize)).value = value;
     (*m).nentries += 1;
@@ -1087,7 +1099,7 @@ pub unsafe extern "C" fn hlp_hosize(m: *mut c_void) -> i32 {
 #[cfg(test)]
 mod hi64_tests {
     use super::*;
-    use crate::hl::{vdynamic, varray};
+    use crate::hl::{varray, vdynamic};
 
     /// Every `#[test]` runs on its own harness thread and every prim below
     /// allocates from the process-wide collector. A thread the collector has
@@ -1126,10 +1138,8 @@ mod hi64_tests {
     /// than a failed assertion.
     unsafe fn dyn_i64(v: i64) -> *mut vdynamic {
         let mut raw = v;
-        let d = crate::cast::hlp_make_dyn(
-            &mut raw as *mut i64 as *mut c_void,
-            crate::types::hlt_i64(),
-        );
+        let d =
+            crate::cast::hlp_make_dyn(&mut raw as *mut i64 as *mut c_void, crate::types::hlt_i64());
         assert!(!d.is_null(), "hlp_make_dyn returned null for {v}");
         d
     }
@@ -1265,7 +1275,10 @@ mod hi64_tests {
         let _m = Mutator::enter();
         unsafe {
             let map = hlp_hi64alloc();
-            assert!(!hlp_hi64remove(map, 5), "removing from an empty map is false");
+            assert!(
+                !hlp_hi64remove(map, 5),
+                "removing from an empty map is false"
+            );
 
             hlp_hi64set(map, 5, dyn_i64(50));
             assert!(hlp_hi64remove(map, 5), "removing a present key is true");
@@ -1397,7 +1410,10 @@ mod hi64_tests {
             assert_eq!(hlp_hi64size(map), 0);
             for &k in &WIDE_KEYS {
                 assert!(!hlp_hi64exists(map, k), "key {k} survived clear");
-                assert!(hlp_hi64get(map, k).is_null(), "value for {k} survived clear");
+                assert!(
+                    hlp_hi64get(map, k).is_null(),
+                    "value for {k} survived clear"
+                );
             }
             assert!(keys_of(map).is_empty());
             assert!(values_of(map).is_empty());
@@ -1444,8 +1460,7 @@ mod hi64_tests {
     fn every_prim_matches_its_upstream_signature() {
         let table: [*const c_void; 9] = [
             (hlp_hi64alloc as unsafe extern "C" fn() -> *mut c_void) as *const c_void,
-            (hlp_hi64set as unsafe extern "C" fn(*mut c_void, i64, *mut vdynamic))
-                as *const c_void,
+            (hlp_hi64set as unsafe extern "C" fn(*mut c_void, i64, *mut vdynamic)) as *const c_void,
             (hlp_hi64exists as unsafe extern "C" fn(*mut c_void, i64) -> bool) as *const c_void,
             (hlp_hi64get as unsafe extern "C" fn(*mut c_void, i64) -> *mut vdynamic)
                 as *const c_void,

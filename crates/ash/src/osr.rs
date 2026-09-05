@@ -162,7 +162,10 @@ pub fn analyze(f: &Function) -> OsrPlan {
         if entry_headers.is_empty() && !refusals.contains(&OsrRefusal::NoBackEdge) {
             refusals.push(OsrRefusal::NoBackEdge);
         }
-        return OsrPlan { refusals, entry_headers };
+        return OsrPlan {
+            refusals,
+            entry_headers,
+        };
     }
     for l in forest.innermost_first() {
         let lp = forest.get(l);

@@ -1622,10 +1622,10 @@ impl Lowerer<'_, '_> {
             .b
             .ins()
             .iconst(types::I64, ash_jit_resolve_stub as usize as i64);
-        let resolve_call =
-            self.b
-                .ins()
-                .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
+        let resolve_call = self
+            .b
+            .ins()
+            .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
         let resolved = self.b.inst_results(resolve_call)[0];
         let resolved_real = self.b.ins().icmp_imm_s(
             IntCC::UnsignedGreaterThanOrEqual,

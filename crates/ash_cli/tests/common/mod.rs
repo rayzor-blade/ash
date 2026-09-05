@@ -239,7 +239,11 @@ pub fn run_haxe_interp(tests_dir: &Path, case: &ParityCase) -> Option<Output> {
     Some(run(cmd))
 }
 
-pub fn run_hashlink(hl_path: &Path, program_args: &[String], timeout: Option<Duration>) -> RunResult {
+pub fn run_hashlink(
+    hl_path: &Path,
+    program_args: &[String],
+    timeout: Option<Duration>,
+) -> RunResult {
     let mut cmd = Command::new("hl");
     cmd.arg(hl_path);
     cmd.args(program_args);
@@ -295,7 +299,12 @@ fn parse_string_array(raw: &str, lineno: usize) -> Vec<String> {
     let inner = v
         .strip_prefix('[')
         .and_then(|x| x.strip_suffix(']'))
-        .unwrap_or_else(|| panic!("program_args must be a single-line array, line {}", lineno + 1));
+        .unwrap_or_else(|| {
+            panic!(
+                "program_args must be a single-line array, line {}",
+                lineno + 1
+            )
+        });
     inner
         .split(',')
         .map(str::trim)

@@ -158,8 +158,7 @@ impl Pass for DeadCellStoreElim {
         if std::env::var_os("ASH_AIR_NO_CELLDSE").is_some() || f.blocks.is_empty() {
             return Ok(stats);
         }
-        if f
-            .blocks
+        if f.blocks
             .iter()
             .any(|b| b.handler.is_some() || matches!(b.term, Terminator::Trap { .. }))
         {

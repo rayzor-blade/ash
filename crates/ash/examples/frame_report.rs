@@ -47,7 +47,11 @@ fn main() {
         slots_now += now;
         slots_peak += peak + ir.cells.len();
         counted += 1;
-        worst.push((now.saturating_sub(peak + ir.cells.len()), now, peak + ir.cells.len()));
+        worst.push((
+            now.saturating_sub(peak + ir.cells.len()),
+            now,
+            peak + ir.cells.len(),
+        ));
     }
 
     worst.sort_by_key(|&(saving, _, _)| std::cmp::Reverse(saving));

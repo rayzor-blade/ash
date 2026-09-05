@@ -255,10 +255,9 @@ pub fn verify(f: &Function) -> Result<()> {
         }
         for ins in &blk.instrs {
             match ins {
-                Instr::Copy { dst, src }
-                    if f.value_ty(*dst) != f.value_ty(*src) => {
-                        bail!("b{}: Copy between different types", b);
-                    }
+                Instr::Copy { dst, src } if f.value_ty(*dst) != f.value_ty(*src) => {
+                    bail!("b{}: Copy between different types", b);
+                }
                 Instr::BinOp { dst, a, b: rb, .. } => {
                     let ty = f.value_ty(*dst);
                     if f.value_ty(*a) != ty || f.value_ty(*rb) != ty {
@@ -274,18 +273,15 @@ pub fn verify(f: &Function) -> Result<()> {
                         bail!("b{}: Fma on non-float type {:?}", b, ty);
                     }
                 }
-                Instr::UnOp { dst, src, .. }
-                    if f.value_ty(*dst) != f.value_ty(*src) => {
-                        bail!("b{}: UnOp operand/result type mismatch", b);
-                    }
-                Instr::CellGet { dst, cell }
-                    if f.value_ty(*dst) != f.cells[cell.idx()].ty => {
-                        bail!("b{}: CellGet type mismatch", b);
-                    }
-                Instr::CellSet { cell, src }
-                    if f.value_ty(*src) != f.cells[cell.idx()].ty => {
-                        bail!("b{}: CellSet type mismatch", b);
-                    }
+                Instr::UnOp { dst, src, .. } if f.value_ty(*dst) != f.value_ty(*src) => {
+                    bail!("b{}: UnOp operand/result type mismatch", b);
+                }
+                Instr::CellGet { dst, cell } if f.value_ty(*dst) != f.cells[cell.idx()].ty => {
+                    bail!("b{}: CellGet type mismatch", b);
+                }
+                Instr::CellSet { cell, src } if f.value_ty(*src) != f.cells[cell.idx()].ty => {
+                    bail!("b{}: CellSet type mismatch", b);
+                }
                 // ---- vector forms ---------------------------------------
                 // Width is carried on the value, so it is the verifier's job
                 // to keep it agreeing: a scalar reaching a lane-wise operand

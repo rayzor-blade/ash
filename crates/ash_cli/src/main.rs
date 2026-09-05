@@ -547,16 +547,15 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
         } else {
             ash_core::llvm::aot_link::Runtime::Static
         };
-        let linked =
-            ash_core::llvm::aot_link::link_executable(
-                &objects,
-                exe,
-                &triple,
-                kind,
-                runtime,
-                abi_version,
-                quiet,
-            );
+        let linked = ash_core::llvm::aot_link::link_executable(
+            &objects,
+            exe,
+            &triple,
+            kind,
+            runtime,
+            abi_version,
+            quiet,
+        );
         // The objects are scratch either way. Keeping them after a failure
         // only helps if someone is told they exist.
         if linked.is_err() {
@@ -636,7 +635,10 @@ fn provide_versioned_runtime(program: &std::path::Path, abi: u32) {
             .arg(&dest)
             .status();
     }
-    eprintln!("[ash] staged {} for HDLLs built against HashLink {abi}.x", dest.display());
+    eprintln!(
+        "[ash] staged {} for HDLLs built against HashLink {abi}.x",
+        dest.display()
+    );
 }
 
 fn main() {

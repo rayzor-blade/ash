@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Context as _, Result};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use beadie::{HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter};
@@ -289,8 +289,10 @@ pub mod stack;
 use instrument::CompileBlocking;
 
 use crate::tiering::env_flag;
-pub use crate::tiering::{decline_report, install_call_counts, TierMode, TierPreset, TieredConfig, TieredStats};
 use crate::tiering::*;
+pub use crate::tiering::{
+    decline_report, install_call_counts, TierMode, TierPreset, TieredConfig, TieredStats,
+};
 
 struct HlpName<'a>(&'a str);
 impl std::fmt::Display for HlpName<'_> {
@@ -603,12 +605,17 @@ impl HLInterpreter {
                 .take(6)
                 .map(|(n, c)| format!("{n}:{c}"))
                 .collect();
-            eprintln!("[arity] {label}: widest buckets (args:count) {}", widest.join(" "));
+            eprintln!(
+                "[arity] {label}: widest buckets (args:count) {}",
+                widest.join(" ")
+            );
             // List the widest signatures whether or not they clear the limit:
             // a shape just under it still has to be marshalled, and the float
             // dispatcher's coverage is per-shape, not per-arity.
-            let mut over: Vec<&(String, Vec<hl::hl_type_kind>)> =
-                rows.iter().filter(|(_, k)| k.len() > limit.min(8)).collect();
+            let mut over: Vec<&(String, Vec<hl::hl_type_kind>)> = rows
+                .iter()
+                .filter(|(_, k)| k.len() > limit.min(8))
+                .collect();
             over.sort_by_key(|(_, k)| std::cmp::Reverse(k.len()));
             for (name, kinds) in over.iter().take(40) {
                 let ks: Vec<String> = kinds.iter().map(|k| format!("{k}")).collect();
@@ -636,9 +643,7 @@ impl HLInterpreter {
             bytecode
                 .natives
                 .iter()
-                .filter_map(|n| {
-                    arity_of(n.type_.0).map(|k| (format!("{}@{}", n.lib, n.name), k))
-                })
+                .filter_map(|n| arity_of(n.type_.0).map(|k| (format!("{}@{}", n.lib, n.name), k)))
                 .collect(),
         );
     }
@@ -1401,7 +1406,8 @@ impl HLInterpreter {
     /// a fiber switch replaces the stack wholesale, and a grown
     /// `wide_call_args` has a new address.
     fn scan_roots_push_frame(&mut self) {
-        if self.fn_gc_set_scan_roots.is_null() || self.wide_call_args.capacity() != self.scan_wide_cap
+        if self.fn_gc_set_scan_roots.is_null()
+            || self.wide_call_args.capacity() != self.scan_wide_cap
         {
             self.sync_gc_scan_roots();
             return;
@@ -1438,7 +1444,8 @@ impl HLInterpreter {
         if !published {
             return;
         }
-        if self.fn_gc_set_scan_roots.is_null() || self.scan_range_buf.len() <= self.scan_prefix_len {
+        if self.fn_gc_set_scan_roots.is_null() || self.scan_range_buf.len() <= self.scan_prefix_len
+        {
             self.sync_gc_scan_roots();
             return;
         }
@@ -1507,8 +1514,7 @@ impl HLInterpreter {
             *self.scan_len = buf.len();
             if !self.fn_gc_set_scan_roots_live.is_null() {
                 type FnLive = unsafe extern "C" fn(*const (usize, usize), *const usize);
-                let live: FnLive =
-                    unsafe { std::mem::transmute(self.fn_gc_set_scan_roots_live) };
+                let live: FnLive = unsafe { std::mem::transmute(self.fn_gc_set_scan_roots_live) };
                 unsafe { live(buf.as_ptr(), &*self.scan_len as *const usize) };
                 self.scan_live_published = true;
             } else {
@@ -2911,18 +2917,14 @@ impl HLInterpreter {
                     // first compiled SafeCast dereference address 0x2.
                     let v = if matches!(
                         ret_kind,
-                        hl::hl_type_kind_HDYN
-                            | hl::hl_type_kind_HNULL
-                            | hl::hl_type_kind_HDYNOBJ
+                        hl::hl_type_kind_HDYN | hl::hl_type_kind_HNULL | hl::hl_type_kind_HDYNOBJ
                     ) {
                         interp.box_for_compiled_dynamic_value(v)
                     } else {
                         v
                     };
                     if std::env::var_os("ASH_DBG_STUB").is_some() {
-                        eprintln!(
-                            "[stub] call findex={findex} ret_kind={ret_kind} value={v:?}"
-                        );
+                        eprintln!("[stub] call findex={findex} ret_kind={ret_kind} value={v:?}");
                     }
                     interp.value_to_i64(v, ret_kind)
                 }
@@ -2959,21 +2961,21 @@ impl HLInterpreter {
                 // The loop function is a vclosure — extract findex from stub pointer
                 let cl = loop_fn as *const hl::_vclosure;
                 let loop_fun = unsafe { (*cl).fun as usize };
-                let findex =
-                    if (loop_fun as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
-                        loop_fun.wrapping_sub(1)
-                    } else {
-                        // `hlp_sys_set_loop` was called from compiled code, so
-                        // the closure carries a real entry address.
-                        match self.findex_for_code_addr(loop_fun) {
-                            Some(fi) => fi,
-                            None => {
-                                return Err(anyhow!(
-                                    "VM event loop closure has an unknown compiled target"
-                                ))
-                            }
+                let findex = if (loop_fun as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
+                {
+                    loop_fun.wrapping_sub(1)
+                } else {
+                    // `hlp_sys_set_loop` was called from compiled code, so
+                    // the closure carries a real entry address.
+                    match self.findex_for_code_addr(loop_fun) {
+                        Some(fi) => fi,
+                        None => {
+                            return Err(anyhow!(
+                                "VM event loop closure has an unknown compiled target"
+                            ))
                         }
-                    };
+                    }
+                };
                 let bound = unsafe {
                     if (*cl).hasValue != 0 && !(*cl).value.is_null() {
                         Some(NanBoxedValue::from_ptr((*cl).value as usize))
@@ -3632,9 +3634,9 @@ impl HLInterpreter {
         if let Some((built_cfg, _)) = built {
             let mine = match ssa {
                 Some((prep, _, _)) => prep.cfg,
-                None => ash_core::air_pipeline::interpreter_config_for(
-                    &bytecode.functions[func_idx],
-                ),
+                None => {
+                    ash_core::air_pipeline::interpreter_config_for(&bytecode.functions[func_idx])
+                }
             };
             if built_cfg != mine {
                 if osr_logging() {
@@ -4098,11 +4100,8 @@ impl HLInterpreter {
                             // Wider than the inline array: keep the whole list,
                             // leaked once, so the entry stays `Copy`.
                             let wide_kinds = (tf.args.len() > 8).then(|| {
-                                let all: Vec<hl::hl_type_kind> = tf
-                                    .args
-                                    .iter()
-                                    .map(|a| bytecode.types[a.0].kind)
-                                    .collect();
+                                let all: Vec<hl::hl_type_kind> =
+                                    tf.args.iter().map(|a| bytecode.types[a.0].kind).collect();
                                 &*Box::leak(all.into_boxed_slice())
                             });
                             tiered.sigs[findex] = Some(CallSignature {
@@ -4619,7 +4618,10 @@ impl HLInterpreter {
         packed.clear();
         if uniform_addr != 0 {
             packed.extend(args.iter().enumerate().map(|(i, &a)| {
-                self.value_to_i64(a, arg_kinds.get(i).copied().unwrap_or(hl::hl_type_kind_HVOID))
+                self.value_to_i64(
+                    a,
+                    arg_kinds.get(i).copied().unwrap_or(hl::hl_type_kind_HVOID),
+                )
             }));
         }
         self.wide_call_words = packed;
@@ -5024,7 +5026,9 @@ impl HLInterpreter {
                     };
                     if hot {
                         self.note_hot_loop(bytecode, func_idx, next_pc);
-                        if let Some(ret) = self.try_osr_transfer(bytecode, func_idx, next_pc, None)? {
+                        if let Some(ret) =
+                            self.try_osr_transfer(bytecode, func_idx, next_pc, None)?
+                        {
                             return Ok(ret);
                         }
                     }
@@ -6645,7 +6649,10 @@ impl HLInterpreter {
             let Some(obj) = ty.obj.as_ref() else { continue };
             for proto in &obj.proto {
                 if proto.findex >= 0 {
-                    names.insert(proto.findex as usize, format!("{}.{}", obj.name, proto.name));
+                    names.insert(
+                        proto.findex as usize,
+                        format!("{}.{}", obj.name, proto.name),
+                    );
                 }
             }
             // Bindings are (field index, findex) pairs — how a class's STATIC
@@ -6674,7 +6681,6 @@ impl HLInterpreter {
         }
         names
     }
-
 }
 
 /// Set once the program's entrypoint has returned, so the broker stops
@@ -6693,7 +6699,6 @@ pub(crate) fn retier_abandoned() -> bool {
 pub fn retier_abandon() {
     RETIER_ABANDON.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-
 
 #[cfg(test)]
 mod stub_bridge_tests {

@@ -138,8 +138,7 @@ impl HLInterpreter {
                         | hl::hl_type_kind_HOBJ
                         | hl::hl_type_kind_HDYNOBJ
                 );
-                if headered && v.is_ptr() && !v.is_null() && !v.is_void() && v.as_ptr() >= 0x10000
-                {
+                if headered && v.is_ptr() && !v.is_null() && !v.is_void() && v.as_ptr() >= 0x10000 {
                     unsafe {
                         let hdr = *(v.as_ptr() as *const *mut hl_type);
                         if !hdr.is_null()

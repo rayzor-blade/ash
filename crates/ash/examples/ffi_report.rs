@@ -41,7 +41,9 @@ fn main() -> anyhow::Result<()> {
                     let air::v2::Instr::Call { fun, .. } = ins else {
                         continue;
                     };
-                    let Some(sym) = natives.get(fun) else { continue };
+                    let Some(sym) = natives.get(fun) else {
+                        continue;
+                    };
                     let e = agg.entry(sym.clone()).or_default();
                     e.0 += 1;
                     e.1 = e.1.max(depth[bi]);
@@ -55,7 +57,10 @@ fn main() -> anyhow::Result<()> {
 
     let mut rows: Vec<_> = agg.into_iter().collect();
     rows.sort_by_key(|r| std::cmp::Reverse((r.1 .1, r.1 .2, r.1 .0)));
-    println!("{:<40} {:>6} {:>9} {:>10}", "native", "sites", "in-loop", "max-depth");
+    println!(
+        "{:<40} {:>6} {:>9} {:>10}",
+        "native", "sites", "in-loop", "max-depth"
+    );
     for (sym, (sites, maxd, inloop)) in rows {
         println!("{sym:<40} {sites:>6} {inloop:>9} {maxd:>10}");
     }

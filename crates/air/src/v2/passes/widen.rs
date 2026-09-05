@@ -129,9 +129,12 @@ impl Pass for Widen<'_> {
         // round, on every function. This pass measured 7.4% of the pipeline on
         // test_stdlib while widening exactly one loop; most of that was asking
         // the question of functions that could not answer yes.
-        if !f.blocks.iter().enumerate().any(|(i, b)| {
-            b.term.successors().iter().any(|s| s.idx() <= i)
-        }) {
+        if !f
+            .blocks
+            .iter()
+            .enumerate()
+            .any(|(i, b)| b.term.successors().iter().any(|s| s.idx() <= i))
+        {
             return Ok(stats);
         }
         let plans: Vec<_> = vectorize::analyze_with(f, &opts, &|i| self.info.int_value(i))
@@ -202,9 +205,9 @@ fn const_of(f: &Function, v: ValueId, info: &dyn crate::v2::module::ModuleInfo) 
         for ins in &blk.instrs {
             if ins.dst() == Some(v) {
                 return match ins {
-                    Instr::Int { idx, .. } => f
-                        .int_at(*idx, |i| info.int_value(i))
-                        .map(|x| x as i64),
+                    Instr::Int { idx, .. } => {
+                        f.int_at(*idx, |i| info.int_value(i)).map(|x| x as i64)
+                    }
                     _ => None,
                 };
             }
@@ -365,7 +368,10 @@ fn recognize_guard(f: &Function, plan: &LoopPlan, b: BlockId) -> Option<Guard> {
     };
     // The limit must not move inside the loop.
     let moves = body.iter().any(|blk| {
-        f.blocks[blk.idx()].instrs.iter().any(|i| i.dst() == Some(limit))
+        f.blocks[blk.idx()]
+            .instrs
+            .iter()
+            .any(|i| i.dst() == Some(limit))
             || f.blocks[blk.idx()].phis.iter().any(|p| p.dst == limit)
     });
     if moves {
@@ -548,13 +554,9 @@ fn widen_loop(
             .iter()
             .position(|i| !matches!(i, Instr::Param { .. }))
             .unwrap_or(f.blocks[0].instrs.len());
-        f.blocks[0].instrs.insert(
-            at,
-            Instr::Int {
-                dst: last_val,
-                idx,
-            },
-        );
+        f.blocks[0]
+            .instrs
+            .insert(at, Instr::Int { dst: last_val, idx });
         hoist_guards(f, plan, &guards, last_val)?;
     }
     let body = loop_blocks(f, plan.header);
@@ -632,9 +634,8 @@ fn widen_loop(
         let inside = body.contains(&BlockId(bi as u32));
         // An accumulator read after the loop is what `collapse_reduction`
         // exists to answer; anywhere else it is a partial sum with no meaning.
-        let unhandled = |v: &ValueId| {
-            widened.contains_key(v) && !(!inside && reduction_phis.contains(v))
-        };
+        let unhandled =
+            |v: &ValueId| widened.contains_key(v) && !(!inside && reduction_phis.contains(v));
         for phi in &blk.phis {
             if reduction_phis.contains(&phi.dst) {
                 continue;
@@ -1225,7 +1226,12 @@ fn retime_induction(
         let mut target: Option<ValueId> = None;
         for ins in &f.blocks[b].instrs {
             if ins.dst() == Some(back) {
-                if let Instr::BinOp { op: BinOp::Add, b: rb, .. } = ins {
+                if let Instr::BinOp {
+                    op: BinOp::Add,
+                    b: rb,
+                    ..
+                } = ins
+                {
                     target = Some(*rb);
                 }
             }
@@ -1324,9 +1330,12 @@ fn clone_blocks(
                 continue;
             }
             for phi in &mut f.blocks[t.idx()].phis {
-                let Some(&(_, v)) = snap[t.idx()].phis.iter().find(|p| p.dst == phi.dst).and_then(
-                    |p| p.incoming.iter().find(|(pb, _)| *pb == b),
-                ) else {
+                let Some(&(_, v)) = snap[t.idx()]
+                    .phis
+                    .iter()
+                    .find(|p| p.dst == phi.dst)
+                    .and_then(|p| p.incoming.iter().find(|(pb, _)| *pb == b))
+                else {
                     continue;
                 };
                 phi.incoming.push((bmap[&b], map_v(v, &vmap)));

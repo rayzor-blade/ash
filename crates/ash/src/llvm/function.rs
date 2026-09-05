@@ -5983,8 +5983,12 @@ impl<'ctx> JITModule<'ctx> {
                 let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
                 let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_float_value() {
-                    self.build_float_to_int_saturating(src_val.into_float_value(), dst_int, "toint")?
-                        .into()
+                    self.build_float_to_int_saturating(
+                        src_val.into_float_value(),
+                        dst_int,
+                        "toint",
+                    )?
+                    .into()
                 } else if src_val.is_int_value() {
                     let iv = src_val.into_int_value();
                     let sw = iv.get_type().get_bit_width();
@@ -6436,10 +6440,8 @@ impl<'ctx> JITModule<'ctx> {
                 // call takes every time its runtime signature differs from
                 // the call site's. The GEP below indexes it by pointer, which
                 // is what an array of pointers is.
-                let argv = self.entry_alloca(
-                    ptr_type.array_type(nargs.max(1) as u32),
-                    "closure_dyn_argv",
-                )?;
+                let argv = self
+                    .entry_alloca(ptr_type.array_type(nargs.max(1) as u32), "closure_dyn_argv")?;
                 let make_dyn = self.declare_native(
                     "hlp_make_dyn",
                     &[ptr_type.into(), ptr_type.into()],
@@ -6777,11 +6779,17 @@ impl<'ctx> JITModule<'ctx> {
                             let iv = v.into_int_value();
                             let (sw, dw) = (iv.get_type().get_bit_width(), t.get_bit_width());
                             if sw > dw {
-                                self.builder.build_int_truncate(iv, t, "safecast_box_trunc")?.into()
+                                self.builder
+                                    .build_int_truncate(iv, t, "safecast_box_trunc")?
+                                    .into()
                             } else if src_unsigned {
-                                self.builder.build_int_z_extend(iv, t, "safecast_box_zext")?.into()
+                                self.builder
+                                    .build_int_z_extend(iv, t, "safecast_box_zext")?
+                                    .into()
                             } else {
-                                self.builder.build_int_s_extend(iv, t, "safecast_box_sext")?.into()
+                                self.builder
+                                    .build_int_s_extend(iv, t, "safecast_box_sext")?
+                                    .into()
                             }
                         }
                         (v, BasicTypeEnum::FloatType(t)) if v.is_int_value() => {
@@ -6863,7 +6871,8 @@ impl<'ctx> JITModule<'ctx> {
                         };
                     // Only the int form takes the destination type; the others
                     // have one result width and need only the source.
-                    let mut params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into(), ptr_type.into()];
+                    let mut params: Vec<BasicMetadataTypeEnum> =
+                        vec![ptr_type.into(), ptr_type.into()];
                     let mut args: Vec<BasicMetadataValueEnum> =
                         vec![registers[src.0 as usize].into(), src_type_ptr.into()];
                     if helper == "hlp_dyn_casti" {

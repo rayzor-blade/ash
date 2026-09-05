@@ -321,9 +321,11 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 /// crate; a standalone binary links only this library, so without these two
 /// defaults every `haxe.CallStack.exceptionStack()` came back empty -- and
 /// heaps' own error reporter then faulted on the null while printing.
-static AOT_SYMBOLS: std::sync::Mutex<Vec<(usize, &'static str)>> = std::sync::Mutex::new(Vec::new());
+static AOT_SYMBOLS: std::sync::Mutex<Vec<(usize, &'static str)>> =
+    std::sync::Mutex::new(Vec::new());
 #[cfg(not(target_family = "wasm"))]
-static AOT_SYMBOL_TEXT: std::sync::Mutex<Vec<(usize, &'static [u16])>> = std::sync::Mutex::new(Vec::new());
+static AOT_SYMBOL_TEXT: std::sync::Mutex<Vec<(usize, &'static [u16])>> =
+    std::sync::Mutex::new(Vec::new());
 /// The same names by position: entry `findex` is that function's name, or
 /// "" where the emitter had none. A shadow frame is keyed by findex rather
 /// than by address, so this is how it is named.
@@ -721,7 +723,10 @@ static AOT_FRAME_CLASS: std::sync::Mutex<Vec<(usize, bool)>> = std::sync::Mutex:
 #[cfg(unix)]
 fn aot_frame_class_cached(pc: usize) -> Option<bool> {
     let table = AOT_FRAME_CLASS.lock().unwrap_or_else(|e| e.into_inner());
-    table.binary_search_by_key(&pc, |(addr, _)| *addr).ok().map(|i| table[i].1)
+    table
+        .binary_search_by_key(&pc, |(addr, _)| *addr)
+        .ok()
+        .map(|i| table[i].1)
 }
 
 #[cfg(unix)]
@@ -783,7 +788,9 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     if let Some(name) = aot_symbol_for_pc(info.dli_saddr as usize) {
         return Some(name.to_string());
     }
-    let raw = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy().into_owned();
+    let raw = std::ffi::CStr::from_ptr(info.dli_sname)
+        .to_string_lossy()
+        .into_owned();
     let name = raw.trim_start_matches('_');
     let name = match name.rfind('.') {
         Some(i) if name[i + 1..].chars().all(|c| c.is_ascii_digit()) => &name[..i],

@@ -797,7 +797,11 @@ pub unsafe extern "C" fn hl_get_obj_proto(ot: *mut hl_type) -> *mut hl_runtime_o
                      field_nargs={field_nargs} fun_nargs={fun_nargs} fun_type_kind={}",
                     (*ft).kind,
                     _func_ptr,
-                    if _func_type_ptr.is_null() { -1 } else { (*_func_type_ptr).kind as i32 },
+                    if _func_type_ptr.is_null() {
+                        -1
+                    } else {
+                        (*_func_type_ptr).kind as i32
+                    },
                 );
             }
 
@@ -1248,7 +1252,9 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
         hl::hl_type_kind_HOBJ => {
             let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
             if f.is_null() || (*f).field_index < 0 {
-                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char);
+                let name = CStr::from_ptr(
+                    (*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char,
+                );
                 let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
 
                 hlp_error(str_to_uchar_ptr(
@@ -1267,7 +1273,9 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
             let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
 
             if f.is_null() || (*f).field_index < 0 {
-                let name = CStr::from_ptr((*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char);
+                let name = CStr::from_ptr(
+                    (*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char,
+                );
                 let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
                 hlp_error(str_to_uchar_ptr(
                     format!(
@@ -1477,7 +1485,8 @@ pub unsafe extern "C" fn hlp_dynobj_add_field(
                 .as_ptr() as *mut *mut c_void;
         ptr::copy_nonoverlapping((*o).values, nvalues, (*o).nvalues as usize);
         *nvalues.add(index as usize) = ptr::null_mut();
-        address_offset = (nvalues as *mut std::ffi::c_char).offset_from((*o).values as *mut std::ffi::c_char);
+        address_offset =
+            (nvalues as *mut std::ffi::c_char).offset_from((*o).values as *mut std::ffi::c_char);
         (*o).values = nvalues;
         (*o).nvalues += 1;
     } else {
@@ -1910,8 +1919,8 @@ pub unsafe extern "C" fn hl_to_virtual(vt: *mut hl_type, obj: *mut vdynamic) -> 
                     // sentinels there, so the bogus pointer was never a real
                     // code address. AOT populates the table for real, and
                     // MBHaxe faulted on String.split's prologue.
-                    let cast_ok = (*ft).kind == hl::hl_type_kind_HMETHOD
-                        && hlp_safe_cast(&mut tmp, ft);
+                    let cast_ok =
+                        (*ft).kind == hl::hl_type_kind_HMETHOD && hlp_safe_cast(&mut tmp, ft);
                     if cast_ok {
                         let method_idx = (-(*f).field_index - 1) as usize;
                         let rt = (*(*obj).t).__bindgen_anon_1.obj.as_ref().unwrap().rt;
@@ -2094,7 +2103,13 @@ unsafe fn vcall_fn_or_stub(fun: *mut c_void, this: *mut vdynamic) -> *mut vdynam
             return method_fn(this);
         }
         if let Some(runner) = crate::fiber::closure_runner() {
-            let mut cl = crate::types::vclosure_new_with_stack(crate::types::hlt_dyn(), fun, 1, this as *mut c_void, 0);
+            let mut cl = crate::types::vclosure_new_with_stack(
+                crate::types::hlt_dyn(),
+                fun,
+                1,
+                this as *mut c_void,
+                0,
+            );
             return runner(&mut cl, ptr::null_mut(), 0);
         }
         return ptr::null_mut();
@@ -2380,7 +2395,8 @@ pub unsafe extern "C" fn hlp_vcall_dyn(
                 // Interpreter stub sentinel: the bridge decodes the findex and
                 // runs the interpreter with its own typing, boxed both ways.
                 if let Some(runner) = crate::fiber::closure_runner() {
-                    let mut cl = crate::types::vclosure_new(fun_type, method_ptr, 1, cur as *mut c_void);
+                    let mut cl =
+                        crate::types::vclosure_new(fun_type, method_ptr, 1, cur as *mut c_void);
                     let aptr = if nargs == 0 {
                         ptr::null_mut()
                     } else {
@@ -2577,7 +2593,10 @@ pub unsafe extern "C" fn hlp_dyn_setp(
     } else if hlp_is_dynamic(t) {
         hlp_write_dyn(addr, ft, value as *mut vdynamic, false);
     } else {
-        let mut tmp = crate::types::vdynamic_new(t, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { ptr: value }));
+        let mut tmp = crate::types::vdynamic_new(
+            t,
+            *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { ptr: value }),
+        );
         hlp_write_dyn(addr, ft, &mut tmp as *mut vdynamic, true);
     }
 }
@@ -2592,7 +2611,10 @@ pub unsafe extern "C" fn hlp_dyn_setd(d: *mut vdynamic, hfield: i32, value: f64)
     if (*t).kind == hl_type_kind_HF64 {
         *(addr as *mut f64) = value;
     } else {
-        let mut tmp = crate::types::vdynamic_new(f64_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { d: value }));
+        let mut tmp = crate::types::vdynamic_new(
+            f64_type,
+            *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { d: value }),
+        );
         hlp_write_dyn(addr, t, &mut tmp, true);
     }
 }
@@ -2607,7 +2629,10 @@ pub unsafe extern "C" fn hlp_dyn_setf(d: *mut vdynamic, hfield: i32, value: f32)
     if (*t).kind == hl_type_kind_HF32 {
         *(addr as *mut f32) = value;
     } else {
-        let mut tmp = crate::types::vdynamic_new(f32_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { f: value }));
+        let mut tmp = crate::types::vdynamic_new(
+            f32_type,
+            *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { f: value }),
+        );
         hlp_write_dyn(addr, t, &mut tmp, true);
     }
 }
@@ -2628,7 +2653,10 @@ pub unsafe extern "C" fn hlp_dyn_seti64(d: *mut vdynamic, hfield: i32, value: i6
         hl_type_kind_HF32 => *(addr as *mut f32) = value as f32,
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
-            let mut tmp = crate::types::vdynamic_new(i64_type, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i64_: value }));
+            let mut tmp = crate::types::vdynamic_new(
+                i64_type,
+                *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i64_: value }),
+            );
             hlp_write_dyn(addr, ft, &mut tmp, true);
         }
     }
@@ -2658,7 +2686,10 @@ pub unsafe extern "C" fn hlp_dyn_seti(d: *mut vdynamic, hfield: i32, t: *mut hl_
         hl_type_kind_HF32 => *(addr as *mut f32) = value as f32,
         hl_type_kind_HF64 => *(addr as *mut f64) = value as f64,
         _ => {
-            let mut tmp = crate::types::vdynamic_new(t, *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i: value }));
+            let mut tmp = crate::types::vdynamic_new(
+                t,
+                *std::mem::ManuallyDrop::new(vdynamic__bindgen_ty_1 { i: value }),
+            );
             hlp_write_dyn(addr, ft, &mut tmp, true);
         }
     }
@@ -2843,8 +2874,7 @@ pub unsafe extern "C" fn hlp_obj_get_field(obj: *mut vdynamic, hfield: i32) -> *
 /// The write is DROPPED, not redirected: the field a null object would have
 /// had does not exist, so there is nothing to write to, and the read side
 /// already returns null for the same reason (upstream does this too).
-static NULL_WRITE_RAISES: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static NULL_WRITE_RAISES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Set by the loader from what it knows about the program.
 #[no_mangle]

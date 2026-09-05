@@ -84,7 +84,10 @@ fn main() -> Result<()> {
         .iter()
         .map(|f| f.findex as usize)
         .collect();
-    let limit: usize = std::env::var("AOT_LIMIT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+    let limit: usize = std::env::var("AOT_LIMIT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     for fx in findexes.iter().take(limit) {
         if std::env::var("AOT_TRACE").is_ok() {
             eprintln!("lowering findex={fx}");
@@ -97,7 +100,11 @@ fn main() -> Result<()> {
             Err(e) => failed.push((*fx, format!("{e}"))),
         }
     }
-    println!("lowered {ok}/{} functions ({} refused)", findexes.len(), failed.len());
+    println!(
+        "lowered {ok}/{} functions ({} refused)",
+        findexes.len(),
+        failed.len()
+    );
     for (fx, e) in failed.iter().take(5) {
         println!("   findex={fx}: {}", e.lines().next().unwrap_or(""));
     }
@@ -111,8 +118,11 @@ fn main() -> Result<()> {
     jit.write_ir(std::path::Path::new(&out).with_extension("ll").as_path())?;
     let bytes = jit.emit_object(&triple, std::path::Path::new(&out))?;
     println!("emitted {out} for {triple} ({bytes} bytes)");
-    println!("entrypoint findex = {}  symbol = {}",
-             jit.entrypoint_findex(), jit.entrypoint_symbol());
+    println!(
+        "entrypoint findex = {}  symbol = {}",
+        jit.entrypoint_findex(),
+        jit.entrypoint_symbol()
+    );
 
     // Whether the profile actually described THIS program. Zero matches
     // against a non-empty profile means every entry is stale -- the failure

@@ -112,7 +112,6 @@ fn logging() -> bool {
     *CELL.get_or_init(|| std::env::var("ASH_AIR_LOG").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
-
 /// An IR body plus the type view the shared `op_*` semantics read operand
 /// types out of.
 pub struct Prepared {
@@ -166,7 +165,6 @@ pub struct Cache {
     refused: usize,
 }
 
-
 impl Cache {
     /// Decide `func_idx`'s body, if it has not been decided already.
     /// Whether [`Self::prepare`] would do more than look up a cached body.
@@ -176,7 +174,11 @@ impl Cache {
     /// lock, which is far more than the early-out it would be guarding on the
     /// overwhelmingly common cached path.
     pub fn needs_prepare(&self, func_idx: usize) -> bool {
-        enabled() && !matches!(self.bodies.get(func_idx), Some(Body::Ready(_)) | Some(Body::Raw))
+        enabled()
+            && !matches!(
+                self.bodies.get(func_idx),
+                Some(Body::Ready(_)) | Some(Body::Raw)
+            )
     }
 
     pub fn prepare(&mut self, bc: &DecodedBytecode, func_idx: usize) {
@@ -226,84 +228,88 @@ impl Cache {
             bare = m.without_callees_view();
             &bare
         };
-        self.bodies[func_idx] = match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg)
-            .map(|o| (o.ir.clone(), o.ser.clone()))
-        {
-            Ok((ir, ser_view)) => match unsupported(&ir) {
-                Some(what) => {
+        self.bodies[func_idx] =
+            match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg)
+                .map(|o| (o.ir.clone(), o.ser.clone()))
+            {
+                Ok((ir, ser_view)) => match unsupported(&ir) {
+                    Some(what) => {
+                        if logging() {
+                            eprintln!(
+                                "[ssa] findex={} {}: raw opcodes ({what} not implemented)",
+                                raw.findex,
+                                raw.name()
+                            );
+                        }
+                        self.refused += 1;
+                        Body::Raw
+                    }
+                    None => {
+                        let cell_base = ir.values.len() as u32;
+                        // Serialized once, for the block -> pc table alone: the
+                        // tiering and OSR machinery key a loop header on a
+                        // bytecode pc, and this is where that mapping is computed.
+                        // The body itself is still executed from the IR; only the
+                        // table is kept.
+                        let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
+                        let instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
+                        let cfg = air::v2::CfgInfo::build(&ir);
+                        let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
+                        let osr_reg_types: Vec<TypeRef> = ser_view
+                            .reg_types
+                            .iter()
+                            .map(|t| TypeRef(t.0 as usize))
+                            .collect();
+                        let mut shim = raw.clone();
+                        // air numbers types with u32, ash with usize; same indices.
+                        shim.regs = ir
+                            .values
+                            .iter()
+                            .map(|v| TypeRef(v.ty.0 as usize))
+                            .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+                            .collect();
+                        shim.ops = Vec::new();
+                        // Indexed by opcode, and the pcs this interpreter
+                        // publishes are indexed into the SERIALIZED opcodes -- so
+                        // the table has to be the one built for those. Leaving it
+                        // empty sent a trace to `air.body()`, which under
+                        // ASH_AIR=v2 is the raw function, whose numbering the
+                        // optimizer has already changed: every reported line was
+                        // off by the drift between them.
+                        shim.debug = crate::air::optimized_debug(raw, &ser_view.ops);
+                        if logging() {
+                            eprintln!(
+                                "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
+                                raw.findex,
+                                raw.name(),
+                                raw.ops.len(),
+                                ir.values.len(),
+                                ir.cells.len(),
+                                ir.blocks.len()
+                            );
+                        }
+                        self.prepared += 1;
+                        Body::Ready(Box::leak(Box::new(Prepared {
+                            ir: Box::leak(Box::new(ir)),
+                            shim: Box::leak(Box::new(shim)),
+                            cell_base,
+                            block_pcs: Box::leak(block_pcs.into_boxed_slice()),
+                            instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
+                            liveness: Box::leak(Box::new(liveness)),
+                            osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
+                            cfg: air_cfg,
+                        })))
+                    }
+                },
+                Err(e) => {
+                    // A refusal is a missed optimization, not a wrong answer.
                     if logging() {
-                        eprintln!(
-                            "[ssa] findex={} {}: raw opcodes ({what} not implemented)",
-                            raw.findex,
-                            raw.name()
-                        );
+                        eprintln!("[ssa] falling back to raw opcodes: {e}");
                     }
                     self.refused += 1;
                     Body::Raw
                 }
-                None => {
-                    let cell_base = ir.values.len() as u32;
-                    // Serialized once, for the block -> pc table alone: the
-                    // tiering and OSR machinery key a loop header on a
-                    // bytecode pc, and this is where that mapping is computed.
-                    // The body itself is still executed from the IR; only the
-                    // table is kept.
-                    let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
-                    let instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
-                    let cfg = air::v2::CfgInfo::build(&ir);
-                    let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
-                    let osr_reg_types: Vec<TypeRef> =
-                        ser_view.reg_types.iter().map(|t| TypeRef(t.0 as usize)).collect();
-                    let mut shim = raw.clone();
-                    // air numbers types with u32, ash with usize; same indices.
-                    shim.regs = ir
-                        .values
-                        .iter()
-                        .map(|v| TypeRef(v.ty.0 as usize))
-                        .chain(ir.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
-                        .collect();
-                    shim.ops = Vec::new();
-                    // Indexed by opcode, and the pcs this interpreter
-                    // publishes are indexed into the SERIALIZED opcodes -- so
-                    // the table has to be the one built for those. Leaving it
-                    // empty sent a trace to `air.body()`, which under
-                    // ASH_AIR=v2 is the raw function, whose numbering the
-                    // optimizer has already changed: every reported line was
-                    // off by the drift between them.
-                    shim.debug = crate::air::optimized_debug(raw, &ser_view.ops);
-                    if logging() {
-                        eprintln!(
-                            "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
-                            raw.findex,
-                            raw.name(),
-                            raw.ops.len(),
-                            ir.values.len(),
-                            ir.cells.len(),
-                            ir.blocks.len()
-                        );
-                    }
-                    self.prepared += 1;
-                    Body::Ready(Box::leak(Box::new(Prepared {
-                        ir: Box::leak(Box::new(ir)),
-                        shim: Box::leak(Box::new(shim)),
-                        cell_base,
-                        block_pcs: Box::leak(block_pcs.into_boxed_slice()),
-                        instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
-                        liveness: Box::leak(Box::new(liveness)),
-                        osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
-                        cfg: air_cfg,
-                    })))
-                }
-            },
-            Err(e) => {
-                // A refusal is a missed optimization, not a wrong answer.
-                if logging() {
-                    eprintln!("[ssa] falling back to raw opcodes: {e}");
-                }
-                self.refused += 1;
-                Body::Raw
-            }
-        };
+            };
     }
 
     /// The prepared IR for `func_idx`, or `None` to run raw opcodes.

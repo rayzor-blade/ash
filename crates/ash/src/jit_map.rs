@@ -139,7 +139,11 @@ pub fn dump(name_of: impl Fn(u32) -> Option<String>) -> Vec<String> {
         out.push(format!(
             "  {:#014x} {:>7} {:<9} {:<8} findex={:<6} {}",
             r.start,
-            if r.size > 0 { r.size.to_string() } else { "?".into() },
+            if r.size > 0 {
+                r.size.to_string()
+            } else {
+                "?".into()
+            },
             match r.tier {
                 Tier::Cranelift => "cranelift",
                 Tier::Llvm => "llvm",

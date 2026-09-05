@@ -48,6 +48,7 @@ use anyhow::Result;
 pub mod body;
 pub mod link;
 pub mod object;
+pub mod suspend;
 
 pub use link::{link, LinkOptions};
 pub use object::{read, Object, Symbol, SymbolTarget};

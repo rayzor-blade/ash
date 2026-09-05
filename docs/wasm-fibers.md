@@ -196,3 +196,42 @@ So the position at the end of this note is the opposite of §8's: the analysis
 is affordable at the HL level, the mechanism was already settled in §2 to §4,
 and what stands between this design and an implementation is the runtime-side
 annotation plus the staging in §6 — not a missing idea.
+
+## 10. §8 re-measured with a real decoder, and what it says about seeds
+
+§8's method note conceded that its numbers came from `wasm-dis` text and that
+"a byte-level decoder may bin a few sites differently". That concession can be
+withdrawn. The analysis now lives in the linker
+(`crates/ash_wasm_link/src/suspend.rs`) and runs over the module bytes through
+the same `wasmparser` decoder the transform will use;
+`tests/suspend_set.rs` is the measurement, so it survives an emitter change
+instead of being a number in a document.
+
+It reproduces §8 exactly — 2,617 and 2,632 on `threads.wasm`, to the function —
+and extends it to two more modules:
+
+| module | functions | address-taken | direct only | TypedTable | AnyIndirect |
+| --- | --- | --- | --- | --- | --- |
+| `t.wasm` | 1,958 | 61.9% | 5.4% | **83.0%** | 83.8% |
+| `threads.wasm` | 3,041 | 58.8% | 11.0% | **86.1%** | 86.6% |
+| `unit_gc.wasm` | 11,661 | 87.5% | 26.4% | **73.9%** | 74.2% |
+
+The gap between the two sound policies is 0.8, 0.5 and 0.3 points. §8's
+conclusion was not an artefact of one program.
+
+The new result is about seeds, and it is stronger than §8's version of it. §8
+narrowed the seeds from 129 safepoints to 27 blocking primitives and saw no
+change. This goes the other way: starting from the single `ash_host_fiber_yield`
+import and *adding* every blocking socket and wasi call — `poll_oneoff`,
+`sched_yield`, `sock_*`, `ash_host_socket_*` — moves the closure by **2
+functions out of 3,041**, while moving the direct-only lower bound from 11.0%
+to 26.6%. The seeds visibly matter to the call graph and are invisible in the
+answer.
+
+That has a consequence for §9's open item. §9 ended by saying the projected
+total depends on runtime-side annotation: stating which ash_std functions can
+reach a suspend, rather than inferring it. At the wasm level that work is now
+known not to pay — the closure is set by table fan-in, and a more precise seed
+set is swallowed by it within two functions. The annotation is only worth
+writing on the HL side of §9, where the seeds still propagate through a call
+graph that has not been merged with libc's.

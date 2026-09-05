@@ -254,14 +254,36 @@ fn run(command: &mut Command, what: &str) -> Result<()> {
         .output()
         .map_err(|e| anyhow!("could not run {what}: {e}"))?;
     if !output.status.success() {
+        // The command line, not just its complaint. A driver's own error
+        // names a symbol and not the invocation that failed to resolve it,
+        // so without this a link failure on a machine nobody has says which
+        // library was missing and never which libraries were offered.
         bail!(
-            "{what} failed ({}):\n{}{}",
+            "{what} failed ({}):\n  {}\n{}{}",
             output.status,
+            rendered(command),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
     }
     Ok(())
+}
+
+/// A command as something that could be pasted into a shell.
+fn rendered(command: &Command) -> String {
+    let mut out = command.get_program().to_string_lossy().into_owned();
+    for arg in command.get_args() {
+        let arg = arg.to_string_lossy();
+        out.push(' ');
+        if arg.contains(' ') {
+            out.push('"');
+            out.push_str(&arg);
+            out.push('"');
+        } else {
+            out.push_str(&arg);
+        }
+    }
+    out
 }
 
 /// The names an HDLL may import the runtime by, on this platform.

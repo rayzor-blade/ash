@@ -708,36 +708,7 @@
         worth nothing if the answers are wrong. Ash runs the official Haxe test suite unmodified, from CI on every push.
       </p>
 
-      <div style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px">
-        <div
-          style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
-          <div id="conf-assert-value"
-            style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—
-          </div>
-          <div id="conf-assert-label"
-            style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">assertions passed
-            across all suites</div>
-        </div>
-        <div
-          style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
-          <div id="conf-suite-value"
-            style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—
-          </div>
-          <div id="conf-suite-label"
-            style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">suites fully
-            passing</div>
-        </div>
-        <div
-          style="flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px">
-          <div id="conf-natives-value"
-            style="font-family:'IBM Plex Mono',monospace;font-size:34px;font-weight:700;color:#221d1a;line-height:1.1">—
-          </div>
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:6px">stdlib natives
-            unresolved</div>
-        </div>
-      </div>
-
-      <div id="conf-engines" hidden style="margin-top:16px;display:flex;flex-wrap:wrap;gap:16px"></div>
+      <div id="conf-engines" style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px"></div>
 
       <div
         style="margin-top:16px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
@@ -1025,7 +996,8 @@
       var CONF_LABEL = {
         unit: 'unit — language core',
         sys: 'sys — files, processes, environment',
-        threads: 'threads — threads, locks, deques'
+        threads: 'threads — threads, locks, deques',
+        misc: 'misc — the event loop'
       };
 
       // The three ways ash runs a program. The suite is measured under each,
@@ -1043,112 +1015,90 @@
         return ENGINE_LABEL[key] || key;
       }
 
-      function renderEngines(sum) {
+      // The engines are how the numbers are categorised: the same suite is run
+      // three ways, and the question a reader has is "how far is each one".
+      // One card per engine, the isolated unit-case percentage as its figure
+      // (the one denominator a crash cannot shrink), and the assertion and
+      // suite tallies under it.
+      function renderEngines(sum, skipped) {
         var mount = document.getElementById('conf-engines');
         var engines = sum.engines || {};
         var keys = Object.keys(engines);
-        if (!keys.length) { mount.hidden = true; return; }
         mount.textContent = '';
+        if (!keys.length) {
+          // A run older than the per-engine summary: the top level is the
+          // interpreter alone.
+          keys = ['interp'];
+          engines = { interp: sum };
+        }
+        // An engine the run asked for but could not build appears with the
+        // reason, so the empty column below is explained rather than a mystery.
+        Object.keys(skipped || {}).forEach(function (key) {
+          if (keys.indexOf(key) < 0) { keys.push(key); engines[key] = { skipped: skipped[key] }; }
+        });
+        var mono = "font-family:'IBM Plex Mono',monospace;";
         keys.forEach(function (key) {
-          var e = engines[key];
+          var e = engines[key] || {};
           var card = el('div', null,
-            'flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:16px 24px');
-          var head = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#a8703c");
+            'flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:20px 24px');
+          var head = el('div', null, mono + 'font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#a8703c');
           head.textContent = engineName(key);
           card.appendChild(head);
-          var value = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:28px;font-weight:700;color:#221d1a;line-height:1.15;margin-top:6px");
-          var label = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:4px");
-          if (e.isolated && typeof e.case_pct === 'number') {
+          var value = el('div', null, mono + 'font-size:34px;font-weight:700;color:#221d1a;line-height:1.1;margin-top:8px;font-variant-numeric:tabular-nums');
+          var lines = [];
+          if (e.skipped) {
+            value.textContent = '—';
+            value.style.color = '#8a807a';
+            lines.push('skipped this run');
+            card.title = e.skipped;
+          } else if (e.isolated && typeof e.case_pct === 'number') {
             value.textContent = e.case_pct + '%';
-            label.textContent = fmtInt(e.cases_ok) + ' / ' + fmtInt(e.cases_attemptable) +
-              ' runnable cases';
-            if (e.cases_crashed) label.textContent += ' \u00b7 ' + e.cases_crashed + ' crashed';
+            lines.push(fmtInt(e.cases_ok) + ' / ' + fmtInt(e.cases_attemptable) + ' runnable unit cases' +
+              (e.cases_crashed ? ' · ' + e.cases_crashed + ' crashed' : ''));
           } else if (typeof e.assertion_pct === 'number') {
             value.textContent = e.assertion_pct + '%';
-            label.textContent = fmtInt(e.assertions_passed) + ' / ' + fmtInt(e.assertions_total) + ' assertions';
           } else {
-            value.textContent = '\u2014';
-            label.textContent = 'not reported yet';
+            value.textContent = '—';
+            value.style.color = '#8a807a';
+            lines.push('not reported yet');
+          }
+          if (e.assertions_total) {
+            lines.push(fmtInt(e.assertions_passed) + ' / ' + fmtInt(e.assertions_total) + ' assertions');
+          }
+          if (typeof e.suites_total === 'number' && e.suites_total) {
+            lines.push((e.suites_passed || 0) + ' / ' + e.suites_total + ' suites fully passing');
           }
           card.appendChild(value);
-          card.appendChild(label);
+          lines.forEach(function (text) {
+            var line = el('div', null, mono + 'font-size:12px;color:#8a807a;margin-top:4px;font-variant-numeric:tabular-nums');
+            line.textContent = text;
+            card.appendChild(line);
+          });
           mount.appendChild(card);
         });
-        mount.hidden = false;
       }
 
       function renderConformance(data) {
         var sum = data.summary || {};
-        renderEngines(sum);
-        var multiEngine = Object.keys(sum.engines || {}).length > 1;
         var rows = (data.results || []).filter(function (r) {
-          return (r.engine || '').indexOf('ash:') === 0 && r.status !== 'SKIP';
+          return (r.engine || '').indexOf('ash:') === 0;
         });
+        var skipped = {};
+        rows.forEach(function (r) {
+          var key = String(r.engine).replace(/^ash:/, '');
+          if (r.status === 'SKIP' && !skipped[key]) skipped[key] = r.detail || 'skipped';
+        });
+        renderEngines(sum, skipped);
 
-        // Aggregate every Ash suite. Isolation currently applies only to unit, so
-        // its case count is a useful unit diagnostic but cannot be the site-wide
-        // score: doing that made a fully passing threads suite invisible here.
-        var assertEl = document.getElementById('conf-assert-value');
-        var assertLbl = document.getElementById('conf-assert-label');
-        var attemptable = sum.cases_attemptable || sum.cases_total;
-        if (typeof sum.assertions_passed === 'number' && sum.assertions_total) {
-          var assertionPct = typeof sum.assertion_pct === 'number'
-            ? sum.assertion_pct
-            : Math.round(1000 * sum.assertions_passed / sum.assertions_total) / 10;
-          assertEl.textContent = assertionPct + '%';
-          assertLbl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
-            fmtInt(sum.assertions_total) + ' assertions passed across all suites';
-          assertEl.title = 'Aggregates reported assertions from unit, sys, and threads';
-          if (typeof sum.cases_ok === 'number' && attemptable) {
-            assertEl.title += '. Unit isolation: ' + fmtInt(sum.cases_ok) + ' of ' +
-              fmtInt(attemptable) + ' runnable cases passed';
-          }
-        } else if (typeof sum.tests_passed === 'number' && sum.tests_accepted) {
-          var testsPct = Math.round(1000 * sum.tests_passed / sum.tests_accepted) / 10;
-          assertEl.textContent = testsPct + '%';
-          assertLbl.textContent = fmtInt(sum.tests_passed) + ' / ' +
-            fmtInt(sum.tests_accepted) + ' tests passed across all suites';
-          assertEl.title = 'Aggregates every published Ash suite row';
-        } else if (typeof sum.cases_ok === 'number' && attemptable) {
-          // Compatibility with artifacts produced before all-suite totals existed.
-          var casesPct = Math.round(1000 * sum.cases_ok / attemptable) / 10;
-          assertEl.textContent = casesPct + '%';
-          assertLbl.textContent = fmtInt(sum.cases_ok) + ' / ' +
-            fmtInt(attemptable) + ' unit cases passed';
-        } else if (typeof sum.assertion_pct === 'number' && sum.suites_passed) {
-          assertEl.textContent = sum.assertion_pct + '%';
-          assertEl.title = sum.assertions_passed + ' of ' + sum.assertions_total + ' assertions';
-          assertLbl.textContent = fmtInt(sum.assertions_passed) + ' / ' +
-            fmtInt(sum.assertions_total) + ' assertions passed';
-        } else if (typeof sum.test_pct === 'number') {
-          assertEl.textContent = sum.test_pct + '%';
-          assertEl.title = sum.tests_reached + ' of ' + sum.tests_total +
-            ' tests reached (total from stock HashLink on the same bytecode)';
-          assertLbl.textContent = fmtInt(sum.tests_reached) + ' / ' +
-            fmtInt(sum.tests_total) + ' tests reached';
-        } else {
-          assertEl.textContent = String(sum.tests_reached || 0);
-          assertEl.title = 'no reference VM in this run, so there is no total to divide by';
-          assertLbl.textContent = 'tests reached (no total)';
-          if (!sum.tests_reached) assertEl.style.color = '#8a807a';
-        }
-
-        var suiteEl = document.getElementById('conf-suite-value');
-        var suiteLbl = document.getElementById('conf-suite-label');
-        suiteEl.textContent = (sum.suites_passed || 0) + ' / ' + (sum.suites_total || 0);
-        if (!sum.suites_passed) suiteEl.style.color = '#8a807a';
-        if (suiteLbl) suiteLbl.textContent = 'suites fully passing';
-
-        var natEl = document.getElementById('conf-natives-value');
-        var nat = (data.missing_natives || []).length;
-        natEl.textContent = String(nat);
-        natEl.style.color = nat === 0 ? '#a8703c' : '#221d1a';
-        natEl.title = nat === 0
-          ? 'every native these suites ask for resolves'
-          : (data.missing_natives || []).join(', ');
+        // A run-wide fact rather than an engine's: every name here is a Haxe
+        // API that fails on a user's machine. It reads as a sentence under the
+        // table, where a number without an engine beside it would mislead.
+        var foot = document.getElementById('conf-footnote');
+        var nat = data.missing_natives || [];
+        foot.textContent = 'The official Haxe test suite, unmodified, run on every push. ' +
+          (nat.length ? nat.length + ' stdlib native' + (nat.length === 1 ? '' : 's') + ' unresolved.'
+            : 'Every stdlib native these suites ask for resolves.');
+        if (nat.length) foot.title = nat.join(', ');
 
         // Stock HashLink's result for the same bytecode, when the run had a
         // reference VM. A suite no VM passes is not an ash defect, and saying so
@@ -1158,60 +1108,112 @@
           if (r.engine === 'hashlink') refBy[r.suite] = r;
         });
 
+        // One row per suite, one column per engine. The flat "suite · engine"
+        // list read fine with one engine and became a wall of repeated names
+        // with three; a matrix puts the same suite's engines side by side,
+        // which is the comparison the page exists to show. SKIP cells stay
+        // in: a skipped engine is a fact about the run, and the reason is
+        // in the tooltip.
+        var engineOrder = Object.keys(sum.engines || {});
+        rows.forEach(function (r) {
+          var key = String(r.engine).replace(/^ash:/, '');
+          if (engineOrder.indexOf(key) < 0) engineOrder.push(key);
+        });
+        var suites = [];
+        var bySuite = {};
+        rows.forEach(function (r) {
+          if (!bySuite[r.suite]) { bySuite[r.suite] = {}; suites.push(r.suite); }
+          var key = String(r.engine).replace(/^ash:/, '');
+          // A suite with several programs (misc) keeps the worst verdict.
+          var prev = bySuite[r.suite][key];
+          if (!prev || rank(r.status) > rank(prev.status)) bySuite[r.suite][key] = r;
+        });
+        function rank(status) {
+          return { OK: 0, PASS: 0, EMPTY: 1, SKIP: 2, PARTIAL: 3, FAIL: 4, CRASH: 5, TIMEOUT: 5 }[status] || 3;
+        }
+
+        var mono = "font-family:'IBM Plex Mono',monospace;";
+        var cols = 'grid-template-columns:minmax(220px,1.5fr) repeat(' + engineOrder.length + ',minmax(150px,1fr))';
         var mount = document.getElementById('conf-rows');
         mount.textContent = '';
-        rows.forEach(function (r, i) {
-          var row = el('div', null,
-            'display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;padding:14px 24px' +
+        // The grid scrolls inside its own box on a narrow screen rather than
+        // pushing the page sideways.
+        mount.style.overflowX = 'auto';
+
+        var head = el('div', null, 'display:grid;' + cols + ';gap:0 16px;padding:12px 24px;' +
+          'border-bottom:1px solid rgba(34,29,26,0.1);background:rgba(34,29,26,0.025)');
+        var corner = el('div', null, mono + 'font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#8a807a');
+        corner.textContent = 'suite';
+        head.appendChild(corner);
+        engineOrder.forEach(function (key) {
+          var h = el('div', null, mono + 'font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#a8703c');
+          h.textContent = engineName(key);
+          head.appendChild(h);
+        });
+        mount.appendChild(head);
+
+        function figure(r) {
+          var prog = r.progress || {};
+          if (r.status === 'SKIP') return 'skipped';
+          if (r.isolated && typeof r.cases_ok === 'number') {
+            return fmtInt(r.cases_ok) + ' / ' + fmtInt(r.cases_attemptable || r.cases_total) + ' cases';
+          }
+          if (r.utest) return fmtInt(r.utest.passed) + ' / ' + fmtInt(r.utest.assertions) + ' assertions';
+          if (prog.tests_reached) return fmtInt(prog.tests_reached) + ' tests reached';
+          // A program with no utest tally (the event loop) that exited cleanly.
+          if (r.status === 'PASS' || r.status === 'OK') return 'ran to completion';
+          return 'stopped before the first test';
+        }
+
+        suites.forEach(function (suite, i) {
+          var row = el('div', null, 'display:grid;' + cols + ';gap:0 16px;align-items:start;padding:14px 24px' +
             (i ? ';border-top:1px solid rgba(34,29,26,0.08)' : ''));
-
-          var name = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:13px;color:#221d1a;flex:1 1 260px");
-          name.textContent = (CONF_LABEL[r.suite] || r.suite) +
-            (multiEngine ? ' \u00b7 ' + engineName(r.engine) : '');
-          row.appendChild(name);
-
-          var ok = r.status === 'PASS';
-          var badge = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.08em;" +
-            'text-transform:uppercase;padding:3px 9px;border-radius:999px;white-space:nowrap;' +
-            (ok ? 'background:rgba(168,112,60,0.12);color:#a8703c'
-              : 'background:rgba(34,29,26,0.07);color:#5c5450'));
-          badge.textContent = r.status;
-          row.appendChild(badge);
-
-          var ref = refBy[r.suite];
+          var name = el('div', null, mono + 'font-size:13px;color:#221d1a');
+          name.textContent = CONF_LABEL[suite] || suite;
+          var ref = refBy[suite];
           if (ref) {
             var refOk = ref.status === 'PASS';
-            var refEl = el('div', null,
-              "font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap");
+            var refEl = el('div', null, mono + 'font-size:11px;color:#8a807a;margin-top:4px');
             refEl.textContent = refOk ? 'HashLink: passes' : 'HashLink: also fails';
             refEl.title = refOk
-              ? 'stock HashLink runs this suite, so the difference is ash\u2019s'
+              ? 'stock HashLink runs this suite, so the difference is ash’s'
               : 'stock HashLink does not run this suite either';
-            row.appendChild(refEl);
+            name.appendChild(refEl);
           }
+          row.appendChild(name);
 
-          var detail = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;flex:1 1 200px;text-align:right");
-          var prog = r.progress || {};
-          if (r.isolated && typeof r.cases_ok === 'number') {
-            detail.textContent = r.cases_ok + ' / ' +
-              (r.cases_attemptable || r.cases_total) + ' runnable cases';
-          } else if (r.utest) {
-            detail.textContent = r.utest.passed + ' / ' + r.utest.assertions + ' assertions';
-          } else if (prog.tests_reached) {
-            detail.textContent = prog.tests_reached + ' tests reached';
-          } else {
-            detail.textContent = 'stopped before the first test';
-          }
-          row.appendChild(detail);
+          engineOrder.forEach(function (key) {
+            var cell = el('div', null, 'display:flex;flex-direction:column;gap:6px;align-items:flex-start');
+            var r = bySuite[suite][key];
+            if (!r) {
+              var none = el('div', null, mono + 'font-size:12px;color:#8a807a');
+              none.textContent = 'not run';
+              cell.appendChild(none);
+              row.appendChild(cell);
+              return;
+            }
+            var good = r.status === 'PASS' || r.status === 'OK';
+            var skipped = r.status === 'SKIP' || r.status === 'EMPTY';
+            var badge = el('div', null, mono + 'font-size:11px;letter-spacing:0.08em;text-transform:uppercase;' +
+              'padding:3px 9px;border-radius:999px;white-space:nowrap;' +
+              (good ? 'background:rgba(168,112,60,0.12);color:#a8703c'
+                : skipped ? 'background:rgba(34,29,26,0.05);color:#8a807a'
+                : 'background:rgba(34,29,26,0.09);color:#5c5450'));
+            // Isolation says OK where a whole-suite run says PASS; one word.
+            badge.textContent = r.status === 'OK' ? 'PASS' : r.status;
+            if (r.detail) badge.title = r.detail;
+            cell.appendChild(badge);
+            var fig = el('div', null, mono + 'font-size:12px;color:#8a807a;font-variant-numeric:tabular-nums');
+            fig.textContent = figure(r);
+            if (r.status === 'SKIP' && r.detail) fig.title = r.detail;
+            cell.appendChild(fig);
+            row.appendChild(cell);
+          });
           mount.appendChild(row);
         });
 
-        if (!mount.children.length) {
-          var note = el('div', null,
-            "font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px");
+        if (!suites.length) {
+          var note = el('div', null, mono + 'font-size:12.5px;color:#8a807a;padding:18px 24px');
           note.textContent = 'The latest run produced no suite results.';
           mount.appendChild(note);
         }

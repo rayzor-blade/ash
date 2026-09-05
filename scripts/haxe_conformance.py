@@ -1425,8 +1425,13 @@ def main(argv=None) -> int:
                 engines.append(("hashlink", [args.reference, str(p)]))
 
             if isolating:
-                for m in modes:
-                    label = f"ash:{m}"
+                # Only the engines that built: a failed one already has its
+                # SKIP row above, and asking run_isolated for it would add a
+                # second.
+                for label, _argv in engines:
+                    if not label.startswith("ash:"):
+                        continue
+                    m = label[len("ash:"):]
                     print(f"   {label}: per-case isolation", flush=True)
                     iso = run_isolated(ash, p, m, args.isolate_timeout,
                                        args.isolate_jobs, args.isolate_limit)

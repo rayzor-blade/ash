@@ -25,7 +25,7 @@
 //! than a symbol index -- a distinction that is invisible at the call site
 //! and would silently mis-type every `call_indirect` if missed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 use wasmparser::{RelocationEntry, RelocationType};
@@ -800,8 +800,21 @@ fn report_unresolved(
 ) -> Result<()> {
     let mut missing: Vec<String> = Vec::new();
     for obj in objects {
-        for sym in &obj.symbols {
-            if !sym.is_undefined() {
+        // Only symbols a KEPT section refers to. Debug sections are dropped,
+        // and their relocations with them, but their symbols stay in the
+        // table: wasi-sdk's libc carries DWARF whose location expressions
+        // name `__tls_base`, a global nothing else in the object touches, and
+        // a link against it refused over a symbol that would never have been
+        // patched.
+        let referenced: HashSet<u32> = obj
+            .code_relocs
+            .iter()
+            .chain(obj.data_relocs.iter())
+            .filter(|entry| entry.ty != RelocationType::TypeIndexLeb)
+            .map(|entry| entry.index)
+            .collect();
+        for (si, sym) in obj.symbols.iter().enumerate() {
+            if !sym.is_undefined() || !referenced.contains(&(si as u32)) {
                 continue;
             }
             let name = obj.symbol_name(sym);

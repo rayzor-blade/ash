@@ -323,42 +323,91 @@ build machine needs nothing installed and `cargo test -p ash --test
 wasm_target` asserts on a struct rather than on someone's text output.
 `ash-wasm-run` is the same thing plus an engine, for actually running one.
 
-### Sockets: preview 1's half, and a host for the rest
+### Sockets: every call is a host import
 
-A sandbox does not simply lack sockets. WASI preview 1 has `sock_accept`,
-`sock_recv`, `sock_send` and `sock_shutdown`, all on a descriptor the HOST
-opened, and nothing that creates one, connects it, binds, listens, resolves a
-name or selects across a set. Rust's own `std::net` compiles on this target
-and answers `Unsupported` to everything, measured, including under
-`wasmtime -S inherit-network`.
+A sandbox does not simply lack sockets; it lacks them in a way that looks like
+having some. WASI preview 1 names `sock_accept`, `sock_recv`, `sock_send` and
+`sock_shutdown` and nothing that creates a descriptor, connects, binds,
+listens, resolves a name or waits on a set -- and the four it names are
+unusable under wasmtime, whose preview 1 answers `ENOTSOCK` to every one of
+them and whose descriptor table cannot hold a socket. Rust's own `std::net`
+compiles on this target and answers `Unsupported` to everything, measured,
+including under `wasmtime -S inherit-network`. A guest built on that half had
+a socket layer that could only fail, and a `close` routed through `fd_close`
+would have closed a WASI *file* at that number (3 is the preopened working
+directory).
 
-So the guest implements the half that exists, and asks for the two calls
-preview 1 cannot express:
+So the guest's `socket.rs` -- the `cfg(not(any(unix, windows)))` arm, which
+is also what any future target that is neither unix nor windows compiles --
+asks the host for all of it, through one `env` block of twelve imports. Every
+argument and result is an `i32`; the pointers are guest addresses the host
+reads through the exported memory:
 
 ```
-env.ash_host_socket_open(udp) -> fd
-env.ash_host_socket_connect(fd, ip, port) -> errno
+env.ash_host_socket_open(udp)                -> fd >= 0            | -errno
+env.ash_host_socket_connect(fd, ip, port)    -> 0                  | errno   AGAIN/INPROGRESS: still connecting
+env.ash_host_socket_bind(fd, ip, port)       -> 0                  | errno   the host sets SO_REUSEADDR first
+env.ash_host_socket_listen(fd, backlog)      -> 0                  | errno
+env.ash_host_socket_accept(fd)               -> fd >= 0            | -errno  AGAIN: non-blocking, nothing pending
+env.ash_host_socket_send(fd, buf, len)       -> bytes >= 0         | -errno
+env.ash_host_socket_recv(fd, buf, len)       -> bytes > 0, 0 = EOF | -errno
+env.ash_host_socket_shutdown(fd, how)        -> 0                  | errno   how: 1 read, 2 write
+env.ash_host_socket_close(fd)                -> 0                  | errno
+env.ash_host_socket_name(fd, which, out)     -> 0                  | errno   which: 0 local, 1 peer; out[0] = s_addr, out[1] = port
+env.ash_host_socket_set(fd, opt, value)      -> 0                  | errno   opt: 0 blocking, 1 TCP_NODELAY, 2 SO_BROADCAST, 3 timeout ms
+env.ash_host_socket_poll(fds, nfds, timeout) -> ready count >= 0   | -errno  timeout in ms, negative waits forever
 ```
 
-A host with nothing to offer returns a negative descriptor and the caller
-sees the refusal a kernel would have given. `bind` and `listen` refuse
-whatever the host is, because a page cannot listen and preview 1 cannot bind.
+Descriptors are the host's own namespace, starting at 0 and private to these
+imports; they never meet a WASI fd. `ip` is an `s_addr` -- the four octets in
+wire order read as an int, the value `sys.net.Host.ip` carries -- and `port`
+is in host order. Errors cross as WASI preview 1 errno numbers, the one
+numbering guest and hosts agree on: `ADDRINUSE` 3, `AGAIN` 6, `ALREADY` 7,
+`BADF` 8, `CONNREFUSED` 14, `CONNRESET` 15, `INPROGRESS` 26, `INVAL` 28, `IO`
+29, `NOTCONN` 53, `NOTSOCK` 57, `NOTSUP` 58, `PIPE` 64, `TIMEDOUT` 73. The
+guest turns `AGAIN`/`ALREADY`/`INPROGRESS` into the -1 that `sys.net.Socket`
+reads as `Blocked` and everything else into -2, the same split the unix
+runtime makes from `errno`.
 
-**In a browser those two are a WebSocket**, which is the only connection a
-page may open, and which a relay can bridge to TCP for a peer that speaks
-something else. `crates/ash_wasm_runtime/src/browser/sockets.rs` is that
-shim. Two places its semantics differ from TCP, both visible to a program and
-both documented at the call site: connecting does not block, so `connect`
-reports `EAGAIN` until the socket is up and a caller polls, exactly as a
-non-blocking socket behaves anywhere; and WebSocket delivers whole messages
-while `recv` hands back bytes, so messages are queued whole and drained by
-count, and a `send` does not pair with a `recv`. Neither is a surprise on
-TCP either.
+`poll` takes an array of 8-byte records, `{ fd: i32, events: u16, revents:
+u16 }`, with ash's own bits -- `RD` 1, `WR` 2, `PRI` 4, `ERR` 8, `HUP` 16,
+`NVAL` 32 -- because `POLLIN` is a different number on Darwin and on Linux and
+a pass-through would be right on one kernel and wrong on the next. The guest's
+`select` builds one record per distinct descriptor from its three sets and
+folds the answer back: read-ready on `RD|HUP|ERR`, write-ready on `WR|ERR`,
+exceptional on `PRI` alone. `socket_fd_size` is 0 on this target, so
+`Socket.select` never allocates a scratch buffer.
 
-Under `wasmtime` the same guest works differently and better: a host that
-pre-opens a listening descriptor gets a real server, since accept, send,
-receive and shutdown are all preview 1 calls. Full outbound TCP wants
-preview 2's `wasi:sockets`, which is a different target rather than a shim.
+"Optional" means a host without sockets answers `-NOTSUP`/`NOTSUP` and the
+program sees the refusal a kernel would have given, at the call rather than as
+a missing symbol at load. Who answers what:
+
+* **`ash-wasm-run`** (`crates/ash_wasm_runtime/src/native/sockets.rs`)
+  implements all twelve over the operating system's sockets through `libc`,
+  keyed by a table from guest descriptor to OS fd. The imports are
+  synchronous host functions, so a blocking `accept`, `recv` or `poll` holds
+  the host thread; the host runs one guest, so nothing waits behind it.
+  Readiness is evaluated with `select(2)`, not `poll(2)`: measured on Darwin,
+  `poll` reports a stream whose peer has closed as `POLLIN|POLLPRI|POLLHUP`
+  and not writable, while `select` -- and the unix runtime, and the Haxe
+  suite's expectations -- say readable and writable and not exceptional. On
+  Windows the same twelve imports are installed and every one answers
+  `NOTSUP`. `unit.spec.sys.net.TestSocket` passes under this host with the
+  same 19 successes as the native binary.
+* **The browser host** (`crates/ash_wasm_runtime/src/browser/sockets.rs`)
+  implements the client half over WebSocket -- `open`, `connect`, `send`,
+  `recv`, `shutdown`, `close`, `set`, and a `poll` that answers what is ready
+  now without waiting, since a page's one thread is the event loop -- and
+  refuses `bind`, `listen`, `accept` and `name`, because a page cannot listen
+  and sees no addresses. Connecting reports `AGAIN` until the socket is up, as
+  a non-blocking connect does anywhere; and WebSocket delivers whole messages
+  while `recv` hands back bytes, so messages are queued whole and drained by
+  count. A relay can bridge a WebSocket to TCP for a peer that speaks
+  something else.
+
+Not in the import set yet: datagram addressing (`send_to`/`recv_from` refuse
+with `NOTSUP`, though a UDP socket can be opened and bound) and name
+resolution, which a guest with no resolver leaves at the dotted-quad parse.
 
 ### It runs
 
@@ -668,7 +717,7 @@ The nine cases out of scope, and why:
 | case | why |
 |---|---|
 | `unit.TestMisc`, `unit.spec.TestUnicode`, `unit.spec.haxe.crypto.TestSha1`, `TestMd5`, `TestHmac`, `unit.spec.haxe.zip.TestCompress`, `unit.issues.Issue2861`, `unit.issues.Issue5090` | the `fmt` HDLL, which a sandbox cannot load |
-| `unit.spec.sys.net.TestSocket` | BSD sockets, which WASI preview 1 does not have |
+| `unit.spec.sys.net.TestSocket` | passes since the twelve `env.ash_host_socket_*` imports (see Sockets above); a host without them answers `NOTSUP` and the case reads as an error there |
 
 Those eight `fmt` cases are compression and hashing, not language semantics:
 they come back into scope the day `fmt`'s primitives are provided by the wasm

@@ -429,93 +429,130 @@ mod sys {
     }
 }
 
-// WASI preview 1 has half a socket API, and this is that half.
+// Sockets on wasm: every call is an import, because the sandbox has none.
 //
-// A module cannot create a socket, connect one, bind, listen, resolve a name
-// or select across a set: preview 1 has no call for any of it, and Rust's own
-// `std::net` compiles on this target only to answer `Unsupported` at run time
-// (measured, including under `wasmtime -S inherit-network`). Those operations
-// refuse here, and refuse honestly.
+// WASI preview 1 names `sock_accept`, `sock_recv`, `sock_send` and
+// `sock_shutdown`, and that is where its socket API stops: nothing creates a
+// descriptor, connects, binds, listens, resolves or waits on a set. The four
+// that exist are also unusable in practice -- wasmtime-wasi's preview 1 answers
+// ENOTSOCK to every one of them, whatever the descriptor, and its descriptor
+// table cannot hold a socket at all -- so a module that leaned on them had a
+// socket layer that could only ever fail, and a `close` that went through
+// `fd_close` would have closed a WASI *file* at that number (3 is the
+// preopened working directory).
 //
-// What preview 1 does have is `sock_accept`, `sock_recv`, `sock_send` and
-// `sock_shutdown`, on a descriptor the HOST opened and passed in -- the shape
-// a server takes when the runtime owns the listening socket. Those are
-// implemented, so a Haxe program handed a listening descriptor accepts
-// connections and talks over them.
+// So the guest asks the host for all of it, through one `env` block of twelve
+// imports. The descriptors it gets back are the host's own namespace, private
+// to these imports and starting at 0; they never meet a WASI fd. The host is
+// optional in the sense that a host without sockets answers every call with
+// `-NOTSUP`, and the program sees the refusal a kernel would have given rather
+// than a missing symbol at load. `ash-wasm-run` implements the twelve over the
+// operating system's sockets; a browser host implements the client half over
+// WebSocket and refuses the server half.
 //
-// The natives above exist either way: a program that never opens a socket
-// runs, and one that does gets a failure at the call rather than a missing
-// symbol at load.
+// `cfg(not(any(unix, windows)))` is this module's condition, so it is also
+// what any future target that is neither unix nor windows compiles: the
+// contract is "ask the host", which is the right default for a target nobody
+// has written a socket layer for yet.
 #[cfg(not(any(unix, windows)))]
 mod sys {
+    use std::cell::{Cell, RefCell};
     use std::ffi::c_int;
 
-    /// The preview 1 calls this module uses. Declared rather than taken from
-    /// a crate: it is five functions, and the alternative is a dependency
-    /// that exists to spell them.
-    #[link(wasm_import_module = "wasi_snapshot_preview1")]
-    extern "C" {
-        fn sock_accept(fd: u32, flags: u16, result: *mut u32) -> u16;
-        fn sock_recv(
-            fd: u32,
-            ri_data: *const IoVec,
-            ri_data_len: usize,
-            ri_flags: u16,
-            ro_datalen: *mut usize,
-            ro_flags: *mut u16,
-        ) -> u16;
-        fn sock_send(
-            fd: u32,
-            si_data: *const IoVec,
-            si_data_len: usize,
-            si_flags: u16,
-            so_datalen: *mut usize,
-        ) -> u16;
-        fn sock_shutdown(fd: u32, how: u8) -> u16;
-        fn fd_close(fd: u32) -> u16;
-    }
-
-    /// `__wasi_ciovec_t` and `__wasi_iovec_t` have the same shape, so one
-    /// type serves both directions.
-    #[repr(C)]
-    struct IoVec {
-        buf: *const u8,
-        len: usize,
-    }
-
-    /// The two operations preview 1 is missing, offered to whatever host
-    /// wants to supply them.
-    ///
-    /// Everything else a socket does -- send, receive, shut down, close --
-    /// preview 1 already names, so a host that implements those imports has
-    /// implemented most of a socket already. It cannot open one or connect
-    /// it, because preview 1 has no call for either, and that is the entire
-    /// gap these two fill.
-    ///
-    /// A browser is the case this exists for. `new WebSocket(url)` opens a
-    /// stream to a peer that speaks WebSocket, which is the only kind of
-    /// connection a page may make; the host hands back a descriptor, and the
-    /// WASI calls above then carry bytes over it. What a page cannot do at
-    /// all is listen, so `bind` and `listen` still refuse.
-    ///
-    /// Declared weak-by-convention: a host that does not implement them is
-    /// the ordinary case, and `open` returning a negative descriptor is how
-    /// it says so.
+    // The host's side of a socket. Every argument and result is an `i32`
+    // because that is what a wasm32 import carries; the pointers are guest
+    // addresses the host reads through the exported memory.
+    //
+    // Two return conventions, chosen per call so the guest does not have to
+    // carry an errno out of band: a call that produces a value (`open`,
+    // `accept`, `send`, `recv`, `poll`) returns it when non-negative and
+    // `-errno` otherwise; a call that produces nothing returns 0 or `+errno`.
+    // The numbers are WASI preview 1's, listed in `errno` below.
     #[link(wasm_import_module = "env")]
     extern "C" {
-        /// Open a socket, returning a descriptor or a negative errno.
+        /// A fresh descriptor, TCP unless `udp` is set.
         fn ash_host_socket_open(udp: i32) -> i32;
-        /// Connect `fd` to an IPv4 address in host byte order. Returns 0, or
-        /// a positive errno -- `EAGAIN` while a connection is still being
-        /// established, which is how an asynchronous host reports progress.
+        /// `ip` is an `s_addr` in network order reinterpreted as an int, the
+        /// same value `sys.net.Host.ip` carries; `port` is in host order.
+        /// `EAGAIN`/`EINPROGRESS` mean a non-blocking connect is still under
+        /// way, which upstream's caller already treats as success.
         fn ash_host_socket_connect(fd: i32, ip: i32, port: i32) -> i32;
+        /// The host sets `SO_REUSEADDR` first, as the unix `sys::bind` does.
+        fn ash_host_socket_bind(fd: i32, ip: i32, port: i32) -> i32;
+        fn ash_host_socket_listen(fd: i32, backlog: i32) -> i32;
+        /// A new descriptor, or `-EAGAIN` on a non-blocking listener with
+        /// nothing pending.
+        fn ash_host_socket_accept(fd: i32) -> i32;
+        fn ash_host_socket_send(fd: i32, buf: *const u8, len: i32) -> i32;
+        /// Bytes read; 0 is end of stream.
+        fn ash_host_socket_recv(fd: i32, buf: *mut u8, len: i32) -> i32;
+        /// `how` is a bit set: 1 closes the read side, 2 the write side.
+        fn ash_host_socket_shutdown(fd: i32, how: i32) -> i32;
+        /// Never `fd_close`: the descriptor is not a WASI fd.
+        fn ash_host_socket_close(fd: i32) -> i32;
+        /// `which` 0 is the local address, 1 the peer's. Writes `out[0]` =
+        /// `s_addr` (network order, as an int) and `out[1]` = port in host
+        /// order.
+        fn ash_host_socket_name(fd: i32, which: i32, out: *mut i32) -> i32;
+        /// `opt` 0 blocking (bool), 1 `TCP_NODELAY` (bool), 2 `SO_BROADCAST`
+        /// (bool), 3 send and receive timeout in milliseconds.
+        fn ash_host_socket_set(fd: i32, opt: i32, value: i32) -> i32;
+        /// Wait for readiness on `nfds` records, at most `timeout_ms`
+        /// (negative waits forever). Returns how many records have a
+        /// non-zero `revents`.
+        fn ash_host_socket_poll(fds: *mut PollFd, nfds: i32, timeout_ms: i32) -> i32;
+    }
+
+    /// One record of a poll request, 8 bytes, read and written in place by
+    /// the host. The event bits are ash's own rather than any libc's: the
+    /// numeric values of `POLLIN` and friends differ between kernels, and a
+    /// host that passed them through would be right on one and wrong on the
+    /// next. Besides the five below the host may answer 32 (`NVAL`) for a
+    /// descriptor it does not know, which no set counts as ready.
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: u16,
+        revents: u16,
+    }
+
+    const RD: u16 = 1;
+    const WR: u16 = 2;
+    const PRI: u16 = 4;
+    const ERR: u16 = 8;
+    const HUP: u16 = 16;
+
+    /// WASI preview 1's errno numbering, which is what the imports speak.
+    /// Only the values this side branches on are named; the host maps its
+    /// kernel's errors onto the full list (`AGAIN` 6, `ALREADY` 7,
+    /// `ADDRINUSE` 3, `BADF` 8, `CONNREFUSED` 14, `CONNRESET` 15,
+    /// `INPROGRESS` 26, `INVAL` 28, `IO` 29, `NOTCONN` 53, `NOTSOCK` 57,
+    /// `NOTSUP` 58, `PIPE` 64, `TIMEDOUT` 73).
+    mod errno {
+        pub const AGAIN: i32 = 6;
+        pub const ALREADY: i32 = 7;
+        pub const INPROGRESS: i32 = 26;
+        pub const NOTSUP: i32 = 58;
+    }
+
+    thread_local! {
+        /// The errno of the last failed import, standing in for the libc
+        /// `errno` the unix module reads back through `last_os_error`. The
+        /// imports return their error and set nothing, so the wrapper below
+        /// records it before the caller asks `block_error` what kind it was.
+        static LAST_ERRNO: Cell<i32> = const { Cell::new(0) };
+    }
+
+    fn fail(e: i32) {
+        LAST_ERRNO.with(|c| c.set(e));
     }
 
     pub type Sock = c_int;
     pub const INVALID: Sock = -1;
 
-    /// The shape of an IPv4 address, kept so the code above compiles and
-    /// indexes it identically. Nothing here ever reads one back from a host.
+    /// The shape of an IPv4 address, kept so the code above builds and reads
+    /// one identically on every target. It never crosses to the host as a
+    /// struct: the imports take the address and port as two ints.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     pub struct SockAddrIn {
@@ -523,15 +560,6 @@ mod sys {
         pub sin_port: u16,
         pub sin_addr: u32,
         pub sin_zero: [u8; 8],
-    }
-
-    #[allow(dead_code)]
-    pub struct Hostent {
-        pub h_name: *mut std::ffi::c_char,
-        pub h_aliases: *mut *mut std::ffi::c_char,
-        pub h_addrtype: c_int,
-        pub h_length: c_int,
-        pub h_addr_list: *mut *mut std::ffi::c_char,
     }
 
     pub fn startup() {}
@@ -544,10 +572,14 @@ mod sys {
         s as u64
     }
 
-    /// `EAGAIN` in WASI's errno numbering, which is what a would-block read
-    /// or write reports.
+    /// -1 when the operation merely has to be retried, -2 for a real failure
+    /// -- the same split the unix module makes, and the two values
+    /// `hlp_socket_send`/`recv` hand to Haxe verbatim (`Blocked` and `Eof`).
     pub fn block_error() -> c_int {
-        6
+        match LAST_ERRNO.with(|c| c.get()) {
+            errno::AGAIN | errno::ALREADY | errno::INPROGRESS => -1,
+            _ => -2,
+        }
     }
 
     pub fn conn_reset() -> bool {
@@ -567,174 +599,222 @@ mod sys {
         (addr.sin_addr as c_int, u16::from_be(addr.sin_port) as c_int)
     }
 
-    /// Preview 1 has no call that creates a socket, so this asks the host.
-    /// A host with nothing to offer returns a negative descriptor, and the
-    /// caller sees the same refusal it would have seen from a kernel.
     pub unsafe fn create(udp: bool) -> Sock {
-        let fd = ash_host_socket_open(i32::from(udp));
-        if fd < 0 {
-            INVALID
-        } else {
-            fd
+        let rc = ash_host_socket_open(i32::from(udp));
+        if rc < 0 {
+            fail(-rc);
+            return INVALID;
         }
+        rc
     }
 
     pub unsafe fn close(s: Sock) {
         if s >= 0 {
-            fd_close(s as u32);
+            ash_host_socket_close(s);
         }
     }
 
     pub unsafe fn send(s: Sock, buf: *const u8, len: c_int) -> isize {
-        if s < 0 {
+        let rc = ash_host_socket_send(s, buf, len);
+        if rc < 0 {
+            fail(-rc);
             return -1;
         }
-        let iov = IoVec {
-            buf,
-            len: len as usize,
-        };
-        let mut sent: usize = 0;
-        if sock_send(s as u32, &iov, 1, 0, &mut sent) != 0 {
-            return -1;
-        }
-        sent as isize
+        rc as isize
     }
 
     pub unsafe fn recv(s: Sock, buf: *mut u8, len: c_int) -> isize {
-        if s < 0 {
+        let rc = ash_host_socket_recv(s, buf, len);
+        if rc < 0 {
+            fail(-rc);
             return -1;
         }
-        let iov = IoVec {
-            buf: buf as *const u8,
-            len: len as usize,
-        };
-        let mut got: usize = 0;
-        let mut flags: u16 = 0;
-        if sock_recv(s as u32, &iov, 1, 0, &mut got, &mut flags) != 0 {
-            return -1;
-        }
-        got as isize
+        rc as isize
     }
 
+    /// Datagram addressing is not part of the import set yet: UDP sockets can
+    /// be opened and bound, but sending to and receiving from an explicit
+    /// address refuse until a host offers the two calls.
     pub unsafe fn send_to(s: Sock, buf: *const u8, len: c_int, addr: &SockAddrIn) -> isize {
         let _ = (s, buf, len, addr);
+        fail(errno::NOTSUP);
         -1
     }
 
     pub unsafe fn recv_from(s: Sock, buf: *mut u8, len: c_int, addr: &mut SockAddrIn) -> isize {
         let _ = (s, buf, len, addr);
+        fail(errno::NOTSUP);
         -1
     }
 
+    /// False with `EINPROGRESS`/`EAGAIN` recorded when a non-blocking
+    /// connect is still under way; `hlp_socket_connect` reads that back
+    /// through `block_error` and reports the in-progress connect as success,
+    /// as upstream does.
     pub unsafe fn connect(s: Sock, addr: &SockAddrIn) -> bool {
-        if s < 0 {
+        let (ip, port) = addr_parts(addr);
+        let rc = ash_host_socket_connect(s, ip, port);
+        if rc != 0 {
+            fail(rc);
             return false;
         }
-        let (ip, port) = addr_parts(addr);
-        ash_host_socket_connect(s, ip, port) == 0
+        true
     }
 
-    /// A page cannot listen, and preview 1 cannot bind. Both stay refused
-    /// however capable the host is.
     pub unsafe fn bind(s: Sock, addr: &SockAddrIn) -> bool {
-        let _ = (s, addr);
-        false
+        let (ip, port) = addr_parts(addr);
+        let rc = ash_host_socket_bind(s, ip, port);
+        if rc != 0 {
+            fail(rc);
+            return false;
+        }
+        true
     }
 
     pub unsafe fn listen(s: Sock, n: c_int) -> bool {
-        let _ = (s, n);
-        false
+        let rc = ash_host_socket_listen(s, n);
+        if rc != 0 {
+            fail(rc);
+            return false;
+        }
+        true
     }
 
-    /// Accept on a descriptor the host opened. This is the one operation
-    /// preview 1 offers that creates a socket, and it is why a server works
-    /// here at all.
     pub unsafe fn accept(s: Sock) -> Sock {
-        if s < 0 {
+        let rc = ash_host_socket_accept(s);
+        if rc < 0 {
+            fail(-rc);
             return INVALID;
         }
-        let mut accepted: u32 = 0;
-        if sock_accept(s as u32, 0, &mut accepted) != 0 {
-            return INVALID;
+        rc
+    }
+
+    unsafe fn name(s: Sock, which: i32) -> Option<SockAddrIn> {
+        let mut out = [0i32; 2];
+        let rc = ash_host_socket_name(s, which, out.as_mut_ptr());
+        if rc != 0 {
+            fail(rc);
+            return None;
         }
-        accepted as Sock
+        Some(sockaddr_in(out[0], out[1]))
     }
 
     pub unsafe fn sock_name(s: Sock) -> Option<SockAddrIn> {
-        let _ = s;
-        None
+        name(s, 0)
     }
 
     pub unsafe fn peer_name(s: Sock) -> Option<SockAddrIn> {
-        let _ = s;
-        None
+        name(s, 1)
     }
 
     pub unsafe fn shutdown(s: Sock, read: bool, write: bool) -> bool {
-        if s < 0 {
+        let how = i32::from(read) | (i32::from(write) << 1);
+        let rc = ash_host_socket_shutdown(s, how);
+        if rc != 0 {
+            fail(rc);
             return false;
         }
-        // The `sdflags` bits: 1 = read, 2 = write.
-        let how = u8::from(read) | (u8::from(write) << 1);
-        sock_shutdown(s as u32, how) == 0
+        true
+    }
+
+    unsafe fn set(s: Sock, opt: i32, value: i32) -> bool {
+        let rc = ash_host_socket_set(s, opt, value);
+        if rc != 0 {
+            fail(rc);
+            return false;
+        }
+        true
     }
 
     pub unsafe fn set_blocking(s: Sock, b: bool) -> bool {
-        let _ = (s, b);
-        false
+        set(s, 0, i32::from(b))
     }
 
+    /// Seconds to whole milliseconds; the cast saturates, so an absurd
+    /// timeout becomes a long one rather than a negative one.
     pub unsafe fn set_timeout(s: Sock, t: f64) -> bool {
-        let _ = (s, t);
-        false
+        set(s, 3, (t * 1000.0).max(0.0) as i32)
     }
 
+    /// Only the two options the natives above ask for have a host-side
+    /// number; anything else is refused as unsupported rather than mapped to
+    /// a kernel constant the host would have to guess the meaning of.
     pub unsafe fn set_flag(s: Sock, level: c_int, name: c_int, b: bool) -> bool {
-        let _ = (s, level, name, b);
-        false
+        let opt = match (level, name) {
+            (TCP_LEVEL, TCP_NODELAY) => 1,
+            (SOCKET_LEVEL, SO_BROADCAST) => 2,
+            _ => {
+                fail(errno::NOTSUP);
+                return false;
+            }
+        };
+        set(s, opt, i32::from(b))
     }
 
-    // The option names the code above passes to `set_flag`, which refuses
-    // them all. Values match the BSD numbering so a trace reads the same.
+    // The option names the code above passes to `set_flag`. Values match the
+    // BSD numbering so a trace reads the same; they are matched, not sent.
     pub const TCP_LEVEL: c_int = 6;
     pub const TCP_NODELAY: c_int = 1;
     pub const SOCKET_LEVEL: c_int = 0xffff;
     pub const SO_BROADCAST: c_int = 0x0020;
 
+    /// The set lives in this module rather than in the caller's scratch
+    /// bytes, so it costs the caller nothing: `Socket.select` then never
+    /// allocates a buffer, and `make_socket_set` sees a region it can hand
+    /// over without checking.
     pub fn fd_size(count: c_int) -> c_int {
         let _ = count;
         0
     }
 
-    pub struct FdSet;
+    /// One of select's three sets: the descriptors asked about, each with
+    /// the answer `select` filled in. The answer is written through a shared
+    /// reference because `select` takes the sets as `Option<&FdSet>` on every
+    /// target, and the fd_set it stands in for is mutated the same way.
+    pub struct FdSet {
+        entries: RefCell<Vec<(Sock, bool)>>,
+    }
 
     impl FdSet {
         /// # Safety
-        /// Takes the caller's region without reading it; there is no set to
-        /// build.
+        /// Takes the caller's region without reading it; the set is stored
+        /// here, not there.
         pub unsafe fn init(region: *mut u8, _count: usize) -> FdSet {
             let _ = region;
-            FdSet
+            FdSet {
+                entries: RefCell::new(Vec::new()),
+            }
         }
 
         /// # Safety
-        /// Mirrors the platform signature; adds nothing.
+        /// Mirrors the platform signature; there is no range a descriptor
+        /// can fall outside of.
         pub unsafe fn add(&mut self, s: Sock) -> bool {
-            let _ = s;
-            false
+            self.entries.borrow_mut().push((s, false));
+            true
         }
 
         /// # Safety
-        /// Mirrors the platform signature; contains nothing.
+        /// Mirrors the platform signature. True once `select` has reported
+        /// the descriptor ready.
         pub unsafe fn contains(&self, s: Sock) -> bool {
-            let _ = s;
-            false
+            self.entries
+                .borrow()
+                .iter()
+                .any(|&(fd, ready)| fd == s && ready)
         }
     }
 
+    /// One poll record per distinct descriptor, its events the union of the
+    /// sets it appears in, then the host's answer folded back: a read set
+    /// counts hang-up and error as readable (the read that follows returns
+    /// end of stream or the error, which is what select promises), a write
+    /// set counts error as writable, and the except set is priority data
+    /// only.
+    ///
     /// # Safety
-    /// Mirrors the platform signature. Selecting over no sockets is an error
-    /// rather than an immediate timeout, so a caller does not spin.
+    /// Mirrors the platform signature. `nfds` is select's `max fd + 1`,
+    /// which a record list does not need.
     pub unsafe fn select(
         nfds: u64,
         read: Option<&FdSet>,
@@ -742,12 +822,46 @@ mod sys {
         except: Option<&FdSet>,
         timeout: Option<f64>,
     ) -> c_int {
-        let _ = (nfds, read, write, except, timeout);
-        -1
+        let _ = nfds;
+        let mut fds: Vec<PollFd> = Vec::new();
+        for (set, bit) in [(read, RD), (write, WR), (except, PRI)] {
+            let Some(set) = set else { continue };
+            for &(fd, _) in set.entries.borrow().iter() {
+                match fds.iter_mut().find(|p| p.fd == fd) {
+                    Some(p) => p.events |= bit,
+                    None => fds.push(PollFd {
+                        fd,
+                        events: bit,
+                        revents: 0,
+                    }),
+                }
+            }
+        }
+        // Rounded up so a short timeout is a wait and not a spin; the cast
+        // saturates for a long one.
+        let timeout_ms = match timeout {
+            None => -1,
+            Some(t) => (t * 1000.0).ceil().max(0.0) as i32,
+        };
+        let rc = ash_host_socket_poll(fds.as_mut_ptr(), fds.len() as i32, timeout_ms);
+        if rc < 0 {
+            fail(-rc);
+            return -1;
+        }
+        for (set, mask) in [(read, RD | HUP | ERR), (write, WR | ERR), (except, PRI)] {
+            let Some(set) = set else { continue };
+            for (fd, ready) in set.entries.borrow_mut().iter_mut() {
+                if let Some(p) = fds.iter().find(|p| p.fd == *fd) {
+                    *ready = p.revents & mask != 0;
+                }
+            }
+        }
+        rc
     }
 
     /// # Safety
-    /// Mirrors the platform signature. There is no resolver.
+    /// Mirrors the platform signature. There is no resolver: a dotted quad
+    /// is parsed before this is reached, and a name has nowhere to go.
     pub unsafe fn resolve_ipv4(name: *const u8) -> Option<c_int> {
         let _ = name;
         None

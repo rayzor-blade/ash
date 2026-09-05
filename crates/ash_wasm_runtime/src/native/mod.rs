@@ -7,11 +7,17 @@
 //! guest's stack aside while something else runs. That is the same capability
 //! JSPI gives a browser, available here without a browser.
 //!
+//! What WASI preview 1 does not have is sockets, and the guest asks for those
+//! through its own `env.ash_host_socket_*` imports; [`sockets`] answers them
+//! with the operating system's.
+//!
 //! It is also useful before the runtime is finished. A module that still
 //! imports `hlp_*` -- because `ash_std` has not been linked into it yet --
 //! does not fail with a linker's idea of an error; [`Program::missing`]
 //! reports exactly which imports nothing satisfies, which during the port is
 //! the question being asked.
+
+mod sockets;
 
 use std::path::Path;
 
@@ -33,6 +39,16 @@ pub enum Outcome {
     Exited(i32),
     /// The program trapped. The string is the trap, already formatted.
     Trapped(String),
+}
+
+/// The store's data: everything a host function reaches through its
+/// `Caller`. WASI keeps its own descriptor table in `wasi`; the guest's
+/// sockets live in a second table because a socket is not a WASI fd and must
+/// never be mistaken for one -- closing guest socket 3 through `fd_close`
+/// would close the preopened working directory.
+pub(crate) struct Host {
+    wasi: WasiP1Ctx,
+    sockets: sockets::Table,
 }
 
 impl Program {
@@ -91,7 +107,8 @@ impl Program {
         if !missing.is_empty() {
             return Err(anyhow!(
                 "the module imports {} symbol(s) no host can supply, the first few being {}. \
-                 A program linked against the wasm runtime imports only WASI and {}.{}.",
+                 A program linked against the wasm runtime imports only WASI and the \
+                 {}.ash_host_* imports this host provides.",
                 missing.len(),
                 missing
                     .iter()
@@ -100,7 +117,6 @@ impl Program {
                     .collect::<Vec<_>>()
                     .join(", "),
                 FIBER_YIELD_MODULE,
-                FIBER_YIELD_NAME
             ));
         }
 
@@ -131,13 +147,19 @@ impl Program {
                 wasi.env(&key, &value);
             }
         }
-        let mut store = Store::new(&self.engine, wasi.build_p1());
+        let mut store = Store::new(
+            &self.engine,
+            Host {
+                wasi: wasi.build_p1(),
+                sockets: sockets::Table::default(),
+            },
+        );
 
-        let mut linker: Linker<WasiP1Ctx> = Linker::new(&self.engine);
-        p1::add_to_linker_async(&mut linker, |ctx: &mut WasiP1Ctx| ctx)
+        let mut linker: Linker<Host> = Linker::new(&self.engine);
+        p1::add_to_linker_async(&mut linker, |host: &mut Host| &mut host.wasi)
             .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
         install_fiber_yield(&mut linker)?;
-        install_socket_refusals(&mut linker)?;
+        sockets::install(&mut linker)?;
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
@@ -178,7 +200,7 @@ enum Entry {
 }
 
 impl Entry {
-    async fn call(self, store: &mut Store<WasiP1Ctx>) -> Result<i32> {
+    async fn call(self, store: &mut Store<Host>) -> Result<i32> {
         match self {
             Entry::Start(f) => {
                 f.call_async(store, ()).await?;
@@ -189,28 +211,6 @@ impl Entry {
             Entry::Main(f) => Ok(f.call_async(store, (0, 0)).await?),
         }
     }
-}
-
-/// Sockets, which this host does not open.
-///
-/// WASI preview 1 has no call that creates or connects a socket, so the guest
-/// asks the host, and the honest answer here is no: a negative descriptor,
-/// which the guest reports as the refusal a kernel would have given. A host
-/// that wants real sockets under `wasmtime` should reach for preview 2's
-/// `wasi:sockets` rather than reimplement them behind this import.
-fn install_socket_refusals(linker: &mut Linker<WasiP1Ctx>) -> Result<()> {
-    linker
-        .func_wrap("env", "ash_host_socket_open", |_: i32| -> i32 { -1 })
-        .map_err(|e| anyhow!("installing ash_host_socket_open: {e}"))?;
-    linker
-        .func_wrap(
-            "env",
-            "ash_host_socket_connect",
-            // ENOTSUP in WASI's numbering.
-            |_: i32, _: i32, _: i32| -> i32 { 58 },
-        )
-        .map_err(|e| anyhow!("installing ash_host_socket_connect: {e}"))?;
-    Ok(())
 }
 
 const FIBER_YIELD_MODULE: &str = crate::FIBER_YIELD_IMPORT.0;
@@ -224,7 +224,7 @@ const FIBER_YIELD_NAME: &str = crate::FIBER_YIELD_IMPORT.1;
 /// runtime is the smallest honest implementation -- it gives other tasks a
 /// turn -- and a scheduler that wants to decide the order can replace this
 /// with one that blocks on its own signal.
-fn install_fiber_yield(linker: &mut Linker<WasiP1Ctx>) -> Result<()> {
+fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
     linker
         .func_wrap_async(
             FIBER_YIELD_MODULE,

@@ -447,9 +447,9 @@ fn link_wasm_module(
         );
         crate::progress::note(
             "[ash] this is a wasm module, not a command: it exports `main` and \
-             `ash_module_init`, and imports WASI plus the two things a sandbox \
-             cannot do for itself, suspending a fiber and opening a socket. \
-             Whatever embeds it supplies those.",
+             `ash_module_init`, and imports WASI plus what a sandbox cannot do \
+             for itself: suspending a fiber, and sockets. Whatever embeds it \
+             supplies those.",
         );
     }
     Ok(())

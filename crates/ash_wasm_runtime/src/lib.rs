@@ -9,11 +9,10 @@
 //!   most things can: WASI already gives the standard library a clock,
 //!   randomness, stdout and a filesystem.
 //! * [`native`], and a browser host to come, are hosts on the far side.
-//!   They exist only
-//!   for what a module cannot do for itself, which today is one operation:
-//!   suspending a fiber. A wasm module has no addressable stack and no
-//!   instruction that moves between two, so that one has to be an import
-//!   whatever else is not.
+//!   They exist only for what a module cannot do for itself: suspending a
+//!   fiber, because a wasm module has no addressable stack and no instruction
+//!   that moves between two; and sockets, because WASI preview 1 has no
+//!   descriptor that can be one.
 //!
 //! The hosts implement the same contract:
 //!
@@ -32,13 +31,29 @@
 //! |---|---|---|
 //! | `wasi_snapshot_preview1.*` | `wasmtime-wasi` | `web-sys`: `console`, `Performance`, `Crypto` |
 //! | `env.ash_host_fiber_yield` | a `wasmtime` fiber suspend | JSPI, or a worker parked on `Atomics.wait` |
+//! | `env.ash_host_socket_*`, twelve of them | the OS's sockets through `libc` (`native::sockets`) | WebSocket for the client half, `NOTSUP` for the server half (`browser::sockets`) |
 //!
-//! The native column is implemented; the browser column is the plan.
+//! The native column is implemented; the browser column is the plan, except
+//! for its socket table, which is written and not yet wired to a module.
 //!
 //! The second row is the whole reason a host exists rather than a library.
 //! [`guest`] holds the program's side of it; `docs/wasm-target.md` explains
 //! why choosing between JSPI, a worker pool and Asyncify is the host's
 //! business and not the program's.
+//!
+//! The third row is one contract for every host. `open`, `connect`, `bind`,
+//! `listen`, `accept`, `send`, `recv`, `shutdown`, `close`, `name`, `set` and
+//! `poll`, every argument and result an `i32`: a call that yields a value
+//! (`open`, `accept`, `send`, `recv`, `poll`) returns it when non-negative and
+//! `-errno` otherwise, a call that yields nothing returns 0 or `+errno`, and
+//! the errno numbers are WASI preview 1's (`AGAIN` 6, `INPROGRESS` 26,
+//! `NOTSUP` 58, ...). Descriptors are the host's own namespace from 0, never
+//! a WASI fd. `poll` reads and writes 8-byte `{ fd: i32, events: u16,
+//! revents: u16 }` records with ash's bits (`RD` 1, `WR` 2, `PRI` 4, `ERR` 8,
+//! `HUP` 16, `NVAL` 32), not any libc's. A host without sockets installs the
+//! twelve and answers `NOTSUP`; the guest then fails the call the way a
+//! kernel would have, instead of failing to instantiate. The full table is in
+//! `docs/wasm-target.md`.
 //!
 //! # Not done yet
 //!

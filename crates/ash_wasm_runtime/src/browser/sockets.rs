@@ -10,21 +10,29 @@
 //!
 //! # What the guest asks for
 //!
-//! The guest's socket module talks preview 1 wherever preview 1 has a call,
-//! and asks the host for the two it does not have:
+//! The guest's socket module asks the host for every socket operation --
+//! WASI preview 1 has no descriptor that can be a socket -- through twelve
+//! `env.ash_host_socket_*` imports. Descriptors are the host's own namespace,
+//! indices into the table below starting at 0; errors are WASI preview 1
+//! errno numbers; and a host that cannot do something answers `NOTSUP`,
+//! which the guest reports as the refusal a kernel would have given.
 //!
 //! | import | here |
 //! |---|---|
-//! | `env.ash_host_socket_open` | take a descriptor from the table |
-//! | `env.ash_host_socket_connect` | `new WebSocket(url)`, non-blocking |
-//! | `wasi_snapshot_preview1.sock_send` | `WebSocket.send` |
-//! | `wasi_snapshot_preview1.sock_recv` | drain the receive queue |
-//! | `wasi_snapshot_preview1.sock_shutdown` | `WebSocket.close` |
-//! | `wasi_snapshot_preview1.fd_close` | close and drop |
+//! | `env.ash_host_socket_open(udp)` | reserve a slot; UDP is `NOTSUP` |
+//! | `env.ash_host_socket_connect(fd, ip, port)` | `new WebSocket(url)`; `AGAIN` until open |
+//! | `env.ash_host_socket_bind` | `NOTSUP`: a page cannot listen |
+//! | `env.ash_host_socket_listen` | `NOTSUP` |
+//! | `env.ash_host_socket_accept` | `-NOTSUP` |
+//! | `env.ash_host_socket_send(fd, buf, len)` | `WebSocket.send` |
+//! | `env.ash_host_socket_recv(fd, buf, len)` | drain the receive queue; 0 once closed |
+//! | `env.ash_host_socket_shutdown(fd, how)` | `WebSocket.close`, whichever side was asked |
+//! | `env.ash_host_socket_close(fd)` | close and drop |
+//! | `env.ash_host_socket_name(fd, which, out)` | `NOTSUP`: a page sees no addresses |
+//! | `env.ash_host_socket_set(fd, opt, value)` | see [`Sockets::set`] |
+//! | `env.ash_host_socket_poll(fds, nfds, timeout)` | evaluated now, never waited for |
 //!
-//! `bind` and `listen` are refused by the guest before they reach here.
-//!
-//! # Two places the semantics differ, both visible to a program
+//! # Where the semantics differ, all visible to a program
 //!
 //! **Connecting does not block.** A `WebSocket` is open when its `open` event
 //! fires, which is after `connect` returns. `connect` therefore reports
@@ -32,6 +40,12 @@
 //! non-blocking socket does everywhere, so `sys.net.Socket.setBlocking(false)`
 //! programs need no change. A program that expects `connect` to block wants
 //! the host to suspend it, which is what `ash_host_fiber_yield` is for.
+//!
+//! **Nothing blocks, including `poll`.** A page has one thread and it is the
+//! event loop; a host function that waited on it would wait for the events
+//! that can never arrive while it waits. `poll` answers what is ready at the
+//! moment of the call and ignores its timeout; a program that wants to wait
+//! yields to the host and asks again.
 //!
 //! **A message is not a byte range.** WebSocket delivers whole messages;
 //! `recv` hands back bytes. Messages are queued whole and drained by byte, so
@@ -58,6 +72,22 @@ mod errno {
     pub const NOTSUP: i32 = 58;
 }
 
+/// The readiness bits of a poll record, ash's own numbering shared with the
+/// guest by value: `RD` 1, `WR` 2, `PRI` 4, `ERR` 8, `HUP` 16, `NVAL` 32.
+mod ev {
+    pub const RD: u16 = 1;
+    pub const WR: u16 = 2;
+    pub const NVAL: u16 = 32;
+}
+
+/// One record of a poll request as the guest lays it out: 8 bytes, `fd`
+/// then `events` then `revents`, little-endian.
+pub struct PollFd {
+    pub fd: i32,
+    pub events: u16,
+    pub revents: u16,
+}
+
 /// One socket: the WebSocket itself, and what has arrived on it.
 struct Socket {
     ws: WebSocket,
@@ -74,24 +104,33 @@ struct Socket {
     _on_close: Closure<dyn FnMut(JsValue)>,
 }
 
-/// The descriptor table. Descriptors are indices into it, offset so that zero
-/// through two stay with the standard streams.
+/// The descriptor table. Descriptors are indices into it, starting at 0: the
+/// guest's sockets are their own namespace and never meet a WASI fd, so
+/// nothing has to be skipped for the standard streams.
 #[derive(Default)]
 pub struct Sockets {
     entries: Vec<Option<Socket>>,
 }
 
-const FD_BASE: i32 = 3;
-
 impl Sockets {
+    fn index(&self, fd: i32) -> Option<usize> {
+        let index = usize::try_from(fd).ok()?;
+        (index < self.entries.len()).then_some(index)
+    }
+
     fn slot(&mut self, fd: i32) -> Option<&mut Socket> {
-        let index = usize::try_from(fd - FD_BASE).ok()?;
-        self.entries.get_mut(index)?.as_mut()
+        let index = self.index(fd)?;
+        self.entries[index].as_mut()
     }
 
     /// Reserve a descriptor. Nothing is connected yet: a socket exists before
-    /// it has a peer, and the guest may set options on it first.
-    pub fn open(&mut self) -> i32 {
+    /// it has a peer, and the guest may set options on it first. A page has
+    /// no datagrams, so a UDP socket is refused here rather than at its first
+    /// use.
+    pub fn open(&mut self, udp: i32) -> i32 {
+        if udp != 0 {
+            return -errno::NOTSUP;
+        }
         let index = match self.entries.iter().position(Option::is_none) {
             Some(i) => i,
             None => {
@@ -101,7 +140,7 @@ impl Sockets {
         };
         // The entry stays empty until `connect` supplies the WebSocket; the
         // slot is what the descriptor names.
-        index as i32 + FD_BASE
+        index as i32
     }
 
     /// Point a descriptor at a peer.
@@ -112,9 +151,8 @@ impl Sockets {
     /// addressing supplies its own mapping; the common case is a program
     /// connecting to the page's own origin.
     pub fn connect(&mut self, fd: i32, ip: i32, port: i32) -> i32 {
-        let index = match usize::try_from(fd - FD_BASE) {
-            Ok(i) if i < self.entries.len() => i,
-            _ => return errno::BADF,
+        let Some(index) = self.index(fd) else {
+            return errno::BADF;
         };
         if let Some(existing) = &self.entries[index] {
             // Already connecting or connected: report progress rather than
@@ -126,12 +164,10 @@ impl Sockets {
             };
         }
 
-        let octets = [
-            (ip >> 24) as u8,
-            (ip >> 16) as u8,
-            (ip >> 8) as u8,
-            ip as u8,
-        ];
+        // `ip` is `s_addr` as it sits in memory -- network byte order -- read
+        // back as a little-endian i32 on wasm32, so the first octet is the
+        // LOW byte. Shifting from the top rendered every address reversed.
+        let octets = (ip as u32).to_le_bytes();
         let url = format!(
             "ws://{}.{}.{}.{}:{}/",
             octets[0], octets[1], octets[2], octets[3], port
@@ -175,6 +211,20 @@ impl Sockets {
         errno::AGAIN
     }
 
+    /// A page cannot listen, so there is nothing to bind to.
+    pub fn bind(&mut self, _fd: i32, _ip: i32, _port: i32) -> i32 {
+        errno::NOTSUP
+    }
+
+    pub fn listen(&mut self, _fd: i32, _backlog: i32) -> i32 {
+        errno::NOTSUP
+    }
+
+    /// A page cannot listen, so nothing ever accepts.
+    pub fn accept(&mut self, _fd: i32) -> i32 {
+        -errno::NOTSUP
+    }
+
     /// Send bytes. Returns the count written, or a negative errno.
     pub fn send(&mut self, fd: i32, bytes: &[u8]) -> i32 {
         let Some(socket) = self.slot(fd) else {
@@ -212,9 +262,10 @@ impl Sockets {
     }
 
     /// WebSocket closes in one direction only, so a half shutdown closes the
-    /// whole thing. A program that shuts down its write side and keeps
-    /// reading will see the peer go away, which is the one place this leaks.
-    pub fn shutdown(&mut self, fd: i32) -> i32 {
+    /// whole thing whichever side `how` names (1 read, 2 write). A program
+    /// that shuts down its write side and keeps reading will see the peer go
+    /// away, which is the one place this leaks.
+    pub fn shutdown(&mut self, fd: i32, _how: i32) -> i32 {
         match self.slot(fd) {
             Some(socket) => {
                 let _ = socket.ws.close();
@@ -225,9 +276,8 @@ impl Sockets {
     }
 
     pub fn close(&mut self, fd: i32) -> i32 {
-        let index = match usize::try_from(fd - FD_BASE) {
-            Ok(i) if i < self.entries.len() => i,
-            _ => return errno::BADF,
+        let Some(index) = self.index(fd) else {
+            return errno::BADF;
         };
         if let Some(socket) = self.entries[index].take() {
             let _ = socket.ws.close();
@@ -237,8 +287,59 @@ impl Sockets {
         }
     }
 
-    /// A page cannot listen, so nothing ever accepts.
-    pub fn accept(&mut self, _fd: i32) -> i32 {
-        -errno::NOTSUP
+    /// A page sees neither its own address nor the peer's, so `host()` and
+    /// `peer()` come back null in the program rather than invented.
+    pub fn name(&self, _fd: i32, _which: i32) -> Result<(i32, i32), i32> {
+        Err(errno::NOTSUP)
+    }
+
+    /// Socket options, most of which a WebSocket has already decided.
+    ///
+    /// `opt` 0 is blocking: a WebSocket is non-blocking and cannot be made
+    /// otherwise, so asking for non-blocking succeeds and asking for
+    /// blocking is `NOTSUP`. 1 (`TCP_NODELAY`) succeeds without doing
+    /// anything, since a WebSocket frame goes out when it is sent. 2
+    /// (`SO_BROADCAST`) is a datagram option and there are no datagrams. 3
+    /// (a timeout) succeeds without recording anything: nothing here ever
+    /// blocks, so there is nothing for a timeout to cut short.
+    pub fn set(&mut self, fd: i32, opt: i32, value: i32) -> i32 {
+        if self.slot(fd).is_none() {
+            return errno::BADF;
+        }
+        match opt {
+            0 if value == 0 => errno::SUCCESS,
+            0 => errno::NOTSUP,
+            1 | 3 => errno::SUCCESS,
+            _ => errno::NOTSUP,
+        }
+    }
+
+    /// What is ready right now. Readable when bytes are queued or the socket
+    /// has closed (the read then reports end of stream); writable while the
+    /// WebSocket is open; never priority data. A descriptor that is not a
+    /// socket is `NVAL`. The timeout is ignored for the reason the module
+    /// header gives, and the count of records with a non-zero `revents` is
+    /// returned.
+    pub fn poll(&mut self, fds: &mut [PollFd], _timeout_ms: i32) -> i32 {
+        let mut ready = 0;
+        for record in fds.iter_mut() {
+            record.revents = match self.slot(record.fd) {
+                None => ev::NVAL,
+                Some(socket) => {
+                    let mut bits = 0;
+                    if !socket.inbox.borrow().is_empty() || *socket.closed.borrow() {
+                        bits |= ev::RD;
+                    }
+                    if socket.ws.ready_state() == WebSocket::OPEN {
+                        bits |= ev::WR;
+                    }
+                    bits & record.events
+                }
+            };
+            if record.revents != 0 {
+                ready += 1;
+            }
+        }
+        ready
     }
 }

@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     if args.imports {
         let missing = program.missing();
         if missing.is_empty() {
-            println!("nothing missing: this module needs only WASI and the fiber import");
+            println!("nothing missing: this module needs only WASI, the fiber import and the socket imports");
         } else {
             println!("{} import(s) no host can supply:", missing.len());
             for name in missing {

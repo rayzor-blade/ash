@@ -9,8 +9,9 @@
 //! to an arbitrary host and port -- that is a security boundary rather than a
 //! missing feature -- so sockets here are WebSocket connections, which is
 //! what a page may open and what a relay can bridge to TCP. The guest asks
-//! for exactly two things preview 1 cannot express, `ash_host_socket_open`
-//! and `ash_host_socket_connect`, and speaks preview 1 for the rest.
+//! the host for every socket operation -- the twelve `ash_host_socket_*`
+//! imports, since preview 1 cannot carry a socket at all -- and a page answers
+//! the client half over WebSocket and refuses the server half.
 //!
 //! What is still missing before a module runs in a page: the WASI preview 1
 //! surface its standard library calls (stdout, clock, randomness, arguments),

@@ -620,6 +620,24 @@ def aot_binary_for(ash: str, program: pathlib.Path, timeout: int) -> str:
     return _AOT_BINARIES[key]
 
 
+def engine_env(mode: str, program: pathlib.Path, base: dict | None = None) -> dict:
+    """The environment a case runs in under `mode`.
+
+    Only the native binary needs anything: it links the runtime as a shared
+    library staged beside it under HashLink's name, and on Linux
+    LD_LIBRARY_PATH outranks the binary's own $ORIGIN runpath. CI sets that
+    variable to the stock HDLL directory, which also holds stock HashLink's
+    libhl.so -- so without this the binary loaded the wrong runtime and the
+    canary refused it. Its own directory goes first.
+    """
+    env = (base or os.environ).copy()
+    if mode == "aot":
+        here = str(program.parent)
+        var = "LD_LIBRARY_PATH"
+        env[var] = here + (os.pathsep + env[var] if env.get(var) else "")
+    return env
+
+
 def engine_argv(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
     """The whole command that runs `program` under `mode`, program included.
 
@@ -638,7 +656,8 @@ def engine_argv(ash: str, program: pathlib.Path, mode: str, timeout: int) -> lis
 def list_cases(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
     """Ask the patched suite to name its cases."""
     r = run(engine_argv(ash, program, mode, timeout) + ["--ash-list"],
-            cwd=str(program.parent.parent), timeout=timeout)
+            cwd=str(program.parent.parent), timeout=timeout,
+            env=engine_env(mode, program))
     return RE_ASHCASE.findall(r.stdout or "")
 
 
@@ -669,7 +688,8 @@ def run_one_case(ash: str, program: pathlib.Path, mode: str, case: str,
     timed_out = False
     try:
         r = run(engine_argv(ash, program, mode, timeout) + ["--ash-only", case],
-                cwd=str(program.parent.parent), timeout=timeout)
+                cwd=str(program.parent.parent), timeout=timeout,
+                env=engine_env(mode, program))
         out = (r.stdout or "") + (r.stderr or "")
         rc = r.returncode
     except subprocess.TimeoutExpired as e:
@@ -1114,6 +1134,50 @@ def run_misc_suite(src: pathlib.Path, haxe: str, ash: str, modes: list[str],
     return rows
 
 
+def summarize_engine_rows(rows: list[dict], successful: set[str]) -> dict:
+    """The conformance figures for one engine's rows.
+
+    Isolated case counts where isolation ran, assertion totals from either
+    shape of row (per-case tallies or a whole-suite utest block), and the
+    suite pass count. None, not zero, where a run produced no data.
+    """
+    passes = sum(1 for r in rows if r["status"] in successful)
+    a_pass = sum(
+        r.get("assertions_passed", 0) if r.get("isolated")
+        else (r.get("utest") or {}).get("passed", 0)
+        for r in rows
+    )
+    a_total = sum(
+        r.get("assertions_of_completed", 0) if r.get("isolated")
+        else (r.get("utest") or {}).get("assertions", 0)
+        for r in rows
+    )
+    out = {
+        "suites_total": len(rows),
+        "suites_passed": passes,
+        "assertions_total": a_total,
+        "assertions_passed": a_pass,
+        "assertion_pct": round(100.0 * a_pass / a_total, 1) if a_total else None,
+    }
+    iso = [r for r in rows if r.get("isolated")]
+    if iso:
+        c_total = sum(r.get("cases_total", 0) for r in iso)
+        c_ok = sum(r.get("cases_ok", 0) for r in iso)
+        c_attempt = sum(r.get("cases_attemptable", r.get("cases_total", 0)) for r in iso)
+        out.update({
+            "isolated": True,
+            "cases_total": c_total,
+            "cases_empty": sum(r.get("cases_empty", 0) for r in iso),
+            "cases_attemptable": c_attempt,
+            "cases_ok": c_ok,
+            "cases_failed": sum(r.get("cases_failed", 0) for r in iso),
+            "cases_crashed": sum(r.get("cases_crashed", 0) for r in iso),
+            "cases_timeout": sum(r.get("cases_timeout", 0) for r in iso),
+            "case_pct": round(100.0 * c_ok / c_attempt, 1) if c_attempt else None,
+        })
+    return out
+
+
 def main(argv=None) -> int:
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     ap = argparse.ArgumentParser(description=__doc__,
@@ -1406,6 +1470,8 @@ def main(argv=None) -> int:
                     suite_env,
                     ash if label.startswith("ash:") else args.reference,
                 )
+                if label.startswith("ash:"):
+                    suite_env = engine_env(label[len("ash:"):], p, suite_env)
                 if name == "sys":
                     # Upstream's TestSys explicitly requires the runner to
                     # provide this fixture. It is inherited by subprocesses,
@@ -1452,13 +1518,27 @@ def main(argv=None) -> int:
     # named and excluded from the denominator, following the isolation
     # precedent: a program with nothing to run on this target is not a score
     # ash can move.
-    ash_rows = [r for r in report["results"]
-                if r.get("engine", "").startswith("ash:")
-                and r["status"] not in ("SKIP", "EMPTY")]
+    all_ash_rows = [r for r in report["results"]
+                    if r.get("engine", "").startswith("ash:")
+                    and r["status"] not in ("SKIP", "EMPTY")]
+    successful = {"PASS", "OK"}
+    # One summary per engine, and the top-level one is the FIRST engine
+    # asked for -- the headline. Summing engines together made the
+    # denominator grow with every engine added and the percentage an
+    # average of unrelated things; a badge that reads one number must know
+    # which engine it is reading.
+    engine_summaries: dict[str, dict] = {}
+    for m in modes:
+        rows_m = [r for r in all_ash_rows if r.get("engine") == f"ash:{m}"]
+        if rows_m:
+            engine_summaries[m] = summarize_engine_rows(rows_m, successful)
+    headline = next((m for m in modes if m in engine_summaries), None)
+    ash_rows = ([r for r in all_ash_rows if r.get("engine") == f"ash:{headline}"]
+                if headline else all_ash_rows)
     ash_empty = [r for r in report["results"]
                  if r.get("engine", "").startswith("ash:")
-                 and r["status"] == "EMPTY"]
-    successful = {"PASS", "OK"}
+                 and r["status"] == "EMPTY"
+                 and (headline is None or r.get("engine") == f"ash:{headline}")]
     passes = sum(1 for r in ash_rows if r["status"] in successful)
     total = len(ash_rows)
     # Unit isolation has one utest process per case, so its aggregate tally
@@ -1510,6 +1590,8 @@ def main(argv=None) -> int:
         # second when it means the first is lying.
         "assertion_pct": round(100.0 * a_pass / a_total, 1) if a_total else None,
         "suite_pct": round(100.0 * passes / total, 1) if total else None,
+        "headline_engine": headline,
+        "engines": engine_summaries,
     }
 
     # Per-case isolation, when it ran. This is the only conformance figure the

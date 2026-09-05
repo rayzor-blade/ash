@@ -737,6 +737,8 @@
         </div>
       </div>
 
+      <div id="conf-engines" hidden style="margin-top:16px;display:flex;flex-wrap:wrap;gap:16px"></div>
+
       <div
         style="margin-top:16px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
         <div id="conf-rows">
@@ -1026,8 +1028,62 @@
         threads: 'threads — threads, locks, deques'
       };
 
+      // The three ways ash runs a program. The suite is measured under each,
+      // and the JSON carries one summary per engine under summary.engines;
+      // the top-level summary is the first engine asked for, the interpreter.
+      var ENGINE_LABEL = {
+        interp: 'interpreter',
+        hybrid: 'hybrid (interpreter + JIT)',
+        jit: 'JIT',
+        aot: 'native AOT binary',
+        wasm: 'wasm32 module'
+      };
+      function engineName(engine) {
+        var key = String(engine || '').replace(/^ash:/, '');
+        return ENGINE_LABEL[key] || key;
+      }
+
+      function renderEngines(sum) {
+        var mount = document.getElementById('conf-engines');
+        var engines = sum.engines || {};
+        var keys = Object.keys(engines);
+        if (!keys.length) { mount.hidden = true; return; }
+        mount.textContent = '';
+        keys.forEach(function (key) {
+          var e = engines[key];
+          var card = el('div', null,
+            'flex:1 1 220px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;padding:16px 24px');
+          var head = el('div', null,
+            "font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#a8703c");
+          head.textContent = engineName(key);
+          card.appendChild(head);
+          var value = el('div', null,
+            "font-family:'IBM Plex Mono',monospace;font-size:28px;font-weight:700;color:#221d1a;line-height:1.15;margin-top:6px");
+          var label = el('div', null,
+            "font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a;margin-top:4px");
+          if (e.isolated && typeof e.case_pct === 'number') {
+            value.textContent = e.case_pct + '%';
+            label.textContent = fmtInt(e.cases_ok) + ' / ' + fmtInt(e.cases_attemptable) +
+              ' runnable cases';
+            if (e.cases_crashed) label.textContent += ' \u00b7 ' + e.cases_crashed + ' crashed';
+          } else if (typeof e.assertion_pct === 'number') {
+            value.textContent = e.assertion_pct + '%';
+            label.textContent = fmtInt(e.assertions_passed) + ' / ' + fmtInt(e.assertions_total) + ' assertions';
+          } else {
+            value.textContent = '\u2014';
+            label.textContent = 'not reported yet';
+          }
+          card.appendChild(value);
+          card.appendChild(label);
+          mount.appendChild(card);
+        });
+        mount.hidden = false;
+      }
+
       function renderConformance(data) {
         var sum = data.summary || {};
+        renderEngines(sum);
+        var multiEngine = Object.keys(sum.engines || {}).length > 1;
         var rows = (data.results || []).filter(function (r) {
           return (r.engine || '').indexOf('ash:') === 0 && r.status !== 'SKIP';
         });
@@ -1111,7 +1167,8 @@
 
           var name = el('div', null,
             "font-family:'IBM Plex Mono',monospace;font-size:13px;color:#221d1a;flex:1 1 260px");
-          name.textContent = CONF_LABEL[r.suite] || r.suite;
+          name.textContent = (CONF_LABEL[r.suite] || r.suite) +
+            (multiEngine ? ' \u00b7 ' + engineName(r.engine) : '');
           row.appendChild(name);
 
           var ok = r.status === 'PASS';

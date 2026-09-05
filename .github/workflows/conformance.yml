@@ -47,7 +47,7 @@ jobs:
   conformance:
     name: Official Haxe suite
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -75,6 +75,39 @@ jobs:
         run: |
           cargo build --release -p ash_std
           cargo build --release -p ash
+
+      # The two other engines the suite is measured under. Native AOT needs
+      # nothing more than ash itself. wasm needs the module host and the
+      # prelinked runtime object, which needs a wasi-libc: wasi-sdk's sysroot,
+      # cached because it never changes for a release.
+      - name: Add the wasm target
+        run: rustup target add wasm32-wasip1
+
+      - name: Cache the WASI sysroot
+        id: wasi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/wasi-sysroot
+          key: wasi-sdk-25-sysroot-v1
+
+      - name: Fetch the WASI sysroot
+        if: steps.wasi-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o /tmp/wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+          mkdir -p /tmp/wasi-sdk && tar -xzf /tmp/wasi-sdk.tar.gz -C /tmp/wasi-sdk --strip-components=1
+          mv /tmp/wasi-sdk/share/wasi-sysroot ~/wasi-sysroot
+          ls ~/wasi-sysroot/lib/wasm32-wasip1/libsetjmp.a
+
+      # Allowed to fail: a wasm toolchain hiccup must not take the interpreter
+      # and AOT numbers down with it. Without the object the harness records
+      # the wasm rows as SKIP with the build error, which is the honest row.
+      - name: Build the wasm host and runtime object
+        run: |
+          cargo build --release -p ash_wasm_runtime --bin ash-wasm-run \
+            || echo "::warning::ash-wasm-run did not build; wasm rows will be skipped"
+          ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot \
+            || echo "::warning::the wasm runtime object did not build; wasm rows will be skipped"
 
       - uses: krdlab/setup-haxe@v1
         with:
@@ -226,8 +259,11 @@ jobs:
           # utest prints its tally once, at the end — so the published figure
           # could never leave 0% until the last crash was fixed, however much
           # of the suite actually passed.
+          # Three engines: the interpreter (the headline), a native AOT
+          # binary, and a wasm32 module under ash-wasm-run. Each gets its own
+          # summary in the JSON, and the site and README badges read them.
           ./scripts/haxe_conformance.py \
-            --modes interp --isolate --isolate-jobs 4 \
+            --modes interp,aot,wasm --isolate --isolate-jobs 4 \
             "${HD[@]}" "${REF[@]}" "${BASE[@]}" \
             --json conformance.json \
             | tee conformance.log
@@ -245,6 +281,17 @@ jobs:
               raise SystemExit
           d = json.loads(p.read_text())
           print(f"## Official Haxe suite @ {d['suite_tag']}\n")
+          engines = (d.get("summary") or {}).get("engines") or {}
+          if engines:
+              print("| engine | cases | assertions |")
+              print("|---|---|---|")
+              for name, e in engines.items():
+                  cases = (f"{e['cases_ok']} / {e['cases_attemptable']} ({e['case_pct']}%)"
+                           if e.get("isolated") else "not isolated")
+                  asserts = (f"{e['assertions_passed']} / {e['assertions_total']}"
+                             if e.get("assertions_total") else "none reported")
+                  print(f"| {name} | {cases} | {asserts} |")
+              print()
           print("| suite | engine | status | detail |")
           print("|---|---|---|---|")
           for r in d["results"]:

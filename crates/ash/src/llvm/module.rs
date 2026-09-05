@@ -134,6 +134,18 @@ pub struct JITModule<'ctx> {
     pub(crate) globals_data: Vec<*mut c_void>,
     pub(crate) pending_compilations: Vec<usize>,
     pub(crate) c_ptr_to_type_index: HashMap<usize, usize>,
+    /// The descriptor that stands for a type index, which is the FIRST one
+    /// built for it.
+    ///
+    /// `c_ptr_to_type_index` is many-to-one -- two lowering paths each box a
+    /// fresh `hl_type` for the same index -- so asking it which pointer
+    /// represents an index means picking one of several. Doing that by
+    /// searching the map picks in hash order, which varies per process, and
+    /// the choice reaches the emitted object: a constant ends up pointing at
+    /// one of two equivalent descriptors and the bytes differ between builds
+    /// of the same program. First-wins is deterministic because the order
+    /// descriptors are built in is.
+    pub(crate) type_index_to_c_ptr: HashMap<usize, usize>,
     pub(crate) hl_type_struct_type: Option<StructType<'ctx>>,
     /// AOT only: the object-data counterparts of the pointers a JIT bakes in
     /// as integer constants. Keyed by the compiler-side address, so a lookup
@@ -370,6 +382,7 @@ impl<'ctx> JITModule<'ctx> {
             globals: HashMap::new(),
             globals_data: Vec::new(),
             c_ptr_to_type_index: HashMap::new(),
+            type_index_to_c_ptr: HashMap::new(),
             func_types: Vec::new(),
             hl_type_struct_type: None,
             aot_types: HashMap::new(),
@@ -802,6 +815,7 @@ impl<'ctx> JITModule<'ctx> {
             globals: HashMap::new(),
             globals_data: Vec::new(),
             c_ptr_to_type_index: HashMap::new(),
+            type_index_to_c_ptr: HashMap::new(),
             func_types: Vec::new(),
             hl_type_struct_type: None,
             aot_types: HashMap::new(),
@@ -1000,11 +1014,15 @@ impl<'ctx> JITModule<'ctx> {
         // Rewire type identity cache to interpreter-owned hl_type pointers.
         self.initialized_type_cache.clear();
         self.c_ptr_to_type_index.clear();
+        self.type_index_to_c_ptr.clear();
         for (i, &c_type_ptr) in shared.c_types.iter().enumerate() {
             if c_type_ptr.is_null() {
                 continue;
             }
             self.c_ptr_to_type_index.insert(c_type_ptr as usize, i);
+            self.type_index_to_c_ptr
+                .entry(i)
+                .or_insert(c_type_ptr as usize);
             let ptr_as_int = self.context.i64_type().const_int(c_type_ptr as u64, false);
             let ptr_to_type = ptr_as_int.const_to_pointer(ptr_type);
             self.initialized_type_cache.insert(i, ptr_to_type.into());
@@ -1455,11 +1473,12 @@ impl<'ctx> JITModule<'ctx> {
             return Ok(());
         }
 
-        // Build type_index -> c_type_ptr mapping from c_ptr_to_type_index
+        // One descriptor per type index, chosen the same way everywhere else:
+        // inverting the many-to-one map here would pick in hash order.
         let type_to_c_ptr: HashMap<usize, *mut hl_type> = self
-            .c_ptr_to_type_index
+            .type_index_to_c_ptr
             .iter()
-            .map(|(&ptr, &idx)| (idx, ptr as *mut hl_type))
+            .map(|(&idx, &ptr)| (idx, ptr as *mut hl_type))
             .collect();
 
         // Resolve native functions we need

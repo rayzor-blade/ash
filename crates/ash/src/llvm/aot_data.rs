@@ -85,9 +85,16 @@ impl<'ctx> JITModule<'ctx> {
         // and a descriptor fabricated during lowering would be an address in
         // this process that no symbol names. Converting all of them first
         // makes that branch unreachable.
+        // Through the canonical map, not by inverting `c_ptr_to_type_index`.
+        // That one is many-to-one -- two lowering paths each box a descriptor
+        // for the same index -- so inverting it means picking one of several
+        // in hash order, and the winner reaches the object: a constant points
+        // at one of two equivalent descriptors and two builds of the same
+        // program differ. Sorting would not help either, since the keys are
+        // heap addresses.
         let cache: Rc<RefCell<HashMap<usize, *mut hl_type>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        for (&ptr, &index) in self.c_ptr_to_type_index.iter() {
+        for (&index, &ptr) in self.type_index_to_c_ptr.iter() {
             cache.borrow_mut().insert(index, ptr as *mut hl_type);
         }
         for index in 0..self.types_.len() {
@@ -103,9 +110,9 @@ impl<'ctx> JITModule<'ctx> {
         // front door. Repoint it at the emitted data instead.
         self.initialized_type_cache.clear();
         let emitted: Vec<(usize, PointerValue<'ctx>)> = self
-            .c_ptr_to_type_index
+            .type_index_to_c_ptr
             .iter()
-            .filter_map(|(&raw, &index)| {
+            .filter_map(|(&index, &raw)| {
                 self.aot_types
                     .get(&raw)
                     .map(|global| (index, global.as_pointer_value()))
@@ -1289,10 +1296,45 @@ impl<'ctx> JITModule<'ctx> {
 
         // type index -> the global that names its descriptor
         let mut type_globals: HashMap<usize, PointerValue<'ctx>> = HashMap::new();
-        for (&raw, &index) in self.c_ptr_to_type_index.iter() {
-            if let Some(global) = self.aot_types.get(&raw) {
-                type_globals.insert(index, global.as_pointer_value());
+        if std::env::var("ASHDBGOLDTG").is_ok() {
+            for (&raw, &index) in self.c_ptr_to_type_index.iter() {
+                if let Some(global) = self.aot_types.get(&raw) {
+                    type_globals.insert(index, global.as_pointer_value());
+                }
             }
+        } else {
+            for (&index, &raw) in self.type_index_to_c_ptr.iter() {
+                if let Some(global) = self.aot_types.get(&raw) {
+                    type_globals.insert(index, global.as_pointer_value());
+                }
+            }
+        }
+        if std::env::var("ASHDBGFLIPTG").is_ok() {
+            let mut cands: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
+            for (&raw, &index) in self.c_ptr_to_type_index.iter() {
+                if self.aot_types.contains_key(&raw) {
+                    cands.entry(index).or_default().push(raw);
+                }
+            }
+            let mut flipped = 0usize;
+            for (index, raws) in cands.iter() {
+                if raws.len() < 2 {
+                    continue;
+                }
+                let canon = self.type_index_to_c_ptr.get(index).copied();
+                if let Some(&other) = raws.iter().find(|&&r| Some(r) != canon) {
+                    if let Some(g) = self.aot_types.get(&other) {
+                        type_globals.insert(*index, g.as_pointer_value());
+                        flipped += 1;
+                        let kind = self.types_.get(*index).map(|t| t.kind).unwrap_or(9999);
+                        eprintln!(
+                            "ASHDBG FLIP index {index} kind {kind} -> {}",
+                            g.get_name().to_string_lossy()
+                        );
+                    }
+                }
+            }
+            eprintln!("ASHDBG flipped={flipped}");
         }
 
         // Everything this can place as data is placed as data; what comes

@@ -40,8 +40,11 @@ impl<'ctx> JITModule<'ctx> {
             mark_bits: ptr::null_mut(),
         };
 
-        if let Some(found) = self.c_ptr_to_type_index.iter().find(|(_, i)| **i == index) {
-            return Ok(*found.0 as *mut hl_type);
+        // Which descriptor represents this index has to be the same in every
+        // build of the same program: searching `c_ptr_to_type_index` for one
+        // picks in hash order, and the choice reaches the object.
+        if let Some(&found) = self.type_index_to_c_ptr.get(&index) {
+            return Ok(found as *mut hl_type);
         }
 
         // Create a cache to store types we've started converting
@@ -162,6 +165,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         let t = Box::into_raw(Box::new(c_type));
         self.c_ptr_to_type_index.insert(t as usize, index);
+        self.type_index_to_c_ptr.entry(index).or_insert(t as usize);
         Ok(t)
     }
 
@@ -428,6 +432,9 @@ impl<'ctx> JITModule<'ctx> {
 
         self.c_ptr_to_type_index
             .insert(placeholder as usize, type_ref.0);
+        self.type_index_to_c_ptr
+            .entry(type_ref.0)
+            .or_insert(placeholder as usize);
 
         Ok(placeholder)
     }

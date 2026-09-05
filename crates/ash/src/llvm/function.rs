@@ -3336,10 +3336,13 @@ impl<'ctx> JITModule<'ctx> {
             // lowered, so the descriptor exists; what must not happen is the
             // fallback below, which would fabricate one in this process's heap
             // and bake its address into an object that runs elsewhere.
+            // The canonical descriptor for the index, not whichever one a
+            // scan of the many-to-one map reaches first: that order varies
+            // per process and the pick is baked into the object.
             let descriptor = self
-                .c_ptr_to_type_index
-                .iter()
-                .find_map(|(&ptr, &index)| (index == type_index).then_some(ptr as *mut hl_type))
+                .type_index_to_c_ptr
+                .get(&type_index)
+                .map(|&p| p as *mut hl_type)
                 .ok_or_else(|| anyhow!("type {type_index} has no emitted descriptor"))?;
             let value = self.aot_type_ptr(descriptor)?;
             self.initialized_type_cache.insert(type_index, value.into());
@@ -3351,9 +3354,9 @@ impl<'ctx> JITModule<'ctx> {
         // by the C-type graph is essential: fabricating only the kind leaves
         // `hlp_safe_cast` with a null `fun`/`tparam` pointer.
         if let Some(c_type_ptr) = self
-            .c_ptr_to_type_index
-            .iter()
-            .find_map(|(&ptr, &index)| (index == type_index).then_some(ptr as *mut hl_type))
+            .type_index_to_c_ptr
+            .get(&type_index)
+            .map(|&p| p as *mut hl_type)
         {
             let ptr_type = self.context.ptr_type(AddressSpace::default());
             let value = self

@@ -3969,9 +3969,7 @@ impl<'ctx> JITModule<'ctx> {
                             || src_kind == hl_type_kind_HI64
                         {
                             // Store value to a temp alloca, pass its address
-                            let tmp = self
-                                .builder
-                                .build_alloca(reg_types[src.0 as usize], "tmp_box")?;
+                            let tmp = self.entry_alloca(reg_types[src.0 as usize], "tmp_box")?;
                             self.builder.build_store(tmp, src_val)?;
                             let type_ptr_val = self
                                 .get_initialized_type(src_type_idx)?
@@ -5165,9 +5163,8 @@ impl<'ctx> JITModule<'ctx> {
                                 if loaded.is_pointer_value() && !src_is_abstract {
                                     loaded
                                 } else {
-                                    let temp = self
-                                        .builder
-                                        .build_alloca(loaded.get_type(), "vcall_box_slot")?;
+                                    let temp =
+                                        self.entry_alloca(loaded.get_type(), "vcall_box_slot")?;
                                     self.builder.build_store(temp, loaded)?;
                                     let type_ptr = self
                                         .get_initialized_type(src_type_idx)?
@@ -5275,9 +5272,8 @@ impl<'ctx> JITModule<'ctx> {
                             let dst_runtime_type = self
                                 .get_initialized_type(f.regs[dst.0 as usize].0)?
                                 .into_pointer_value();
-                            let result_slot = self
-                                .builder
-                                .build_alloca(ptr_type, "vcall_dyn_result_slot")?;
+                            let result_slot =
+                                self.entry_alloca(ptr_type, "vcall_dyn_result_slot")?;
                             self.builder.build_store(result_slot, ret_dyn)?;
                             let castp = self.declare_native(
                                 "hlp_dyn_castp",
@@ -5844,9 +5840,7 @@ impl<'ctx> JITModule<'ctx> {
                 } else {
                     // Primitives: alloca temp, store value, call hlp_make_dyn(&temp, type_ptr)
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
-                    let temp = self
-                        .builder
-                        .build_alloca(reg_types[src.0 as usize], "todyn_temp")?;
+                    let temp = self.entry_alloca(reg_types[src.0 as usize], "todyn_temp")?;
                     self.builder.build_store(temp, src_val)?;
 
                     let type_ptr = self
@@ -5989,8 +5983,7 @@ impl<'ctx> JITModule<'ctx> {
                 let src_kind = self.types_[f.regs[src.0 as usize].0].kind;
                 let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
                 let result: BasicValueEnum = if src_val.is_float_value() {
-                    self.builder
-                        .build_float_to_signed_int(src_val.into_float_value(), dst_int, "toint")?
+                    self.build_float_to_int_saturating(src_val.into_float_value(), dst_int, "toint")?
                         .into()
                 } else if src_val.is_int_value() {
                     let iv = src_val.into_int_value();
@@ -6434,9 +6427,17 @@ impl<'ctx> JITModule<'ctx> {
 
                 self.builder.position_at_end(dynamic_bb);
                 let nargs = args.len();
-                let argv = self.builder.build_array_alloca(
-                    ptr_type,
-                    i32_type.const_int(nargs.max(1) as u64, false),
+                // In the entry block, and an array type rather than
+                // `build_array_alloca`: the count is a constant here, and an
+                // alloca in this conditional block is a DYNAMIC one, so a
+                // closure called dynamically inside a loop moved the stack
+                // pointer once per iteration and never gave it back. Same
+                // defect as the boxing slots below, on the path a closure
+                // call takes every time its runtime signature differs from
+                // the call site's. The GEP below indexes it by pointer, which
+                // is what an array of pointers is.
+                let argv = self.entry_alloca(
+                    ptr_type.array_type(nargs.max(1) as u32),
                     "closure_dyn_argv",
                 )?;
                 let make_dyn = self.declare_native(
@@ -6466,9 +6467,7 @@ impl<'ctx> JITModule<'ctx> {
                     let boxed = if self_describing {
                         loaded
                     } else {
-                        let slot = self
-                            .builder
-                            .build_alloca(loaded.get_type(), "closure_dyn_box_slot")?;
+                        let slot = self.entry_alloca(loaded.get_type(), "closure_dyn_box_slot")?;
                         self.builder.build_store(slot, loaded)?;
                         let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
                         self.builder
@@ -6534,9 +6533,7 @@ impl<'ctx> JITModule<'ctx> {
                         let dst_runtime_type = self
                             .get_initialized_type(dst_type_index)?
                             .into_pointer_value();
-                        let result_slot = self
-                            .builder
-                            .build_alloca(ptr_type, "closure_dyn_result_slot")?;
+                        let result_slot = self.entry_alloca(ptr_type, "closure_dyn_result_slot")?;
                         self.builder.build_store(result_slot, dyn_result)?;
                         let castp = self.declare_native(
                             "hlp_dyn_castp",
@@ -6800,8 +6797,11 @@ impl<'ctx> JITModule<'ctx> {
                             }
                         }
                         (v, BasicTypeEnum::IntType(t)) if v.is_float_value() => self
-                            .builder
-                            .build_float_to_signed_int(v.into_float_value(), t, "safecast_box_fptosi")?
+                            .build_float_to_int_saturating(
+                                v.into_float_value(),
+                                t,
+                                "safecast_box_fptosi",
+                            )?
                             .into(),
                         (v, BasicTypeEnum::FloatType(t)) if v.is_float_value() => self
                             .builder
@@ -6809,9 +6809,7 @@ impl<'ctx> JITModule<'ctx> {
                             .into(),
                         (v, t) => self.cast_for_call(v, t)?,
                     };
-                    let temp = self
-                        .builder
-                        .build_alloca(box_llvm_type, "safecast_box_temp")?;
+                    let temp = self.entry_alloca(box_llvm_type, "safecast_box_temp")?;
                     self.builder.build_store(temp, converted)?;
                     let type_ptr = self
                         .get_initialized_type(box_type_idx)?
@@ -8425,6 +8423,85 @@ impl<'ctx> JITModule<'ctx> {
         Ok(function)
     }
 
+    /// Float to integer with a defined result for every input.
+    ///
+    /// LLVM's `fptosi` is poison when the value does not fit, and O3 is
+    /// entitled to reason backwards from that. `Std.int(f) == f` is how
+    /// `haxe.format.JsonParser.parseNumber` and `Std.isOfType(_, Int)` ask
+    /// whether a Float is integral; assuming the conversion was in range, the
+    /// optimizer folded it to `true` for 1e10, and `Json.parse("10000000000")`
+    /// came back as the Int -2147483648 (TestJson, TestReflect). It only
+    /// surfaced once boxing slots moved to the entry block -- a body with a
+    /// dynamic alloca is never inlined, and the inlined shape is what the
+    /// fold needed -- but the poison was there all along.
+    ///
+    /// The saturating intrinsic clamps and maps NaN to zero: exactly what
+    /// the interpreter's Rust `as` does, so both engines agree by
+    /// construction. It is the one `fcvtzs` HashLink's own JIT emits on
+    /// aarch64 and a `cvttsd2si` plus fixups on x86-64. (x86-64 HashLink
+    /// answers INT_MIN for every out-of-range value; no suite depends on
+    /// that, and the interpreter never did it either.) The math intrinsics
+    /// went saturating for the same reason -- see `emit_native_intrinsic`.
+    fn build_float_to_int_saturating(
+        &self,
+        x: inkwell::values::FloatValue<'ctx>,
+        dst: inkwell::types::IntType<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>> {
+        use inkwell::intrinsics::Intrinsic;
+        let decl = Intrinsic::find("llvm.fptosi.sat")
+            .and_then(|sat| sat.get_declaration(&self.module, &[dst.into(), x.get_type().into()]));
+        let Some(decl) = decl else {
+            // Every LLVM this crate builds against has the intrinsic; the
+            // plain conversion is kept only so a missing declaration reads
+            // as the old behaviour rather than a refused body.
+            return Ok(self.builder.build_float_to_signed_int(x, dst, name)?);
+        };
+        let call = self.builder.build_call(decl, &[x.into()], name)?;
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("llvm.fptosi.sat returned void"))?
+            .into_int_value())
+    }
+
+    /// A scratch slot for one site, allocated in the function's entry block.
+    ///
+    /// An `alloca` anywhere else is a DYNAMIC allocation: LLVM moves the
+    /// stack pointer every time control passes it, and nothing gives the
+    /// space back before the function returns. Every boxing site used to
+    /// allocate at its own position, so a loop that boxed a primitive per
+    /// iteration -- `waitLock.wait(0.0)` in `sys.thread.EventLoop.loop`, a
+    /// `Null<Float>` argument -- grew the stack by a slot per pass, and the
+    /// event loops of the threads and eventLoop suites overflowed the main
+    /// thread's 8 MB in about a second on Linux, SEVEN frames deep: gdb showed
+    /// `loop`'s frame spanning the whole stack. macOS ran the same code and
+    /// merely spun fewer times before the loop ended. `mem2reg` cannot
+    /// rescue such a slot either: its address is handed to a native.
+    ///
+    /// An entry-block alloca is static -- one slot per site per activation,
+    /// reserved in the prologue -- and that is enough here, because every
+    /// caller passes the slot to a runtime helper that copies out of it
+    /// before returning (`hlp_make_dyn`, `hlp_dyn_castp`, the stub bridge)
+    /// and keeps nothing past the call. A second builder does the placing so
+    /// the emitting builder's insertion point is never disturbed.
+    fn entry_alloca<T: BasicType<'ctx>>(&self, ty: T, name: &str) -> Result<PointerValue<'ctx>> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| anyhow!("entry_alloca: builder is not inside a function"))?;
+        let entry = function
+            .get_first_basic_block()
+            .ok_or_else(|| anyhow!("entry_alloca: function has no entry block"))?;
+        let at_entry = self.context.create_builder();
+        match entry.get_first_instruction() {
+            Some(first) => at_entry.position_before(&first),
+            None => at_entry.position_at_end(entry),
+        }
+        Ok(at_entry.build_alloca(ty, name)?)
+    }
+
     /// Emit an indirect call guarded against interpreter stub sentinels.
     ///
     /// In hybrid mode, shared function-pointer slots (functions_ptrs, vtables,
@@ -8658,24 +8735,10 @@ impl<'ctx> JITModule<'ctx> {
         // --- Hybrid fallback: spill raw words and re-enter the interpreter. ---
         self.builder.position_at_end(interpreter_bb);
         let nargs = args.len() as u32;
-        // Hoist the spill buffer to the entry block so a guarded call inside
-        // a hot loop does not grow the stack per iteration.
-        let buf = {
-            let saved = self.builder.get_insert_block();
-            let entry = function.get_first_basic_block().unwrap();
-            match entry.get_first_instruction() {
-                Some(first) => self.builder.position_before(&first),
-                None => self.builder.position_at_end(entry),
-            }
-            let buf = self.builder.build_alloca(
-                i64_type.array_type(nargs.max(1)),
-                &format!("{}_argbuf", name),
-            )?;
-            if let Some(block) = saved {
-                self.builder.position_at_end(block);
-            }
-            buf
-        };
+        let buf = self.entry_alloca(
+            i64_type.array_type(nargs.max(1)),
+            &format!("{}_argbuf", name),
+        )?;
         for (i, arg) in args.iter().enumerate() {
             let val = BasicValueEnum::try_from(*arg)
                 .map_err(|_| anyhow!("non-basic argument in stub-guarded call"))?;

@@ -596,3 +596,16 @@ slow = false
 timeout_secs = 180
 expectation = "exact"
 normalize = "default"
+
+# Std.int(f) == f, the integral-Float test JsonParser and Std.isOfType(_, Int)
+# rely on, folded to true under O3 because fptosi is poison out of range;
+# Json.parse("10000000000") came back as an Int. Saturating now, like the
+# interpreter. Only a whole-program compile optimizes these bodies together.
+[[case]]
+name = "TestFloatToIntRange"
+main = "TestFloatToIntRange"
+hl = "test_float_to_int_range.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"

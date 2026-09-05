@@ -666,6 +666,8 @@ fn aot_symbol_for_pc(pc: usize) -> Option<&'static str> {
 /// linked statically into the same image, so image identity cannot tell them
 /// apart; names can. `ash_h*` is a helper thunk the emitter generates, which
 /// the single-module build hides too, so a stack reads the same either way.
+/// `libc_start*` is glibc's pair of frames below `main`, which it exports and
+/// `dladdr` therefore names -- the Linux spelling of `start`.
 #[cfg(unix)]
 fn aot_name_is_runtime(name: &str) -> bool {
     let name = name.trim_start_matches('_');
@@ -676,6 +678,7 @@ fn aot_name_is_runtime(name: &str) -> bool {
         || name.starts_with("RNv")
         || name.starts_with("ZN")
         || name.starts_with("std_")
+        || name.starts_with("libc_start")
         || name == "main"
         || name == "start"
 }
@@ -800,7 +803,10 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
 /// produces keeps a frame pointer, and so does the runtime; the walk stops at
 /// the first frame that does not (the C entry), or at anything that fails a
 /// sanity check. With a null `output` it only counts, as the JIT walker does.
-#[cfg(not(target_family = "wasm"))]
+///
+/// Not on Linux, where the runtime keeps no frame pointers -- see the other
+/// `aot_capture_stack` below.
+#[cfg(not(any(target_os = "linux", target_family = "wasm")))]
 unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
     let mut fp: usize;
     #[cfg(target_arch = "aarch64")]
@@ -837,6 +843,80 @@ unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) 
         }
         fp = next;
         depth += 1;
+    }
+    written
+}
+
+/// The same walk on Linux, read from `.eh_frame` instead of the frame-pointer
+/// chain. Same contract, same filter, same order: nothing downstream can tell
+/// the two apart.
+///
+/// Rust omits frame pointers on x86_64 Linux by default, and a throw passes
+/// through several runtime frames before it reaches this function --
+/// `hlp_throw` (or the variadic `hlp_error`), `throw_impl`,
+/// `capture_exception_stack` -- any of which may use rbp as an ordinary
+/// register. The chain the emitter keeps in every body was therefore cut
+/// before the walk began, and every exception stack on Linux came back EMPTY:
+/// `e.stack.length > 0` failed (Issue10109) and `stackItemData(s[0])`
+/// null-faulted (TestExceptions), while the same binary passed on macOS,
+/// whose ABI keeps the register. The C boundary in stack_boundary.c only ever
+/// covered `hlp_call_stack_raw`, and only because that primitive is a tail
+/// call that touches nothing.
+///
+/// libgcc's unwinder needs no frame pointers: Rust emits an FDE for every
+/// function and LLVM for every body that is not `nounwind` (the emitter marks
+/// none; the eventLoop binary carries 6,363 of them). Rust's std links
+/// libgcc_s for panics, so the two entry points cost no new dependency.
+/// Return addresses are collected first and classified afterwards, because
+/// `aot_frame_in_program` asks `dladdr`, and the loader's lock is not one to
+/// take from inside a walk the loader is servicing.
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
+    extern "C" {
+        fn _Unwind_Backtrace(
+            trace: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32,
+            argument: *mut c_void,
+        ) -> i32;
+        fn _Unwind_GetIP(context: *mut c_void) -> usize;
+    }
+    // `_Unwind_Reason_Code`: NO_REASON asks for the next frame, END_OF_STACK
+    // ends the walk. The bound matches the frame-pointer walker's.
+    const URC_NO_REASON: i32 = 0;
+    const URC_END_OF_STACK: i32 = 5;
+    const MAX_FRAMES: usize = 256;
+    struct Walk {
+        pcs: [usize; MAX_FRAMES],
+        len: usize,
+    }
+    unsafe extern "C" fn visit(context: *mut c_void, argument: *mut c_void) -> i32 {
+        let walk = &mut *(argument as *mut Walk);
+        // For every frame but the innermost this is the return address, which
+        // is what the frame-pointer walk records too.
+        let pc = _Unwind_GetIP(context);
+        if pc == 0 || walk.len == MAX_FRAMES {
+            return URC_END_OF_STACK;
+        }
+        walk.pcs[walk.len] = pc;
+        walk.len += 1;
+        URC_NO_REASON
+    }
+    let mut walk = Walk {
+        pcs: [0; MAX_FRAMES],
+        len: 0,
+    };
+    _Unwind_Backtrace(visit, &mut walk as *mut Walk as *mut c_void);
+    let mut written = 0i32;
+    for &pc in &walk.pcs[..walk.len] {
+        if !aot_frame_in_program(pc) {
+            continue;
+        }
+        if !output.is_null() {
+            if written >= capacity {
+                break;
+            }
+            *output.add(written as usize) = pc as *mut c_void;
+        }
+        written += 1;
     }
     written
 }

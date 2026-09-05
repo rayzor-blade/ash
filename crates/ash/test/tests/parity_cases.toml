@@ -168,10 +168,10 @@ normalize = "default"
 # accumulate contractible mul+add chains, and the AIR fma peephole fuses those
 # in the LLVM tier -- legally, but into a different number than the oracle's
 # op-by-op rounding, and WHICH number depends on how many pixels ran before
-# promotion landed. Cranelift re-serializes Fma as mul+add by design, so the
-# pinned run still promotes and still matches the oracle bit for bit. If
-# fusion ever becomes construction-wide (every engine, interpreter included),
-# these pins and the oracle comparison move together.
+# promotion landed. The Cranelift tier lowers Fma as mul+add (see
+# cranelift/codegen.rs), so the pinned run still promotes and still matches the
+# oracle bit for bit. If fusion ever becomes construction-wide (every engine,
+# interpreter included), these pins and the oracle comparison move together.
 [[case]]
 name = "MandelbrotSmall"
 main = "MandelbrotSmall"

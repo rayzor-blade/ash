@@ -12,7 +12,6 @@ use ash_core::hl_bindings as hl;
 use ash_core::opcodes::Reg;
 use ash_core::types::HLFunction;
 
-use crate::frame::InterpreterFrame;
 use crate::values::NanBoxedValue;
 
 use super::HLExceptionPropagation;
@@ -24,7 +23,8 @@ use crate::tiering::env_flag;
 
 use super::instrument::{stride_probe, stride_probe_enabled};
 use super::{
-    func_of, hash_field_name, native_of, run_with_hl_trap, FnAllocDynObj, FnAllocObj, FnAllocVirtual, HLInterpreter, StepResult,
+    func_of, hash_field_name, native_of, run_with_hl_trap, FnAllocDynObj, FnAllocObj,
+    FnAllocVirtual, HLInterpreter, StepResult,
 };
 
 impl HLInterpreter {
@@ -478,7 +478,11 @@ impl HLInterpreter {
                                 }
                                 hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(raw != 0),
                                 _ => {
-                                    return self.invalid_cast_step(bytecode, src_type_idx, dst_type_idx);
+                                    return self.invalid_cast_step(
+                                        bytecode,
+                                        src_type_idx,
+                                        dst_type_idx,
+                                    );
                                 }
                             }
                         } else {
@@ -694,7 +698,11 @@ impl HLInterpreter {
                             } else if upcast {
                                 val
                             } else {
-                                return self.invalid_cast_step(bytecode, src_type_idx, dst_type_idx);
+                                return self.invalid_cast_step(
+                                    bytecode,
+                                    src_type_idx,
+                                    dst_type_idx,
+                                );
                             }
                         } else {
                             val // non-HOBJ cast, just copy
@@ -747,10 +755,8 @@ impl HLInterpreter {
         // on return there is no allocation point before the view is installed
         // in the destination register and becomes part of the live root set.
         self.sync_gc_scan_roots();
-        type FnToVirtual = unsafe extern "C" fn(
-            *mut hl_type,
-            *mut hl::vdynamic,
-        ) -> *mut hl::vvirtual;
+        type FnToVirtual =
+            unsafe extern "C" fn(*mut hl_type, *mut hl::vdynamic) -> *mut hl::vvirtual;
         let to_virtual: FnToVirtual = unsafe { std::mem::transmute(self.fn_to_virtual) };
         // Through the trap boundary: materializing a view over a dynobj
         // recasts mismatched fields, and a failed recast throws. Without an
@@ -1724,8 +1730,7 @@ impl HLInterpreter {
                                         {
                                             cfun.wrapping_sub(1)
                                         } else {
-                                            self.findex_for_code_addr(cfun)
-                                                .unwrap_or(usize::MAX)
+                                            self.findex_for_code_addr(cfun).unwrap_or(usize::MAX)
                                         };
                                         if func_of(&self.targets, fi).is_some()
                                             || native_of(&self.targets, fi).is_some()
@@ -1802,16 +1807,14 @@ impl HLInterpreter {
                                     .map(|ret_kind| {
                                         let dst_kind =
                                             bytecode.types[func.regs[dst as usize].0].kind;
-                                        Self::is_ptr_kind(ret_kind)
-                                            == Self::is_ptr_kind(dst_kind)
+                                        Self::is_ptr_kind(ret_kind) == Self::is_ptr_kind(dst_kind)
                                     });
                                 if ret_compatible == Some(true)
                                     && (func_of(&self.targets, fi).is_some()
                                         || native_of(&self.targets, fi).is_some())
                                 {
                                     let mut call_args = arg_vals;
-                                    call_args[0] =
-                                        NanBoxedValue::from_ptr(dispatch_obj as usize);
+                                    call_args[0] = NanBoxedValue::from_ptr(dispatch_obj as usize);
                                     return Ok(StepResult::Call {
                                         findex: fi,
                                         args: call_args,
@@ -1871,8 +1874,7 @@ impl HLInterpreter {
                                         {
                                             cfun.wrapping_sub(1)
                                         } else {
-                                            self.findex_for_code_addr(cfun)
-                                                .unwrap_or(usize::MAX)
+                                            self.findex_for_code_addr(cfun).unwrap_or(usize::MAX)
                                         };
                                         if func_of(&self.targets, fi).is_some()
                                             || native_of(&self.targets, fi).is_some()
@@ -1935,18 +1937,14 @@ impl HLInterpreter {
                                 || found.is_some_and(|fi| {
                                     func_of(&self.targets, fi).is_some_and(|f_idx| {
                                         let ft = &bytecode.functions[f_idx];
-                                        bytecode.types[ft.type_.0].fun.as_ref().is_some_and(
-                                            |f| {
-                                                let ret_kind =
-                                                    bytecode.types[f.ret.0].kind;
-                                                let dst_kind = bytecode.types
-                                                    [func.regs[dst as usize].0]
-                                                    .kind;
-                                                dst_kind != hl::hl_type_kind_HVOID
-                                                    && Self::is_ptr_kind(ret_kind)
-                                                        != Self::is_ptr_kind(dst_kind)
-                                            },
-                                        )
+                                        bytecode.types[ft.type_.0].fun.as_ref().is_some_and(|f| {
+                                            let ret_kind = bytecode.types[f.ret.0].kind;
+                                            let dst_kind =
+                                                bytecode.types[func.regs[dst as usize].0].kind;
+                                            dst_kind != hl::hl_type_kind_HVOID
+                                                && Self::is_ptr_kind(ret_kind)
+                                                    != Self::is_ptr_kind(dst_kind)
+                                        })
                                     })
                                 });
                             (found, receiver, hname, needs_boxed_dispatch)
@@ -2049,15 +2047,16 @@ impl HLInterpreter {
                 // longjmp with no HL trap installed aborts the process.
                 let stack_depth = self.stack.len();
                 let mut result: *mut hl::vdynamic = std::ptr::null_mut();
-                let jumped = run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
-                    result = unsafe {
-                        vcall(
-                            this_val.as_ptr() as *mut hl::vdynamic,
-                            hfield,
-                            packed.as_ptr() as *mut hl::varray,
-                        )
-                    };
-                });
+                let jumped =
+                    run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+                        result = unsafe {
+                            vcall(
+                                this_val.as_ptr() as *mut hl::vdynamic,
+                                hfield,
+                                packed.as_ptr() as *mut hl::varray,
+                            )
+                        };
+                    });
                 if jumped != 0 {
                     return Err(self.longjmp_error(
                         Some(bytecode),
@@ -2163,5 +2162,4 @@ impl HLInterpreter {
     // the shared `op_*` methods above run the per-instruction semantics so this
     // dispatcher never holds a second copy of them.
     // =====================================================================
-
 }

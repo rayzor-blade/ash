@@ -32,9 +32,12 @@
 //! same `ASH_AIR_LEVEL` every other engine reads. Per-tier options would give
 //! each engine a different opcode array, which is exactly the property this
 //! wiring exists to establish. Notably `fma` stays on even though this tier
-//! gains nothing from it: the serializer emits `Fma` back as `Mul` + `Add`
-//! through a temporary, so the arithmetic that reaches CLIF is the unfused
-//! arithmetic the bytecode had.
+//! gains nothing from it: `Fma` is lowered as a multiply and an add, rounding
+//! twice, so the arithmetic that reaches CLIF is the unfused arithmetic the
+//! bytecode had. That was the serializer's doing when this tier read
+//! serialized opcodes; composing CLIF from AIR directly, it is
+//! [`super::codegen`]'s, and it is what keeps a promoted function answering
+//! what the interpreter answered.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

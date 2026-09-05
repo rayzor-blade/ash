@@ -77,7 +77,7 @@ pub struct PollFd {
 const POLLFD_SIZE: usize = 8;
 
 impl PollFd {
-    fn read(bytes: &[u8]) -> PollFd {
+    fn read(bytes: &[u8; POLLFD_SIZE]) -> PollFd {
         PollFd {
             fd: i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
             events: u16::from_le_bytes([bytes[4], bytes[5]]),
@@ -87,7 +87,7 @@ impl PollFd {
 
     /// Only `revents` is the host's to write; the rest stays as the guest
     /// left it.
-    fn write_revents(&self, bytes: &mut [u8]) {
+    fn write_revents(&self, bytes: &mut [u8; POLLFD_SIZE]) {
         bytes[6..8].copy_from_slice(&self.revents.to_le_bytes());
     }
 }
@@ -294,7 +294,8 @@ mod os {
                 Ok(s) => s,
                 Err(e) => return -e,
             };
-            let n = unsafe { libc::send(s, bytes.as_ptr() as *const c_void, bytes.len(), NOSIGNAL) };
+            let n =
+                unsafe { libc::send(s, bytes.as_ptr() as *const c_void, bytes.len(), NOSIGNAL) };
             if n < 0 {
                 return -last_errno();
             }
@@ -354,7 +355,10 @@ mod os {
             if rc < 0 {
                 return Err(last_errno());
             }
-            Ok((addr.sin_addr.s_addr as i32, u16::from_be(addr.sin_port) as i32))
+            Ok((
+                addr.sin_addr.s_addr as i32,
+                u16::from_be(addr.sin_port) as i32,
+            ))
         }
 
         /// `opt` 0 blocking, 1 `TCP_NODELAY`, 2 `SO_BROADCAST`, 3 send and
@@ -402,7 +406,13 @@ mod os {
                         if rc < 0 {
                             return last_errno();
                         }
-                        status(libc::setsockopt(s, libc::SOL_SOCKET, libc::SO_RCVTIMEO, p, len))
+                        status(libc::setsockopt(
+                            s,
+                            libc::SOL_SOCKET,
+                            libc::SO_RCVTIMEO,
+                            p,
+                            len,
+                        ))
                     }
                     _ => errno::NOTSUP,
                 }
@@ -586,9 +596,7 @@ pub fn install(linker: &mut Linker<Host>) -> Result<()> {
         .func_wrap(
             "env",
             "ash_host_socket_open",
-            |mut caller: Caller<'_, Host>, udp: i32| -> i32 {
-                caller.data_mut().sockets.open(udp)
-            },
+            |mut caller: Caller<'_, Host>, udp: i32| -> i32 { caller.data_mut().sockets.open(udp) },
         )
         .map_err(failed("ash_host_socket_open"))?;
     linker
@@ -622,9 +630,7 @@ pub fn install(linker: &mut Linker<Host>) -> Result<()> {
         .func_wrap(
             "env",
             "ash_host_socket_accept",
-            |mut caller: Caller<'_, Host>, fd: i32| -> i32 {
-                caller.data_mut().sockets.accept(fd)
-            },
+            |mut caller: Caller<'_, Host>, fd: i32| -> i32 { caller.data_mut().sockets.accept(fd) },
         )
         .map_err(failed("ash_host_socket_accept"))?;
     linker
@@ -664,9 +670,7 @@ pub fn install(linker: &mut Linker<Host>) -> Result<()> {
         .func_wrap(
             "env",
             "ash_host_socket_close",
-            |mut caller: Caller<'_, Host>, fd: i32| -> i32 {
-                caller.data_mut().sockets.close(fd)
-            },
+            |mut caller: Caller<'_, Host>, fd: i32| -> i32 { caller.data_mut().sockets.close(fd) },
         )
         .map_err(failed("ash_host_socket_close"))?;
     linker
@@ -715,10 +719,14 @@ pub fn install(linker: &mut Linker<Host>) -> Result<()> {
                     Ok(pair) => pair,
                     Err(e) => return -e,
                 };
-                let mut records: Vec<PollFd> =
-                    bytes.chunks_exact(POLLFD_SIZE).map(PollFd::read).collect();
+                // `as_chunks` rather than `chunks_exact`: the record size is a
+                // constant, so the compiler gets fixed-size arrays and the
+                // remainder is split off once instead of checked per record.
+                let (records_in, _) = bytes.as_chunks::<POLLFD_SIZE>();
+                let mut records: Vec<PollFd> = records_in.iter().map(PollFd::read).collect();
                 let rc = host.sockets.poll(&mut records, timeout_ms);
-                for (record, slot) in records.iter().zip(bytes.chunks_exact_mut(POLLFD_SIZE)) {
+                let (records_out, _) = bytes.as_chunks_mut::<POLLFD_SIZE>();
+                for (record, slot) in records.iter().zip(records_out.iter_mut()) {
                     record.write_revents(slot);
                 }
                 rc

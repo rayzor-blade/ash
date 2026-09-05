@@ -975,11 +975,9 @@ impl AirCodegen<'_, '_> {
     }
 
     fn init_fiber_poll_epoch(&mut self) -> Result<()> {
-        let slot = self.b.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            8,
-            3,
-        ));
+        let slot =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let epoch_addr = self
             .b
             .ins()
@@ -1004,10 +1002,7 @@ impl AirCodegen<'_, '_> {
         let body = self.b.create_block();
         self.b.set_cold_block(poll);
 
-        let handled = self
-            .b
-            .ins()
-            .stack_load(types::I64, types::I64, slot, 0);
+        let handled = self.b.ins().stack_load(types::I64, types::I64, slot, 0);
         let epoch_addr = self
             .b
             .ins()
@@ -1155,9 +1150,9 @@ impl AirCodegen<'_, '_> {
         // widened, so this is the scalar answer everywhere else.
         match self.f.value_lanes(v) {
             0 | 1 => Ok(lane),
-            n => lane.by(n as u32).ok_or_else(|| {
-                anyhow!("no CLIF vector type for {n} lanes of {lane}")
-            }),
+            n => lane
+                .by(n as u32)
+                .ok_or_else(|| anyhow!("no CLIF vector type for {n} lanes of {lane}")),
         }
     }
 
@@ -1324,16 +1319,30 @@ impl AirCodegen<'_, '_> {
 
             Instr::BinOp { op, dst, a, b } => self.emit_binop(*op, *dst, *a, *b)?,
 
-            // A real fused multiply-add. The serialize path lowers `Fma` back
-            // to `Mul` + `Add` because HL bytecode has no fused opcode, so
-            // this is arithmetic only a backend reading the IR can emit.
+            // Multiply then add, ROUNDING TWICE, which is the one thing this
+            // tier could emit as a single instruction and must not.
+            //
+            // A fused multiply-add rounds once, so it answers a different
+            // number from the interpreter's op-by-op arithmetic. This tier's
+            // contract is that promoting a function does not change what the
+            // program computes -- the parity matrix compares a hybrid run
+            // against the interpreter's own output -- and the FMA peephole
+            // runs before every consumer, so honouring `Fma` here would make
+            // the answer depend on whether a function happened to get hot.
+            // Mandelbrot is the case that showed it: 112790102 interpreted,
+            // 112798500 once the kernel was promoted and fused.
+            //
+            // The serializer already lowers `Fma` this way for the same
+            // reason (`crates/air/src/v2/serialize.rs`), and the LLVM tier is
+            // where fusion is taken deliberately, under `ASH_AIR_FMA`.
             Instr::Fma { dst, a, b, c } => {
                 let (va, vb, vc) = (self.get(*a)?, self.get(*b)?, self.get(*c)?);
                 let t = self.b.func.dfg.value_type(va);
                 if !t.is_float() {
                     bail!("Fma on non-float operands");
                 }
-                let r = self.b.ins().fma(va, vb, vc);
+                let product = self.b.ins().fmul(va, vb);
+                let r = self.b.ins().fadd(product, vc);
                 self.def(*dst, r)?;
             }
 
@@ -1987,7 +1996,9 @@ impl AirCodegen<'_, '_> {
         Ok(match kind {
             MemAccess::Mem | MemAccess::I8 | MemAccess::I16 => {
                 if stride as u32 != elem_bits / 8 {
-                    bail!("vector access stride {stride} is not contiguous for {elem_bits}-bit lanes");
+                    bail!(
+                        "vector access stride {stride} is not contiguous for {elem_bits}-bit lanes"
+                    );
                 }
                 (self.b.ins().iadd(vbase, idx), 0)
             }
@@ -3009,10 +3020,7 @@ impl AirCodegen<'_, '_> {
             .load(types::I64, MemFlagsData::trusted(), closure, 0);
         let expected_type = self.ctx.type_ptr(self.f.value_ty(fun).0 as usize)?;
         let expected_type = self.b.ins().iconst(types::I64, expected_type as i64);
-        let pointer_exact = self
-            .b
-            .ins()
-            .icmp(IntCC::Equal, runtime_type, expected_type);
+        let pointer_exact = self.b.ins().icmp(IntCC::Equal, runtime_type, expected_type);
         // A bound method carries the closure type embedded in its full
         // function type, while AIR's register can refer to an independently
         // interned but structurally identical HFUN. Pointer identity sent
@@ -3451,10 +3459,10 @@ impl AirCodegen<'_, '_> {
             .b
             .ins()
             .iconst(types::I64, ash_jit_resolve_stub as usize as i64);
-        let resolve_call =
-            self.b
-                .ins()
-                .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
+        let resolve_call = self
+            .b
+            .ins()
+            .call_indirect(resolve_sig, resolve_addr, &[fn_addr]);
         let resolved = self.b.inst_results(resolve_call)[0];
         let resolved_real = self.b.ins().icmp_imm_s(
             IntCC::UnsignedGreaterThanOrEqual,

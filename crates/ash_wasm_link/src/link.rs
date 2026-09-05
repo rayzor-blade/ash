@@ -436,10 +436,12 @@ fn plan(
                 // A global symbol resolves to the global itself, not a GOT
                 // entry, and needs nothing here.
                 SymbolTarget::Global { .. } => continue,
-                SymbolTarget::Undefined | SymbolTarget::UndefinedData => match linker_address_early(&name, opts, address) {
-                    Some(v) => v as i32,
-                    None => continue,
-                },
+                SymbolTarget::Undefined | SymbolTarget::UndefinedData => {
+                    match linker_address_early(&name, opts, address) {
+                        Some(v) => v as i32,
+                        None => continue,
+                    }
+                }
                 _ => continue,
             };
             let key = (Kind::Data, name);
@@ -1460,8 +1462,8 @@ fn emit(
                 }
             }
         }
-        for li in 0..obj.functions.len() {
-            let Some(out) = layout.func_out[oi][li] else {
+        for (li, out) in layout.func_out[oi].iter().enumerate() {
+            let Some(out) = *out else {
                 continue;
             };
             if let Some(name) = by_fspace.get(&(imported + li as u32)) {

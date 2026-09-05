@@ -680,7 +680,11 @@ pub fn add_rewind_dispatch(
                 frame = match drive.machine() {
                     Some(m) => {
                         let scratch = c.reserve_local(ValType::I32);
-                        let saved = Saved::new(c, scratch)?;
+                        let ordinal = c.reserve_local(ValType::I32);
+                        let saved = Saved::new(c, scratch, ordinal)?;
+                        // Everything the body does happens inside this, so
+                        // any call site can leave by branching to its end.
+                        c.open_block(wasm_encoder::BlockType::Empty);
                         emit_prologue(c, m, &saved)?;
                         report.saved_bytes += saved.size as usize;
                         Some(saved)
@@ -729,6 +733,19 @@ pub fn add_rewind_dispatch(
             if let Some(f) = chain.last_mut() {
                 f.passed += 1;
                 f.open -= 1;
+            }
+        }
+
+        // The body's own last `End`. Everything before it is inside the block
+        // a suspending call site branches out of, so this is where that block
+        // closes and where the one copy of the save sequence goes.
+        if matches!(op, Operator::End) && c.depth() == 1 {
+            if let (Some(m), Some(saved)) = (drive.machine(), &frame) {
+                // Reaching here normally means returning normally; falling
+                // through into the save sequence would be wrong.
+                c.emit_new(&Instruction::Return);
+                c.close_block()?;
+                emit_unwind_exit(c, m, saved)?;
             }
         }
 
@@ -1000,13 +1017,17 @@ struct Saved {
     /// the prologue needs it before the locals are restored, so restoring it
     /// would overwrite the pointer it is reading through.
     scratch: u32,
+    /// A scratch `i32` a call site puts its ordinal in before branching to
+    /// the function's one copy of the save sequence. Not saved either: it is
+    /// written into the record explicitly.
+    ordinal: u32,
     /// What the function returns, which an unwinding frame has to leave on
     /// the stack even though nobody will look at it.
     results: Vec<ValType>,
 }
 
 impl Saved {
-    fn new(c: &Cursor, scratch: u32) -> Result<Self> {
+    fn new(c: &Cursor, scratch: u32, ordinal: u32) -> Result<Self> {
         let locals = c.local_types()?;
         let mut offsets = Vec::new();
         let mut indices = Vec::new();
@@ -1015,7 +1036,7 @@ impl Saved {
         let mut at = 4u32;
         for (i, &ty) in locals.iter().enumerate() {
             let i = i as u32;
-            if i == scratch {
+            if i == scratch || i == ordinal {
                 continue;
             }
             let size = value_size(ty)?;
@@ -1038,6 +1059,7 @@ impl Saved {
             types,
             size: at.next_multiple_of(8),
             scratch,
+            ordinal,
             results,
         })
     }
@@ -1141,7 +1163,24 @@ fn emit_epilogue(c: &mut Cursor, m: &Machine, saved: &Saved, ordinal: u32) -> Re
     c.emit_new(&Instruction::I32Const(UNWINDING));
     c.emit_new(&Instruction::I32Eq);
     c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+    c.emit_new(&Instruction::I32Const(ordinal as i32));
+    c.emit_new(&Instruction::LocalSet(saved.ordinal));
+    // Out to the block wrapping the whole body, where the one copy of the
+    // save sequence lives. Inside the `if` just emitted, which the cursor
+    // does not know about, that block sits one further out than
+    // `emitted_depth` reports.
+    c.emit_new(&Instruction::Br(c.emitted_depth() - 1));
+    c.emit_new(&Instruction::End);
+    Ok(())
+}
 
+/// The one copy of a function's save-and-return sequence, at the end of the
+/// body, reached by a `br` out of the block that wraps everything.
+///
+/// Emitting this per call site instead costs three instructions per local per
+/// site, which is where nearly all of the transform's code growth would
+/// otherwise go.
+fn emit_unwind_exit(c: &mut Cursor, m: &Machine, saved: &Saved) -> Result<()> {
     c.emit_new(&Instruction::GlobalGet(m.data));
     c.emit_new(&load(ValType::I32, 0));
     c.emit_new(&Instruction::LocalTee(saved.scratch));
@@ -1157,7 +1196,7 @@ fn emit_epilogue(c: &mut Cursor, m: &Machine, saved: &Saved, ordinal: u32) -> Re
     c.emit_new(&Instruction::End);
 
     c.emit_new(&Instruction::LocalGet(saved.scratch));
-    c.emit_new(&Instruction::I32Const(ordinal as i32));
+    c.emit_new(&Instruction::LocalGet(saved.ordinal));
     c.emit_new(&store(ValType::I32, 0));
     for ((&offset, &index), &ty) in saved.offsets.iter().zip(&saved.indices).zip(&saved.types) {
         c.emit_new(&Instruction::LocalGet(saved.scratch));
@@ -1171,13 +1210,12 @@ fn emit_epilogue(c: &mut Cursor, m: &Machine, saved: &Saved, ordinal: u32) -> Re
     c.emit_new(&Instruction::I32Add);
     c.emit_new(&store(ValType::I32, 0));
 
-    // A branch takes the label's types off the top and discards whatever is
-    // under them, so the call's own results can be left where they are.
+    // Nobody looks at what an unwinding frame returns, but the function's
+    // signature still has to be honoured.
     for &ty in &saved.results {
         c.emit_new(&zero(ty));
     }
     c.emit_new(&Instruction::Return);
-    c.emit_new(&Instruction::End);
     Ok(())
 }
 

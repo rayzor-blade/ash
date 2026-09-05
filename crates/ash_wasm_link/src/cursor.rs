@@ -287,6 +287,16 @@ impl Cursor {
         self.inserted.len()
     }
 
+    /// Control depth in the *emitted* body: the original frames plus the ones
+    /// this rewrite opened.
+    ///
+    /// Only counts frames opened through [`Cursor::open_block`]; a block
+    /// emitted with [`Cursor::emit_new`] is invisible here, and a caller
+    /// inside one has to add it back itself.
+    pub fn emitted_depth(&self) -> u32 {
+        self.depth() + self.inserted.len() as u32
+    }
+
     fn reencode(&mut self, op: &Operator<'_>) -> Result<()> {
         let i = RoundtripReencoder
             .instruction(op.clone())

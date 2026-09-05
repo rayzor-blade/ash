@@ -46,6 +46,7 @@
 use anyhow::Result;
 
 pub mod body;
+pub mod cursor;
 pub mod link;
 pub mod object;
 pub mod suspend;

@@ -70,6 +70,36 @@ fn imports_named(bytes: &[u8], names: &[&str]) -> BTreeSet<u32> {
     found
 }
 
+/// Function names from the name section, for the indices that have one.
+///
+/// Only used to write the set out for comparison against another tool's, so a
+/// module without a name section simply yields nothing.
+fn names(bytes: &[u8]) -> std::collections::BTreeMap<u32, String> {
+    let mut out = std::collections::BTreeMap::new();
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let wasmparser::Payload::CustomSection(c) = payload.expect("parsing") else {
+            continue;
+        };
+        if c.name() != "name" {
+            continue;
+        }
+        let reader = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new_features(
+            c.data(),
+            c.data_offset(),
+            wasmparser::WasmFeatures::all(),
+        ));
+        for sub in reader {
+            if let Ok(wasmparser::Name::Function(map)) = sub {
+                for entry in map {
+                    let entry = entry.expect("a name entry");
+                    out.insert(entry.index, entry.name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 fn report(p: &Program, total: usize, label: &str, seeds: &BTreeSet<u32>) -> [usize; 3] {
     let mut out = [0usize; 3];
     for (i, policy) in [Policy::DirectOnly, Policy::TypedTable, Policy::AnyIndirect]
@@ -130,6 +160,27 @@ fn the_suspend_set_over_a_real_module() {
     );
     let mut all = yield_seeds.clone();
     all.extend(imports_named(&bytes, BLOCKING));
+
+    // Written out so the set can be diffed against another instrumenter's.
+    // `docs/wasm-fibers.md` §6 makes ours being a subset of Binaryen's the
+    // exit condition for this step, and a count alone cannot show that.
+    if let Ok(path) = std::env::var("ASH_LINK_TEST_NAMES") {
+        let names = names(&bytes);
+        let mut lines: Vec<String> = p
+            .suspend_closure(&yield_seeds, Policy::TypedTable)
+            .iter()
+            .filter(|f| p.edges.contains_key(f))
+            .map(|f| {
+                names
+                    .get(f)
+                    .cloned()
+                    .unwrap_or_else(|| format!("func[{f}]"))
+            })
+            .collect();
+        lines.sort();
+        std::fs::write(&path, lines.join("\n") + "\n").expect("writing the name list");
+        eprintln!("  wrote {} names to {path}", lines.len());
+    }
 
     let a = report(&p, total, "yield only", &yield_seeds);
     let b = report(&p, total, "yield + blocking", &all);

@@ -384,6 +384,31 @@ impl Frame {
     }
 }
 
+/// The span of the body over which a reference-typed local might hold a
+/// value someone still wants.
+///
+/// A reference cannot be written to linear memory, so a fiber cannot suspend
+/// while one is live. Deciding that exactly needs liveness over the control
+/// flow graph; this is the cheap over-approximation that a value is only live
+/// somewhere between the first place it is written and the last place it is
+/// read. Anything genuinely live across a resume point falls inside that
+/// span, so refusing on the span refuses at least as much as the truth --
+/// which is the safe direction.
+#[derive(Debug, Clone, Copy)]
+struct RefSpan {
+    first_write: Option<usize>,
+    last_read: Option<usize>,
+}
+
+impl RefSpan {
+    fn covers(&self, at: usize) -> bool {
+        match (self.first_write, self.last_read) {
+            (Some(w), Some(r)) => w <= at && at <= r,
+            _ => false,
+        }
+    }
+}
+
 /// What one function's rewind dispatch has to be able to do.
 #[derive(Debug, Default)]
 struct Plan {
@@ -412,6 +437,14 @@ fn plan(
     instrument: &dyn Fn(u32) -> bool,
     machine: bool,
 ) -> Result<(BTreeMap<u32, Plan>, usize, usize)> {
+    // Where each function's reference-typed locals might still hold
+    // something. Its own pass, because a span is only known once the whole
+    // body has been seen and a resume point is decided while walking it.
+    let spans = if machine {
+        ref_spans(bytes, instrument)?
+    } else {
+        BTreeMap::new()
+    };
     let mut plans: BTreeMap<u32, Plan> = BTreeMap::new();
     let mut refused: BTreeSet<u32> = BTreeSet::new();
     let mut unsavable = 0usize;
@@ -432,17 +465,18 @@ fn plan(
         }
         let watching = instrument(index) && !refused.contains(&index);
         if watching {
-            if at == 0 && machine && !savable(c)? {
-                unsavable += 1;
-                refused.insert(index);
-                plans.remove(&index);
-            } else if !can_instrument(c, op)? {
+            if !can_instrument(c, op)? {
                 refused.insert(index);
                 plans.remove(&index);
             } else if suspends(op, instrument) && !unreachable_here(c) {
                 let (split, spill) = boundary(at, c.stack_height(), trivial);
                 let need = spill_types(c, spill)?;
-                if machine && need.keys().any(|t| value_size(*t).is_err()) {
+                // A reference cannot go to linear memory, so a fiber must not
+                // stop where one is still holding something -- nor where one
+                // is on the operand stack.
+                let ref_live =
+                    machine && spans.get(&index).is_some_and(|f| ref_local_live_at(f, at));
+                if ref_live || (machine && need.keys().any(|t| value_size(*t).is_err())) {
                     unsavable += 1;
                     refused.insert(index);
                     plans.remove(&index);
@@ -529,17 +563,63 @@ fn plan(
     Ok((plans, refused.len(), unsavable))
 }
 
-/// Whether every local and result of this function can go to linear memory.
-fn savable(c: &Cursor) -> Result<bool> {
-    if c.local_types()?.iter().any(|t| value_size(*t).is_err()) {
-        return Ok(false);
-    }
-    for r in c.results()? {
-        if value_size(encode_val_type(r)?).is_err() {
-            return Ok(false);
+/// Where every function's reference-typed locals are written and read.
+fn ref_spans(
+    bytes: &[u8],
+    instrument: &dyn Fn(u32) -> bool,
+) -> Result<BTreeMap<u32, BTreeMap<u32, RefSpan>>> {
+    let mut all: BTreeMap<u32, BTreeMap<u32, RefSpan>> = BTreeMap::new();
+    let mut at = 0usize;
+    let mut current = u32::MAX;
+    rewrite_module(bytes, |index, c, op| {
+        if index != current {
+            current = index;
+            at = 0;
+            if instrument(index) {
+                let mut f = BTreeMap::new();
+                for (i, ty) in c.local_types()?.iter().enumerate() {
+                    if value_size(*ty).is_err() {
+                        f.insert(
+                            i as u32,
+                            RefSpan {
+                                first_write: None,
+                                last_read: None,
+                            },
+                        );
+                    }
+                }
+                if !f.is_empty() {
+                    all.insert(index, f);
+                }
+            }
         }
-    }
-    Ok(true)
+        if let Some(f) = all.get_mut(&index) {
+            match op {
+                Operator::LocalSet { local_index } | Operator::LocalTee { local_index } => {
+                    if let Some(sp) = f.get_mut(local_index) {
+                        sp.first_write.get_or_insert(at);
+                    }
+                }
+                Operator::LocalGet { local_index } => {
+                    if let Some(sp) = f.get_mut(local_index) {
+                        sp.last_read = Some(at);
+                    }
+                }
+                _ => {}
+            }
+        }
+        at += 1;
+        c.emit(op)
+    })?;
+    Ok(all)
+}
+
+/// A reference-typed local that might still hold something at `at`.
+///
+/// Reference-typed locals are not saved -- they cannot be -- so a resume point
+/// inside one's span is a place the fiber must not stop.
+fn ref_local_live_at(spans: &BTreeMap<u32, RefSpan>, at: usize) -> bool {
+    spans.values().any(|sp| sp.covers(at))
 }
 
 /// Where to put a jump target for an operator that consumes `height` values.
@@ -947,6 +1027,49 @@ pub const GLOBALS: [&str; 3] = ["ash_fiber_state", "ash_fiber_data", "ash_fiber_
 /// The import a fiber suspends through, and the seed of the whole analysis.
 pub const YIELD_IMPORT: &str = "ash_host_fiber_yield";
 
+/// Where an unwind stops.
+///
+/// The runtime defines this with a stable name for exactly this lookup. It is
+/// the function that calls a fiber's body, left uninstrumented so the unwind
+/// ends there and the scheduler above it is still running afterwards. A
+/// module without it is instrumented all the way up, and an unwind then
+/// leaves the guest entirely.
+pub const BARRIER: &str = "ash_fiber_enter";
+
+/// The defined function with this name, from the name section.
+///
+/// `None` when the module has no name section or nothing is called that,
+/// which is not an error here: a program that never makes a fiber has no
+/// barrier to find.
+pub fn function_named(bytes: &[u8], want: &str) -> Result<Option<u32>> {
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let wasmparser::Payload::CustomSection(c) =
+            payload.map_err(|e| anyhow!("parsing the module: {e}"))?
+        else {
+            continue;
+        };
+        if c.name() != "name" {
+            continue;
+        }
+        let reader = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new_features(
+            c.data(),
+            c.data_offset(),
+            wasmparser::WasmFeatures::all(),
+        ));
+        for sub in reader {
+            if let Ok(wasmparser::Name::Function(map)) = sub {
+                for entry in map {
+                    let entry = entry.map_err(|e| anyhow!("reading a name: {e}"))?;
+                    if entry.name == want {
+                        return Ok(Some(entry.index));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Instrument a linked module so a fiber can suspend inside it and be
 /// resumed.
 ///
@@ -968,12 +1091,20 @@ pub fn instrument(bytes: &[u8]) -> Result<(Vec<u8>, Dispatch)> {
              produce a program that can never suspend"
         );
     }
+    // Stop the closure at the runtime's barrier, so the scheduler that has to
+    // pick the next fiber is still standing when this one suspends.
+    let barriers: std::collections::BTreeSet<u32> =
+        function_named(bytes, BARRIER)?.into_iter().collect();
     let (module, globals) = add_exported_i32_globals(bytes, &GLOBALS)?;
     // The globals are appended past the GOT block, whose indices the linker
     // has already written into patch sites, so nothing is renumbered and the
     // analysis sees the module the rewrite will actually run over.
     let program = crate::suspend::program_from_module(&module)?;
-    let set = program.suspend_closure(&seeds, crate::suspend::Policy::TypedTable);
+    let set = program.suspend_closure_with_barriers(
+        &seeds,
+        crate::suspend::Policy::TypedTable,
+        &barriers,
+    );
     add_rewind_dispatch(
         &module,
         &|f| set.contains(&f),
@@ -1153,20 +1284,23 @@ impl Saved {
             if i == scratch || i == ordinal {
                 continue;
             }
-            let size = value_size(ty)?;
+            // A reference cannot be written to linear memory at all, so it is
+            // left out of the record. The planner is what makes that safe: it
+            // refuses a resume point where one might still hold something.
+            let Ok(size) = value_size(ty) else {
+                continue;
+            };
             at = at.next_multiple_of(size);
             offsets.push(at);
             indices.push(i);
             types.push(ty);
             at += size;
         }
-        let mut results = Vec::new();
-        for r in c.results()? {
-            results.push(encode_val_type(r)?);
-            // Checked here rather than where it is used, so a function that
-            // cannot be unwound is rejected before anything is emitted for it.
-            value_size(*results.last().expect("just pushed"))?;
-        }
+        let results = c
+            .results()?
+            .into_iter()
+            .map(encode_val_type)
+            .collect::<Result<Vec<_>>>()?;
         Ok(Saved {
             offsets,
             indices,
@@ -1222,13 +1356,18 @@ fn store(ty: ValType, offset: u32) -> Instruction<'static> {
     }
 }
 
+/// Something of this type for an unwinding frame to return.
+///
+/// Nobody looks at it -- the frame is on its way out -- but the function's
+/// signature still has to be honoured, including when it returns a reference.
 fn zero(ty: ValType) -> Instruction<'static> {
     match ty {
         ValType::I32 => Instruction::I32Const(0),
         ValType::I64 => Instruction::I64Const(0),
         ValType::F32 => Instruction::F32Const(0.0f32.into()),
         ValType::F64 => Instruction::F64Const(0.0f64.into()),
-        _ => Instruction::V128Const(0),
+        ValType::V128 => Instruction::V128Const(0),
+        ValType::Ref(r) => Instruction::RefNull(r.heap_type),
     }
 }
 

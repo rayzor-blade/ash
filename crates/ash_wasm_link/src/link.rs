@@ -1352,6 +1352,24 @@ fn emit(
     // --- exports ---
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
+    if opts.fibers {
+        // Two fibers cannot share one shadow stack. The transform leaves a
+        // suspended frame's shadow allocation in place, which is right for
+        // one coroutine; with a second, the frames that were between the
+        // suspend and the scheduler return, restore this pointer above the
+        // suspended frames, and the next allocation writes over them. So a
+        // fiber runs on a region of its own and the runtime swaps this on the
+        // way in and out -- which it can only do if it can see it.
+        //
+        // Gated, because exporting it hands every host arbitrary access to
+        // the guest's stack pointer, and a build without fibers should not
+        // widen its ABI to pay for a feature it did not ask for.
+        exports.export(
+            "__stack_pointer",
+            ExportKind::Global,
+            layout.stack_pointer_global,
+        );
+    }
     let mut exported_names: HashMap<&str, ()> = HashMap::new();
     {
         for (oi, obj) in objects.iter().enumerate() {

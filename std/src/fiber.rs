@@ -1028,15 +1028,15 @@ unsafe fn install_fiber(id: u32, c: *mut vclosure) {
     let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
         run_closure(c_usize as *mut vclosure);
     }));
-    // A wasm fiber has no stack in linear memory, so there is nothing for the
-    // collector to scan and nothing to charge; `stack_range` returns an empty
-    // range there rather than lying about one.
+    // Both backends put a suspended fiber's live values somewhere the
+    // collector has to look: a switched-out stack natively, and the side
+    // stack the link-time transform writes locals into on wasm. Either way
+    // an object a suspended fiber alone refers to is only reachable through
+    // this range.
     let (base, len) = fiber.stack_range();
-    #[cfg(not(target_family = "wasm"))]
     crate::gc::gc_register_fiber_stack(id, base as usize, len);
     // Charge the off-heap stack as GC allocation pressure so dead fibers'
     // stacks translate into collections (wren_lift core/fiber.rs:189-199).
-    #[cfg(not(target_family = "wasm"))]
     crate::gc::hlp_gc_track_external(len as u64);
 
     SCHEDULER.with(|scheduler| {

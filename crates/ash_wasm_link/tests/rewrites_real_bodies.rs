@@ -217,34 +217,15 @@ fn yield_imports(bytes: &[u8]) -> std::collections::BTreeSet<u32> {
 #[test]
 fn the_fiber_transform_on_a_real_module() {
     let Some(bytes) = module() else {
-        eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to build a real dispatch");
+        eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to instrument a real program");
         return;
     };
-    let (with_global, g) = ash_wasm_link::fiber::add_exported_i32_globals(
-        &bytes,
-        &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
-    )
-    .expect("adding the state globals");
-    let program =
-        ash_wasm_link::suspend::program_from_module(&with_global).expect("reading the module");
-    let seeds = yield_imports(&with_global);
-    let set = program.suspend_closure(&seeds, ash_wasm_link::suspend::Policy::TypedTable);
-
-    let (out, report) = ash_wasm_link::fiber::add_rewind_dispatch(
-        &with_global,
-        &|i| set.contains(&i),
-        ash_wasm_link::fiber::Drive::Full(ash_wasm_link::fiber::Machine {
-            state: g[0],
-            data: g[1],
-            resume: g[2],
-        }),
-    )
-    .expect("dispatch");
+    let (out, report) = ash_wasm_link::fiber::instrument(&bytes).expect("the fiber transform");
     eprintln!(
         "{} functions instrumented, {} refused ({} holding a value that cannot be saved); \
          {} ladders, {} blocks, {} br_table entries, {} unwind checks, {} traps, \
-         {} bytes of frame; \
-         {} resume points free, {} needed a spill; {} -> {} bytes ({:+.1}%)",
+         {} bytes of frame; {} resume points free, {} needed a spill; \
+         {} -> {} bytes ({:+.1}%)",
         report.functions,
         report.refused,
         report.unsavable,
@@ -260,10 +241,10 @@ fn the_fiber_transform_on_a_real_module() {
         out.len(),
         100.0 * (out.len() as f64 - bytes.len() as f64) / bytes.len() as f64
     );
-    validate(&out).unwrap_or_else(|e| panic!("the dispatched module does not validate: {e}"));
+    validate(&out).unwrap_or_else(|e| panic!("the instrumented module does not validate: {e}"));
 
     if let Ok(path) = std::env::var("ASH_LINK_TEST_OUT") {
         std::fs::write(&path, &out).unwrap_or_else(|e| panic!("writing {path}: {e}"));
-        eprintln!("wrote the dispatched module to {path}");
+        eprintln!("wrote the instrumented module to {path}");
     }
 }

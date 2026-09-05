@@ -52,6 +52,13 @@ pub struct LinkOptions {
     /// Names to keep whatever else happens, because the host calls them by
     /// name and no relocation points at them.
     pub roots: Vec<String>,
+    /// Instrument the module so a fiber can suspend inside it and be resumed.
+    ///
+    /// Off by default, and the gate is not that the code path is skipped but
+    /// that the emitted module is byte-identical: with this false, `link`
+    /// returns exactly what `emit` produced and nothing in
+    /// [`crate::fiber`] runs. See `docs/wasm-fibers.md`.
+    pub fibers: bool,
 }
 
 impl Default for LinkOptions {
@@ -66,6 +73,7 @@ impl Default for LinkOptions {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            fibers: false,
         }
     }
 }
@@ -136,7 +144,17 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
     report_unresolved(&objects, &defs, &layout)?;
     // Patching mutates each object's kept payloads in place.
     apply_relocations(&mut objects, &defs, &layout)?;
-    emit(&objects, &defs, &layout, opts)
+    let module = emit(&objects, &defs, &layout, opts)?;
+    if !opts.fibers {
+        return Ok(module);
+    }
+    // Only here, and never earlier. A relocation names an absolute byte
+    // offset into a body and is written into a fixed-width slot; re-encoding
+    // a body writes every immediate at its natural width, so a rewrite ahead
+    // of `apply_relocations` would leave every later patch landing across an
+    // opcode boundary in a module that still validates. By this point every
+    // relocation has been spent and nothing reads an offset again.
+    Ok(crate::fiber::instrument(&module)?.0)
 }
 
 /// Say no to what has not been implemented, rather than producing a module

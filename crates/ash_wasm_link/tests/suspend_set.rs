@@ -43,33 +43,6 @@ const BLOCKING: &[&str] = &[
     "ash_host_socket_poll",
 ];
 
-/// Import function indices whose name matches one of `names`.
-///
-/// Imported functions take the low indices in order, so this walks the import
-/// section counting only the function imports, the same way
-/// `program_from_module` assigns them.
-fn imports_named(bytes: &[u8], names: &[&str]) -> BTreeSet<u32> {
-    let mut found = BTreeSet::new();
-    let mut next = 0u32;
-    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
-        let wasmparser::Payload::ImportSection(r) = payload.expect("parsing") else {
-            continue;
-        };
-        for group in r {
-            for import in group.expect("imports") {
-                let (_, import) = import.expect("an import");
-                if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
-                    if names.contains(&import.name) {
-                        found.insert(next);
-                    }
-                    next += 1;
-                }
-            }
-        }
-    }
-    found
-}
-
 /// Function names from the name section, for the indices that have one.
 ///
 /// Only used to write the set out for comparison against another tool's, so a
@@ -152,14 +125,14 @@ fn the_suspend_set_over_a_real_module() {
         types_called.len()
     );
 
-    let yield_seeds = imports_named(&bytes, YIELD);
+    let yield_seeds = ash_wasm_link::fiber::imports_named(&bytes, YIELD).expect("reading imports");
     assert!(
         !yield_seeds.is_empty(),
         "the module does not import ash_host_fiber_yield, so there is no suspend point to \
          close over -- point this at a module built with the fiber host imports"
     );
     let mut all = yield_seeds.clone();
-    all.extend(imports_named(&bytes, BLOCKING));
+    all.extend(ash_wasm_link::fiber::imports_named(&bytes, BLOCKING).expect("reading imports"));
 
     // Written out so the set can be diffed against another instrumenter's.
     // `docs/wasm-fibers.md` §6 makes ours being a subset of Binaryen's the

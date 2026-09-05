@@ -937,6 +937,83 @@ fn spill_stack(c: &mut Cursor, pool: &BTreeMap<ValType, Vec<u32>>, count: u32) -
     }
     Ok(slots)
 }
+/// Names the transform gives the globals it adds.
+///
+/// Exported, because the host is what starts an unwind and a rewind: ash owns
+/// both sides, so three globals do what Asyncify needs five exported
+/// functions for.
+pub const GLOBALS: [&str; 3] = ["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"];
+
+/// The import a fiber suspends through, and the seed of the whole analysis.
+pub const YIELD_IMPORT: &str = "ash_host_fiber_yield";
+
+/// Instrument a linked module so a fiber can suspend inside it and be
+/// resumed.
+///
+/// This is the whole transform, in the order the pieces have to run: add the
+/// state globals, close the suspend set over the call graph from the yield
+/// import, then rewrite every function in that set. `link` gates it behind
+/// `LinkOptions::fibers` and does nothing else.
+///
+/// It refuses a module that does not import the yield rather than
+/// instrumenting it. Such a module has no suspend point, so the rewrite would
+/// cost every function in it to produce a program that can never suspend --
+/// a build worth stopping, not one worth shipping quietly.
+pub fn instrument(bytes: &[u8]) -> Result<(Vec<u8>, Dispatch)> {
+    let seeds = imports_named(bytes, &[YIELD_IMPORT])?;
+    if seeds.is_empty() {
+        bail!(
+            "fibers are on but the module does not import `env.{YIELD_IMPORT}`, so it has no \
+             suspend point: instrumenting it would cost every function in the module and \
+             produce a program that can never suspend"
+        );
+    }
+    let (module, globals) = add_exported_i32_globals(bytes, &GLOBALS)?;
+    // The globals are appended past the GOT block, whose indices the linker
+    // has already written into patch sites, so nothing is renumbered and the
+    // analysis sees the module the rewrite will actually run over.
+    let program = crate::suspend::program_from_module(&module)?;
+    let set = program.suspend_closure(&seeds, crate::suspend::Policy::TypedTable);
+    add_rewind_dispatch(
+        &module,
+        &|f| set.contains(&f),
+        Drive::Full(Machine {
+            state: globals[0],
+            data: globals[1],
+            resume: globals[2],
+        }),
+    )
+}
+
+/// Function imports whose name is in `names`, by index.
+///
+/// Imported functions take the low indices in order, so this counts only
+/// function imports, the same way [`crate::suspend::program_from_module`]
+/// assigns them.
+pub fn imports_named(bytes: &[u8], names: &[&str]) -> Result<std::collections::BTreeSet<u32>> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut next = 0u32;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let wasmparser::Payload::ImportSection(r) =
+            payload.map_err(|e| anyhow!("parsing the module: {e}"))?
+        else {
+            continue;
+        };
+        for group in r {
+            for import in group.map_err(|e| anyhow!("reading imports: {e}"))? {
+                let (_, import) = import.map_err(|e| anyhow!("reading an import: {e}"))?;
+                if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
+                    if names.contains(&import.name) {
+                        found.insert(next);
+                    }
+                    next += 1;
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// Append mutable `i32` globals to a module, exported under `names`, and
 /// return their indices.
 ///
@@ -999,6 +1076,11 @@ pub fn add_exported_i32_globals(bytes: &[u8], names: &[&str]) -> Result<(Vec<u8>
             let mut section = wasm_encoder::ExportSection::new();
             for e in r.clone() {
                 let e = e.map_err(|e| anyhow!("reading an export: {e}"))?;
+                // Two exports of one name is invalid, and the module would be
+                // rejected at instantiation with nothing pointing here.
+                if names.contains(&e.name) {
+                    bail!("the module already exports `{}`", e.name);
+                }
                 section.export(
                     e.name,
                     RoundtripReencoder
@@ -2095,6 +2177,57 @@ mod tests {
         assert!(
             deepest >= 3,
             "the deepest generated body nested only {deepest} frames"
+        );
+    }
+
+    #[test]
+    fn a_module_with_no_suspend_point_is_refused_rather_than_instrumented() {
+        // The straight-line dispatch module imports `rec`, not the yield.
+        let err = instrument(&straight_line()).expect_err("must refuse");
+        assert!(
+            err.to_string().contains(YIELD_IMPORT),
+            "the message must name the import that is missing: {err}"
+        );
+    }
+
+    #[test]
+    fn instrument_refuses_a_module_that_already_exports_a_state_global_name() {
+        // Two exports of one name is invalid, and a module that reached
+        // instantiation before failing would point at nothing.
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("env", YIELD_IMPORT, wasm_encoder::EntityType::Function(0));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export(GLOBALS[0], wasm_encoder::ExportKind::Func, 1);
+        let mut f = wasm_encoder::Function::new([]);
+        f.instruction(&Instruction::Call(0));
+        f.instruction(&Instruction::End);
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&f);
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+
+        let err = instrument(&m.finish()).expect_err("must refuse");
+        assert!(
+            err.to_string().contains(GLOBALS[0]),
+            "the message must name the export that collides: {err}"
         );
     }
 

@@ -1579,6 +1579,72 @@ mod tests {
         );
     }
 
+    /// Instantiate a transformed module and hand back the pieces a fiber
+    /// test drives: the store recording what `rec` saw, the exported `f`, and
+    /// the state global.
+    ///
+    /// The host's `yield` is the whole scheduler for these tests: running, it
+    /// turns the call into an unwind; rewinding, it is the frame the unwind
+    /// started from, so the rewind is over.
+    #[allow(clippy::type_complexity)]
+    fn drive_fiber(
+        out: &[u8],
+    ) -> (
+        wasmtime::Store<Vec<i32>>,
+        wasmtime::TypedFunc<(), ()>,
+        wasmtime::Global,
+    ) {
+        let mut config = wasmtime::Config::new();
+        // ash's own modules carry try_table and exnref, so a test that does
+        // not enable this is not testing the shapes that matter.
+        config.wasm_exceptions(true);
+        config.wasm_function_references(true);
+        let engine = wasmtime::Engine::new(&config).expect("engine");
+        let compiled = wasmtime::Module::new(&engine, out).expect("wasmtime rejects it");
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker
+            .func_wrap(
+                "t",
+                "rec",
+                |mut caller: wasmtime::Caller<Vec<i32>>, v: i32| {
+                    caller.data_mut().push(v);
+                },
+            )
+            .expect("rec");
+        linker
+            .func_wrap("t", "yield", |mut caller: wasmtime::Caller<Vec<i32>>| {
+                let state = match caller.get_export("ash_fiber_state") {
+                    Some(wasmtime::Extern::Global(g)) => g,
+                    _ => panic!("no state global"),
+                };
+                let now = state.get(&mut caller).i32().expect("an i32 state");
+                let next = if now == 0 { UNWINDING } else { 0 };
+                state
+                    .set(&mut caller, wasmtime::Val::I32(next))
+                    .expect("setting state");
+            })
+            .expect("yield");
+
+        let mut store = wasmtime::Store::new(&engine, Vec::new());
+        let instance = linker.instantiate(&mut store, &compiled).expect("instance");
+        let memory = instance.get_memory(&mut store, "memory").expect("memory");
+        // The side stack lives at 1024 and its two-word header at 16.
+        memory.data_mut(&mut store)[16..20].copy_from_slice(&1024i32.to_le_bytes());
+        memory.data_mut(&mut store)[20..24].copy_from_slice(&8192i32.to_le_bytes());
+        instance
+            .get_global(&mut store, "ash_fiber_data")
+            .expect("the data global")
+            .set(&mut store, wasmtime::Val::I32(16))
+            .expect("data");
+        let state = instance
+            .get_global(&mut store, "ash_fiber_state")
+            .expect("the state global");
+        let f = instance
+            .get_typed_func::<(), ()>(&mut store, "f")
+            .expect("f");
+        (store, f, state)
+    }
+
     /// A fiber that suspends inside a nested call and is resumed.
     ///
     /// `f` calls `inner`, which yields. On the first call the host turns the
@@ -1739,6 +1805,123 @@ mod tests {
             i32::from_le_bytes(memory.data(&store)[16..20].try_into().unwrap()),
             1024,
             "the side stack is empty again"
+        );
+    }
+
+    /// Suspending inside an exception handler's protected region.
+    ///
+    /// `try_table` is the shape Binaryen's Flatten aborts on and the reason
+    /// this transform exists, so a fiber that suspends under one is the case
+    /// worth being sure about. The ladder for the try block has to sit inside
+    /// it, and the rewind has to re-enter the try before jumping forward --
+    /// otherwise the resumed code runs outside the handler it was protected
+    /// by, which nothing would report.
+    #[test]
+    fn a_fiber_suspends_inside_a_try_table_and_the_handler_still_catches() {
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        types.ty().function([ValType::I32], []);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("t", "yield", wasm_encoder::EntityType::Function(0));
+        imports.import("t", "rec", wasm_encoder::EntityType::Function(1));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        funcs.function(0);
+        let mut tags = wasm_encoder::TagSection::new();
+        tags.tag(wasm_encoder::TagType {
+            kind: wasm_encoder::TagKind::Exception,
+            func_type_idx: 0,
+        });
+        let mut mems = wasm_encoder::MemorySection::new();
+        mems.memory(wasm_encoder::MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export("f", wasm_encoder::ExportKind::Func, 3);
+        exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
+        // inner: record 1, yield, then throw.
+        let mut inner = wasm_encoder::Function::new([]);
+        inner.instruction(&Instruction::I32Const(1));
+        inner.instruction(&Instruction::Call(1));
+        inner.instruction(&Instruction::Call(0));
+        inner.instruction(&Instruction::I32Const(2));
+        inner.instruction(&Instruction::Call(1));
+        inner.instruction(&Instruction::Throw(0));
+        inner.instruction(&Instruction::End);
+
+        // f: record 0, then call inner inside a try whose handler records 9.
+        let mut f = wasm_encoder::Function::new([]);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Call(1));
+        f.instruction(&Instruction::Block(wasm_encoder::BlockType::Empty));
+        f.instruction(&Instruction::TryTable(
+            wasm_encoder::BlockType::Empty,
+            vec![wasm_encoder::Catch::One { tag: 0, label: 0 }].into(),
+        ));
+        f.instruction(&Instruction::Call(2));
+        f.instruction(&Instruction::End); // try_table
+        f.instruction(&Instruction::End); // block: falls here on a catch
+        f.instruction(&Instruction::I32Const(9));
+        f.instruction(&Instruction::Call(1));
+        f.instruction(&Instruction::End);
+
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&inner);
+        code.function(&f);
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mems);
+        m.section(&tags);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+        let module = m.finish();
+
+        let (module, g) = add_exported_i32_globals(
+            &module,
+            &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+        )
+        .expect("state globals");
+        let machine = Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        };
+        let (out, report) =
+            add_rewind_dispatch(&module, &|i| matches!(i, 0 | 2 | 3), Drive::Full(machine))
+                .expect("transform");
+        assert_eq!(report.refused, 0, "no exnref local, so nothing to refuse");
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&out)
+            .expect("the transformed module must validate");
+
+        let (mut store, f, state) = drive_fiber(&out);
+        f.call(&mut store, ()).expect("the first call");
+        assert_eq!(store.data(), &vec![0, 1], "suspended inside the try");
+        state
+            .set(&mut store, wasmtime::Val::I32(REWINDING))
+            .expect("start the rewind");
+        f.call(&mut store, ()).expect("the second call");
+        assert_eq!(
+            store.data(),
+            &vec![0, 1, 2, 9],
+            "resumed inside the try, and the throw that followed was still caught"
         );
     }
 

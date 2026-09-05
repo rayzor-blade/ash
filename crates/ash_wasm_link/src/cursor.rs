@@ -49,7 +49,19 @@ use wasmparser::{FuncValidator, Operator, ValidatorResources};
 /// needs to know what is on the stack.
 pub struct Cursor {
     validator: FuncValidator<ValidatorResources>,
+    /// Instructions are encoded as they are emitted, but a rewrite does not
+    /// know how many locals it needs until it has seen the whole body, and
+    /// `wasm_encoder::Function` takes its locals up front. So this one is
+    /// built with none, and the real declarations are prepended at the end.
     out: wasm_encoder::Function,
+    /// Length of the empty locals declaration `out` starts with, so the
+    /// instruction bytes can be separated from it without assuming its width.
+    prefix: usize,
+    /// Local declarations for the emitted body: the original groups, then one
+    /// entry per reserved local.
+    locals: Vec<(u32, wasm_encoder::ValType)>,
+    /// Next local index to hand out, which is one past every original local.
+    next_local: u32,
     /// Original control depths at which this rewrite has an extra frame open.
     /// An entry `d` means the inserted frame encloses every original frame
     /// from index `d` on, so a branch that targets an original frame below
@@ -83,6 +95,23 @@ impl Cursor {
         self.validator.get_control_frame(depth)
     }
 
+    /// Add a local to the emitted body and return its index.
+    ///
+    /// Original local indices are untouched: reserved locals are appended
+    /// after every declaration the body already had, so an operator copied
+    /// from the input still names what it named.
+    pub fn reserve_local(&mut self, ty: wasm_encoder::ValType) -> u32 {
+        let index = self.next_local;
+        self.next_local += 1;
+        self.locals.push((1, ty));
+        index
+    }
+
+    /// The module the function lives in, for looking up a callee's type.
+    pub fn resources(&self) -> &ValidatorResources {
+        self.validator.resources()
+    }
+
     /// The function's own index, imports included.
     pub fn function_index(&self) -> u32 {
         self.validator.index()
@@ -93,6 +122,11 @@ impl Cursor {
     /// Needed to wrap a body in a block: the wrapper has to produce what the
     /// function produces, or a branch that used to return cannot target it.
     pub fn results(&self) -> Result<Vec<wasmparser::ValType>> {
+        Ok(self.signature()?.1)
+    }
+
+    /// The function's parameter and result types.
+    pub fn signature(&self) -> Result<(Vec<wasmparser::ValType>, Vec<wasmparser::ValType>)> {
         use wasmparser::WasmModuleResources as _;
         let r = self.validator.resources();
         let index = self.validator.index();
@@ -103,7 +137,9 @@ impl Cursor {
             .sub_type_at(ti)
             .ok_or_else(|| anyhow!("type {ti} is not in the module"))?;
         match &sub.composite_type.inner {
-            wasmparser::CompositeInnerType::Func(f) => Ok(f.results().to_vec()),
+            wasmparser::CompositeInnerType::Func(f) => {
+                Ok((f.params().to_vec(), f.results().to_vec()))
+            }
             other => bail!("function {index} has a non-function type {other:?}"),
         }
     }
@@ -348,9 +384,32 @@ where
         ));
     }
 
+    let params = {
+        use wasmparser::WasmModuleResources as _;
+        let r = validator.resources();
+        let index = validator.index();
+        let ti = r
+            .type_index_of_function(index)
+            .ok_or_else(|| anyhow!("function {index} has no type"))?;
+        let sub = r
+            .sub_type_at(ti)
+            .ok_or_else(|| anyhow!("type {ti} is not in the module"))?;
+        match &sub.composite_type.inner {
+            wasmparser::CompositeInnerType::Func(f) => f.params().len() as u32,
+            other => bail!("function {index} has a non-function type {other:?}"),
+        }
+    };
+    let declared: u32 = locals.iter().map(|(n, _)| *n).sum();
+    let out = wasm_encoder::Function::new([]);
+    let prefix = out.byte_len();
     let mut cursor = Cursor {
         validator,
-        out: wasm_encoder::Function::new(locals),
+        out,
+        prefix,
+        locals,
+        // Parameters occupy the low indices, then the declared locals; a
+        // reserved local starts after both.
+        next_local: params + declared,
         inserted: Vec::new(),
     };
     let mut ops = body
@@ -384,8 +443,19 @@ where
             cursor.inserted.len()
         );
     }
-    let Cursor { out, validator, .. } = cursor;
-    Ok((out.into_raw_body(), validator.into_allocations()))
+    let Cursor {
+        out,
+        prefix,
+        locals,
+        validator,
+        ..
+    } = cursor;
+    // Split the instruction bytes off the empty locals declaration and put
+    // them behind the real one.
+    let encoded = out.into_raw_body();
+    let mut body = wasm_encoder::Function::new(locals);
+    body.raw(encoded[prefix..].iter().copied());
+    Ok((body.into_raw_body(), validator.into_allocations()))
 }
 
 #[cfg(test)]
@@ -560,6 +630,35 @@ mod tests {
         assert!(
             err.to_string().contains("does not nest"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_reserved_local_is_usable_and_leaves_the_original_indices_alone() {
+        let input = module();
+        // Copy the parameter into a fresh local and read it back out, so the
+        // function still returns what it returned only if both the original
+        // index 0 and the reserved index mean what they should.
+        let mut done = false;
+        let out = rewrite_module(&input, |_, c, op| {
+            if !done {
+                done = true;
+                let l = c.reserve_local(ValType::I32);
+                assert_eq!(l, 1, "one parameter, no declared locals");
+                c.emit_new(&Instruction::LocalGet(0));
+                c.emit_new(&Instruction::LocalSet(l));
+                c.emit_new(&Instruction::LocalGet(l));
+                c.emit_new(&Instruction::LocalSet(0));
+            }
+            c.emit(op)
+        })
+        .expect("rewrite");
+        validate(&out).expect("a body with a reserved local must validate");
+        let after = ops(&out);
+        assert_eq!(
+            after.iter().filter(|o| o.starts_with("LocalSet")).count(),
+            2,
+            "{after:?}"
         );
     }
 

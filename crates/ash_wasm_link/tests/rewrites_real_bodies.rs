@@ -137,3 +137,73 @@ fn wrapping_every_body_renumbers_every_branch_that_leaves_one() {
         );
     }
 }
+
+/// The transform that replaces Binaryen's `Flatten`, over the suspend set the
+/// analysis actually produces.
+///
+/// This is the one number in the fiber design that nothing could predict:
+/// whether ash's own output keeps values on the stack across calls, and how
+/// much it costs to get them into locals. `docs/wasm-fibers.md` §7 took its
+/// operand-stack statistics from a disassembly's folded rendering and said so;
+/// this counts them.
+#[test]
+fn emptying_the_stack_across_calls_on_a_real_module() {
+    let Some(bytes) = module() else {
+        eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to measure real call sites");
+        return;
+    };
+    let program = ash_wasm_link::suspend::program_from_module(&bytes).expect("reading the module");
+    let seeds = yield_imports(&bytes);
+    assert!(
+        !seeds.is_empty(),
+        "no ash_host_fiber_yield import to seed from"
+    );
+    let set = program.suspend_closure(&seeds, ash_wasm_link::suspend::Policy::TypedTable);
+
+    let (out, spills) =
+        ash_wasm_link::fiber::empty_stack_at_calls(&bytes, &|i| set.contains(&i)).expect("spill");
+    eprintln!(
+        "{} functions instrumented, {} refused; {} call sites, {} needed nothing ({:.1}%); \
+         {} values through locals of which {} were live; {} locals added; {} -> {} bytes ({:+.1}%)",
+        set.len() - spills.refused,
+        spills.refused,
+        spills.calls,
+        spills.already_empty,
+        100.0 * spills.already_empty as f64 / spills.calls.max(1) as f64,
+        spills.moved,
+        spills.live,
+        spills.locals,
+        bytes.len(),
+        out.len(),
+        100.0 * (out.len() as f64 - bytes.len() as f64) / bytes.len() as f64
+    );
+    validate(&out).unwrap_or_else(|e| panic!("the spilled module does not validate: {e}"));
+
+    if let Ok(path) = std::env::var("ASH_LINK_TEST_OUT") {
+        std::fs::write(&path, &out).unwrap_or_else(|e| panic!("writing {path}: {e}"));
+        eprintln!("wrote the spilled module to {path}");
+    }
+}
+
+/// The `ash_host_fiber_yield` import, by index.
+fn yield_imports(bytes: &[u8]) -> std::collections::BTreeSet<u32> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut next = 0u32;
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let wasmparser::Payload::ImportSection(r) = payload.expect("parsing") else {
+            continue;
+        };
+        for group in r {
+            for import in group.expect("imports") {
+                let (_, import) = import.expect("an import");
+                if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
+                    if import.name == "ash_host_fiber_yield" {
+                        found.insert(next);
+                    }
+                    next += 1;
+                }
+            }
+        }
+    }
+    found
+}

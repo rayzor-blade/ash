@@ -1925,6 +1925,147 @@ mod tests {
         );
     }
 
+    /// A body built by a generator, resumed at every call it makes.
+    ///
+    /// The hand-written dispatch tests check shapes chosen because they were
+    /// thought of. The failure this crate is written against is a branch
+    /// label that is wrong and still in range, which produces a module that
+    /// validates and jumps to the wrong place -- exactly the thing a chosen
+    /// example is worst at finding. So: generate nested bodies, and for every
+    /// call in one, assert that resuming there produces precisely the calls
+    /// from that point on and not one more or less.
+    ///
+    /// Blocks and conditionals only, no loops: with a constant condition the
+    /// executed call sequence is a flat list, so the expected answer for a
+    /// resume is a suffix of it and needs no model. Loops are covered by
+    /// their own test, where the counter is the thing being checked.
+    #[test]
+    fn every_call_of_a_generated_body_resumes_to_exactly_its_own_suffix() {
+        struct Gen {
+            seed: u64,
+            body: Vec<Instruction<'static>>,
+            /// Ordinal, payload and whether this call is on the path the
+            /// module actually takes.
+            calls: Vec<(u32, i32, bool)>,
+            budget: usize,
+        }
+        impl Gen {
+            fn bits(&mut self) -> u32 {
+                self.seed = self
+                    .seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (self.seed >> 33) as u32
+            }
+            fn seq(&mut self, depth: usize, live: bool) {
+                let items = 1 + (self.bits() % 3) as usize;
+                for _ in 0..items {
+                    if self.budget == 0 {
+                        return;
+                    }
+                    let nested = depth > 0 && !self.bits().is_multiple_of(3);
+                    if !nested {
+                        self.budget -= 1;
+                        let ordinal = self.calls.len() as u32;
+                        let payload = 100 + ordinal as i32;
+                        self.calls.push((ordinal, payload, live));
+                        self.body.push(Instruction::I32Const(payload));
+                        self.body.push(Instruction::Call(0));
+                    } else if self.bits().is_multiple_of(2) {
+                        self.body
+                            .push(Instruction::Block(wasm_encoder::BlockType::Empty));
+                        self.seq(depth - 1, live);
+                        self.body.push(Instruction::End);
+                    } else {
+                        let taken = self.bits().is_multiple_of(2);
+                        self.body.push(Instruction::I32Const(taken as i32));
+                        self.body
+                            .push(Instruction::If(wasm_encoder::BlockType::Empty));
+                        self.seq(depth - 1, live && taken);
+                        self.body.push(Instruction::Else);
+                        self.seq(depth - 1, live && !taken);
+                        self.body.push(Instruction::End);
+                    }
+                }
+            }
+        }
+
+        // A generator that quietly produced nothing interesting would make
+        // this test pass by doing nothing, so what it covered is asserted.
+        let (mut bodies, mut resumes_checked, mut deepest) = (0usize, 0usize, 0usize);
+        for seed in 1u64..=64 {
+            let mut g = Gen {
+                seed: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                body: Vec::new(),
+                calls: Vec::new(),
+                budget: 24,
+            };
+            g.seq(4, true);
+            let executed: Vec<i32> = g
+                .calls
+                .iter()
+                .filter(|(_, _, live)| *live)
+                .map(|(_, p, _)| *p)
+                .collect();
+            if executed.len() < 3 {
+                continue;
+            }
+
+            // Resume 0 runs the whole thing; resuming at the j-th executed
+            // call must produce exactly the calls from j on. A call on a path
+            // the module never takes is not a place it could have suspended,
+            // so it is not a resume value worth asking about.
+            let mut want: Vec<(i32, Vec<i32>)> = vec![(0, executed.clone())];
+            let mut j = 0usize;
+            for &(ordinal, _, live) in &g.calls {
+                if live {
+                    want.push((ordinal as i32 + 1, executed[j..].to_vec()));
+                    j += 1;
+                }
+            }
+            bodies += 1;
+            resumes_checked += want.len();
+            deepest = deepest.max(
+                g.body
+                    .iter()
+                    .scan(0usize, |d, i| {
+                        match i {
+                            Instruction::Block(_) | Instruction::If(_) => *d += 1,
+                            Instruction::End => *d = d.saturating_sub(1),
+                            _ => {}
+                        }
+                        Some(*d)
+                    })
+                    .max()
+                    .unwrap_or(0),
+            );
+            let resumes: Vec<(i32, i32)> = want.iter().map(|(r, _)| (*r, 0)).collect();
+            let got = run_dispatch(dispatch_module(&[], &g.body), &resumes);
+            for ((resume, expected), actual) in want.iter().zip(&got) {
+                assert_eq!(
+                    actual,
+                    expected,
+                    "seed {seed}, resume {resume}: {} calls in the body, {} on the taken path",
+                    g.calls.len(),
+                    executed.len()
+                );
+            }
+        }
+        eprintln!("{bodies} generated bodies, {resumes_checked} resumes, nesting to {deepest}");
+        assert!(
+            bodies >= 15,
+            "only {bodies} bodies were interesting enough to run"
+        );
+        assert!(
+            resumes_checked >= 150,
+            "only {resumes_checked} resumes checked"
+        );
+        assert!(
+            deepest >= 3,
+            "the deepest generated body nested only {deepest} frames"
+        );
+    }
+
     #[test]
     fn a_value_from_an_enclosing_frame_makes_a_function_refuse() {
         // The `i32.const 5` is pushed before the block, so inside the block it

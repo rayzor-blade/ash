@@ -460,6 +460,11 @@ pub struct HLInterpreter {
     fn_value_to_string: *mut c_void,
     /// Resolved stdlib function pointer: hlp_type_name (runtime type name lookup)
     fn_type_name: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_type_str, upstream's
+    /// `hl_type_str`. Names every type, primitives included ("i32",
+    /// "hl.types.ArrayBytes_Int"), and is what compiled code puts in a
+    /// "Can't cast X to Y" message -- so the interpreter's reads the same.
+    fn_type_str: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_clear_scan_roots
     fn_gc_clear_scan_roots: *mut c_void,
     /// Resolved stdlib function pointer: hlp_gc_add_scan_root
@@ -792,6 +797,9 @@ impl HLInterpreter {
         let fn_type_name = native_resolver
             .resolve_function("std", "hlp_type_name")
             .unwrap_or(std::ptr::null_mut());
+        let fn_type_str = native_resolver
+            .resolve_function("std", "hlp_type_str")
+            .unwrap_or(std::ptr::null_mut());
         let fn_gc_clear_scan_roots = native_resolver
             .resolve_function("std", "hlp_gc_clear_scan_roots")
             .unwrap_or(std::ptr::null_mut());
@@ -870,6 +878,7 @@ impl HLInterpreter {
             fn_obj_get_field,
             fn_value_to_string,
             fn_type_name,
+            fn_type_str,
             fn_gc_clear_scan_roots,
             fn_gc_add_scan_root,
             fn_gc_set_scan_roots,
@@ -2068,6 +2077,28 @@ impl HLInterpreter {
                 }
             }
         }
+    }
+
+    /// Upstream `hl_type_str` of a bytecode type: the text compiled code puts
+    /// in "Can't cast X to Y", so the interpreter's message is byte-identical.
+    /// Falls back to the kind's name if the runtime function is unresolved.
+    fn type_str(&mut self, bytecode: &DecodedBytecode, type_idx: usize) -> String {
+        if !self.fn_type_str.is_null() {
+            let t = self.c_type_factory.get(type_idx);
+            if !t.is_null() {
+                type FnTypeStr = unsafe extern "C" fn(*mut hl::hl_type) -> *const u16;
+                let f: FnTypeStr = unsafe { std::mem::transmute(self.fn_type_str) };
+                let p = unsafe { f(t) };
+                if !p.is_null() {
+                    let mut n = 0usize;
+                    while n < 4096 && unsafe { *p.add(n) } != 0 {
+                        n += 1;
+                    }
+                    return String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) });
+                }
+            }
+        }
+        format!("{:?}", bytecode.types[type_idx].kind)
     }
 
     fn dynamic_type_name(&self, d: *mut hl::vdynamic) -> Option<String> {

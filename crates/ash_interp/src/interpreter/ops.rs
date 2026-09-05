@@ -355,20 +355,34 @@ impl HLInterpreter {
     ///
     /// SafeCast runs as an interpreter opcode rather than a native call, so
     /// calling `hlp_dyn_cast*` for its failure path would longjmp without the
-    /// native-call setjmp boundary.  Represent the same catchable failure in
-    /// the interpreter's trap stack instead.  A null exception value is also
-    /// what the existing Assert/NullCheck opcode failures use.
-    pub(super) fn invalid_cast_step(frame: &mut InterpreterFrame) -> Result<StepResult> {
-        let value = NanBoxedValue::null();
+    /// native-call setjmp boundary. Represent the same catchable failure in
+    /// the interpreter's trap stack instead, carrying the value compiled code
+    /// throws: the runtime's `invalid_cast` message as a bytes exception. This
+    /// used to hand the catch a null, so `catch (e:Dynamic)` printed "null"
+    /// where every other engine printed "Can't cast String to i32"; Assert and
+    /// NullCheck already mint their value through `internal_exception_value`.
+    pub(super) fn invalid_cast_step(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        src_type_idx: usize,
+        dst_type_idx: usize,
+    ) -> Result<StepResult> {
+        let message = format!(
+            "Can't cast {} to {}",
+            self.type_str(bytecode, src_type_idx),
+            self.type_str(bytecode, dst_type_idx)
+        );
+        let value = self.internal_exception_value(&message);
+        let frame = self.stack.last_mut().unwrap();
         if let Some((target, exc_reg)) = frame.trap_stack.pop() {
             frame.registers.set(exc_reg, value);
             Ok(StepResult::JumpAbs(target))
         } else {
+            let stack = self.capture_call_stack(bytecode);
             Err(anyhow::Error::new(HLExceptionPropagation {
                 value,
-                message: Some("Invalid cast".to_string()),
-                // Static helper: it has the frame but not the frame STACK.
-                stack: Vec::new(),
+                message: Some(message),
+                stack,
             }))
         }
     }
@@ -464,11 +478,11 @@ impl HLInterpreter {
                                 }
                                 hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(raw != 0),
                                 _ => {
-                                    return Self::invalid_cast_step(self.stack.last_mut().unwrap());
+                                    return self.invalid_cast_step(bytecode, src_type_idx, dst_type_idx);
                                 }
                             }
                         } else {
-                            return Self::invalid_cast_step(self.stack.last_mut().unwrap());
+                            return self.invalid_cast_step(bytecode, src_type_idx, dst_type_idx);
                         }
                     }
                 }
@@ -680,7 +694,7 @@ impl HLInterpreter {
                             } else if upcast {
                                 val
                             } else {
-                                return Self::invalid_cast_step(self.stack.last_mut().unwrap());
+                                return self.invalid_cast_step(bytecode, src_type_idx, dst_type_idx);
                             }
                         } else {
                             val // non-HOBJ cast, just copy

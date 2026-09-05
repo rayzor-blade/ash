@@ -415,11 +415,18 @@ impl<'ctx> JITModule<'ctx> {
             }
             hl_type_kind_HPACKED | hl_type_kind_HNULL | hl_type_kind_HREF => {
                 if let Some(ref tparam) = rust_type.tparam {
-                    c_type.__bindgen_anon_1.tparam = self.convert_to_c_type(
-                        tparam.0.clone(),
-                        &self.types_[tparam.0].clone(),
-                        Rc::clone(&cache),
-                    )?
+                    // Through the same cache every other arm uses. Going via
+                    // `convert_to_c_type` here instead does not consult it,
+                    // and the index is not registered until this function
+                    // returns -- so a parameter converted mid-recursion is
+                    // invisible and gets a SECOND descriptor boxed for it.
+                    // That is what made the index-to-descriptor relation
+                    // many-to-one, and every reverse lookup over it a coin
+                    // toss. Measured on a small program: exactly three
+                    // duplicated indices, the primitives sitting under
+                    // `Null<...>`.
+                    c_type.__bindgen_anon_1.tparam =
+                        self.convert_type_ref_to_c_cached(&TypeRef(tparam.0), Rc::clone(&cache))?;
                 }
             }
             _ => {}

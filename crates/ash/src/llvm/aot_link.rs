@@ -397,6 +397,20 @@ const RUNTIME_OBJECT: &str = "ash_runtime.o";
 /// `ash_module_init` and imports what only a host can answer, because a wasm
 /// ash program cannot start itself. It has no fibers until a host lends it
 /// suspension, and no sockets until a host lends it those.
+/// Whether to instrument the module for fibers.
+///
+/// An env var rather than a flag, matching how every other experimental
+/// codegen switch here is reached (`ASH_AIR_FMA` and the rest), and because
+/// the transform is unproven in a real build: `docs/wasm-fibers.md` has it
+/// working and measured on linked modules, and nothing has yet run a Haxe
+/// program that actually suspends.
+fn fiber_transform_requested() -> bool {
+    matches!(
+        std::env::var("ASH_WASM_FIBERS").as_deref(),
+        Ok("1") | Ok("on") | Ok("yes")
+    )
+}
+
 fn link_wasm_module(
     objects: &[PathBuf],
     out: &Path,
@@ -435,7 +449,23 @@ fn link_wasm_module(
             .unwrap_or_else(|| path.display().to_string());
         inputs.push(ash_wasm_link::read(&name, &bytes)?);
     }
-    let module = ash_wasm_link::link(inputs, &ash_wasm_link::LinkOptions::default())?;
+    // Fibers are opt-in and off by default, so a normal build gets a module
+    // byte-identical to the one it got before the transform existed. Turning
+    // them on refuses loudly if the program has no suspend point rather than
+    // paying for the rewrite to produce something that can never suspend --
+    // which is what a module that never imports `env.ash_host_fiber_yield`
+    // would be.
+    let opts = ash_wasm_link::LinkOptions {
+        fibers: fiber_transform_requested(),
+        ..Default::default()
+    };
+    if opts.fibers && !quiet {
+        crate::progress::note(
+            "[ash] ASH_WASM_FIBERS is set: instrumenting so a fiber can suspend inside \
+             this module. It gets bigger and every call in the suspend set pays a check.",
+        );
+    }
+    let module = ash_wasm_link::link(inputs, &opts)?;
     std::fs::write(out, &module).map_err(|e| anyhow!("writing {}: {e}", out.display()))?;
 
     if !quiet {

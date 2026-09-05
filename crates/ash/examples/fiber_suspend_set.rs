@@ -127,7 +127,11 @@ fn main() -> anyhow::Result<()> {
         by_slot.len(),
         closure_targets.len()
     );
-    println!("  blocking natives {}, seed functions {}", blocking_findex.len(), seeds.len());
+    println!(
+        "  blocking natives {}, seed functions {}",
+        blocking_findex.len(),
+        seeds.len()
+    );
 
     // Slot fan-out is the number the whole idea rests on: a virtual call
     // reaches this many functions, where the wasm analysis reaches every

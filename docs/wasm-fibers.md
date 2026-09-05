@@ -152,3 +152,47 @@ sites, taking address-taken functions from the element segments, then running
 the closure to a fixpoint. It is an approximation of what the real analysis
 would see -- a byte-level decoder may bin a few sites differently -- but the
 gap between 9.2% and 86.1% is far too wide for that to change the conclusion.
+
+## 9. The same question asked one level up — and the answer changes
+
+§8 measured the suspend set on the linked *module* and concluded the analysis
+does not pay. That measurement was sound but it was taken at the only level
+Binaryen can see. Asked at the level ash still knows, the answer is different,
+and §7's named fallback — an HL-level refinement of the indirect edges — is
+worth substantially more than the wasm-level type partitioning was.
+
+`crates/ash/examples/fiber_suspend_set.rs` computes the closure over the HL
+call graph, where a `CallMethod`/`CallThis` names a vtable SLOT rather than a
+signature, and a `CallClosure` can reach only a function some `*Closure`
+opcode actually turned into a closure:
+
+| program | functions | direct only | HL-level | every indirect reaches anything |
+| --- | --- | --- | --- | --- |
+| `t.hl` | 357 | 2.5% | **11.5%** | 19.6% |
+| `threads.hl` | 749 | 16.3% | **35.8%** | 37.9% |
+| `unit.hl` | 8,688 | 15.9% | **27.3%** | 27.7% |
+
+The comparison that matters is like-for-like, on the same program's Haxe
+functions. In the linked `threads.wasm`, the wasm-level closure takes **754 of
+836 `ash_f*` functions, 90.2%**. The HL analysis of the same program's
+bytecode takes **35.8%**. That is the refinement paying, and the reason is
+visible in the shape: the module has 19 vtable slots with a median fan-out of
+6, where the wasm view has 41 signatures over an address-taken set covering
+58.8% of the module.
+
+Two honest qualifications. First, the narrowing itself is worth little at this
+level either — HL 35.8% against a blanket HL 37.9% — so the win is not the
+slot/closure precision, it is asking at a level where the call graph is the
+Haxe program rather than the Haxe program plus a linked runtime. Second, these
+numbers cover only bytecode functions. The linked module's other 2,205
+functions are ash_std and libc, of which the wasm closure sweeps in 85.2%;
+that part is not covered by this analysis and must not be assumed away. It is
+also the part ash has the most direct knowledge of, since the runtime is our
+own code and the set of runtime functions that can reach a suspend is a
+property we can state rather than infer — but stating it is work, and until
+someone does it the projected total remains a projection.
+
+So the position at the end of this note is the opposite of §8's: the analysis
+is affordable at the HL level, the mechanism was already settled in §2 to §4,
+and what stands between this design and an implementation is the runtime-side
+annotation plus the staging in §6 — not a missing idea.

@@ -452,7 +452,7 @@ shipped with the transform rather than after the first mysterious answer.
 | traps in refused-but-reachable functions | 37 | 445 |
 | unwind checks | 9,764 | 19,192 |
 | side-stack bytes per frame, summed | 77,496 | 132,088 (≈51 each) |
-| module size | **+98.1%** | **+172.9%** |
+| module size | **+35.7%** | **+43.0%** |
 
 Against §8's budget of a 3.5x code section, that is the good end of the range,
 and it is now a measurement rather than an estimate.
@@ -464,10 +464,16 @@ the calls they had already made and not past the ones they had not. On the
 linked modules the transform validates, and with the state left at zero
 `t.wasm` prints exactly what it printed.
 
-**Where the size goes, and the obvious next cut.** The epilogue saves every
-local at every call site, so its cost is (call sites x locals). A shared
-unwind block per function — each call site storing its ordinal and branching to
-one copy of the save-and-return sequence — replaces about `3L + 10`
-instructions per site with four, and liveness would cut what is saved at all.
-Neither is needed for correctness, and both are worth more than any other
-optimisation available here.
+**Where the size went.** The first working version wrote every local at every
+call site, which is (call sites x locals) and was +98.1% and +172.9%. The whole
+body now sits inside a block whose end holds one copy of the save sequence, and
+a call site that finds itself unwinding stores its ordinal and branches there:
+six instructions instead of about `3L + 10`. That is the 35.7% and 43.0% above,
+a fourfold cut, with the round trip and the linked module's own output
+unchanged.
+
+What is left on the table is liveness — saving only the locals actually live
+across a call, rather than all of them. It would shrink both the side-stack
+frame (51 bytes average) and the save sequence, and it is the same analysis
+that would turn the 21 EH refusals into a handful. Neither is needed for
+correctness.

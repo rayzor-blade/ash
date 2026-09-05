@@ -569,14 +569,67 @@ def wasm_module_for(ash: str, program: pathlib.Path, timeout: int) -> str:
     return str(out)
 
 
+# ---------------------------------------------------------------------------
+# The native AOT engine
+#
+# The same shape as wasm: a build per program, a run per case, and a failed
+# build remembered rather than retried. What it measures is the LLVM lowering
+# alone -- no interpreter underneath, no tiers -- which is the configuration a
+# shipped binary runs in and the one the interpreter's 100% says nothing about.
+# ---------------------------------------------------------------------------
+
+_AOT_BINARIES: dict[str, str] = {}
+_AOT_FAILURES: dict[str, str] = {}
+
+
+def aot_binary_for(ash: str, program: pathlib.Path, timeout: int) -> str:
+    """Build `program` to a native binary beside it, once."""
+    key = str(program)
+    if key in _AOT_FAILURES:
+        raise RuntimeError(_AOT_FAILURES[key])
+    if key in _AOT_BINARIES:
+        return _AOT_BINARIES[key]
+    out = program.with_name(program.stem + "_aot")
+    # Fresh against the bytecode, the compiler and the runtime it links: the
+    # static runtime is the compiler's sibling library, and a std fix changes
+    # it without changing ash.
+    runtime = pathlib.Path(ash).parent / "libash_std.dylib"
+    try:
+        built = out.stat().st_mtime
+        inputs = [program.stat().st_mtime, os.stat(ash).st_mtime]
+        if runtime.is_file():
+            inputs.append(runtime.stat().st_mtime)
+        if all(built > t for t in inputs):
+            _AOT_BINARIES[key] = str(out)
+            return _AOT_BINARIES[key]
+    except FileNotFoundError:
+        pass
+    try:
+        r = run([ash, "--build", str(out), str(program)],
+                cwd=str(program.parent), timeout=max(timeout, 1800))
+    except subprocess.TimeoutExpired:
+        _AOT_FAILURES[key] = (
+            f"building {program.name} natively did not finish in {max(timeout, 1800)}s")
+        raise RuntimeError(_AOT_FAILURES[key]) from None
+    if r.returncode != 0 or not out.is_file():
+        why = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()
+        _AOT_FAILURES[key] = (
+            f"building {program.name} natively failed: " + (why[-1] if why else "no output"))
+        raise RuntimeError(_AOT_FAILURES[key])
+    _AOT_BINARIES[key] = str(out)
+    return _AOT_BINARIES[key]
+
+
 def engine_argv(ash: str, program: pathlib.Path, mode: str, timeout: int) -> list[str]:
     """The whole command that runs `program` under `mode`, program included.
 
-    Program-included rather than a prefix, because the wasm engine does not
-    run the `.hl` at all: it runs the module built from it.
+    Program-included rather than a prefix, because the wasm and aot engines do
+    not run the `.hl` at all: they run what was built from it.
     """
     if mode == "wasm":
         return [wasm_runner(ash), wasm_module_for(ash, program, timeout)]
+    if mode == "aot":
+        return [aot_binary_for(ash, program, timeout)]
     return [ash, "--mode", mode, str(program)]
 
 
@@ -1077,7 +1130,9 @@ def main(argv=None) -> int:
     ap.add_argument("--suites", default=",".join(ALL_SUITES),
                     help=f"comma-separated subset of: {', '.join(ALL_SUITES)}")
     ap.add_argument("--modes", default="interp",
-                    help="ash modes to run, comma-separated (interp, hybrid, jit)")
+                    help="engines to run, comma-separated: interp, hybrid, jit "
+                         "(ash modes), aot (a native binary built with --build), "
+                         "wasm (a module built for wasm32-wasip1, run by ash-wasm-run)")
     ap.add_argument("--reference", default=None,
                     help="a stock HashLink `hl` binary, to separate ash bugs from suite bugs")
     ap.add_argument("--timeout", type=int, default=900)

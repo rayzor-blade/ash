@@ -208,21 +208,23 @@ fn yield_imports(bytes: &[u8]) -> std::collections::BTreeSet<u32> {
     found
 }
 
-/// The rewind dispatch over a real module: every instrumented function given
-/// a way to resume at any of its call sites.
+/// The whole transform over a real module: prologue, ladders and epilogues.
 ///
-/// With the resume global left at zero the added code is inert, so this is
-/// also the check that the ladders cost nothing on the path every non-fiber
-/// program takes -- and, run through `ash-wasm-run`, that the program still
-/// does what it did.
+/// With the state global left at zero the added code is inert, so this is also
+/// the check that it costs nothing on the path every non-fiber program takes
+/// -- and, run through `ash-wasm-run`, that the program still does what it
+/// did.
 #[test]
-fn the_rewind_dispatch_on_a_real_module() {
+fn the_fiber_transform_on_a_real_module() {
     let Some(bytes) = module() else {
         eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to build a real dispatch");
         return;
     };
-    let (with_global, resume) =
-        ash_wasm_link::fiber::add_i32_global(&bytes, 0).expect("adding the resume global");
+    let (with_global, g) = ash_wasm_link::fiber::add_exported_i32_globals(
+        &bytes,
+        &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+    )
+    .expect("adding the state globals");
     let program =
         ash_wasm_link::suspend::program_from_module(&with_global).expect("reading the module");
     let seeds = yield_imports(&with_global);
@@ -231,17 +233,27 @@ fn the_rewind_dispatch_on_a_real_module() {
     let (out, report) = ash_wasm_link::fiber::add_rewind_dispatch(
         &with_global,
         &|i| set.contains(&i),
-        ash_wasm_link::fiber::Resume::Global(resume),
+        ash_wasm_link::fiber::Drive::Full(ash_wasm_link::fiber::Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        }),
     )
     .expect("dispatch");
     eprintln!(
-        "{} functions given a dispatch, {} refused; {} ladders, {} blocks, {} br_table entries; \
+        "{} functions instrumented, {} refused ({} holding a value that cannot be saved); \
+         {} ladders, {} blocks, {} br_table entries, {} unwind checks, {} traps, \
+         {} bytes of frame; \
          {} resume points free, {} needed a spill; {} -> {} bytes ({:+.1}%)",
         report.functions,
         report.refused,
+        report.unsavable,
         report.ladders,
         report.blocks,
         report.table_entries,
+        report.epilogues,
+        report.traps,
+        report.saved_bytes,
         report.free,
         report.spilled,
         bytes.len(),

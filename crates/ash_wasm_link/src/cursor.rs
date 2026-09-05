@@ -107,6 +107,32 @@ impl Cursor {
         index
     }
 
+    /// Every local of the emitted body, in index order: the parameters, then
+    /// the declarations the body had, then anything reserved since.
+    ///
+    /// A transform that saves locals to memory needs this, and needs it to be
+    /// the same list in the prologue and the epilogue -- prologue and epilogue
+    /// disagreeing about the order is the failure `docs/wasm-fibers.md` §7
+    /// names as silent, so there is one list and both read it.
+    pub fn local_types(&self) -> Result<Vec<wasm_encoder::ValType>> {
+        use wasm_encoder::reencode::Reencode as _;
+        let (params, _) = self.signature()?;
+        let mut out = Vec::with_capacity(self.next_local as usize);
+        for p in params {
+            out.push(
+                wasm_encoder::reencode::RoundtripReencoder
+                    .val_type(p)
+                    .map_err(|e| anyhow!("re-encoding a parameter type: {e}"))?,
+            );
+        }
+        for &(n, t) in &self.locals {
+            for _ in 0..n {
+                out.push(t);
+            }
+        }
+        Ok(out)
+    }
+
     /// The module the function lives in, for looking up a callee's type.
     pub fn resources(&self) -> &ValidatorResources {
         self.validator.resources()

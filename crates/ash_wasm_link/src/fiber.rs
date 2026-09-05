@@ -220,17 +220,53 @@ fn encode_val_type(ty: wasmparser::ValType) -> Result<ValType> {
 
 // ------------------------------------------------------- resuming a frame
 
-/// Where a rewind is told which call site to resume at.
+/// The globals the transform runs on.
 ///
-/// The state machine that will drive this is not written yet. Naming the
-/// source makes the jump machinery testable on its own, which is why it is
-/// built before the machine rather than inside it.
+/// All three are `i32`. `state` is 0 while running, 1 while unwinding and 2
+/// while rewinding, which is Asyncify's encoding and is kept because the
+/// runtime side is easier to read against a published one. `data` points at a
+/// two-word record in linear memory holding the side stack's current and end
+/// pointers. `resume` carries the call ordinal a rewind is heading for, and is
+/// cleared where it lands.
 #[derive(Debug, Clone, Copy)]
-pub enum Resume {
-    /// An `i32` global: `0` runs the function normally, `k` resumes at call
-    /// site `k - 1`. The transform clears it on arrival, so the resumed
-    /// function's own later calls run normally.
-    Global(u32),
+pub struct Machine {
+    pub state: u32,
+    pub data: u32,
+    pub resume: u32,
+}
+
+/// Running while unwinding out of a suspend.
+const UNWINDING: i32 = 1;
+/// Running while rewinding back into one.
+const REWINDING: i32 = 2;
+
+/// How much of the transform to apply.
+#[derive(Debug, Clone, Copy)]
+pub enum Drive {
+    /// Jump machinery only, with the resume value set from outside. The state
+    /// machine reads and writes linear memory, which makes it useless for
+    /// testing the jumps on their own -- so the jumps keep a mode where they
+    /// can be driven directly, and are tested that way.
+    Resume(u32),
+    /// Prologue, ladders and epilogues: a function that can suspend and be
+    /// resumed.
+    Full(Machine),
+}
+
+impl Drive {
+    fn resume(&self) -> u32 {
+        match self {
+            Drive::Resume(g) => *g,
+            Drive::Full(m) => m.resume,
+        }
+    }
+
+    fn machine(&self) -> Option<&Machine> {
+        match self {
+            Drive::Resume(_) => None,
+            Drive::Full(m) => Some(m),
+        }
+    }
 }
 
 /// What the dispatch cost.
@@ -241,6 +277,10 @@ pub struct Dispatch {
     /// Functions left alone, for the reasons in [`can_instrument`] or because
     /// a jump target could not be given an empty operand stack.
     pub refused: usize,
+    /// Of those, the ones holding a value that cannot be written to linear
+    /// memory -- a reference. LLVM's setjmp lowering is not supposed to leave
+    /// an `exnref` live across a call, and this is the count that says so.
+    pub unsavable: usize,
     /// Ladders emitted, one per control frame that contains a call.
     pub ladders: usize,
     /// Blocks added by those ladders.
@@ -252,6 +292,17 @@ pub struct Dispatch {
     pub spilled: usize,
     /// Resume points that needed no spill at all.
     pub free: usize,
+    /// Checks emitted on the way back from a call that could suspend.
+    pub epilogues: usize,
+    /// Traps emitted in functions that can be on the stack at a suspend but
+    /// could not be instrumented. Each one is a place a fiber must not
+    /// suspend under; a trap is what turns that from a wrong answer into a
+    /// report.
+    pub traps: usize,
+    /// Side-stack bytes one frame of each instrumented function takes,
+    /// summed. The deepest call chain, not this, is what a fiber has to have
+    /// room for; this says how heavy an average frame is.
+    pub saved_bytes: usize,
 }
 
 /// The function frame, which has no opening instruction of its own.
@@ -329,6 +380,11 @@ struct Plan {
     frames: BTreeMap<usize, Frame>,
     /// Every split position in the function, with what landing there costs.
     boundaries: BTreeMap<usize, Boundary>,
+    /// How many spill locals of each type the function will need, which is
+    /// the most any one boundary asks for. Reserved up front rather than on
+    /// demand, so the local list -- and therefore the layout of a saved frame
+    /// -- is settled before the prologue is emitted.
+    pool: BTreeMap<ValType, usize>,
 }
 
 /// Work out, for every instrumented function, where a rewind has to jump.
@@ -338,9 +394,14 @@ struct Plan {
 /// must never have been half rewritten, and a frame's ladder has to be emitted
 /// at the top of the frame, before the calls that tell it how many arms it
 /// needs have been seen.
-fn plan(bytes: &[u8], instrument: &dyn Fn(u32) -> bool) -> Result<(BTreeMap<u32, Plan>, usize)> {
+fn plan(
+    bytes: &[u8],
+    instrument: &dyn Fn(u32) -> bool,
+    machine: bool,
+) -> Result<(BTreeMap<u32, Plan>, usize, usize)> {
     let mut plans: BTreeMap<u32, Plan> = BTreeMap::new();
     let mut refused: BTreeSet<u32> = BTreeSet::new();
+    let mut unsavable = 0usize;
     let mut chain: Vec<Enclosing> = Vec::new();
     let mut at = 0usize;
     let mut current = u32::MAX;
@@ -358,12 +419,29 @@ fn plan(bytes: &[u8], instrument: &dyn Fn(u32) -> bool) -> Result<(BTreeMap<u32,
         }
         let watching = instrument(index) && !refused.contains(&index);
         if watching {
-            if !can_instrument(c, op)? {
+            if at == 0 && machine && !savable(c)? {
+                unsavable += 1;
                 refused.insert(index);
                 plans.remove(&index);
-            } else if is_call(op) && !unreachable_here(c) {
+            } else if !can_instrument(c, op)? {
+                refused.insert(index);
+                plans.remove(&index);
+            } else if suspends(op, instrument) && !unreachable_here(c) {
                 let (split, spill) = boundary(at, c.stack_height(), trivial);
+                let need = spill_types(c, spill)?;
+                if machine && need.keys().any(|t| value_size(*t).is_err()) {
+                    unsavable += 1;
+                    refused.insert(index);
+                    plans.remove(&index);
+                    at += 1;
+                    trivial = 0;
+                    return c.emit(op);
+                }
                 let plan = plans.entry(index).or_default();
+                for (ty, n) in need {
+                    let have = plan.pool.entry(ty).or_default();
+                    *have = (*have).max(n);
+                }
                 let ordinal = plan.calls as u32;
                 plan.calls += 1;
                 plan.boundaries.insert(
@@ -435,7 +513,20 @@ fn plan(bytes: &[u8], instrument: &dyn Fn(u32) -> bool) -> Result<(BTreeMap<u32,
     })?;
 
     plans.retain(|i, _| !refused.contains(i));
-    Ok((plans, refused.len()))
+    Ok((plans, refused.len(), unsavable))
+}
+
+/// Whether every local and result of this function can go to linear memory.
+fn savable(c: &Cursor) -> Result<bool> {
+    if c.local_types()?.iter().any(|t| value_size(*t).is_err()) {
+        return Ok(false);
+    }
+    for r in c.results()? {
+        if value_size(encode_val_type(r)?).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Where to put a jump target for an operator that consumes `height` values.
@@ -453,8 +544,30 @@ fn boundary(at: usize, height: u32, trivial: usize) -> (usize, u32) {
     }
 }
 
-fn is_call(op: &Operator<'_>) -> bool {
-    matches!(op, Operator::Call { .. } | Operator::CallIndirect { .. })
+/// Whether a call could be the one a fiber suspends inside.
+///
+/// A direct call to a function outside the suspend set cannot unwind, so it
+/// needs neither a resume point nor a check on the way back. An indirect one
+/// could reach anything the analysis had to assume it could.
+fn suspends(op: &Operator<'_>, instrument: &dyn Fn(u32) -> bool) -> bool {
+    match op {
+        Operator::Call { function_index } => instrument(*function_index),
+        Operator::CallIndirect { .. } => true,
+        _ => false,
+    }
+}
+
+/// How many locals of each type spilling the top `count` operands needs.
+fn spill_types(c: &Cursor, count: u32) -> Result<BTreeMap<ValType, usize>> {
+    let mut need: BTreeMap<ValType, usize> = BTreeMap::new();
+    for depth in 0..count as usize {
+        let ty = c
+            .operand(depth)
+            .ok_or_else(|| anyhow!("operand {depth} is past the bottom of the stack"))?
+            .ok_or_else(|| anyhow!("operand {depth} has no type"))?;
+        *need.entry(encode_val_type(ty)?).or_default() += 1;
+    }
+    Ok(need)
 }
 
 /// A value a rewind can recompute rather than restore.
@@ -491,16 +604,18 @@ fn unreachable_here(c: &Cursor) -> bool {
 /// between the stores and the loads.
 ///
 /// This is the jump machinery only. Nothing here decides *whether* to rewind:
-/// that is [`Resume`], which a state machine will later drive.
+/// that is [`Drive`], which carries either a value set from outside or the
+/// state machine that computes one.
 pub fn add_rewind_dispatch(
     bytes: &[u8],
     instrument: &dyn Fn(u32) -> bool,
-    resume: Resume,
+    drive: Drive,
 ) -> Result<(Vec<u8>, Dispatch)> {
-    let (plans, refused) = plan(bytes, instrument)?;
+    let (plans, refused, unsavable) = plan(bytes, instrument, drive.machine().is_some())?;
     let mut report = Dispatch {
         functions: plans.len(),
         refused,
+        unsavable,
         ..Dispatch::default()
     };
 
@@ -512,6 +627,9 @@ pub fn add_rewind_dispatch(
     // the same step as the frame's opening instruction: the cursor's depth
     // only advances once that instruction has been validated.
     let mut pending: Option<usize> = None;
+    let mut ordinals_seen = 0u32;
+    // Set once per instrumented function, when its locals are settled.
+    let mut frame: Option<Saved> = None;
 
     let out = rewrite_module(bytes, |index, c, op| {
         if index != current {
@@ -520,14 +638,57 @@ pub fn add_rewind_dispatch(
             chain.push(Enclosing::function());
             at = 0;
             pool.clear();
+            frame = None;
+            ordinals_seen = 0;
             pending = plans.get(&index).map(|_| FUNCTION_FRAME);
         }
         let Some(p) = plans.get(&index) else {
-            return c.emit(op);
+            c.emit(op)?;
+            // A function the analysis says can be on the stack at a suspend,
+            // but which the rewrite could not instrument, is not safe -- it
+            // would carry on running as though the call had returned
+            // normally. Refusing it silently is exactly the failure this
+            // crate is written against, so it traps instead, in the frame
+            // that would have been wrong rather than somewhere later.
+            if let (Some(m), true) = (
+                drive.machine(),
+                instrument(index) && suspends(op, instrument) && !unreachable_here(c),
+            ) {
+                c.emit_new(&Instruction::GlobalGet(m.state));
+                c.emit_new(&Instruction::I32Const(UNWINDING));
+                c.emit_new(&Instruction::I32Eq);
+                c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+                c.emit_new(&Instruction::Unreachable);
+                c.emit_new(&Instruction::End);
+                report.traps += 1;
+            }
+            return Ok(());
         };
 
         if let Some(key) = pending.take() {
-            let opened = open_ladder(c, p, key, resume, &mut report)?;
+            if key == FUNCTION_FRAME {
+                // Reserving every spill local before anything is emitted is
+                // what makes the saved-frame layout knowable here, and the
+                // same list is what the epilogue writes.
+                pool.clear();
+                for (&ty, &n) in &p.pool {
+                    let slots = pool.entry(ty).or_default();
+                    for _ in 0..n {
+                        slots.push(c.reserve_local(ty));
+                    }
+                }
+                frame = match drive.machine() {
+                    Some(m) => {
+                        let scratch = c.reserve_local(ValType::I32);
+                        let saved = Saved::new(c, scratch)?;
+                        emit_prologue(c, m, &saved)?;
+                        report.saved_bytes += saved.size as usize;
+                        Some(saved)
+                    }
+                    None => None,
+                };
+            }
+            let opened = open_ladder(c, p, key, drive, &mut report)?;
             if let Some(f) = chain.last_mut() {
                 f.open = opened;
             }
@@ -547,19 +708,15 @@ pub fn add_rewind_dispatch(
         if land {
             let b = p.boundaries.get(&at).copied().unwrap_or_default();
             let slots = if b.spill > 0 {
-                spill_stack(c, &mut pool, b.spill)?
+                spill_stack(c, &pool, b.spill)?
             } else {
                 Vec::new()
             };
             c.close_block()?;
             if b.is_call {
                 // Later calls in this function must run normally.
-                match resume {
-                    Resume::Global(g) => {
-                        c.emit_new(&Instruction::I32Const(0));
-                        c.emit_new(&Instruction::GlobalSet(g));
-                    }
-                }
+                c.emit_new(&Instruction::I32Const(0));
+                c.emit_new(&Instruction::GlobalSet(drive.resume()));
                 if b.spill > 0 {
                     report.spilled += 1;
                 } else {
@@ -576,6 +733,21 @@ pub fn add_rewind_dispatch(
         }
 
         c.emit(op)?;
+
+        // Coming back from a call that could have suspended, the state says
+        // whether this frame is on its way out.
+        if let (Some(m), true) = (drive.machine(), suspends(op, instrument)) {
+            if let Some(saved) = &frame {
+                if !unreachable_here(c) {
+                    let ordinal = ordinals_seen;
+                    emit_epilogue(c, m, saved, ordinal)?;
+                    report.epilogues += 1;
+                }
+            }
+        }
+        if suspends(op, instrument) && !unreachable_here(c) {
+            ordinals_seen += 1;
+        }
 
         match op {
             Operator::Block { .. } | Operator::Loop { .. } | Operator::TryTable { .. } => {
@@ -639,7 +811,7 @@ fn open_ladder(
     c: &mut Cursor,
     plan: &Plan,
     key: usize,
-    resume: Resume,
+    drive: Drive,
     report: &mut Dispatch,
 ) -> Result<usize> {
     let Some(frame) = plan.frames.get(&key) else {
@@ -674,30 +846,23 @@ fn open_ladder(
         }
     }
     report.table_entries += targets.len();
-    match resume {
-        Resume::Global(g) => {
-            c.emit_new(&Instruction::GlobalGet(g));
-            c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
-            c.emit_new(&Instruction::GlobalGet(g));
-            c.emit_new(&Instruction::I32Const(1 + lo as i32));
-            c.emit_new(&Instruction::I32Sub);
-            // Labels are relative to the `if` frame, so the innermost ladder
-            // block is 1 and split `i` is `i + 2`.
-            c.emit_new(&Instruction::BrTable(targets.into(), 1));
-            c.emit_new(&Instruction::End);
-        }
-    }
+    let g = drive.resume();
+    c.emit_new(&Instruction::GlobalGet(g));
+    c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+    c.emit_new(&Instruction::GlobalGet(g));
+    c.emit_new(&Instruction::I32Const(1 + lo as i32));
+    c.emit_new(&Instruction::I32Sub);
+    // Labels are relative to the `if` frame, so the innermost ladder block is
+    // 1 and split `i` is `i + 2`.
+    c.emit_new(&Instruction::BrTable(targets.into(), 1));
+    c.emit_new(&Instruction::End);
     c.close_block()?;
     Ok(m)
 }
 
 /// Move the top `count` operands into locals, leaving the stack that much
 /// shorter, and return the locals holding them, top first.
-fn spill_stack(
-    c: &mut Cursor,
-    pool: &mut BTreeMap<ValType, Vec<u32>>,
-    count: u32,
-) -> Result<Vec<u32>> {
+fn spill_stack(c: &mut Cursor, pool: &BTreeMap<ValType, Vec<u32>>, count: u32) -> Result<Vec<u32>> {
     let mut used: BTreeMap<ValType, usize> = BTreeMap::new();
     let mut slots = Vec::with_capacity(count as usize);
     for depth in 0..count as usize {
@@ -709,29 +874,35 @@ fn spill_stack(
         let nth = used.entry(ty).or_default();
         let at = *nth;
         *nth += 1;
-        let have = pool.entry(ty).or_default();
-        while have.len() <= at {
-            have.push(c.reserve_local(ty));
-        }
-        slots.push(have[at]);
+        let have = pool.get(&ty).map(Vec::as_slice).unwrap_or_default();
+        slots.push(*have.get(at).ok_or_else(|| {
+            anyhow!(
+                "the plan reserved {} locals of {ty:?} and the rewrite wants {}",
+                have.len(),
+                at + 1
+            )
+        })?);
     }
     for &l in &slots {
         c.emit_new(&Instruction::LocalSet(l));
     }
     Ok(slots)
 }
-/// Append a mutable `i32` global to a module and return its index.
+/// Append mutable `i32` globals to a module, exported under `names`, and
+/// return their indices.
 ///
 /// The fiber state lives in globals, and a linked module has none of them
 /// yet. Appending leaves every existing global index alone, so nothing that
 /// refers to one has to be rewritten -- which is the only reason this can be
-/// a small function rather than an index-space renumbering.
-pub fn add_i32_global(bytes: &[u8], initial: i32) -> Result<(Vec<u8>, u32)> {
+/// a small function rather than an index-space renumbering. They are exported
+/// because the host is what starts an unwind and a rewind; ash owns both
+/// sides, so three globals do what Asyncify needs five exported functions for.
+pub fn add_exported_i32_globals(bytes: &[u8], names: &[&str]) -> Result<(Vec<u8>, Vec<u32>)> {
     use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 
     let mut out = wasm_encoder::Module::new();
     let mut index = 0u32;
-    let mut added = false;
+    let mut added = Vec::new();
     for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(|e| anyhow!("parsing the module: {e}"))?;
         // Imported globals take the low indices, so they have to be counted
@@ -760,16 +931,40 @@ pub fn add_i32_global(bytes: &[u8], initial: i32) -> Result<(Vec<u8>, u32)> {
                         .map_err(|e| anyhow!("re-encoding a global initialiser: {e}"))?,
                 );
             }
-            section.global(
-                wasm_encoder::GlobalType {
-                    val_type: ValType::I32,
-                    mutable: true,
-                    shared: false,
-                },
-                &wasm_encoder::ConstExpr::i32_const(initial),
-            );
+            for _ in names {
+                section.global(
+                    wasm_encoder::GlobalType {
+                        val_type: ValType::I32,
+                        mutable: true,
+                        shared: false,
+                    },
+                    &wasm_encoder::ConstExpr::i32_const(0),
+                );
+                added.push(index);
+                index += 1;
+            }
             out.section(&section);
-            added = true;
+            continue;
+        }
+        if let wasmparser::Payload::ExportSection(r) = &payload {
+            let mut section = wasm_encoder::ExportSection::new();
+            for e in r.clone() {
+                let e = e.map_err(|e| anyhow!("reading an export: {e}"))?;
+                section.export(
+                    e.name,
+                    RoundtripReencoder
+                        .export_kind(e.kind)
+                        .map_err(|e| anyhow!("re-encoding an export kind: {e}"))?,
+                    e.index,
+                );
+            }
+            if added.len() != names.len() {
+                bail!("the export section came before the global section");
+            }
+            for (name, &g) in names.iter().zip(&added) {
+                section.export(name, wasm_encoder::ExportKind::Global, g);
+            }
+            out.section(&section);
             continue;
         }
         if let Some((id, range)) = payload.as_section() {
@@ -779,10 +974,211 @@ pub fn add_i32_global(bytes: &[u8], initial: i32) -> Result<(Vec<u8>, u32)> {
             });
         }
     }
-    if !added {
+    if added.len() != names.len() {
         bail!("the module has no global section to append to");
     }
-    Ok((out.finish(), index))
+    Ok((out.finish(), added))
+}
+
+/// Where one function's frame goes when it is suspended.
+///
+/// The record starts with the call ordinal so a rewind knows where it was,
+/// then every local in index order. Prologue and epilogue both read this one
+/// list, which is what makes them unable to disagree about the order --
+/// `docs/wasm-fibers.md` §7 names that disagreement as the failure nothing
+/// would report.
+struct Saved {
+    /// Byte offset of each saved local within the record.
+    offsets: Vec<u32>,
+    /// Local index of each saved local, in the same order.
+    indices: Vec<u32>,
+    /// Type of each saved local, in the same order.
+    types: Vec<ValType>,
+    /// The record's size, a multiple of eight.
+    size: u32,
+    /// A scratch `i32` holding the record's address. Deliberately not saved:
+    /// the prologue needs it before the locals are restored, so restoring it
+    /// would overwrite the pointer it is reading through.
+    scratch: u32,
+    /// What the function returns, which an unwinding frame has to leave on
+    /// the stack even though nobody will look at it.
+    results: Vec<ValType>,
+}
+
+impl Saved {
+    fn new(c: &Cursor, scratch: u32) -> Result<Self> {
+        let locals = c.local_types()?;
+        let mut offsets = Vec::new();
+        let mut indices = Vec::new();
+        let mut types = Vec::new();
+        // The ordinal occupies the first word.
+        let mut at = 4u32;
+        for (i, &ty) in locals.iter().enumerate() {
+            let i = i as u32;
+            if i == scratch {
+                continue;
+            }
+            let size = value_size(ty)?;
+            at = at.next_multiple_of(size);
+            offsets.push(at);
+            indices.push(i);
+            types.push(ty);
+            at += size;
+        }
+        let mut results = Vec::new();
+        for r in c.results()? {
+            results.push(encode_val_type(r)?);
+            // Checked here rather than where it is used, so a function that
+            // cannot be unwound is rejected before anything is emitted for it.
+            value_size(*results.last().expect("just pushed"))?;
+        }
+        Ok(Saved {
+            offsets,
+            indices,
+            types,
+            size: at.next_multiple_of(8),
+            scratch,
+            results,
+        })
+    }
+}
+
+/// Bytes one value takes in the side stack.
+fn value_size(ty: ValType) -> Result<u32> {
+    Ok(match ty {
+        ValType::I32 | ValType::F32 => 4,
+        ValType::I64 | ValType::F64 => 8,
+        ValType::V128 => 16,
+        // A reference cannot be written to linear memory at all. LLVM's
+        // setjmp lowering is not supposed to leave one live across a call;
+        // this is where that assumption is checked rather than assumed.
+        ValType::Ref(_) => bail!("a reference-typed value cannot be saved to the side stack"),
+    })
+}
+
+fn load(ty: ValType, offset: u32) -> Instruction<'static> {
+    let mem = wasm_encoder::MemArg {
+        offset: offset as u64,
+        align: value_size(ty).unwrap_or(4).trailing_zeros(),
+        memory_index: 0,
+    };
+    match ty {
+        ValType::I32 => Instruction::I32Load(mem),
+        ValType::I64 => Instruction::I64Load(mem),
+        ValType::F32 => Instruction::F32Load(mem),
+        ValType::F64 => Instruction::F64Load(mem),
+        _ => Instruction::V128Load(mem),
+    }
+}
+
+fn store(ty: ValType, offset: u32) -> Instruction<'static> {
+    let mem = wasm_encoder::MemArg {
+        offset: offset as u64,
+        align: value_size(ty).unwrap_or(4).trailing_zeros(),
+        memory_index: 0,
+    };
+    match ty {
+        ValType::I32 => Instruction::I32Store(mem),
+        ValType::I64 => Instruction::I64Store(mem),
+        ValType::F32 => Instruction::F32Store(mem),
+        ValType::F64 => Instruction::F64Store(mem),
+        _ => Instruction::V128Store(mem),
+    }
+}
+
+fn zero(ty: ValType) -> Instruction<'static> {
+    match ty {
+        ValType::I32 => Instruction::I32Const(0),
+        ValType::I64 => Instruction::I64Const(0),
+        ValType::F32 => Instruction::F32Const(0.0f32.into()),
+        ValType::F64 => Instruction::F64Const(0.0f64.into()),
+        _ => Instruction::V128Const(0),
+    }
+}
+
+/// At the top of an instrumented function: if this is a rewind, take this
+/// frame's record back off the side stack and pick up where it left off.
+///
+/// The records come off in the reverse of the order they went on, which is
+/// what makes the outermost frame -- saved last, restored first -- line up
+/// with the order a rewind re-enters them in.
+fn emit_prologue(c: &mut Cursor, m: &Machine, saved: &Saved) -> Result<()> {
+    c.emit_new(&Instruction::GlobalGet(m.state));
+    c.emit_new(&Instruction::I32Const(REWINDING));
+    c.emit_new(&Instruction::I32Eq);
+    c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+
+    // current -= size, and keep the address.
+    c.emit_new(&Instruction::GlobalGet(m.data));
+    c.emit_new(&Instruction::GlobalGet(m.data));
+    c.emit_new(&load(ValType::I32, 0));
+    c.emit_new(&Instruction::I32Const(saved.size as i32));
+    c.emit_new(&Instruction::I32Sub);
+    c.emit_new(&Instruction::LocalTee(saved.scratch));
+    c.emit_new(&store(ValType::I32, 0));
+
+    // The ordinal the epilogue wrote becomes the resume value the ladders
+    // read, offset by one so that zero can mean "run normally".
+    c.emit_new(&Instruction::LocalGet(saved.scratch));
+    c.emit_new(&load(ValType::I32, 0));
+    c.emit_new(&Instruction::I32Const(1));
+    c.emit_new(&Instruction::I32Add);
+    c.emit_new(&Instruction::GlobalSet(m.resume));
+
+    for ((&offset, &index), &ty) in saved.offsets.iter().zip(&saved.indices).zip(&saved.types) {
+        c.emit_new(&Instruction::LocalGet(saved.scratch));
+        c.emit_new(&load(ty, offset));
+        c.emit_new(&Instruction::LocalSet(index));
+    }
+    c.emit_new(&Instruction::End);
+    Ok(())
+}
+
+/// After a call that could have suspended: if it did, put this frame on the
+/// side stack and get out of the way.
+fn emit_epilogue(c: &mut Cursor, m: &Machine, saved: &Saved, ordinal: u32) -> Result<()> {
+    c.emit_new(&Instruction::GlobalGet(m.state));
+    c.emit_new(&Instruction::I32Const(UNWINDING));
+    c.emit_new(&Instruction::I32Eq);
+    c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+
+    c.emit_new(&Instruction::GlobalGet(m.data));
+    c.emit_new(&load(ValType::I32, 0));
+    c.emit_new(&Instruction::LocalTee(saved.scratch));
+    c.emit_new(&Instruction::I32Const(saved.size as i32));
+    c.emit_new(&Instruction::I32Add);
+    c.emit_new(&Instruction::GlobalGet(m.data));
+    c.emit_new(&load(ValType::I32, 4));
+    c.emit_new(&Instruction::I32GtU);
+    // Reported by the frame that overran rather than at the API boundary,
+    // which is a TODO left open in Binaryen's own version.
+    c.emit_new(&Instruction::If(wasm_encoder::BlockType::Empty));
+    c.emit_new(&Instruction::Unreachable);
+    c.emit_new(&Instruction::End);
+
+    c.emit_new(&Instruction::LocalGet(saved.scratch));
+    c.emit_new(&Instruction::I32Const(ordinal as i32));
+    c.emit_new(&store(ValType::I32, 0));
+    for ((&offset, &index), &ty) in saved.offsets.iter().zip(&saved.indices).zip(&saved.types) {
+        c.emit_new(&Instruction::LocalGet(saved.scratch));
+        c.emit_new(&Instruction::LocalGet(index));
+        c.emit_new(&store(ty, offset));
+    }
+
+    c.emit_new(&Instruction::GlobalGet(m.data));
+    c.emit_new(&Instruction::LocalGet(saved.scratch));
+    c.emit_new(&Instruction::I32Const(saved.size as i32));
+    c.emit_new(&Instruction::I32Add);
+    c.emit_new(&store(ValType::I32, 0));
+
+    // A branch takes the label's types off the top and discards whatever is
+    // under them, so the call's own results can be left where they are.
+    for &ty in &saved.results {
+        c.emit_new(&zero(ty));
+    }
+    c.emit_new(&Instruction::Return);
+    c.emit_new(&Instruction::End);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -896,7 +1292,7 @@ mod tests {
     /// saw for each resume value in `resumes`.
     fn run_dispatch(module: Vec<u8>, resumes: &[(i32, i32)]) -> Vec<Vec<i32>> {
         let (out, report) =
-            add_rewind_dispatch(&module, &|_| true, Resume::Global(0)).expect("dispatch");
+            add_rewind_dispatch(&module, &|_| true, Drive::Resume(0)).expect("dispatch");
         assert_eq!(report.refused, 0, "nothing should have been refused");
         wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
             .validate_all(&out)
@@ -1142,6 +1538,169 @@ mod tests {
             got[1],
             vec![100, 1, 100, 2, 100],
             "the first iteration's first call is skipped, and no other"
+        );
+    }
+
+    /// A fiber that suspends inside a nested call and is resumed.
+    ///
+    /// `f` calls `inner`, which yields. On the first call the host turns the
+    /// yield into an unwind and every frame saves itself and returns; on the
+    /// second the host rewinds, and each frame has to come back exactly where
+    /// it was -- past the calls it had already made and not past the ones it
+    /// had not. Nothing but running it says whether that happened.
+    #[test]
+    fn a_fiber_suspends_inside_a_call_and_is_resumed_where_it_stopped() {
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        types.ty().function([ValType::I32], []);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("t", "yield", wasm_encoder::EntityType::Function(0));
+        imports.import("t", "rec", wasm_encoder::EntityType::Function(1));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0);
+        funcs.function(0);
+        let mut mems = wasm_encoder::MemorySection::new();
+        mems.memory(wasm_encoder::MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        // A global the module already had, so the transform's own three are
+        // appended after it and the existing index has to survive.
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export("f", wasm_encoder::ExportKind::Func, 3);
+        exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
+        let mut inner = wasm_encoder::Function::new([]);
+        inner.instruction(&Instruction::I32Const(1));
+        inner.instruction(&Instruction::Call(1));
+        inner.instruction(&Instruction::Call(0));
+        inner.instruction(&Instruction::I32Const(2));
+        inner.instruction(&Instruction::Call(1));
+        inner.instruction(&Instruction::End);
+        let mut f = wasm_encoder::Function::new([]);
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::Call(1));
+        f.instruction(&Instruction::Call(2));
+        f.instruction(&Instruction::I32Const(3));
+        f.instruction(&Instruction::Call(1));
+        f.instruction(&Instruction::End);
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&inner);
+        code.function(&f);
+
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mems);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+        let module = m.finish();
+
+        let (module, g) = add_exported_i32_globals(
+            &module,
+            &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+        )
+        .expect("state globals");
+        assert_eq!(g, vec![1, 2, 3], "the module's own global keeps index 0");
+        let machine = Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        };
+        // The yield import, `inner` and `f`: the suspend point and everything
+        // that can be on the stack when it fires.
+        let (out, report) =
+            add_rewind_dispatch(&module, &|i| matches!(i, 0 | 2 | 3), Drive::Full(machine))
+                .expect("transform");
+        assert_eq!(report.refused, 0);
+        assert_eq!(report.epilogues, 2, "one per call that could suspend");
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&out)
+            .expect("the transformed module must validate");
+
+        let engine = wasmtime::Engine::default();
+        let compiled = wasmtime::Module::new(&engine, &out).expect("wasmtime rejects it");
+        let mut linker = wasmtime::Linker::new(&engine);
+        linker
+            .func_wrap(
+                "t",
+                "rec",
+                |mut caller: wasmtime::Caller<Vec<i32>>, v: i32| {
+                    caller.data_mut().push(v);
+                },
+            )
+            .expect("rec");
+        linker
+            .func_wrap("t", "yield", |mut caller: wasmtime::Caller<Vec<i32>>| {
+                let state = match caller.get_export("ash_fiber_state") {
+                    Some(wasmtime::Extern::Global(g)) => g,
+                    _ => panic!("no state global"),
+                };
+                let now = state.get(&mut caller).i32().expect("an i32 state");
+                // Running: turn this into an unwind. Rewinding: this is the
+                // frame the unwind started from, so it is over.
+                let next = if now == 0 { 1 } else { 0 };
+                state
+                    .set(&mut caller, wasmtime::Val::I32(next))
+                    .expect("setting state");
+            })
+            .expect("yield");
+
+        let mut store = wasmtime::Store::new(&engine, Vec::new());
+        let instance = linker.instantiate(&mut store, &compiled).expect("instance");
+        let memory = instance.get_memory(&mut store, "memory").expect("memory");
+        // The side stack lives at 1024 and its two-word header at 16.
+        memory.data_mut(&mut store)[16..20].copy_from_slice(&1024i32.to_le_bytes());
+        memory.data_mut(&mut store)[20..24].copy_from_slice(&8192i32.to_le_bytes());
+        let state = instance.get_global(&mut store, "ash_fiber_state").unwrap();
+        let data = instance.get_global(&mut store, "ash_fiber_data").unwrap();
+        data.set(&mut store, wasmtime::Val::I32(16)).expect("data");
+        let f = instance
+            .get_typed_func::<(), ()>(&mut store, "f")
+            .expect("f");
+
+        f.call(&mut store, ()).expect("the first call");
+        assert_eq!(
+            store.data(),
+            &vec![0, 1],
+            "the fiber ran up to the yield and unwound"
+        );
+        assert_eq!(
+            state.get(&mut store).i32(),
+            Some(UNWINDING),
+            "the unwind reached the host with the state still set"
+        );
+        let top = i32::from_le_bytes(memory.data(&store)[16..20].try_into().unwrap());
+        assert!(top > 1024, "two frames should be on the side stack: {top}");
+
+        state
+            .set(&mut store, wasmtime::Val::I32(REWINDING))
+            .expect("start the rewind");
+        f.call(&mut store, ()).expect("the second call");
+        assert_eq!(
+            store.data(),
+            &vec![0, 1, 2, 3],
+            "the fiber resumed after the yield and ran to the end, \
+             without repeating what it had already done"
+        );
+        assert_eq!(
+            i32::from_le_bytes(memory.data(&store)[16..20].try_into().unwrap()),
+            1024,
+            "the side stack is empty again"
         );
     }
 

@@ -85,6 +85,13 @@ SUITES = {
         "programs": ["bin/threads.hl"],
         "needs": ["utest"],
         "about": "Threads, locks, mutexes, deques.",
+        # A wasm module cannot suspend a fiber, so a pool worker that loops
+        # waiting for tasks never returns and the suite deadlocks there
+        # (cases.TestFixedThreadPool). It is reached in seconds and native ash
+        # finishes the whole suite in seven, so the default fifteen-minute
+        # budget only decides how long CI waits to learn something it learns
+        # at once. The row is still a TIMEOUT, which is the honest verdict.
+        "timeout_secs": 120,
     },
 }
 
@@ -463,6 +470,16 @@ def parse_progress(out: str) -> dict:
     """
     accepted = len(RE_TEST.findall(out))
     bad = len(set(m.group(1) for m in RE_TEST_BAD.finditer(out)))
+    # A test counts as passed only if the run lived to say so. FAILURE and
+    # ERROR are named in utest's TERMINAL report, so a run that hung or died
+    # names none of them -- and `accepted - bad` then credited every test the
+    # VM had merely entered. The wasm threads row published six passes from a
+    # run that deadlocked in the third fixture and printed no tally at all,
+    # and those six reached the site's headline. `run_one_case` already draws
+    # this line for isolated cases ("No tally printed at all: the VM did not
+    # survive to the end of the case, whatever the exit code claims"); this is
+    # the same rule for a whole-suite row.
+    completed = parse_utest(out) is not None
     return {
         "cases_reached": len(RE_CASE.findall(out)),
         "tests_reached": accepted,
@@ -470,7 +487,7 @@ def parse_progress(out: str) -> dict:
         # starts, so this survives a crash mid-case. "passed" subtracts the
         # ones it then reported as FAILURE or ERROR.
         "tests_accepted": accepted,
-        "tests_passed": max(0, accepted - bad),
+        "tests_passed": max(0, accepted - bad) if completed else 0,
         "tests_bad": bad,
     }
 
@@ -1505,7 +1522,7 @@ def main(argv=None) -> int:
                     res = run(
                         argv0,
                         cwd=str(sdir),
-                        timeout=args.timeout,
+                        timeout=min(args.timeout, spec.get("timeout_secs", args.timeout)),
                         env=suite_env,
                     )
                 except subprocess.TimeoutExpired as e:

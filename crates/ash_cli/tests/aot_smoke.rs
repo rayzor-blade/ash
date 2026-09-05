@@ -10,8 +10,26 @@
 //! `cargo test -p ash --test aot_smoke -- --nocapture` to watch it work.
 //! `ASH_SMOKE_PROGRAMS="a.hl b.hl"` swaps the corpus.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+/// How long any one `ash` invocation may take before it is treated as hung.
+///
+/// There is a limit at all because a subprocess that never returns takes the
+/// whole job down with it: this test ran 75 minutes on a CI arm64 runner and
+/// reported nothing, because it prints only once a program has passed and
+/// waits forever for one that does not. A named failure after a few minutes
+/// is worth more than a stall.
+fn limit() -> Duration {
+    Duration::from_secs(
+        std::env::var("ASH_SMOKE_TIMEOUT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300),
+    )
+}
 
 /// The corpus, chosen so each entry once caught something.
 const PROGRAMS: &[&str] = &[
@@ -39,14 +57,63 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn run(binary: &Path, args: &[&str]) -> (String, bool) {
-    let out = Command::new(binary)
+/// What one invocation did: its output, whether it succeeded, and whether it
+/// had to be killed.
+struct Ran {
+    text: String,
+    ok: bool,
+    hung: bool,
+}
+
+/// Run one command, giving up on it after [`limit`].
+///
+/// Output goes to files rather than pipes. Polling a child while it fills a
+/// pipe nobody is draining deadlocks on the pipe instead of the deadline,
+/// which would reintroduce the hang this exists to catch.
+fn run(binary: &Path, args: &[&str], label: &str) -> Ran {
+    let scratch = std::env::temp_dir().join("ash-aot-smoke");
+    let _ = std::fs::create_dir_all(&scratch);
+    let out_path = scratch.join(format!("{label}.stdout"));
+    let err_path = scratch.join(format!("{label}.stderr"));
+    let stdout = std::fs::File::create(&out_path).expect("capture file");
+    let stderr = std::fs::File::create(&err_path).expect("capture file");
+
+    let mut child = Command::new(binary)
         .args(args)
-        .output()
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
         .unwrap_or_else(|e| panic!("running {}: {e}", binary.display()));
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    (text, out.status.success())
+
+    let deadline = Instant::now() + limit();
+    let status = loop {
+        match child.try_wait().expect("waiting on a child") {
+            Some(status) => break Some(status),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+
+    let mut text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    text.push_str(&std::fs::read_to_string(&err_path).unwrap_or_default());
+    Ran {
+        text,
+        ok: status.map(|s| s.success()).unwrap_or(false),
+        hung: status.is_none(),
+    }
+}
+
+/// Say what is about to happen, before it happens.
+///
+/// The only thing that made the arm64 stall unactionable was that nothing had
+/// been printed by the time it hung, so the log named no program.
+fn announce(what: &str) {
+    println!("{what}");
+    let _ = std::io::stdout().flush();
 }
 
 /// The interpreter announces its own return value; nothing else does.
@@ -81,24 +148,50 @@ fn every_aot_binary_matches_the_jit() {
             continue;
         }
         let binary = scratch.join(&name);
-        let (emit, ok) = run(
+        announce(&format!("{name}: building"));
+        let emit = run(
             &ash,
             &[
                 "--build",
                 &binary.to_string_lossy(),
                 &program.to_string_lossy(),
             ],
+            &format!("{name}-build"),
         );
-        if !ok {
+        if emit.hung {
+            failures.push(format!("{name}: build hung, killed after {:?}", limit()));
+            continue;
+        }
+        if !emit.ok {
             failures.push(format!(
                 "{name}: build failed\n{}",
-                emit.lines().rev().take(4).collect::<Vec<_>>().join("\n")
+                emit.text
+                    .lines()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join("\n")
             ));
             continue;
         }
 
-        let (jit, _) = run(&ash, &["--mode", "jit", &program.to_string_lossy()]);
-        let (aot, _) = run(&binary, &[]);
+        announce(&format!("{name}: running under the jit"));
+        let jit = run(
+            &ash,
+            &["--mode", "jit", &program.to_string_lossy()],
+            &format!("{name}-jit"),
+        );
+        announce(&format!("{name}: running the binary"));
+        let aot = run(&binary, &[], &format!("{name}-aot"));
+        if jit.hung || aot.hung {
+            failures.push(format!(
+                "{name}: {} hung, killed after {:?}",
+                if jit.hung { "the jit" } else { "the binary" },
+                limit()
+            ));
+            continue;
+        }
+        let (jit, aot) = (jit.text, aot.text);
         if normalize(&jit) != normalize(&aot) {
             let jit = normalize(&jit);
             let aot = normalize(&aot);
@@ -116,7 +209,7 @@ fn every_aot_binary_matches_the_jit() {
                 });
             failures.push(format!("{name}: differs from the JIT\n{first}"));
         } else {
-            println!("{name}: ok");
+            announce(&format!("{name}: ok"));
         }
     }
 

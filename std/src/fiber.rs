@@ -1125,6 +1125,18 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
 
     // Give the new thread a chance to run to its first blocking point,
     // matching the "starts immediately" expectation of real threads.
+    //
+    // Not where a fiber cannot suspend. A wasm module has no addressable
+    // stack and no way to move between two, so `Fiber::resume` there runs the
+    // body straight through to its return (see `ash_wasm_runtime::guest`).
+    // Running it here would therefore not start a thread, it would finish
+    // one -- before the creator's next statement. A body that waits for the
+    // creator then waits forever, which is the Haxe suite's atomics test
+    // exactly: the new thread spins until the creator moves an atomic, and
+    // the creator cannot move it because it is still inside this call. The
+    // fiber is installed and runs at the creator's first blocking point,
+    // which is the earliest moment its body can make progress.
+    #[cfg(not(target_family = "wasm"))]
     schedule_step();
 
     // Handle = fiber id, offset so it is never null and never a valid ptr.

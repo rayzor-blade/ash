@@ -235,3 +235,61 @@ known not to pay — the closure is set by table fan-in, and a more precise seed
 set is swallowed by it within two functions. The annotation is only worth
 writing on the HL side of §9, where the seeds still propagate through a call
 graph that has not been merged with libc's.
+
+## 11. Step 1 closed against its oracle, and Step 2's oracle does not exist
+
+§6 set the exit condition for Step 1: ash's suspend set must be a strict
+*subset* of Binaryen's under matching seeds, since Binaryen's blanket indirect
+rule can only ever be looser. That check has now run.
+
+Both tools were seeded from the same single import
+(`--pass-arg=asyncify-imports@env.ash_host_fiber_yield`) on `threads.wasm`,
+Binaryen's list taken from `--pass-arg=asyncify-verbose` and ash's written by
+`ASH_LINK_TEST_NAMES` in `tests/suspend_set.rs`:
+
+- ash `TypedTable`: **2,617** functions
+- Binaryen: **2,632** functions and the import
+- in ash's and not Binaryen's: **0**
+- in Binaryen's and not ash's: **15**, which is exactly `AnyIndirect` minus
+  `TypedTable`
+
+So the two analyses agree function for function under the blanket policy, and
+the type partitioning removes precisely those fifteen. §8's conclusion is
+confirmed from the other side: the refinement is correct, and it is worth
+fifteen functions.
+
+Run Binaryen single-threaded (`BINARYEN_CORES=1`) or the verbose output is
+useless: it prints from a worker pool without holding a lock, so names and
+`[asyncify]` prefixes interleave into each other mid-line.
+
+**Step 2's oracle, on the other hand, is not available at all.** §6 planned to
+test the rewrite differentially against `wasm-opt --asyncify` on an EH-free
+module. Two things stand in the way, and both are now observed rather than
+predicted:
+
+- **Binaryen 116 cannot read an ash module.** `[parse exception: invalid wasm
+  type: -23]` -- the `exnref` byte of the final EH proposal. Every module we
+  have hits it, including the smallest.
+- **Binaryen 132 reads it, analyses it, and then crashes**: `UNREACHABLE
+  executed at src/passes/Flatten.cpp:231`. §3 predicted this from reading
+  Flatten's source; it is now a stack trace.
+
+And there is no EH-free ash module to fall back to: the prelinked runtime
+object uses setjmp, so every module ash links carries `try_table`. If Step 2
+is to have a differential oracle it has to be a *synthetic* one -- a small C
+program compiled to wasm32-wasip1 with a yield import, instrumented both ways
+and run against the same host. That is worth building, but it must be
+recognised for what it is: an oracle for the transform's mechanics on shapes
+ash does not emit, silent on the shapes it does.
+
+Which raises the value of the checks that do cover ash's own output.
+`crates/ash_wasm_link/src/cursor.rs` is the decode/annotate/re-encode loop §5
+argued for, and it is checked three ways on real modules: an identity rewrite
+of all 3,041 bodies of `threads.wasm` reproduces the operator stream exactly
+(and is 4.4% smaller, the relocation padding recovered); wrapping every one of
+those bodies in a new block -- which moves every branch in the module that
+leaves its function -- still validates; and the wrapped `t.wasm`, all 1,958
+bodies, runs and prints exactly what the original printed. Wrapped
+`threads.wasm` produces the same twelve lines as the original and stops at the
+same place, which is a pre-existing hang in `testShutdown_finishesSubmittedTasks`
+and not something the rewrite introduced.

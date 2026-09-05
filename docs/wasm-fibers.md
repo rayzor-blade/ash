@@ -343,3 +343,68 @@ instructions in a body of 793,780 operators.
 relocation padding (§10's −4.4%) than the instrumentation adds. That does not
 survive the prologue and epilogue work still to come, but it does mean the
 stack handling — the part with no precedent to copy — is not what will cost.
+
+## 13. The rewind jump, built and run
+
+The remaining structural unknown was how a rewind gets back to the call it
+suspended at, since wasm has no `goto` and Binaryen's answer depends on Flatten
+having made the body a flat sequence first.
+
+**Ladders, one per control frame.** Each frame gets a run of nested blocks
+whose ends sit at that frame's resume points, and a `br_table` at the top that
+leaves the ladder at the right one. Landing in a nested frame is the same
+problem one level down, so they compose: the outer ladder jumps to just before
+the inner frame, and the inner one takes over. Two shapes need no special
+handling and it is worth saying why:
+
+- A **loop** is resumed by jumping into its body. Which iteration this is lives
+  in the locals, and a rewind restores those, so there is nothing else to
+  reconstruct.
+- An **`if`** has two sequences sharing one entry. Each arm gets its own
+  ladder; the condition steers, and it is restored the same way a call's
+  operands are.
+
+**The stack has to be empty where a ladder ends**, which is the whole reason
+§12 came first. Where a call's operands are all `local.get`s and constants, the
+target goes before them and the rewind re-executes them at no cost; otherwise
+they go through locals and the target sits between the stores and the loads.
+The same analysis serves the unwind: a value a rewind can recompute is one an
+unwind need not save.
+
+**The `br_table` sizing was worth catching.** A frame's call ordinals are a
+contiguous range — ordinals follow body order and a frame is a contiguous span
+of it — so each table spans only that range, and an ordinal outside it
+underflows an unsigned index straight to the default arm. Sizing tables to the
+whole function instead costs an entry per call per *enclosing* frame, which is
+quadratic where this is not: on `t.wasm`, 390,163 entries against 86,531, and
++29.6% against +16.6%.
+
+| | `t.wasm` | `threads.wasm` |
+| --- | --- | --- |
+| functions given a dispatch | 1,625 | 2,617 |
+| refused | **0** | **0** |
+| ladders | 11,634 | 22,965 |
+| blocks added | 33,480 | 68,641 |
+| `br_table` entries | 86,531 | 214,631 |
+| resume points needing no spill | 5,983 (51%) | 12,909 (51%) |
+| module size | +16.6% | +22.9% |
+
+Half of all resume points cost nothing at all, which is a weaker result than
+§12's 96.5% and for a different reason: §12 asked whether anything was live
+*under* the arguments, while a ladder needs the arguments themselves to be
+recomputable, and about half of ash's call sites compute an argument rather
+than loading one.
+
+Tested by running what it builds. The unit tests drive a transformed module
+under `wasmtime` and check which calls execute: resuming at each call of a flat
+body, through two nested frames, into either arm of an `if`, and inside a loop
+where exactly one iteration is entered part-way and the rest run whole. On the
+linked modules, every instrumented function takes a dispatch with none refused,
+both validate, and with the resume value left at zero `t.wasm` prints exactly
+what it printed and `threads.wasm` reaches the same place.
+
+What is left is the state machine: the side stack, the unwind that spills and
+returns, the prologue that restores and sets the resume value, and the
+scheduler of §6 step 4. The jump machinery those drive is now built, and so is
+the evidence that it costs about a fifth of a module rather than the 3.5x §8
+budgeted for.

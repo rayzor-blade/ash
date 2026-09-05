@@ -248,9 +248,14 @@ impl HbMapExt for *mut hl::hl_hb_map {
     fn m_index(&self, ckey: u32) -> i32 {
         unsafe {
             if (**self).maxentries < _MLIMIT {
-                ((*(*self)).cells as *const std::ffi::c_char)
-                    .add(ckey as usize)
-                    .read() as i32
+                // `i8`, not `c_char`: this array holds signed indices with
+                // -1 for end of chain, and `c_char` is UNSIGNED on
+                // aarch64-linux (and arm, riscv, powerpc, s390x). There the
+                // sentinel reads back as 255, every chain walk finds it
+                // non-negative, and `hlp_hbset` loops forever on a cell that
+                // does not exist. x86-64, macOS, Windows and wasm32 all have
+                // it signed, which is why only one CI runner hung.
+                ((*(*self)).cells as *const i8).add(ckey as usize).read() as i32
             } else {
                 ((*(*self)).cells as *const i32).add(ckey as usize).read()
             }
@@ -260,9 +265,7 @@ impl HbMapExt for *mut hl::hl_hb_map {
     fn m_next(&self, ckey: u32) -> i32 {
         unsafe {
             if (**self).maxentries < _MLIMIT {
-                ((*(*self)).nexts as *const std::ffi::c_char)
-                    .add(ckey as usize)
-                    .read() as i32
+                ((*(*self)).nexts as *const i8).add(ckey as usize).read() as i32
             } else {
                 ((*(*self)).nexts as *const i32).add(ckey as usize).read()
             }
@@ -337,13 +340,10 @@ pub unsafe extern "C" fn hlp_hbset(
     m.set_entry(c as usize, hash, key);
     // nexts[c] = cells[ckey] (old head of chain), then cells[ckey] = c
     if (*m).maxentries < _MLIMIT {
-        let src = ((*m).cells as *const std::ffi::c_char).wrapping_add(ckey as usize);
-        let dst = ((*m).nexts as *mut std::ffi::c_char).wrapping_add(c as usize);
+        let src = ((*m).cells as *const i8).wrapping_add(ckey as usize);
+        let dst = ((*m).nexts as *mut i8).wrapping_add(c as usize);
         ptr::write(dst, ptr::read(src));
-        ptr::write(
-            ((*m).cells as *mut std::ffi::c_char).wrapping_add(ckey as usize),
-            c as std::ffi::c_char,
-        );
+        ptr::write(((*m).cells as *mut i8).wrapping_add(ckey as usize), c as i8);
     } else {
         let src = ((*m).cells as *const i32).wrapping_add(ckey as usize);
         let dst = ((*m).nexts as *mut i32).wrapping_add(c as usize);
@@ -437,7 +437,7 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         hl_freelist_add_range(&mut (*m).lfree, 0, (*m).maxentries);
         for i in 0..old.ncells {
             let mut c = if old.maxentries < _MLIMIT {
-                *(old.cells as *const std::ffi::c_char).add(i as usize) as i32
+                *(old.cells as *const i8).add(i as usize) as i32
             } else {
                 *(old.cells as *const i32).add(i as usize)
             };
@@ -530,8 +530,8 @@ pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::u
                 // Head of chain: cells[ckey] = next
                 if (*m).maxentries < _MLIMIT {
                     ptr::write(
-                        ((*m).cells as *mut std::ffi::c_char).wrapping_add(ckey as usize),
-                        next as std::ffi::c_char,
+                        ((*m).cells as *mut i8).wrapping_add(ckey as usize),
+                        next as i8,
                     );
                 } else {
                     ptr::write(((*m).cells as *mut i32).wrapping_add(ckey as usize), next);
@@ -540,8 +540,8 @@ pub unsafe extern "C" fn hlp_hbremove(mut m: *mut hl::hl_hb_map, key: *mut hl::u
                 // Middle/end of chain: nexts[prev] = next
                 if (*m).maxentries < _MLIMIT {
                     ptr::write(
-                        ((*m).nexts as *mut std::ffi::c_char).wrapping_add(prev as usize),
-                        next as std::ffi::c_char,
+                        ((*m).nexts as *mut i8).wrapping_add(prev as usize),
+                        next as i8,
                     );
                 } else {
                     ptr::write(((*m).nexts as *mut i32).wrapping_add(prev as usize), next);
@@ -568,7 +568,7 @@ pub unsafe extern "C" fn hlp_hbkeys(m: *mut hl::hl_hb_map) -> *mut hl::varray {
     let mut p = 0;
     for i in 0..(*m).ncells {
         let mut c = if (*m).maxentries < _MLIMIT {
-            *((*m).cells as *const std::ffi::c_char).add(i as usize) as i32
+            *((*m).cells as *const i8).add(i as usize) as i32
         } else {
             *((*m).cells as *const i32).add(i as usize)
         };
@@ -592,7 +592,7 @@ pub unsafe extern "C" fn hlp_hbvalues(m: *mut hl::hl_hb_map) -> *mut hl::varray 
     let mut p = 0;
     for i in 0..(*m).ncells {
         let mut c = if (*m).maxentries < _MLIMIT {
-            *((*m).cells as *const std::ffi::c_char).add(i as usize) as i32
+            *((*m).cells as *const i8).add(i as usize) as i32
         } else {
             *((*m).cells as *const i32).add(i as usize)
         };

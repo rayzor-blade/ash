@@ -293,3 +293,53 @@ bodies, runs and prints exactly what the original printed. Wrapped
 `threads.wasm` produces the same twelve lines as the original and stops at the
 same place, which is a pre-existing hang in `testShutdown_finishesSubmittedTasks`
 and not something the rewrite introduced.
+
+## 12. Flatten's job, measured — and it is nearly free
+
+§7 listed the operand-stack statistics among "where the studies left gaps",
+because they were read off `wasm-dis`'s folded rendering rather than the
+binary. `crates/ash_wasm_link/src/fiber.rs` now does the transform, so the
+number is exact.
+
+The transform is local, not a Flatten: at each call site the operand stack is
+popped into locals and pushed straight back. The values are unchanged and in
+the same order, and each one now also sits in a local an unwind can spill.
+Nothing is restructured, no tree is built, and `try_table` is not a special
+case — which is the whole reason this exists, since Binaryen's Flatten aborts
+on it (§11).
+
+Over the 2,618 functions the suspend analysis selects in `threads.wasm`:
+
+| | |
+| --- | --- |
+| functions refused | **0** |
+| call sites | 25,328 |
+| already empty (only the call's own arguments) | **24,449 — 96.5%** |
+| values moved through a local | 3,057 |
+| of those, live under a call | 1,098 |
+| locals added | 1,545 |
+| module size | 3,604,264 → 3,459,906 (**−4.0%**) |
+
+`t.wasm` is the same shape: 97.7% of call sites need nothing, 683 locals
+added, −3.4%, and the spilled module runs and prints exactly what the original
+printed.
+
+Three things in that table were open questions the design could not answer:
+
+**Both refusal shapes are absent.** §7 named `return_call` as the thing that
+"closes this door permanently", and a value belonging to an enclosing frame is
+the case that would force the global restructure. Neither occurs anywhere in
+ash's output. Both are still refused per function rather than assumed away —
+the decision is taken in a first walk whose output is discarded, so a function
+is never left half instrumented — but today nothing triggers either.
+
+**LLVM has already done the flattening.** 96.5% of call sites have nothing on
+the stack but the call's own arguments, because the wasm backend keeps values
+in locals across anything interesting. Flatten exists to manufacture a
+property ash's output very nearly has already. The remaining 3.5% cost 6,114
+instructions in a body of 793,780 operators.
+
+**The transform makes the module smaller.** Re-encoding recovers more
+relocation padding (§10's −4.4%) than the instrumentation adds. That does not
+survive the prologue and epilogue work still to come, but it does mean the
+stack handling — the part with no precedent to copy — is not what will cost.

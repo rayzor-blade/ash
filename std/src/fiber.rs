@@ -144,6 +144,11 @@ pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
 
 fn ensure_preemption_timer() {
     PREEMPTOR_STARTED.get_or_init(|| {
+        // A wasm module has one thread and its fibers yield through the host,
+        // so there is no timer to start -- and no thread to start it on:
+        // merely naming `spawn` here made the module import `pthread_create`,
+        // which wasi-libc defines only as a weak stub, and not in every build.
+        #[cfg(not(target_family = "wasm"))]
         let _ = std::thread::Builder::new()
             .name("ash-fiber-timer".into())
             .spawn(|| loop {
@@ -461,40 +466,49 @@ fn configured_worker_count() -> usize {
 }
 
 fn worker_pool() -> Option<&'static WorkerPool> {
-    WORKER_POOL
-        .get_or_init(|| {
-            let count = configured_worker_count();
-            if count == 0 {
-                return None;
-            }
-            let (sender, receiver) = std::sync::mpsc::channel();
-            let mut started = 0usize;
-            for index in 0..count {
-                let sender = sender.clone();
-                let spawn = std::thread::Builder::new()
-                    .name(format!("ash-vm-{index}"))
-                    .spawn(move || worker_main(sender));
-                if spawn.is_ok() {
-                    started += 1;
-                }
-            }
-            drop(sender);
-            // A worker that panics before publishing its endpoint must not
-            // hang VM startup forever. Missing workers merely reduce the
-            // pool; dispatch remains correct with any non-empty subset.
-            let mut workers = Vec::with_capacity(started);
-            for _ in 0..started {
-                match receiver.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(endpoint) => workers.push(endpoint),
-                    Err(_) => break,
-                }
-            }
-            (!workers.is_empty()).then(|| WorkerPool {
-                workers,
-                next: AtomicUsize::new(0),
-            })
-        })
-        .as_ref()
+    WORKER_POOL.get_or_init(spawn_worker_pool).as_ref()
+}
+
+/// No pool on wasm: one thread, and fibers that suspend through the host.
+/// Kept out of the build rather than sized to zero, because the spawn call
+/// alone made the module import `pthread_create`.
+#[cfg(target_family = "wasm")]
+fn spawn_worker_pool() -> Option<WorkerPool> {
+    None
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn spawn_worker_pool() -> Option<WorkerPool> {
+    let count = configured_worker_count();
+    if count == 0 {
+        return None;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut started = 0usize;
+    for index in 0..count {
+        let sender = sender.clone();
+        let spawn = std::thread::Builder::new()
+            .name(format!("ash-vm-{index}"))
+            .spawn(move || worker_main(sender));
+        if spawn.is_ok() {
+            started += 1;
+        }
+    }
+    drop(sender);
+    // A worker that panics before publishing its endpoint must not
+    // hang VM startup forever. Missing workers merely reduce the
+    // pool; dispatch remains correct with any non-empty subset.
+    let mut workers = Vec::with_capacity(started);
+    for _ in 0..started {
+        match receiver.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(endpoint) => workers.push(endpoint),
+            Err(_) => break,
+        }
+    }
+    (!workers.is_empty()).then(|| WorkerPool {
+        workers,
+        next: AtomicUsize::new(0),
+    })
 }
 
 fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {

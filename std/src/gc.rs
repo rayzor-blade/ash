@@ -2150,6 +2150,11 @@ fn mark_threads() -> usize {
         // core on a 4-core machine and left the collection contending with
         // the very threads it had just stopped the world to get ahead of.
         // On a 10-core box this is unchanged at 8.
+        // One thread on wasm, and the parallel marker is not even compiled
+        // there (see conservative_trace).
+        if cfg!(target_family = "wasm") {
+            return 1;
+        }
         std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(1).clamp(1, 8))
             .unwrap_or(1)
@@ -2778,80 +2783,86 @@ impl ImmixAllocator {
             return;
         }
 
-        // Marking is pointer-chasing over the whole live set: latency-bound,
-        // so several threads keep more misses outstanding. The world is
-        // already stopped, which is why this needs no write barrier -- nothing
-        // mutates the heap while the trace runs, and a line is claimed exactly
-        // once however many threads reach it.
-        let blocks: &[Block] = &self.blocks;
-        let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
-        let queue = MarkQueue {
-            work: std::sync::Mutex::new(initial),
-            ready: std::sync::Condvar::new(),
-            idle: std::sync::atomic::AtomicUsize::new(0),
-            done: AtomicBool::new(false),
-        };
-        let queue = &queue;
+        // Compiled out on wasm rather than merely skipped: the spawn would
+        // make the module import `pthread_create`, and mark_threads() is one
+        // there, so the serial loop above is the whole collector.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            // Marking is pointer-chasing over the whole live set: latency-bound,
+            // so several threads keep more misses outstanding. The world is
+            // already stopped, which is why this needs no write barrier -- nothing
+            // mutates the heap while the trace runs, and a line is claimed exactly
+            // once however many threads reach it.
+            let blocks: &[Block] = &self.blocks;
+            let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
+            let queue = MarkQueue {
+                work: std::sync::Mutex::new(initial),
+                ready: std::sync::Condvar::new(),
+                idle: std::sync::atomic::AtomicUsize::new(0),
+                done: AtomicBool::new(false),
+            };
+            let queue = &queue;
 
-        std::thread::scope(|scope| {
-            for _ in 0..threads {
-                scope.spawn(move || {
-                    const BATCH: usize = 64;
-                    const SPILL: usize = 512;
-                    let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
-                    loop {
-                        if local.is_empty() {
-                            let mut work = queue.work.lock().expect("mark queue poisoned");
-                            loop {
-                                if !work.is_empty() {
-                                    let take = work.len().min(BATCH);
-                                    let at = work.len() - take;
-                                    local.extend(work.drain(at..));
-                                    break;
-                                }
-                                if queue.done.load(Ordering::Relaxed) {
-                                    return;
-                                }
-                                // Everyone idle with an empty queue means the
-                                // trace is finished: a thread only reaches
-                                // here having drained its own local list.
-                                let idle = queue.idle.fetch_add(1, Ordering::Relaxed) + 1;
-                                if idle == threads {
-                                    queue.done.store(true, Ordering::Relaxed);
-                                    queue.ready.notify_all();
-                                    return;
-                                }
-                                // Timed, so a lost wakeup cannot strand anyone.
-                                let (w, _) = queue
-                                    .ready
-                                    .wait_timeout(work, std::time::Duration::from_micros(200))
-                                    .expect("mark queue poisoned");
-                                work = w;
-                                queue.idle.fetch_sub(1, Ordering::Relaxed);
-                            }
-                        }
-                        while let Some((block_idx, line_idx)) = local.pop() {
-                            scan_line_shared(
-                                blocks,
-                                alloc_sizes,
-                                heap_start,
-                                heap_end,
-                                block_idx,
-                                line_idx,
-                                &mut local,
-                            );
-                            if local.len() >= SPILL {
-                                let half = local.len() / 2;
+            std::thread::scope(|scope| {
+                for _ in 0..threads {
+                    scope.spawn(move || {
+                        const BATCH: usize = 64;
+                        const SPILL: usize = 512;
+                        let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
+                        loop {
+                            if local.is_empty() {
                                 let mut work = queue.work.lock().expect("mark queue poisoned");
-                                work.extend(local.drain(..half));
-                                drop(work);
-                                queue.ready.notify_all();
+                                loop {
+                                    if !work.is_empty() {
+                                        let take = work.len().min(BATCH);
+                                        let at = work.len() - take;
+                                        local.extend(work.drain(at..));
+                                        break;
+                                    }
+                                    if queue.done.load(Ordering::Relaxed) {
+                                        return;
+                                    }
+                                    // Everyone idle with an empty queue means the
+                                    // trace is finished: a thread only reaches
+                                    // here having drained its own local list.
+                                    let idle = queue.idle.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if idle == threads {
+                                        queue.done.store(true, Ordering::Relaxed);
+                                        queue.ready.notify_all();
+                                        return;
+                                    }
+                                    // Timed, so a lost wakeup cannot strand anyone.
+                                    let (w, _) = queue
+                                        .ready
+                                        .wait_timeout(work, std::time::Duration::from_micros(200))
+                                        .expect("mark queue poisoned");
+                                    work = w;
+                                    queue.idle.fetch_sub(1, Ordering::Relaxed);
+                                }
+                            }
+                            while let Some((block_idx, line_idx)) = local.pop() {
+                                scan_line_shared(
+                                    blocks,
+                                    alloc_sizes,
+                                    heap_start,
+                                    heap_end,
+                                    block_idx,
+                                    line_idx,
+                                    &mut local,
+                                );
+                                if local.len() >= SPILL {
+                                    let half = local.len() / 2;
+                                    let mut work = queue.work.lock().expect("mark queue poisoned");
+                                    work.extend(local.drain(..half));
+                                    drop(work);
+                                    queue.ready.notify_all();
+                                }
                             }
                         }
-                    }
-                });
-            }
-        });
+                    });
+                }
+            });
+        }
     }
 
     /// Charge off-heap memory (fiber stacks, JIT structures) as allocation

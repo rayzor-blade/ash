@@ -1098,11 +1098,16 @@ def run_misc_suite(src: pathlib.Path, haxe: str, ash: str, modes: list[str],
                          "detail": f"{case['program']} not produced"})
             continue
 
-        try:
-            engines = [(f"ash:{m}", engine_argv(ash, p, m, timeout)) for m in modes]
-        except RuntimeError as e:
-            rows.append({"suite": "misc", "program": prog_id, "engine": "-",
-                         "bucket": "vm", "status": "SKIP", "detail": str(e)})
+        engines = []
+        for m in modes:
+            try:
+                engines.append((f"ash:{m}", engine_argv(ash, p, m, timeout)))
+            except RuntimeError as e:
+                # One engine's build failing is that engine's row, not the
+                # program's: the others still run.
+                rows.append({"suite": "misc", "program": prog_id, "engine": f"ash:{m}",
+                             "bucket": "vm", "status": "SKIP", "detail": str(e)})
+        if not engines and not reference:
             continue
         if reference:
             engines.append(("hashlink", [reference, str(p)]))
@@ -1399,13 +1404,22 @@ def main(argv=None) -> int:
                 continue
             stage_hdlls(p.parent, hdlls)
 
-            try:
-                engines = [(f"ash:{m}", engine_argv(ash, p, m, args.timeout))
-                           for m in modes]
-            except RuntimeError as e:
-                report["results"].append({"suite": name, "program": prog,
-                                          "engine": "-", "status": "SKIP",
-                                          "detail": str(e)})
+            # One engine at a time, so a build that fails -- the wasm module
+            # needing a runtime object the machine does not have -- skips
+            # THAT engine's row and nothing else. Building the list in one
+            # comprehension made the first failure the whole program's
+            # verdict: a single wasm toolchain problem in CI once turned
+            # every interpreter and AOT row into SKIP and blanked the site.
+            engines = []
+            for m in modes:
+                try:
+                    engines.append((f"ash:{m}", engine_argv(ash, p, m, args.timeout)))
+                except RuntimeError as e:
+                    print(f"   SKIP ash:{m}: {str(e)[:160]}")
+                    report["results"].append({"suite": name, "program": prog,
+                                              "engine": f"ash:{m}", "status": "SKIP",
+                                              "detail": str(e)})
+            if not engines and not args.reference:
                 continue
             if args.reference:
                 engines.append(("hashlink", [args.reference, str(p)]))

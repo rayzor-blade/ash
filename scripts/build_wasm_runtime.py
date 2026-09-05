@@ -110,7 +110,11 @@ def main() -> int:
                  "--crate-type", "staticlib"]
     if args.profile == "release":
         cargo_cmd.append("--release")
-    sh(cargo_cmd, cwd=REPO)
+    # std/build.rs runs bindgen against the WASI libc headers and reads the
+    # sysroot from this variable; the linker below needs the same directory's
+    # libraries. One discovery, handed to both.
+    env = dict(os.environ, WASI_SYSROOT=str(sysroot))
+    sh(cargo_cmd, cwd=REPO, env=env)
 
     archive = REPO / "target" / TRIPLE / args.profile / "libash_std.a"
     if not archive.is_file():

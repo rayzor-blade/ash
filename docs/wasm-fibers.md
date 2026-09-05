@@ -408,3 +408,66 @@ returns, the prologue that restores and sets the resume value, and the
 scheduler of §6 step 4. The jump machinery those drive is now built, and so is
 the evidence that it costs about a fifth of a module rather than the 3.5x §8
 budgeted for.
+
+## 14. A fiber that suspends and comes back
+
+The state machine is written and it works. Three `i32` globals, exported so the
+host can drive them, do what Asyncify needs five exported functions for —
+`ash_fiber_state` (0 running, 1 unwinding, 2 rewinding, Asyncify's encoding
+kept so the runtime side reads against a published one), `ash_fiber_data`
+pointing at the side stack's two-word header, and `ash_fiber_resume` carrying
+the ordinal a rewind is heading for.
+
+- **Prologue.** If rewinding, take this frame's record back off the side stack,
+  set the resume value from the ordinal it holds, and restore every local. The
+  ladders of §13 do the rest.
+- **Epilogue**, after every call that could suspend: if unwinding, push this
+  frame's record and return. The bounds check is in the push, so an overflow is
+  reported by the frame that overran, which Binaryen's own version leaves as a
+  TODO.
+- Records come off in the reverse of the order they went on, which is what
+  lines the outermost frame — saved last, restored first — up with the order a
+  rewind re-enters frames in.
+
+§7 named "a spill set that disagrees with itself" as the failure nothing would
+report. It cannot happen here by construction: prologue and epilogue read one
+list of locals in index order, and the scratch pointer is the only local not in
+it, because restoring it would overwrite the pointer being read through.
+
+**The exnref assumption does not hold, and it is cheap that it doesn't.** §3
+took it from LLVM that a reference is never live across a call. Measured by
+refusing any function holding one: 3 in `t.wasm`, **21 in `threads.wasm` — its
+21 EH bodies exactly**. The check is on presence rather than liveness, so a
+liveness pass would likely recover most of them, but at these numbers refusing
+is affordable. What is *not* affordable is refusing silently: a function the
+analysis says can be on the stack at a suspend does not become safe by going
+uninstrumented, so it traps instead, in the frame that would have been wrong.
+That is 37 places in `t.wasm` and 445 in `threads.wasm` — §6's assert mode,
+shipped with the transform rather than after the first mysterious answer.
+
+| | `t.wasm` | `threads.wasm` |
+| --- | --- | --- |
+| functions instrumented | 1,622 | 2,596 |
+| refused (a reference-typed value) | 3 | 21 |
+| traps in refused-but-reachable functions | 37 | 445 |
+| unwind checks | 9,764 | 19,192 |
+| side-stack bytes per frame, summed | 77,496 | 132,088 (≈51 each) |
+| module size | **+98.1%** | **+172.9%** |
+
+Against §8's budget of a 3.5x code section, that is the good end of the range,
+and it is now a measurement rather than an estimate.
+
+The test that means something runs it: a fiber suspends inside a nested call,
+both frames save themselves and return, the host sets the state to rewinding
+and calls again, and both frames come back exactly where they stopped — past
+the calls they had already made and not past the ones they had not. On the
+linked modules the transform validates, and with the state left at zero
+`t.wasm` prints exactly what it printed.
+
+**Where the size goes, and the obvious next cut.** The epilogue saves every
+local at every call site, so its cost is (call sites x locals). A shared
+unwind block per function — each call site storing its ordinal and branching to
+one copy of the save-and-return sequence — replaces about `3L + 10`
+instructions per site with four, and liveness would cut what is saved at all.
+Neither is needed for correctness, and both are worth more than any other
+optimisation available here.

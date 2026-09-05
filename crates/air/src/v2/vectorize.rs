@@ -641,7 +641,10 @@ fn classify_instr(
         | Instr::Param { .. }
         | Instr::NullCheck { .. }
         | Instr::Assert
-        | Instr::Prefetch { .. } => {}
+        | Instr::Prefetch { .. }
+        // A position marker names the line the body runs at; widened or
+        // not, it is the same line.
+        | Instr::Pos { .. } => {}
 
         // Numeric conversions are elementwise, and `UnsafeCast` is a pointer
         // reinterpretation the machine does not execute at all. The rest —

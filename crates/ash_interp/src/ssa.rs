@@ -425,6 +425,7 @@ fn unsupported_instr(i: &Instr) -> Option<&'static str> {
         | Instr::CellRef { .. }
         | Instr::Assert
         | Instr::Prefetch { .. }
+        | Instr::Pos { .. }
         | Instr::Asm { .. } => None,
     }
 }

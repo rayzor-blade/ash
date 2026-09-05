@@ -483,11 +483,14 @@ impl<'ctx> JITModule<'ctx> {
             // function back into HashLink opcodes here made the old bytecode
             // translator the real backend and discarded AIR's phis, cells,
             // resolved fields and effects before code generation.
+            // A shadow-stack target isolates callees too: Haxe's stack
+            // arithmetic (`__skipStack`, the `sub(1)` in callStack) counts
+            // one frame per Haxe function, and an inlined callee has none.
             let air = crate::llvm::air::prepare_llvm(
                 &self.bytecode,
                 &f,
                 self.hot_reload,
-                self.lazy_compilation,
+                self.lazy_compilation || self.shadow_frames(),
             )
             .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
 
@@ -1715,6 +1718,48 @@ impl<'ctx> JITModule<'ctx> {
         Ok((ptrs, types))
     }
 
+    /// Whether the bodies being emitted keep the runtime's shadow call stack
+    /// (`TargetAbi::shadow_call_stack`). Only an ahead-of-time target can:
+    /// the JIT's frames are machine frames the runtime walks.
+    fn shadow_frames(&self) -> bool {
+        self.aot && self.target_abi.shadow_call_stack
+    }
+
+    /// Open the function's shadow frame: `hlp_shadow_push(findex)` returns
+    /// the frame's position slot, and every `Pos` in the body stores into it.
+    ///
+    /// The slot is memory an external call handed back, so LLVM keeps every
+    /// store that a later call or the return could observe and may drop only
+    /// one that another position overwrites first -- exactly the ones no
+    /// trace can see. It must NOT be marked `noalias`: dead-store elimination
+    /// treats a non-escaping `noalias` allocation as private and would delete
+    /// every position store as unread.
+    fn emit_shadow_push(&self, findex: usize) -> Result<PointerValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i32_type = self.context.i32_type();
+        let push =
+            self.declare_native("hlp_shadow_push", &[i32_type.into()], Some(ptr_type.into()));
+        let slot = self
+            .builder
+            .build_call(
+                push,
+                &[i32_type.const_int(findex as u64, false).into()],
+                "shadow_frame",
+            )?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_shadow_push returned void"))?
+            .into_pointer_value();
+        Ok(slot)
+    }
+
+    /// Close the frame `emit_shadow_push` opened.
+    fn emit_shadow_pop(&self) -> Result<()> {
+        let pop = self.declare_native("hlp_shadow_pop", &[], None);
+        self.builder.build_call(pop, &[], "")?;
+        Ok(())
+    }
+
     /// Lower a verified AIR v2 function directly to LLVM.
     ///
     /// Values and pinned cells get distinct stack slots. LLVM's mem2reg pass
@@ -1762,6 +1807,16 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.build_store(registers[slot], init)?;
         }
 
+        // The frame opens once the registers are seeded and before any block
+        // runs; each `Ret` closes it. Throws need nothing here: the runtime
+        // records the depth when a trap is armed and unwinds to it, the way
+        // it restores the GC lock depth.
+        self.shadow_slot = if self.shadow_frames() {
+            Some(self.emit_shadow_push(source.findex as usize)?)
+        } else {
+            None
+        };
+
         let included = vec![true; air.blocks.len()];
         self.emit_air_v2_cfg(
             source,
@@ -1774,6 +1829,7 @@ impl<'ctx> JITModule<'ctx> {
             &included,
             AirBlockId(0),
         )?;
+        self.shadow_slot = None;
         self.audit_register_stores(source.findex as usize, function, &registers, &reg_types);
         Ok(())
     }
@@ -2154,6 +2210,16 @@ impl<'ctx> JITModule<'ctx> {
                         self.translate_opcode(lowering, &set, registers, reg_types, 1, &dummy)?;
                         lowering.ops.clear();
                     }
+                    AirInstr::Pos { file, line } => {
+                        // The frame's position, as the runtime reads it back:
+                        // `(file << 32) | line`. Only a shadow-stack body has a
+                        // slot; lowering emits the marker for no other target.
+                        if let Some(slot) = self.shadow_slot {
+                            let pos = (u64::from(*file) << 32) | u64::from(*line);
+                            self.builder
+                                .build_store(slot, self.context.i64_type().const_int(pos, false))?;
+                        }
+                    }
                     _ => {
                         if let Some(op) = self.air_instr_opcode(instr, cell_base)? {
                             let dummy = [current, next];
@@ -2425,6 +2491,7 @@ impl<'ctx> JITModule<'ctx> {
             // Emitted directly, like Fma: there is no HL opcode to route
             // through, which is the whole reason these exist in the IR.
             AirInstr::Param { .. }
+            | AirInstr::Pos { .. }
             | AirInstr::Fma { .. }
             | AirInstr::VecLoad { .. }
             | AirInstr::VecStore { .. }
@@ -2945,6 +3012,9 @@ impl<'ctx> JITModule<'ctx> {
                     .get_insert_block()
                     .and_then(|b| b.get_parent())
                     .ok_or_else(|| anyhow!("AIR terminator has no parent function"))?;
+                if self.shadow_slot.is_some() {
+                    self.emit_shadow_pop()?;
+                }
                 match function.get_type().get_return_type() {
                     None => {
                         self.builder.build_return(None)?;

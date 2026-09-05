@@ -315,6 +315,12 @@ fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     // exists, and this one lives until the process ends.
     let context: &'static inkwell::context::Context =
         Box::leak(Box::new(inkwell::context::Context::create()));
+    // Decided before anything is lowered: a function's AIR is built once,
+    // through the shared cache, and on a target whose frames record their own
+    // positions every body needs the markers from its first lowering.
+    ash_core::air_pipeline::set_shadow_frames(
+        ash_core::target_abi::TargetAbi::for_triple(&triple)?.shadow_call_stack,
+    );
     let mut jit = ash_core::llvm::module::JITModule::new_aot_for_target(context, file, &triple)?;
 
     let findexes: Vec<usize> = jit

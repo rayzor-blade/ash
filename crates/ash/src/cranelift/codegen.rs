@@ -151,7 +151,8 @@ fn instr_reject(i: &Instr) -> Option<&'static str> {
         | Instr::GetTID { .. }
         | Instr::RefOffset { .. }
         | Instr::Assert
-        | Instr::Prefetch { .. } => None,
+        | Instr::Prefetch { .. }
+        | Instr::Pos { .. } => None,
 
         Instr::Cast { kind, .. } => match kind {
             CastKind::ToSFloat | CastKind::ToUFloat | CastKind::ToInt | CastKind::UnsafeCast => {
@@ -1755,6 +1756,11 @@ impl AirCodegen<'_, '_> {
             // this `Effect::Pure`, so dropping it changes nothing an observer
             // can see. The interpreter drops it too.
             Instr::Prefetch { .. } => {}
+
+            // A source position for a shadow call stack. This tier keeps
+            // none -- its frames are machine frames the runtime can walk --
+            // and lowering only emits the marker for a target that does.
+            Instr::Pos { .. } => {}
 
             // Haxe uses the non-zero OAsm modes as backend register hints;
             // neither interpreter observes them. Cranelift owns its register

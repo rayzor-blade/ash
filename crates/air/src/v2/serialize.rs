@@ -725,6 +725,9 @@ fn emit_instr(
             }
         }
         Instr::Param { .. } => {}
+        // No opcode: the flat form's positions are the decoder's own debug
+        // table, which every consumer of opcodes already holds.
+        Instr::Pos { .. } => {}
         // Back to the direct native call the bytecode had — the flat form
         // has no intrinsic opcode, the same round-trip Fma takes.
         Instr::Intrinsic { fun, dst, args, .. } => {

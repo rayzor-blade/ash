@@ -164,6 +164,12 @@ pub struct JITModule<'ctx> {
     /// Findex currently being lowered. Stub calls carry this across the Rust
     /// lazy-compilation bridge so logical Haxe stack traces remain intact.
     pub(crate) current_findex: usize,
+    /// The shadow-stack slot of the body being lowered, on a target that
+    /// keeps one (`TargetAbi::shadow_call_stack`): `hlp_shadow_push` hands
+    /// it out at entry, every `Instr::Pos` stores the position into it, and
+    /// each `Ret` pops the frame. `None` on every other target and between
+    /// bodies.
+    pub(crate) shadow_slot: Option<PointerValue<'ctx>>,
 }
 
 /// Per-phase init timing: printed inline when ASH_TIERED_TIMING=1, and always
@@ -378,6 +384,7 @@ impl<'ctx> JITModule<'ctx> {
             aot,
             lazy_compilation: false,
             current_findex: usize::MAX,
+            shadow_slot: None,
         };
 
         module.create_constant_pool_globals();
@@ -809,6 +816,7 @@ impl<'ctx> JITModule<'ctx> {
             aot: false,
             lazy_compilation: false,
             current_findex: usize::MAX,
+            shadow_slot: None,
         };
 
         // NOT the whole pool. Promotion is per function, and both paths that

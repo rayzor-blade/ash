@@ -1203,6 +1203,33 @@ impl<'ctx> JITModule<'ctx> {
                 "",
             )?;
         }
+        // The debug-file table, for a target whose frames record their own
+        // positions: a shadow frame holds (file index, line), and the runtime
+        // needs the names to format a trace. A native binary names its frames
+        // from the machine stack and has no use for the table.
+        if self.target_abi.shadow_call_stack {
+            let files = self.bytecode.debug_files.clone();
+            let mut file_ptrs: Vec<PointerValue<'ctx>> = Vec::with_capacity(files.len());
+            for file in &files {
+                let bytes = self.context.const_string(file.as_bytes(), true);
+                file_ptrs.push(self.intern_global(bytes.as_basic_value_enum(), "ash_dfile"));
+            }
+            let table = self.intern_global(
+                ptr_type.const_array(&file_ptrs).as_basic_value_enum(),
+                "ash_debug_files",
+            );
+            let reg_ty = void_type.fn_type(&[ptr_type.into(), size_type.into()], false);
+            let register = self.aot_symbol("hlp_register_aot_debug_files", reg_ty);
+            self.builder.build_indirect_call(
+                reg_ty,
+                register,
+                &[
+                    table.into(),
+                    size_type.const_int(files.len() as u64, false).into(),
+                ],
+                "",
+            )?;
+        }
 
         // Same policy the interpreter sets, for a binary that has no
         // interpreter to set it: a program built with debug info keeps

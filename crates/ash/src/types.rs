@@ -760,7 +760,7 @@ pub fn function_names(types: &[HLType]) -> std::collections::HashMap<u32, String
             if fid < 0 || findex < 0 {
                 continue;
             }
-            let Some(field) = obj.fields.get(fid as usize) else {
+            let Some(field) = binding_field(types, obj, fid as usize) else {
                 continue;
             };
             if field.name.contains(char::is_whitespace) {
@@ -771,6 +771,28 @@ pub fn function_names(types: &[HLType]) -> std::collections::HashMap<u32, String
         }
     }
     out
+}
+
+/// The field a binding names.
+///
+/// A binding's field index is the one `hl_obj_field_fetch` resolves: it
+/// counts every ancestor's fields first, and the type's own list starts after
+/// them. Every `$Class` type of statics extends `hl.Class`, so indexing the
+/// own list directly named no static method at all -- the whole static
+/// surface of a program, its `main` included, fell through to `#hash`.
+fn binding_field<'a>(
+    types: &'a [HLType],
+    obj: &'a HLTypeObj,
+    fid: usize,
+) -> Option<&'a HLObjField> {
+    let mut inherited = 0usize;
+    let mut parent = obj.super_.as_ref();
+    while let Some(sup) = parent {
+        let sup = types.get(sup.0)?.obj.as_ref()?;
+        inherited += sup.fields.len();
+        parent = sup.super_.as_ref();
+    }
+    obj.fields.get(fid.checked_sub(inherited)?)
 }
 
 /// A durable key for every function, name where there is one.

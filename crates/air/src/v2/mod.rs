@@ -121,7 +121,7 @@ pub use ir::{
     BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, Instr,
     MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,
 };
-pub use lower::{lower, lower_with, ModuleBuilder};
+pub use lower::{lower, lower_with, lower_with_positions, ModuleBuilder};
 pub use module::{
     CalleeBody, ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo, NO_MODULE_INFO,
 };

@@ -170,6 +170,10 @@ pub struct TrapContext {
     /// restores the lock to this depth before longjmp, releasing guards
     /// held by the frames being jumped over (their Drop never runs).
     pub saved_lock_depth: usize,
+    /// Shadow call-stack depth at the setjmp site, restored the same way:
+    /// the frames being jumped over never reach their pop. Always 0 on a
+    /// target that walks its machine stack instead (see `shadow`).
+    pub saved_shadow_depth: usize,
 }
 
 impl Default for TrapContext {
@@ -188,6 +192,7 @@ impl TrapContext {
             exception_value: None,
             caught: false,
             saved_lock_depth: 0,
+            saved_shadow_depth: 0,
         }
     }
 }
@@ -317,7 +322,15 @@ pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
 /// defaults every `haxe.CallStack.exceptionStack()` came back empty -- and
 /// heaps' own error reporter then faulted on the null while printing.
 static AOT_SYMBOLS: std::sync::Mutex<Vec<(usize, &'static str)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(not(target_family = "wasm"))]
 static AOT_SYMBOL_TEXT: std::sync::Mutex<Vec<(usize, &'static [u16])>> = std::sync::Mutex::new(Vec::new());
+/// The same names by position: entry `findex` is that function's name, or
+/// "" where the emitter had none. A shadow frame is keyed by findex rather
+/// than by address, so this is how it is named.
+static AOT_NAMES_BY_FINDEX: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+/// The module's debug-file table, by the index a shadow frame's position
+/// carries; see `hlp_register_aot_debug_files`.
+static AOT_DEBUG_FILES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_register_aot_symbols(
@@ -329,33 +342,291 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
         return;
     }
     let mut table = Vec::with_capacity(count);
+    let mut by_findex = Vec::with_capacity(count);
     for i in 0..count {
         let start = *starts.add(i) as usize;
         let name = *names.add(i);
+        let text: &'static str = if name.is_null() {
+            ""
+        } else {
+            Box::leak(
+                std::ffi::CStr::from_ptr(name)
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_boxed_str(),
+            )
+        };
+        by_findex.push(text);
         if start == 0 || name.is_null() {
             continue;
         }
-        let text: &'static str = Box::leak(
-            std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned().into_boxed_str(),
-        );
         table.push((start, text));
     }
     table.sort_by_key(|(start, _)| *start);
     table.dedup_by_key(|(start, _)| *start);
     *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
+    *AOT_NAMES_BY_FINDEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = by_findex;
+    // A wasm module has no machine stack to walk, so its pair reads the
+    // shadow stack its functions maintain; everywhere else the frame-pointer
+    // walker and the address table do. Neither displaces a pair the JIT
+    // installed first.
+    #[cfg(target_family = "wasm")]
+    let (resolve, capture): (ResolveSymbol, CaptureStack) =
+        (shadow::resolve_symbol, shadow::capture_stack);
+    #[cfg(not(target_family = "wasm"))]
+    let (resolve, capture): (ResolveSymbol, CaptureStack) = (aot_resolve_symbol, aot_capture_stack);
     if RESOLVE_SYMBOL.load(Ordering::Acquire) == 0 {
-        RESOLVE_SYMBOL.store(aot_resolve_symbol as *const () as usize, Ordering::Release);
+        RESOLVE_SYMBOL.store(resolve as usize, Ordering::Release);
     }
     if CAPTURE_STACK.load(Ordering::Acquire) == 0 {
-        CAPTURE_STACK.store(aot_capture_stack as *const () as usize, Ordering::Release);
+        CAPTURE_STACK.store(capture as usize, Ordering::Release);
     }
 }
 
+/// The debug-file table of an ahead-of-time module, registered by the
+/// emitter after its symbols. A shadow frame records `(file, line)` with
+/// `file` an index into this table, which is how HashLink's bytecode itself
+/// spells positions; the emitter only hands the table over for a target whose
+/// frames record positions at all.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_register_aot_debug_files(
+    files: *const *const std::os::raw::c_char,
+    count: usize,
+) {
+    if files.is_null() {
+        return;
+    }
+    let table: Vec<&'static str> = (0..count)
+        .map(|i| {
+            let file = *files.add(i);
+            if file.is_null() {
+                ""
+            } else {
+                Box::leak(
+                    std::ffi::CStr::from_ptr(file)
+                        .to_string_lossy()
+                        .into_owned()
+                        .into_boxed_str(),
+                )
+            }
+        })
+        .collect();
+    *AOT_DEBUG_FILES.lock().unwrap_or_else(|e| e.into_inner()) = table;
+}
+
+/// No shadow stack on a target whose machine stack the runtime can walk: a
+/// trap records depth 0 and unwinding to it is nothing.
+#[cfg(not(target_family = "wasm"))]
+mod shadow {
+    pub fn depth() -> usize {
+        0
+    }
+
+    pub fn unwind_to(_depth: usize) {}
+}
+
+/// The shadow call stack of a WebAssembly module.
+///
+/// A wasm call stack is not addressable: no frame pointer, no return address,
+/// nothing a walker could read. So on that target every compiled Haxe
+/// function opens a frame here at entry (`hlp_shadow_push`), stores its
+/// source position into the frame as it executes (the emitter's `Pos`
+/// markers), and closes it on return (`hlp_shadow_pop`). A throw abandons the
+/// frames between the throw and the catch, so `hlp_setup_trap_jit` records
+/// the depth and `throw_impl` unwinds to it, alongside the GC lock depth.
+///
+/// Fixed capacity and no allocation: a push runs in every prologue, and a
+/// stack this deep is a runaway recursion that fails on its own terms. Past
+/// the capacity a push still counts -- the pops have to balance -- and writes
+/// into a scratch slot; those innermost frames are simply missing from a
+/// trace.
+///
+/// wasm32-wasip1 here is single-threaded, which is what makes one static
+/// stack sound. Fibers would share it and interleave their frames.
+#[cfg(target_family = "wasm")]
+mod shadow {
+    use std::cell::UnsafeCell;
+    use std::collections::BTreeMap;
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    const CAP: usize = 1 << 15;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Frame {
+        /// `(file << 32) | line`, as the emitter stores it; 0 until the
+        /// function reaches its first marker.
+        pos: u64,
+        findex: u32,
+    }
+
+    struct Stack {
+        frames: UnsafeCell<[Frame; CAP]>,
+        depth: UnsafeCell<usize>,
+        scratch: UnsafeCell<u64>,
+    }
+
+    // One thread; see the module docs.
+    unsafe impl Sync for Stack {}
+
+    static STACK: Stack = Stack {
+        frames: UnsafeCell::new([Frame { pos: 0, findex: 0 }; CAP]),
+        depth: UnsafeCell::new(0),
+        scratch: UnsafeCell::new(0),
+    };
+
+    /// Open a frame for `findex`; the returned slot receives its positions.
+    pub unsafe fn push(findex: u32) -> *mut u64 {
+        let depth = &mut *STACK.depth.get();
+        let at = *depth;
+        *depth = at + 1;
+        if at < CAP {
+            let frame = &mut (*STACK.frames.get())[at];
+            *frame = Frame { pos: 0, findex };
+            &mut frame.pos
+        } else {
+            STACK.scratch.get()
+        }
+    }
+
+    /// Close the innermost frame.
+    pub unsafe fn pop() {
+        let depth = &mut *STACK.depth.get();
+        *depth = depth.saturating_sub(1);
+    }
+
+    pub fn depth() -> usize {
+        unsafe { *STACK.depth.get() }
+    }
+
+    /// Drop the frames a longjmp is about to abandon.
+    pub fn unwind_to(depth: usize) {
+        unsafe {
+            let current = &mut *STACK.depth.get();
+            if depth < *current {
+                *current = depth;
+            }
+        }
+    }
+
+    /// What a raw stack entry points at. Haxe holds the entries as opaque
+    /// words and hands them back to `resolve_symbol`; on wasm32 a word is 32
+    /// bits, too small for the frame itself, so each distinct (function,
+    /// position) is leaked once and named by its address.
+    #[repr(C)]
+    struct Symbol {
+        findex: u32,
+        pos: u64,
+    }
+
+    static SYMBOLS: Mutex<BTreeMap<(u32, u64), &'static Symbol>> = Mutex::new(BTreeMap::new());
+    static TEXT: Mutex<BTreeMap<usize, &'static [u16]>> = Mutex::new(BTreeMap::new());
+
+    fn symbol_for(findex: u32, pos: u64) -> *mut c_void {
+        let mut table = SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
+        let symbol = table
+            .entry((findex, pos))
+            .or_insert_with(|| Box::leak(Box::new(Symbol { findex, pos })));
+        *symbol as *const Symbol as *mut c_void
+    }
+
+    /// The `CaptureStack` callback: the frames innermost first, the way the
+    /// machine-stack walkers report them, so `haxe.NativeStackTrace`'s
+    /// arithmetic holds unchanged. With a null `output` it only counts.
+    pub unsafe extern "C" fn capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
+        let depth = depth().min(CAP);
+        if output.is_null() {
+            return depth as i32;
+        }
+        let frames = &*STACK.frames.get();
+        let written = depth.min(capacity.max(0) as usize);
+        for (i, frame) in frames[..depth].iter().rev().take(written).enumerate() {
+            *output.add(i) = symbol_for(frame.findex, frame.pos);
+        }
+        written as i32
+    }
+
+    /// The `ResolveSymbol` callback: `Class.method(file:line)` for a symbol
+    /// from `capture_stack`, the shape `haxe.NativeStackTrace.toHaxe` parses.
+    /// NUL-terminated UTF-16, cached per symbol; the caller reads
+    /// `*buffer_len` code units from the returned pointer.
+    pub unsafe extern "C" fn resolve_symbol(
+        symbol: *mut c_void,
+        _buffer: *mut u8,
+        buffer_len: *mut i32,
+    ) -> *mut u8 {
+        if symbol.is_null() {
+            return std::ptr::null_mut();
+        }
+        let mut cache = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+        let text = *cache.entry(symbol as usize).or_insert_with(|| {
+            let Symbol { findex, pos } = *(symbol as *const Symbol);
+            let mut units: Vec<u16> = super::format_frame(findex, pos).encode_utf16().collect();
+            units.push(0);
+            Box::leak(units.into_boxed_slice())
+        });
+        if !buffer_len.is_null() {
+            *buffer_len = (text.len() - 1) as i32;
+        }
+        text.as_ptr() as *mut u8
+    }
+}
+
+/// Open a shadow frame for `findex`: every compiled prologue of a wasm module
+/// calls this, and stores the function's positions into the slot it returns.
+/// The cfg sits on the export itself so the compiler's symbol-table scanner
+/// (crates/ash/build.rs) leaves it out of a native binary, where it does not
+/// exist.
+#[cfg(target_family = "wasm")]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_shadow_push(findex: u32) -> *mut u64 {
+    shadow::push(findex)
+}
+
+/// Close the innermost shadow frame; every `Ret` of a wasm module calls it.
+#[cfg(target_family = "wasm")]
+#[no_mangle]
+pub unsafe extern "C" fn hlp_shadow_pop() {
+    shadow::pop()
+}
+
+/// The text of one shadow frame, in the shape Haxe's parser expects:
+/// `Class.method(file:line)`, or `fun$<findex>(file:line)` for a closure or
+/// the entrypoint, which it reads as a `LocalFunction`. A frame that never
+/// reached a position marker is named alone, as HashLink names a frame
+/// without debug info.
+#[cfg(target_family = "wasm")]
+fn format_frame(findex: u32, pos: u64) -> String {
+    let names = AOT_NAMES_BY_FINDEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let name = match names.get(findex as usize).copied() {
+        // The emitter's `#<hash>` key marks a function no class declares. A
+        // static's declaring type is the `$Class` object; HashLink names the
+        // frame by the class, so the marker goes.
+        Some(name) if !name.is_empty() && !name.starts_with('#') => {
+            name.strip_prefix('$').unwrap_or(name).to_owned()
+        }
+        _ => format!("fun${findex}"),
+    };
+    drop(names);
+    if pos == 0 {
+        return name;
+    }
+    let (file, line) = ((pos >> 32) as usize, pos as u32);
+    let files = AOT_DEBUG_FILES.lock().unwrap_or_else(|e| e.into_inner());
+    let file = files.get(file).copied().unwrap_or("?");
+    format!("{name}({file}:{line})")
+}
 
 /// The largest a single compiled body is assumed to be, used to bound the
 /// last entry of the table below. Bodies run to a few tens of kilobytes; a
 /// megabyte is generous and keeps a return address in some unrelated library
 /// from being attributed to the last Haxe function in the image.
+#[cfg(not(target_family = "wasm"))]
 const AOT_MAX_BODY_BYTES: usize = 1 << 20;
 
 /// The registered name of the body containing `pc`, by address.
@@ -367,6 +638,7 @@ const AOT_MAX_BODY_BYTES: usize = 1 << 20;
 /// not in `.dynsym`, and glibc's `dladdr` reads nothing else, so on Linux it
 /// names no program frame at all. Asking it first was the bug -- it made the
 /// table reachable only for frames that did not need it.
+#[cfg(not(target_family = "wasm"))]
 fn aot_symbol_for_pc(pc: usize) -> Option<&'static str> {
     let table = AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner());
     if table.is_empty() {
@@ -485,7 +757,7 @@ unsafe fn aot_frame_in_program_uncached(pc: usize) -> bool {
 /// Windows has no `dladdr`. The registered table is still enough to retain
 /// program frames; it just cannot veto a runtime function that the linker
 /// happened to place in a gap between two adjacent program bodies.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_family = "wasm")))]
 unsafe fn aot_frame_in_program(pc: usize) -> bool {
     aot_symbol_for_pc(pc).is_some()
 }
@@ -519,7 +791,7 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
 
 /// The emitter registers every program body and its Haxe name, so platforms
 /// without `dladdr` can still resolve AOT frames directly from that table.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_family = "wasm")))]
 unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
     aot_symbol_for_pc(pc).map(str::to_owned)
 }
@@ -528,6 +800,7 @@ unsafe fn aot_symbol_via_dladdr(pc: usize) -> Option<String> {
 /// produces keeps a frame pointer, and so does the runtime; the walk stops at
 /// the first frame that does not (the C entry), or at anything that fails a
 /// sanity check. With a null `output` it only counts, as the JIT walker does.
+#[cfg(not(target_family = "wasm"))]
 unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) -> i32 {
     let mut fp: usize;
     #[cfg(target_arch = "aarch64")]
@@ -572,6 +845,7 @@ unsafe extern "C" fn aot_capture_stack(output: *mut *mut c_void, capacity: i32) 
 /// its name as a NUL-terminated UTF-16 string, cached per address: the
 /// JIT's resolver returns a pointer into text it owns, and the caller reads
 /// `*buffer_len` code units from it.
+#[cfg(not(target_family = "wasm"))]
 unsafe extern "C" fn aot_resolve_symbol(
     symbol: *mut c_void,
     _buffer: *mut u8,
@@ -787,7 +1061,7 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     let mut buf_copy: hl::jmp_buf = mem::zeroed();
     // Read and pop the trap chain without the GC lock: it is this thread's
     // state, and a longjmp cannot leave the thread that set it up.
-    let saved_lock_depth = crate::gc::with_exc(|st| {
+    let (saved_lock_depth, saved_shadow_depth) = crate::gc::with_exc(|st| {
         let current = st.current_trap;
         if throw_trace_enabled() {
             let prev = if current.is_null() {
@@ -801,6 +1075,7 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
             // JIT path: store exception, pop trap, longjmp back to setjmp site
             st.exc_value = v;
             let depth = (*current).saved_lock_depth;
+            let shadow_depth = (*current).saved_shadow_depth;
             // Copy jmp_buf to stack BEFORE retiring the TrapContext — longjmp
             // reads from it, and a retired context may be handed straight back
             // out by the next setup_trap.
@@ -812,7 +1087,7 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
             st.current_trap = (*current).prev;
             (*current).exception_value = None;
             retire_trap(st, current);
-            depth
+            (depth, shadow_depth)
         } else {
             // No active setjmp trap: this is an uncaught exception. Say WHAT
             // was thrown before dying — the value is right here, and "kind=8
@@ -829,6 +1104,8 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     // any GcGuards they hold never run Drop. Restore the lock depth recorded
     // at trap setup (= the depth held at the setjmp site).
     crate::gc::gc_lock_unwind_to(saved_lock_depth);
+    // The same frames never reach their shadow-stack pop either.
+    shadow::unwind_to(saved_shadow_depth);
     // darwin and glibc export `_longjmp` (the no-signal-mask variant); MSVC's
     // setjmp.h declares only `longjmp`, so the generated bindings differ by
     // exactly this underscore per platform. Windows longjmp never touches
@@ -930,6 +1207,7 @@ pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     let trap = setup_trap();
     (*trap).has_jmpbuf = true;
     (*trap).saved_lock_depth = outer_depth;
+    (*trap).saved_shadow_depth = shadow::depth();
     (*trap).buf.as_mut_ptr().cast()
 }
 

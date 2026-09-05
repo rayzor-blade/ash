@@ -13,7 +13,7 @@
 
 use super::analysis::{read_class, write_class, AliasClass, CfgInfo, LoopForest};
 use super::ir::*;
-use super::lower::{lower, lower_with, ModuleBuilder};
+use super::lower::{lower, lower_with, lower_with_positions, ModuleBuilder};
 use super::module::{
     CalleeBody, ModuleInfo, ModuleTables, NativeImport, NativeTable, NoModuleInfo,
 };
@@ -611,6 +611,67 @@ fn lower_straight_line_shape() {
     for v in &f.values {
         assert_eq!(v.ty, t(0));
     }
+}
+
+#[test]
+fn lower_positions_mark_blocks_and_line_changes() {
+    // One (file, line) pair per op, the decoder's flat layout. The diamond:
+    // op0 JTrue | op1 Int, op2 JAlways | op3 Int | op4 Ret -- four blocks,
+    // the second spanning two ops on one line.
+    let (ops, tys) = fix_diamond();
+    let debug = [0, 10, 0, 11, 0, 11, 0, 12, 0, 13];
+    let f = lower_with_positions(&ops, &tys, &NoModuleInfo, Some(&debug)).unwrap();
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+    assert!(
+        f.blocks[0].instrs.iter().all(|i| !matches!(i, Instr::Pos { .. })),
+        "the synthetic entry emits no code and carries no position"
+    );
+    let firsts: Vec<(u32, u32)> = f.blocks[1..]
+        .iter()
+        .map(|b| match b.instrs.first() {
+            Some(Instr::Pos { file, line }) => (*file, *line),
+            other => panic!("block starts with {other:?}, not a Pos"),
+        })
+        .collect();
+    assert_eq!(firsts, vec![(0, 10), (0, 11), (0, 12), (0, 13)]);
+    // Two ops on one line share one marker.
+    assert_eq!(
+        f.blocks[2]
+            .instrs
+            .iter()
+            .filter(|i| matches!(i, Instr::Pos { .. }))
+            .count(),
+        1
+    );
+
+    // A line change inside a block gets its own marker, right before the
+    // first op at the new line.
+    let (ops, tys) = fix_straight_line();
+    let debug = [0, 1, 0, 1, 0, 2, 0, 2];
+    let f = lower_with_positions(&ops, &tys, &NoModuleInfo, Some(&debug)).unwrap();
+    verify(&f).unwrap();
+    let shape: Vec<String> = f.blocks[1]
+        .instrs
+        .iter()
+        .map(|i| match i {
+            Instr::Pos { file, line } => format!("pos {file}:{line}"),
+            Instr::Int { .. } => "int".into(),
+            Instr::BinOp { .. } => "add".into(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(shape, ["pos 0:1", "int", "int", "pos 0:2", "add"]);
+    // Positions are not opcodes: the flat form comes back without them.
+    let out = serialize(&f).unwrap();
+    assert_eq!(ops_text(&out.ops), ops_text(&ops));
+
+    // Without a table, no markers at all.
+    let f = lower_with_positions(&ops, &tys, &NoModuleInfo, None).unwrap();
+    assert!(f
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .all(|i| !matches!(i, Instr::Pos { .. })));
 }
 
 #[test]

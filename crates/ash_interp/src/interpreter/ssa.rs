@@ -1176,7 +1176,10 @@ impl HLInterpreter {
                     stack,
                 }));
             }
-            I::Prefetch { .. } | I::Asm { .. } => {}
+            // A position marker for a shadow call stack the interpreter does
+            // not keep: its frames are its own, and lowering emits the marker
+            // only for a target whose frames record positions.
+            I::Prefetch { .. } | I::Asm { .. } | I::Pos { .. } => {}
         }
 
         Ok(None)

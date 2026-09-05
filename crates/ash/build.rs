@@ -89,7 +89,7 @@ fn generate_hl_bindings(out_dir: &Path) {
 fn generate_std_symbol_table(out_dir: &Path) {
     let std_src = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../std/src");
 
-    // build.rs cannot ask rustc whether a cfg holds, but the four predicates
+    // build.rs cannot ask rustc whether a cfg holds, but the five predicates
     // that actually guard an export are all decidable from the target.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_family = env::var("CARGO_CFG_TARGET_FAMILY").unwrap_or_default();
@@ -107,6 +107,11 @@ fn generate_std_symbol_table(out_dir: &Path) {
         }
         if let Some(v) = p.strip_prefix("target_os") {
             return v.trim_start_matches([' ', '=']).trim().trim_matches('"') == target_os;
+        }
+        // The wasm module's shadow call stack exports exist only there.
+        if let Some(v) = p.strip_prefix("target_family") {
+            let want = v.trim_start_matches([' ', '=']).trim().trim_matches('"');
+            return target_family.split(',').any(|f| f == want);
         }
         // An unrecognized guard is not silently dropped: including the symbol
         // makes the link fail loudly, which is the outcome that gets noticed.

@@ -275,6 +275,20 @@ pub enum Instr {
         dst: ValueId,
         reg: u32,
     },
+    /// Source position of the ops that follow: `file` indexes the module's
+    /// debug-file table, `line` is 1-based. Lowering emits one before the
+    /// first op of every block and wherever the position changes, and only
+    /// when the embedder asked for positions.
+    ///
+    /// It defines nothing and reads nothing, yet it is observable: a backend
+    /// keeping a shadow call stack stores it into the frame's slot so a trace
+    /// can name the line that was executing. It is therefore
+    /// [`Effect::WriteMem`] -- never dead, never hoisted, never reordered
+    /// against the calls and throws whose traces read it.
+    Pos {
+        file: u32,
+        line: u32,
+    },
     /// `dst = src` (HL `Mov`).
     Copy {
         dst: ValueId,
@@ -656,6 +670,7 @@ impl Instr {
             | Instr::CellDecr { .. }
             | Instr::Assert
             | Instr::Prefetch { .. }
+            | Instr::Pos { .. }
             | Instr::Asm { .. } => None,
         }
     }
@@ -681,6 +696,7 @@ impl Instr {
             | Instr::CellDecr { .. }
             | Instr::CellRef { .. }
             | Instr::Assert
+            | Instr::Pos { .. }
             | Instr::Asm { .. } => vec![],
             Instr::Copy { src, .. }
             | Instr::UnOp { src, .. }
@@ -796,7 +812,10 @@ impl Instr {
             | Instr::SetEnumField { .. }
             | Instr::CellSet { .. }
             | Instr::CellIncr { .. }
-            | Instr::CellDecr { .. } => Effect::WriteMem,
+            | Instr::CellDecr { .. }
+            // No HL memory is touched, but the position is what a backend
+            // writes to its shadow frame; see the variant.
+            | Instr::Pos { .. } => Effect::WriteMem,
             Instr::NullCheck { .. }
             | Instr::DynGet { .. }
             | Instr::DynSet { .. }
@@ -851,6 +870,7 @@ impl Instr {
             | Instr::CellDecr { .. }
             | Instr::CellRef { .. }
             | Instr::Assert
+            | Instr::Pos { .. }
             | Instr::Asm { .. } => {}
             Instr::Copy { src, .. }
             | Instr::UnOp { src, .. }
@@ -990,6 +1010,7 @@ impl Instr {
             | Instr::CellDecr { .. }
             | Instr::Assert
             | Instr::Prefetch { .. }
+            | Instr::Pos { .. }
             | Instr::Asm { .. } => {}
         }
     }

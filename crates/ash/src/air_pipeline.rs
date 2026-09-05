@@ -34,8 +34,8 @@ use std::panic::{self, AssertUnwindSafe};
 
 use air::v2::module::{CalleeBody, ModuleInfo, NativeImport};
 use air::v2::{
-    lower_with, serialize, verify, Function, OptLevel, PassManager, PassOptions, PassReport,
-    Serialized, TypeRef,
+    lower_with_positions, serialize, verify, Function, OptLevel, PassManager, PassOptions,
+    PassReport, Serialized, TypeRef,
 };
 
 use crate::bytecode::DecodedBytecode;
@@ -411,6 +411,30 @@ pub fn air_enabled() -> bool {
             true
         }
     })
+}
+
+/// Whether lowering records source positions for a shadow call stack.
+///
+/// Set once by the AOT driver from the target it is building for: a
+/// WebAssembly module has no machine stack the runtime could walk, so each
+/// of its frames records its own position (`TargetAbi::shadow_call_stack`).
+/// Process-global like the level, because every lowering in a build is for
+/// that one target, and a JIT or interpreter process -- which never sets it
+/// -- keeps producing AIR without markers.
+static SHADOW_FRAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_shadow_frames(on: bool) {
+    SHADOW_FRAMES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn shadow_frames() -> bool {
+    SHADOW_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The per-op positions `f` lowers with: its debug table when this process
+/// builds for a shadow-stack target, nothing otherwise.
+fn positions_of(f: &HLFunction) -> Option<&[i32]> {
+    shadow_frames().then(|| f.debug.as_slice())
 }
 
 /// The one optimization level, from `ASH_AIR_LEVEL`.
@@ -854,8 +878,11 @@ pub fn optimize_full(
         };
     }
 
-    let mut ir = stage!(Stage::Lower, lower_with(&f.ops, &reg_types_of(f), m))
-        .with_findex(f.findex as usize);
+    let mut ir = stage!(
+        Stage::Lower,
+        lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f))
+    )
+    .with_findex(f.findex as usize);
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
@@ -905,8 +932,11 @@ pub fn prepare_ir(
         };
     }
 
-    let mut ir = stage!(Stage::Lower, lower_with(&f.ops, &reg_types_of(f), m))
-        .with_findex(f.findex as usize);
+    let mut ir = stage!(
+        Stage::Lower,
+        lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f))
+    )
+    .with_findex(f.findex as usize);
 
     let pm = PassManager::with_module(level, m).with_options(*opts);
     let report = stage!(Stage::Optimize, pm.run(&mut ir));
@@ -1056,7 +1086,8 @@ pub fn trip(m: &AshModule, f: &HLFunction, level: OptLevel, opts: &PassOptions) 
     };
 
     // 1. lower
-    let lowered = match guard(|| lower_with(&f.ops, &reg_types_of(f), m)) {
+    let lowered = match guard(|| lower_with_positions(&f.ops, &reg_types_of(f), m, positions_of(f)))
+    {
         Ok(Ok(ir)) => ir.with_findex(f.findex as usize),
         Ok(Err(e)) => {
             t.failure = Some(mk(Stage::Lower, format!("{e:#}"), false));

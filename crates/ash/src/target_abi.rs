@@ -29,6 +29,15 @@ pub struct TargetAbi {
     /// only -- so generated code must reach such a word through a pointer the
     /// module's own initializer fills.
     pub direct_data_relocations: bool,
+    /// Whether compiled functions keep the runtime's shadow call stack.
+    ///
+    /// A native frame has a frame pointer and a return address, so the
+    /// runtime walks the machine stack to name the frames of a trace and
+    /// `dladdr` or the registered table names each one. WebAssembly's call
+    /// stack is not addressable at all: no walker can see it, so every Haxe
+    /// function instead pushes a frame at entry, records its source position
+    /// as it goes, and pops on return, and the runtime reads that.
+    pub shadow_call_stack: bool,
 }
 
 impl TargetAbi {
@@ -60,6 +69,7 @@ impl TargetAbi {
             sjlj_eh: !wasm,
             native_dynamic_loading: !wasm,
             direct_data_relocations: !wasm,
+            shadow_call_stack: wasm,
         })
     }
 

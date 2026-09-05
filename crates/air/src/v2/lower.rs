@@ -54,6 +54,24 @@ pub fn lower_with(
     reg_types: &[TypeRef],
     info: &dyn ModuleInfo,
 ) -> Result<Function> {
+    lower_with_positions(ops, reg_types, info, None)
+}
+
+/// [`lower_with`], also recording source positions.
+///
+/// `debug` is the decoder's per-op position table -- a flat `(file, line)`
+/// pair per op, HashLink's own debug layout. When it is given, the lowering
+/// emits an [`Instr::Pos`] before the first op of every block and at each
+/// change of position within one, so every instruction between two markers
+/// executes at the position of the first. That is what a backend keeping a
+/// shadow call stack stores into its frame. `None` lowers without markers,
+/// which is what every consumer with no frame to fill asks for.
+pub fn lower_with_positions(
+    ops: &[Opcode],
+    reg_types: &[TypeRef],
+    info: &dyn ModuleInfo,
+    debug: Option<&[i32]>,
+) -> Result<Function> {
     if ops.is_empty() {
         bail!("cannot lower an empty function");
     }
@@ -502,6 +520,7 @@ pub fn lower_with(
                 &construct_of,
                 &endtrap_cell,
                 &blk_of,
+                debug,
                 &mut func,
                 &mut stacks,
                 &mut instrs,
@@ -717,6 +736,7 @@ fn convert_ops(
     construct_of: &HashMap<usize, usize>,
     endtrap_cell: &HashMap<usize, CellId>,
     blk_of: &dyn Fn(usize) -> Result<BlockId>,
+    debug: Option<&[i32]>,
     func: &mut Function,
     stacks: &mut [Vec<ValueId>],
     instrs: &mut Vec<Instr>,
@@ -790,11 +810,30 @@ fn convert_ops(
         }};
     }
 
+    // Positions, when asked for: a `Pos` before the block's first op and one
+    // at every change, so the instructions between two markers share the
+    // position of the first. The terminator gets its own -- a `throw` is
+    // named by its line, not by the line of whatever preceded it.
+    let pos_of = |i: usize| -> Option<(u32, u32)> {
+        let d = debug?;
+        let (file, line) = (*d.get(2 * i)?, *d.get(2 * i + 1)?);
+        // The decoder starts with no current file, so an op before the first
+        // file marker has no position.
+        (file >= 0).then(|| (file as u32, line.max(0) as u32))
+    };
+    let mut last_pos: Option<(u32, u32)> = None;
+
     // Index loop kept: the body re-reads `ops[i]` in nested matches and uses
     // `i` for jump-target arithmetic; an enumerate rewrite would obscure both.
     #[allow(clippy::needless_range_loop)]
     for i in start..=end {
         let is_last = i == end;
+        if let Some((file, line)) = pos_of(i) {
+            if last_pos != Some((file, line)) {
+                instrs.push(Instr::Pos { file, line });
+                last_pos = Some((file, line));
+            }
+        }
         match &ops[i] {
             // ---- terminators (always last op of a block) ----
             Opcode::JAlways { offset } => {

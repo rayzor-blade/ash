@@ -6,7 +6,10 @@ edition = "2021"
 [dependencies]
 anyhow = { workspace = true }
 wasmparser = "0.258"
-wasm-encoder = "0.258"
+# The `wasmparser` feature is what brings in `reencode`, the bridge that turns
+# a decoded operator back into an encodable one. Named explicitly rather than
+# left to workspace feature unification, so the crate still builds alone.
+wasm-encoder = { version = "0.258", features = ["wasmparser"] }
 
 [lints]
 workspace = true

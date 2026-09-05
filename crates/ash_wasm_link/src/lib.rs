@@ -45,6 +45,7 @@
 
 use anyhow::Result;
 
+pub mod body;
 pub mod link;
 pub mod object;
 

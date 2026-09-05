@@ -1726,6 +1726,20 @@ mod tests {
             )
             .expect("rec");
         linker
+            .func_wrap(
+                "t",
+                "state",
+                |mut caller: wasmtime::Caller<Vec<i32>>| -> i32 {
+                    match caller.get_export("ash_fiber_state") {
+                        Some(wasmtime::Extern::Global(g)) => {
+                            g.get(&mut caller).i32().expect("an i32 state")
+                        }
+                        _ => panic!("no state global"),
+                    }
+                },
+            )
+            .expect("state");
+        linker
             .func_wrap("t", "yield", |mut caller: wasmtime::Caller<Vec<i32>>| {
                 let state = match caller.get_export("ash_fiber_state") {
                     Some(wasmtime::Extern::Global(g)) => g,
@@ -1862,6 +1876,20 @@ mod tests {
                 },
             )
             .expect("rec");
+        linker
+            .func_wrap(
+                "t",
+                "state",
+                |mut caller: wasmtime::Caller<Vec<i32>>| -> i32 {
+                    match caller.get_export("ash_fiber_state") {
+                        Some(wasmtime::Extern::Global(g)) => {
+                            g.get(&mut caller).i32().expect("an i32 state")
+                        }
+                        _ => panic!("no state global"),
+                    }
+                },
+            )
+            .expect("state");
         linker
             .func_wrap("t", "yield", |mut caller: wasmtime::Caller<Vec<i32>>| {
                 let state = match caller.get_export("ash_fiber_state") {
@@ -2228,6 +2256,144 @@ mod tests {
         assert!(
             err.to_string().contains(GLOBALS[0]),
             "the message must name the export that collides: {err}"
+        );
+    }
+
+    /// A scheduler that is still standing after the fiber under it suspends.
+    ///
+    /// This is the shape ash needs and the reason the transform has barriers.
+    /// An unwind travels exactly as far as the instrumentation does, so a
+    /// function deliberately left out of the suspend set is where it stops:
+    /// the callee returns, the caller's locals were never touched, and it
+    /// carries on. Everything above the scheduler -- the whole M:N scheduler
+    /// in ash_std -- therefore keeps running while one fiber is parked, which
+    /// an unwind that went all the way out to the host would not allow.
+    ///
+    /// `sched` is the barrier. It calls the fiber body, then asks the host
+    /// what the state is and records it, which is how a guest with no way to
+    /// name a linker-added global finds out that its callee suspended.
+    #[test]
+    fn an_unwind_stops_at_a_scheduler_left_uninstrumented() {
+        let mut types = wasm_encoder::TypeSection::new();
+        types.ty().function([], []);
+        types.ty().function([ValType::I32], []);
+        types.ty().function([], [ValType::I32]);
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("t", "yield", wasm_encoder::EntityType::Function(0));
+        imports.import("t", "rec", wasm_encoder::EntityType::Function(1));
+        imports.import("t", "state", wasm_encoder::EntityType::Function(2));
+        let mut funcs = wasm_encoder::FunctionSection::new();
+        funcs.function(0); // 3: body
+        funcs.function(0); // 4: sched
+        funcs.function(0); // 5: f
+        let mut mems = wasm_encoder::MemorySection::new();
+        mems.memory(wasm_encoder::MemoryType {
+            minimum: 1,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        let mut globals = wasm_encoder::GlobalSection::new();
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        let mut exports = wasm_encoder::ExportSection::new();
+        exports.export("f", wasm_encoder::ExportKind::Func, 5);
+        exports.export("memory", wasm_encoder::ExportKind::Memory, 0);
+
+        let mut body = wasm_encoder::Function::new([]);
+        body.instruction(&Instruction::I32Const(1));
+        body.instruction(&Instruction::Call(1));
+        body.instruction(&Instruction::Call(0)); // yield
+        body.instruction(&Instruction::I32Const(2));
+        body.instruction(&Instruction::Call(1));
+        body.instruction(&Instruction::End);
+
+        // The barrier: run the fiber, then report what the state is. On the
+        // pass where the fiber suspends it reaches this line anyway, which is
+        // the whole point.
+        let mut sched = wasm_encoder::Function::new([]);
+        sched.instruction(&Instruction::Call(3)); // body
+        sched.instruction(&Instruction::Call(2)); // state
+        sched.instruction(&Instruction::I32Const(100));
+        sched.instruction(&Instruction::I32Add);
+        sched.instruction(&Instruction::Call(1)); // rec(100 + state)
+        sched.instruction(&Instruction::End);
+
+        let mut f = wasm_encoder::Function::new([]);
+        f.instruction(&Instruction::Call(4));
+        f.instruction(&Instruction::End);
+
+        let mut code = wasm_encoder::CodeSection::new();
+        code.function(&body);
+        code.function(&sched);
+        code.function(&f);
+        let mut m = wasm_encoder::Module::new();
+        m.section(&types);
+        m.section(&imports);
+        m.section(&funcs);
+        m.section(&mems);
+        m.section(&globals);
+        m.section(&exports);
+        m.section(&code);
+
+        let (module, g) = add_exported_i32_globals(
+            &m.finish(),
+            &["ash_fiber_state", "ash_fiber_data", "ash_fiber_resume"],
+        )
+        .expect("state globals");
+        let machine = Machine {
+            state: g[0],
+            data: g[1],
+            resume: g[2],
+        };
+        // The closure from the yield import would sweep in sched and f as
+        // well; barriers stop it at sched, so f is out too.
+        let program = crate::suspend::program_from_module(&module).expect("program");
+        let set = program.suspend_closure_with_barriers(
+            &BTreeSet::from([0]),
+            crate::suspend::Policy::TypedTable,
+            &BTreeSet::from([4]),
+        );
+        assert!(set.contains(&3), "the fiber body is instrumented");
+        assert!(!set.contains(&4), "the scheduler is the barrier");
+        assert!(!set.contains(&5), "and nothing above it is swept in");
+
+        let (out, report) =
+            add_rewind_dispatch(&module, &|i| set.contains(&i), Drive::Full(machine))
+                .expect("transform");
+        assert_eq!(
+            report.traps, 0,
+            "a barrier is deliberate, so it must not trap"
+        );
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&out)
+            .expect("must validate");
+
+        let (mut store, run, state) = drive_fiber(&out);
+        run.call(&mut store, ()).expect("the first call");
+        assert_eq!(
+            store.data(),
+            &vec![1, 101],
+            "the fiber ran to the yield and unwound, and the scheduler was \
+             still there to see the state say so"
+        );
+
+        state
+            .set(&mut store, wasmtime::Val::I32(REWINDING))
+            .expect("start the rewind");
+        run.call(&mut store, ()).expect("the second call");
+        assert_eq!(
+            store.data(),
+            &vec![1, 101, 2, 100],
+            "the fiber resumed after the yield and finished, and the scheduler \
+             saw the state back to running"
         );
     }
 

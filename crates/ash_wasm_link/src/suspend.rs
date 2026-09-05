@@ -89,6 +89,31 @@ impl Program {
     /// block is a property of ash's runtime and not something to infer from a
     /// module.
     pub fn suspend_closure(&self, seeds: &BTreeSet<u32>, policy: Policy) -> BTreeSet<u32> {
+        self.suspend_closure_with_barriers(seeds, policy, &BTreeSet::new())
+    }
+
+    /// The same closure, stopped at `barriers`.
+    ///
+    /// An unwind travels exactly as far as the instrumentation does: a
+    /// function with no epilogue sees the callee return and carries on with
+    /// its own locals intact. A barrier is a function chosen to be that
+    /// edge -- the scheduler, which has to still be running after the fiber
+    /// under it suspends, so it can put the fiber aside and pick another.
+    ///
+    /// So a barrier is not instrumented, and nothing reaching a suspend point
+    /// only through one is either: the unwind never gets that far. That makes
+    /// the set smaller as well as correct, since everything above the
+    /// scheduler drops out of it.
+    ///
+    /// A barrier is a promise the caller makes and this cannot check: that the
+    /// function does not need to resume in the middle. It observes that its
+    /// callee suspended and returns; it must not expect the callee's result.
+    pub fn suspend_closure_with_barriers(
+        &self,
+        seeds: &BTreeSet<u32>,
+        policy: Policy,
+        barriers: &BTreeSet<u32>,
+    ) -> BTreeSet<u32> {
         // Address-taken functions grouped by type: what an indirect call of a
         // given type could reach.
         let mut by_type: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
@@ -98,7 +123,7 @@ impl Program {
             }
         }
 
-        let mut set = seeds.clone();
+        let mut set: BTreeSet<u32> = seeds.difference(barriers).copied().collect();
         loop {
             // Types whose table entries include something that can suspend.
             // Recomputed each round because the set grows.
@@ -114,7 +139,7 @@ impl Program {
             };
             let mut grew = false;
             for (&f, e) in &self.edges {
-                if set.contains(&f) {
+                if set.contains(&f) || barriers.contains(&f) {
                     continue;
                 }
                 let reaches = e.direct.iter().any(|c| set.contains(c))

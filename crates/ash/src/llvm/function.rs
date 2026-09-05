@@ -5176,10 +5176,53 @@ impl<'ctx> JITModule<'ctx> {
                                 .try_as_basic_value()
                                 .basic()
                                 .unwrap()
-                        } else if dst_ty.is_pointer_type() {
-                            // Objects/strings/dynamics ARE their own box; an
-                            // unresolved call's null return is dst's null.
+                        } else if dst_kind == hl_type_kind_HDYN {
+                            // A Dynamic destination: the box is the value.
                             ret_dyn.into()
+                        } else if dst_ty.is_pointer_type() {
+                            // The callee returned ITS declared type, which is
+                            // not necessarily the caller's. `ArrayBytes_Int.map`
+                            // hands back an ArrayDyn where the structural type
+                            // says Array<Int>; storing that pointer as-is read
+                            // the ArrayDyn through ArrayBytes_Int's layout --
+                            // `length` was the inner array's address and
+                            // `bytes` its allowReinterpret flag, 0x1, which is
+                            // the SIGSEGV at 0x1 in unit suite Issue2889. The
+                            // interpreter and the Cranelift tier run the
+                            // runtime's dynamic cast here: it walks the super
+                            // chain and otherwise asks the object's own __cast,
+                            // which for ArrayDyn reinterprets into the typed
+                            // array. Same as this file's CallClosure dynamic
+                            // path. Null passes through as null.
+                            let dyn_type_index = self
+                                .types_
+                                .iter()
+                                .position(|ty| ty.kind == hl_type_kind_HDYN)
+                                .ok_or_else(|| anyhow!("module has no HDYN runtime type"))?;
+                            let dyn_type = self
+                                .get_initialized_type(dyn_type_index)?
+                                .into_pointer_value();
+                            let dst_runtime_type = self
+                                .get_initialized_type(f.regs[dst.0 as usize].0)?
+                                .into_pointer_value();
+                            let result_slot = self
+                                .builder
+                                .build_alloca(ptr_type, "vcall_dyn_result_slot")?;
+                            self.builder.build_store(result_slot, ret_dyn)?;
+                            let castp = self.declare_native(
+                                "hlp_dyn_castp",
+                                &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                                Some(ptr_type.into()),
+                            );
+                            self.builder
+                                .build_call(
+                                    castp,
+                                    &[result_slot.into(), dyn_type.into(), dst_runtime_type.into()],
+                                    "vcall_dyn_result_cast",
+                                )?
+                                .try_as_basic_value()
+                                .basic()
+                                .ok_or_else(|| anyhow!("hlp_dyn_castp returned void"))?
                         } else {
                             // Primitive dst: dyn-cast the box (null -> zero,
                             // numeric coercion when the box holds a wider

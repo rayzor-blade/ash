@@ -1296,45 +1296,10 @@ impl<'ctx> JITModule<'ctx> {
 
         // type index -> the global that names its descriptor
         let mut type_globals: HashMap<usize, PointerValue<'ctx>> = HashMap::new();
-        if std::env::var("ASHDBGOLDTG").is_ok() {
-            for (&raw, &index) in self.c_ptr_to_type_index.iter() {
-                if let Some(global) = self.aot_types.get(&raw) {
-                    type_globals.insert(index, global.as_pointer_value());
-                }
+        for (&index, &raw) in self.type_index_to_c_ptr.iter() {
+            if let Some(global) = self.aot_types.get(&raw) {
+                type_globals.insert(index, global.as_pointer_value());
             }
-        } else {
-            for (&index, &raw) in self.type_index_to_c_ptr.iter() {
-                if let Some(global) = self.aot_types.get(&raw) {
-                    type_globals.insert(index, global.as_pointer_value());
-                }
-            }
-        }
-        if std::env::var("ASHDBGFLIPTG").is_ok() {
-            let mut cands: std::collections::BTreeMap<usize, Vec<usize>> = Default::default();
-            for (&raw, &index) in self.c_ptr_to_type_index.iter() {
-                if self.aot_types.contains_key(&raw) {
-                    cands.entry(index).or_default().push(raw);
-                }
-            }
-            let mut flipped = 0usize;
-            for (index, raws) in cands.iter() {
-                if raws.len() < 2 {
-                    continue;
-                }
-                let canon = self.type_index_to_c_ptr.get(index).copied();
-                if let Some(&other) = raws.iter().find(|&&r| Some(r) != canon) {
-                    if let Some(g) = self.aot_types.get(&other) {
-                        type_globals.insert(*index, g.as_pointer_value());
-                        flipped += 1;
-                        let kind = self.types_.get(*index).map(|t| t.kind).unwrap_or(9999);
-                        eprintln!(
-                            "ASHDBG FLIP index {index} kind {kind} -> {}",
-                            g.get_name().to_string_lossy()
-                        );
-                    }
-                }
-            }
-            eprintln!("ASHDBG flipped={flipped}");
         }
 
         // Everything this can place as data is placed as data; what comes

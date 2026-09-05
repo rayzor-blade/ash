@@ -14,7 +14,7 @@
 //! Binaryen solves this with a separate `Flatten` pass that rewrites the whole
 //! function into a form where nothing is ever on the stack across a call.
 //! That pass aborts on `try_table`, which every module ash links contains, so
-//! it is not available to us (`docs/wasm-fibers.md` §11 has the stack trace).
+//! it is not available to us (`docs/wasm-fibers.md` has the stack trace).
 //!
 //! [`empty_stack_at_calls`] does the same job locally and without a tree. At
 //! each call site the operand stack is popped into locals and pushed straight
@@ -1114,10 +1114,10 @@ pub fn add_exported_i32_globals(bytes: &[u8], names: &[&str]) -> Result<(Vec<u8>
 /// Where one function's frame goes when it is suspended.
 ///
 /// The record starts with the call ordinal so a rewind knows where it was,
-/// then every local in index order. Prologue and epilogue both read this one
-/// list, which is what makes them unable to disagree about the order --
-/// `docs/wasm-fibers.md` §7 names that disagreement as the failure nothing
-/// would report.
+/// then every local in index order. Prologue and epilogue read this one list,
+/// so they cannot disagree about the order: a frame that saved its locals in
+/// one order and restored them in another would resume with them permuted,
+/// in a module that validates and runs.
 struct Saved {
     /// Byte offset of each saved local within the record.
     offsets: Vec<u32>,

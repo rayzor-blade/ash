@@ -3336,9 +3336,9 @@ impl<'ctx> JITModule<'ctx> {
             // lowered, so the descriptor exists; what must not happen is the
             // fallback below, which would fabricate one in this process's heap
             // and bake its address into an object that runs elsewhere.
-            // The canonical descriptor for the index, not whichever one a
-            // scan of the many-to-one map reaches first: that order varies
-            // per process and the pick is baked into the object.
+            // The canonical descriptor for the index. A scan of
+            // `c_ptr_to_type_index` by value answers in hash order, and the
+            // pick is baked into the object.
             let descriptor = self
                 .type_index_to_c_ptr
                 .get(&type_index)

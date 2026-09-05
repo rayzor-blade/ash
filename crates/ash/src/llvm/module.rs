@@ -134,17 +134,13 @@ pub struct JITModule<'ctx> {
     pub(crate) globals_data: Vec<*mut c_void>,
     pub(crate) pending_compilations: Vec<usize>,
     pub(crate) c_ptr_to_type_index: HashMap<usize, usize>,
-    /// The descriptor that stands for a type index, which is the FIRST one
-    /// built for it.
+    /// The descriptor that stands for a type index: the first one built for
+    /// it, since descriptors are built in a deterministic order.
     ///
-    /// `c_ptr_to_type_index` is many-to-one -- two lowering paths each box a
-    /// fresh `hl_type` for the same index -- so asking it which pointer
-    /// represents an index means picking one of several. Doing that by
-    /// searching the map picks in hash order, which varies per process, and
-    /// the choice reaches the emitted object: a constant ends up pointing at
-    /// one of two equivalent descriptors and the bytes differ between builds
-    /// of the same program. First-wins is deterministic because the order
-    /// descriptors are built in is.
+    /// Every reverse lookup goes through this rather than searching
+    /// `c_ptr_to_type_index` by value. A search there answers in hash order,
+    /// and the descriptor it picks reaches the emitted object, so the same
+    /// program would not build to the same bytes twice.
     pub(crate) type_index_to_c_ptr: HashMap<usize, usize>,
     pub(crate) hl_type_struct_type: Option<StructType<'ctx>>,
     /// AOT only: the object-data counterparts of the pointers a JIT bakes in

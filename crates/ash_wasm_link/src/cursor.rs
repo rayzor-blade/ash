@@ -11,7 +11,7 @@
 //! spilled. Binaryen's answer is the `Flatten` pass, which rewrites the
 //! function into a form where nothing is ever on the stack across a call --
 //! and which aborts on `try_table`, so it is not available to us (see
-//! `docs/wasm-fibers.md` §3). `wasmparser`'s [`wasmparser::FuncValidator`]
+//! `docs/wasm-fibers.md`). `wasmparser`'s [`wasmparser::FuncValidator`]
 //! already computes the typed operand stack as a side effect of validating,
 //! on the flat operator stream, with no tree and no special case for EH. Run
 //! it in lockstep and the information Flatten exists to manufacture is simply
@@ -110,10 +110,10 @@ impl Cursor {
     /// Every local of the emitted body, in index order: the parameters, then
     /// the declarations the body had, then anything reserved since.
     ///
-    /// A transform that saves locals to memory needs this, and needs it to be
-    /// the same list in the prologue and the epilogue -- prologue and epilogue
-    /// disagreeing about the order is the failure `docs/wasm-fibers.md` §7
-    /// names as silent, so there is one list and both read it.
+    /// A transform that saves locals to memory needs this, and needs the
+    /// prologue and the epilogue to get the same list: saving in one order
+    /// and restoring in another resumes a frame with its locals permuted, in
+    /// a module that validates and runs.
     pub fn local_types(&self) -> Result<Vec<wasm_encoder::ValType>> {
         use wasm_encoder::reencode::Reencode as _;
         let (params, _) = self.signature()?;

@@ -22,15 +22,16 @@
 //! matches the call site. That is strictly tighter than "any indirect call
 //! suspends" and it is the best this level of the program allows.
 //!
-//! It is also worth almost nothing, which is the finding this module exists to
-//! make reproducible rather than to be rediscovered. Measured on the linked
-//! Haxe threads suite: 2,617 of 3,041 functions under `TypedTable` against
-//! 2,632 under [`Policy::AnyIndirect`] -- half a percentage point -- because
-//! the module has 41 distinct function types for 3,041 functions and 36 of
-//! them already hold a suspending target. The information that would separate
-//! them (a virtual call reaches one vtable slot; a closure call reaches only
-//! what was made into a closure) exists in ash's bytecode and does not survive
-//! into wasm. Narrowing has to happen before this point or not at all.
+//! It is also worth almost nothing, and this module exists so that stays
+//! measurable rather than being rediscovered: `tests/suspend_set.rs` prints
+//! both policies over a real module, and `docs/wasm-fibers.md` records what
+//! they came to. A Haxe program has thousands of functions sharing a few
+//! dozen wasm signatures, so once any suspending function is in the table
+//! under a common signature every `call_indirect` of that signature has to be
+//! assumed to suspend. The information that would separate them -- a virtual
+//! call reaches one vtable slot, a closure call reaches only what was made
+//! into a closure -- exists in ash's bytecode and does not survive into wasm.
+//! Narrowing has to happen before this point or not at all.
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -85,13 +85,11 @@ impl<'ctx> JITModule<'ctx> {
         // and a descriptor fabricated during lowering would be an address in
         // this process that no symbol names. Converting all of them first
         // makes that branch unreachable.
-        // Through the canonical map, not by inverting `c_ptr_to_type_index`.
-        // That one is many-to-one -- two lowering paths each box a descriptor
-        // for the same index -- so inverting it means picking one of several
-        // in hash order, and the winner reaches the object: a constant points
-        // at one of two equivalent descriptors and two builds of the same
-        // program differ. Sorting would not help either, since the keys are
-        // heap addresses.
+        // Through the canonical map. Inverting `c_ptr_to_type_index` instead
+        // would answer in hash order, and the descriptor it picked for an
+        // index reaches the emitted object -- so the same program would not
+        // build to the same bytes twice. Sorting that map does not help: its
+        // keys are heap addresses.
         let cache: Rc<RefCell<HashMap<usize, *mut hl_type>>> =
             Rc::new(RefCell::new(HashMap::new()));
         for (&index, &ptr) in self.type_index_to_c_ptr.iter() {

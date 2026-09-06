@@ -508,25 +508,48 @@ pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte
         SetEnvironmentVariableW(wkey.as_ptr(), wval.as_ptr()) != 0
     }
     // WASI hands the environment to the module at startup and offers no way
-    // to tell the HOST about a change. It does not follow that the module
-    // cannot change its own view of it, and that is all `Sys.putEnv` promises
-    // on any target: set a variable, read it back, see it in
-    // `Sys.environment()`. Refusing here made a program that sets a variable
-    // and reads it get nothing, on wasm alone.
+    // to tell the HOST about a change, so the module's own view is set here
+    // and the host is told separately, through an import ash's runner
+    // supplies. Both halves are needed: the first is what `Sys.putEnv`
+    // promises on any target -- set a variable, read it back, see it in
+    // `Sys.environment()` -- and the second is what makes a child process
+    // started afterwards inherit it, since the child is spawned by the host
+    // and inherits the host's environment rather than the module's.
     #[cfg(not(any(unix, windows)))]
     {
         let Some(key) = pchar_to_os(name) else {
             return false;
         };
+        let bytes = pchar_slice(name);
         match value.is_null() {
-            true => std::env::remove_var(&key),
+            true => {
+                std::env::remove_var(&key);
+                ash_host_put_env(bytes.as_ptr(), bytes.len() as i32, std::ptr::null(), -1);
+            }
             false => match pchar_to_os(value) {
-                Some(v) => std::env::set_var(&key, &v),
+                Some(v) => {
+                    std::env::set_var(&key, &v);
+                    let val = pchar_slice(value);
+                    ash_host_put_env(
+                        bytes.as_ptr(),
+                        bytes.len() as i32,
+                        val.as_ptr(),
+                        val.len() as i32,
+                    );
+                }
                 None => return false,
             },
         }
         true
     }
+}
+
+/// Set or, with a negative `value_len`, clear a variable in the HOST's
+/// environment, so a process the host starts afterwards inherits it.
+#[cfg(target_family = "wasm")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    fn ash_host_put_env(name: *const u8, name_len: i32, value: *const u8, value_len: i32);
 }
 
 /// Flat key/value array: 2*n entries, key at 2i, value at 2i+1.

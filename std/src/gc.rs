@@ -408,7 +408,29 @@ pub(crate) fn gc_register_current_os_thread() {
         high
     };
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    // A thread's stack on WebAssembly is a block its own allocator handed it,
+    // anywhere in linear memory, and no libc call says how big. What is known
+    // is that this runs in the thread's OUTERMOST frame -- it is the first
+    // thing `worker_main` does -- so every root that thread will ever hold is
+    // below this local, and the top is here.
+    //
+    // A megabyte above it is not an over-scan on this target, it is a read
+    // past the end of linear memory. Which traps, and traps inside whatever
+    // allocation triggered the collection: `hlp_alloc_obj`, out of bounds, on
+    // a thread that had done nothing wrong.
+    #[cfg(target_family = "wasm")]
+    let stack_top = {
+        let anchor = 0usize;
+        // This frame's own slots, and nothing above them.
+        (&anchor as *const usize as usize) + mem::size_of::<usize>() * 8
+    };
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        windows,
+        target_family = "wasm"
+    )))]
     let stack_top = {
         let anchor = 0usize;
         (&anchor as *const usize as usize) + 1024 * 1024

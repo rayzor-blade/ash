@@ -117,7 +117,7 @@ impl Spawner {
             start
                 .call_async(&mut store, (id, start_arg))
                 .await
-                .map_err(|e| anyhow!("the thread trapped: {e}"))
+                .map_err(|e| anyhow!("the thread trapped: {e:?}"))
         })
     }
 }

@@ -174,6 +174,30 @@ A library that pulls in all of `std` is around 770 KB, most of it `std` rather
 than the library. `#![no_std]` with the runtime's own allocator is the way to
 keep one small.
 
+## A library whose work is the host's
+
+The examples so far call the runtime: allocate, box, return. A library that
+draws to a canvas or plays a sound calls neither the runtime nor libc -- it
+calls the host, and its primitives are little more than forwarding.
+
+That works, and it is the shape to reach for wherever the capability belongs
+to the embedder rather than to the program. Declare the import in `env` under
+the `ash_host_` prefix:
+
+    extern int ash_host_fiber_state(void);
+
+`env` resolves against the program first and the host second, and a name
+beginning `ash_host_` is never demanded of the program -- it is the same
+namespace the program itself reaches suspension and sockets through. So a
+library like this needs nothing exported on its behalf, and the program's ABI
+does not widen at all.
+
+The cost is that such a library only runs where the host answers those
+imports. That is the honest position for a capability a sandbox does not
+have: the native host and the browser host each supply what they can, and a
+library asking for something neither has fails to load with the name in the
+message.
+
 ## What is not done yet
 
 - **The browser half.** The loader is the native host's. In a page the same

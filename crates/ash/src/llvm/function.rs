@@ -80,6 +80,11 @@ pub enum FuncPtr {
     Native(HLNative),
 }
 
+/// The word a pinned register's address is stored to, so that the address
+/// escapes and the middle end leaves the register in memory. Nothing reads
+/// it; see [`FunctionCompiler::pin_register`].
+const GC_REGISTER_PIN: &str = "ash_gc_register_pin";
+
 impl<'ctx> JITModule<'ctx> {
     /// Tag an access as touching the object field at `field_index` of
     /// `type_index`. Keyed by byte offset — see [`super::tbaa`] for why that
@@ -1715,7 +1720,51 @@ impl<'ctx> JITModule<'ctx> {
             types.push(reg_type);
             ptrs.push(self.builder.build_alloca(reg_type, &format!("reg_{}", i))?);
         }
+        if self.target_abi.pointer_registers_in_memory {
+            for (slot, ty) in types.iter().enumerate() {
+                if ty.is_pointer_type() {
+                    self.pin_register(ptrs[slot])?;
+                }
+            }
+        }
         Ok((ptrs, types))
+    }
+
+    /// Keep one register in memory, where the collector can see what it holds.
+    ///
+    /// These start as `alloca`s on every target, and the middle end promotes
+    /// the ones whose address never escapes -- into machine registers
+    /// natively, which the mutator publishes at a safepoint, and into wasm
+    /// LOCALS on WebAssembly, which live in the engine's frame storage and are
+    /// not addressable by anything. An object whose only reference is there is
+    /// collected while it is in use. Measured: with the middle end off the
+    /// same program is correct, and with it on an array held by a live frame
+    /// comes back holding another object's bytes.
+    ///
+    /// So the address is made to escape, once, and promotion cannot happen.
+    /// A volatile store is what does it: the value stored is the slot's
+    /// address, the store is to a word nothing reads, and volatile is what
+    /// stops the optimiser removing a store whose result is unused. The slot
+    /// then stays on the shadow stack, which is memory, which is scanned.
+    ///
+    /// Only pointer-typed registers. An integer register holds nothing the
+    /// collector needs to find, and pinning it would pay the cost for
+    /// nothing.
+    fn pin_register(&mut self, slot: PointerValue<'ctx>) -> Result<()> {
+        let sink = match self.module.get_global(GC_REGISTER_PIN) {
+            Some(global) => global,
+            None => {
+                let ty = self.context.ptr_type(AddressSpace::default());
+                let global = self.module.add_global(ty, None, GC_REGISTER_PIN);
+                global.set_initializer(&ty.const_null());
+                global
+            }
+        };
+        let store = self.builder.build_store(sink.as_pointer_value(), slot)?;
+        store
+            .set_volatile(true)
+            .map_err(|e| anyhow!("marking the register pin volatile: {e:?}"))?;
+        Ok(())
     }
 
     /// Whether the bodies being emitted keep the runtime's shadow call stack

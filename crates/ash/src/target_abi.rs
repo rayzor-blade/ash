@@ -38,6 +38,22 @@ pub struct TargetAbi {
     /// function instead pushes a frame at entry, records its source position
     /// as it goes, and pops on return, and the runtime reads that.
     pub shadow_call_stack: bool,
+    /// Whether a register that can hold a heap pointer must live in memory.
+    ///
+    /// The collector finds roots by scanning memory it can address. On every
+    /// native target that is enough: a value live across a call is either in
+    /// a callee-saved register, which the mutator publishes at a safepoint,
+    /// or spilled to the machine stack, which is memory. WebAssembly has
+    /// neither. A value LLVM leaves in a wasm local lives in the engine's own
+    /// frame storage, which is not in linear memory and cannot be scanned by
+    /// anything -- so an object whose only reference is there is collected
+    /// while it is still in use.
+    ///
+    /// Keeping those registers in memory costs a load and a store where a
+    /// local would have been free, and it is the difference between a program
+    /// that is correct and one that is correct until it collects at the wrong
+    /// moment.
+    pub pointer_registers_in_memory: bool,
 }
 
 impl TargetAbi {
@@ -70,6 +86,7 @@ impl TargetAbi {
             native_dynamic_loading: !wasm,
             direct_data_relocations: !wasm,
             shadow_call_stack: wasm,
+            pointer_registers_in_memory: wasm,
         })
     }
 

@@ -191,10 +191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ash_hdll_sdl"
-version = "0.1.0"
-
-[[package]]
 name = "ash_hdll_sqlite"
 version = "0.1.0"
 dependencies = [
@@ -2483,6 +2479,10 @@ dependencies = [
  "libc",
  "tikv-jemalloc-sys",
 ]
+
+[[package]]
+name = "tinysdl"
+version = "0.1.0"
 
 [[package]]
 name = "tinystr"

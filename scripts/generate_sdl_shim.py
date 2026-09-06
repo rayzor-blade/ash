@@ -10,7 +10,7 @@ library's own answer they are wrong only if the extractor is.
     ASH_SIGNATURES_LIB=examples/heaps_base2d/bin/sdl.hdll \\
     ASH_SIGNATURES_NAMES=<names.txt> \\
       cargo test -p ash_core --test native_signatures -- --nocapture > sigs.txt
-    scripts/generate_sdl_shim.py sigs.txt > crates/ash_hdll_sdl/src/generated.rs
+    scripts/generate_sdl_shim.py sigs.txt > crates/tinysdl/src/generated.rs
 
 The result is committed, because generating it needs the .hdll and a machine
 that can load it, and neither is true of everyone who builds ash.

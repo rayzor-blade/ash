@@ -59,10 +59,12 @@ SDL_PRIMITIVES = [
 ]
 
 HDLLS = {
-    # Every primitive the Heaps base3d example reaches. See
-    # crates/ash_hdll_sdl and scripts/generate_sdl_shim.py.
+    # Every primitive the Heaps base3d example reaches. The library is named
+    # `sdl` because that is what `@:hlNative("sdl", ...)` asks for and the file
+    # stem is the name; the crate that builds it is `tinysdl`, because it is
+    # not SDL. See crates/tinysdl and scripts/generate_sdl_shim.py.
     "sdl": {
-        "package": "ash_hdll_sdl",
+        "package": "tinysdl",
         "primitives": SDL_PRIMITIVES,
     },
     "sqlite": {

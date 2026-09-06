@@ -1,15 +1,17 @@
-//! The `sdl` HDLL for wasm.
+//! A small `sdl` for wasm -- enough of one for a Heaps program, and no more.
 //!
-//! A demonstration that a Heaps program runs unmodified on ash's VM wherever
-//! a host can answer for a window and a drawing surface: `examples/heaps_base3d`
-//! reaches sixty-seven of `sdl.hdll`'s two hundred and eight primitives, and
-//! those sixty-seven are what is here.
+//! It builds `sdl.wasm`, because `@:hlNative("sdl", ...)` is what a program
+//! asks for and the file stem is the name. The crate is `tinysdl` because
+//! this is not SDL and is not offered as one: it is sixty-seven of
+//! `sdl.hdll`'s two hundred and eight primitives, chosen by tracing what
+//! `examples/heaps_base3d` actually calls, and a program that reaches
+//! anything else will not find it.
 //!
-//! # What this is not
+//! # What it does not do
 //!
-//! Not an SDL, and not a GL. Every function forwards, and the host decides
-//! what a window and a frame actually are -- a canvas and WebGL2 in a page, a
-//! recorder under a headless host. That is what makes it small enough to
+//! Decide anything. Every function forwards, and the host settles what a
+//! window and a frame actually are -- a canvas and WebGL2 in a page, a
+//! recorder under a headless host. That is what keeps it small enough to
 //! generate and small enough to check.
 //!
 //! # How it is built

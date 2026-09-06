@@ -1,10 +1,10 @@
 [package]
-name = "ash_hdll_sdl"
+name = "tinysdl"
 version = "0.1.0"
 edition = "2021"
 authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
-description = "The sdl HDLL for wasm, forwarding to whatever host can draw"
+description = "A small sdl for wasm, forwarding to whatever host can draw"
 publish = false
 
 # Deliberately no dependencies at all, ash_std included: a native library

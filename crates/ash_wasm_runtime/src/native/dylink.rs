@@ -247,17 +247,22 @@ async fn load_one(
             imports.push(Extern::Global(slot));
             continue;
         }
-        // `env` is the program: its memory, its table, and the runtime
-        // functions it exports. Anything else -- WASI, above all -- is the
-        // host's, and the host answers a library exactly as it answers the
-        // program.
+        // `env` is mostly the program: its memory, its table, and the runtime
+        // functions it exports. But a library whose work is the host's --
+        // drawing to a canvas, say -- reaches the host through `env` too, so
+        // a name the program does not export is asked of the host before it
+        // is called missing. Everything outside `env`, WASI above all, is the
+        // host's outright, and the host answers a library exactly as it
+        // answers the program.
         let found = if import.module() == "env" {
             match import.name() {
                 "memory" => Some(Extern::Memory(memory)),
                 "__indirect_function_table" => Some(Extern::Table(table)),
                 "__memory_base" => Some(Extern::Global(memory_base_global)),
                 "__table_base" => Some(Extern::Global(table_base_global)),
-                name => main.get_export(&mut *store, name),
+                name => main
+                    .get_export(&mut *store, name)
+                    .or_else(|| linker.get(&mut *store, "env", name)),
             }
         } else {
             linker.get(&mut *store, import.module(), import.name())

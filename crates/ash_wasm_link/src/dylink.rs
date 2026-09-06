@@ -23,8 +23,8 @@ use wasmparser::{Parser, Payload};
 pub struct SideModule {
     /// Functions it expects the PROGRAM to provide: the ones it calls, from
     /// the `env` module, and the ones whose address it takes, from
-    /// `GOT.func`. Not the ones it imports from WASI -- those are the host's
-    /// to answer -- nor any it defines itself.
+    /// `GOT.func`. Not the ones it defines itself, nor the host's -- WASI,
+    /// and anything named `ash_host_*`.
     pub functions: Vec<String>,
     /// Data symbols it expects to find outside itself, imported as
     /// `GOT.mem.<name>` -- globals holding an address. `errno` is the one
@@ -86,7 +86,15 @@ pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
             Payload::ImportSection(imports) => {
                 for import in imports.into_imports() {
                     let import = import?;
-                    if import.module == "env" && matches!(import.ty, wasmparser::TypeRef::Func(_))
+                    if import.module == "env"
+                        && matches!(import.ty, wasmparser::TypeRef::Func(_))
+                        // `ash_host_*` is the host's namespace, not the
+                        // program's -- it is how the program itself reaches
+                        // suspension and sockets, and a library that draws or
+                        // plays sound reaches the host the same way. Asking
+                        // the program to export one would refuse the link
+                        // over a name the program never had.
+                        && !import.name.starts_with("ash_host_")
                     {
                         out.functions.push(import.name.to_string());
                     }

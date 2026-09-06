@@ -114,6 +114,16 @@ def main() -> int:
     # sysroot from this variable; the linker below needs the same directory's
     # libraries. One discovery, handed to both.
     env = dict(os.environ, WASI_SYSROOT=str(sysroot))
+    # ash_std carries a C dependency on wasm -- SQLite, compiled in because a
+    # module cannot dlopen the HDLL. `cc` needs to be told which compiler and
+    # which sysroot, since neither is the host's. Set only if the caller has
+    # not: a machine with its own wasi-sdk knows better than this guess.
+    cc = shutil.which("clang") or "clang"
+    env.setdefault("CC_wasm32_wasip1", cc)
+    env.setdefault(
+        "CFLAGS_wasm32_wasip1",
+        f"--target=wasm32-wasi --sysroot={sysroot}",
+    )
     sh(cargo_cmd, cwd=REPO, env=env)
 
     archive = REPO / "target" / TRIPLE / args.profile / "libash_std.a"

@@ -41,6 +41,8 @@ pub mod process;
 pub mod random;
 pub mod regexp;
 pub mod socket;
+#[cfg(target_family = "wasm")]
+pub mod sqlite;
 pub mod strings;
 pub mod sys;
 pub mod thread;

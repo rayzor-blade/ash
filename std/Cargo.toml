@@ -60,3 +60,7 @@ git = "https://github.com/darmie/krio"
 # crate's docs for why only fiber suspension crosses the module boundary.
 [target.'cfg(target_family = "wasm")'.dependencies]
 ash_wasm_runtime = { path = "../crates/ash_wasm_runtime", default-features = false, features = ["guest"] }
+# The sqlite HDLL, compiled in. A wasm module cannot dlopen one, and nothing
+# about SQLite needs a shared library -- it builds for wasm32-wasip1
+# unchanged. Only wasm pays for it: everywhere else the real HDLL loads.
+rusqlite = { version = "0.32", features = ["bundled"] }

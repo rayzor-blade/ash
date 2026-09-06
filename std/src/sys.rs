@@ -977,8 +977,8 @@ pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
     }
 }
 
-/// Running a command is the one thing here that leaves the sandbox, so it is
-/// the host's to grant and the host's to refuse.
+// Running a command is the one thing here that leaves the sandbox, so it is
+// the host's to grant and the host's to refuse.
 #[cfg(not(any(unix, windows)))]
 #[link(wasm_import_module = "env")]
 extern "C" {

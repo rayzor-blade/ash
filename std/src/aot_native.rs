@@ -195,6 +195,7 @@ fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
     extern "C" fn ssl_init_nothing() {}
     match (lib, name) {
         ("fmt", prim) => crate::fmt::primitive(prim),
+        ("sqlite", prim) => crate::sqlite::primitive(prim),
         ("ssl", "ssl_init") => ssl_init_nothing as *mut c_void,
         _ => std::ptr::null_mut(),
     }

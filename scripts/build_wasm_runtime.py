@@ -57,11 +57,11 @@ LIBRARY_LIBC = [
     # What sqlite.wasm asks for beyond the above. A library's list is not
     # guesswork: link it and read its `env` imports.
     "abort", "fsync", "getcwd", "getenv", "gettimeofday", "lseek", "open",
-    "strerror_r", "time", "utimes", "write", "memchr",
+    "strerror", "strerror_r", "time", "utimes", "write", "memchr",
     # A library also takes the ADDRESS of libc functions -- sqlite builds a
     # VFS out of them -- and those must be exported to be given a table slot.
     "close", "fcntl", "fstat", "ftruncate", "read", "access", "rmdir",
-    "unlink", "stat", "mkdir",
+    "unlink", "stat", "lstat", "mkdir", "readlink",
 ]
 REPO = pathlib.Path(__file__).resolve().parent.parent
 

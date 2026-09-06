@@ -218,12 +218,17 @@ fn platform_args(dialect: Dialect) -> Vec<String> {
             "ntdll.lib",
             "userenv.lib",
             "ws2_32.lib",
+            // GetProcessMemoryInfo, which `Sys.processMemory` calls. The only
+            // symbol in ash_std that comes from here, and the only one the
+            // link was missing.
+            "psapi.lib",
             "synchronization.lib",
             "dbghelp.lib",
             "legacy_stdio_definitions.lib",
         ],
         (Dialect::Unix, "windows") => &[
             "-lws2_32",
+            "-lpsapi",
             "-luserenv",
             "-lbcrypt",
             "-lntdll",

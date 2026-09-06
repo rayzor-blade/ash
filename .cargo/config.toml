@@ -26,3 +26,17 @@ rustflags = [
   "-Cllvm-args=-wasm-enable-sjlj",
   "-Cllvm-args=-wasm-use-legacy-eh=false",
 ]
+
+# The same reasoning for the sqlite library's C half. libsqlite3-sys HAS a
+# wasm branch that sets exactly these, but it tests `TARGET == "wasm32-wasi"`
+# and ours is `wasm32-wasip1`, so it never fires -- and the default it falls
+# back to is `SQLITE_THREADSAFE=1`, which fails to compile against a sysroot
+# with no pthreads: "This mode of WASI does not have threads enabled". A
+# sysroot that HAS the stubs builds it and then imports mutex functions the
+# library never needs, so the flags are the fix on both.
+#
+# Set here rather than in scripts/build_wasm_hdll.py because clippy and a
+# plain `cargo check` build this crate too, and a flag only the build script
+# knows is a flag CI does not have.
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_THREADSAFE -DSQLITE_THREADSAFE=0 -DLONGDOUBLE_TYPE=double -D_WASI_EMULATED_MMAN -D_WASI_EMULATED_GETPID -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"

@@ -27,20 +27,54 @@ for (const [name, kind] of [["log", "out"], ["error", "err"]]) {
   };
 }
 
-// How a Haxe thread becomes a Worker.
+// The agents Haxe threads run on, started before the program is.
 //
-// The host hands over everything the new agent needs -- the compiled module,
-// the shared memory, the thread id and the argument the guest prepared -- and
-// keeps for itself only the thing it cannot delegate, which is handing out
-// the id. Where a Worker comes from is the page's business for the same
-// reason fetching the module is: this file knows its own URL and the crate
-// does not.
+// They have to exist first. Creating a Worker needs the creating agent to
+// return to its event loop, and the agent that asks for a thread is inside a
+// synchronous call into wasm which will not return until that thread has
+// answered -- so a Worker created at that moment never loads and the program
+// waits forever. Posting to a Worker that is already running has no such
+// problem, which is why they are warmed here and only messaged later.
 //
-// Nested Workers, since this file is already one. Chrome and Firefox have
-// allowed that for years; Safari since 16.4.
+// This is the same reason Emscripten sizes a pool up front, and it is the one
+// place a browser really does bound what "as many threads as you like" means:
+// the bound is how many agents the page warmed, not anything the runtime
+// asked for. The runtime asks for one agent per thread and takes what it gets
+// -- a thread with no agent free runs on the main scheduler.
+const idle = [];
+const agents = [];
+
+function warmAgents(count) {
+  const ready = [];
+  for (let i = 0; i < count; i++) {
+    const worker = new Worker(new URL("./thread.js", import.meta.url), { type: "module" });
+    let announce;
+    ready.push(new Promise((resolve) => (announce = resolve)));
+    worker.onmessage = ({ data }) => {
+      if (data.kind !== "agent") {
+        self.postMessage(data);
+        return;
+      }
+      if (data.state === "ready") announce();
+      idle.push(worker);
+    };
+    worker.onerror = (e) => post("err", `agent: ${e.message}`);
+    agents.push(worker);
+  }
+  return Promise.all(ready);
+}
+
+// What the host calls to ask for one. It hands over everything the agent
+// needs -- the compiled module, the shared memory, the thread id and the
+// argument the guest prepared -- and keeps only what it cannot delegate,
+// which is handing out the id.
 const spawn = (request) => {
-  const worker = new Worker(new URL("./thread.js", import.meta.url), { type: "module" });
-  worker.onmessage = (event) => self.postMessage(event.data);
+  const worker = idle.pop();
+  if (!worker) {
+    post("meta", `thread ${request.tid}: no idle agent, running on the main scheduler`);
+    throw new Error("no idle agent");
+  }
+  post("meta", `thread ${request.tid}: handed to an agent (${idle.length} left idle)`);
   worker.postMessage(request);
 };
 
@@ -48,6 +82,10 @@ self.onmessage = async (event) => {
   const { module, args, environ } = event.data;
   try {
     await init();
+    // Before the program runs, and before it can ask for a thread.
+    const wanted = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+    await warmAgents(wanted);
+    post("meta", `${wanted} agents ready`);
     const response = await fetch(module);
     if (!response.ok) throw new Error(`fetching ${module}: ${response.status}`);
     const bytes = new Uint8Array(await response.arrayBuffer());

@@ -46,6 +46,38 @@ function the compiled module, the shared memory, a thread id and the guest's
 `run_thread`. The crate never names a URL, for the same reason it does not
 fetch the module.
 
+**The agents are started before the program is, and that is the one thing
+here that cannot be arranged any other way.** Creating a Worker needs the
+creating agent to return to its event loop. The agent asking for a thread is
+inside a synchronous call into wasm which will not return until that thread
+has answered -- so a Worker created at that moment never loads, and the
+program waits for it forever. Measured, exactly: on-demand creation hung with
+no output at all, and warming the same agents first ran in 338ms against
+1016ms serial. Emscripten's `PTHREAD_POOL_SIZE` exists for this reason.
+
+It is also the one real bound on "as many threads as you like" in a page: the
+bound is how many agents the page warmed, not anything the runtime asked for.
+The runtime asks for an agent per thread and takes what it gets; a thread with
+none free runs on the main scheduler, and the page says so.
+
+One thing to know when reading the output: the lines a thread prints arrive
+after the program's, because they are forwarded through `worker.js`, which
+cannot run its message handler until the program returns. It is a forwarding
+order, not an execution order.
+
+## Testing it without a browser
+
+    wasm-bindgen --target nodejs --out-dir <dir> \
+      target/wasm32-unknown-unknown/release/ash_browser.wasm
+    cp examples/browser/run-node*.js <dir>/
+    node --experimental-wasm-exnref <dir>/run-node.js --agents 7 threads.wasm
+
+Same host, same module, same shared memory, same entry point: node's
+`worker_threads` stand in for Workers, and only who makes the agent differs.
+It is how this path is checked when there is no browser to hand, and it agrees
+with one -- the same four answers, and 2.17x on the same machine that gives a
+browser 3.01x.
+
 Nothing configures it. A page has no environment to configure it through and
 no count to give: the runtime asks for an agent per Haxe thread, this page
 answers by starting a Worker, and it keeps answering for as long as the

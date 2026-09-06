@@ -904,8 +904,31 @@ loaded libraries: preview 1 has no way to hand one descriptor table to two
 instances, so each thread builds its own, exactly as wasmtime's own
 wasi-threads does. A file opened on one thread is not open on another.
 
-The deferral above stands for the browser, where a thread is a Worker and
-shared memory costs COOP/COEP on every response the app serves.
+**And in a browser.** A page starts a Worker where wasmtime starts an
+operating system thread, and everything else is the same: `run` hands the
+page's `spawn` the compiled module, the shared memory, the thread id and the
+guest's `startArg`, and the Worker calls `run_thread`. Measured in a browser
+on the same machine: 338ms for four threads against 1016ms one after another,
+3.01x. The same shape under node's `worker_threads`, which is how it is
+checked without a browser, gives 2.17x and the same four answers.
+
+Two things a page costs that a host does not.
+
+Shared memory needs `SharedArrayBuffer`, which needs cross-origin isolation --
+COOP and COEP on every response the app serves. `examples/browser/serve.py`
+exists to say so, because without them the memory constructor throws where it
+reads as the module being broken.
+
+And the agents must be warmed before the program starts. Creating a Worker
+needs the creating agent to return to its event loop, and the agent asking for
+a thread is inside a synchronous call into wasm that will not return until
+that thread has answered; a Worker created at that moment never loads, and the
+program waits for it forever. That was measured too, by getting it wrong: a
+hang with no output, against 3.01x once the same agents were started first.
+Emscripten's `PTHREAD_POOL_SIZE` exists for this. It is also the one real
+bound on how many threads a page can run -- not a number the runtime asked
+for, but how many agents the page kept warm, with a thread that finds none
+free running on the main scheduler.
 
 Heaps follows the single-threaded language/runtime target. Its rendering work
 is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'

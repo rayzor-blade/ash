@@ -218,9 +218,7 @@ fn platform_args(dialect: Dialect) -> Vec<String> {
             "ntdll.lib",
             "userenv.lib",
             "ws2_32.lib",
-            // GetProcessMemoryInfo, which `Sys.processMemory` calls. The only
-            // symbol in ash_std that comes from here, and the only one the
-            // link was missing.
+            // GetProcessMemoryInfo, which `Sys.processMemory` calls.
             "psapi.lib",
             "synchronization.lib",
             "dbghelp.lib",

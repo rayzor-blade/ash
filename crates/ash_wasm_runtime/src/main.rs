@@ -30,6 +30,18 @@ struct Args {
     /// that the host did not build.
     #[arg(long = "dir", value_name = "PATH")]
     dirs: Vec<PathBuf>,
+    /// Let the program start threads.
+    ///
+    /// A thread here is a second instance of the module on an operating
+    /// system thread over the same memory, and whether the program gets one
+    /// is the host's to say: ash asks for an agent per Haxe thread and uses
+    /// what it is given. Off by default, and that is a bug rather than a
+    /// preference -- threads that only compute give the right answers and
+    /// scale, and threads that allocate do not survive, because two
+    /// instances over one memory are two mutators and this collector is
+    /// single-mutator. See docs/wasm-target.md.
+    #[arg(long)]
+    threads: bool,
     /// Everything after the module belongs to the program.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     program_args: Vec<String>,
@@ -80,7 +92,7 @@ async fn main() -> Result<()> {
     let mut argv = vec![guest_visible_path(&args.module)];
     argv.extend(args.program_args);
 
-    match program.run(&argv, &args.dirs).await? {
+    match program.run(&argv, &args.dirs, args.threads).await? {
         Outcome::Exited(code) => std::process::exit(code),
         Outcome::Trapped(trap) => {
             eprintln!("{trap}");

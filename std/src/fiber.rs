@@ -429,7 +429,9 @@ thread_local! {
 }
 
 struct WorkerPool {
-    workers: Vec<Arc<SchedulerEndpoint>>,
+    /// Behind a lock because on WebAssembly this list grows: see
+    /// [`dispatch_to_worker`]. On every other target it is written once.
+    workers: Mutex<Vec<Arc<SchedulerEndpoint>>>,
     next: AtomicUsize,
 }
 
@@ -442,24 +444,13 @@ static WORKER_POOL: OnceLock<Option<WorkerPool>> = OnceLock::new();
 /// pool currently costs more than it earns on allocation-heavy workloads, that
 /// misconfiguration looks like a speed-up rather than a mistake.
 ///
-/// On WebAssembly the default is zero however many cores the machine has, and
-/// that is a limit rather than a tuning choice. A thread there is a second
-/// instance of the module over the same memory, so two of them are two
-/// mutators on one heap, and this collector is single-mutator. Measured: four
-/// threads that only compute give the right answers and scale to 3.65x on
-/// eight cores; four that allocate do not survive -- a worker reaches
-/// `hlp_throw` with no trap installed and aborts, and one run instead stopped
-/// making progress at 0.6% CPU until it was killed.
-///
-/// So the pool is there to be asked for by name, `ASH_WORKERS=N`, and is not
-/// the default until the heap can take it. See docs/wasm-target.md.
+/// Not consulted on WebAssembly, which has neither a core count worth asking
+/// for nor an environment to read: see [`dispatch_to_worker`] for what
+/// decides there.
 fn configured_worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
         let machine_default = || {
-            if cfg!(target_family = "wasm") {
-                return 0;
-            }
             std::thread::available_parallelism()
                 .map(|count| count.get().saturating_sub(1))
                 .unwrap_or(0)
@@ -501,6 +492,15 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
 
 #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 fn spawn_worker_pool() -> Option<WorkerPool> {
+    // Empty on WebAssembly, and not for want of workers: the pool there grows
+    // as threads are created, so there is nothing to size up front and
+    // nothing to size it from. See [`dispatch_to_worker`].
+    if cfg!(target_family = "wasm") {
+        return Some(WorkerPool {
+            workers: Mutex::new(Vec::new()),
+            next: AtomicUsize::new(0),
+        });
+    }
     let count = configured_worker_count();
     if count == 0 {
         return None;
@@ -511,7 +511,7 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
         let sender = sender.clone();
         let spawn = std::thread::Builder::new()
             .name(format!("ash-vm-{index}"))
-            .spawn(move || worker_main(sender));
+            .spawn(move || worker_main(Some(sender), None));
         if spawn.is_ok() {
             started += 1;
         }
@@ -528,21 +528,63 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
         }
     }
     (!workers.is_empty()).then(|| WorkerPool {
-        workers,
+        workers: Mutex::new(workers),
         next: AtomicUsize::new(0),
     })
 }
 
+/// Start one worker, with the fiber it was started for.
+///
+/// Nothing is waited for. The worker takes the job before it announces
+/// itself, so the caller does not need its mailbox and the agent's startup --
+/// on wasm, a whole second instance of the module -- overlaps with whatever
+/// the caller does next. `false` means the host would not give an agent, and
+/// the caller runs the fiber itself.
 #[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
-fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {
+fn start_worker(index: usize, first: Option<SchedulerCommand>) -> bool {
+    std::thread::Builder::new()
+        .name(format!("ash-vm-{index}"))
+        .spawn(move || worker_main(None, first))
+        .is_ok()
+}
+
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
+/// One worker: its own scheduler, and every fiber it is given.
+///
+/// Started two ways. A pool sized up front hands it a `sender` and waits to
+/// hear back; a pool that grows hands it `first` instead and waits for
+/// nothing, and it puts itself where the next thread will find it once it has
+/// taken the job it was made for. Which is the order that matters: in the
+/// pool before it has its fiber, it would be picked as idle and given a
+/// second one to run after the first.
+fn worker_main(
+    sender: Option<std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>>,
+    first: Option<SchedulerCommand>,
+) {
     WORKER_LANE.with(|worker| worker.set(true));
     crate::gc::gc_register_current_os_thread();
     let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
     let scheduler_id = SCHEDULER.with(|scheduler| scheduler.borrow().id);
     worker_trace("worker-ready", scheduler_id, 0);
-    if sender.send(Arc::clone(&endpoint)).is_err() {
-        crate::gc::gc_unregister_current_os_thread();
-        return;
+    if let Some(command) = first {
+        endpoint.assigned.fetch_add(1, Ordering::AcqRel);
+        endpoint.push(command);
+    }
+    match sender {
+        Some(sender) => {
+            if sender.send(Arc::clone(&endpoint)).is_err() {
+                crate::gc::gc_unregister_current_os_thread();
+                return;
+            }
+        }
+        None => {
+            if let Some(pool) = worker_pool() {
+                pool.workers
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(Arc::clone(&endpoint));
+            }
+        }
     }
     loop {
         unsafe {
@@ -574,33 +616,94 @@ fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {
 }
 
 fn can_dispatch_to_worker() -> bool {
-    COMPILED_WORKERS_ENABLED.load(Ordering::Acquire) && configured_worker_count() != 0
+    if !COMPILED_WORKERS_ENABLED.load(Ordering::Acquire) {
+        return false;
+    }
+    // On WebAssembly there is no count to consult. Whether a thread can be
+    // had is the host's to answer and it answers it by being asked: the
+    // browser page that supplies a way to start a Worker has threads, and the
+    // one that does not gets `EAGAIN` from the first `pthread_create` and
+    // falls back to the main scheduler. Nothing is read from an environment,
+    // which a page does not have.
+    cfg!(target_family = "wasm") || configured_worker_count() != 0
 }
 
 fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
     let Some(pool) = worker_pool() else {
         return false;
     };
+    let workers = pool
+        .workers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // On WebAssembly a worker runs a fiber body straight through: there is no
+    // addressable stack to switch away from, so it cannot hold a second
+    // fiber and come back to the first. A fixed pool of N would therefore let
+    // N threads run and make the next one WAIT for one of them to finish,
+    // which is not what a thread is. So the pool grows instead: one agent per
+    // live thread, asked for when the thread is created, as many as the host
+    // will give. A host that will give no more says so by failing to start
+    // one, and that thread runs on the main scheduler.
+    if cfg!(target_family = "wasm") {
+        let idle = workers
+            .iter()
+            .position(|worker| worker.assigned.load(Ordering::Acquire) == 0);
+        let index = match idle {
+            Some(index) => index,
+            None => {
+                let at = workers.len();
+                // The fiber goes with the agent as it starts, rather than
+                // being handed over once it reports ready. Waiting for that
+                // would start N threads one after another -- and starting one
+                // here means instantiating the whole module again, which is
+                // the slowest thing on this path. A program that creates four
+                // threads should be waiting for one agent to appear, not four
+                // in a row.
+                //
+                // The lock is dropped first for the same reason: two threads
+                // racing to grow costs a spare agent, and blocking one behind
+                // the other costs the parallelism this exists for.
+                drop(workers);
+                worker_trace("dispatch", id as u64, at as u64);
+                return start_worker(
+                    at,
+                    Some(SchedulerCommand::Spawn {
+                        id,
+                        closure: closure as usize,
+                    }),
+                );
+            }
+        };
+        assign(&workers[index], id, index, closure);
+        return true;
+    }
+
     // Suspended krio stacks are deliberately !Send: once a worker creates a
     // fiber, moving it would also move native TLS/trap assumptions captured by
     // its stack. Balance at the last safe point instead -- before creation.
     // Rotate the starting point so equal loads do not permanently favor lane
     // zero, then choose the least-loaded endpoint.
-    let start = pool.next.fetch_add(1, Ordering::Relaxed) % pool.workers.len();
-    let index = (0..pool.workers.len())
+    let start = pool.next.fetch_add(1, Ordering::Relaxed) % workers.len();
+    let index = (0..workers.len())
         .min_by_key(|offset| {
-            let index = (start + offset) % pool.workers.len();
-            pool.workers[index].assigned.load(Ordering::Acquire)
+            let index = (start + offset) % workers.len();
+            workers[index].assigned.load(Ordering::Acquire)
         })
-        .map(|offset| (start + offset) % pool.workers.len())
+        .map(|offset| (start + offset) % workers.len())
         .unwrap_or(start);
-    pool.workers[index].assigned.fetch_add(1, Ordering::AcqRel);
+    assign(&workers[index], id, index, closure);
+    true
+}
+
+/// Hand one fiber to one worker, and count it against that worker.
+fn assign(worker: &SchedulerEndpoint, id: u32, index: usize, closure: *mut vclosure) {
+    worker.assigned.fetch_add(1, Ordering::AcqRel);
     worker_trace("dispatch", id as u64, index as u64);
-    pool.workers[index].push(SchedulerCommand::Spawn {
+    worker.push(SchedulerCommand::Spawn {
         id,
         closure: closure as usize,
     });
-    true
 }
 
 /// wren_lift-proven default; 64 KB tripped on real workloads there.

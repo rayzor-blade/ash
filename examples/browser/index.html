@@ -70,15 +70,12 @@ worker.onmessage = ({ data }) => {
 };
 worker.onerror = (e) => write(`worker: ${e.message}`, "err");
 
-// Which demo, from the query string. The threaded one needs the worker pool
-// asked for by name -- ash never turns it on by itself on wasm, because two
-// instances over one memory are two mutators on a single-mutator heap and
-// only threads that compute are safe there yet.
+// Which demo, from the query string. Nothing here configures threads: a page
+// has no environment to configure them through, and there is no count to
+// give -- the runtime asks for an agent per thread and this page answers by
+// starting a Worker, for as long as it keeps saying yes.
 const threaded = new URLSearchParams(location.search).get("demo") === "threads";
 const module = threaded ? "./threads.wasm" : "./demo.wasm";
-const environ = threaded
-  ? [`ASH_WORKERS=${Math.max(1, (navigator.hardwareConcurrency || 4) - 1)}`]
-  : [];
 
 if (threaded && !self.crossOriginIsolated) {
   write(
@@ -93,5 +90,5 @@ document.getElementById("which").textContent = threaded
   ? "threads — four Haxe threads, each in a Worker of its own"
   : "single-threaded — strings, maps, closures, exceptions, arithmetic";
 
-worker.postMessage({ module, args: [module.slice(2)], environ });
+worker.postMessage({ module, args: [module.slice(2)] });
 </script>

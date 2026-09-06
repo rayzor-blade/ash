@@ -168,7 +168,12 @@ impl Program {
     }
 
     /// Run the program to completion.
-    pub async fn run(&self, args: &[String], dirs: &[std::path::PathBuf]) -> Result<Outcome> {
+    pub async fn run(
+        &self,
+        args: &[String],
+        dirs: &[std::path::PathBuf],
+        threads: bool,
+    ) -> Result<Outcome> {
         let missing = self.missing();
         if !missing.is_empty() {
             return Err(anyhow!(
@@ -189,19 +194,17 @@ impl Program {
         let mut store = store_for(&self.engine, args, dirs);
         // A module that shares its memory has a thread to spawn into; one
         // that does not has neither, and asks for neither.
-        let spawner = self
-            .shared_memory()?
-            .map(|memory| {
-                Spawner::new(
-                    self.engine.clone(),
-                    self.module.clone(),
-                    memory,
-                    args,
-                    dirs,
-                )
-            });
+        // The memory is made whenever the module imports one, because
+        // without it the module does not instantiate. Whether anything may
+        // START a thread on it is a separate question and the host's to
+        // answer: a module built for threads runs single-threaded perfectly
+        // well, and `--threads` is how this one says yes.
+        let memory = self.shared_memory()?;
+        let spawner = memory.clone().filter(|_| threads).map(|memory| {
+            Spawner::new(self.engine.clone(), self.module.clone(), memory, args, dirs)
+        });
 
-        let linker = linker_for(&self.engine, &store, spawner.as_ref())?;
+        let linker = linker_for(&self.engine, &store, memory.as_ref(), spawner.as_ref())?;
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
@@ -429,6 +432,7 @@ fn store_for(engine: &Engine, args: &[String], dirs: &[std::path::PathBuf]) -> S
 fn linker_for(
     engine: &Engine,
     store: &Store<Host>,
+    memory: Option<&wasmtime::SharedMemory>,
     spawner: Option<&Arc<Spawner>>,
 ) -> Result<Linker<Host>> {
     let mut linker: Linker<Host> = Linker::new(engine);
@@ -439,7 +443,7 @@ fn linker_for(
     sockets::install(&mut linker)?;
     dylink::install(&mut linker)?;
     sdl::install(&mut linker)?;
-    threads::install(&mut linker, store, spawner.cloned())?;
+    threads::install(&mut linker, store, memory, spawner.cloned())?;
     Ok(linker)
 }
 

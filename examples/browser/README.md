@@ -46,13 +46,13 @@ function the compiled module, the shared memory, a thread id and the guest's
 `run_thread`. The crate never names a URL, for the same reason it does not
 fetch the module.
 
-Two things to know before reading anything into the numbers.
+Nothing configures it. A page has no environment to configure it through and
+no count to give: the runtime asks for an agent per Haxe thread, this page
+answers by starting a Worker, and it keeps answering for as long as the
+browser keeps saying yes. A page that supplies no `spawn` gets threads that
+take turns, and the demo says so.
 
-The worker pool is opt-in on wasm and the page asks for it by name --
-`ASH_WORKERS` in the environment it passes. Ash will not turn it on by itself
-there, and without it the threads take turns and the demo says so.
-
-And the demo computes rather than allocates, deliberately. Two instances over
+The demo computes rather than allocates, deliberately. Two instances over
 one memory are two mutators on one heap and ash's collector is
 single-mutator: threads that allocate do not survive yet. `docs/wasm-target.md`
 has the measurements and what is left to do.

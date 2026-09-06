@@ -25,7 +25,10 @@ class Threads {
 
 	static function main() {
 		var n = 4;
-		var steps = 40000000;
+		// Enough work that starting the agents does not dominate it. A
+		// thread in a page is a Worker instantiating this whole module
+		// again, which is tens of milliseconds before it computes anything.
+		var steps = 200000000;
 
 		Sys.println('$n threads, ${steps} steps each');
 		Sys.println("");
@@ -49,6 +52,6 @@ class Threads {
 		Sys.println("");
 		Sys.println(together < apart * 0.75
 			? "They ran at the same time."
-			: "They took turns — no worker pool. Is ASH_WORKERS set?");
+			: "They took turns — this host started no agent for them.");
 	}
 }

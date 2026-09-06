@@ -103,6 +103,72 @@ pub fn fdstat(filetype: u8, flags: u16, rights_base: u64, rights_inheriting: u64
 }
 
 /// Size of a `filestat`.
+/// One `subscription` handed to `poll_oneoff`, and one `event` given back.
+///
+/// The event is the half that matters and the half easiest to get wrong: a
+/// host that reports "n events" without writing them leaves the caller
+/// reading whatever was in that memory as the event's errno. wasi-libc's
+/// `nanosleep` does exactly that, and Rust's `thread::sleep` asserts the
+/// result is either success or `EINTR` -- so uninitialised memory becomes a
+/// panic in the guest with a number that means nothing.
+pub mod poll {
+    /// Bytes per `subscription`. `userdata` at 0, the union's tag at 8, and
+    /// the union's contents from 16.
+    pub const SUBSCRIPTION_SIZE: usize = 48;
+    /// Bytes per `event`.
+    pub const EVENT_SIZE: usize = 32;
+
+    /// `eventtype`: what a subscription is waiting for.
+    pub const CLOCK: u8 = 0;
+    pub const FD_READ: u8 = 1;
+    pub const FD_WRITE: u8 = 2;
+
+    /// `subclockflags`: the timeout is an absolute time rather than a delay.
+    pub const ABSTIME: u16 = 1;
+
+    /// What one subscription asks for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Subscription {
+        pub userdata: u64,
+        pub eventtype: u8,
+        /// Which clock, for a clock subscription.
+        pub clock_id: u32,
+        /// Nanoseconds: a delay, or an absolute time when `ABSTIME` is set.
+        pub timeout: u64,
+        pub flags: u16,
+    }
+
+    /// Read one, or `None` if the bytes are short.
+    pub fn subscription(bytes: &[u8]) -> Option<Subscription> {
+        let at8 = |at: usize| -> Option<u64> {
+            Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+        };
+        let at4 = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+        };
+        let at2 = |at: usize| -> Option<u16> {
+            Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+        };
+        Some(Subscription {
+            userdata: at8(0)?,
+            eventtype: *bytes.get(8)?,
+            clock_id: at4(16)?,
+            timeout: at8(24)?,
+            flags: at2(40)?,
+        })
+    }
+
+    /// The event answering one subscription. `error` of zero is what a caller
+    /// reads as "this happened".
+    pub fn event(userdata: u64, error: u16, eventtype: u8) -> [u8; EVENT_SIZE] {
+        let mut out = [0u8; EVENT_SIZE];
+        out[0..8].copy_from_slice(&userdata.to_le_bytes());
+        out[8..10].copy_from_slice(&error.to_le_bytes());
+        out[10] = eventtype;
+        out
+    }
+}
+
 pub const FILESTAT_SIZE: usize = 64;
 
 /// A `filestat` for something that is not a file: no device, no inode, no
@@ -224,5 +290,51 @@ mod tests {
     #[test]
     fn no_vectors_is_no_bytes() {
         assert_eq!(vector_sizes(&[]), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::poll::*;
+
+    /// The offsets preview 1 fixes for a clock subscription: `userdata` at 0,
+    /// the tag at 8, the clock id at 16, the timeout at 24 and the flags at
+    /// 40. Read from anywhere else and a sleep asks for the wrong duration.
+    #[test]
+    fn a_clock_subscription_is_read_where_preview_one_puts_it() {
+        let mut bytes = [0u8; SUBSCRIPTION_SIZE];
+        bytes[0..8].copy_from_slice(&0xfeed_u64.to_le_bytes());
+        bytes[8] = CLOCK;
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        bytes[24..32].copy_from_slice(&1_500_000u64.to_le_bytes());
+        bytes[40..42].copy_from_slice(&ABSTIME.to_le_bytes());
+
+        assert_eq!(
+            subscription(&bytes),
+            Some(Subscription {
+                userdata: 0xfeed,
+                eventtype: CLOCK,
+                clock_id: 1,
+                timeout: 1_500_000,
+                flags: ABSTIME,
+            })
+        );
+    }
+
+    /// An event carries the subscription's userdata back, and an error of
+    /// zero. Everything else has to be written, not left: the caller reads
+    /// all of it.
+    #[test]
+    fn an_event_says_which_subscription_and_that_it_worked() {
+        let event = event(0xfeed, 0, CLOCK);
+        assert_eq!(&event[0..8], &0xfeed_u64.to_le_bytes());
+        assert_eq!(u16::from_le_bytes([event[8], event[9]]), 0);
+        assert_eq!(event[10], CLOCK);
+        assert!(event[11..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn a_short_subscription_is_refused() {
+        assert_eq!(subscription(&[0u8; 12]), None);
     }
 }

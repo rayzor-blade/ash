@@ -870,14 +870,27 @@ grows eightfold. The flat ~250ms is instantiating the module for a thread,
 paid about once because the instantiations overlap too -- which also prices a
 Haxe thread here, and it is not a goroutine yet.
 
-**That is threads that compute. Threads that allocate do not work yet, and
-the pool is therefore opt-in on wasm** -- `ASH_WORKERS=N`, never the machine's
-core count. Two instances over one memory are two mutators on one heap and
-this collector is single-mutator: the same four threads, allocating arrays and
-maps instead of multiplying integers, end with a worker reaching `hlp_throw`
-with no trap installed and aborting, or in one run simply stopping at 0.6% CPU.
-That is the "single-mutator GC correctness first" above, arriving exactly where
-it was predicted.
+**Nothing configures this.** There is no worker count on wasm and no
+environment to read one from -- a page has neither. A wasm worker runs a fiber
+body straight through, having no stack to switch away from, so a pool of N
+could only ever run N Haxe threads and would make the next one wait for one of
+them to finish. So the pool grows instead: an agent per live thread, asked for
+when the thread is created, and as many as the host will give. The fiber goes
+with the agent as it starts rather than being handed over once it reports
+ready, so four threads wait for one agent to appear rather than four in a row.
+
+Whether there is a host willing to give one is the host's to answer, in the
+host's own terms: `ash-wasm-run --threads`, or a browser page supplying the
+`spawn` function that makes a Worker. A host that says no answers the way the
+interface has for it and those threads run on the main scheduler.
+
+**That is threads that compute. Threads that allocate do not work yet**, which
+is why the native host says no unless asked. Two instances over one memory are
+two mutators on one heap and this collector is single-mutator: the same four
+threads, allocating arrays and maps instead of multiplying integers, end with a
+worker reaching `hlp_throw` with no trap installed and aborting, or in one run
+simply stopping at 0.6% CPU. That is the "single-mutator GC correctness first"
+above, arriving exactly where it was predicted.
 
 Worth separating from it, because it is not about threads at all: that same
 allocating program is already wrong on plain `wasm32-wasip1`, with no threads

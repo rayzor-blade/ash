@@ -36,11 +36,13 @@
 //! and then blocks forever will not have shown its last line -- which is the
 //! same bargain as a line-buffered terminal.
 //!
-//! **Nothing waits.** A page has one thread and it is the event loop, so
-//! `poll_oneoff` reports its clock subscriptions as expired immediately
-//! rather than sleeping. `Sys.sleep` therefore returns at once. A program
-//! that wants to wait yields to the host, which is what
-//! `ash_host_fiber_yield` is for.
+//! **Waiting is real in a Worker, and nowhere else.** `poll_oneoff` blocks on
+//! `Atomics.wait`, which parks the agent for the timeout -- allowed in a
+//! Worker, which is where a module runs, forbidden on a page's main thread,
+//! and needing a `SharedArrayBuffer` and therefore a cross-origin isolated
+//! page. Where it cannot wait, a clock subscription is reported ready at
+//! once, so `Sys.sleep` returns immediately and a program that wants to wait
+//! must yield to the host -- which is what `ash_host_fiber_yield` is for.
 
 use web_sys::console;
 
@@ -294,13 +296,57 @@ impl Wasi {
         errno::SUCCESS
     }
 
-    /// Nothing waits here. Every subscription is reported as ready at once,
-    /// which turns a sleep into a no-op and a wait for input into an
-    /// immediate answer. See the note at the top.
-    pub fn poll_oneoff(&self, guest: &Guest, _subs: u32, _events: u32, n: u32, out: u32) -> i32 {
-        // Reporting zero events would spin a caller that waits for one, so
-        // the count is honest about how many subscriptions were considered
-        // even though none of them slept.
+    /// Answer each subscription with an event, and wait if a clock asked to.
+    ///
+    /// The events have to be WRITTEN, not merely counted. wasi-libc's
+    /// `nanosleep` reads the event it was given back and takes its `error`
+    /// field at face value; a host that reports "n events" and writes none
+    /// hands it whatever was in that memory. Rust's `thread::sleep` then
+    /// asserts the result is success or `EINTR`, and a program dies on a
+    /// number that came from its own heap. It reads as zero for as long as
+    /// that memory has never been used, which is why this survived until
+    /// threads gave the page something else to put there.
+    ///
+    /// Waiting is real where a page can wait: `Atomics.wait` blocks in a
+    /// Worker, which is where a module runs. Where it cannot -- no
+    /// `SharedArrayBuffer`, because the page is not cross-origin isolated --
+    /// the subscription is reported ready at once, which is the old
+    /// behaviour and turns a sleep into a yield.
+    pub fn poll_oneoff(&self, guest: &Guest, subs: u32, events: u32, n: u32, out: u32) -> i32 {
+        use crate::wasi_abi::poll;
+
+        let Some(bytes) = guest.read(subs, n.saturating_mul(poll::SUBSCRIPTION_SIZE as u32)) else {
+            return errno::FAULT;
+        };
+        let mut longest: Option<f64> = None;
+        for i in 0..n as usize {
+            let at = i * poll::SUBSCRIPTION_SIZE;
+            let Some(sub) = poll::subscription(&bytes[at..]) else {
+                return errno::INVAL;
+            };
+            if sub.eventtype == poll::CLOCK {
+                // Absolute against this clock, or a delay from now. Only the
+                // delay matters here, and the longest of them is how long
+                // this call has to take.
+                let now = now_in_nanos(sub.clock_id);
+                let target = sub.timeout as f64;
+                let delay = if sub.flags & poll::ABSTIME != 0 {
+                    target - now
+                } else {
+                    target
+                };
+                longest = Some(longest.unwrap_or(0.0).max(delay / 1.0e6));
+            }
+            let event = poll::event(sub.userdata, 0, sub.eventtype);
+            if !guest.write(events + (i * poll::EVENT_SIZE) as u32, &event) {
+                return errno::FAULT;
+            }
+        }
+        if let Some(millis) = longest {
+            if millis > 0.0 {
+                block_for(millis);
+            }
+        }
         if !guest.write_u32(out, n) {
             return errno::FAULT;
         }
@@ -333,6 +379,62 @@ fn from_global<T: JsCast>(name: &str) -> Option<T> {
     js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name))
         .ok()
         .and_then(|value| value.dyn_into::<T>().ok())
+}
+
+/// Whether this agent may have a `SharedArrayBuffer` at all.
+///
+/// The global says so directly, and asking it is cheaper and more honest than
+/// constructing one to see whether it throws.
+fn cross_origin_isolated() -> bool {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("crossOriginIsolated"))
+        .ok()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+/// A clock's reading in nanoseconds, for comparing against an absolute
+/// timeout. An unknown clock reads as zero, which makes an absolute deadline
+/// look like a delay of its whole value -- and `block_for` caps that.
+fn now_in_nanos(id: u32) -> f64 {
+    let millis = match id {
+        clock::REALTIME => js_sys::Date::now(),
+        clock::MONOTONIC => now_monotonic(),
+        _ => 0.0,
+    };
+    millis * 1.0e6
+}
+
+/// Block this agent for `millis`, which only a Worker can do.
+///
+/// `Atomics.wait` on a word nobody will ever change is how a Worker sleeps:
+/// it parks the agent for the timeout and returns "timed-out". It needs a
+/// `SharedArrayBuffer`, so it needs the page to be cross-origin isolated, and
+/// it is forbidden outright on a page's main thread -- both of which mean
+/// this can fail, and failing is the old behaviour of not waiting at all.
+///
+/// Capped, because a guest asking to sleep for an hour in a page should be
+/// woken to find out whether the page is still there rather than held for an
+/// hour. Callers that want a real deadline loop.
+fn block_for(millis: f64) {
+    use js_sys::{Atomics, Int32Array, SharedArrayBuffer};
+
+    thread_local! {
+        // Constructed once, and only where constructing it is not an error:
+        // `SharedArrayBuffer` is absent from a page that is not cross-origin
+        // isolated, and reaching for it there throws rather than returning
+        // anything. A page without it is the ordinary single-threaded case
+        // and must not be broken by a sleep.
+        static PARK: Option<Int32Array> = cross_origin_isolated()
+            .then(|| Int32Array::new(&SharedArrayBuffer::new(4).into()));
+    }
+    let capped = millis.min(1000.0);
+    PARK.with(|park| {
+        if let Some(park) = park {
+            // The value is the one that is there, so this always waits out
+            // the timeout rather than returning "not-equal" at once.
+            let _ = Atomics::wait_with_timeout(park, 0, 0, capped);
+        }
+    });
 }
 
 /// `performance.now()`, and `Date.now()` where there is no `performance`.

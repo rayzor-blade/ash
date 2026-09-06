@@ -101,7 +101,7 @@ impl Spawner {
             .map_err(|e| anyhow!("a runtime for the thread: {e}"))?;
         runtime.block_on(async {
             let mut store = store_for(&self.engine, &self.args, &self.dirs);
-            let linker = linker_for(&self.engine, &store, Some(self))?;
+            let linker = linker_for(&self.engine, &store, Some(&self.memory), Some(self))?;
             let instance = linker
                 .instantiate_async(&mut store, &self.module)
                 .await
@@ -132,14 +132,16 @@ impl Spawner {
 pub(crate) fn install(
     linker: &mut Linker<Host>,
     store: &wasmtime::Store<Host>,
+    memory: Option<&wasmtime::SharedMemory>,
     spawner: Option<Arc<Spawner>>,
 ) -> Result<()> {
     // A module that shares its memory cannot make one: every thread
     // instantiates that same module, and a memory it defined would be one per
-    // thread. So the host makes it, once, and hands it to all of them.
-    if let Some(spawner) = &spawner {
+    // thread. So the host makes it, once, and hands it to all of them --
+    // whether or not it is also willing to start a thread.
+    if let Some(memory) = memory {
         linker
-            .define(store, "env", "memory", spawner.memory.clone())
+            .define(store, "env", "memory", memory.clone())
             .map_err(|e| anyhow!("giving the module its shared memory: {e}"))?;
     }
     linker

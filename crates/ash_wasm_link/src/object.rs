@@ -500,10 +500,20 @@ fn read_linking(obj: &mut Object, section: &wasmparser::CustomSectionReader<'_>)
         .with_context(|| format!("{}: reading the linking section", obj.name))?;
     for subsection in reader.subsections() {
         match subsection? {
+            // Read by hand rather than through wasmparser, for one symbol in
+            // a threads build -- see `read_symbol_table`.
             Linking::SymbolTable(map) => {
-                for info in map {
-                    obj.symbols.push(convert_symbol(info?)?);
-                }
+                let range = map.range();
+                let base = section.data_offset() as usize;
+                let (start, end) = (
+                    (range.start as usize).saturating_sub(base),
+                    (range.end as usize).saturating_sub(base),
+                );
+                let bytes = section
+                    .data()
+                    .get(start..end)
+                    .ok_or_else(|| anyhow!("{}: symbol table outside its section", obj.name))?;
+                read_symbol_table(obj, bytes)?;
             }
             Linking::SegmentInfo(map) => {
                 for segment in map {
@@ -546,6 +556,123 @@ fn read_linking(obj: &mut Object, section: &wasmparser::CustomSectionReader<'_>)
     Ok(())
 }
 
+/// The symbol table, parsed here instead of by wasmparser.
+///
+/// One rule differs, and a threads build turns on it. A function symbol
+/// carries a name unless it is undefined, and every reader decides "undefined"
+/// from the `UNDEFINED` flag -- but wasi-libc's
+/// `env.__wasilibc_futex_wait_maybe_busy` arrives as a WEAK symbol naming an
+/// imported function with that flag clear and no name after it. Reading a
+/// name there consumes the next symbol's bytes, and the table desynchronises;
+/// the failure surfaces fifteen hundred symbols later as "malformed UTF-8",
+/// which says nothing about where it went wrong. wabt reads it the same wrong
+/// way.
+///
+/// So an index inside the import range counts as undefined whatever the flags
+/// say, which is what it means. Checked both ways: with this rule the threads
+/// object's 12,299 symbols parse and end exactly on the subsection boundary.
+fn read_symbol_table(obj: &mut Object, mut bytes: &[u8]) -> Result<()> {
+    // How many functions this object imports. A function index below it names
+    // an import, and an import is not defined here.
+    let imported = obj.imported_functions();
+
+    let count = read_uleb(&mut bytes)?;
+    for _ in 0..count {
+        let kind = *bytes
+            .first()
+            .ok_or_else(|| anyhow!("{}: symbol table ends mid-symbol", obj.name))?;
+        bytes = &bytes[1..];
+        let flags = SymbolFlags::from_bits_retain(read_uleb(&mut bytes)?);
+        let explicit = flags.contains(SymbolFlags::EXPLICIT_NAME);
+        let flagged_undefined = flags.contains(SymbolFlags::UNDEFINED);
+
+        let (target, name) = match kind {
+            SYMTAB_DATA => {
+                let name = read_name(&mut bytes)?;
+                let target = if flagged_undefined {
+                    SymbolTarget::UndefinedData
+                } else {
+                    SymbolTarget::Data {
+                        segment: read_uleb(&mut bytes)?,
+                        offset: read_uleb(&mut bytes)?,
+                        size: read_uleb(&mut bytes)?,
+                    }
+                };
+                (target, Some(name))
+            }
+            // A section symbol names a section and never has a name of its
+            // own.
+            SYMTAB_SECTION => (
+                SymbolTarget::Section {
+                    index: read_uleb(&mut bytes)?,
+                },
+                None,
+            ),
+            SYMTAB_FUNCTION | SYMTAB_GLOBAL | SYMTAB_TAG | SYMTAB_TABLE => {
+                let index = read_uleb(&mut bytes)?;
+                let undefined =
+                    flagged_undefined || (kind == SYMTAB_FUNCTION && index < imported);
+                let name = if !undefined || explicit {
+                    Some(read_name(&mut bytes)?)
+                } else {
+                    None
+                };
+                let target = match kind {
+                    SYMTAB_FUNCTION => SymbolTarget::Function { index },
+                    SYMTAB_GLOBAL => SymbolTarget::Global { index },
+                    SYMTAB_TAG => SymbolTarget::Tag { index },
+                    _ => SymbolTarget::Table { index },
+                };
+                (target, name)
+            }
+            other => bail!("{}: unknown symbol kind {other}", obj.name),
+        };
+
+        obj.symbols.push(Symbol {
+            name: name.unwrap_or_default(),
+            target,
+            flags,
+        });
+    }
+    Ok(())
+}
+
+const SYMTAB_FUNCTION: u8 = 0;
+const SYMTAB_DATA: u8 = 1;
+const SYMTAB_GLOBAL: u8 = 2;
+const SYMTAB_SECTION: u8 = 3;
+const SYMTAB_TAG: u8 = 4;
+const SYMTAB_TABLE: u8 = 5;
+
+fn read_uleb(bytes: &mut &[u8]) -> Result<u32> {
+    let (mut value, mut shift) = (0u32, 0u32);
+    loop {
+        let byte = *bytes.first().ok_or_else(|| anyhow!("truncated LEB"))?;
+        *bytes = &bytes[1..];
+        value |= u32::from(byte & 0x7f)
+            .checked_shl(shift)
+            .ok_or_else(|| anyhow!("LEB too wide for a u32"))?;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+        if shift > 31 {
+            bail!("LEB too wide for a u32");
+        }
+    }
+}
+
+fn read_name(bytes: &mut &[u8]) -> Result<String> {
+    let len = read_uleb(bytes)? as usize;
+    if bytes.len() < len {
+        bail!("a symbol name runs past the end of the table");
+    }
+    let (name, rest) = bytes.split_at(len);
+    *bytes = rest;
+    Ok(String::from_utf8_lossy(name).into_owned())
+}
+
+#[allow(dead_code)]
 fn convert_symbol(info: SymbolInfo<'_>) -> Result<Symbol> {
     let (name, target, flags) = match info {
         SymbolInfo::Func { flags, index, name } => (

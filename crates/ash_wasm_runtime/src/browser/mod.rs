@@ -13,9 +13,21 @@
 //! imports, since preview 1 cannot carry a socket at all -- and a page answers
 //! the client half over WebSocket and refuses the server half.
 //!
-//! What is still missing before a module runs in a page: the WASI preview 1
-//! surface its standard library calls (stdout, clock, randomness, arguments),
-//! and the fiber suspension `ash_host_fiber_yield` names. Both are host work
-//! of the same shape as the sockets below.
+//! [`wasi`] is the other part: the whole `wasi_snapshot_preview1` surface,
+//! answered by the page. All 45 of them, because an import nothing supplies
+//! is a link error before a line runs -- so a module cannot be instantiated
+//! until every one has an answer, even the ones a page can only refuse.
+//! [`memory`] is how both reach the guest's heap.
+//!
+//! [`imports`] binds all of it to a module: 69 imports, every one of which
+//! must be answered before a module can be instantiated at all.
+//!
+//! What is still missing before a module runs in a page: suspending a fiber,
+//! which needs JSPI or a worker parked on `Atomics.wait`, and loading a
+//! native library, which is the native host's loader against
+//! `WebAssembly.instantiate`.
 
+pub mod imports;
+pub mod memory;
 pub mod sockets;
+pub mod wasi;

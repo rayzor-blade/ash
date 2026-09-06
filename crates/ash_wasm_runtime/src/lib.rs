@@ -19,22 +19,27 @@
 //! * `native` runs the module under `wasmtime`: the conformance lane and CI.
 //!   No browser, no JavaScript, no `wasm-bindgen`, and wasmtime's own fibers
 //!   answer the suspending import.
-//! * The browser host is not written yet. It will be the same contract with
-//!   the browser's own APIs behind it, through `web-sys`, and still no
-//!   hand-written JavaScript: `wasm-bindgen` generates its glue the way a
-//!   compiler generates an object file. Its feature and dependencies are
-//!   declared so the shape is fixed before the code exists.
+//! * The browser host is the same contract with the browser's own APIs behind
+//!   it, through `web-sys`, and still no hand-written JavaScript:
+//!   `wasm-bindgen` generates its glue the way a compiler generates an object
+//!   file. All 69 imports are answered -- an import nothing supplies is a
+//!   link error, so a module cannot be instantiated until even the ones a
+//!   page can only refuse have an answer. What it cannot yet do is suspend a
+//!   fiber, which needs JSPI or a worker parked on `Atomics.wait`, and load a
+//!   native library.
 //!
 //! What the guest imports, and what a host owes it:
 //!
 //! | import | native | browser |
 //! |---|---|---|
-//! | `wasi_snapshot_preview1.*` | `wasmtime-wasi` | `web-sys`: `console`, `Performance`, `Crypto` |
+//! | `wasi_snapshot_preview1.*` | `wasmtime-wasi` | `browser::wasi`: `console` for output, `Performance` and `Date` for clocks, `Crypto` for randomness, and a refusal for every path |
 //! | `env.ash_host_fiber_yield` | a `wasmtime` fiber suspend | JSPI, or a worker parked on `Atomics.wait` |
 //! | `env.ash_host_socket_*`, twelve of them | the OS's sockets through `libc` (`native::sockets`) | WebSocket for the client half, `NOTSUP` for the server half (`browser::sockets`) |
 //!
-//! The native column is implemented; the browser column is the plan, except
-//! for its socket table, which is written and not yet wired to a module.
+//! Both columns are implemented. The browser one has not been run in a page:
+//! there is no headless browser in the test lane, so what holds it up is the
+//! preview 1 arithmetic in [`wasi_abi`], which is ordinary Rust with ordinary
+//! tests, and review of the rest.
 //!
 //! The second row is the whole reason a host exists rather than a library.
 //! [`guest`] holds the program's side of it; `docs/wasm-target.md` explains
@@ -68,6 +73,7 @@
 /// Windows, where a DLL may not.
 #[cfg(target_family = "wasm")]
 pub mod guest;
+pub mod wasi_abi;
 
 #[cfg(feature = "native")]
 pub mod native;

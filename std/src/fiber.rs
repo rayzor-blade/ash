@@ -441,10 +441,25 @@ static WORKER_POOL: OnceLock<Option<WorkerPool>> = OnceLock::new();
 /// Silently reading a typo as zero disables the pool outright, and since the
 /// pool currently costs more than it earns on allocation-heavy workloads, that
 /// misconfiguration looks like a speed-up rather than a mistake.
+///
+/// On WebAssembly the default is zero however many cores the machine has, and
+/// that is a limit rather than a tuning choice. A thread there is a second
+/// instance of the module over the same memory, so two of them are two
+/// mutators on one heap, and this collector is single-mutator. Measured: four
+/// threads that only compute give the right answers and scale to 3.65x on
+/// eight cores; four that allocate do not survive -- a worker reaches
+/// `hlp_throw` with no trap installed and aborts, and one run instead stopped
+/// making progress at 0.6% CPU until it was killed.
+///
+/// So the pool is there to be asked for by name, `ASH_WORKERS=N`, and is not
+/// the default until the heap can take it. See docs/wasm-target.md.
 fn configured_worker_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| {
         let machine_default = || {
+            if cfg!(target_family = "wasm") {
+                return 0;
+            }
             std::thread::available_parallelism()
                 .map(|count| count.get().saturating_sub(1))
                 .unwrap_or(0)

@@ -817,9 +817,9 @@ and copy the template into it. Eight test programs print the same thing on both
 targets, the GC and exception ones included, and those read a thread-local on
 every allocation and every throw.
 
-The shape a second thread needs is built too, off by default and reached
-through `LinkOptions::shared_memory`. A thread on wasm is another instance of
-the same module over the same memory, so the memory becomes `env.memory` --
+The shape a second thread needs is built too, and the threads triple asks for
+it. A thread on wasm is another instance of the same module over the same
+memory, so the memory becomes `env.memory` --
 imported, shared, and carrying the 1GiB maximum the Rust target declares. The
 data image cannot then be an active segment, because an active segment is
 written at instantiation and the second instance would put the program's
@@ -836,13 +836,63 @@ A test instantiates that module twice over one shared memory with a sentinel
 written in between. Without the guard the sentinel is gone, which is exactly
 what a second thread would do to the first one's heap.
 
-What is missing is the host, and ash therefore does not ask for that shape
-yet. `ash-wasm-run` creates no shared memory, and every place it reaches into
-guest memory goes through `wasmtime::Memory::data`, which asserts the memory
-is not shared. Spawning is the rest of it -- instantiating the module again on
-an operating system thread and calling `wasi_thread_start` -- and until that
-exists `wasi.thread-spawn` is answered with the refusal the interface has for
-a host that cannot start one. The deferral above stands unchanged.
+**And Haxe threads run at the same time.** `ash-wasm-run` makes the memory the
+module imports and answers `wasi.thread-spawn` by instantiating the module
+again on an operating system thread and calling `wasi_thread_start`. It
+allocates nothing for the thread and knows nothing about what it will do: the
+guest's own entry sets `__stack_pointer` from the structure `pthread_create`
+filled in, so a thread runs on a shadow stack its own allocator gave it, and
+sets `__tls_base` to a block `__copy_tls` made by calling this linker's
+`__wasm_init_tls`. Which is what the second copy of the thread-local data is
+for -- a thread starting later copies the template, not whatever the main
+thread has since stored there.
+
+One thing in `std` stood between that and any parallelism, and it is worth
+recording because the shape recurs: three places decided "compiled body or
+interpreter stub" by comparing the function pointer against a limit, and on
+wasm a function pointer IS a small integer -- a table index in the low
+hundreds -- so every real one looked like a stub. `is_stub_sentinel` already
+knew that; those three were copies of the test rather than callers of it. Ash
+therefore sent every Haxe thread to the main scheduler on the one target where
+every body is compiled before the program runs.
+
+Measured on 8 performance cores, four hundred million iterations per thread:
+
+| threads | in parallel | one after another | speedup |
+|---|---|---|---|
+| 1 | 504ms | 251ms | 0.50x |
+| 2 | 514ms | 499ms | 0.97x |
+| 4 | 527ms | 1002ms | 1.90x |
+| 8 | 548ms | 1998ms | 3.65x |
+
+The wall clock barely moves from one thread to eight while the serial time
+grows eightfold. The flat ~250ms is instantiating the module for a thread,
+paid about once because the instantiations overlap too -- which also prices a
+Haxe thread here, and it is not a goroutine yet.
+
+**That is threads that compute. Threads that allocate do not work yet, and
+the pool is therefore opt-in on wasm** -- `ASH_WORKERS=N`, never the machine's
+core count. Two instances over one memory are two mutators on one heap and
+this collector is single-mutator: the same four threads, allocating arrays and
+maps instead of multiplying integers, end with a worker reaching `hlp_throw`
+with no trap installed and aborting, or in one run simply stopping at 0.6% CPU.
+That is the "single-mutator GC correctness first" above, arriving exactly where
+it was predicted.
+
+Worth separating from it, because it is not about threads at all: that same
+allocating program is already wrong on plain `wasm32-wasip1`, with no threads
+target, no shared memory and no pool. An array the main frame holds while
+fibers allocate comes back with somebody else's length. Whatever roots the
+main scheduler's frame on wasm does not, which is a rooting bug to find before
+any of the above is worth revisiting.
+
+What a thread does not share is its WASI context, its socket table and its
+loaded libraries: preview 1 has no way to hand one descriptor table to two
+instances, so each thread builds its own, exactly as wasmtime's own
+wasi-threads does. A file opened on one thread is not open on another.
+
+The deferral above stands for the browser, where a thread is a Worker and
+shared memory costs COOP/COEP on every response the app serves.
 
 Heaps follows the single-threaded language/runtime target. Its rendering work
 is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'

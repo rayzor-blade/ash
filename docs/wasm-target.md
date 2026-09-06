@@ -817,12 +817,32 @@ and copy the template into it. Eight test programs print the same thing on both
 targets, the GC and exception ones included, and those read a thread-local on
 every allocation and every throw.
 
-What is not built is everything a second thread needs, and it is most of it:
-the memory is the module's own rather than an imported shared one, the data
-segments are active rather than passive behind a `__wasm_init_memory` guard --
-so a second instance would re-initialise memory under the first -- and
-`wasi.thread-spawn` is answered with the refusal the interface has for a host
-that cannot start one. The deferral above stands unchanged.
+The shape a second thread needs is built too, off by default and reached
+through `LinkOptions::shared_memory`. A thread on wasm is another instance of
+the same module over the same memory, so the memory becomes `env.memory` --
+imported, shared, and carrying the 1GiB maximum the Rust target declares. The
+data image cannot then be an active segment, because an active segment is
+written at instantiation and the second instance would put the program's
+initial data back over everything the first had reached: every allocation,
+every global, the collector's own bookkeeping, with nothing trapping. So it
+becomes one passive segment, and a `__wasm_init_memory` races every instance
+on a flag word placed above the image -- the winner copies the data in, hands
+the main thread its thread-locals and runs the constructors; the losers wait
+on that word rather than on nothing. `__tls_base` starts at zero there, so an
+instance that reads a thread-local before it has been given a block traps
+rather than quietly reading the main thread's.
+
+A test instantiates that module twice over one shared memory with a sentinel
+written in between. Without the guard the sentinel is gone, which is exactly
+what a second thread would do to the first one's heap.
+
+What is missing is the host, and ash therefore does not ask for that shape
+yet. `ash-wasm-run` creates no shared memory, and every place it reaches into
+guest memory goes through `wasmtime::Memory::data`, which asserts the memory
+is not shared. Spawning is the rest of it -- instantiating the module again on
+an operating system thread and calling `wasi_thread_start` -- and until that
+exists `wasi.thread-spawn` is answered with the refusal the interface has for
+a host that cannot start one. The deferral above stands unchanged.
 
 Heaps follows the single-threaded language/runtime target. Its rendering work
 is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'

@@ -77,6 +77,25 @@ pub struct LinkOptions {
     /// library wants. Each name here becomes an exported global holding where
     /// the linker put it.
     pub hdll_data: Vec<String>,
+    /// Emit a module several threads can instantiate against one memory.
+    ///
+    /// A thread on wasm is another instance of the same module, and what
+    /// makes them one program rather than two is that they share the memory.
+    /// So the memory stops being the module's own and becomes `env.memory`,
+    /// imported, shared, and with the maximum a shared memory is required to
+    /// declare.
+    ///
+    /// The data then cannot be an active segment. An active segment is
+    /// written at instantiation, and the second instance would write the
+    /// program's initial data over whatever the first one had got to. So the
+    /// image becomes one passive segment and a start function copies it in
+    /// exactly once, behind a compare-and-swap on a flag word: the instance
+    /// that wins initialises and then wakes the others, and the others wait
+    /// on that word rather than racing it.
+    ///
+    /// Off by default, and the gate is that the emitted module is otherwise
+    /// byte-identical: nothing here runs for a build that did not ask.
+    pub shared_memory: bool,
     /// Instrument the module so a fiber can suspend inside it and be resumed.
     ///
     /// Off by default, and the gate is not that the code path is skipped but
@@ -99,6 +118,7 @@ impl Default for LinkOptions {
                 .map(|s| s.to_string())
                 .collect(),
             fibers: false,
+            shared_memory: false,
             hdll_imports: Vec::new(),
             hdll_data: Vec::new(),
         }
@@ -163,8 +183,6 @@ struct TlsLayout {
     base_global: u32,
     size_global: u32,
     align_global: u32,
-    /// Output index of the synthesised `__wasm_init_tls`.
-    init_function: u32,
 }
 
 /// Does this link have thread-local storage in it at all?
@@ -238,12 +256,35 @@ struct ImportKey {
 }
 
 impl Layout {
+    /// Output index of `__wasm_call_ctors`, which is always the first
+    /// function the linker writes itself.
+    fn ctors(&self) -> u32 {
+        self.synthetic_base
+    }
+
+    /// Output index of `__wasm_init_tls`, when there is anything to
+    /// initialise.
+    fn init_tls(&self) -> Option<u32> {
+        self.tls.as_ref().map(|_| self.synthetic_base + 1)
+    }
+
+    /// Output index of `__wasm_init_memory`, when the memory is shared.
+    fn init_memory(&self) -> Option<u32> {
+        self.init_flag
+            .map(|_| self.synthetic_base + 1 + u32::from(self.tls.is_some()))
+    }
+
+    /// Output index of the first trapping stub, which follows all of those.
+    fn first_stub(&self) -> u32 {
+        self.synthetic_base
+            + 1
+            + u32::from(self.tls.is_some())
+            + u32::from(self.init_flag.is_some())
+    }
+
     /// Output index of the trapping stub standing in for a weak reference.
-    ///
-    /// The stubs follow `__wasm_call_ctors` and, when there is thread-local
-    /// storage, `__wasm_init_tls`, in the order `weak_stubs` holds them.
     fn weak_stub(&self, name: &str) -> Option<u32> {
-        let first = self.synthetic_base + if self.tls.is_some() { 2 } else { 1 };
+        let first = self.first_stub();
         self.weak_stubs
             .iter()
             .position(|(n, _)| n == name)
@@ -293,8 +334,13 @@ struct Layout {
     weak_stubs: Vec<(String, u32)>,
     /// Output index of the first function the linker writes itself.
     /// `__wasm_call_ctors` is there, then `__wasm_init_tls` if there is any
-    /// thread-local storage, then the weak stubs in order.
+    /// thread-local storage, then `__wasm_init_memory` if the memory is
+    /// shared, then the weak stubs in order.
     synthetic_base: u32,
+    /// Address of the word `__wasm_init_memory` races on, when the memory is
+    /// shared. Placed above the data image, because the initialisation it
+    /// guards would otherwise write over the flag that says it happened.
+    init_flag: Option<u32>,
 }
 
 /// Link `objects` into a module.
@@ -631,9 +677,18 @@ fn plan(
             base_global: tls_globals,
             size_global: tls_globals + 1,
             align_global: tls_globals + 2,
-            // After `__wasm_call_ctors`, which is always first.
-            init_function: synthetic_base + 1,
         }
+    });
+
+    // The word `__wasm_init_memory` races on. Above the image and not in it,
+    // because `memory.init` would otherwise write the flag back to zero after
+    // the instance that won had set it, and a second instance would then
+    // initialise the memory a second time.
+    let init_flag = opts.shared_memory.then(|| {
+        address = address.next_multiple_of(4);
+        let at = address;
+        address += 4;
+        at
     });
 
     let heap_base = address.next_multiple_of(16);
@@ -833,6 +888,7 @@ fn plan(
         tls,
         weak_stubs,
         synthetic_base,
+        init_flag,
         func_out,
         type_map,
         segment_addr,
@@ -1325,10 +1381,9 @@ fn resolve_symbol(
             // before the import table is consulted: the one only it can write,
             // and a weak reference nothing defines.
             if is_linker_function(name) {
-                let tls = layout.tls.as_ref().ok_or_else(|| {
+                return layout.init_tls().map(Resolved::Function).ok_or_else(|| {
                     anyhow!("{name} is called but this link has no thread-local storage")
-                })?;
-                return Ok(Resolved::Function(tls.init_function));
+                });
             }
             if weak_undefined_function(defs, &objects[doi], def).is_some() {
                 return layout
@@ -1731,6 +1786,13 @@ fn emit(
     for (key, type_index) in &layout.imports {
         imports.import(&key.module, &key.name, EntityType::Function(*type_index));
     }
+    // A shared memory is imported rather than defined, because a module that
+    // defines one gets a fresh one per instantiation -- and every thread is
+    // another instantiation of this same module. The host makes one and hands
+    // it to all of them.
+    if opts.shared_memory {
+        imports.import("env", "memory", shared_memory_type(layout));
+    }
     module.section(&imports);
 
     // --- functions ---
@@ -1756,32 +1818,25 @@ fn emit(
         .ok_or_else(|| anyhow!("no () -> () type to give __wasm_call_ctors"))?;
     functions.function(ctor_type);
     let ctors_index = layout.imports.len() as u32 + kept_functions;
-    if ctors_index != layout.synthetic_base {
+    if ctors_index != layout.ctors() {
         bail!(
             "the layout put the linker's own functions at {} and the emitter at \
              {ctors_index}",
             layout.synthetic_base
         );
     }
-    if let Some(tls) = &layout.tls {
+    if layout.tls.is_some() {
         let ty = ordered
             .iter()
-            .find(|(_, t)| {
-                t.params() == [wasmparser::ValType::I32] && t.results().is_empty()
-            })
+            .find(|(_, t)| t.params() == [wasmparser::ValType::I32] && t.results().is_empty())
             .map(|(i, _)| *i)
             .ok_or_else(|| anyhow!("no (i32) -> () type to give __wasm_init_tls"))?;
         functions.function(ty);
-        if tls.init_function != ctors_index + 1 {
-            bail!(
-                "the layout put __wasm_init_tls at {} and the emitter at {}",
-                tls.init_function,
-                ctors_index + 1
-            );
-        }
     }
-    let first_stub = ctors_index + if layout.tls.is_some() { 2 } else { 1 };
-    for (at, (name, ty)) in (first_stub..).zip(&layout.weak_stubs) {
+    if layout.init_flag.is_some() {
+        functions.function(ctor_type);
+    }
+    for (at, (name, ty)) in (layout.first_stub()..).zip(&layout.weak_stubs) {
         functions.function(*ty);
         if layout.weak_stub(name) != Some(at) {
             bail!(
@@ -1811,15 +1866,17 @@ fn emit(
     });
     module.section(&tables);
 
-    let mut memories = MemorySection::new();
-    memories.memory(MemoryType {
-        minimum: layout.memory_pages as u64,
-        maximum: None,
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-    module.section(&memories);
+    if !opts.shared_memory {
+        let mut memories = MemorySection::new();
+        memories.memory(MemoryType {
+            minimum: layout.memory_pages as u64,
+            maximum: None,
+            memory64: false,
+            shared: false,
+            page_size_log2: None,
+        });
+        module.section(&memories);
+    }
 
     if layout.tag_index.is_some() {
         let mut tags = TagSection::new();
@@ -1869,13 +1926,20 @@ fn emit(
     // start function to run them. It is mutable because `__wasm_init_tls`
     // moves it as each further thread arrives.
     if let Some(tls) = &layout.tls {
+        // Zero when every thread instantiates this module for itself:
+        // `__wasm_init_memory` gives the first instance the main block, and
+        // `wasi_thread_start` gives each later one its own before it touches
+        // a thread-local. Starting them all at the main block instead would
+        // have a thread that touched one too early read main's copy and get
+        // an answer, rather than trap.
+        let start_at = if opts.shared_memory { 0 } else { tls.main as i32 };
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
                 mutable: true,
                 shared: false,
             },
-            &ConstExpr::i32_const(tls.main as i32),
+            &ConstExpr::i32_const(start_at),
         );
         for value in [tls.size, tls.align] {
             globals.global(
@@ -1988,7 +2052,7 @@ fn emit(
     // going to initialise holding zeroes, which is not a crash but a wrong
     // answer somewhere later.
     module.section(&StartSection {
-        function_index: ctors_index,
+        function_index: layout.init_memory().unwrap_or(ctors_index),
     });
 
     // --- element segment: the functions whose address is taken ---
@@ -2006,26 +2070,21 @@ fn emit(
     }
     module.section(&elements);
 
-    // --- code ---
-    let mut code = CodeSection::new();
-    for (oi, obj) in objects.iter().enumerate() {
-        for (i, body) in obj.code_bodies.iter().enumerate() {
-            if layout.func_out[oi][i].is_none() {
-                continue;
-            }
-            code.raw(&obj.code_payload[body.clone()]);
-        }
+    // --- how many data segments the code will name ---
+    //
+    // `memory.init` and `data.drop` name a segment by index, and the module
+    // has to say how many there are before the code that names them, so that
+    // a validator can check the index without having read the data section
+    // yet. Only a shared-memory build has either instruction.
+    if opts.shared_memory {
+        module.section(&wasm_encoder::DataCountSection { count: 1 });
     }
-    code.raw(&constructor_body(objects, defs, layout)?);
-    if let Some(tls) = &layout.tls {
-        code.raw(&init_tls_body(tls));
-    }
-    for _ in &layout.weak_stubs {
-        code.raw(&trap_body());
-    }
-    module.section(&code);
 
-    // --- data: every segment, merged, at the addresses just assigned ---
+    // --- the data image ---
+    //
+    // Built before the code section rather than beside the data section,
+    // because `__wasm_init_memory` copies this image and has to be told
+    // where it goes and how much of it there is.
     //
     // Placed by address rather than in the order the objects hold them,
     // because the thread-local segments were moved to the end of memory and
@@ -2048,8 +2107,7 @@ fn emit(
             }
         }
     }
-    let mut data = DataSection::new();
-    if let Some(start) = placed.iter().map(|(a, _)| *a).min() {
+    let image = placed.iter().map(|(a, _)| *a).min().map(|start| {
         let end = placed
             .iter()
             .map(|(a, b)| *a + b.len() as u32)
@@ -2060,7 +2118,44 @@ fn emit(
             let at = (*addr - start) as usize;
             merged[at..at + bytes.len()].copy_from_slice(bytes);
         }
-        data.active(0, &ConstExpr::i32_const(start as i32), merged);
+        (start, merged)
+    });
+
+    // --- code ---
+    let mut code = CodeSection::new();
+    for (oi, obj) in objects.iter().enumerate() {
+        for (i, body) in obj.code_bodies.iter().enumerate() {
+            if layout.func_out[oi][i].is_none() {
+                continue;
+            }
+            code.raw(&obj.code_payload[body.clone()]);
+        }
+    }
+    code.raw(&constructor_body(objects, defs, layout)?);
+    if let Some(tls) = &layout.tls {
+        code.raw(&init_tls_body(tls));
+    }
+    if layout.init_flag.is_some() {
+        let sizes = image.as_ref().map(|(start, bytes)| (*start, bytes.len()));
+        code.raw(&init_memory_body(layout, sizes));
+    }
+    for _ in &layout.weak_stubs {
+        code.raw(&trap_body());
+    }
+    module.section(&code);
+
+    // --- data ---
+    //
+    // Active for a memory this module owns, because then instantiation is the
+    // one time it happens. Passive for a shared one, where it happens once
+    // across every instance and `__wasm_init_memory` decides which.
+    let mut data = DataSection::new();
+    if let Some((start, merged)) = image {
+        if opts.shared_memory {
+            data.passive(merged);
+        } else {
+            data.active(0, &ConstExpr::i32_const(start as i32), merged);
+        }
     }
     module.section(&data);
 
@@ -2105,6 +2200,109 @@ fn emit(
     module.section(&name_section);
 
     Ok(module.finish())
+}
+
+/// How much a shared memory may grow to.
+///
+/// A shared memory must declare a maximum -- an engine cannot move it when it
+/// grows, because other threads hold the old base, so it reserves the whole
+/// range up front. One gigabyte is what the Rust `wasm32-wasip1-threads`
+/// target passes to its own linker, so a module built by this one is asking
+/// for the same thing as a module built beside it.
+const SHARED_MEMORY_MAX_PAGES: u64 = 16384;
+
+fn shared_memory_type(layout: &Layout) -> wasm_encoder::EntityType {
+    wasm_encoder::EntityType::Memory(wasm_encoder::MemoryType {
+        minimum: layout.memory_pages as u64,
+        maximum: Some(SHARED_MEMORY_MAX_PAGES),
+        memory64: false,
+        shared: true,
+        page_size_log2: None,
+    })
+}
+
+/// The body of `__wasm_init_memory`: put the data in memory exactly once.
+///
+/// Every thread instantiates this module, so every thread runs this. Only one
+/// of them may write the data image: the others are already running on it,
+/// and copying it again would put the program's initial values back over
+/// whatever they had reached. Nor may the others simply skip it, because the
+/// first one has not necessarily finished -- a thread that ran ahead would
+/// read half-initialised memory.
+///
+/// So the instances race on one word, and the three outcomes of a
+/// compare-and-swap decide it: zero means this instance won and initialises,
+/// one means another is doing it and this one waits, two means it is done.
+/// The winner stores two and wakes everyone waiting. This is the shape LLD
+/// emits, and the flag lives above the image so that the copy does not undo
+/// the claim.
+///
+/// The constructors are called on the winning path only, for the same reason:
+/// a constructor runs once per program, not once per thread.
+fn init_memory_body(layout: &Layout, image: Option<(u32, usize)>) -> Vec<u8> {
+    use wasm_encoder::{BlockType, Function, Instruction, MemArg};
+
+    let flag = layout.init_flag.unwrap_or(0);
+    let word = MemArg {
+        offset: 0,
+        align: 2,
+        memory_index: 0,
+    };
+    let mut f = Function::new([]);
+    // block $done { block $wait { block $init { ... br_table } ... } ... }
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::Block(BlockType::Empty));
+    f.instruction(&Instruction::I32Const(flag as i32));
+    f.instruction(&Instruction::I32Const(0));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I32AtomicRmwCmpxchg(word));
+    f.instruction(&Instruction::BrTable(vec![0, 1].into(), 2));
+    f.instruction(&Instruction::End);
+
+    // Won: copy the image in, hand the main thread its thread-locals, run the
+    // constructors, then say so and wake the others.
+    if let Some((start, len)) = image {
+        f.instruction(&Instruction::I32Const(start as i32));
+        f.instruction(&Instruction::I32Const(0));
+        f.instruction(&Instruction::I32Const(len as i32));
+        f.instruction(&Instruction::MemoryInit {
+            mem: 0,
+            data_index: 0,
+        });
+    }
+    if let Some(tls) = &layout.tls {
+        f.instruction(&Instruction::I32Const(tls.main as i32));
+        f.instruction(&Instruction::GlobalSet(tls.base_global));
+    }
+    f.instruction(&Instruction::Call(layout.ctors()));
+    f.instruction(&Instruction::I32Const(flag as i32));
+    f.instruction(&Instruction::I32Const(2));
+    f.instruction(&Instruction::I32AtomicStore(word));
+    f.instruction(&Instruction::I32Const(flag as i32));
+    f.instruction(&Instruction::I32Const(-1));
+    f.instruction(&Instruction::MemoryAtomicNotify(word));
+    f.instruction(&Instruction::Drop);
+    f.instruction(&Instruction::Br(1));
+    f.instruction(&Instruction::End);
+
+    // Lost: wait until the winner stores two. The wait returns immediately if
+    // the word is no longer one, which is the case where it finished between
+    // the swap and here.
+    f.instruction(&Instruction::I32Const(flag as i32));
+    f.instruction(&Instruction::I32Const(1));
+    f.instruction(&Instruction::I64Const(-1));
+    f.instruction(&Instruction::MemoryAtomicWait32(word));
+    f.instruction(&Instruction::Drop);
+    f.instruction(&Instruction::End);
+
+    // Either way this instance is done with the segment, and dropping it
+    // lets the engine release its copy.
+    if image.is_some() {
+        f.instruction(&Instruction::DataDrop(0));
+    }
+    f.instruction(&Instruction::End);
+    strip_size_prefix(f)
 }
 
 /// The body of `__wasm_init_tls`: give this thread the block it was handed.

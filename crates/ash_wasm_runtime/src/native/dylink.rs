@@ -109,6 +109,7 @@ fn head_looks_like_side_module(path: &Path) -> bool {
 /// found", which points at the wrong thing entirely.
 pub(crate) async fn load_beside(
     store: &mut Store<Host>,
+    linker: &wasmtime::Linker<Host>,
     main: &Instance,
     program: &Path,
 ) -> Result<Libraries> {
@@ -145,7 +146,7 @@ pub(crate) async fn load_beside(
         let Some(name) = library_name(&path) else {
             continue;
         };
-        match load_one(store, main, &bytes, &side).await {
+        match load_one(store, linker, main, &bytes, &side).await {
             Ok((instance, table)) => {
                 out.table = Some(table);
                 out.by_name.insert(
@@ -164,6 +165,7 @@ pub(crate) async fn load_beside(
 
 async fn load_one(
     store: &mut Store<Host>,
+    linker: &wasmtime::Linker<Host>,
     main: &Instance,
     bytes: &[u8],
     side: &ash_wasm_link::SideModule,
@@ -220,19 +222,50 @@ async fn load_one(
 
     // Imports are supplied positionally, so they are resolved in the order
     // the module declares them.
+    //
+    // The global offset table is the part that cannot be answered yet. A
+    // `GOT.mem.x` or `GOT.func.x` import is a mutable global that must end up
+    // holding where `x` was placed -- and for a symbol the library itself
+    // defines, that is not known until it has been instantiated. So they are
+    // supplied as zeroes here and filled in below, before anything reads
+    // them.
     let mut imports: Vec<Extern> = Vec::new();
+    let mut got: Vec<(GotKind, String, Global)> = Vec::new();
     for import in module.imports() {
-        let found = match import.name() {
-            "memory" => Some(Extern::Memory(memory)),
-            "__indirect_function_table" => Some(Extern::Table(table)),
-            "__memory_base" => Some(Extern::Global(memory_base_global)),
-            "__table_base" => Some(Extern::Global(table_base_global)),
-            name => main.get_export(&mut *store, name),
+        let kind = match import.module() {
+            "GOT.mem" => Some(GotKind::Data),
+            "GOT.func" => Some(GotKind::Function),
+            _ => None,
+        };
+        if let Some(kind) = kind {
+            let slot = Global::new(
+                store.as_context_mut(),
+                GlobalType::new(wasmtime::ValType::I32, Mutability::Var),
+                Val::I32(0),
+            )?;
+            got.push((kind, import.name().to_string(), slot));
+            imports.push(Extern::Global(slot));
+            continue;
+        }
+        // `env` is the program: its memory, its table, and the runtime
+        // functions it exports. Anything else -- WASI, above all -- is the
+        // host's, and the host answers a library exactly as it answers the
+        // program.
+        let found = if import.module() == "env" {
+            match import.name() {
+                "memory" => Some(Extern::Memory(memory)),
+                "__indirect_function_table" => Some(Extern::Table(table)),
+                "__memory_base" => Some(Extern::Global(memory_base_global)),
+                "__table_base" => Some(Extern::Global(table_base_global)),
+                name => main.get_export(&mut *store, name),
+            }
+        } else {
+            linker.get(&mut *store, import.module(), import.name())
         };
         let found = found.ok_or_else(|| {
             anyhow!(
-                "it imports {}::{}, which the program does not export. A runtime function \
-                 is exported only when a library beside the program imports it, so this \
+                "it imports {}::{}, which nothing here provides. A runtime function is \
+                 exported only when a library beside the program imports it, so this \
                  usually means the program was linked without this library present.",
                 import.module(),
                 import.name()
@@ -243,6 +276,24 @@ async fn load_one(
 
     let instance = Instance::new_async(&mut *store, &module, &imports).await?;
 
+    // Now that it has been placed, say where. A library's own symbol comes
+    // from its exports -- a data symbol as a global holding its address, a
+    // function as a function that has to be given a table slot; one it does
+    // not define is the program's, and comes from there.
+    let mut placed: HashMap<String, i32> = HashMap::new();
+    for (kind, name, slot) in got {
+        let value = match kind {
+            GotKind::Data => data_address(&mut *store, &instance, main, &name),
+            GotKind::Function => {
+                function_address(&mut *store, &instance, main, table, &name, &mut placed)?
+            }
+        };
+        let value = value.ok_or_else(|| {
+            anyhow!("it needs the address of {name}, which neither it nor the program defines")
+        })?;
+        slot.set(&mut *store, Val::I32(value))?;
+    }
+
     // Its data holds addresses that were not known until the loader placed
     // it, and this is what writes them.
     if let Ok(relocs) = instance.get_typed_func::<(), ()>(&mut *store, "__wasm_apply_data_relocs") {
@@ -252,6 +303,68 @@ async fn load_one(
         ctors.call_async(&mut *store, ()).await?;
     }
     Ok((instance, table))
+}
+
+/// Which of the two global offset tables an import belongs to.
+#[derive(Clone, Copy)]
+enum GotKind {
+    /// An address in linear memory.
+    Data,
+    /// A slot in the function table.
+    Function,
+}
+
+/// Where a data symbol was placed, as its own module reports it: a
+/// position-independent module exports each such symbol as a global holding
+/// its address.
+fn data_address(
+    store: &mut Store<Host>,
+    instance: &Instance,
+    main: &Instance,
+    name: &str,
+) -> Option<i32> {
+    for owner in [instance, main] {
+        if let Some(Extern::Global(g)) = owner.get_export(&mut *store, name) {
+            if let Some(v) = g.get(&mut *store).i32() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// A table slot holding `name`, appending one if it has none yet.
+///
+/// Cached, because a function whose address is taken twice must be the same
+/// pointer both times or a program comparing them sees two functions where it
+/// has one.
+fn function_address(
+    store: &mut Store<Host>,
+    instance: &Instance,
+    main: &Instance,
+    table: wasmtime::Table,
+    name: &str,
+    placed: &mut HashMap<String, i32>,
+) -> Result<Option<i32>> {
+    if let Some(&index) = placed.get(name) {
+        return Ok(Some(index));
+    }
+    let mut func = None;
+    for owner in [instance, main] {
+        if let Some(Extern::Func(f)) = owner.get_export(&mut *store, name) {
+            func = Some(f);
+            break;
+        }
+    }
+    let Some(func) = func else {
+        return Ok(None);
+    };
+    let index = table.size(&mut *store) as i32;
+    table
+        .grow(&mut *store, 1, Ref::Func(Some(func)))
+        .map_err(|e| anyhow!("no room in the function table for {name}: {e}"))?;
+    placed.insert(name.to_string(), index);
+    Ok(Some(index))
 }
 
 /// Find `symbol` in `lib` and return a pointer the program can call.

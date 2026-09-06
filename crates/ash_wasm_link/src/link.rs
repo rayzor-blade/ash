@@ -69,6 +69,14 @@ pub struct LinkOptions {
     /// export exactly those. Empty means this module hosts nothing and its
     /// ABI stays as narrow as it was.
     pub hdll_imports: Vec<String>,
+    /// Data symbols a separately-loaded native library needs the address of.
+    ///
+    /// A position-independent library reaches a symbol it does not define
+    /// through the global offset table, importing `GOT.mem.<name>` -- a
+    /// global holding that symbol's address. `errno` is the one every C
+    /// library wants. Each name here becomes an exported global holding where
+    /// the linker put it.
+    pub hdll_data: Vec<String>,
     /// Instrument the module so a fiber can suspend inside it and be resumed.
     ///
     /// Off by default, and the gate is not that the code path is skipped but
@@ -92,6 +100,7 @@ impl Default for LinkOptions {
                 .collect(),
             fibers: false,
             hdll_imports: Vec::new(),
+            hdll_data: Vec::new(),
         }
     }
 }
@@ -145,6 +154,9 @@ struct Layout {
     /// What each GOT global is initialised to, in output-index order after
     /// the three the linker defines outright.
     got_init: Vec<i32>,
+    /// Data symbols a native library asks for, and the global holding each
+    /// one's address, to be exported under the symbol's own name.
+    hdll_data_globals: Vec<(String, u32)>,
     heap_base: u32,
     memory_pages: u32,
     /// Where data starts, which is also the top of the shadow stack.
@@ -158,6 +170,7 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
     refuse_unsupported(&objects)?;
 
     let defs = resolve_definitions(&objects)?;
+    check_hdll_imports(&defs, opts)?;
     let layout = plan(&objects, &defs, opts)?;
     report_unresolved(&objects, &defs, &layout)?;
     // Patching mutates each object's kept payloads in place.
@@ -209,6 +222,36 @@ fn refuse_unsupported(objects: &[Object]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Refuse a link whose libraries ask for something the runtime does not have.
+///
+/// A side module gets its libc, and everything else it did not bring, from the
+/// program that hosts it -- that is the model, and it is why the program
+/// exports what the libraries import. So a name the runtime never defined is
+/// not a warning: the library would fail to instantiate at run time, with the
+/// evidence a build away from where it could be acted on. Saying it here
+/// costs nothing and points at the right thing.
+fn check_hdll_imports(
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+    opts: &LinkOptions,
+) -> Result<()> {
+    let missing: Vec<&String> = opts
+        .hdll_imports
+        .iter()
+        .filter(|name| !defs.contains_key(&(Kind::Function, (*name).clone())))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let shown: Vec<&str> = missing.iter().take(8).map(|n| n.as_str()).collect();
+    bail!(
+        "a native library beside the output imports {} function(s) this runtime does not \
+         define, the first few being {}. A wasm library takes libc and the runtime from the \
+         program that hosts it, so it can only use what ash_std itself pulled in.",
+        missing.len(),
+        shown.join(", ")
+    );
 }
 
 /// Name to the object and symbol that defines it.
@@ -489,6 +532,39 @@ fn plan(
         }
     }
 
+    // The same globals, for the addresses a native library asks the program
+    // for. A library reaches them exactly as this module reaches its own --
+    // through the global offset table -- so they are the same kind of entry,
+    // and the only difference is that these are exported under the symbol's
+    // own name for the loader to find.
+    let mut hdll_data_globals: Vec<(String, u32)> = Vec::new();
+    for name in &opts.hdll_data {
+        let key = (Kind::Data, name.clone());
+        if let Some(&existing) = got.get(&key) {
+            hdll_data_globals.push((name.clone(), existing));
+            continue;
+        }
+        let Some(&(doi, si)) = defs.get(&key) else {
+            continue;
+        };
+        let SymbolTarget::Data {
+            segment, offset, ..
+        } = objects[doi].symbols[si].target
+        else {
+            continue;
+        };
+        let Some(base) = segment_addr
+            .get(doi)
+            .and_then(|s| s.get(segment as usize))
+        else {
+            continue;
+        };
+        let index = first_got + got_init.len() as u32;
+        got.insert(key, index);
+        got_init.push((base + offset) as i32);
+        hdll_data_globals.push((name.clone(), index));
+    }
+
     let tag_index = objects.iter().any(|o| !o.tags.is_empty()).then_some(0);
 
     Ok(Layout {
@@ -506,6 +582,7 @@ fn plan(
         table_base_global: 2,
         got,
         got_init,
+        hdll_data_globals,
         heap_base,
         memory_pages,
     })
@@ -1386,6 +1463,9 @@ fn emit(
         exports.export("__indirect_function_table", ExportKind::Table, 0);
         exports.export("__memory_base", ExportKind::Global, layout.memory_base_global);
         exports.export("__table_base", ExportKind::Global, layout.table_base_global);
+        for (name, index) in &layout.hdll_data_globals {
+            exports.export(name, ExportKind::Global, *index);
+        }
     }
     if opts.fibers || !opts.hdll_imports.is_empty() {
         // Two fibers cannot share one shadow stack. The transform leaves a

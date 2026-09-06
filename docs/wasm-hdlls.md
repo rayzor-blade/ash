@@ -71,6 +71,41 @@ had. It still builds and still runs; a primitive it never reaches costs it
 nothing, and one it does reach raises the same "not loaded" a native binary
 raises for a missing HDLL.
 
+## Where a library gets everything else
+
+A side module brings almost nothing with it. `wasm-ld -shared` resolves
+undefined symbols by importing them rather than by pulling archive members, so
+even `-lc` changes nothing: a library's libc comes from whoever hosts it. That
+is the model, not a gap in it.
+
+So three parties answer a library's imports:
+
+- **`env`** is the program: its memory, its table, and the runtime and libc
+  functions it exports.
+- **`wasi_snapshot_preview1`** is the host, which answers a library exactly as
+  it answers the program.
+- **`GOT.mem.x` and `GOT.func.x`** are the global offset table: mutable
+  globals holding where `x` ended up. A symbol the library defines itself is
+  resolved from its own exports -- a data symbol is exported as a global
+  holding its address, a function as a function that the loader gives a table
+  slot. One it does not define is the program's.
+
+A library therefore cannot use a libc function that is not in the runtime
+object, and the runtime object only has what `ash_std` itself referenced. The
+build says so rather than letting the load fail:
+
+    a native library beside the output imports 9 function(s) this runtime does
+    not define, the first few being futimens, pread, pwrite, readv...
+
+`LIBRARY_LIBC` in `scripts/build_wasm_runtime.py` is the answer to that: a
+list of libc entry points force-included into the runtime object for
+libraries to use. It can be generous, because nothing references them and no
+library asks for them in an ordinary program, so tree shaking drops them
+again. They are named as archive members rather than forced with `-u`, which
+a relocatable link refuses -- and `--whole-archive` on libc is not the way
+either, because it pulls crt1 and the long-double printf, whose own undefined
+symbols nothing provides.
+
 ## What the loader does
 
 `crates/ash_wasm_runtime/src/native/dylink.rs`, before the program's own
@@ -81,14 +116,35 @@ call the guest is making:
 2. Take the bytes from the program's own `malloc`, so one allocator owns the
    whole heap.
 3. Grow the program's table by the slots, and remember where they start.
-4. Instantiate, supplying the memory, the table, the two bases, and each named
-   function from the program's exports.
-5. Call `__wasm_apply_data_relocs` and `__wasm_call_ctors` if it exports them.
+4. Instantiate, supplying the memory, the table, the two bases, each named
+   function from the program's exports, WASI from the host, and a zeroed
+   mutable global for every GOT entry.
+5. Fill in the GOT now that the library has been placed.
+6. Call `__wasm_apply_data_relocs` and `__wasm_call_ctors` if it exports them.
 
 The guest then reaches it through two imports that are `dlopen` and `dlsym`
 under other names: `ash_host_dlopen` answers whether a library is there, and
 `ash_host_dlsym` answers with a table index -- which is what a function
 pointer already is in a wasm module.
+
+## A library written in Rust
+
+The same thing, with two extra flags, because the toolchain's precompiled
+`core` and `std` are not position-independent:
+
+    RUSTFLAGS="-C relocation-model=pic -C target-feature=+mutable-globals" \
+      cargo +nightly build --release --target wasm32-wasip1 \
+      -Z build-std=std,panic_abort
+    wasm-ld --experimental-pic -shared --unresolved-symbols=import-dynamic \
+      --no-entry --export=hlp_greet -o rustlib.wasm libyourlib.a
+
+`--unresolved-symbols=import-dynamic` rather than `--import-undefined`: the
+latter covers functions only, and Rust's std needs the address of `errno`,
+which is data.
+
+A library that pulls in all of `std` is around 770 KB, most of it `std` rather
+than the library. `#![no_std]` with the runtime's own allocator is the way to
+keep one small.
 
 ## What is not done yet
 

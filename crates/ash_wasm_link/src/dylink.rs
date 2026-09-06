@@ -21,8 +21,15 @@ use wasmparser::{Parser, Payload};
 /// What a side module needs from the program that hosts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SideModule {
-    /// Functions it imports by name, in the order it declares them.
+    /// Functions it expects the PROGRAM to provide, in the order it declares
+    /// them. Only the `env` module: a library also imports WASI, and that is
+    /// the host's to answer, not the program's.
     pub functions: Vec<String>,
+    /// Data symbols it expects to find outside itself, imported as
+    /// `GOT.mem.<name>` -- globals holding an address. `errno` is the one
+    /// every C library wants. A name it defines itself resolves against its
+    /// own exports, so only the rest are the program's to answer.
+    pub data: Vec<String>,
     /// Bytes of linear memory the loader must set aside for its data, and the
     /// alignment that address needs.
     pub memory_size: u32,
@@ -57,23 +64,37 @@ pub const SIDE_MODULE_PREFIX: usize = 64;
 pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
     let mut out = SideModule::default();
     let mut is_side_module = false;
+    // What it exports, so that a GOT entry for one of its OWN symbols is not
+    // asked of the program. Collected as it goes and applied at the end,
+    // because the export section comes after the imports.
+    let mut defined = std::collections::HashSet::new();
     for payload in Parser::new(0).parse_all(bytes) {
         match payload? {
             Payload::CustomSection(c) if c.name() == "dylink.0" => {
                 is_side_module = true;
                 read_mem_info(c.data(), &mut out);
             }
+            Payload::ExportSection(exports) => {
+                for export in exports {
+                    defined.insert(export?.name.to_string());
+                }
+            }
             Payload::ImportSection(imports) => {
                 for import in imports.into_imports() {
                     let import = import?;
-                    if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
+                    if import.module == "env" && matches!(import.ty, wasmparser::TypeRef::Func(_))
+                    {
                         out.functions.push(import.name.to_string());
+                    }
+                    if import.module == "GOT.mem" {
+                        out.data.push(import.name.to_string());
                     }
                 }
             }
             _ => {}
         }
     }
+    out.data.retain(|name| !defined.contains(name));
     Ok(is_side_module.then_some(out))
 }
 

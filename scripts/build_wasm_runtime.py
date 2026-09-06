@@ -29,6 +29,29 @@ import subprocess
 import sys
 
 TRIPLE = "wasm32-wasip1"
+
+# libc entry points a native library may use that ash_std itself never calls,
+# force-included with `-u` so they are IN the runtime object and can be
+# exported to a library that asks for one. `-u` rather than `--whole-archive`
+# on libc: whole-archiving pulls crt1 and the long-double printf, whose own
+# undefined symbols (`__main_argc_argv`, `__multc3`) nothing provides.
+#
+# They cost nothing when unused. Nothing references them and no library asks
+# for them, so tree shaking drops them from the module -- which is why this
+# list can be generous.
+LIBRARY_LIBC = [
+    "pread", "pwrite", "readv", "writev", "preadv", "pwritev",
+    "futimens", "utimensat", "fstatat", "mkdirat", "unlinkat", "renameat",
+    "readlinkat", "symlinkat", "faccessat", "fdopendir", "readdir", "closedir",
+    "qsort", "bsearch", "strtol", "strtoul", "strtoll", "strtoull",
+    "strncmp", "strrchr", "strchr", "strstr", "strcspn", "strspn",
+    "localtime_r", "gmtime_r", "mktime", "nanosleep",
+    "pthread_attr_init", "pthread_attr_destroy", "pthread_attr_setstacksize",
+    "pthread_detach", "pthread_create", "pthread_join",
+    "pthread_mutex_init", "pthread_mutex_lock", "pthread_mutex_unlock",
+    "pthread_mutex_destroy", "pthread_cond_init", "pthread_cond_wait",
+    "pthread_cond_signal", "pthread_cond_broadcast", "pthread_cond_destroy",
+]
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -92,6 +115,64 @@ def find_sysroot(explicit: str | None) -> pathlib.Path:
              f"Looked in: {', '.join(str(c) for c in candidates)}")
 
 
+def ar_members(path: pathlib.Path):
+    """Yield (name, bytes) for each member of a `ar` archive.
+
+    Written out rather than shelled to `llvm-ar`, which is not otherwise
+    needed to build ash and would be one more tool to find. The format is a
+    magic line, then 60-byte headers; long names live in the `//` member and
+    are referenced as `/<offset>`.
+    """
+    data = path.read_bytes()
+    if not data.startswith(b"!<arch>\n"):
+        return
+    longnames = b""
+    p = 8
+    while p + 60 <= len(data):
+        header = data[p:p + 60]
+        name = header[0:16].decode("ascii", "replace").rstrip()
+        size = int(header[48:58].decode("ascii", "replace").strip() or 0)
+        body = data[p + 60:p + 60 + size]
+        p += 60 + size + (size & 1)
+        if name == "//":
+            longnames = body
+            continue
+        if name.startswith("/") and name[1:].isdigit():
+            start = int(name[1:])
+            end = longnames.find(b"/", start)
+            name = longnames[start:end].decode("ascii", "replace")
+        yield name.rstrip("/"), body
+
+
+def extract_library_libc(sysroot: pathlib.Path, into: pathlib.Path):
+    """Write out the libc members in LIBRARY_LIBC, and return their paths.
+
+    A relocatable link keeps only what is given to it, and `-u` -- the usual
+    way to force an archive member in -- is refused alongside `-r`. wasi-libc
+    puts one function per member and names it after the function, so naming
+    the members directly does the same job.
+    """
+    archive = sysroot / "lib" / TRIPLE / "libc.a"
+    if not archive.is_file():
+        return []
+    wanted = {f"{name}.c.obj": name for name in LIBRARY_LIBC}
+    out_dir = into / "library-libc"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    found = set()
+    for member, body in ar_members(archive):
+        if member not in wanted:
+            continue
+        target = out_dir / member
+        target.write_bytes(body)
+        written.append(target)
+        found.add(wanted[member])
+    missing = sorted(set(LIBRARY_LIBC) - found)
+    if missing:
+        print(f"note: this wasi-libc has no member for {', '.join(missing)}")
+    return written
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -131,8 +212,10 @@ def main() -> int:
         sys.exit(f"cargo produced no {archive}")
     out = args.out or (REPO / "target" / args.profile / TRIPLE / "ash_runtime.o")
     out.parent.mkdir(parents=True, exist_ok=True)
+    extra = extract_library_libc(sysroot, out.parent)
     sh([str(lld), "-flavor", "wasm", "-r", "-o", str(out),
         "--whole-archive", str(archive), "--no-whole-archive",
+        *[str(o) for o in extra],
         f"-L{sysroot / 'lib' / TRIPLE}", "-lc", "-lsetjmp"])
     print(f"wrote {out} ({out.stat().st_size} bytes)")
     return 0

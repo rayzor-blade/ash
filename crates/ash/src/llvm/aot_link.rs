@@ -551,6 +551,12 @@ fn link_wasm_module(
             },
         ));
     }
+    let mut hdll_data: Vec<String> = hdlls
+        .iter()
+        .flat_map(|(_, side)| side.data.clone())
+        .collect();
+    hdll_data.sort();
+    hdll_data.dedup();
     let mut hdll_imports: Vec<String> = hdlls
         .into_iter()
         .flat_map(|(_, side)| side.functions)
@@ -567,6 +573,7 @@ fn link_wasm_module(
     let opts = ash_wasm_link::LinkOptions {
         fibers: fiber_transform_requested(),
         hdll_imports,
+        hdll_data,
         ..Default::default()
     };
     if opts.fibers && !quiet {

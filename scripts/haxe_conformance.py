@@ -1552,6 +1552,10 @@ def main(argv=None) -> int:
                     # when told, since it is the one capability that leaves
                     # the sandbox.
                     suite_env.setdefault("ASH_WASM_ALLOW_COMMAND", "1")
+                    # The suite walks up out of its own directory -- setCwd
+                    # and readDirectory both try `..`. A guest reaches only
+                    # what the host opened for it, so say that one is fair.
+                    suite_env.setdefault("ASH_WASM_DIRS", "..")
                 try:
                     # Programs are invoked by upstream from their suite root.
                     # In particular, sys addresses gen_test_res.py,

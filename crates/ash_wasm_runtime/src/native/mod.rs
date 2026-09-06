@@ -102,7 +102,7 @@ impl Program {
     }
 
     /// Run the program to completion.
-    pub async fn run(&self, args: &[String]) -> Result<Outcome> {
+    pub async fn run(&self, args: &[String], dirs: &[std::path::PathBuf]) -> Result<Outcome> {
         let missing = self.missing();
         if !missing.is_empty() {
             return Err(anyhow!(
@@ -129,6 +129,24 @@ impl Program {
         // directory is the one the host was started in, nothing above it.
         if let Err(e) = wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
             eprintln!("[ash-wasm-run] the working directory is not available to the program: {e}");
+        }
+        // Anything else the operator named, on the command line or in
+        // ASH_WASM_DIRS. A module can open only what has been opened for it,
+        // so a program that legitimately reaches outside its own directory --
+        // upwards, most often -- needs the host to say so rather than to be
+        // refused at the boundary with nothing to do about it.
+        let named: Vec<std::path::PathBuf> = std::env::var("ASH_WASM_DIRS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .collect();
+        for dir in dirs.iter().chain(named.iter()) {
+            let at = dir.to_string_lossy().into_owned();
+            if let Err(e) = wasi.preopened_dir(dir, &at, DirPerms::all(), FilePerms::all()) {
+                eprintln!("[ash-wasm-run] {at} is not available to the program: {e}");
+            }
         }
         for arg in args {
             wasi.arg(arg);

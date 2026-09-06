@@ -3164,6 +3164,21 @@ impl ImmixAllocator {
                     mutator.scan_ranges.len(),
                     self.globals_range.map(|(_, c)| c)
                 );
+                // Every stack this mutator owns. Which of them gets scanned
+                // is decided below, a descriptor with no saved SP is skipped
+                // silently, and the range for one that IS scanned is only as
+                // good as the SP it recorded -- none of which is visible
+                // without printing it.
+                for f in fiber_stacks.iter().filter(|f| f.thread == mutator.thread) {
+                    eprintln!(
+                        "[gc-roots]   stack id={} base={:#x} size={} saved_sp={:#x}{}",
+                        f.id,
+                        f.base,
+                        f.size,
+                        f.saved_sp,
+                        if f.saved_sp == 0 { "  <- SKIPPED" } else { "" }
+                    );
+                }
             }
             match running_fiber {
                 Some((_, top)) => {
@@ -3183,7 +3198,7 @@ impl ImmixAllocator {
                 if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
                     continue;
                 }
-                let start = word_align_up(f.saved_sp);
+                let mut start = word_align_up(f.saved_sp);
                 let top = if f.size > 0 {
                     f.base + f.size
                 } else {
@@ -3192,6 +3207,23 @@ impl ImmixAllocator {
                     }
                     mutator.stack_top
                 };
+                // The main stack, on a target where the probe that recorded
+                // `saved_sp` is not below the frames it is supposed to cover.
+                //
+                // Measured: with a fiber running, this scanned `0xffa4` to
+                // `0xffff` -- ninety-one bytes -- while the frames holding
+                // the program's own locals were at `0xfd10`. Everything the
+                // suspended main held was below the range meant to find it,
+                // so a collection triggered inside a fiber freed it.
+                //
+                // The whole stack instead, which on WebAssembly is bounded
+                // and small: it is the shadow stack the linker placed at the
+                // bottom of memory, one page of it, and `stack_top` is its
+                // top. Scanning dead frames below the suspend point
+                // over-retains, which is the conservative contract already.
+                if f.size == 0 && cfg!(target_family = "wasm") {
+                    start = 0;
+                }
                 if start < top {
                     all_newly_marked.extend(self.conservative_scan_range(start, top));
                 }

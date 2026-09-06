@@ -944,11 +944,6 @@ pub(crate) fn install(linker: &mut Linker<Host>) -> anyhow::Result<()> {
         "ash_host_sdl_win_set_title",
         |mut caller: Caller<'_, Host>, a0: i32, a1: i32| { caller.data_mut().sdl.call("sdl@win_set_title", &[Arg::I(a0), Arg::I(a1)]); },
     )?;
-    linker.func_wrap(
-        FIBER_YIELD_MODULE,
-        "ash_host_sdl_win_swap_window",
-        |mut caller: Caller<'_, Host>, a0: i32| { caller.data_mut().sdl.call("sdl@win_swap_window", &[Arg::I(a0)]); },
-    )?;
 
     linker.func_wrap(
         FIBER_YIELD_MODULE,

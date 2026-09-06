@@ -2992,19 +2992,3 @@ pub unsafe extern "C" fn sdl_win_set_title(a0: *mut c_void, a1: *mut vbyte) {
     ash_host_sdl_win_set_title(a0 as i32, a1 as i32);
 }
 define_prim!(hlp_win_set_title, sdl_win_set_title, "PXsdl_window_B_v");
-
-#[link(wasm_import_module = "env")]
-extern "C" {
-    fn ash_host_sdl_win_swap_window(a0: i32);
-}
-
-/// `PXsdl_window__v`
-///
-/// # Safety
-/// Called by the VM through the resolver below, with the arguments the
-/// signature above declares.
-#[no_mangle]
-pub unsafe extern "C" fn sdl_win_swap_window(a0: *mut c_void) {
-    ash_host_sdl_win_swap_window(a0 as i32);
-}
-define_prim!(hlp_win_swap_window, sdl_win_swap_window, "PXsdl_window__v");

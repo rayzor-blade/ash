@@ -13,11 +13,23 @@
 //!
 //! # What a program can tell
 //!
-//! **It runs for a fixed number of frames.** After `ASH_SDL_FRAMES` swaps the
-//! recorder prints what it saw and ends the process. Asking the program to
-//! quit would be tidier, but a quit is an event and filling one in means
-//! knowing the layout of a Heaps object; a headless program otherwise has no
-//! reason to ever stop.
+//! **A frame ends where the guest suspends.** `win_swap_window` is not an
+//! ordinary call: a Heaps program's main loop is `while(true) { events;
+//! render; present; }` and it never returns, so a host that answered `present`
+//! and let the guest carry on would never get control back. Here that costs a
+//! run that cannot be stopped; in a page it is a frozen tab -- no
+//! `requestAnimationFrame`, no events, no paint, ever.
+//!
+//! So the swap yields, and the host decides when the next frame starts. This
+//! one resumes immediately, `ASH_SDL_FRAMES` times, and then stops the guest
+//! rather than resuming again. A page schedules the resume on
+//! `requestAnimationFrame`, which is what a frame boundary is actually for.
+//!
+//! The suspension has to come from the ENGINE -- `func_wrap_async` here, JSPI
+//! in a page -- and not from the link-time fiber transform. The transform
+//! instruments the program's module, and this frame is in `sdl.wasm`, which
+//! it never saw; an unwind travels exactly as far as the instrumentation
+//! does.
 //!
 //! **Every object name is invented here.** `gl_create_*` hands out
 //! consecutive integers; nothing checks that a name later handed back was
@@ -121,18 +133,8 @@ impl Sdl {
 
             // A frame ended. After enough of them the program is told to
             // quit, which is the only reason a headless run ever stops.
-            "win_swap_window" => {
-                self.frames += 1;
-                if self.frames >= self.limit {
-                    // Nothing here can ask the program to stop: the quit that
-                    // would do it is an event, and filling one means knowing
-                    // the layout of a Heaps object. A recorder has what it
-                    // came for by now, so it says so and ends the process.
-                    eprint!("{}", self.report());
-                    std::process::exit(0);
-                }
-                0
-            }
+            // Not answered here: see `Sdl::present`, which suspends.
+            "win_swap_window" => 0,
             // False means "no more events". hlsdl pumps this in a loop until
             // it says so, so answering true is an event queue that never
             // drains and a frame that never starts.
@@ -171,6 +173,15 @@ impl Sdl {
 
             _ => 0,
         }
+    }
+
+    /// A frame ended. Answers whether there is another one.
+    ///
+    /// The count is the whole of the policy: a headless run has no reason to
+    /// stop on its own, since nothing will ever send it a quit event.
+    pub(crate) fn present(&mut self) -> bool {
+        self.frames += 1;
+        self.frames < self.limit
     }
 
     /// Fill in one of GL's strings, and answer how many bytes that took.
@@ -215,3 +226,19 @@ impl Sdl {
 /// visible in a trace rather than silently fine.
 const WINDOW: i64 = 0x5D_10_00_01;
 const CONTEXT: i64 = 0x5D_10_00_02;
+
+/// The run ended because it had the frames it was asked for.
+///
+/// An error so that it unwinds the guest, which is the only way out of a main
+/// loop that never returns; the runner recognises it and reports an ending
+/// rather than a failure.
+#[derive(Debug)]
+pub(crate) struct FramesDone;
+
+impl std::fmt::Display for FramesDone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the requested frames have been rendered")
+    }
+}
+
+impl std::error::Error for FramesDone {}

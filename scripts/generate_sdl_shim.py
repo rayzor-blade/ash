@@ -143,7 +143,7 @@ def emit_host(rows, lib):
 
 # Primitives whose shape the generator cannot express: they allocate in the
 # guest and are filled by the host, so both sides are written by hand.
-MANUAL = {"gl_get_string"}
+MANUAL = {"gl_get_string", "win_swap_window"}
 
 
 def library():

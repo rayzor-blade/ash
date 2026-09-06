@@ -269,6 +269,13 @@ impl Program {
                 if let Some(exit) = err.downcast_ref::<wasmtime_wasi::I32Exit>() {
                     return Ok(Outcome::Exited(exit.0));
                 }
+                // A run that rendered what it was asked for, which is an
+                // ending rather than a failure: a main loop that never
+                // returns can only be left by unwinding it.
+                if err.downcast_ref::<sdl::FramesDone>().is_some() {
+                    eprint!("{}", store.data().sdl.report());
+                    return Ok(Outcome::Exited(0));
+                }
                 Ok(Outcome::Trapped(format!("{err:?}")))
             }
         }
@@ -733,6 +740,54 @@ fn install_dlopen(linker: &mut Linker<Host>) -> Result<()> {
 /// library allocates the room and the host only fills it -- which means
 /// reaching into guest memory, and none of the generated bindings do that.
 fn install_sdl_manual(linker: &mut Linker<Host>) -> Result<()> {
+    // The frame boundary. Async because it suspends the guest: a Heaps main
+    // loop never returns, so this is the only point at which a host gets
+    // control back, and a host that did not take it here would never run
+    // again. See `sdl::Sdl` for why the engine has to do the suspending
+    // rather than the link-time transform.
+    //
+    // Declared untyped rather than through `func_wrap_async`, because the
+    // typed form's future cannot answer with an error and this one has to:
+    // refusing to resume is how a headless run ends.
+    let swap = wasmtime::FuncType::new(
+        linker.engine(),
+        [wasmtime::ValType::I32],
+        [wasmtime::ValType::I32],
+    );
+    linker
+        .func_new_async(
+            FIBER_YIELD_MODULE,
+            "ash_host_sdl_win_swap_window",
+            swap,
+            |mut caller: Caller<'_, Host>, args, results| {
+                let window = args.first().and_then(wasmtime::Val::i32).unwrap_or(0);
+                let another = {
+                    let sdl = &mut caller.data_mut().sdl;
+                    sdl.call("sdl@win_swap_window", &[sdl::Arg::I(window)]);
+                    sdl.present()
+                };
+                Box::new(async move {
+                    if !another {
+                        // Nothing can ask a headless program to stop -- the
+                        // quit that would do it is an event, and filling one
+                        // in means knowing the layout of a Heaps object. So
+                        // the run ends here, and the runner reports it as an
+                        // ending rather than a failure.
+                        return Err(wasmtime::Error::new(sdl::FramesDone));
+                    }
+                    // A page waits for the next `requestAnimationFrame`. This
+                    // host has nothing to wait for, so it returns to the
+                    // executor and comes straight back.
+                    tokio::task::yield_now().await;
+                    if let Some(slot) = results.first_mut() {
+                        *slot = wasmtime::Val::I32(0);
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .map_err(|e| anyhow!("installing the frame boundary: {e}"))?;
+
     linker
         .func_wrap(
             FIBER_YIELD_MODULE,

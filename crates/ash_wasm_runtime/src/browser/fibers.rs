@@ -13,6 +13,15 @@
 //! the whole point of having the transform: a host needs to be able to
 //! suspend, not to have an engine that can.
 //!
+//! # What this is not
+//!
+//! Parallelism. Fibers take turns on the page's one thread and control moves
+//! between them only where one of them blocks, so two of them never run at
+//! once and a fiber that does not yield starves the rest and the page with
+//! it. Running wasm on more than one core in a browser is Web Workers over a
+//! shared memory, which is what COOP/COEP are for and is a different
+//! mechanism from this one.
+//!
 //! # What a module without the transform gets
 //!
 //! Nothing, and it must not be an error. The globals are absent, every call

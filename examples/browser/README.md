@@ -59,14 +59,32 @@ way it would with the file absent.
 Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
 `Sys.sleep` returns immediately.
 
-## Threads
+## Threads: concurrency, not parallelism
 
 A `sys.thread` worker suspends and resumes in the middle of its body, in a
-page. Not through JSPI and not through a worker parked on `Atomics.wait`:
-ash's link-time transform rewrites the module so its frames can unwind back
-to a scheduler and rewind to exactly where they stopped, and the host drives
-the three globals that transform adds. `browser/fibers.rs` is the same thing
-`native::install_fiber_yield` does, against `WebAssembly.Global`.
+page. It does not run *alongside* anything: `Thread.create` gives a fiber, and
+control moves between fibers only where one of them blocks -- a `Deque.pop`, a
+lock, an explicit yield. One thread, one stack running at a time, taking turns.
+
+That is why this needs no `SharedArrayBuffer` and no COOP/COEP headers: there
+is no second thread and nothing shared between threads to protect. The saving
+is real but it is the saving of a different feature. A program that expects
+two threads to make progress at once will not get it here, and a busy loop in
+a fiber starves every other fiber and the page with it.
+
+**Parallelism in a browser is a different mechanism entirely** -- Web Workers,
+each with its own instance, over one `SharedArrayBuffer` memory, which is what
+COOP/COEP are for. ash does not do that on wasm: its collector, its shadow
+stacks and its allocator are all written for one thread of execution, and a
+worker pool cannot multiplex them. `docs/wasm-fibers.md` says the same thing
+about the primitive itself -- "no parallelism (this is suspension, like the
+JSPI row, not the worker row)".
+
+What it is instead: ash's link-time transform rewrites the module so its
+frames can unwind back to a scheduler and rewind to exactly where they
+stopped, and the host drives the three globals that transform adds.
+`browser/fibers.rs` is the same thing `native::install_fiber_yield` does,
+against `WebAssembly.Global`.
 
 A module built without `ASH_WASM_FIBERS=1` has no such globals. Every call
 answers zero and a fiber runs to completion at the point it would have

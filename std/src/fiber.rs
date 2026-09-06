@@ -540,7 +540,7 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
 /// on wasm, a whole second instance of the module -- overlaps with whatever
 /// the caller does next. `false` means the host would not give an agent, and
 /// the caller runs the fiber itself.
-#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
 fn start_worker(index: usize, first: Option<SchedulerCommand>) -> bool {
     std::thread::Builder::new()
         .name(format!("ash-vm-{index}"))
@@ -625,9 +625,19 @@ fn can_dispatch_to_worker() -> bool {
     // one that does not gets `EAGAIN` from the first `pthread_create` and
     // falls back to the main scheduler. Nothing is read from an environment,
     // which a page does not have.
-    cfg!(target_family = "wasm") || configured_worker_count() != 0
+    cfg!(all(target_family = "wasm", target_feature = "atomics"))
+        || configured_worker_count() != 0
 }
 
+/// Hand a fiber to an agent, on a target where an agent is an OS thread and
+/// a pool of them is sized once.
+///
+/// Suspended krio stacks are deliberately !Send: once a worker creates a
+/// fiber, moving it would also move native TLS/trap assumptions captured by
+/// its stack. Balance at the last safe point instead -- before creation.
+/// Rotate the starting point so equal loads do not permanently favour lane
+/// zero, then choose the least-loaded endpoint.
+#[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
 fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
     let Some(pool) = worker_pool() else {
         return false;
@@ -636,54 +646,9 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
         .workers
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    // On WebAssembly a worker runs a fiber body straight through: there is no
-    // addressable stack to switch away from, so it cannot hold a second
-    // fiber and come back to the first. A fixed pool of N would therefore let
-    // N threads run and make the next one WAIT for one of them to finish,
-    // which is not what a thread is. So the pool grows instead: one agent per
-    // live thread, asked for when the thread is created, as many as the host
-    // will give. A host that will give no more says so by failing to start
-    // one, and that thread runs on the main scheduler.
-    if cfg!(target_family = "wasm") {
-        let idle = workers
-            .iter()
-            .position(|worker| worker.assigned.load(Ordering::Acquire) == 0);
-        let index = match idle {
-            Some(index) => index,
-            None => {
-                let at = workers.len();
-                // The fiber goes with the agent as it starts, rather than
-                // being handed over once it reports ready. Waiting for that
-                // would start N threads one after another -- and starting one
-                // here means instantiating the whole module again, which is
-                // the slowest thing on this path. A program that creates four
-                // threads should be waiting for one agent to appear, not four
-                // in a row.
-                //
-                // The lock is dropped first for the same reason: two threads
-                // racing to grow costs a spare agent, and blocking one behind
-                // the other costs the parallelism this exists for.
-                drop(workers);
-                worker_trace("dispatch", id as u64, at as u64);
-                return start_worker(
-                    at,
-                    Some(SchedulerCommand::Spawn {
-                        id,
-                        closure: closure as usize,
-                    }),
-                );
-            }
-        };
-        assign(&workers[index], id, index, closure);
-        return true;
+    if workers.is_empty() {
+        return false;
     }
-
-    // Suspended krio stacks are deliberately !Send: once a worker creates a
-    // fiber, moving it would also move native TLS/trap assumptions captured by
-    // its stack. Balance at the last safe point instead -- before creation.
-    // Rotate the starting point so equal loads do not permanently favor lane
-    // zero, then choose the least-loaded endpoint.
     let start = pool.next.fetch_add(1, Ordering::Relaxed) % workers.len();
     let index = (0..workers.len())
         .min_by_key(|offset| {
@@ -694,6 +659,54 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
         .unwrap_or(start);
     assign(&workers[index], id, index, closure);
     true
+}
+
+/// The same, where an agent is another instance of this module.
+///
+/// A wasm worker runs a fiber body straight through: there is no addressable
+/// stack to switch away from, so it cannot hold a second fiber and come back
+/// to the first. A fixed pool of N would therefore let N threads run and make
+/// the next one WAIT for one of them to finish, which is not what a thread
+/// is. So the pool grows: one agent per live thread, asked for when the
+/// thread is created, as many as the host will give. A host that will give no
+/// more says so by failing to start one, and that thread runs on the main
+/// scheduler.
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
+    let Some(pool) = worker_pool() else {
+        return false;
+    };
+    let workers = pool
+        .workers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(index) = workers
+        .iter()
+        .position(|worker| worker.assigned.load(Ordering::Acquire) == 0)
+    {
+        assign(&workers[index], id, index, closure);
+        return true;
+    }
+    let at = workers.len();
+    // The fiber goes with the agent as it starts, rather than being handed
+    // over once it reports ready. Waiting for that would start N threads one
+    // after another -- and starting one here means instantiating the whole
+    // module again, which is the slowest thing on this path. A program that
+    // creates four threads should be waiting for one agent to appear, not
+    // four in a row.
+    //
+    // The lock is dropped first for the same reason: two threads racing to
+    // grow costs a spare agent, and blocking one behind the other costs the
+    // parallelism this exists for.
+    drop(workers);
+    worker_trace("dispatch", id as u64, at as u64);
+    start_worker(
+        at,
+        Some(SchedulerCommand::Spawn {
+            id,
+            closure: closure as usize,
+        }),
+    )
 }
 
 /// Hand one fiber to one worker, and count it against that worker.

@@ -1,0 +1,16 @@
+[package]
+name = "ash_hdll_sdl"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "The sdl HDLL for wasm, forwarding to whatever host can draw"
+publish = false
+
+# Deliberately no dependencies at all, ash_std included: a native library
+# reaches the runtime through the C ABI, the way an HDLL reaches libhl. See
+# src/abi.rs.
+[dependencies]
+
+[lib]
+crate-type = ["staticlib"]

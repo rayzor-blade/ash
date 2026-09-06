@@ -930,8 +930,15 @@ unsafe fn notify_switch(from: u32, to: u32) {
 
 unsafe fn run_closure(c: *mut vclosure) {
     let fun = (*c).fun as usize;
+    // Compiled, rather than an interpreter stub waiting to be. Asked through
+    // `is_stub_sentinel` for the reason `thread_create` asks it that way: a
+    // WebAssembly function pointer is a table index in the low hundreds, so
+    // comparing against the limit calls every one of them a sentinel -- and
+    // this is the refusal at the end of that, a worker that will not run the
+    // body it was handed.
+    let compiled = fun != 0 && !is_stub_sentinel(fun);
     if WORKER_LANE.with(Cell::get) {
-        if fun >= STUB_SENTINEL_LIMIT {
+        if compiled {
             hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
         } else {
             eprintln!(
@@ -942,7 +949,7 @@ unsafe fn run_closure(c: *mut vclosure) {
     }
     if let Some(runner) = closure_runner() {
         runner(c, std::ptr::null_mut(), 0);
-    } else if fun >= STUB_SENTINEL_LIMIT {
+    } else if compiled {
         // Invoke a compiled thread body through the same typed ABI bridge used
         // by dynamic native calls. We are already on the thread fiber's stack;
         // creating another fiber here would change Thread.current() identity.
@@ -1116,8 +1123,16 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
         // the same M:N treatment as later closures whose call sites happened
         // to compile them already. Failure is non-fatal: the main scheduler
         // can still execute it through the interpreter bridge.
+        //
+        // Asked through `is_stub_sentinel` and not by comparing the pointer
+        // against the limit, because the two answers differ on WebAssembly: a
+        // function pointer there IS a small integer -- a table index in the
+        // low hundreds -- so every real one is below the limit and looks like
+        // a sentinel. Comparing directly said no body was compiled and sent
+        // every Haxe thread to the main scheduler, on the one target where
+        // they are all compiled by construction.
         let fun = (*c).fun as usize;
-        if fun != 0 && fun < STUB_SENTINEL_LIMIT {
+        if is_stub_sentinel(fun) {
             let resolved = resolve_stub_sentinel(fun);
             if !resolved.is_null() {
                 (*c).fun = resolved;
@@ -1125,7 +1140,8 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
                 worker_trace("resolve-failed", id as u64, fun as u64);
             }
         }
-        if (*c).fun as usize >= STUB_SENTINEL_LIMIT && dispatch_to_worker(id, c) {
+        let fun = (*c).fun as usize;
+        if fun != 0 && !is_stub_sentinel(fun) && dispatch_to_worker(id, c) {
             return ((id as usize) << 4 | 1) as *mut c_void;
         }
     }

@@ -1,15 +1,29 @@
-# ash in a page
+# Running HashLink in WebAssembly
 
-The browser host, run against a program built for `wasm32-wasip1`.
+A Haxe program, compiled to HashLink bytecode and then ahead of time to a
+WebAssembly module by ash, with ash's runtime linked in. Nothing in the page
+interprets bytecode: the browser runs compiled code, and the host below
+answers what a sandbox cannot do for itself.
 
+    # the host
     cargo build --release -p ash_browser --target wasm32-unknown-unknown
     wasm-bindgen --target web --out-dir examples/browser \
       target/wasm32-unknown-unknown/release/ash_browser.wasm
+
+    # the program the page runs
+    cd examples/browser/demo && haxe -main Demo -hl demo.hl
+    ash --build ../demo.wasm --target wasm32-wasip1 demo.hl
+
     python3 -m http.server -d examples/browser
 
-Then open the page and choose a `.wasm`. A module has to be served rather
-than opened from a file, because `WebAssembly.instantiate` and ES modules
-both refuse a `file://` origin.
+Then open the page. It fetches `demo.wasm` and runs it; there is nothing to
+click. A module has to be served rather than opened from a file, because
+`WebAssembly.instantiate` and ES modules both refuse a `file://` origin.
+
+`demo/Demo.hx` is deliberately not a hello world -- a prime sieve, a Leibniz
+series, UTF-16 strings with non-ASCII, a `Map` with closures and sorting, and
+a caught exception. A browser that prints the right numbers has run Haxe
+rather than merely loaded a module.
 
 The browser needs the standardised exception-handling proposal, because ash's
 exception handling is `setjmp` lowered into those instructions and every

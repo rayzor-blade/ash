@@ -11,6 +11,12 @@
 //! copy of its `#[no_mangle]` exports in this library's archive, and two
 //! strong definitions of one name cannot be linked.
 
+// These are `hl.h`'s names, and they are spelled its way on purpose: someone
+// checking this against the header should be able to read the two side by
+// side. The runtime's own bindings suppress the same lints for the same
+// reason.
+#![allow(non_camel_case_types)]
+
 use std::ffi::c_void;
 use std::os::raw::c_int;
 

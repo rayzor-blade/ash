@@ -380,6 +380,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
 /// Register the current OS worker using the platform's real stack boundary.
 /// A guessed `sp + N` can cross an unmapped guard page and make conservative
 /// scanning fault, especially with custom thread stack sizes.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn gc_register_current_os_thread() {
     #[cfg(target_os = "macos")]
     let stack_top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize };
@@ -418,6 +419,7 @@ pub(crate) fn gc_register_current_os_thread() {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) fn gc_unregister_current_os_thread() {
     unregister_current_mutator();
 }
@@ -2159,6 +2161,8 @@ fn mark_threads() -> usize {
     })
 }
 
+// Parallel marking, which wasm has no threads for.
+#[cfg(not(target_family = "wasm"))]
 struct MarkQueue {
     work: std::sync::Mutex<Vec<(usize, usize)>>,
     ready: std::sync::Condvar,
@@ -2778,6 +2782,9 @@ impl ImmixAllocator {
                     &mut worklist,
                 );
             }
+            // Not needless: on every target but wasm the parallel marker
+            // follows, and this is what skips it.
+            #[allow(clippy::needless_return)]
             return;
         }
 
@@ -3698,6 +3705,11 @@ impl ImmixAllocator {
                 // reported footprint to 1.2GB, 2.4GB, 3.6GB, 4.8GB, 6.0GB in
                 // even steps, and the machine paged itself to a stop.
                 let advise = |start: usize, len: usize| -> bool {
+                    // A target with no such syscall hands the range back in
+                    // ash's own bookkeeping and nowhere else, so nothing
+                    // below reads any of these.
+                    #[cfg(not(any(unix, windows)))]
+                    let _ = (base, start, len);
                     #[cfg(unix)]
                     unsafe {
                         #[cfg(target_os = "macos")]

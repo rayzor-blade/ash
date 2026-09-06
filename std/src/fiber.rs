@@ -91,6 +91,7 @@ static PREEMPTOR_WAKE: LazyLock<(Mutex<()>, Condvar)> =
     LazyLock::new(|| (Mutex::new(()), Condvar::new()));
 const STUB_SENTINEL_LIMIT: usize = 0x100000;
 
+#[cfg(not(target_family = "wasm"))]
 const FIBER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(2);
 
 #[derive(Clone, Copy)]
@@ -511,6 +512,7 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
     })
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {
     WORKER_LANE.with(|worker| worker.set(true));
     crate::gc::gc_register_current_os_thread();

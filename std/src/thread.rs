@@ -830,7 +830,7 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
     // compared, never dereferenced.
     #[cfg(not(any(unix, windows)))]
     {
-        1 as *mut c_void
+        std::ptr::without_provenance_mut(1)
     }
     #[cfg(unix)]
     {

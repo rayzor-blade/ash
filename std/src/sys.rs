@@ -423,6 +423,10 @@ pub unsafe extern "C" fn hlp_sys_set_time_locale(l: *const vbyte) -> bool {
     let Ok(name) = name else {
         return false;
     };
+    // No locale API to hand it to, and the call still reports whether the
+    // name was usable at all.
+    #[cfg(not(any(unix, windows)))]
+    let _ = &name;
     #[cfg(unix)]
     {
         // LC_GLOBAL_LOCALE, which libc does not name.

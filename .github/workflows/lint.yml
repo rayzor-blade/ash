@@ -40,6 +40,57 @@ jobs:
           cargo build -p ash_std
           cargo clippy --workspace --all-targets -- -D warnings
 
+  # The host job above compiles none of the wasm code: `browser` is gated on
+  # a wasm target family and half of ash_std is behind `cfg(target_family)`,
+  # so a lint that only fires there goes unseen. It does fire -- gating the
+  # HDLL search to the targets that can dlopen left two functions dead on
+  # wasm, and neither showed up on the host.
+  clippy-wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+          targets: wasm32-wasip1, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-wasm
+
+      - name: Cache the WASI sysroot
+        id: wasi-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/wasi-sysroot
+          key: wasi-sdk-25-sysroot-v1
+
+      - name: Fetch the WASI sysroot
+        if: steps.wasi-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -sSL -o /tmp/wasi-sdk.tar.gz \
+            https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-linux.tar.gz
+          mkdir -p /tmp/wasi-sdk && tar -xzf /tmp/wasi-sdk.tar.gz -C /tmp/wasi-sdk --strip-components=1
+          mv /tmp/wasi-sdk/share/wasi-sysroot ~/wasi-sysroot
+          ls ~/wasi-sysroot/lib/wasm32-wasip1/libsetjmp.a
+
+      # ash_std's build script runs bindgen against these headers, and a C
+      # dependency needs the same sysroot and -fPIC, since a library is
+      # position-independent by definition.
+      - name: Clippy for wasm
+        env:
+          WASI_SYSROOT: /home/runner/wasi-sysroot
+          CC_wasm32_wasip1: clang
+          CFLAGS_wasm32_wasip1: --target=wasm32-wasi --sysroot=/home/runner/wasi-sysroot -fPIC
+        run: |
+          cargo clippy -p ash_std --target wasm32-wasip1 -- -D warnings
+          cargo clippy -p ash_hdll_sqlite --target wasm32-wasip1 -- -D warnings
+          cargo clippy -p ash_wasm_runtime --no-default-features --features guest \
+            --target wasm32-wasip1 -- -D warnings
+          cargo clippy -p ash_wasm_runtime --no-default-features --features browser \
+            --target wasm32-unknown-unknown -- -D warnings
+
   # Compile and link the full CLI against real Windows headers on every push.
   # Checking ash_std alone missed ash_interp's MSVC enum width and Unix API
   # regressions; cargo check would also miss unavailable CRT symbols at link

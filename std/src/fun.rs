@@ -62,11 +62,17 @@ pub unsafe extern "C" fn ash_static_call(
     let Some(ft) = (*t).__bindgen_anon_1.fun.as_ref() else {
         panic!("ash: a dynamic call whose type is not a function type");
     };
+    // bindgen types `kind` from the platform's headers, so the cast is
+    // redundant on some targets and not on others.
+    #[allow(clippy::unnecessary_cast)]
     let ret_kind = (*ft.ret).kind as u32;
     let mut arg_kinds = [0u32; HL_MAX_ARGS];
     let nargs = (ft.nargs as usize).min(HL_MAX_ARGS);
     for (i, slot) in arg_kinds.iter_mut().enumerate().take(nargs) {
-        *slot = (**ft.args.add(i)).kind as u32;
+        #[allow(clippy::unnecessary_cast)]
+        {
+            *slot = (**ft.args.add(i)).kind as u32;
+        }
     }
     let key = signature_key(ret_kind, &arg_kinds[..nargs]);
 

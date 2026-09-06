@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
+// Only a target that can open a library by path looks for one.
+#[cfg(any(unix, windows))]
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -28,6 +30,7 @@ fn handles() -> &'static Mutex<HashMap<String, usize>> {
 ///
 /// Beside the executable before the working directory: a binary is run from
 /// anywhere, and its own directory is the only one that travels with it.
+#[cfg(any(unix, windows))]
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -133,6 +136,7 @@ unsafe fn dlsym_handle(handle: *mut c_void, symbol: &str) -> *mut c_void {
 }
 
 /// The file names an HDLL may have, in the order upstream tries them.
+#[cfg(any(unix, windows))]
 fn candidates(lib: &str) -> Vec<String> {
     let mut v = vec![format!("{lib}.hdll")];
     #[cfg(windows)]

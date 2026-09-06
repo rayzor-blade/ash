@@ -11,6 +11,9 @@ pub extern "C" fn hlp_breakpoint() {
 
 pub fn hl_debug_break() {
     if hl_detect_debugger() {
+        // Every arm below is architecture-gated, and on one with no
+        // breakpoint instruction nothing unsafe is left inside.
+        #[allow(unused_unsafe)]
         unsafe {
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             {

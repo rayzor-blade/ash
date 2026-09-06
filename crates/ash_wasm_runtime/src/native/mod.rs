@@ -118,8 +118,9 @@ impl Program {
             .imports()
             .filter(|import| {
                 let module = import.module();
-                let known_wasi =
-                    module.starts_with("wasi_snapshot_preview1") || module.starts_with("wasi_");
+                let known_wasi = module.starts_with("wasi_snapshot_preview1")
+                    || module.starts_with("wasi_")
+                    || (module == "wasi" && import.name() == "thread-spawn");
                 let known_host = module == FIBER_YIELD_MODULE
                     && (import.name() == FIBER_YIELD_NAME
                         || import.name().starts_with("ash_host_"));
@@ -687,6 +688,28 @@ fn run_to_completion(cmd: &str, args: &[String], input: &[u8]) -> Option<Finishe
     })
 }
 
+/// Where a threads build asks for a thread, and what it is told.
+///
+/// `wasi.thread-spawn` is how a module built for `wasm32-wasip1-threads`
+/// starts one: the host instantiates the same module again on an operating
+/// system thread, against the same memory, and calls the module's
+/// `wasi_thread_start`. That needs a memory both instances share, and this
+/// host's modules define their own -- so what a thread would run on does not
+/// exist yet.
+///
+/// A negative return is the answer the interface has for that, and the one
+/// wasi-libc's `pthread_create` turns into `EAGAIN`. The import has to be
+/// answered either way: an import nothing supplies is a link error before a
+/// line runs, so a program that never starts a thread would not start at all.
+fn install_thread_spawn(linker: &mut Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap("wasi", "thread-spawn", |_: Caller<'_, Host>, _: i32| -> i32 {
+            -1
+        })
+        .map_err(|e| anyhow!("installing the thread-spawn import: {e}"))?;
+    Ok(())
+}
+
 /// How the guest reaches a native library that was loaded beside it.
 ///
 /// Two imports, and they are `dlopen` and `dlsym` under other names, because
@@ -883,6 +906,7 @@ fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
     install_command(linker)?;
     install_process(linker)?;
     install_dlopen(linker)?;
+    install_thread_spawn(linker)?;
     sdl_generated::install(linker)?;
     install_sdl_manual(linker)?;
 

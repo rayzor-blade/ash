@@ -380,7 +380,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
 /// Register the current OS worker using the platform's real stack boundary.
 /// A guessed `sp + N` can cross an unmapped guard page and make conservative
 /// scanning fault, especially with custom thread stack sizes.
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 pub(crate) fn gc_register_current_os_thread() {
     #[cfg(target_os = "macos")]
     let stack_top = unsafe { libc::pthread_get_stackaddr_np(libc::pthread_self()) as usize };
@@ -419,7 +419,7 @@ pub(crate) fn gc_register_current_os_thread() {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 pub(crate) fn gc_unregister_current_os_thread() {
     unregister_current_mutator();
 }
@@ -2161,8 +2161,8 @@ fn mark_threads() -> usize {
     })
 }
 
-// Parallel marking, which wasm has no threads for.
-#[cfg(not(target_family = "wasm"))]
+// Parallel marking, which needs threads to mark with.
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 struct MarkQueue {
     work: std::sync::Mutex<Vec<(usize, usize)>>,
     ready: std::sync::Condvar,

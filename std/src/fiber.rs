@@ -91,7 +91,7 @@ static PREEMPTOR_WAKE: LazyLock<(Mutex<()>, Condvar)> =
     LazyLock::new(|| (Mutex::new(()), Condvar::new()));
 const STUB_SENTINEL_LIMIT: usize = 0x100000;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 const FIBER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(2);
 
 #[derive(Clone, Copy)]
@@ -470,15 +470,21 @@ fn worker_pool() -> Option<&'static WorkerPool> {
     WORKER_POOL.get_or_init(spawn_worker_pool).as_ref()
 }
 
-/// No pool on wasm: one thread, and fibers that suspend through the host.
+/// No pool where the target has no threads to make one from: fibers then
+/// take turns on the one thread and suspend through the host.
+///
 /// Kept out of the build rather than sized to zero, because the spawn call
-/// alone made the module import `pthread_create`.
-#[cfg(target_family = "wasm")]
+/// alone makes the module import `pthread_create` -- which a wasm module
+/// without atomics cannot have, and one WITH atomics can, since wasi-libc
+/// backs it with a `wasi_thread_spawn` the host answers by starting a worker.
+/// So the condition is whether this target has threads, not whether it is
+/// wasm.
+#[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
 fn spawn_worker_pool() -> Option<WorkerPool> {
     None
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 fn spawn_worker_pool() -> Option<WorkerPool> {
     let count = configured_worker_count();
     if count == 0 {
@@ -512,7 +518,7 @@ fn spawn_worker_pool() -> Option<WorkerPool> {
     })
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(any(not(target_family = "wasm"), target_feature = "atomics"))]
 fn worker_main(sender: std::sync::mpsc::Sender<Arc<SchedulerEndpoint>>) {
     WORKER_LANE.with(|worker| worker.set(true));
     crate::gc::gc_register_current_os_thread();

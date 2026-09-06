@@ -20,6 +20,16 @@ rustflags = [
   "-Cllvm-args=-wasm-use-legacy-eh=false",
 ]
 
+# The same for the threads target, which is the same wasm with atomics and a
+# shared memory. Without these it links against a plain `longjmp` that nothing
+# defines, exactly as wasm32-wasip1 does.
+[target.wasm32-wasip1-threads]
+rustflags = [
+  "-Ctarget-feature=+exception-handling",
+  "-Cllvm-args=-wasm-enable-sjlj",
+  "-Cllvm-args=-wasm-use-legacy-eh=false",
+]
+
 [target.wasm32-wasip2]
 rustflags = [
   "-Ctarget-feature=+exception-handling",

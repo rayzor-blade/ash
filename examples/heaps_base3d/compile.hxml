@@ -1,0 +1,14 @@
+# Heaps 2.1.0 as released, not the `dev:` checkout haxelib points at: that one
+# is the MBHaxe fixture's patched pair, and its hlsdl calls
+# `win_get_pixel_size`, which the sdl.hdll committed here does not export.
+-lib heaps:2.1.0
+
+# hlsdl by path for the same reason, from the HashLink checkout rather than
+# the patched one. `-lib` would set `-D hlsdl=<version>` for us; by path it
+# has to be said, and Heaps compares it as a version -- `-D hlsdl` alone fails
+# to compile with `Invalid version string "1"`.
+-cp /Users/amaterasu/Vibranium/hashlink/libs/sdl
+-D hlsdl=1.14.0
+
+-main Main
+-hl bin/game.hl

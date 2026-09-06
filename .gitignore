@@ -16,3 +16,6 @@ ash_fileio_tmp/
 examples/heaps_base2d/bin/libhl*.dylib
 examples/heaps_base2d/bin/libhl*.so
 examples/heaps_base2d/bin/libhl*.dll
+
+# Build output and the .hdll files copied from the base2d example beside it.
+examples/heaps_base3d/bin/

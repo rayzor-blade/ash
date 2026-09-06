@@ -1541,6 +1541,17 @@ def main(argv=None) -> int:
                     # provide this fixture. It is inherited by subprocesses,
                     # which is part of what that suite verifies.
                     suite_env.setdefault("EXISTS", "1")
+                    # A wasm guest sees only what the host lets through, and
+                    # the default is ASH_ names alone. Say that this fixture
+                    # may cross, or the suite asks for a variable the sandbox
+                    # has already dropped.
+                    suite_env.setdefault("ASH_WASM_ENV", "EXISTS")
+                    # sys runs helper programs and asserts on their exit
+                    # codes. A sandbox cannot spawn one itself, so the host
+                    # does it on the guest's behalf -- which it only will
+                    # when told, since it is the one capability that leaves
+                    # the sandbox.
+                    suite_env.setdefault("ASH_WASM_ALLOW_COMMAND", "1")
                 try:
                     # Programs are invoked by upstream from their suite root.
                     # In particular, sys addresses gen_test_res.py,

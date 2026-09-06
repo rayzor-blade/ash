@@ -508,11 +508,24 @@ pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte
         SetEnvironmentVariableW(wkey.as_ptr(), wval.as_ptr()) != 0
     }
     // WASI hands the environment to the module at startup and offers no way
-    // to change it. False is the same answer `setenv` failing gives.
+    // to tell the HOST about a change. It does not follow that the module
+    // cannot change its own view of it, and that is all `Sys.putEnv` promises
+    // on any target: set a variable, read it back, see it in
+    // `Sys.environment()`. Refusing here made a program that sets a variable
+    // and reads it get nothing, on wasm alone.
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (name, value);
-        false
+        let Some(key) = pchar_to_os(name) else {
+            return false;
+        };
+        match value.is_null() {
+            true => std::env::remove_var(&key),
+            false => match pchar_to_os(value) {
+                Some(v) => std::env::set_var(&key, &v),
+                None => return false,
+            },
+        }
+        true
     }
 }
 
@@ -608,12 +621,21 @@ pub unsafe extern "C" fn hlp_sys_hl_file() -> *mut vbyte {
 }
 
 /// Upstream reads `_NSGetExecutablePath` / `GetModuleFileNameW` / `/proc`.
+///
+/// None of those exist on wasm and `current_exe` fails there, so argv[0] --
+/// which a host sets to the module it is running -- is the answer instead of
+/// null. Null is worse than a relative path: `Sys.programPath` hands it
+/// straight to `haxe.io.Path`, and the caller gets a null dereference rather
+/// than a path it can judge for itself.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_exe_path() -> *mut vbyte {
-    let Ok(exe) = std::env::current_exe() else {
-        return std::ptr::null_mut();
-    };
-    alloc_pbytes(&os_to_pbytes(exe.as_os_str()))
+    if let Ok(exe) = std::env::current_exe() {
+        return alloc_pbytes(&os_to_pbytes(exe.as_os_str()));
+    }
+    match std::env::args_os().next() {
+        Some(argv0) => alloc_pbytes(&os_to_pbytes(&argv0)),
+        None => std::ptr::null_mut(),
+    }
 }
 
 // ============================================================================
@@ -645,10 +667,30 @@ pub unsafe extern "C" fn hlp_sys_delete(path: *const vbyte) -> bool {
     }
 }
 
+/// A directory path with any trailing separators removed.
+///
+/// `rmdir("a/")` is a POSIX directory removal like any other, and WASI
+/// refuses it with EINVAL. Haxe's `FileSystem.deleteDirectory` is routinely
+/// handed a path that ends in a separator -- the suite's own
+/// `TestFileSystem` keeps its directory as `"temp/TestFileSystem/"` -- so
+/// without this every delete of one fails on wasm and nowhere else.
+///
+/// The last separator of a root is kept: `"/"` names a directory and `""`
+/// names nothing.
+fn without_trailing_separator(path: &std::path::Path) -> std::path::PathBuf {
+    let text = path.to_string_lossy();
+    let trimmed = text.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        path.to_path_buf()
+    } else {
+        std::path::PathBuf::from(trimmed)
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_remove_dir(path: *const vbyte) -> bool {
     match pchar_to_path(path) {
-        Some(p) => std::fs::remove_dir(p).is_ok(),
+        Some(p) => std::fs::remove_dir(without_trailing_separator(&p)).is_ok(),
         None => false,
     }
 }
@@ -922,13 +964,28 @@ pub unsafe extern "C" fn hlp_sys_command(cmd: *const vbyte) -> i32 {
             Err(_) => -1,
         }
     }
-    // No subprocesses in a sandbox. -1 is what the unix arm returns when the
-    // shell cannot be spawned, so a caller already has a path for it.
+    // A sandbox cannot spawn anything itself, so the host is asked. It
+    // refuses unless it has been told to allow it, and then this returns -1 --
+    // what the unix arm returns when the shell cannot be spawned, so a caller
+    // already has a path for it.
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = cmdline;
-        -1
+        let bytes = os_to_pbytes(&cmdline);
+        // Safety: the host reads `len` bytes from `ptr` during the call and
+        // keeps nothing.
+        unsafe { ash_host_command(bytes.as_ptr(), bytes.len() as i32) }
     }
+}
+
+/// Running a command is the one thing here that leaves the sandbox, so it is
+/// the host's to grant and the host's to refuse.
+#[cfg(not(any(unix, windows)))]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    /// Run `len` bytes of shell command line, returning what the platform's
+    /// `Sys.command` would: the exit status, or -1 if it could not be run --
+    /// which is also the answer when the host has not been told to allow it.
+    fn ash_host_command(cmd: *const u8, len: i32) -> i32;
 }
 
 #[cfg(windows)]

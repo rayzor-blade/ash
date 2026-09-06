@@ -860,10 +860,28 @@ mod sys {
     }
 
     /// # Safety
-    /// Mirrors the platform signature. There is no resolver: a dotted quad
-    /// is parsed before this is reached, and a name has nowhere to go.
+    /// Mirrors the platform signature. A dotted quad is parsed before this is
+    /// reached, and there is no resolver behind it -- with one exception.
+    ///
+    /// `localhost` is not a network question. It is 127.0.0.1 everywhere, it
+    /// needs nothing outside the sandbox to answer, and loopback is the only
+    /// address a guest can reach in any case. Returning nothing for it made
+    /// `new Host("localhost")` -- the way nearly every socket example and
+    /// test opens a connection -- fail on wasm alone.
     pub unsafe fn resolve_ipv4(name: *const u8) -> Option<c_int> {
-        let _ = name;
+        if name.is_null() {
+            return None;
+        }
+        let mut end = name;
+        while *end != 0 {
+            end = end.add(1);
+        }
+        let text = std::slice::from_raw_parts(name, end.offset_from(name) as usize);
+        if text.eq_ignore_ascii_case(b"localhost") {
+            // The bytes in network order, read back in this machine's, which
+            // is what an `s_addr` is and what `sockaddr_in` expects.
+            return Some(u32::from_ne_bytes([127, 0, 0, 1]) as c_int);
+        }
         None
     }
 

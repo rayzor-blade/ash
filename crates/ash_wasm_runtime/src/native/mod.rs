@@ -139,11 +139,26 @@ impl Program {
         // diagnostic is unreachable, which is the difference between being
         // able to ask a question of a wasm build and not.
         //
-        // Only ASH_ names cross. A wasm module is a sandbox and the host's
-        // environment is not its business; handing over PATH and credentials
-        // to get one debugging flag through is not a trade worth making.
+        // Only ASH_ names cross by default. A wasm module is a sandbox and
+        // the host's environment is not its business; handing over PATH and
+        // credentials to get one debugging flag through is not a trade worth
+        // making.
+        //
+        // ASH_WASM_ENV names what else may. A program that legitimately reads
+        // a variable -- `Sys.getEnv` means the same thing on every other
+        // target -- would otherwise see nothing at all on wasm, and the host
+        // is the only party that can say which of its variables the guest is
+        // entitled to. Naming them keeps that decision explicit and with the
+        // side that owns the secret.
+        let allowed: Vec<String> = std::env::var("ASH_WASM_ENV")
+            .unwrap_or_default()
+            .split([',', ' '])
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect();
         for (key, value) in std::env::vars() {
-            if key.starts_with("ASH_") {
+            if key.starts_with("ASH_") || allowed.contains(&key) {
                 wasi.env(&key, &value);
             }
         }
@@ -227,6 +242,97 @@ const SP_GLOBAL: &str = "__stack_pointer";
 const UNWINDING: i32 = 1;
 const REWINDING: i32 = 2;
 
+/// Let the guest run a command, if this host has been told it may.
+///
+/// This is the one import that leaves the sandbox, so it is off unless
+/// `ASH_WASM_ALLOW_COMMAND` says otherwise, and the refusal is the same -1 a
+/// native `Sys.command` returns when the shell cannot be started. The guest
+/// cannot grant itself the capability; only whoever started the host can.
+fn install_command(linker: &mut Linker<Host>) -> Result<()> {
+    let allowed = matches!(
+        std::env::var("ASH_WASM_ALLOW_COMMAND").as_deref(),
+        Ok("1") | Ok("on") | Ok("yes")
+    );
+    linker
+        .func_wrap(
+            FIBER_YIELD_MODULE,
+            "ash_host_command",
+            move |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> i32 {
+                if !allowed {
+                    return -1;
+                }
+                let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return -1;
+                };
+                let (data, _) = memory.data_and_store_mut(&mut caller);
+                let (Ok(start), Ok(len)) = (usize::try_from(ptr), usize::try_from(len)) else {
+                    return -1;
+                };
+                let Some(bytes) = data.get(start..start.saturating_add(len)) else {
+                    return -1;
+                };
+                let line = String::from_utf8_lossy(bytes).into_owned();
+                run_command(&line)
+            },
+        )
+        .map_err(|e| anyhow!("installing the command import: {e}"))?;
+    Ok(())
+}
+
+/// A command line with the guest's idea of an absolute path made into the
+/// host's.
+///
+/// The guest's root is the directory this host preopened for it, which is
+/// this host's own working directory -- so a path the guest built from its
+/// `Sys.getCwd()` arrives here looking absolute and naming something under
+/// `.`. Only a token that does not exist as given and does exist relative to
+/// here is rewritten, so a genuine host path like `/bin/sh` is left alone.
+fn rebase_guest_paths(line: &str) -> String {
+    line.split_whitespace()
+        .map(|token| {
+            let Some(rest) = token.strip_prefix('/') else {
+                return token.to_string();
+            };
+            if std::path::Path::new(token).exists() || !std::path::Path::new(rest).exists() {
+                return token.to_string();
+            }
+            rest.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The platform's shell, answering the way `Sys.command` does everywhere else.
+fn run_command(line: &str) -> i32 {
+    let line = &rebase_guest_paths(line);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        match std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(line)
+            .status()
+        {
+            Ok(s) => s.code().unwrap_or(0) | (s.signal().unwrap_or(0) << 8),
+            Err(_) => -1,
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let shell =
+            std::env::var_os("COMSPEC").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"));
+        match std::process::Command::new(shell)
+            .raw_arg("/C")
+            .raw_arg(line)
+            .status()
+        {
+            Ok(s) => s.code().unwrap_or(-1),
+            Err(_) => -1,
+        }
+    }
+}
+
 /// The transform's state global, if this module has one.
 fn fiber_global(caller: &mut Caller<'_, Host>, name: &str) -> Option<wasmtime::Global> {
     match caller.get_export(name) {
@@ -285,6 +391,8 @@ fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
             },
         )
         .map_err(|e| anyhow!("installing the fiber state import: {e}"))?;
+
+    install_command(linker)?;
 
     // Point the transform at a fiber's side stack and say whether the next
     // entry is a rewind. An uninstrumented module has neither global and

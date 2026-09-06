@@ -1,0 +1,18 @@
+[package]
+name = "ash_hdll_sqlite"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "The sqlite HDLL, built as a wasm side module"
+publish = false
+
+# Deliberately NOT ash_std. A native library reaches the runtime through the
+# C ABI, the way an HDLL reaches libhl -- see src/abi.rs. Depending on the
+# runtime as a Rust crate would link a second copy of its `#[no_mangle]`
+# exports into this library, which is two definitions of one name.
+[dependencies]
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[lib]
+crate-type = ["staticlib"]

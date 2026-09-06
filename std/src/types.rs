@@ -152,6 +152,31 @@ pub static T_SIZES: [isize; 23] = [
     0,        // PACKED
 ];
 
+/// The persistent type singletons, for a native library.
+///
+/// A library loaded as its own module cannot reach `hlt_i32()` -- that is a
+/// Rust function, and a library reaches this runtime through the C ABI, the
+/// way an HDLL reaches libhl. It cannot use the exported `hlt_i32` static
+/// either: that is `hl.h`'s plain descriptor, while these are the persistent,
+/// GC-registered ones every allocation here is made against, and the two are
+/// not interchangeable.
+///
+/// So they are handed out by name. One per kind a primitive returns.
+macro_rules! persistent_type_accessor {
+    ($name:ident, $singleton:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name() -> *mut hl_type {
+            $singleton()
+        }
+    };
+}
+
+persistent_type_accessor!(hlp_type_i32, hlt_i32);
+persistent_type_accessor!(hlp_type_f64, hlt_f64);
+persistent_type_accessor!(hlp_type_bytes, hlt_bytes);
+persistent_type_accessor!(hlp_type_array, hlt_array);
+persistent_type_accessor!(hlp_type_dyn, hlt_dyn);
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_type_size(t: *mut hl_type) -> isize {
     T_SIZES[(*t).kind as usize]

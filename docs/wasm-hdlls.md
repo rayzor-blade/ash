@@ -127,6 +127,34 @@ under other names: `ash_host_dlopen` answers whether a library is there, and
 `ash_host_dlsym` answers with a table index -- which is what a function
 pointer already is in a wasm module.
 
+## sqlite, as it is actually shipped
+
+`crates/ash_hdll_sqlite` is the worked example, built by
+`scripts/build_wasm_hdll.py` to
+`target/<profile>/wasm32-wasip1/hdll/sqlite.wasm`. It is 1.9 MB, and taking it
+out of the runtime took a hello world from **3,964,699 to 2,292,831 bytes --
+42% smaller**, because a library compiled into the runtime object is in every
+module whether the program uses it or not.
+
+It depends on `ash_std` for nothing at all. `src/abi.rs` is the C ABI written
+out -- the `#[repr(C)]` layouts and the `extern "C"` declarations -- because
+depending on the runtime as a Rust crate would put a second copy of its
+`#[no_mangle]` exports in the library's archive, and two strong definitions of
+one name cannot be linked. Three things that seam needed:
+
+- **`hlp_type_i32` and its four siblings**, added to `ash_std`. A library
+  cannot call `hlt_i32()`, which is a Rust function, and must not use `hl.h`'s
+  `hlt_i32` static: that is the plain descriptor, while allocations are made
+  against the persistent GC-registered one, and they are not interchangeable.
+- **The program's allocator as the library's.** Rust's default on wasm is its
+  own `dlmalloc` over its own arena; two allocators on one linear memory do
+  not corrupt each other, but nothing either allocates can be freed by the
+  other, and the first pointer that crosses is a bug far from its cause.
+- **The address of libc functions, not just calls to them.** sqlite builds a
+  VFS out of function pointers, so `close`, `fcntl`, `fstat` and the rest
+  arrive as `GOT.func` entries and the program has to export them for the
+  loader to give them table slots.
+
 ## A library written in Rust
 
 The same thing, with two extra flags, because the toolchain's precompiled
@@ -155,6 +183,6 @@ keep one small.
   Loading on first use needs instantiation from inside a guest call, which is
   a knot worth tying only once there is a reason to.
 - **Unloading.** Nothing frees a library's data or its table slots.
-- **`fmt` and `sqlite` are still compiled in.** They can become side modules
-  now that there is somewhere for them to go, and that is what takes 1.67 MB
-  out of every module that does not use a database.
+- **`fmt` is still compiled in**, and should stay: its digests and zlib
+  streams are pure computation, small, and a program that hashes has no other
+  way to get them in a sandbox.

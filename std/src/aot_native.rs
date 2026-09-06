@@ -197,6 +197,10 @@ unsafe fn library(lib: &str) -> *mut c_void {
 /// Two kinds of entry. `fmt`'s digests and zlib streams are implemented in
 /// this runtime (see `fmt.rs`), because they are pure computation and a
 /// program that hashes or unzips has no other way to get them in a sandbox.
+/// Nothing heavier belongs here: a library named from this file is reachable
+/// from it and therefore in every module, which is what sqlite was until it
+/// became `sqlite.wasm` -- 1.67 MB of a 3.96 MB hello world. See
+/// `docs/wasm-hdlls.md`.
 /// The other entry is not a shim for a missing library. `sys.ssl.Lib` is
 /// written as
 ///
@@ -229,7 +233,6 @@ fn sandbox_primitive(lib: &str, name: &str) -> *mut c_void {
     extern "C" fn ssl_init_nothing() {}
     match (lib, name) {
         ("fmt", prim) => crate::fmt::primitive(prim),
-        ("sqlite", prim) => crate::sqlite::primitive(prim),
         ("ssl", "ssl_init") => ssl_init_nothing as *mut c_void,
         _ => std::ptr::null_mut(),
     }

@@ -21,9 +21,10 @@ use wasmparser::{Parser, Payload};
 /// What a side module needs from the program that hosts it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SideModule {
-    /// Functions it expects the PROGRAM to provide, in the order it declares
-    /// them. Only the `env` module: a library also imports WASI, and that is
-    /// the host's to answer, not the program's.
+    /// Functions it expects the PROGRAM to provide: the ones it calls, from
+    /// the `env` module, and the ones whose address it takes, from
+    /// `GOT.func`. Not the ones it imports from WASI -- those are the host's
+    /// to answer -- nor any it defines itself.
     pub functions: Vec<String>,
     /// Data symbols it expects to find outside itself, imported as
     /// `GOT.mem.<name>` -- globals holding an address. `errno` is the one
@@ -68,6 +69,9 @@ pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
     // asked of the program. Collected as it goes and applied at the end,
     // because the export section comes after the imports.
     let mut defined = std::collections::HashSet::new();
+    // Functions whose address it takes, kept apart until the exports are
+    // known: most are its own.
+    let mut addressed: Vec<String> = Vec::new();
     for payload in Parser::new(0).parse_all(bytes) {
         match payload? {
             Payload::CustomSection(c) if c.name() == "dylink.0" => {
@@ -89,12 +93,22 @@ pub fn read_side_module(bytes: &[u8]) -> Result<Option<SideModule>> {
                     if import.module == "GOT.mem" {
                         out.data.push(import.name.to_string());
                     }
+                    // The ADDRESS of a function, not a call to it. The
+                    // program must still export it, because that is how the
+                    // loader finds it to give it a table slot.
+                    if import.module == "GOT.func" {
+                        addressed.push(import.name.to_string());
+                    }
                 }
             }
             _ => {}
         }
     }
     out.data.retain(|name| !defined.contains(name));
+    addressed.retain(|name| !defined.contains(name));
+    out.functions.extend(addressed);
+    out.functions.sort();
+    out.functions.dedup();
     Ok(is_side_module.then_some(out))
 }
 

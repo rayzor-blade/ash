@@ -44,13 +44,24 @@ LIBRARY_LIBC = [
     "futimens", "utimensat", "fstatat", "mkdirat", "unlinkat", "renameat",
     "readlinkat", "symlinkat", "faccessat", "fdopendir", "readdir", "closedir",
     "qsort", "bsearch", "strtol", "strtoul", "strtoll", "strtoull",
-    "strncmp", "strrchr", "strchr", "strstr", "strcspn", "strspn",
+    "strcmp", "strncmp", "strrchr", "strchr", "strstr", "strcspn", "strspn",
     "localtime_r", "gmtime_r", "mktime", "nanosleep",
     "pthread_attr_init", "pthread_attr_destroy", "pthread_attr_setstacksize",
     "pthread_detach", "pthread_create", "pthread_join",
     "pthread_mutex_init", "pthread_mutex_lock", "pthread_mutex_unlock",
-    "pthread_mutex_destroy", "pthread_cond_init", "pthread_cond_wait",
+    "pthread_mutex_trylock", "pthread_mutex_destroy",
+    "pthread_mutexattr_init", "pthread_mutexattr_destroy",
+    "pthread_mutexattr_settype",
+    "pthread_cond_init", "pthread_cond_wait",
     "pthread_cond_signal", "pthread_cond_broadcast", "pthread_cond_destroy",
+    # What sqlite.wasm asks for beyond the above. A library's list is not
+    # guesswork: link it and read its `env` imports.
+    "abort", "fsync", "getcwd", "getenv", "gettimeofday", "lseek", "open",
+    "strerror_r", "time", "utimes", "write", "memchr",
+    # A library also takes the ADDRESS of libc functions -- sqlite builds a
+    # VFS out of them -- and those must be exported to be given a table slot.
+    "close", "fcntl", "fstat", "ftruncate", "read", "access", "rmdir",
+    "unlink", "stat", "mkdir",
 ]
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -115,25 +126,43 @@ def find_sysroot(explicit: str | None) -> pathlib.Path:
              f"Looked in: {', '.join(str(c) for c in candidates)}")
 
 
-def ar_members(path: pathlib.Path):
-    """Yield (name, bytes) for each member of a `ar` archive.
+def ar_archive(path: pathlib.Path):
+    """Parse a `ar` archive into its symbol index and its members.
+
+    Returns `(symbols, members)`, where `symbols` maps a symbol name to the
+    offset of the member defining it, and `members` maps that offset to
+    `(name, bytes)`.
 
     Written out rather than shelled to `llvm-ar`, which is not otherwise
     needed to build ash and would be one more tool to find. The format is a
-    magic line, then 60-byte headers; long names live in the `//` member and
-    are referenced as `/<offset>`.
+    magic line then 60-byte headers; the first member, named `/`, is the
+    symbol index -- a big-endian count, that many big-endian member offsets,
+    then the names NUL-separated. Long member names live in `//` and are
+    referenced as `/<offset>`.
     """
     data = path.read_bytes()
+    symbols: dict[str, int] = {}
+    members: dict[int, tuple[str, bytes]] = {}
     if not data.startswith(b"!<arch>\n"):
-        return
+        return symbols, members
     longnames = b""
     p = 8
     while p + 60 <= len(data):
+        at = p
         header = data[p:p + 60]
         name = header[0:16].decode("ascii", "replace").rstrip()
         size = int(header[48:58].decode("ascii", "replace").strip() or 0)
         body = data[p + 60:p + 60 + size]
         p += 60 + size + (size & 1)
+        if name == "/":
+            count = int.from_bytes(body[0:4], "big")
+            offsets = [
+                int.from_bytes(body[4 + i * 4:8 + i * 4], "big") for i in range(count)
+            ]
+            names = body[4 + count * 4:].split(b"\0")
+            for symbol, offset in zip(names, offsets):
+                symbols.setdefault(symbol.decode("ascii", "replace"), offset)
+            continue
         if name == "//":
             longnames = body
             continue
@@ -141,35 +170,39 @@ def ar_members(path: pathlib.Path):
             start = int(name[1:])
             end = longnames.find(b"/", start)
             name = longnames[start:end].decode("ascii", "replace")
-        yield name.rstrip("/"), body
+        members[at] = (name.rstrip("/"), body)
+    return symbols, members
 
 
 def extract_library_libc(sysroot: pathlib.Path, into: pathlib.Path):
-    """Write out the libc members in LIBRARY_LIBC, and return their paths.
+    """Write out the libc members defining LIBRARY_LIBC, and return their paths.
 
     A relocatable link keeps only what is given to it, and `-u` -- the usual
-    way to force an archive member in -- is refused alongside `-r`. wasi-libc
-    puts one function per member and names it after the function, so naming
-    the members directly does the same job.
+    way to force an archive member in -- is refused alongside `-r`. So the
+    members are named directly, found through the archive's own symbol index
+    rather than by guessing at file names: `open` and `utimes` both live in
+    `posix.c.obj`, and `strtoul` in `strtol.c.obj`.
     """
     archive = sysroot / "lib" / TRIPLE / "libc.a"
     if not archive.is_file():
         return []
-    wanted = {f"{name}.c.obj": name for name in LIBRARY_LIBC}
+    symbols, members = ar_archive(archive)
     out_dir = into / "library-libc"
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
-    found = set()
-    for member, body in ar_members(archive):
-        if member not in wanted:
+    missing = []
+    for name in LIBRARY_LIBC:
+        offset = symbols.get(name)
+        if offset is None or offset not in members:
+            missing.append(name)
             continue
+        member, body = members[offset]
         target = out_dir / member
-        target.write_bytes(body)
-        written.append(target)
-        found.add(wanted[member])
-    missing = sorted(set(LIBRARY_LIBC) - found)
+        if target not in written:
+            target.write_bytes(body)
+            written.append(target)
     if missing:
-        print(f"note: this wasi-libc has no member for {', '.join(missing)}")
+        print(f"note: this wasi-libc defines no {', '.join(sorted(missing))}")
     return written
 
 

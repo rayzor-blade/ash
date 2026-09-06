@@ -1,16 +1,19 @@
-//! The `sqlite` HDLL, compiled in rather than loaded.
+//! The `sqlite` HDLL, as a wasm side module.
 //!
-//! A wasm module cannot `dlopen` anything, so every HDLL primitive a program
-//! reaches is unavailable to it -- `sys.db.Sqlite` raises "Native library
-//! 'sqlite' not loaded" on the first `connect`. That is not a property of the
-//! sandbox so much as of how the primitive arrives: nothing about SQLite
-//! needs a shared library, and it builds for `wasm32-wasip1` unchanged.
+//! Its own crate and its own `.wasm`, loaded beside a program that asks for
+//! it -- see `docs/wasm-hdlls.md`. Compiled into the runtime it cost 1.67 MB
+//! of every module, hello world included, because a library present in the
+//! runtime object is also reachable from it.
 //!
-//! So this is the same library reached the same way. [`primitive`] answers the
-//! names `DEFINE_PRIM` would have exported, `crate::aot_native` consults it
-//! before it looks for a library, and the Haxe side cannot tell the
-//! difference -- which is the point: `sys/db/Sqlite.hx` is not modified, and
-//! a program that runs against the HDLL natively runs against this on wasm.
+//! Nothing of the runtime is linked in: it is reached through [`abi`], the C
+//! ABI an HDLL has always used. `sys/db/Sqlite.hx` is not modified and cannot
+//! tell the difference, which is the point.
+//!
+//! Nothing about SQLite needs a shared library -- it builds for
+//! `wasm32-wasip1` unchanged -- so what was missing was never the code but a
+//! way for a primitive to arrive. Each function below is exported as
+//! `hlp_<name>`, the resolver `DEFINE_PRIM` would have written, and the
+//! program finds it by name among this module's exports.
 //!
 //! # What the Haxe side expects
 //!
@@ -28,13 +31,34 @@
 //! costs memory on a large result and buys a `result_get_length` that does
 //! not have to drain the cursor to answer.
 
-use std::ffi::c_void;
-use std::os::raw::c_int;
 
-use crate::array::hlp_alloc_array;
-use crate::bytes::hlp_alloc_bytes;
-use crate::hl::{varray, vbyte, vdynamic};
-use crate::types::{hl_aptr, hlt_array, hlt_bytes, hlt_dyn, hlt_f64, hlt_i32};
+mod abi;
+
+/// This library allocates through the program. See [`abi::ProgramAllocator`].
+#[global_allocator]
+static ALLOCATOR: abi::ProgramAllocator = abi::ProgramAllocator;
+
+/// A NUL-terminated UTF-16 string, as Rust.
+///
+/// The runtime has this too, but reaching it would mean linking the runtime
+/// in, and it is six lines.
+unsafe fn ucs2_to_string(p: *const u16) -> String {
+    let mut units = Vec::new();
+    let mut at = p;
+    while *at != 0 {
+        units.push(*at);
+        at = at.add(1);
+    }
+    String::from_utf16_lossy(&units)
+}
+
+use std::ffi::c_void;
+use std::os::raw::{c_char, c_int};
+
+use crate::abi::{
+    hl_aptr, hlp_alloc_array, hlp_alloc_bytes, hlp_alloc_dynamic, hlp_type_array, hlp_type_bytes,
+    hlp_type_dyn, hlp_type_f64, hlp_type_i32, varray, vbyte, vdynamic,
+};
 
 /// Stamped into both handles. `hl.Abstract` is an untyped pointer on the VM
 /// side, so a slot that was never opened, was closed, or holds something else
@@ -96,7 +120,7 @@ unsafe fn borrow_ucs2(p: *const vbyte) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    Some(crate::strings::uchar_to_string(p as *const u16))
+    Some(ucs2_to_string(p as *const u16))
 }
 
 /// GC-allocated NUL-terminated UTF-16, which is what every string returned
@@ -124,7 +148,7 @@ unsafe fn raw_bytes(data: &[u8]) -> *mut vbyte {
 }
 
 unsafe fn box_int(v: i32) -> *mut vdynamic {
-    let d = crate::obj::hlp_alloc_dynamic(hlt_i32());
+    let d = hlp_alloc_dynamic(hlp_type_i32());
     if !d.is_null() {
         (*d).v.i = v;
     }
@@ -132,7 +156,7 @@ unsafe fn box_int(v: i32) -> *mut vdynamic {
 }
 
 unsafe fn box_float(v: f64) -> *mut vdynamic {
-    let d = crate::obj::hlp_alloc_dynamic(hlt_f64());
+    let d = hlp_alloc_dynamic(hlp_type_f64());
     if !d.is_null() {
         (*d).v.d = v;
     }
@@ -141,19 +165,19 @@ unsafe fn box_float(v: f64) -> *mut vdynamic {
 
 /// A BLOB, as the `[data, length]` pair `doNext` unpacks for `haxe.io.Bytes`.
 unsafe fn box_blob(data: &[u8]) -> *mut vdynamic {
-    let pair = hlp_alloc_array(hlt_dyn(), 2);
+    let pair = hlp_alloc_array(hlp_type_dyn(), 2);
     if pair.is_null() {
         return std::ptr::null_mut();
     }
     let slots = hl_aptr::<*mut vdynamic>(pair);
-    let b = crate::obj::hlp_alloc_dynamic(hlt_bytes());
+    let b = hlp_alloc_dynamic(hlp_type_bytes());
     if b.is_null() {
         return std::ptr::null_mut();
     }
     (*b).v.bytes = raw_bytes(data);
     *slots = b;
     *slots.add(1) = box_int(data.len() as i32);
-    let d = crate::obj::hlp_alloc_dynamic(hlt_array());
+    let d = hlp_alloc_dynamic(hlp_type_array());
     if !d.is_null() {
         (*d).v.ptr = pair as *mut c_void;
     }
@@ -161,7 +185,7 @@ unsafe fn box_blob(data: &[u8]) -> *mut vdynamic {
 }
 
 unsafe fn box_text(s: &str) -> *mut vdynamic {
-    let d = crate::obj::hlp_alloc_dynamic(hlt_bytes());
+    let d = hlp_alloc_dynamic(hlp_type_bytes());
     if !d.is_null() {
         (*d).v.bytes = ucs2(s);
     }
@@ -286,7 +310,7 @@ unsafe extern "C" fn sqlite_result_next(r: *mut c_void) -> *mut varray {
     res.current = Some(index);
 
     let row = &res.rows[index];
-    let a = hlp_alloc_array(hlt_dyn(), row.len() as i32);
+    let a = hlp_alloc_array(hlp_type_dyn(), row.len() as i32);
     if a.is_null() {
         return std::ptr::null_mut();
     }
@@ -352,7 +376,7 @@ unsafe extern "C" fn sqlite_result_get_fields(r: *mut c_void) -> *mut varray {
     let Some(res) = res(r) else {
         return std::ptr::null_mut();
     };
-    let a = hlp_alloc_array(hlt_bytes(), res.names.len() as i32);
+    let a = hlp_alloc_array(hlp_type_bytes(), res.names.len() as i32);
     if a.is_null() {
         return std::ptr::null_mut();
     }
@@ -363,20 +387,49 @@ unsafe extern "C" fn sqlite_result_get_fields(r: *mut c_void) -> *mut varray {
     a
 }
 
-/// The names `DEFINE_PRIM` would have exported from the HDLL.
-pub fn primitive(name: &str) -> *mut c_void {
-    match name {
-        "connect" => sqlite_connect as *mut c_void,
-        "close" => sqlite_close as *mut c_void,
-        "request" => sqlite_request as *mut c_void,
-        "last_id" => sqlite_last_id as *mut c_void,
-        "result_next" => sqlite_result_next as *mut c_void,
-        "result_get" => sqlite_result_get as *mut c_void,
-        "result_get_int" => sqlite_result_get_int as *mut c_void,
-        "result_get_float" => sqlite_result_get_float as *mut c_void,
-        "result_get_length" => sqlite_result_get_length as *mut c_void,
-        "result_get_nfields" => sqlite_result_get_nfields as *mut c_void,
-        "result_get_fields" => sqlite_result_get_fields as *mut c_void,
-        _ => std::ptr::null_mut(),
-    }
+/// The eleven primitives, each exported as the resolver `DEFINE_PRIM` writes.
+///
+/// The macro expands to exactly what the C one does:
+///
+/// ```c
+/// EXPORT void *hlp_<name>(const char **sign) {
+///     *sign = <signature>; return (void*)&<name>;
+/// }
+/// ```
+///
+/// a RESOLVER that reports the signature through an out-parameter and returns
+/// the real function -- never the primitive itself. Storing the resolver and
+/// calling it as the primitive writes a signature string through whatever the
+/// first argument happens to be.
+///
+/// The signature letters are HashLink's: `_` void, `i` i32, `d` f64, `b`
+/// bytes, `A` array, `D` dynamic, `?` an abstract pointer. ash reads the
+/// string and discards it -- the AOT call site is typed by the Haxe
+/// declaration -- but it is what an interpreter would check arity against, so
+/// it is written truthfully rather than left blank.
+macro_rules! define_prim {
+    ($resolver:ident, $function:ident, $signature:literal) => {
+        /// # Safety
+        /// `sign` must be a writable pointer, which is what the caller of a
+        /// `DEFINE_PRIM` resolver passes.
+        #[no_mangle]
+        pub unsafe extern "C" fn $resolver(sign: *mut *const c_char) -> *mut c_void {
+            if !sign.is_null() {
+                *sign = concat!($signature, "\0").as_ptr() as *const c_char;
+            }
+            $function as *mut c_void
+        }
+    };
 }
+
+define_prim!(hlp_connect, sqlite_connect, "b?");
+define_prim!(hlp_close, sqlite_close, "?_");
+define_prim!(hlp_request, sqlite_request, "?b?");
+define_prim!(hlp_last_id, sqlite_last_id, "?i");
+define_prim!(hlp_result_next, sqlite_result_next, "?A");
+define_prim!(hlp_result_get, sqlite_result_get, "?ib");
+define_prim!(hlp_result_get_int, sqlite_result_get_int, "?iD");
+define_prim!(hlp_result_get_float, sqlite_result_get_float, "?iD");
+define_prim!(hlp_result_get_length, sqlite_result_get_length, "?i");
+define_prim!(hlp_result_get_nfields, sqlite_result_get_nfields, "?i");
+define_prim!(hlp_result_get_fields, sqlite_result_get_fields, "?A");

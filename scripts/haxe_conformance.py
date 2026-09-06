@@ -375,6 +375,19 @@ def stage_hdlls(dest: pathlib.Path, srcs: list[pathlib.Path]) -> int:
     return len(srcs)
 
 
+def wasm_hdll_sources(ash: str) -> list[pathlib.Path]:
+    """The wasm side modules ash was built with, if any.
+
+    A wasm program loads a native library from a `.wasm` beside it rather than
+    from an HDLL -- see docs/wasm-hdlls.md -- so the wasm arms need these
+    staged the way the other arms need the .hdll files. Built by
+    scripts/build_wasm_hdll.py; absent is not an error, it just means a
+    program reaching one of those primitives raises.
+    """
+    beside = pathlib.Path(ash).resolve().parent / "wasm32-wasip1" / "hdll"
+    return sorted(beside.glob("*.wasm")) if beside.is_dir() else []
+
+
 def stage_macos_libhl(ash: str) -> None:
     """Give Mach-O HDLLs the current ash runtime under their import name."""
     if sys.platform != "darwin":
@@ -1334,11 +1347,14 @@ def main(argv=None) -> int:
         print(f"ref:   {args.reference}")
 
     hdlls = hdll_sources(root, args.hdll_dir)
+    wasm_hdlls = wasm_hdll_sources(ash)
     if hdlls:
         stage_macos_libhl(ash)
         print(f"hdll:  {len(hdlls)} from {hdlls[0].parent}")
     elif sys.platform != "darwin":
         print("hdll:  none (pass --hdll-dir); suites needing ssl/fmt will not load")
+    if wasm_hdlls:
+        print(f"wasm:  {len(wasm_hdlls)} side module(s) from {wasm_hdlls[0].parent}")
 
     src = ensure_checkout(work, tag)
     wanted = [s.strip() for s in args.suites.split(",") if s.strip()]
@@ -1448,6 +1464,10 @@ def main(argv=None) -> int:
                                           "detail": f"{prog} not produced"})
                 continue
             stage_hdlls(p.parent, hdlls)
+            # And the wasm libraries, for the wasm arms. Staged even when no
+            # wasm arm runs: they are inert to every other engine, and the
+            # alternative is threading the mode list down here.
+            stage_hdlls(p.parent, wasm_hdlls)
 
             # One engine at a time, so a build that fails -- the wasm module
             # needing a runtime object the machine does not have -- skips

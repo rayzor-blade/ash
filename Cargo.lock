@@ -191,6 +191,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_hdll_sqlite"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
 name = "ash_interp"
 version = "0.1.0"
 dependencies = [
@@ -228,7 +235,6 @@ dependencies = [
  "libc",
  "miniz_oxide",
  "once_cell",
- "rusqlite",
  "winapi",
  "windows-sys 0.59.0",
 ]

@@ -544,8 +544,8 @@ pub unsafe extern "C" fn hlp_sys_put_env(name: *const vbyte, value: *const vbyte
     }
 }
 
-/// Set or, with a negative `value_len`, clear a variable in the HOST's
-/// environment, so a process the host starts afterwards inherits it.
+// Set or, with a negative `value_len`, clear a variable in the HOST's
+// environment, so a process the host starts afterwards inherits it.
 #[cfg(target_family = "wasm")]
 #[link(wasm_import_module = "env")]
 extern "C" {

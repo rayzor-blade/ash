@@ -248,6 +248,7 @@ name = "ash_wasm_runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash_wasm_link",
  "clap",
  "js-sys",
  "libc",

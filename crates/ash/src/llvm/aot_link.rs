@@ -440,6 +440,58 @@ fn fiber_transform_requested() -> bool {
     )
 }
 
+/// The wasm HDLLs shipped beside a program.
+///
+/// A native library for wasm is a `dylink.0` side module and arrives the way
+/// an HDLL always has: dropped next to the program. Finding them here rather
+/// than being told about them means the ABI this module exports is decided by
+/// what is actually there to load -- and a program shipped with none keeps
+/// the narrow ABI it had.
+///
+/// A file that is not a side module, or that cannot be read at all, is
+/// skipped: the directory holds the program's own module, and may hold
+/// anything else.
+/// Read only enough of a file to rule it out, because the program's own
+/// module is in the same directory and is megabytes.
+fn head_looks_like_side_module(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; ash_wasm_link::SIDE_MODULE_PREFIX];
+    let Ok(n) = f.read(&mut head) else {
+        return false;
+    };
+    ash_wasm_link::looks_like_side_module(&head[..n])
+}
+
+fn side_modules_beside(out: &Path) -> Vec<(PathBuf, ash_wasm_link::SideModule)> {
+    let Some(dir) = out.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == out || path.extension().and_then(|e| e.to_str()) != Some("wasm") {
+            continue;
+        }
+        if !head_looks_like_side_module(&path) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        if let Ok(Some(side)) = ash_wasm_link::read_side_module(&bytes) {
+            found.push((path, side));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 fn link_wasm_module(
     objects: &[PathBuf],
     out: &Path,
@@ -484,8 +536,37 @@ fn link_wasm_module(
     // paying for the rewrite to produce something that can never suspend --
     // which is what a module that never imports `env.ash_host_fiber_yield`
     // would be.
+    let hdlls = side_modules_beside(out);
+    if !hdlls.is_empty() && !quiet {
+        crate::progress::note(&format!(
+            "[ash] {} native {} beside the output will be loaded at run time, so this \
+             module exports the memory, table and {} runtime {} they import.",
+            hdlls.len(),
+            if hdlls.len() == 1 { "library" } else { "libraries" },
+            hdlls.iter().map(|(_, s)| s.functions.len()).sum::<usize>(),
+            if hdlls.iter().map(|(_, s)| s.functions.len()).sum::<usize>() == 1 {
+                "function"
+            } else {
+                "functions"
+            },
+        ));
+    }
+    let mut hdll_imports: Vec<String> = hdlls
+        .into_iter()
+        .flat_map(|(_, side)| side.functions)
+        .collect();
+    if !hdll_imports.is_empty() {
+        // Not imported by any library, but needed to load one: a side module
+        // is position-independent and its static data has to be placed
+        // somewhere, and it must come from the program's own allocator so
+        // that one allocator owns the whole heap.
+        hdll_imports.push("malloc".to_string());
+    }
+    hdll_imports.sort();
+    hdll_imports.dedup();
     let opts = ash_wasm_link::LinkOptions {
         fibers: fiber_transform_requested(),
+        hdll_imports,
         ..Default::default()
     };
     if opts.fibers && !quiet {

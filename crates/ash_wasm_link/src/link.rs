@@ -52,6 +52,23 @@ pub struct LinkOptions {
     /// Names to keep whatever else happens, because the host calls them by
     /// name and no relocation points at them.
     pub roots: Vec<String>,
+    /// Names a separately-loaded native library will import from this module,
+    /// which is what makes this module a host for one.
+    ///
+    /// A wasm HDLL is a `dylink.0` side module: it imports this module's
+    /// memory and function table, so it works on the same heap the collector
+    /// scans and a function pointer it returns is an index this module can
+    /// call -- which is what lets `DEFINE_PRIM` signatures keep passing
+    /// `vbyte*`, `varray*` and `vclosure*` across the boundary. It then
+    /// imports each runtime function it calls by name, the way an HDLL links
+    /// against libhl.
+    ///
+    /// The names are listed rather than assumed because exporting a function
+    /// pins it: tree shaking cannot remove what the host is told about. A
+    /// build knows which libraries it ships, so it can read their imports and
+    /// export exactly those. Empty means this module hosts nothing and its
+    /// ABI stays as narrow as it was.
+    pub hdll_imports: Vec<String>,
     /// Instrument the module so a fiber can suspend inside it and be resumed.
     ///
     /// Off by default, and the gate is not that the code path is skipped but
@@ -74,6 +91,7 @@ impl Default for LinkOptions {
                 .map(|s| s.to_string())
                 .collect(),
             fibers: false,
+            hdll_imports: Vec::new(),
         }
     }
 }
@@ -565,6 +583,7 @@ fn mark_reachable(
             let wanted = sym.is_exported()
                 || sym.is_no_strip()
                 || opts.roots.iter().any(|r| r == name)
+                || opts.hdll_imports.iter().any(|r| r == name)
                 || (opts.export_all_functions && !sym.is_local() && !sym.is_hidden());
             if !wanted {
                 continue;
@@ -1278,7 +1297,14 @@ fn emit(
     tables.table(TableType {
         element_type: RefType::FUNCREF,
         minimum: slots,
-        maximum: Some(slots),
+        // A module hosting native libraries cannot fix its table: a side
+        // module's functions are appended to it at load, so the loader has to
+        // be able to grow it.
+        maximum: if opts.hdll_imports.is_empty() {
+            Some(slots)
+        } else {
+            None
+        },
         table64: false,
         shared: false,
     });
@@ -1352,7 +1378,16 @@ fn emit(
     // --- exports ---
     let mut exports = ExportSection::new();
     exports.export("memory", ExportKind::Memory, 0);
-    if opts.fibers {
+    if !opts.hdll_imports.is_empty() {
+        // What a `dylink.0` side module imports before anything of its own:
+        // the table its functions are appended to, and the two globals saying
+        // where the loader placed its data and its table entries. The stack
+        // pointer goes with them because a side module's own frames use it.
+        exports.export("__indirect_function_table", ExportKind::Table, 0);
+        exports.export("__memory_base", ExportKind::Global, layout.memory_base_global);
+        exports.export("__table_base", ExportKind::Global, layout.table_base_global);
+    }
+    if opts.fibers || !opts.hdll_imports.is_empty() {
         // Two fibers cannot share one shadow stack. The transform leaves a
         // suspended frame's shadow allocation in place, which is right for
         // one coroutine; with a second, the frames that were between the
@@ -1386,6 +1421,7 @@ fn emit(
                 let wanted = sym.is_exported()
                     || sym.is_no_strip()
                     || opts.roots.iter().any(|r| r == name)
+                    || opts.hdll_imports.iter().any(|r| r == name)
                     || (opts.export_all_functions && !sym.is_local() && !sym.is_hidden());
                 if !wanted {
                     continue;

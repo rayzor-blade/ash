@@ -47,11 +47,13 @@ use anyhow::Result;
 
 pub mod body;
 pub mod cursor;
+pub mod dylink;
 pub mod fiber;
 pub mod link;
 pub mod object;
 pub mod suspend;
 
+pub use dylink::{looks_like_side_module, read_side_module, SideModule, SIDE_MODULE_PREFIX};
 pub use link::{link, LinkOptions};
 pub use object::{read, Object, Symbol, SymbolTarget};
 

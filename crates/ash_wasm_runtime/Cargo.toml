@@ -28,7 +28,7 @@ guest = []
 validate = ["dep:wasmparser"]
 # The native host: wasmtime, for the conformance lane and for CI. No
 # JavaScript anywhere in this path, and no wasm-bindgen.
-native = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow", "dep:clap", "dep:tokio", "dep:libc", "validate"]
+native = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow", "dep:clap", "dep:tokio", "dep:libc", "dep:ash_wasm_link", "validate"]
 # The browser host: the same contract, reached through web-sys.
 browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 
@@ -42,6 +42,10 @@ tokio = { version = "1", features = ["rt", "macros"], optional = true }
 # The native host answers the guest's socket imports with the operating
 # system's sockets; on unix that is libc, and nowhere else is it anything.
 libc = { version = "0.2", optional = true }
+# Reading a native library's `dylink.0` section, which says what the loader
+# must place for it. The linker already knows that format because it writes
+# the relocations the format exists to describe.
+ash_wasm_link = { path = "../ash_wasm_link", optional = true }
 
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }

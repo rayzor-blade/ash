@@ -17,9 +17,10 @@
 //! reports exactly which imports nothing satisfies, which during the port is
 //! the question being asked.
 
+pub(crate) mod dylink;
 mod sockets;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
@@ -30,6 +31,9 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 pub struct Program {
     engine: Engine,
     module: Module,
+    /// Where it was loaded from, because a native library shipped with it is
+    /// found beside it -- the same rule an HDLL has always followed.
+    path: PathBuf,
 }
 
 /// How a run ended.
@@ -52,6 +56,8 @@ pub(crate) struct Host {
     /// What each `sys.io.Process` the guest started said. See
     /// [`install_process`] for why the whole of it is here at once.
     processes: Vec<Option<Finished>>,
+    /// Native libraries loaded beside the program. See [`dylink`].
+    pub(crate) libraries: dylink::Libraries,
 }
 
 /// A child that has already run, and how much of what it said the guest has
@@ -92,7 +98,11 @@ impl Program {
             Engine::new(&config).map_err(|e| anyhow!("creating the wasmtime engine: {e}"))?;
         let module = Module::from_file(&engine, path)
             .map_err(|e| anyhow!("loading {}: {e}", path.display()))?;
-        Ok(Self { engine, module })
+        Ok(Self {
+            engine,
+            module,
+            path: path.to_path_buf(),
+        })
     }
 
     /// The imports this module needs that neither WASI nor this host supplies.
@@ -200,6 +210,7 @@ impl Program {
                 wasi: wasi.build_p1(),
                 sockets: sockets::Table::default(),
                 processes: Vec::new(),
+                libraries: dylink::Libraries::default(),
             },
         );
 
@@ -213,6 +224,23 @@ impl Program {
             .instantiate_async(&mut store, &self.module)
             .await
             .map_err(|e| anyhow!("instantiating the module: {e}"))?;
+
+        // Before the program initialises, because that is when it resolves
+        // its primitives -- and because instantiating a module from inside a
+        // call the guest is making is a knot not worth tying.
+        let libraries = dylink::load_beside(&mut store, &instance, &self.path).await?;
+        if !libraries.is_empty() {
+            eprintln!(
+                "[ash] loaded native {}: {}",
+                if libraries.names().len() == 1 {
+                    "library"
+                } else {
+                    "libraries"
+                },
+                libraries.names().join(", ")
+            );
+        }
+        store.data_mut().libraries = libraries;
 
         // A command module is entered through `_start`; one linked without a
         // command entry is entered through `main`.
@@ -647,6 +675,53 @@ fn run_to_completion(cmd: &str, args: &[String], input: &[u8]) -> Option<Finishe
     })
 }
 
+/// How the guest reaches a native library that was loaded beside it.
+///
+/// Two imports, and they are `dlopen` and `dlsym` under other names, because
+/// that is what `crate::aot_native` on every other target calls at exactly
+/// this point. The library is already loaded by the time either is asked --
+/// see [`dylink`] -- so "open" is a lookup, and "sym" answers with a table
+/// index, which is what a function pointer is in a wasm module.
+///
+/// Answering zero is not an error. It is the null the `DEFINE_PRIM` resolver
+/// protocol already reads as "not in this library", and the call site raises
+/// the same "not loaded" a native binary raises for a missing HDLL -- only if
+/// the primitive is actually reached.
+fn install_dlopen(linker: &mut Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap(
+            FIBER_YIELD_MODULE,
+            "ash_host_dlopen",
+            |mut caller: Caller<'_, Host>, name: i32, name_len: i32| -> i32 {
+                let Some(name) = guest_slice(&mut caller, name, name_len) else {
+                    return 0;
+                };
+                let name = String::from_utf8_lossy(&name).into_owned();
+                caller.data().libraries.contains(&name) as i32
+            },
+        )
+        .map_err(|e| anyhow!("installing the library import: {e}"))?;
+
+    linker
+        .func_wrap(
+            FIBER_YIELD_MODULE,
+            "ash_host_dlsym",
+            |mut caller: Caller<'_, Host>, lib: i32, lib_len: i32, sym: i32, sym_len: i32| -> i32 {
+                let Some(lib) = guest_slice(&mut caller, lib, lib_len) else {
+                    return 0;
+                };
+                let Some(sym) = guest_slice(&mut caller, sym, sym_len) else {
+                    return 0;
+                };
+                let lib = String::from_utf8_lossy(&lib).into_owned();
+                let sym = String::from_utf8_lossy(&sym).into_owned();
+                dylink::resolve(&mut caller, &lib, &sym).unwrap_or(0)
+            },
+        )
+        .map_err(|e| anyhow!("installing the symbol import: {e}"))?;
+    Ok(())
+}
+
 /// The transform's state global, if this module has one.
 fn fiber_global(caller: &mut Caller<'_, Host>, name: &str) -> Option<wasmtime::Global> {
     match caller.get_export(name) {
@@ -708,6 +783,7 @@ fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
 
     install_command(linker)?;
     install_process(linker)?;
+    install_dlopen(linker)?;
 
     // Point the transform at a fiber's side stack and say whether the next
     // entry is a rewind. An uninstrumented module has neither global and

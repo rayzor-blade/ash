@@ -1,9 +1,8 @@
 # Running HashLink in WebAssembly
 
-A Haxe program, compiled to HashLink bytecode and then ahead of time to a
-WebAssembly module by ash, with ash's runtime linked in. Nothing in the page
-interprets bytecode: the browser runs compiled code, and the host below
-answers what a sandbox cannot do for itself.
+HashLink bytecode compiled to a WebAssembly module by ash, with a browser
+compatible runtime. The host below answers what a sandbox cannot do for
+itself.
 
     # the host
     cargo build --release -p ash_browser --target wasm32-unknown-unknown

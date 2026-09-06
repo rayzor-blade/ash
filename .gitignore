@@ -19,3 +19,8 @@ examples/heaps_base2d/bin/libhl*.dll
 
 # Build output and the .hdll files copied from the base2d example beside it.
 examples/heaps_base3d/bin/
+
+# wasm-bindgen output: build product, and the README says how to make it.
+examples/browser/ash_browser.js
+examples/browser/ash_browser.d.ts
+examples/browser/ash_browser_bg.wasm

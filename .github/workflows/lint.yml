@@ -90,6 +90,7 @@ jobs:
             --target wasm32-wasip1 -- -D warnings
           cargo clippy -p ash_wasm_runtime --no-default-features --features browser \
             --target wasm32-unknown-unknown -- -D warnings
+          cargo clippy -p ash_browser --target wasm32-unknown-unknown -- -D warnings
 
   # Compile and link the full CLI against real Windows headers on every push.
   # Checking ash_std alone missed ash_interp's MSVC enum width and Unix API

@@ -1,0 +1,56 @@
+# ash in a page
+
+The browser host, run against a program built for `wasm32-wasip1`.
+
+    cargo build --release -p ash_browser --target wasm32-unknown-unknown
+    wasm-bindgen --target web --out-dir examples/browser \
+      target/wasm32-unknown-unknown/release/ash_browser.wasm
+    python3 -m http.server -d examples/browser
+
+Then open the page and choose a `.wasm`. A module has to be served rather
+than opened from a file, because `WebAssembly.instantiate` and ES modules
+both refuse a `file://` origin.
+
+The browser needs the standardised exception-handling proposal, because ash's
+exception handling is `setjmp` lowered into those instructions and every
+module carries `exnref`. Browsers that have shipped it need nothing; node
+needs `--experimental-wasm-exnref`.
+
+## Without a browser
+
+`run-node.js` runs the same host under node, which is the only way to
+exercise it in a test lane:
+
+    cargo build --release -p ash_browser --target wasm32-unknown-unknown
+    wasm-bindgen --target nodejs --out-dir /tmp/host \
+      target/wasm32-unknown-unknown/release/ash_browser.wasm
+    cp examples/browser/run-node.js /tmp/host/
+    node --experimental-wasm-exnref /tmp/host/run-node.js prog.wasm
+
+The code path is identical: the same imports, the same instantiate, the same
+entrypoint. What differs is what the global object offers, which is why
+`crypto` and `performance` are looked up there rather than on `window` -- a
+worker has no `window` either.
+
+## What a page can and cannot do for a program
+
+A browser has no WASI, so the host answers all forty-five of those imports
+itself: output goes to `console.log` a line at a time, clocks come from
+`Date.now` and `performance.now`, randomness from `crypto.getRandomValues`,
+and there is no filesystem -- `path_open` is `ENOTSUP` and every descriptor
+above the standard three is `EBADF`. A program that reads a file fails the
+way it would with the file absent.
+
+Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
+`Sys.sleep` returns immediately.
+
+## Not yet
+
+**Suspending a fiber.** `ash_host_fiber_yield` answers without suspending, so
+`sys.thread` runs a fiber to completion rather than interleaving, and a
+program whose main loop never returns will not give the page back its thread.
+That wants JSPI, or a worker parked on `Atomics.wait`.
+
+**Loading a native library.** `ash_host_dlopen` answers "no such library", so
+a primitive from one raises when it is reached. The steps are the native
+host's loader (`docs/wasm-hdlls.md`) against `WebAssembly.instantiate`.

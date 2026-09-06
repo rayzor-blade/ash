@@ -22,12 +22,15 @@
 //! [`imports`] binds all of it to a module: 69 imports, every one of which
 //! must be answered before a module can be instantiated at all.
 //!
-//! What is still missing before a module runs in a page: suspending a fiber,
-//! which needs JSPI or a worker parked on `Atomics.wait`, and loading a
-//! native library, which is the native host's loader against
-//! `WebAssembly.instantiate`.
+//! [`run`] is the entry point: it instantiates a module against all of it and
+//! calls the module's entrypoint.
+//!
+//! What is still missing: suspending a fiber, which needs JSPI or a worker
+//! parked on `Atomics.wait`, and loading a native library, which is the
+//! native host's loader against `WebAssembly.instantiate`.
 
 pub mod imports;
+pub mod run;
 pub mod memory;
 pub mod sockets;
 pub mod wasi;

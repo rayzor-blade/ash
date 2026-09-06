@@ -48,7 +48,7 @@ use crate::wasi_abi::{clock, errno, filetype, gather, parse_iovecs, vector_sizes
 
 use super::memory::Guest;
 
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 
 /// The rights a character device has: everything to do with a stream and
 /// nothing to do with a file. libc only checks that the seek right is absent
@@ -323,22 +323,26 @@ impl Wasi {
     }
 }
 
-/// `performance.now()` from a window or a worker, and `Date.now()` if this is
-/// somehow neither.
-fn now_monotonic() -> f64 {
-    if let Some(window) = web_sys::window() {
-        if let Ok(p) = window.performance().ok_or(()) {
-            return p.now();
-        }
-    }
-    js_sys::Date::now()
+/// Something the global object holds, whatever kind of global this is.
+///
+/// Not `web_sys::window()`: that is `None` in a worker, and a worker is where
+/// a program wanting a thread of its own has to run. Both `crypto` and
+/// `performance` sit on every global that has them, so asking the global
+/// directly works in a page, in a worker, and anywhere else this is embedded.
+fn from_global<T: JsCast>(name: &str) -> Option<T> {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.dyn_into::<T>().ok())
 }
 
-/// `crypto.getRandomValues`, from a window or a worker.
+/// `performance.now()`, and `Date.now()` where there is no `performance`.
+fn now_monotonic() -> f64 {
+    from_global::<web_sys::Performance>("performance").map_or_else(js_sys::Date::now, |p| p.now())
+}
+
+/// `crypto.getRandomValues`.
 fn crypto_fill(bytes: &mut [u8]) -> Result<(), ()> {
-    let crypto = web_sys::window()
-        .and_then(|w| w.crypto().ok())
-        .ok_or(())?;
+    let crypto = from_global::<web_sys::Crypto>("crypto").ok_or(())?;
     crypto
         .get_random_values_with_u8_array(bytes)
         .map(|_| ())

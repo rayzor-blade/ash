@@ -1,0 +1,20 @@
+[package]
+name = "ash_browser"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "The browser host, packaged for wasm-bindgen"
+publish = false
+
+[dependencies]
+ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["browser"] }
+
+[lib]
+# A cdylib, which is what wasm-bindgen packages, and the reason this crate
+# exists at all: `ash_wasm_runtime` is deliberately rlib-only, because a
+# cdylib is linked as a DLL on Windows and a DLL demands every symbol be
+# defined -- which `ash_host_fiber_yield` never is, being a wasm import. The
+# separation keeps that constraint where it belongs and lets the browser have
+# the link product it needs.
+crate-type = ["cdylib", "rlib"]

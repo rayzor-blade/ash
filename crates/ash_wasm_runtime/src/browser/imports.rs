@@ -163,9 +163,11 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(wasi, "clock_time_get", move |id: u32, _p: u32, _p2: u32, out: u32| -> i32 {
-        // `precision` is a u64 and arrives as two i32 halves; it is advisory
-        // and this clock ignores it.
+    bind!(wasi, "clock_time_get", move |id: u32, _precision: i64, out: u32| -> i32 {
+        // `precision` is an i64 and has to be declared as one: a wasm i64
+        // reaches JavaScript as a BigInt, and a binding that reads it as two
+        // i32 halves takes the wrong number of arguments and leaves `out`
+        // with no argument at all. It is advisory, and this clock ignores it.
         let g = guest!(h);
         h.wasi.borrow().clock_time_get(&g, id, out)
     });

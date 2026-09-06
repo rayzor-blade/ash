@@ -163,6 +163,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_browser"
+version = "0.1.0"
+dependencies = [
+ "ash_wasm_runtime",
+]
+
+[[package]]
 name = "ash_core"
 version = "0.1.0"
 dependencies = [

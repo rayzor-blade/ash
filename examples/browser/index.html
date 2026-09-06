@@ -1,0 +1,54 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>ash in a page</title>
+<style>
+  body { font: 14px ui-monospace, monospace; margin: 2rem; max-width: 60rem; }
+  #out { white-space: pre-wrap; border: 1px solid #8884; padding: 1rem; min-height: 6rem; }
+  .err { color: #c33; }
+</style>
+<h1>ash in a page</h1>
+<p>
+  Pick a <code>.wasm</code> built by <code>ash --build --target wasm32-wasip1</code>.
+  Its output goes to the console and below.
+</p>
+<input type="file" id="pick" accept=".wasm">
+<pre id="out"></pre>
+
+<script type="module">
+import init, { run } from "./ash_browser.js";
+
+const out = document.getElementById("out");
+const say = (text, cls) => {
+  const line = document.createElement("span");
+  if (cls) line.className = cls;
+  line.textContent = text + "\n";
+  out.appendChild(line);
+};
+
+// The host writes through console.log and console.error, because that is
+// where a page's output goes and where a developer already looks. Mirroring
+// it here as well means the page shows a program's output without the
+// developer tools open.
+for (const [name, cls] of [["log", ""], ["error", "err"]]) {
+  const original = console[name].bind(console);
+  console[name] = (...args) => {
+    original(...args);
+    say(args.join(" "), cls);
+  };
+}
+
+await init();
+
+document.getElementById("pick").addEventListener("change", async (event) => {
+  const file = event.target.files[0];
+  if (!file) return;
+  out.textContent = "";
+  say(`running ${file.name} (${file.size} bytes)...`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  // Fetching is the page's business, so the host is handed bytes rather than
+  // a URL: it has no opinion about origins, caching or streaming.
+  const outcome = await run(bytes, [file.name], []);
+  if (outcome.trapped) say(`trapped: ${outcome.trapped}`, "err");
+  else say(`exited with ${outcome.status}`);
+});
+</script>

@@ -34,6 +34,7 @@ use crate::wasi_abi::errno;
 use super::fibers::Fibers;
 use super::memory::Guest;
 use super::sockets::Sockets;
+use super::threads::Threads;
 use super::wasi::Wasi;
 
 /// Everything a page holds on a program's behalf.
@@ -102,23 +103,42 @@ macro_rules! bind {
 
 /// The imports object to instantiate a module with.
 ///
-/// Two namespaces, as the module names them: `wasi_snapshot_preview1` for the
-/// standard library's own calls, and `env` for what ash asks of a host beyond
-/// it.
-pub fn imports(host: &Rc<Host>) -> Object {
+/// Three namespaces, as the module names them: `wasi_snapshot_preview1` for
+/// the standard library's own calls, `env` for what ash asks of a host beyond
+/// it, and `wasi` for the one function a threads build asks for.
+pub fn imports(
+    host: &Rc<Host>,
+    memory: Option<&js_sys::WebAssembly::Memory>,
+    threads: &Rc<Threads>,
+) -> Object {
     let imports = Object::new();
-    let wasi = Object::new();
+    let preview1 = Object::new();
     let env = Object::new();
+    // `wasi` and `wasi_snapshot_preview1` are two module names, not one
+    // shortened. The threads interface never went into preview 1 and imports
+    // its single function from its own namespace.
+    let wasi = Object::new();
 
-    install_wasi(&wasi, host);
+    install_wasi(&preview1, host);
     install_env(&env, host);
+    // A threads build imports its memory rather than defining one, so that
+    // every thread instantiates against the same one. The host made it; here
+    // is where the module is given it.
+    if let Some(memory) = memory {
+        install(&env, "memory", memory.clone().into());
+    }
+    let starting = Rc::clone(threads);
+    bind!(&wasi, "thread-spawn", move |start_arg: i32| -> i32 {
+        starting.spawn(start_arg)
+    });
 
     install(
         &imports,
         "wasi_snapshot_preview1",
-        wasi.unchecked_into::<JsValue>(),
+        preview1.unchecked_into::<JsValue>(),
     );
     install(&imports, "env", env.unchecked_into::<JsValue>());
+    install(&imports, "wasi", wasi.unchecked_into::<JsValue>());
     imports
 }
 

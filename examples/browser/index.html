@@ -23,6 +23,8 @@
 <h1>Running HashLink in WebAssembly</h1>
 <p class="sub">HashLink bytecode compiled to a WebAssembly module by ash, with a
   browser compatible runtime.</p>
+<p class="sub"><a href="?">one thread</a> · <a href="?demo=threads">threads</a>
+  — running: <span id="which"></span></p>
 <pre id="out"></pre>
 <p class="proof">
   <span id="frames">0</span>
@@ -68,5 +70,28 @@ worker.onmessage = ({ data }) => {
 };
 worker.onerror = (e) => write(`worker: ${e.message}`, "err");
 
-worker.postMessage({ module: "./demo.wasm", args: ["demo.wasm"] });
+// Which demo, from the query string. The threaded one needs the worker pool
+// asked for by name -- ash never turns it on by itself on wasm, because two
+// instances over one memory are two mutators on a single-mutator heap and
+// only threads that compute are safe there yet.
+const threaded = new URLSearchParams(location.search).get("demo") === "threads";
+const module = threaded ? "./threads.wasm" : "./demo.wasm";
+const environ = threaded
+  ? [`ASH_WORKERS=${Math.max(1, (navigator.hardwareConcurrency || 4) - 1)}`]
+  : [];
+
+if (threaded && !self.crossOriginIsolated) {
+  write(
+    "This page is not cross-origin isolated, so it has no SharedArrayBuffer " +
+      "and the threaded module cannot be given a memory. Serve it with " +
+      "examples/browser/serve.py.",
+    "err",
+  );
+}
+
+document.getElementById("which").textContent = threaded
+  ? "threads — four Haxe threads, each in a Worker of its own"
+  : "single-threaded — strings, maps, closures, exceptions, arithmetic";
+
+worker.postMessage({ module, args: [module.slice(2)], environ });
 </script>

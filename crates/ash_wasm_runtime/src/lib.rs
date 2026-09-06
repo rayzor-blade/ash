@@ -75,6 +75,13 @@
 pub mod guest;
 pub mod wasi_abi;
 
+/// What memory a module asks a host for, read from the module itself.
+///
+/// Not behind a host feature and not behind a target: the answer is the same
+/// wherever it is asked, it needs nothing but the bytes, and having it here
+/// is what lets it be tested off a browser.
+pub mod imported_memory;
+
 #[cfg(feature = "native")]
 pub mod native;
 

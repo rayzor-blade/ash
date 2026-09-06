@@ -37,4 +37,5 @@ pub mod imports;
 pub mod run;
 pub mod memory;
 pub mod sockets;
+pub mod threads;
 pub mod wasi;

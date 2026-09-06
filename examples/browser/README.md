@@ -15,10 +15,47 @@ itself.
     cd examples/browser/demo && haxe -main Demo -hl demo.hl
     ASH_WASM_FIBERS=1 ash --build ../demo.wasm --target wasm32-wasip1 demo.hl
 
-    python3 -m http.server -d examples/browser
+    # the threaded program, and the other demo the page can run
+    haxe -cp . -main Threads -hl threads.hl
+    ASH_WASM_FIBERS=1 ash --build ../threads.wasm \
+      --target wasm32-wasip1-threads threads.hl
 
-Then open the page. It starts a worker, which fetches `demo.wasm` and runs
-it; there is nothing to click.
+    ./examples/browser/serve.py
+
+Then open <http://127.0.0.1:8731>. It starts a worker, which fetches the
+module and runs it; there is nothing to click. `?demo=threads` runs the other
+one.
+
+`serve.py` rather than `python3 -m http.server` because of the threaded demo:
+it needs a `SharedArrayBuffer`, a page only has one when it is cross-origin
+isolated, and that means two headers on every response. The single-threaded
+demo does not care and works under either.
+
+## Threads
+
+`?demo=threads` runs four Haxe threads, each in a Worker of its own, and times
+them against the same work done one after another. A thread on wasm is a
+second instance of the same module over one shared memory, entered through
+`wasi_thread_start` -- so the page's job is to make the agent, and everything
+about what the thread does was decided by the guest's own `pthread_create`
+before it asked for one.
+
+Who does what: `worker.js` gives `run` a `spawn` function; the host hands that
+function the compiled module, the shared memory, a thread id and the guest's
+`startArg`; `thread.js` is the Worker that receives them and calls
+`run_thread`. The crate never names a URL, for the same reason it does not
+fetch the module.
+
+Two things to know before reading anything into the numbers.
+
+The worker pool is opt-in on wasm and the page asks for it by name --
+`ASH_WORKERS` in the environment it passes. Ash will not turn it on by itself
+there, and without it the threads take turns and the demo says so.
+
+And the demo computes rather than allocates, deliberately. Two instances over
+one memory are two mutators on one heap and ash's collector is
+single-mutator: threads that allocate do not survive yet. `docs/wasm-target.md`
+has the measurements and what is left to do.
 
 ## The module runs in a worker
 

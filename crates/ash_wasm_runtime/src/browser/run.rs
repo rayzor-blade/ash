@@ -27,9 +27,13 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
+use std::rc::Rc;
+
 use super::fibers::Fibers;
 use super::imports::{imports, Host};
 use super::memory::Guest;
+use crate::imported_memory::{imported_memory, MemoryLimits};
+use super::threads::Threads;
 
 /// How a run ended, as a page sees it.
 #[wasm_bindgen]
@@ -64,15 +68,32 @@ pub async fn run(
     module: Uint8Array,
     args: Vec<String>,
     environ: Vec<String>,
+    spawn: Option<Function>,
 ) -> Result<Outcome, JsValue> {
-    let host = Host::new(args, environ);
-    let instance = instantiate(&module, &imports(&host)).await?;
+    let bytes = module.to_vec();
+    let host = Host::new(args.clone(), environ.clone());
+    // A threads build does not define its memory. It imports one, shared, so
+    // that every thread instantiates against the same one -- and the host is
+    // what makes it. See [`super::module::imported_memory`] for why the
+    // limits are read out of the module rather than asked of the engine.
+    let shared = imported_memory(&bytes)
+        .map(shared_memory)
+        .transpose()?;
+    let threads = Rc::new(Threads::new(spawn, args, environ));
+
+    let (compiled, instance) =
+        instantiate(&bytes, &imports(&host, shared.as_ref(), &threads)).await?;
     let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
 
     // The host functions need the memory, and the instance is the first thing
-    // that knows which one it got.
+    // that knows which one it got -- a module that made its own, at least.
+    // One that imported it is being handed back what was just given to it.
     let memory: WebAssembly::Memory = Reflect::get(&exports, &"memory".into())?.unchecked_into();
     host.attach(Guest::new(memory));
+    // What a thread will instantiate. The module is passed on already
+    // compiled, because a Worker starting a thread should not fetch and
+    // compile megabytes again to run one function.
+    threads.attach(compiled, shared);
     // And the transform's globals, if this module was built with fibers.
     // Absent is the ordinary case and not an error.
     host.attach_fibers(Fibers::from_exports(&exports));
@@ -111,10 +132,74 @@ pub async fn run(
     })
 }
 
-async fn instantiate(module: &Uint8Array, imports: &Object) -> Result<JsValue, JsValue> {
-    let ready = WebAssembly::instantiate_buffer(&module.to_vec(), imports);
-    let result = JsFuture::from(ready).await?;
-    Reflect::get(&result, &"instance".into())
+/// Compile and instantiate, and keep both: the instance to run, and the
+/// module because a thread instantiates that same one again.
+async fn instantiate(
+    bytes: &[u8],
+    imports: &Object,
+) -> Result<(WebAssembly::Module, JsValue), JsValue> {
+    let result = JsFuture::from(WebAssembly::instantiate_buffer(bytes, imports)).await?;
+    let compiled: WebAssembly::Module = Reflect::get(&result, &"module".into())?.unchecked_into();
+    Ok((compiled, Reflect::get(&result, &"instance".into())?))
+}
+
+/// The memory a threads build imports: shared, and reserving the maximum it
+/// declared so that growing it never moves it out from under another thread.
+///
+/// This needs `SharedArrayBuffer`, which a page only has when it is
+/// cross-origin isolated -- COOP and COEP on every response it serves. The
+/// failure without them is this constructor throwing, so it is said here
+/// rather than left as a stack trace.
+fn shared_memory(limits: MemoryLimits) -> Result<WebAssembly::Memory, JsValue> {
+    let descriptor = Object::new();
+    let set = |key: &str, value: JsValue| {
+        let _ = Reflect::set(&descriptor, &JsValue::from_str(key), &value);
+    };
+    set("initial", limits.minimum.into());
+    set("maximum", limits.maximum.into());
+    set("shared", JsValue::TRUE);
+    WebAssembly::Memory::new(&descriptor).map_err(|e| {
+        JsValue::from_str(&format!(
+            "this module needs a shared memory, which needs SharedArrayBuffer, which needs \
+             the page to be cross-origin isolated: serve it with Cross-Origin-Opener-Policy: \
+             same-origin and Cross-Origin-Embedder-Policy: require-corp. ({})",
+            describe(&e)
+        ))
+    })
+}
+
+/// Run one thread: the same module, the same memory, entered where wasi-libc
+/// leaves off.
+///
+/// This is what the Worker a page started in `spawn` calls. It instantiates
+/// rather than fetches, because the module arrives already compiled, and it
+/// calls `wasi_thread_start` rather than an entrypoint -- the guest's own
+/// `pthread_create` prepared `start_arg`, and everything about what this
+/// thread will do is in there.
+#[wasm_bindgen]
+pub async fn run_thread(
+    module: WebAssembly::Module,
+    memory: WebAssembly::Memory,
+    tid: i32,
+    start_arg: i32,
+    args: Vec<String>,
+    environ: Vec<String>,
+    spawn: Option<Function>,
+) -> Result<(), JsValue> {
+    let host = Host::new(args.clone(), environ.clone());
+    let threads = Rc::new(Threads::new(spawn, args, environ));
+    let ready = WebAssembly::instantiate_module(&module, &imports(&host, Some(&memory), &threads));
+    let instance: WebAssembly::Instance = JsFuture::from(ready).await?.unchecked_into();
+    let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
+
+    host.attach(Guest::new(memory.clone()));
+    host.attach_fibers(Fibers::from_exports(&exports));
+    // A thread may start a thread, so it is given what it would need to.
+    threads.attach(module, Some(memory));
+
+    export(&exports, "wasi_thread_start")?
+        .call2(&JsValue::UNDEFINED, &tid.into(), &start_arg.into())
+        .map(|_| ())
 }
 
 fn export(exports: &Object, name: &str) -> Result<Function, JsValue> {

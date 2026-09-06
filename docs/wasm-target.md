@@ -805,6 +805,25 @@ Add threads only after single-mutator GC correctness. The work includes shared
 memory, worker startup, mutator rendezvous, fiber semantics and host deployment
 documentation.
 
+**The linker's half of it is built.** `wasm32-wasip1-threads` links and runs,
+single-threaded, which took thread-local storage: ash's linker refused it
+outright and a threads object cannot do without it, since wasi-libc puts
+`errno` there and `ash_std` has thread-locals in five files. `.tdata` is placed
+twice -- once as the template a new thread copies from, once as the main
+thread's own block, which `__tls_base` starts at -- a `MEMORY_ADDR_TLS_SLEB`
+relocation writes an offset within the block rather than an address, and
+`__wasm_init_tls` is synthesised to point `__tls_base` at a thread's own block
+and copy the template into it. Eight test programs print the same thing on both
+targets, the GC and exception ones included, and those read a thread-local on
+every allocation and every throw.
+
+What is not built is everything a second thread needs, and it is most of it:
+the memory is the module's own rather than an imported shared one, the data
+segments are active rather than passive behind a `__wasm_init_memory` guard --
+so a second instance would re-initialise memory under the first -- and
+`wasi.thread-spawn` is answered with the refusal the interface has for a host
+that cannot start one. The deferral above stands unchanged.
+
 Heaps follows the single-threaded language/runtime target. Its rendering work
 is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'
 non-rendering code, allocation, exceptions, reflection and callbacks are

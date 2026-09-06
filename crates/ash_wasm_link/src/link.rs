@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{anyhow, bail, Context, Result};
 use wasmparser::{RelocationEntry, RelocationType};
 
-use crate::object::{ImportKind, ObjImport, Object, SymbolTarget};
+use crate::object::{ImportKind, ObjImport, Object, SegmentInfo, SymbolTarget};
 
 /// How the output is laid out.
 #[derive(Debug, Clone)]
@@ -110,6 +110,115 @@ impl Default for LinkOptions {
 /// `__table_base` is this same number.
 const TABLE_BASE: u32 = 1;
 
+/// Does this segment hold thread-local data?
+///
+/// Two things say so and only one of them is dependable. The `linking`
+/// section has a flag for it, and `lld -r` does not carry that flag through
+/// its own output -- every segment in the prelinked runtime object comes back
+/// with flags of zero, `.tdata` included. The name survives, and LLVM fixes
+/// it: `.tdata` and `.tbss`, with a `.<symbol>` suffix when each datum gets
+/// its own section. So either is enough, and `refuse_unsupported` checks the
+/// answer against the symbols that point into the segment.
+fn segment_is_tls(info: Option<&SegmentInfo>) -> bool {
+    /// `WASM_SEG_FLAG_TLS`.
+    const TLS: u32 = 0x2;
+    let Some(info) = info else {
+        return false;
+    };
+    if info.flags & TLS != 0 {
+        return true;
+    }
+    [".tdata", ".tbss"]
+        .iter()
+        .any(|stem| info.name == *stem || info.name.starts_with(&format!("{stem}.")))
+}
+
+/// Where thread-local data went.
+///
+/// A thread-local is not at an address. It is at an offset from
+/// `__tls_base`, a mutable global holding the base of the block belonging to
+/// whichever thread is running -- so the same code reads a different variable
+/// depending on who runs it, and a `MEMORY_ADDR_TLS_SLEB` relocation holds
+/// that offset rather than an address.
+///
+/// Two copies of the data are placed. The template is the image a thread's
+/// block starts as and nothing ever writes it; the main thread gets its own
+/// block, so that a thread starting later still copies the initial values
+/// rather than whatever main has since stored. LLD does the same with a
+/// passive segment and `memory.init`; a second placed copy needs no passive
+/// segment and no `data.drop` bookkeeping, and costs the size of the block.
+#[derive(Debug, Clone)]
+struct TlsLayout {
+    /// Offset within the block of each object's TLS segments, and `None` for
+    /// a segment that is not thread-local.
+    offset: Vec<Vec<Option<u32>>>,
+    /// `__tls_size`: how much one thread's block is.
+    size: u32,
+    /// `__tls_align`: what a block must be aligned to.
+    align: u32,
+    /// Address of the template every thread's block is copied from.
+    template: u32,
+    /// Address of the main thread's own block, which `__tls_base` starts at.
+    main: u32,
+    base_global: u32,
+    size_global: u32,
+    align_global: u32,
+    /// Output index of the synthesised `__wasm_init_tls`.
+    init_function: u32,
+}
+
+/// Does this link have thread-local storage in it at all?
+///
+/// A `.tdata` segment is the obvious sign, and the globals are the other one:
+/// an object built for a threads target imports `__tls_base` and calls
+/// `__wasm_init_tls` whether or not it ended up with any thread-locals of its
+/// own, and something has to define those.
+fn needs_tls(objects: &[Object]) -> bool {
+    objects.iter().any(|obj| {
+        obj.symbols.iter().any(|s| s.is_tls())
+            || obj.imports.iter().any(|i| {
+                matches!(
+                    i.name.as_str(),
+                    "__tls_base" | "__tls_size" | "__tls_align" | "__wasm_init_tls"
+                )
+            })
+    })
+}
+
+/// The functions the linker writes rather than any object supplying them.
+///
+/// An object built for a threads target imports `__wasm_init_tls` because
+/// only the linker knows where the thread-local template ended up. Nothing
+/// else is in this position, so the list is one name long.
+fn is_linker_function(name: &str) -> bool {
+    name == "__wasm_init_tls"
+}
+
+/// A weak reference to a function nothing in this link defines.
+///
+/// Not an error, and not an import either. C writes `if (fn) fn(...)` against
+/// a symbol that may or may not have been linked in: the address has to be
+/// zero for that test to answer no, and the call the test guards still has to
+/// be a call to something. wasi-libc's `__wasilibc_futex_wait_maybe_busy` is
+/// the one this link meets. LLD emits a body that traps and resolves the
+/// address to zero, and so does this -- a program that reaches the trap took
+/// a branch it had just tested its way out of.
+fn weak_undefined_function<'a>(
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+    obj: &'a Object,
+    sym: &'a crate::object::Symbol,
+) -> Option<&'a str> {
+    if !matches!(sym.target, SymbolTarget::Function { .. }) || !sym.is_undefined() || !sym.is_weak()
+    {
+        return None;
+    }
+    let name = obj.symbol_name(sym);
+    if defs.contains_key(&(Kind::Function, name.to_string())) {
+        return None;
+    }
+    Some(name)
+}
+
 /// Where a symbol ended up in the output.
 #[derive(Debug, Clone, Copy)]
 enum Resolved {
@@ -126,6 +235,20 @@ enum Resolved {
 struct ImportKey {
     module: String,
     name: String,
+}
+
+impl Layout {
+    /// Output index of the trapping stub standing in for a weak reference.
+    ///
+    /// The stubs follow `__wasm_call_ctors` and, when there is thread-local
+    /// storage, `__wasm_init_tls`, in the order `weak_stubs` holds them.
+    fn weak_stub(&self, name: &str) -> Option<u32> {
+        let first = self.synthetic_base + if self.tls.is_some() { 2 } else { 1 };
+        self.weak_stubs
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|i| first + i as u32)
+    }
 }
 
 struct Layout {
@@ -163,6 +286,15 @@ struct Layout {
     data_base: u32,
     /// One past the last byte of placed data.
     data_end: u32,
+    /// Thread-local storage, when the objects have any.
+    tls: Option<TlsLayout>,
+    /// A trapping body for each weak reference nothing defines, by name, with
+    /// the output type it has to have.
+    weak_stubs: Vec<(String, u32)>,
+    /// Output index of the first function the linker writes itself.
+    /// `__wasm_call_ctors` is there, then `__wasm_init_tls` if there is any
+    /// thread-local storage, then the weak stubs in order.
+    synthetic_base: u32,
 }
 
 /// Link `objects` into a module.
@@ -192,12 +324,28 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
 /// that is quietly missing something.
 fn refuse_unsupported(objects: &[Object]) -> Result<()> {
     for obj in objects {
+        // Thread-local data is laid out, and the two things that say a
+        // segment holds it have to agree. A symbol flagged TLS whose segment
+        // is not, or a symbol in a TLS segment that is not flagged, means one
+        // of the two is being read wrongly -- and the result would be an
+        // address measured from the wrong base, which is a running program
+        // reading someone else's variable rather than a crash.
         for sym in &obj.symbols {
-            if sym.is_tls() {
+            let SymbolTarget::Data { segment, .. } = sym.target else {
+                continue;
+            };
+            let tls_segment = segment_is_tls(obj.segment_info.get(segment as usize));
+            if sym.is_tls() != tls_segment {
                 bail!(
-                    "{}: symbol {} is thread-local, which this linker does not lay out",
+                    "{}: symbol {} is {} but segment {segment} ({}) is {}",
                     obj.name,
-                    sym.name
+                    obj.symbol_name(sym),
+                    if sym.is_tls() { "thread-local" } else { "not thread-local" },
+                    obj.segment_info
+                        .get(segment as usize)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("unnamed"),
+                    if tls_segment { "thread-local" } else { "not" },
                 );
             }
         }
@@ -339,6 +487,14 @@ fn plan(
             if defs.contains_key(&(Kind::Function, obj.symbol_name(sym).to_string())) {
                 continue;
             }
+            let name = obj.symbol_name(sym);
+            // Two undefined things this linker answers itself rather than
+            // asking a host for: the function only it can write, and a weak
+            // reference nothing defines. Importing either would put a name in
+            // the module's ABI that no host has any business supplying.
+            if is_linker_function(name) || weak_undefined_function(defs, obj, sym).is_some() {
+                continue;
+            }
             // Undefined and undefinable: it has to come from the host. Only
             // a function can, and the object's own import entry says under
             // what name.
@@ -392,32 +548,94 @@ fn plan(
         }
         func_out.push(map);
     }
+    // Where the functions the linker writes itself begin: after every
+    // function any object supplied.
+    let synthetic_base = next;
 
     // --- linker-defined globals ---
     let stack_pointer_global = 0;
     let memory_base_global = 1;
+    let table_base_global = 2;
+    let tls_globals = 3;
 
     // --- data layout ---
     // The stack is first, so a stack overflow walks into address zero rather
     // than into the program's own data.
     let mut address = opts.stack_size;
-    let mut segment_addr = Vec::with_capacity(objects.len());
-    for obj in objects {
-        let mut addrs = Vec::with_capacity(obj.data_segments.len());
+    let alignment = |obj: &Object, i: usize| {
+        1u32 << obj
+            .segment_info
+            .get(i)
+            .map(|s| s.align_log2)
+            .unwrap_or(0)
+            .min(16)
+    };
+    let mut segment_addr: Vec<Vec<u32>> = objects
+        .iter()
+        .map(|o| vec![0; o.data_segments.len()])
+        .collect();
+    let mut tls_offset: Vec<Vec<Option<u32>>> = objects
+        .iter()
+        .map(|o| vec![None; o.data_segments.len()])
+        .collect();
+    for (oi, obj) in objects.iter().enumerate() {
         for (i, seg) in obj.data_segments.iter().enumerate() {
-            let align_log2 = obj
-                .segment_info
-                .get(i)
-                .map(|s| s.align_log2)
-                .unwrap_or(0)
-                .min(16);
-            let align = 1u32 << align_log2;
-            address = address.next_multiple_of(align);
-            addrs.push(address);
+            if segment_is_tls(obj.segment_info.get(i)) {
+                continue;
+            }
+            address = address.next_multiple_of(alignment(obj, i));
+            segment_addr[oi][i] = address;
             address += (seg.range.end - seg.range.start) as u32;
         }
-        segment_addr.push(addrs);
     }
+
+    // Then the thread-local data, last so that its two copies are one
+    // contiguous run and `__tls_size` is the distance between them.
+    //
+    // `.tdata` and `.tbss` are placed in whatever order the objects hold
+    // them, because both are placed as bytes: a wasm object carries its
+    // zero-initialised data as zeroes rather than as a size, so there is no
+    // fill to keep at the end.
+    let tls = needs_tls(objects).then(|| {
+        let mut align = 1u32;
+        for obj in objects {
+            for i in 0..obj.data_segments.len() {
+                if segment_is_tls(obj.segment_info.get(i)) {
+                    align = align.max(alignment(obj, i));
+                }
+            }
+        }
+        address = address.next_multiple_of(align);
+        let template = address;
+        for (oi, obj) in objects.iter().enumerate() {
+            for (i, seg) in obj.data_segments.iter().enumerate() {
+                if !segment_is_tls(obj.segment_info.get(i)) {
+                    continue;
+                }
+                address = address.next_multiple_of(alignment(obj, i));
+                segment_addr[oi][i] = address;
+                tls_offset[oi][i] = Some(address - template);
+                address += (seg.range.end - seg.range.start) as u32;
+            }
+        }
+        let size = address - template;
+        address = address.next_multiple_of(align);
+        let main = address;
+        address += size;
+        TlsLayout {
+            offset: tls_offset,
+            size,
+            align,
+            template,
+            main,
+            base_global: tls_globals,
+            size_global: tls_globals + 1,
+            align_global: tls_globals + 2,
+            // After `__wasm_call_ctors`, which is always first.
+            init_function: synthetic_base + 1,
+        }
+    });
+
     let heap_base = address.next_multiple_of(16);
     let memory_pages = heap_base.div_ceil(65536).max(1);
 
@@ -459,6 +677,12 @@ fn plan(
             ) {
                 continue;
             }
+            // The address of a weak reference nothing defines is zero, which
+            // is what the `if (fn)` around the call tests for. A slot would
+            // be an address, and an address tests as present.
+            if weak_undefined_at(objects, defs, oi, entry.index).is_some() {
+                continue;
+            }
             let out = function_symbol(objects, defs, &func_out, &import_index, oi, entry.index)?;
             give_slot(out, &mut table_slot);
         }
@@ -488,7 +712,9 @@ fn plan(
     // relocation of its own.
     let mut got: HashMap<(Kind, String), u32> = HashMap::new();
     let mut got_init: Vec<i32> = Vec::new();
-    let first_got = 3u32; // after __stack_pointer, __memory_base, __table_base
+    // After __stack_pointer, __memory_base and __table_base, and after the
+    // three thread-local globals when there are any.
+    let first_got = if tls.is_some() { tls_globals + 3 } else { 3 };
     for (oi, obj) in objects.iter().enumerate() {
         for entry in obj.code_relocs.iter().chain(obj.data_relocs.iter()) {
             if !matches!(
@@ -502,6 +728,13 @@ fn plan(
             };
             let (doi, def) = definition_of(objects, defs, oi, sym);
             let name = objects[doi].symbol_name(def).to_string();
+            if def.is_tls() {
+                bail!(
+                    "{name} is thread-local and is reached through the global offset \
+                     table, which holds one address per symbol and a thread-local has \
+                     one per thread"
+                );
+            }
             let value = match def.target {
                 SymbolTarget::Data {
                     segment, offset, ..
@@ -567,9 +800,39 @@ fn plan(
 
     let tag_index = objects.iter().any(|o| !o.tags.is_empty()).then_some(0);
 
+    // --- a trapping body for each weak reference nothing defines ---
+    //
+    // The type comes from the import entry the object left behind, because a
+    // stub has to have the shape the call site already encoded.
+    let mut weak_stubs: Vec<(String, u32)> = Vec::new();
+    let mut stub_named: HashSet<String> = HashSet::new();
+    for (oi, obj) in objects.iter().enumerate() {
+        let func_imports = function_imports(obj);
+        for sym in &obj.symbols {
+            let Some(name) = weak_undefined_function(defs, obj, sym) else {
+                continue;
+            };
+            if !stub_named.insert(name.to_string()) {
+                continue;
+            }
+            let Some(local) = undefined_function_index(sym) else {
+                continue;
+            };
+            let import = func_imports.get(local as usize).ok_or_else(|| {
+                anyhow!("{}: weak symbol {name} has no import entry", obj.name)
+            })?;
+            let ImportKind::Function { type_index } = import.kind else {
+                bail!("{}: weak symbol {name} does not name a function", obj.name);
+            };
+            weak_stubs.push((name.to_string(), type_map[oi][type_index as usize]));
+        }
+    }
     Ok(Layout {
         data_base: opts.stack_size,
         data_end: address,
+        tls,
+        weak_stubs,
+        synthetic_base,
         func_out,
         type_map,
         segment_addr,
@@ -579,7 +842,7 @@ fn plan(
         tag_index,
         stack_pointer_global,
         memory_base_global,
-        table_base_global: 2,
+        table_base_global,
         got,
         got_init,
         hdll_data_globals,
@@ -889,6 +1152,18 @@ fn local_function(
             }
         }
     }
+    // Two of them are not imports: a function the linker writes itself, and a
+    // weak reference nothing defines. Neither belongs in the table -- the
+    // element segment lists what had its address taken, and both of these
+    // have their addresses answered elsewhere.
+    if is_linker_function(&import.name)
+        || obj
+            .symbols
+            .iter()
+            .any(|s| weak_undefined_function(defs, obj, s) == Some(import.name.as_str()))
+    {
+        return Ok(None);
+    }
     let key = ImportKey {
         module: import.module.clone(),
         name: import.name.clone(),
@@ -946,7 +1221,7 @@ fn report_unresolved(
                 continue;
             }
             if matches!(sym.target, SymbolTarget::Global { .. })
-                && matches!(name, "__stack_pointer" | "__memory_base" | "__table_base")
+                && linker_global(name, layout).is_some()
             {
                 continue;
             }
@@ -1009,6 +1284,24 @@ fn linker_address(name: &str, layout: &Layout) -> Option<u32> {
     })
 }
 
+/// The globals the linker defines, because no object may define one.
+///
+/// The three thread-local ones exist only when this link laid out
+/// thread-local storage; an object referencing them without it has been built
+/// for a threads target and linked against a runtime that was not.
+fn linker_global(name: &str, layout: &Layout) -> Option<u32> {
+    let tls = layout.tls.as_ref();
+    Some(match name {
+        "__stack_pointer" => layout.stack_pointer_global,
+        "__memory_base" => layout.memory_base_global,
+        "__table_base" => layout.table_base_global,
+        "__tls_base" => tls?.base_global,
+        "__tls_size" => tls?.size_global,
+        "__tls_align" => tls?.align_global,
+        _ => return None,
+    })
+}
+
 /// What a symbol referenced by a relocation resolves to in the output.
 fn resolve_symbol(
     objects: &[Object],
@@ -1027,6 +1320,22 @@ fn resolve_symbol(
 
     match def.target {
         SymbolTarget::Function { index } => {
+            let name = objects[doi].symbol_name(def);
+            // The two kinds of undefined function this linker answers itself,
+            // before the import table is consulted: the one only it can write,
+            // and a weak reference nothing defines.
+            if is_linker_function(name) {
+                let tls = layout.tls.as_ref().ok_or_else(|| {
+                    anyhow!("{name} is called but this link has no thread-local storage")
+                })?;
+                return Ok(Resolved::Function(tls.init_function));
+            }
+            if weak_undefined_function(defs, &objects[doi], def).is_some() {
+                return layout
+                    .weak_stub(name)
+                    .map(Resolved::Function)
+                    .ok_or_else(|| anyhow!("no stub was planned for weak symbol {name}"));
+            }
             let imported = objects[doi].imported_functions();
             if index >= imported {
                 layout.func_out[doi][(index - imported) as usize]
@@ -1075,12 +1384,9 @@ fn resolve_symbol(
             // Every global in this link is one the linker defines; objects
             // define none. Which one is decided by name, because that is the
             // only thing an import carries.
-            let index = match objects[doi].symbol_name(def) {
-                "__stack_pointer" => layout.stack_pointer_global,
-                "__memory_base" => layout.memory_base_global,
-                "__table_base" => layout.table_base_global,
-                other => bail!("no definition for global {other:?}"),
-            };
+            let name = objects[doi].symbol_name(def);
+            let index = linker_global(name, layout)
+                .ok_or_else(|| anyhow!("no definition for global {name:?}"))?;
             Ok(Resolved::Global(index))
         }
         SymbolTarget::Table { .. } => Ok(Resolved::Table(0)),
@@ -1141,6 +1447,51 @@ fn apply_relocations(
     Ok(())
 }
 
+/// The offset within a thread's block of the symbol a TLS relocation names.
+fn tls_offset_of(
+    objects: &[Object],
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+    layout: &Layout,
+    oi: usize,
+    sym_index: u32,
+) -> Result<u32> {
+    let sym = objects[oi]
+        .symbols
+        .get(sym_index as usize)
+        .ok_or_else(|| anyhow!("{}: symbol {sym_index} is out of range", objects[oi].name))?;
+    let (doi, def) = definition_of(objects, defs, oi, sym);
+    let name = objects[doi].symbol_name(def);
+    let tls = layout
+        .tls
+        .as_ref()
+        .ok_or_else(|| anyhow!("{name} is thread-local but this link laid out no TLS"))?;
+    let SymbolTarget::Data {
+        segment, offset, ..
+    } = def.target
+    else {
+        bail!("a thread-local relocation names {name}, which is not data");
+    };
+    tls.offset
+        .get(doi)
+        .and_then(|s| s.get(segment as usize))
+        .copied()
+        .flatten()
+        .map(|base| base + offset)
+        .ok_or_else(|| anyhow!("{name} is in segment {segment}, which is not thread-local"))
+}
+
+/// The name of the weak reference a relocation names, if nothing defines it.
+fn weak_undefined_at<'a>(
+    objects: &'a [Object],
+    defs: &HashMap<(Kind, String), (usize, usize)>,
+    oi: usize,
+    sym_index: u32,
+) -> Option<&'a str> {
+    let sym = objects[oi].symbols.get(sym_index as usize)?;
+    let (doi, def) = definition_of(objects, defs, oi, sym);
+    weak_undefined_function(defs, &objects[doi], def)
+}
+
 fn patch(
     objects: &[Object],
     defs: &HashMap<(Kind, String), (usize, usize)>,
@@ -1183,6 +1534,19 @@ fn patch(
                 write_i32_leb5(buf, offset, slot as i32 - TABLE_BASE as i32)?;
             }
             RelocationType::TableIndexSleb | RelocationType::TableIndexI32 => {
+                // The address of a weak reference nothing defines is zero, so
+                // that the `if (fn)` guarding the call answers no. Asked for
+                // before the symbol is resolved, because resolving it gives
+                // the trapping stub, and a stub in the table is an address
+                // that tests as present.
+                if weak_undefined_at(objects, defs, oi, entry.index).is_some() {
+                    if entry.ty == RelocationType::TableIndexI32 {
+                        write_u32(buf, offset, 0)?;
+                    } else {
+                        write_i32_leb5(buf, offset, 0)?;
+                    }
+                    continue;
+                }
                 let Resolved::Function(f) = resolve_symbol(objects, defs, layout, oi, entry.index)?
                 else {
                     bail!("a table relocation names something that is not a function");
@@ -1196,10 +1560,33 @@ fn patch(
                     write_i32_leb5(buf, offset, slot as i32)?;
                 }
             }
+            // A thread-local is not at an address: it is at an offset from
+            // `__tls_base`, and the code that reads it adds the two. So this
+            // writes the offset within the block, and the same symbol read
+            // from two threads reaches two different variables.
+            RelocationType::MemoryAddrTlsSleb => {
+                let offset_in_block = tls_offset_of(objects, defs, layout, oi, entry.index)?;
+                write_i32_leb5(buf, offset, (offset_in_block as i64 + addend as i64) as i32)?;
+            }
             RelocationType::MemoryAddrLeb
             | RelocationType::MemoryAddrSleb
             | RelocationType::MemoryAddrI32
             | RelocationType::MemoryAddrRelSleb => {
+                // An absolute address for a thread-local would be one
+                // thread's copy, silently shared by every thread that ran the
+                // code. There are none in what this linker links, and one
+                // arriving is a compiler emitting a form this does not
+                // implement rather than something to guess at.
+                if let Some(sym) = objects[oi].symbols.get(entry.index as usize) {
+                    let (doi, def) = definition_of(objects, defs, oi, sym);
+                    if def.is_tls() {
+                        bail!(
+                            "{:?} wants the address of {}, which is thread-local",
+                            entry.ty,
+                            objects[doi].symbol_name(def)
+                        );
+                    }
+                }
                 let Resolved::Data(base) = resolve_symbol(objects, defs, layout, oi, entry.index)?
                 else {
                     bail!("a memory relocation names something that is not data");
@@ -1358,7 +1745,10 @@ fn emit(
             kept_functions += 1;
         }
     }
-    // One more: the constructor runner this linker synthesises.
+    // Then the functions this linker writes itself, in the order `plan`
+    // numbered them: the constructor runner, `__wasm_init_tls` when there is
+    // thread-local storage, and a stub for each weak reference nothing
+    // defines.
     let ctor_type = ordered
         .iter()
         .find(|(_, t)| t.params().is_empty() && t.results().is_empty())
@@ -1366,6 +1756,40 @@ fn emit(
         .ok_or_else(|| anyhow!("no () -> () type to give __wasm_call_ctors"))?;
     functions.function(ctor_type);
     let ctors_index = layout.imports.len() as u32 + kept_functions;
+    if ctors_index != layout.synthetic_base {
+        bail!(
+            "the layout put the linker's own functions at {} and the emitter at \
+             {ctors_index}",
+            layout.synthetic_base
+        );
+    }
+    if let Some(tls) = &layout.tls {
+        let ty = ordered
+            .iter()
+            .find(|(_, t)| {
+                t.params() == [wasmparser::ValType::I32] && t.results().is_empty()
+            })
+            .map(|(i, _)| *i)
+            .ok_or_else(|| anyhow!("no (i32) -> () type to give __wasm_init_tls"))?;
+        functions.function(ty);
+        if tls.init_function != ctors_index + 1 {
+            bail!(
+                "the layout put __wasm_init_tls at {} and the emitter at {}",
+                tls.init_function,
+                ctors_index + 1
+            );
+        }
+    }
+    let first_stub = ctors_index + if layout.tls.is_some() { 2 } else { 1 };
+    for (at, (name, ty)) in (first_stub..).zip(&layout.weak_stubs) {
+        functions.function(*ty);
+        if layout.weak_stub(name) != Some(at) {
+            bail!(
+                "the layout put the stub for {name} at {:?} and the emitter at {at}",
+                layout.weak_stub(name)
+            );
+        }
+    }
     module.section(&functions);
 
     // --- table, memory, tag ---
@@ -1439,6 +1863,31 @@ fn emit(
         },
         &ConstExpr::i32_const(TABLE_BASE as i32),
     );
+    // The three a threads build needs. `__tls_base` starts at the main
+    // thread's own block, which is placed data like anything else, so the
+    // main thread has its thread-locals before a line runs and without a
+    // start function to run them. It is mutable because `__wasm_init_tls`
+    // moves it as each further thread arrives.
+    if let Some(tls) = &layout.tls {
+        globals.global(
+            GlobalType {
+                val_type: ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &ConstExpr::i32_const(tls.main as i32),
+        );
+        for value in [tls.size, tls.align] {
+            globals.global(
+                GlobalType {
+                    val_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                },
+                &ConstExpr::i32_const(value as i32),
+            );
+        }
+    }
     // Then the global offset table, in the order `plan` numbered it.
     for value in &layout.got_init {
         globals.global(
@@ -1568,26 +2017,49 @@ fn emit(
         }
     }
     code.raw(&constructor_body(objects, defs, layout)?);
+    if let Some(tls) = &layout.tls {
+        code.raw(&init_tls_body(tls));
+    }
+    for _ in &layout.weak_stubs {
+        code.raw(&trap_body());
+    }
     module.section(&code);
 
     // --- data: every segment, merged, at the addresses just assigned ---
-    let mut merged: Vec<u8> = Vec::new();
-    let mut base: Option<u32> = None;
+    //
+    // Placed by address rather than in the order the objects hold them,
+    // because the thread-local segments were moved to the end of memory and
+    // appear in the middle of an object's list. The gaps are the alignment
+    // padding the layout already accounted for.
+    let mut placed: Vec<(u32, &[u8])> = Vec::new();
     for (oi, obj) in objects.iter().enumerate() {
         for (si, seg) in obj.data_segments.iter().enumerate() {
-            let addr = layout.segment_addr[oi][si];
-            let start = *base.get_or_insert(addr);
-            let want = (addr - start) as usize;
-            // The gap is the alignment padding the layout already accounted
-            // for, so it is filled rather than skipped.
-            if merged.len() < want {
-                merged.resize(want, 0);
+            let bytes = &obj.data_payload[seg.range.clone()];
+            placed.push((layout.segment_addr[oi][si], bytes));
+            // A thread-local segment is placed twice: once as the template a
+            // new thread copies from, and once as the main thread's own copy,
+            // which it is then free to write.
+            if let Some((tls, offset)) = layout
+                .tls
+                .as_ref()
+                .and_then(|t| t.offset[oi][si].map(|o| (t, o)))
+            {
+                placed.push((tls.main + offset, bytes));
             }
-            merged.extend_from_slice(&obj.data_payload[seg.range.clone()]);
         }
     }
     let mut data = DataSection::new();
-    if let Some(start) = base {
+    if let Some(start) = placed.iter().map(|(a, _)| *a).min() {
+        let end = placed
+            .iter()
+            .map(|(a, b)| *a + b.len() as u32)
+            .max()
+            .unwrap_or(start);
+        let mut merged = vec![0u8; (end - start) as usize];
+        for (addr, bytes) in &placed {
+            let at = (*addr - start) as usize;
+            merged[at..at + bytes.len()].copy_from_slice(bytes);
+        }
         data.active(0, &ConstExpr::i32_const(start as i32), merged);
     }
     module.section(&data);
@@ -1635,13 +2107,75 @@ fn emit(
     Ok(module.finish())
 }
 
+/// The body of `__wasm_init_tls`: give this thread the block it was handed.
+///
+/// A thread arrives with a block of its own and no thread-locals in it. This
+/// points `__tls_base` at the block and copies the template over it, so the
+/// thread starts from the initial values rather than from whatever the thread
+/// that allocated the block left there. Every read of a thread-local
+/// afterwards is `__tls_base` plus the offset a `MEMORY_ADDR_TLS_SLEB`
+/// relocation wrote, so this one store is what makes the same code reach a
+/// different variable per thread.
+fn init_tls_body(tls: &TlsLayout) -> Vec<u8> {
+    use wasm_encoder::{Function, Instruction};
+
+    let mut function = Function::new([]);
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::GlobalSet(tls.base_global));
+    if tls.size > 0 {
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Const(tls.template as i32));
+        function.instruction(&Instruction::I32Const(tls.size as i32));
+        function.instruction(&Instruction::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        });
+    }
+    function.instruction(&Instruction::End);
+    strip_size_prefix(function)
+}
+
+/// The body of a stub standing in for a weak reference nothing defines: a
+/// trap. `unreachable` satisfies any result type, so one body serves every
+/// shape.
+fn trap_body() -> Vec<u8> {
+    use wasm_encoder::{Function, Instruction};
+
+    let mut function = Function::new([]);
+    function.instruction(&Instruction::Unreachable);
+    function.instruction(&Instruction::End);
+    strip_size_prefix(function)
+}
+
+/// `Function::encode` writes a length-prefixed body and `CodeSection::raw`
+/// adds a length of its own, so the prefix comes back off.
+fn strip_size_prefix(function: wasm_encoder::Function) -> Vec<u8> {
+    use wasm_encoder::Encode;
+
+    let mut bytes = Vec::new();
+    function.encode(&mut bytes);
+    let mut reader = &bytes[..];
+    let mut len: u32 = 0;
+    let mut shift = 0;
+    loop {
+        let byte = reader[0];
+        reader = &reader[1..];
+        len |= ((byte & 0x7f) as u32) << shift;
+        if byte & 0x80 == 0 {
+            break;
+        }
+        shift += 7;
+    }
+    reader[..len as usize].to_vec()
+}
+
 /// The body of `__wasm_call_ctors`: every constructor, in priority order.
 fn constructor_body(
     objects: &[Object],
     defs: &HashMap<(Kind, String), (usize, usize)>,
     layout: &Layout,
 ) -> Result<Vec<u8>> {
-    use wasm_encoder::{Encode, Function, Instruction};
+    use wasm_encoder::{Function, Instruction};
 
     let mut calls: Vec<(u32, u32)> = Vec::new();
     for (oi, obj) in objects.iter().enumerate() {
@@ -1660,24 +2194,7 @@ fn constructor_body(
         function.instruction(&Instruction::Call(f));
     }
     function.instruction(&Instruction::End);
-    // `CodeSection::raw` adds the size prefix, so hand it the body alone.
-    let mut bytes = Vec::new();
-    function.encode(&mut bytes);
-    // `Function::encode` writes a length-prefixed body; strip that prefix so
-    // the section encoder can write its own.
-    let mut reader = &bytes[..];
-    let mut len: u32 = 0;
-    let mut shift = 0;
-    loop {
-        let byte = reader[0];
-        reader = &reader[1..];
-        len |= ((byte & 0x7f) as u32) << shift;
-        if byte & 0x80 == 0 {
-            break;
-        }
-        shift += 7;
-    }
-    Ok(reader[..len as usize].to_vec())
+    Ok(strip_size_prefix(function))
 }
 
 fn val_type(v: &wasmparser::ValType) -> wasm_encoder::ValType {

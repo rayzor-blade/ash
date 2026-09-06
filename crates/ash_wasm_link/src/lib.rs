@@ -17,17 +17,22 @@
 //! members are resolved before a user ever runs ash.
 //!
 //! Measured across every object ash actually links, the following are absent
-//! and are refused rather than half-handled: COMDAT groups, thread-local
-//! storage, the six 64-bit relocation forms, and position-independent output.
-//! Debug sections are dropped, which removes three more relocation types and
-//! about a quarter of all patches.
+//! and are refused rather than half-handled: COMDAT groups, the six 64-bit
+//! relocation forms, and position-independent output. Debug sections are
+//! dropped, which removes three more relocation types and about a quarter of
+//! all patches.
+//!
+//! Thread-local storage is laid out, because a `wasm32-wasip1-threads` object
+//! cannot do without it -- wasi-libc puts `errno` there, and `ash_std` has
+//! thread-locals in five files. It is one more relocation type and three more
+//! globals; `docs/wasm-target.md` records what that does and does not buy.
 //!
 //! Refusing rather than dropping has already earned itself: a survey of these
 //! objects reported no constructors, and the runtime object turned out to
 //! have them. Had they been skipped quietly, the result would have been a
 //! program whose allocator was never initialised.
 //!
-//! What remains is eleven relocation types and the work of assigning six
+//! What remains is twelve relocation types and the work of assigning six
 //! index spaces.
 //!
 //! # The one dangerous property

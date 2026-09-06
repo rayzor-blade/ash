@@ -571,6 +571,11 @@ fn read_linking(obj: &mut Object, section: &wasmparser::CustomSectionReader<'_>)
 /// So an index inside the import range counts as undefined whatever the flags
 /// say, which is what it means. Checked both ways: with this rule the threads
 /// object's 12,299 symbols parse and end exactly on the subsection boundary.
+///
+/// The flag is then set to match, because everything downstream asks the
+/// symbol rather than the index space: without it `defines()` answers yes for
+/// a symbol that defines nothing, and the link resolves a call to an import
+/// it never created.
 fn read_symbol_table(obj: &mut Object, mut bytes: &[u8]) -> Result<()> {
     // How many functions this object imports. A function index below it names
     // an import, and an import is not defined here.
@@ -582,7 +587,7 @@ fn read_symbol_table(obj: &mut Object, mut bytes: &[u8]) -> Result<()> {
             .first()
             .ok_or_else(|| anyhow!("{}: symbol table ends mid-symbol", obj.name))?;
         bytes = &bytes[1..];
-        let flags = SymbolFlags::from_bits_retain(read_uleb(&mut bytes)?);
+        let mut flags = SymbolFlags::from_bits_retain(read_uleb(&mut bytes)?);
         let explicit = flags.contains(SymbolFlags::EXPLICIT_NAME);
         let flagged_undefined = flags.contains(SymbolFlags::UNDEFINED);
 
@@ -612,6 +617,9 @@ fn read_symbol_table(obj: &mut Object, mut bytes: &[u8]) -> Result<()> {
                 let index = read_uleb(&mut bytes)?;
                 let undefined =
                     flagged_undefined || (kind == SYMTAB_FUNCTION && index < imported);
+                if undefined {
+                    flags.insert(SymbolFlags::UNDEFINED);
+                }
                 let name = if !undefined || explicit {
                     Some(read_name(&mut bytes)?)
                 } else {

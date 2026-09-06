@@ -27,6 +27,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
+use super::fibers::Fibers;
 use super::imports::{imports, Host};
 use super::memory::Guest;
 
@@ -72,6 +73,9 @@ pub async fn run(
     // that knows which one it got.
     let memory: WebAssembly::Memory = Reflect::get(&exports, &"memory".into())?.unchecked_into();
     host.attach(Guest::new(memory));
+    // And the transform's globals, if this module was built with fibers.
+    // Absent is the ordinary case and not an error.
+    host.attach_fibers(Fibers::from_exports(&exports));
 
     // `ash_module_init` is NOT called here, though the module exports it:
     // the emitted `main` calls it itself, and calling it first reaches the

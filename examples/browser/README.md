@@ -9,9 +9,11 @@ itself.
     wasm-bindgen --target web --out-dir examples/browser \
       target/wasm32-unknown-unknown/release/ash_browser.wasm
 
-    # the program the page runs
+    # the program the page runs. ASH_WASM_FIBERS is what makes its thread
+    # able to suspend; without it the worker runs to its first block and
+    # stays there, and the page never finishes.
     cd examples/browser/demo && haxe -main Demo -hl demo.hl
-    ash --build ../demo.wasm --target wasm32-wasip1 demo.hl
+    ASH_WASM_FIBERS=1 ash --build ../demo.wasm --target wasm32-wasip1 demo.hl
 
     python3 -m http.server -d examples/browser
 
@@ -57,12 +59,21 @@ way it would with the file absent.
 Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
 `Sys.sleep` returns immediately.
 
-## Not yet
+## Threads
 
-**Suspending a fiber.** `ash_host_fiber_yield` answers without suspending, so
-`sys.thread` runs a fiber to completion rather than interleaving, and a
-program whose main loop never returns will not give the page back its thread.
-That wants JSPI, or a worker parked on `Atomics.wait`.
+A `sys.thread` worker suspends and resumes in the middle of its body, in a
+page. Not through JSPI and not through a worker parked on `Atomics.wait`:
+ash's link-time transform rewrites the module so its frames can unwind back
+to a scheduler and rewind to exactly where they stopped, and the host drives
+the three globals that transform adds. `browser/fibers.rs` is the same thing
+`native::install_fiber_yield` does, against `WebAssembly.Global`.
+
+A module built without `ASH_WASM_FIBERS=1` has no such globals. Every call
+answers zero and a fiber runs to completion at the point it would have
+suspended, which is what the native host does for the same module -- so the
+worker in this demo would reach its first `pop` and stay there.
+
+## Not yet
 
 **Loading a native library.** `ash_host_dlopen` answers "no such library", so
 a primitive from one raises when it is reached. The steps are the native

@@ -31,6 +31,7 @@ use wasm_bindgen::JsCast;
 
 use crate::wasi_abi::errno;
 
+use super::fibers::Fibers;
 use super::memory::Guest;
 use super::sockets::Sockets;
 use super::wasi::Wasi;
@@ -41,6 +42,9 @@ pub struct Host {
     pub sockets: RefCell<Sockets>,
     /// Set once the module has been instantiated. See the note above.
     pub guest: RefCell<Option<Guest>>,
+    /// The globals ash's link-time transform added, if the module carries it.
+    /// Read from the same exports as the memory, and for the same reason.
+    pub fibers: RefCell<Fibers>,
 }
 
 impl Host {
@@ -49,12 +53,18 @@ impl Host {
             wasi: RefCell::new(Wasi::new(args, environ)),
             sockets: RefCell::new(Sockets::default()),
             guest: RefCell::new(None),
+            fibers: RefCell::new(Fibers::default()),
         })
     }
 
     /// Point the host at the memory the instance turned out to have.
     pub fn attach(&self, guest: Guest) {
         *self.guest.borrow_mut() = Some(guest);
+    }
+
+    /// The same for the transform's globals, which are exports too.
+    pub fn attach_fibers(&self, fibers: Fibers) {
+        *self.fibers.borrow_mut() = fibers;
     }
 }
 
@@ -402,17 +412,25 @@ fn install_env(env: &Object, host: &Rc<Host>) {
         poll_through(&h, &g, fds, n, timeout)
     });
 
-    // Fibers. A page can suspend a guest with JSPI or a worker parked on
-    // `Atomics.wait`, and neither is here yet, so this yields to nothing and
-    // a fiber runs to completion -- which is what the native host does for a
-    // module the linker did not instrument.
-    for name in [
-        "ash_host_fiber_yield",
-        "ash_host_fiber_state",
-        "ash_host_fiber_arm",
-    ] {
-        install(env, name, constant(0).into());
-    }
+    // Fibers, through the globals ash's link-time transform added. A module
+    // without the transform has none, every call answers zero, and a fiber
+    // runs to completion at the point it would have suspended -- which is
+    // what the native host does for the same module.
+    let h = host.clone();
+    bind!(env, "ash_host_fiber_yield", move || -> i32 {
+        h.fibers.borrow().yield_now();
+        0
+    });
+
+    let h = host.clone();
+    bind!(env, "ash_host_fiber_state", move || -> i32 {
+        h.fibers.borrow().state()
+    });
+
+    let h = host.clone();
+    bind!(env, "ash_host_fiber_arm", move |data: i32, rewind: i32, sp: i32| -> i32 {
+        h.fibers.borrow().arm(data, rewind, sp)
+    });
 
     // Starting a process is not something a page does, at all. `-1` is what
     // `Sys.command` reports when a shell cannot be started, and what the

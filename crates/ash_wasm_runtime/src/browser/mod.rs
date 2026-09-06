@@ -25,10 +25,14 @@
 //! [`run`] is the entry point: it instantiates a module against all of it and
 //! calls the module's entrypoint.
 //!
-//! What is still missing: suspending a fiber, which needs JSPI or a worker
-//! parked on `Atomics.wait`, and loading a native library, which is the
-//! native host's loader against `WebAssembly.instantiate`.
+//! [`fibers`] is how a fiber suspends: not JSPI and not a worker, but the
+//! three globals ash's link-time transform adds, driven from here exactly as
+//! the native host drives them.
+//!
+//! What is still missing: loading a native library, which is the native
+//! host's loader against `WebAssembly.instantiate`.
 
+pub mod fibers;
 pub mod imports;
 pub mod run;
 pub mod memory;

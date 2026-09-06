@@ -44,6 +44,25 @@ class Demo {
 			Sys.println('exception: $e');
 		}
 
+		// A thread that has to resume in the MIDDLE of its body. A browser
+		// has one thread and cannot block it, so this only works because the
+		// module was built with `ASH_WASM_FIBERS=1`: the worker suspends
+		// inside `pop`, main runs, and the worker carries on from where it
+		// stopped. Without the transform it would run to its first block and
+		// stay there.
+		var toWorker = new sys.thread.Deque<Int>();
+		var toMain = new sys.thread.Deque<String>();
+		sys.thread.Thread.create(() -> {
+			var first = toWorker.pop(true);
+			toMain.add('woke with $first');
+			var second = toWorker.pop(true);
+			toMain.add('woke again with $second');
+		});
+		toWorker.add(1);
+		Sys.println('thread: ${toMain.pop(true)}');
+		toWorker.add(2);
+		Sys.println('thread: ${toMain.pop(true)}');
+
 		var ms = Math.round((haxe.Timer.stamp() - t0) * 1000);
 		Sys.println("");
 		Sys.println('all of that took ${ms}ms');

@@ -411,3 +411,50 @@ pub(crate) fn resolve(
     }
     Ok(index)
 }
+
+/// How the guest reaches a native library that was loaded beside it.
+///
+/// Two imports, and they are `dlopen` and `dlsym` under other names, because
+/// that is what `crate::aot_native` on every other target calls at exactly
+/// this point. The library is already loaded by the time either is asked --
+/// see [`dylink`] -- so "open" is a lookup, and "sym" answers with a table
+/// index, which is what a function pointer is in a wasm module.
+///
+/// Answering zero is not an error. It is the null the `DEFINE_PRIM` resolver
+/// protocol already reads as "not in this library", and the call site raises
+/// the same "not loaded" a native binary raises for a missing HDLL -- only if
+/// the primitive is actually reached.
+pub(crate) fn install(linker: &mut wasmtime::Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap(
+            super::fibers::YIELD_MODULE,
+            "ash_host_dlopen",
+            |mut caller: wasmtime::Caller<'_, Host>, name: i32, name_len: i32| -> i32 {
+                let Some(name) = super::guest_slice(&mut caller, name, name_len) else {
+                    return 0;
+                };
+                let name = String::from_utf8_lossy(&name).into_owned();
+                caller.data().libraries.contains(&name) as i32
+            },
+        )
+        .map_err(|e| anyhow!("installing the library import: {e}"))?;
+
+    linker
+        .func_wrap(
+            super::fibers::YIELD_MODULE,
+            "ash_host_dlsym",
+            |mut caller: wasmtime::Caller<'_, Host>, lib: i32, lib_len: i32, sym: i32, sym_len: i32| -> i32 {
+                let Some(lib) = super::guest_slice(&mut caller, lib, lib_len) else {
+                    return 0;
+                };
+                let Some(sym) = super::guest_slice(&mut caller, sym, sym_len) else {
+                    return 0;
+                };
+                let lib = String::from_utf8_lossy(&lib).into_owned();
+                let sym = String::from_utf8_lossy(&sym).into_owned();
+                resolve(&mut caller, &lib, &sym).unwrap_or(0)
+            },
+        )
+        .map_err(|e| anyhow!("installing the symbol import: {e}"))?;
+    Ok(())
+}

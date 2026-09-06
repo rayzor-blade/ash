@@ -7,9 +7,16 @@
 //! guest's stack aside while something else runs. That is the same capability
 //! JSPI gives a browser, available here without a browser.
 //!
-//! What WASI preview 1 does not have is sockets, and the guest asks for those
-//! through its own `env.ash_host_socket_*` imports; [`sockets`] answers them
-//! with the operating system's.
+//! What is here is the assembly: a store, a linker with every import
+//! answered, and the call that enters the module. The imports themselves are
+//! one module each, because what they answer for is what makes them
+//! different: [`fibers`] suspends one and drives the transform's globals,
+//! [`process`] starts a command WASI preview 1 has no interface for,
+//! [`sockets`] opens what preview 1 cannot, [`dylink`] loads a native library
+//! beside the program, [`sdl`] draws for a host with no screen, and
+//! [`threads`] answers the one import a threads build asks for -- a thread,
+//! which on wasm means another instance of this same module over this same
+//! memory.
 //!
 //! It is also useful before the runtime is finished. A module that still
 //! imports `hlp_*` -- because `ash_std` has not been linked into it yet --
@@ -18,14 +25,21 @@
 //! the question being asked.
 
 pub(crate) mod dylink;
+mod fibers;
+mod process;
 pub(crate) mod sdl;
 mod sdl_generated;
 mod sockets;
+mod threads;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use wasmtime::{Caller, Config, Engine, Linker, Module, Store};
+
+use process::Finished;
+use threads::Spawner;
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
@@ -64,16 +78,6 @@ pub(crate) struct Host {
     pub(crate) sdl: sdl::Sdl,
 }
 
-/// A child that has already run, and how much of what it said the guest has
-/// taken.
-#[derive(Default)]
-pub(crate) struct Finished {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    /// How far into each of the two the guest has read.
-    taken: [usize; 2],
-    code: i32,
-}
 
 impl Program {
     /// Load a module, without running it.
@@ -126,8 +130,8 @@ impl Program {
                 let known_wasi = module.starts_with("wasi_snapshot_preview1")
                     || module.starts_with("wasi_")
                     || (module == "wasi" && import.name() == "thread-spawn");
-                let known_host = module == FIBER_YIELD_MODULE
-                    && (import.name() == FIBER_YIELD_NAME
+                let known_host = module == fibers::YIELD_MODULE
+                    && (import.name() == fibers::YIELD_NAME
                         || import.name() == "memory"
                         || import.name().starts_with("ash_host_"));
                 !(known_wasi || known_host)
@@ -178,94 +182,26 @@ impl Program {
                     .cloned()
                     .collect::<Vec<_>>()
                     .join(", "),
-                FIBER_YIELD_MODULE,
+                fibers::YIELD_MODULE,
             ));
         }
 
-        let mut wasi = WasiCtxBuilder::new();
-        wasi.inherit_stdout().inherit_stderr();
-        // The working directory, as the program's own. A native ash program
-        // can write a file beside itself; a wasm one can only reach what the
-        // host preopens, and with nothing preopened every `File.write` failed
-        // with "Can't open" while the same program ran natively. The
-        // directory is the one the host was started in, nothing above it.
-        if let Err(e) = wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
-            eprintln!("[ash-wasm-run] the working directory is not available to the program: {e}");
-        }
-        // Anything else the operator named, on the command line or in
-        // ASH_WASM_DIRS. A module can open only what has been opened for it,
-        // so a program that legitimately reaches outside its own directory --
-        // upwards, most often -- needs the host to say so rather than to be
-        // refused at the boundary with nothing to do about it.
-        let named: Vec<std::path::PathBuf> = std::env::var("ASH_WASM_DIRS")
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .map(std::path::PathBuf::from)
-            .collect();
-        for dir in dirs.iter().chain(named.iter()) {
-            let at = dir.to_string_lossy().into_owned();
-            if let Err(e) = wasi.preopened_dir(dir, &at, DirPerms::all(), FilePerms::all()) {
-                eprintln!("[ash-wasm-run] {at} is not available to the program: {e}");
-            }
-        }
-        for arg in args {
-            wasi.arg(arg);
-        }
-        // The runtime inside the module reads its switches from the
-        // environment, exactly as the native one does -- ASH_GC_STRESS and the
-        // rest. Without this the guest sees an empty environment and every
-        // diagnostic is unreachable, which is the difference between being
-        // able to ask a question of a wasm build and not.
-        //
-        // Only ASH_ names cross by default. A wasm module is a sandbox and
-        // the host's environment is not its business; handing over PATH and
-        // credentials to get one debugging flag through is not a trade worth
-        // making.
-        //
-        // ASH_WASM_ENV names what else may. A program that legitimately reads
-        // a variable -- `Sys.getEnv` means the same thing on every other
-        // target -- would otherwise see nothing at all on wasm, and the host
-        // is the only party that can say which of its variables the guest is
-        // entitled to. Naming them keeps that decision explicit and with the
-        // side that owns the secret.
-        let allowed: Vec<String> = std::env::var("ASH_WASM_ENV")
-            .unwrap_or_default()
-            .split([',', ' '])
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(str::to_string)
-            .collect();
-        for (key, value) in std::env::vars() {
-            if key.starts_with("ASH_") || allowed.contains(&key) {
-                wasi.env(&key, &value);
-            }
-        }
-        let mut store = Store::new(
-            &self.engine,
-            Host {
-                wasi: wasi.build_p1(),
-                sockets: sockets::Table::default(),
-                processes: Vec::new(),
-                libraries: dylink::Libraries::default(),
-                sdl: sdl::Sdl::new(),
-            },
-        );
+        let mut store = store_for(&self.engine, args, dirs);
+        // A module that shares its memory has a thread to spawn into; one
+        // that does not has neither, and asks for neither.
+        let spawner = self
+            .shared_memory()?
+            .map(|memory| {
+                Spawner::new(
+                    self.engine.clone(),
+                    self.module.clone(),
+                    memory,
+                    args,
+                    dirs,
+                )
+            });
 
-        let mut linker: Linker<Host> = Linker::new(&self.engine);
-        p1::add_to_linker_async(&mut linker, |host: &mut Host| &mut host.wasi)
-            .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
-        install_fiber_yield(&mut linker)?;
-        sockets::install(&mut linker)?;
-        // A module that shares its memory cannot make one: every thread
-        // instantiates that same module, and a memory it defined would be one
-        // per thread. So the host makes it, once, and hands it to all of them.
-        if let Some(memory) = self.shared_memory()? {
-            linker
-                .define(&store, "env", "memory", memory)
-                .map_err(|e| anyhow!("giving the module its shared memory: {e}"))?;
-        }
+        let linker = linker_for(&self.engine, &store, spawner.as_ref())?;
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
@@ -343,304 +279,13 @@ impl Entry {
     }
 }
 
-const FIBER_YIELD_MODULE: &str = crate::FIBER_YIELD_IMPORT.0;
-const FIBER_YIELD_NAME: &str = crate::FIBER_YIELD_IMPORT.1;
 
-/// The globals the link-time fiber transform adds, if it was applied.
-const STATE_GLOBAL: &str = "ash_fiber_state";
-const DATA_GLOBAL: &str = "ash_fiber_data";
-/// The module's own shadow stack pointer, exported only when the linker
-/// instrumented it, because a fiber has to run on a region of its own.
-const SP_GLOBAL: &str = "__stack_pointer";
 
-/// State values shared with the transform, which are Asyncify's.
-const UNWINDING: i32 = 1;
-const REWINDING: i32 = 2;
 
-/// Let the guest run a command, if this host has been told it may.
-///
-/// This is the one import that leaves the sandbox, so it is off unless
-/// `ASH_WASM_ALLOW_COMMAND` says otherwise, and the refusal is the same -1 a
-/// native `Sys.command` returns when the shell cannot be started. The guest
-/// cannot grant itself the capability; only whoever started the host can.
-fn install_command(linker: &mut Linker<Host>) -> Result<()> {
-    let allowed = matches!(
-        std::env::var("ASH_WASM_ALLOW_COMMAND").as_deref(),
-        Ok("1") | Ok("on") | Ok("yes")
-    );
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_command",
-            move |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> i32 {
-                if !allowed {
-                    return -1;
-                }
-                let Some((data, _)) = guest_memory(&mut caller) else {
-                    return -1;
-                };
-                let (Ok(start), Ok(len)) = (usize::try_from(ptr), usize::try_from(len)) else {
-                    return -1;
-                };
-                let Some(bytes) = data.get(start..start.saturating_add(len)) else {
-                    return -1;
-                };
-                let line = String::from_utf8_lossy(bytes).into_owned();
-                run_command(&line)
-            },
-        )
-        .map_err(|e| anyhow!("installing the command import: {e}"))?;
-    Ok(())
-}
 
-/// A command line with the guest's idea of an absolute path made into the
-/// host's.
-///
-/// The guest's root is the directory this host preopened for it, which is
-/// this host's own working directory, so a path the guest built from its
-/// `Sys.getCwd()` arrives looking absolute and names something under `.`.
-/// Dropping the leading separator is the whole translation, and it is right
-/// for every path the guest can produce, because that root is the only one it
-/// has.
-///
-/// This works on the string rather than on tokens: splitting on whitespace
-/// would take `"/temp/two words"` apart and put it back as two arguments. A
-/// separator only starts a path where a token does -- at the beginning, or
-/// after a space or a quote -- so those are the only places it is dropped.
-fn rebase_guest_paths(line: &str) -> String {
-    // The first token names the program, and a program is usually somewhere
-    // the guest cannot see, so it gets the resolves-or-not test the whole
-    // line cannot have -- the rest of the line may well name a path that is
-    // about to be created.
-    if let Some(cmd) = line.split_whitespace().next() {
-        if line.starts_with(cmd) && cmd.starts_with('/') && !Path::new(&rebase_guest_arg(cmd)).exists() {
-            let (_, rest) = line.split_at(cmd.len());
-            return format!("{cmd}{}", rebase_guest_paths_in(rest));
-        }
-    }
-    rebase_guest_paths_in(line)
-}
 
-fn rebase_guest_paths_in(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut starts_token = true;
-    for c in line.chars() {
-        if c == '/' && starts_token {
-            // The separator is dropped, and what follows is no longer at the
-            // start of a token.
-            starts_token = false;
-            continue;
-        }
-        starts_token = matches!(c, ' ' | '\t' | '"' | '\'');
-        out.push(c);
-    }
-    out
-}
 
-/// The platform's shell, answering the way `Sys.command` does everywhere else.
-fn run_command(line: &str) -> i32 {
-    let line = &rebase_guest_paths(line);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        match std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(line)
-            .status()
-        {
-            Ok(s) => s.code().unwrap_or(0) | (s.signal().unwrap_or(0) << 8),
-            Err(_) => -1,
-        }
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let shell =
-            std::env::var_os("COMSPEC").unwrap_or_else(|| std::ffi::OsString::from("cmd.exe"));
-        match std::process::Command::new(shell)
-            .raw_arg("/C")
-            .raw_arg(line)
-            .status()
-        {
-            Ok(s) => s.code().unwrap_or(-1),
-            Err(_) => -1,
-        }
-    }
-}
 
-/// Let the guest run a `sys.io.Process` -- once, to completion.
-///
-/// A host function is not concurrent with the guest that called it, so
-/// nothing here can hand a guest a live child to interleave with. The guest
-/// side ([`ash_std::process`] on wasm) collects the command and everything
-/// written to its input, and calls `start` at the first point the answer is
-/// actually needed; this runs it and keeps what it said, and the other four
-/// imports hand that over.
-///
-/// Spawning leaves the sandbox, so it obeys the same `ASH_WASM_ALLOW_COMMAND`
-/// switch [`install_command`] does, and refuses the same way when it is unset.
-fn install_process(linker: &mut Linker<Host>) -> Result<()> {
-    let allowed = matches!(
-        std::env::var("ASH_WASM_ALLOW_COMMAND").as_deref(),
-        Ok("1") | Ok("on") | Ok("yes")
-    );
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_process_start",
-            move |mut caller: Caller<'_, Host>,
-                  argv: i32,
-                  argv_len: i32,
-                  input: i32,
-                  input_len: i32,
-                  shell: i32|
-                  -> i32 {
-                if !allowed {
-                    return -1;
-                }
-                let Some(argv) = guest_slice(&mut caller, argv, argv_len) else {
-                    return -1;
-                };
-                let Some(input) = guest_slice(&mut caller, input, input_len) else {
-                    return -1;
-                };
-                if shell != 0 {
-                    let line = rebase_guest_paths(&String::from_utf8_lossy(&argv));
-                    let (cmd, args) = shell_command(&line);
-                    return match run_to_completion(&cmd, &args, &input) {
-                        Some(done) => {
-                            let table = &mut caller.data_mut().processes;
-                            table.push(Some(done));
-                            (table.len() - 1) as i32
-                        }
-                        None => -1,
-                    };
-                }
-                let mut parts = argv.split(|b| *b == 0);
-                let Some(cmd) = parts.next().filter(|c| !c.is_empty()) else {
-                    return -1;
-                };
-                let cmd = rebase_command(&String::from_utf8_lossy(cmd));
-                let args: Vec<String> = parts
-                    .map(|a| rebase_guest_arg(&String::from_utf8_lossy(a)))
-                    .collect();
-                let Some(done) = run_to_completion(&cmd, &args, &input) else {
-                    return -1;
-                };
-                let table = &mut caller.data_mut().processes;
-                table.push(Some(done));
-                (table.len() - 1) as i32
-            },
-        )
-        .map_err(|e| anyhow!("installing the process start import: {e}"))?;
-
-    // `Sys.putEnv` in the guest, applied to this process so that a child
-    // started later inherits it. Not gated: it changes nothing outside this
-    // process, and without it a guest's own environment and its children's
-    // disagree.
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_put_env",
-            |mut caller: Caller<'_, Host>, name: i32, name_len: i32, value: i32, value_len: i32| {
-                let Some(name) = guest_slice(&mut caller, name, name_len) else {
-                    return;
-                };
-                let name = String::from_utf8_lossy(&name).into_owned();
-                if value_len < 0 {
-                    std::env::remove_var(name);
-                    return;
-                }
-                let Some(value) = guest_slice(&mut caller, value, value_len) else {
-                    return;
-                };
-                std::env::set_var(name, String::from_utf8_lossy(&value).as_ref());
-            },
-        )
-        .map_err(|e| anyhow!("installing the environment import: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_process_len",
-            |mut caller: Caller<'_, Host>, handle: i32, which: i32| -> i32 {
-                let Some(done) = process_of(&mut caller, handle) else {
-                    return 0;
-                };
-                let (stream, taken) = match which {
-                    0 => (&done.stdout, done.taken[0]),
-                    1 => (&done.stderr, done.taken[1]),
-                    _ => return 0,
-                };
-                stream.len().saturating_sub(taken).min(i32::MAX as usize) as i32
-            },
-        )
-        .map_err(|e| anyhow!("installing the process length import: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_process_read",
-            |mut caller: Caller<'_, Host>, handle: i32, which: i32, into: i32, len: i32| -> i32 {
-                let (Ok(into), Ok(len)) = (usize::try_from(into), usize::try_from(len)) else {
-                    return -1;
-                };
-                // Take a copy, because the memory borrow below and the store
-                // data cannot both be held.
-                let chunk = {
-                    let Some(done) = process_of(&mut caller, handle) else {
-                        return -1;
-                    };
-                    let (stream, taken) = match which {
-                        0 => (&done.stdout, &mut done.taken[0]),
-                        1 => (&done.stderr, &mut done.taken[1]),
-                        _ => return -1,
-                    };
-                    let n = stream.len().saturating_sub(*taken).min(len);
-                    let chunk = stream[*taken..*taken + n].to_vec();
-                    *taken += n;
-                    chunk
-                };
-                if chunk.is_empty() {
-                    return 0;
-                }
-                let Some((data, _)) = guest_memory(&mut caller) else {
-                    return -1;
-                };
-                let Some(dst) = data.get_mut(into..into.saturating_add(chunk.len())) else {
-                    return -1;
-                };
-                dst.copy_from_slice(&chunk);
-                chunk.len() as i32
-            },
-        )
-        .map_err(|e| anyhow!("installing the process read import: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_process_code",
-            |mut caller: Caller<'_, Host>, handle: i32| -> i32 {
-                process_of(&mut caller, handle).map_or(-1, |d| d.code)
-            },
-        )
-        .map_err(|e| anyhow!("installing the process code import: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_process_free",
-            |mut caller: Caller<'_, Host>, handle: i32| {
-                if let Ok(i) = usize::try_from(handle) {
-                    if let Some(slot) = caller.data_mut().processes.get_mut(i) {
-                        *slot = None;
-                    }
-                }
-            },
-        )
-        .map_err(|e| anyhow!("installing the process free import: {e}"))?;
-    Ok(())
-}
 
 /// The guest's memory as bytes, and the store's data beside it.
 ///
@@ -690,329 +335,117 @@ fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<
     Some(data.get(start..start.checked_add(len)?)?.to_vec())
 }
 
-/// One entry of the guest's table, if that handle is live.
-fn process_of<'a>(caller: &'a mut Caller<'_, Host>, handle: i32) -> Option<&'a mut Finished> {
-    let i = usize::try_from(handle).ok()?;
-    caller.data_mut().processes.get_mut(i)?.as_mut()
-}
 
-/// A single argument with the guest's idea of an absolute path made into the
-/// host's, on the same reasoning as [`rebase_guest_paths`] -- but on an
-/// argument that is already one token, so it needs no scanning.
-fn rebase_guest_arg(arg: &str) -> String {
-    arg.strip_prefix('/').unwrap_or(arg).to_string()
-}
 
-/// The same, for the one argument that names a program.
+
+
+
+/// The WASI context a store gets: the program's arguments, what the operator
+/// opened for it, and the part of the host's environment it is entitled to.
 ///
-/// A program is usually somewhere the guest cannot see at all -- `/bin/sh`,
-/// the `hl` on `PATH` -- and rebasing those under the preopened directory
-/// names nothing. It is only a guest path when the rebased form exists, so
-/// that is the test: rebase what resolves, and otherwise leave it for the
-/// host to resolve as it would any other command.
-fn rebase_command(cmd: &str) -> String {
-    let rebased = rebase_guest_arg(cmd);
-    if cmd.starts_with('/') && !Path::new(&rebased).exists() {
-        return cmd.to_string();
+/// A free function because every thread needs one of its own. Preview 1 has
+/// no way to hand a descriptor table to two instances, so each thread gets a
+/// context built the same way rather than the same context -- which is what
+/// wasmtime's own wasi-threads does, and it means a file opened on one thread
+/// is not open on another.
+fn wasi_context(args: &[String], dirs: &[std::path::PathBuf]) -> WasiP1Ctx {
+    let mut wasi = WasiCtxBuilder::new();
+    wasi.inherit_stdout().inherit_stderr();
+    // The working directory, as the program's own. A native ash program
+    // can write a file beside itself; a wasm one can only reach what the
+    // host preopens, and with nothing preopened every `File.write` failed
+    // with "Can't open" while the same program ran natively. The
+    // directory is the one the host was started in, nothing above it.
+    if let Err(e) = wasi.preopened_dir(".", ".", DirPerms::all(), FilePerms::all()) {
+        eprintln!("[ash-wasm-run] the working directory is not available to the program: {e}");
     }
-    rebased
-}
-
-/// The platform's shell and the argument that hands it one line, so a
-/// `Process` built with no argument array runs the same way `Sys.command`
-/// does.
-fn shell_command(line: &str) -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
-        (shell, vec!["/C".to_string(), line.to_string()])
+    // Anything else the operator named, on the command line or in
+    // ASH_WASM_DIRS. A module can open only what has been opened for it,
+    // so a program that legitimately reaches outside its own directory --
+    // upwards, most often -- needs the host to say so rather than to be
+    // refused at the boundary with nothing to do about it.
+    let named: Vec<std::path::PathBuf> = std::env::var("ASH_WASM_DIRS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect();
+    for dir in dirs.iter().chain(named.iter()) {
+        let at = dir.to_string_lossy().into_owned();
+        if let Err(e) = wasi.preopened_dir(dir, &at, DirPerms::all(), FilePerms::all()) {
+            eprintln!("[ash-wasm-run] {at} is not available to the program: {e}");
+        }
     }
-    #[cfg(not(windows))]
-    {
-        (
-            "/bin/sh".to_string(),
-            vec!["-c".to_string(), line.to_string()],
-        )
+    for arg in args {
+        wasi.arg(arg);
     }
-}
-
-/// Run a child with `input` as all of its input, and collect all of its
-/// output. Nothing is streamed: the guest is stopped for the whole of it.
-fn run_to_completion(cmd: &str, args: &[String], input: &[u8]) -> Option<Finished> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-
-    let mut child = Command::new(cmd)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    // Closing input is what tells a filter it may finish, so the write and
-    // the drop have to happen before the wait or a child reading to end of
-    // input never returns.
-    if let Some(mut sink) = child.stdin.take() {
-        let _ = sink.write_all(input);
-    }
-    let out = child.wait_with_output().ok()?;
-    Some(Finished {
-        stdout: out.stdout,
-        stderr: out.stderr,
-        taken: [0, 0],
-        code: out.status.code().unwrap_or(-1),
-    })
-}
-
-/// Where a threads build asks for a thread, and what it is told.
-///
-/// `wasi.thread-spawn` is how a module built for `wasm32-wasip1-threads`
-/// starts one: the host instantiates the same module again on an operating
-/// system thread, against the same memory, and calls the module's
-/// `wasi_thread_start`. That needs a memory both instances share, and this
-/// host's modules define their own -- so what a thread would run on does not
-/// exist yet.
-///
-/// A negative return is the answer the interface has for that, and the one
-/// wasi-libc's `pthread_create` turns into `EAGAIN`. The import has to be
-/// answered either way: an import nothing supplies is a link error before a
-/// line runs, so a program that never starts a thread would not start at all.
-fn install_thread_spawn(linker: &mut Linker<Host>) -> Result<()> {
-    linker
-        .func_wrap("wasi", "thread-spawn", |_: Caller<'_, Host>, _: i32| -> i32 {
-            -1
-        })
-        .map_err(|e| anyhow!("installing the thread-spawn import: {e}"))?;
-    Ok(())
-}
-
-/// How the guest reaches a native library that was loaded beside it.
-///
-/// Two imports, and they are `dlopen` and `dlsym` under other names, because
-/// that is what `crate::aot_native` on every other target calls at exactly
-/// this point. The library is already loaded by the time either is asked --
-/// see [`dylink`] -- so "open" is a lookup, and "sym" answers with a table
-/// index, which is what a function pointer is in a wasm module.
-///
-/// Answering zero is not an error. It is the null the `DEFINE_PRIM` resolver
-/// protocol already reads as "not in this library", and the call site raises
-/// the same "not loaded" a native binary raises for a missing HDLL -- only if
-/// the primitive is actually reached.
-fn install_dlopen(linker: &mut Linker<Host>) -> Result<()> {
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_dlopen",
-            |mut caller: Caller<'_, Host>, name: i32, name_len: i32| -> i32 {
-                let Some(name) = guest_slice(&mut caller, name, name_len) else {
-                    return 0;
-                };
-                let name = String::from_utf8_lossy(&name).into_owned();
-                caller.data().libraries.contains(&name) as i32
-            },
-        )
-        .map_err(|e| anyhow!("installing the library import: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_dlsym",
-            |mut caller: Caller<'_, Host>, lib: i32, lib_len: i32, sym: i32, sym_len: i32| -> i32 {
-                let Some(lib) = guest_slice(&mut caller, lib, lib_len) else {
-                    return 0;
-                };
-                let Some(sym) = guest_slice(&mut caller, sym, sym_len) else {
-                    return 0;
-                };
-                let lib = String::from_utf8_lossy(&lib).into_owned();
-                let sym = String::from_utf8_lossy(&sym).into_owned();
-                dylink::resolve(&mut caller, &lib, &sym).unwrap_or(0)
-            },
-        )
-        .map_err(|e| anyhow!("installing the symbol import: {e}"))?;
-    Ok(())
-}
-
-/// The imports `sdl.wasm` declares that the generator cannot express.
-///
-/// One, so far: a GL string crosses back as bytes in the guest's heap, so the
-/// library allocates the room and the host only fills it -- which means
-/// reaching into guest memory, and none of the generated bindings do that.
-fn install_sdl_manual(linker: &mut Linker<Host>) -> Result<()> {
-    // The frame boundary. Async because it suspends the guest: a Heaps main
-    // loop never returns, so this is the only point at which a host gets
-    // control back, and a host that did not take it here would never run
-    // again. See `sdl::Sdl` for why the engine has to do the suspending
-    // rather than the link-time transform.
+    // The runtime inside the module reads its switches from the
+    // environment, exactly as the native one does -- ASH_GC_STRESS and the
+    // rest. Without this the guest sees an empty environment and every
+    // diagnostic is unreachable, which is the difference between being
+    // able to ask a question of a wasm build and not.
     //
-    // Declared untyped rather than through `func_wrap_async`, because the
-    // typed form's future cannot answer with an error and this one has to:
-    // refusing to resume is how a headless run ends.
-    let swap = wasmtime::FuncType::new(
-        linker.engine(),
-        [wasmtime::ValType::I32],
-        [wasmtime::ValType::I32],
-    );
-    linker
-        .func_new_async(
-            FIBER_YIELD_MODULE,
-            "ash_host_sdl_win_swap_window",
-            swap,
-            |mut caller: Caller<'_, Host>, args, results| {
-                let window = args.first().and_then(wasmtime::Val::i32).unwrap_or(0);
-                let another = {
-                    let sdl = &mut caller.data_mut().sdl;
-                    sdl.call("sdl@win_swap_window", &[sdl::Arg::I(window)]);
-                    sdl.present()
-                };
-                Box::new(async move {
-                    if !another {
-                        // Nothing can ask a headless program to stop -- the
-                        // quit that would do it is an event, and filling one
-                        // in means knowing the layout of a Heaps object. So
-                        // the run ends here, and the runner reports it as an
-                        // ending rather than a failure.
-                        return Err(wasmtime::Error::new(sdl::FramesDone));
-                    }
-                    // A page waits for the next `requestAnimationFrame`. This
-                    // host has nothing to wait for, so it returns to the
-                    // executor and comes straight back.
-                    tokio::task::yield_now().await;
-                    if let Some(slot) = results.first_mut() {
-                        *slot = wasmtime::Val::I32(0);
-                    }
-                    Ok(())
-                })
-            },
-        )
-        .map_err(|e| anyhow!("installing the frame boundary: {e}"))?;
-
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_sdl_gl_get_string",
-            |mut caller: Caller<'_, Host>, name: i32, into: i32, len: i32| -> i32 {
-                caller
-                    .data_mut()
-                    .sdl
-                    .call("sdl@gl_get_string", &[sdl::Arg::I(name)]);
-                let Some(text) = caller.data().sdl.gl_string(name) else {
-                    return 0;
-                };
-                if text.len() as i32 > len {
-                    return 0;
-                }
-                let Some((data, _)) = guest_memory(&mut caller) else {
-                    return 0;
-                };
-                let Ok(at) = usize::try_from(into) else {
-                    return 0;
-                };
-                let Some(dst) = data.get_mut(at..at + text.len()) else {
-                    return 0;
-                };
-                dst.copy_from_slice(text);
-                text.len() as i32
-            },
-        )
-        .map_err(|e| anyhow!("installing the GL string import: {e}"))?;
-    Ok(())
+    // Only ASH_ names cross by default. A wasm module is a sandbox and
+    // the host's environment is not its business; handing over PATH and
+    // credentials to get one debugging flag through is not a trade worth
+    // making.
+    //
+    // ASH_WASM_ENV names what else may. A program that legitimately reads
+    // a variable -- `Sys.getEnv` means the same thing on every other
+    // target -- would otherwise see nothing at all on wasm, and the host
+    // is the only party that can say which of its variables the guest is
+    // entitled to. Naming them keeps that decision explicit and with the
+    // side that owns the secret.
+    let allowed: Vec<String> = std::env::var("ASH_WASM_ENV")
+        .unwrap_or_default()
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect();
+    for (key, value) in std::env::vars() {
+        if key.starts_with("ASH_") || allowed.contains(&key) {
+            wasi.env(&key, &value);
+        }
+    }    wasi.build_p1()
 }
 
-/// The transform's state global, if this module has one.
-fn fiber_global(caller: &mut Caller<'_, Host>, name: &str) -> Option<wasmtime::Global> {
-    match caller.get_export(name) {
-        Some(wasmtime::Extern::Global(g)) => Some(g),
-        _ => None,
-    }
+/// A store with a fresh host in it.
+fn store_for(engine: &Engine, args: &[String], dirs: &[std::path::PathBuf]) -> Store<Host> {
+    Store::new(
+        engine,
+        Host {
+            wasi: wasi_context(args, dirs),
+            sockets: sockets::Table::default(),
+            processes: Vec::new(),
+            libraries: dylink::Libraries::default(),
+            sdl: sdl::Sdl::new(),
+        },
+    )
 }
 
-/// Supply the imports that have to reach outside the sandbox to suspend.
-///
-/// Two mechanisms, and the module says which it wants. A module the linker
-/// instrumented exports the transform's state global: suspending it means
-/// setting that global and letting the instrumented frames unwind themselves
-/// back to the scheduler, and the engine is not involved. A module without it
-/// has no way to unwind, so the engine has to do the suspending -- which
-/// wasmtime's async support can, by parking the guest stack while a host
-/// function awaits.
-///
-/// Both are here because they are not interchangeable. Engine suspension is
-/// cheaper and needs no rewrite, and is what to use where the engine has it;
-/// the transform is what makes a fiber work where it does not.
-fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
-    linker
-        .func_wrap_async(
-            FIBER_YIELD_MODULE,
-            FIBER_YIELD_NAME,
-            |mut caller: Caller<'_, Host>, _params: ()| {
-                // Setting the state is what makes every instrumented frame
-                // between here and the scheduler return on its way out.
-                if let Some(state) = fiber_global(&mut caller, STATE_GLOBAL) {
-                    let now = state.get(&mut caller).i32().unwrap_or(0);
-                    // On a rewind this is the call the fiber stopped at, so
-                    // reaching it again means the rewind is over.
-                    let next = if now == REWINDING { 0 } else { UNWINDING };
-                    let _ = state.set(&mut caller, wasmtime::Val::I32(next));
-                    return Box::new(async {}) as _;
-                }
-                Box::new(async {
-                    tokio::task::yield_now().await;
-                })
-            },
-        )
-        .map_err(|e| anyhow!("installing the fiber yield import: {e}"))?;
-
-    // What the transform's state global says. The guest cannot read it: the
-    // global is added after the guest has been compiled, so there is no name
-    // in the guest to refer to it by.
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_fiber_state",
-            |mut caller: Caller<'_, Host>| -> i32 {
-                fiber_global(&mut caller, STATE_GLOBAL)
-                    .and_then(|g| g.get(&mut caller).i32())
-                    .unwrap_or(0)
-            },
-        )
-        .map_err(|e| anyhow!("installing the fiber state import: {e}"))?;
-
-    install_command(linker)?;
-    install_process(linker)?;
-    install_dlopen(linker)?;
-    install_thread_spawn(linker)?;
-    sdl_generated::install(linker)?;
-    install_sdl_manual(linker)?;
-
-    // Point the transform at a fiber's side stack and say whether the next
-    // entry is a rewind. An uninstrumented module has neither global and
-    // needs neither: this is then a no-op and its fibers run to completion.
-    linker
-        .func_wrap(
-            FIBER_YIELD_MODULE,
-            "ash_host_fiber_arm",
-            |mut caller: Caller<'_, Host>, data: i32, rewind: i32, sp: i32| -> i32 {
-                if let Some(g) = fiber_global(&mut caller, DATA_GLOBAL) {
-                    let _ = g.set(&mut caller, wasmtime::Val::I32(data));
-                }
-                if let Some(g) = fiber_global(&mut caller, STATE_GLOBAL) {
-                    let next = if rewind != 0 { REWINDING } else { 0 };
-                    let _ = g.set(&mut caller, wasmtime::Val::I32(next));
-                }
-                // Swap in the fiber's own shadow stack and hand back whose it
-                // was, so the caller can be put back exactly where it was.
-                match fiber_global(&mut caller, SP_GLOBAL) {
-                    Some(g) if sp != 0 => {
-                        let was = g.get(&mut caller).i32().unwrap_or(0);
-                        let _ = g.set(&mut caller, wasmtime::Val::I32(sp));
-                        was
-                    }
-                    Some(g) => g.get(&mut caller).i32().unwrap_or(0),
-                    None => 0,
-                }
-            },
-        )
-        .map_err(|e| anyhow!("installing the fiber arm import: {e}"))?;
-    Ok(())
+/// Everything a store needs answered, including a thread to run in.
+fn linker_for(
+    engine: &Engine,
+    store: &Store<Host>,
+    spawner: Option<&Arc<Spawner>>,
+) -> Result<Linker<Host>> {
+    let mut linker: Linker<Host> = Linker::new(engine);
+    p1::add_to_linker_async(&mut linker, |host: &mut Host| &mut host.wasi)
+        .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
+    fibers::install(&mut linker)?;
+    process::install(&mut linker)?;
+    sockets::install(&mut linker)?;
+    dylink::install(&mut linker)?;
+    sdl::install(&mut linker)?;
+    threads::install(&mut linker, store, spawner.cloned())?;
+    Ok(linker)
 }
+
+
+
+
+
+
+

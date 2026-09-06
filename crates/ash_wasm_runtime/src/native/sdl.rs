@@ -265,3 +265,95 @@ impl std::fmt::Display for FramesDone {
 }
 
 impl std::error::Error for FramesDone {}
+
+/// Every SDL primitive: the generated ones, and the few written by hand.
+pub(crate) fn install(linker: &mut wasmtime::Linker<super::Host>) -> anyhow::Result<()> {
+    super::sdl_generated::install(linker)?;
+    install_manual(linker)
+}
+
+/// The imports `sdl.wasm` declares that the generator cannot express.
+///
+/// One, so far: a GL string crosses back as bytes in the guest's heap, so the
+/// library allocates the room and the host only fills it -- which means
+/// reaching into guest memory, and none of the generated bindings do that.
+fn install_manual(linker: &mut wasmtime::Linker<super::Host>) -> anyhow::Result<()> {
+    // The frame boundary. Async because it suspends the guest: a Heaps main
+    // loop never returns, so this is the only point at which a host gets
+    // control back, and a host that did not take it here would never run
+    // again. See `sdl::Sdl` for why the engine has to do the suspending
+    // rather than the link-time transform.
+    //
+    // Declared untyped rather than through `func_wrap_async`, because the
+    // typed form's future cannot answer with an error and this one has to:
+    // refusing to resume is how a headless run ends.
+    let swap = wasmtime::FuncType::new(
+        linker.engine(),
+        [wasmtime::ValType::I32],
+        [wasmtime::ValType::I32],
+    );
+    linker
+        .func_new_async(
+            super::fibers::YIELD_MODULE,
+            "ash_host_sdl_win_swap_window",
+            swap,
+            |mut caller: wasmtime::Caller<'_, super::Host>, args, results| {
+                let window = args.first().and_then(wasmtime::Val::i32).unwrap_or(0);
+                let another = {
+                    let sdl = &mut caller.data_mut().sdl;
+                    sdl.call("sdl@win_swap_window", &[Arg::I(window)]);
+                    sdl.present()
+                };
+                Box::new(async move {
+                    if !another {
+                        // Nothing can ask a headless program to stop -- the
+                        // quit that would do it is an event, and filling one
+                        // in means knowing the layout of a Heaps object. So
+                        // the run ends here, and the runner reports it as an
+                        // ending rather than a failure.
+                        return Err(wasmtime::Error::new(FramesDone));
+                    }
+                    // A page waits for the next `requestAnimationFrame`. This
+                    // host has nothing to wait for, so it returns to the
+                    // executor and comes straight back.
+                    tokio::task::yield_now().await;
+                    if let Some(slot) = results.first_mut() {
+                        *slot = wasmtime::Val::I32(0);
+                    }
+                    Ok(())
+                })
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("installing the frame boundary: {e}"))?;
+
+    linker
+        .func_wrap(
+            super::fibers::YIELD_MODULE,
+            "ash_host_sdl_gl_get_string",
+            |mut caller: wasmtime::Caller<'_, super::Host>, name: i32, into: i32, len: i32| -> i32 {
+                caller
+                    .data_mut()
+                    .sdl
+                    .call("sdl@gl_get_string", &[Arg::I(name)]);
+                let Some(text) = caller.data().sdl.gl_string(name) else {
+                    return 0;
+                };
+                if text.len() as i32 > len {
+                    return 0;
+                }
+                let Some((data, _)) = super::guest_memory(&mut caller) else {
+                    return 0;
+                };
+                let Ok(at) = usize::try_from(into) else {
+                    return 0;
+                };
+                let Some(dst) = data.get_mut(at..at + text.len()) else {
+                    return 0;
+                };
+                dst.copy_from_slice(text);
+                text.len() as i32
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("installing the GL string import: {e}"))?;
+    Ok(())
+}

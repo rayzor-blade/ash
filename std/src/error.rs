@@ -139,7 +139,12 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
             // an `"S"` alternative look necessary once, and matching it here
             // would read an arbitrary S-named class's fields as bytes/length.
             if name == "String" {
-                let bytes = *((v as *const u8).add(8) as *const *const hl::uchar);
+                // Its first field, which is one pointer past the type. Not a
+                // fixed eight: a pointer is four bytes on a 32-bit target, and
+                // reading at eight there lands past the field and prints an
+                // empty message for every string ever thrown.
+                let bytes = *((v as *const u8).add(mem::size_of::<*mut hl::hl_type>())
+                    as *const *const hl::uchar);
                 return format!("String \"{}\"", utf16z(bytes));
             }
             return format!("instance of {name} ({v:p})");
@@ -157,6 +162,45 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
     eprintln!("[ash] uncaught exception: {}", describe_exception(v));
+    print_exception_stack();
+}
+
+/// The frames the throw recorded, as far as anything can name them.
+///
+/// The stack is captured at the throw and the symbolizer is whatever the
+/// module installed -- a frame-pointer walk and an address table natively, the
+/// shadow stack a wasm module's own prologues maintain. So this works on every
+/// target, and it is the only thing that says WHERE on a target where a
+/// debugger is not an option.
+///
+/// Nothing is printed when there is no stack: a throw before the symbolizer
+/// was installed has no frames, and inventing a line for that would be worse
+/// than the silence.
+unsafe fn print_exception_stack() {
+    let frames = EXCEPTION_STACK.with(|saved| saved.borrow().clone());
+    if frames.is_empty() {
+        return;
+    }
+    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
+    if callback == 0 {
+        return;
+    }
+    let callback: ResolveSymbol = std::mem::transmute(callback);
+    for frame in frames {
+        let mut buffer = [0u8; 512];
+        let mut len: i32 = buffer.len() as i32;
+        let text = callback(frame as *mut c_void, buffer.as_mut_ptr(), &mut len);
+        if text.is_null() || len <= 0 {
+            eprintln!("[ash]   at {frame:#x}");
+            continue;
+        }
+        // UTF-16, and `len` counts code units rather than bytes: the
+        // symbolizer answers in the same encoding HashLink's strings use, and
+        // it may point at storage of its own rather than the buffer it was
+        // handed.
+        let units = std::slice::from_raw_parts(text as *const u16, len as usize);
+        eprintln!("[ash]   at {}", String::from_utf16_lossy(units));
+    }
 }
 
 pub struct TrapContext {

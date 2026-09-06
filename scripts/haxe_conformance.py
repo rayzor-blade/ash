@@ -1408,7 +1408,7 @@ def main(argv=None) -> int:
         gone = [] if args.skip_build else ensure_libs(spec.get("needs", []), args.haxelib)
         if gone:
             print(f"   SKIP: haxelib(s) unavailable: {', '.join(gone)}")
-            report["results"].append({"suite": name, "mode": "-", "status": "SKIP",
+            report["results"].append({"suite": name, "engine": "-", "status": "SKIP",
                                       "detail": f"missing haxelib {', '.join(gone)}"})
             continue
 
@@ -1437,14 +1437,14 @@ def main(argv=None) -> int:
                 err = (r.stdout + r.stderr).strip().splitlines()
                 detail = next((l for l in err if "ERROR" in l or "Error" in l), err[-1] if err else "")
                 print(f"   SKIP: the suite did not compile — {detail[:150]}")
-                report["results"].append({"suite": name, "mode": "-", "status": "SKIP",
+                report["results"].append({"suite": name, "engine": "-", "status": "SKIP",
                                           "detail": f"compile failed: {detail[:300]}"})
                 continue
 
         for prog in spec["programs"]:
             p = sdir / prog
             if not p.is_file():
-                report["results"].append({"suite": name, "mode": "-", "status": "SKIP",
+                report["results"].append({"suite": name, "engine": "-", "status": "SKIP",
                                           "detail": f"{prog} not produced"})
                 continue
             stage_hdlls(p.parent, hdlls)

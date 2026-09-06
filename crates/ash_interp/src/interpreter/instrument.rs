@@ -130,6 +130,9 @@ impl HLInterpreter {
         native_idx: usize,
         args: &[NanBoxedValue],
     ) -> Result<NanBoxedValue> {
+        if crate::tiering::env_flag!("ASH_TRACE_NATIVES") {
+            note_first_call(bytecode, native_idx);
+        }
         static LIMIT: std::sync::OnceLock<Option<u128>> = std::sync::OnceLock::new();
         let limit = *LIMIT.get_or_init(|| {
             std::env::var("ASH_SLOW_NATIVE_MS")
@@ -154,6 +157,30 @@ impl HLInterpreter {
         }
         out
     }
+}
+
+/// Name each native the first time this program calls one.
+///
+/// A program REFERENCES far more primitives than it calls: `game.hl` names
+/// 163 from `sdl`, and which of those a given scene actually reaches is the
+/// difference between porting a library and porting a demonstration. The
+/// bytecode cannot answer that -- only running it can.
+///
+/// First call rather than every call, so the output is a set and a render
+/// loop does not bury it.
+#[cold]
+fn note_first_call(bytecode: &DecodedBytecode, native_idx: usize) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<usize>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    let Ok(mut seen) = seen.lock() else {
+        return;
+    };
+    if !seen.insert(native_idx) {
+        return;
+    }
+    let native = &bytecode.natives[native_idx];
+    eprintln!("[native] {}@{}", native.lib, native.name);
 }
 
 /// Whether the array-layout probe is on. See its use in `GetArray`.

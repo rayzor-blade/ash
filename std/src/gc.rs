@@ -28,6 +28,20 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
+/// How far below a stack's top to scan when nothing says where it ends.
+///
+/// WebAssembly has no call to ask how big a thread's stack is, and the
+/// suspend point a thread recorded cannot be trusted to be below its own live
+/// frames (see the id-0 descriptor in `mark_roots`). This is the window taken
+/// from the top instead: larger than either stack this runtime makes -- the
+/// linker gives the main thread one page, and a spawned thread gets what
+/// wasi-libc's pthread default allocates -- and small enough that scanning it
+/// is not the heap.
+#[cfg(target_family = "wasm")]
+const WASM_STACK_WINDOW: usize = 1024 * 1024;
+#[cfg(not(target_family = "wasm"))]
+const WASM_STACK_WINDOW: usize = 0;
+
 /// The stride of every conservative walk, on the heap and on the stacks.
 ///
 /// A machine word, not eight bytes. Every walker here reads a `usize`, so an
@@ -3207,22 +3221,27 @@ impl ImmixAllocator {
                     }
                     mutator.stack_top
                 };
-                // The main stack, on a target where the probe that recorded
-                // `saved_sp` is not below the frames it is supposed to cover.
+                // A stack with no range of its own, on a target where the
+                // probe that recorded `saved_sp` is not below the frames it
+                // is supposed to cover.
                 //
                 // Measured: with a fiber running, this scanned `0xffa4` to
                 // `0xffff` -- ninety-one bytes -- while the frames holding
                 // the program's own locals were at `0xfd10`. Everything the
-                // suspended main held was below the range meant to find it,
+                // suspended thread held was below the range meant to find it,
                 // so a collection triggered inside a fiber freed it.
                 //
-                // The whole stack instead, which on WebAssembly is bounded
-                // and small: it is the shadow stack the linker placed at the
-                // bottom of memory, one page of it, and `stack_top` is its
-                // top. Scanning dead frames below the suspend point
-                // over-retains, which is the conservative contract already.
+                // So the range is taken from the top down rather than from
+                // the probe up. `WASM_STACK_WINDOW` is a bound and not a
+                // size: scanning dead frames below the suspend point
+                // over-retains, which is the conservative contract already,
+                // while starting above a live frame loses it. Bounded because
+                // the main thread's stack is at the bottom of memory and a
+                // worker's is a block in the middle of it -- taking every
+                // address below a worker's stack top would be the whole heap,
+                // per collection.
                 if f.size == 0 && cfg!(target_family = "wasm") {
-                    start = 0;
+                    start = start.min(top.saturating_sub(WASM_STACK_WINDOW));
                 }
                 if start < top {
                     all_newly_marked.extend(self.conservative_scan_range(start, top));

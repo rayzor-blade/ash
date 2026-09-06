@@ -67,6 +67,10 @@ pub union vdynamic_value {
 }
 
 extern "C" {
+    /// GC-allocated bytes, zeroed and scanned as data.
+    pub fn hlp_alloc_bytes(size: c_int) -> *mut vbyte;
+    /// A GC-allocated array of `size` elements of type `at`.
+    pub fn hlp_alloc_array(at: *mut hl_type, size: c_int) -> *mut varray;
     /// A GC-allocated box of type `t`, its value unset.
     pub fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic;
 
@@ -74,6 +78,9 @@ extern "C" {
     /// static: that is the plain descriptor, while the allocation above is
     /// made against the GC-registered one.
     pub fn hlp_type_i32() -> *mut hl_type;
+    /// For the empty arrays below; the element type of an empty array is
+    /// never read, but it has to be a real one.
+    pub fn hlp_type_bytes() -> *mut hl_type;
 
     /// The program's allocator. Used as this library's own, so that one
     /// allocator owns the one heap: a side module that brought its own would
@@ -139,6 +146,29 @@ pub unsafe fn box_i32(value: i32) -> *mut vdynamic {
         (*d).v.i = value;
     }
     d
+}
+
+/// A HashLink array: a header, then its elements.
+#[repr(C)]
+pub struct varray {
+    pub t: *mut hl_type,
+    pub at: *mut hl_type,
+    pub size: c_int,
+    pub __pad: c_int,
+}
+
+/// An array of nothing.
+///
+/// What a host with no screen has to say when asked to list its displays or
+/// its devices. An empty array rather than null, because the caller iterates
+/// it and null would be a crash where "none" is the truth.
+///
+/// # Safety
+/// Calls the runtime's allocator, so the GC must be up -- which it is by the
+/// time any primitive here is reached.
+#[inline]
+pub unsafe fn empty_array() -> *mut varray {
+    hlp_alloc_array(hlp_type_bytes(), 0)
 }
 
 /// Allocate through the program, never through a second allocator of our own.

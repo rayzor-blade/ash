@@ -1,6 +1,8 @@
-//! A small `sdl` for wasm -- enough of one for a Heaps program, and no more.
+//! Small `sdl` and `ui` libraries for wasm -- enough of them for a Heaps
+//! program, and no more.
 //!
-//! It builds `sdl.wasm`, because `@:hlNative("sdl", ...)` is what a program
+//! It builds `sdl.wasm` and `ui.wasm` from one archive, each linked with only
+//! its own primitives exported. `sdl.wasm`, because `@:hlNative("sdl", ...)` is what a program
 //! asks for and the file stem is the name. The crate is `tinysdl` because
 //! this is not SDL and is not offered as one: it is sixty-seven of
 //! `sdl.hdll`'s two hundred and eight primitives, chosen by tracing what
@@ -54,3 +56,5 @@ macro_rules! define_prim {
 }
 
 mod generated;
+mod manual;
+mod generated_ui;

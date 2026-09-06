@@ -144,6 +144,10 @@ fn report_the_signatures() {
     };
     let wanted = std::fs::read_to_string(&names).expect("reading the name list");
 
+    // Absolute, because `dlopen` resolves a relative path against the
+    // process's directory rather than the caller's idea of one, and a test
+    // does not run where it was invoked from.
+    let lib = std::fs::canonicalize(&lib).unwrap_or_else(|e| panic!("finding {lib}: {e}"));
     let library = unsafe { libloading::Library::new(&lib) }.expect("opening the library");
     type Resolver = unsafe extern "C" fn(*mut *const c_char) -> *mut c_void;
 

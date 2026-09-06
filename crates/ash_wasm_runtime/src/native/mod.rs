@@ -18,6 +18,8 @@
 //! the question being asked.
 
 pub(crate) mod dylink;
+pub(crate) mod sdl;
+mod sdl_generated;
 mod sockets;
 
 use std::path::{Path, PathBuf};
@@ -58,6 +60,8 @@ pub(crate) struct Host {
     processes: Vec<Option<Finished>>,
     /// Native libraries loaded beside the program. See [`dylink`].
     pub(crate) libraries: dylink::Libraries,
+    /// A window and a frame, for a host with no screen. See [`sdl`].
+    pub(crate) sdl: sdl::Sdl,
 }
 
 /// A child that has already run, and how much of what it said the guest has
@@ -211,6 +215,7 @@ impl Program {
                 sockets: sockets::Table::default(),
                 processes: Vec::new(),
                 libraries: dylink::Libraries::default(),
+                sdl: sdl::Sdl::new(),
             },
         );
 
@@ -722,6 +727,45 @@ fn install_dlopen(linker: &mut Linker<Host>) -> Result<()> {
     Ok(())
 }
 
+/// The imports `sdl.wasm` declares that the generator cannot express.
+///
+/// One, so far: a GL string crosses back as bytes in the guest's heap, so the
+/// library allocates the room and the host only fills it -- which means
+/// reaching into guest memory, and none of the generated bindings do that.
+fn install_sdl_manual(linker: &mut Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap(
+            FIBER_YIELD_MODULE,
+            "ash_host_sdl_gl_get_string",
+            |mut caller: Caller<'_, Host>, name: i32, into: i32, len: i32| -> i32 {
+                caller
+                    .data_mut()
+                    .sdl
+                    .call("sdl@gl_get_string", &[sdl::Arg::I(name)]);
+                let Some(text) = caller.data().sdl.gl_string(name) else {
+                    return 0;
+                };
+                if text.len() as i32 > len {
+                    return 0;
+                }
+                let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                    return 0;
+                };
+                let (data, _) = memory.data_and_store_mut(&mut caller);
+                let Ok(at) = usize::try_from(into) else {
+                    return 0;
+                };
+                let Some(dst) = data.get_mut(at..at + text.len()) else {
+                    return 0;
+                };
+                dst.copy_from_slice(text);
+                text.len() as i32
+            },
+        )
+        .map_err(|e| anyhow!("installing the GL string import: {e}"))?;
+    Ok(())
+}
+
 /// The transform's state global, if this module has one.
 fn fiber_global(caller: &mut Caller<'_, Host>, name: &str) -> Option<wasmtime::Global> {
     match caller.get_export(name) {
@@ -784,6 +828,8 @@ fn install_fiber_yield(linker: &mut Linker<Host>) -> Result<()> {
     install_command(linker)?;
     install_process(linker)?;
     install_dlopen(linker)?;
+    sdl_generated::install(linker)?;
+    install_sdl_manual(linker)?;
 
     // Point the transform at a fiber's side stack and say whether the next
     // entry is a rewind. An uninstrumented module has neither global and

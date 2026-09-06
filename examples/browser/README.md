@@ -17,8 +17,29 @@ itself.
 
     python3 -m http.server -d examples/browser
 
-Then open the page. It fetches `demo.wasm` and runs it; there is nothing to
-click. A module has to be served rather than opened from a file, because
+Then open the page. It starts a worker, which fetches `demo.wasm` and runs
+it; there is nothing to click.
+
+## The module runs in a worker
+
+Not on the page's thread, and not as an optimisation. A Haxe program's main
+loop does not return, and a fiber that computes without blocking never yields
+-- on the page's thread either of those is a frozen tab. In a worker the UI
+thread is free throughout, and the worst a runaway fiber can do is stall the
+worker it is in.
+
+It buys a second thing that matters more than it looks. `memory.atomic.wait`
+traps on a browser's main thread and is permitted in a worker, so blocking
+synchronisation is only ever possible there.
+
+Nothing is given up by moving: HashLink has no DOM API to lose. Output is
+posted to the page because a worker's console is not the page's document.
+
+The demo spends a second on solid arithmetic that yields to nothing, and the
+page counts the frames it draws while that happens. Counted with
+`requestAnimationFrame` rather than animated with CSS on purpose: a CSS
+animation can run off the main thread and would keep going even if that thread
+were blocked, which would make it no evidence at all. A module has to be served rather than opened from a file, because
 `WebAssembly.instantiate` and ES modules both refuse a `file://` origin.
 
 `demo/Demo.hx` is deliberately not a hello world -- a prime sieve, a Leibniz

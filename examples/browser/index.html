@@ -8,24 +8,30 @@
     margin: 0 auto; padding: 3rem 1.5rem; max-width: 46rem;
   }
   h1 { font-size: 1.3rem; font-weight: 600; margin: 0 0 .3rem; }
-  p.sub { margin: 0 0 2rem; opacity: .65; }
+  p.sub { margin: 0 0 1.5rem; opacity: .65; }
   #out {
-    white-space: pre-wrap; margin: 0;
+    white-space: pre-wrap; margin: 0 0 1.5rem;
     border-left: 3px solid currentColor; padding: 1rem 1.2rem;
     min-height: 12rem; opacity: .95;
   }
   .err { color: #d33; }
   .meta { opacity: .55; }
+  .proof { display: flex; align-items: center; gap: .75rem; opacity: .8; }
+  #frames { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 4ch; }
 </style>
 
 <h1>Running HashLink in WebAssembly</h1>
 <p class="sub">HashLink bytecode compiled to a WebAssembly module by ash, with a
   browser compatible runtime.</p>
 <pre id="out"></pre>
+<p class="proof">
+  <span id="frames">0</span>
+  <span>frames drawn on <em>this</em> thread while the program ran. It keeps
+    counting through the program's unyielding second, because the module is in
+    a worker and this counter is not.</span>
+</p>
 
 <script type="module">
-import init, { run } from "./ash_browser.js";
-
 const out = document.getElementById("out");
 const write = (text, cls) => {
   const line = document.createElement("span");
@@ -34,35 +40,33 @@ const write = (text, cls) => {
   out.appendChild(line);
 };
 
-// The host writes through console.log and console.error, which is where a
-// page's output belongs and where a developer already looks. Mirroring it
-// into the document as well means the program's output is visible without
-// opening the developer tools.
-for (const [name, cls] of [["log", ""], ["error", "err"]]) {
-  const original = console[name].bind(console);
-  console[name] = (...args) => {
-    original(...args);
-    write(args.join(" "), cls);
-  };
-}
+// The module runs in a worker, so a program that computes without yielding --
+// or one whose main loop never returns -- stalls that worker and nothing
+// else. The spinner above is the visible half of that claim.
+const worker = new Worker("./worker.js", { type: "module" });
 
-try {
-  await init();
-  const response = await fetch("./demo.wasm");
-  if (!response.ok) throw new Error(`fetching demo.wasm: ${response.status}`);
-  const bytes = new Uint8Array(await response.arrayBuffer());
-  write(`loaded demo.wasm, ${bytes.length.toLocaleString()} bytes`, "meta");
-  write("", "meta");
+// Counted with requestAnimationFrame rather than animated with CSS: a CSS
+// animation can run off the main thread and would keep going even if this
+// thread were blocked, which would make it no evidence at all. This counter
+// only advances if the page's own thread is free to draw.
+const frames = document.getElementById("frames");
+let drawn = 0, counting = true;
+const tick = () => {
+  if (!counting) return;
+  frames.textContent = ++drawn;
+  requestAnimationFrame(tick);
+};
+requestAnimationFrame(tick);
 
-  // Fetching is the page's business -- its origin, its caching, whether it
-  // wants a stream -- so the host is handed bytes rather than a URL.
-  const outcome = await run(bytes, ["demo.wasm"], []);
-  write("");
-  if (outcome.trapped) write(`trapped: ${outcome.trapped}`, "err");
-  else write(`exited with ${outcome.status}`, "meta");
-  document.title = outcome.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
-} catch (e) {
-  write(String(e && e.message ? e.message : e), "err");
-  document.title = "HashLink in wasm — failed";
-}
+worker.onmessage = ({ data }) => {
+  if (data.kind === "done") {
+    counting = false;
+    document.title = data.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
+    return;
+  }
+  write(data.text, data.kind === "err" ? "err" : data.kind === "meta" ? "meta" : "");
+};
+worker.onerror = (e) => write(`worker: ${e.message}`, "err");
+
+worker.postMessage({ module: "./demo.wasm", args: ["demo.wasm"] });
 </script>

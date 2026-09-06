@@ -63,6 +63,22 @@ class Demo {
 		toWorker.add(2);
 		Sys.println('thread: ${toMain.pop(true)}');
 
+		// A deliberately unyielding stretch. Nothing here blocks, so no fiber
+		// gets a turn and neither would the page if this ran on its thread --
+		// which is the reason it does not. The frame counter beside the
+		// output keeps moving throughout, because that counter is on the
+		// page's thread and this is not.
+		Sys.println("");
+		Sys.println("now a second of solid work, yielding to nothing...");
+		var spin = 0.0;
+		var until = haxe.Timer.stamp() + 1.0;
+		var rounds = 0;
+		while (haxe.Timer.stamp() < until) {
+			for (k in 0...100000) spin += Math.sqrt(k + spin % 7);
+			rounds++;
+		}
+		Sys.println('...done: $rounds rounds, checksum ${Math.round(spin) % 100000}');
+
 		var ms = Math.round((haxe.Timer.stamp() - t0) * 1000);
 		Sys.println("");
 		Sys.println('all of that took ${ms}ms');

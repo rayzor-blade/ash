@@ -35,11 +35,10 @@ struct Args {
     /// A thread here is a second instance of the module on an operating
     /// system thread over the same memory, and whether the program gets one
     /// is the host's to say: ash asks for an agent per Haxe thread and uses
-    /// what it is given. Off by default, and that is a bug rather than a
-    /// preference -- threads that only compute give the right answers and
-    /// scale, and threads that allocate do not survive, because two
-    /// instances over one memory are two mutators and this collector is
-    /// single-mutator. See docs/wasm-target.md.
+    /// what it is given. Opt-in because this host is the conformance lane's,
+    /// and that lane publishes what the single-agent build does; a run that
+    /// wants agents says so. A browser page decides the same question by
+    /// supplying `spawn`.
     #[arg(long)]
     threads: bool,
     /// Everything after the module belongs to the program.

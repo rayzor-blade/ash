@@ -84,10 +84,9 @@ answers by starting a Worker, and it keeps answering for as long as the
 browser keeps saying yes. A page that supplies no `spawn` gets threads that
 take turns, and the demo says so.
 
-The demo computes rather than allocates, deliberately. Two instances over
-one memory are two mutators on one heap and ash's collector is
-single-mutator: threads that allocate do not survive yet. `docs/wasm-target.md`
-has the measurements and what is left to do.
+The demo computes rather than allocates so that what it times is the threads
+and not the collector. Threads that allocate work as well; `docs/wasm-target.md`
+has the program that checks it, and what was wrong before it did.
 
 ## The module runs in a worker
 

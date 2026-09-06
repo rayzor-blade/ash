@@ -9,10 +9,9 @@ import sys.thread.Deque;
 	taking turns would also manage that -- but that four of them take about as
 	long as one, while the same work done in a row takes four times as long.
 
-	It computes and does not allocate, and that is not a stylistic choice. Two
-	instances over one memory are two mutators on one heap, and ash's
-	collector is single-mutator: threads that allocate do not survive yet. See
-	docs/wasm-target.md.
+	It computes rather than allocates so that what it times is the threads
+	and not the collector. Threads that allocate work too -- see
+	docs/wasm-target.md for the program that checks that.
 **/
 class Threads {
 	// A linear congruential generator, iterated. No allocation, no calls the

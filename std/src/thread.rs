@@ -826,9 +826,25 @@ pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
     if let Some(handle) = crate::fiber::current_handle() {
         return handle;
     }
-    // One agent, and the identity has only to be stable and non-null: it is
-    // compared, never dereferenced.
-    #[cfg(not(any(unix, windows)))]
+    // Compared, never dereferenced: the identity has only to be stable for
+    // the thread's life, distinct per thread, and non-null. On wasm the
+    // address of a thread-local is exactly that -- each thread has its own TLS
+    // block, so each gets its own address -- and it costs one add to read.
+    //
+    // This was the constant 1 from before the target had threads, and with
+    // threads it told every Haxe thread it was the same one: `Thread.current()`
+    // agreed everywhere, and anything keyed on it -- a mutex's owner, a lock's
+    // waiter -- excluded nothing. The same constant sat in the collector's
+    // `thread_self_fast`, with the same consequence for its bookkeeping.
+    #[cfg(target_family = "wasm")]
+    {
+        thread_local! {
+            static IDENTITY: u8 = const { 0 };
+        }
+        IDENTITY.with(|slot| slot as *const u8 as *mut c_void)
+    }
+    // One agent, one identity, on a target with no threads.
+    #[cfg(not(any(unix, windows, target_family = "wasm")))]
     {
         std::ptr::without_provenance_mut(1)
     }

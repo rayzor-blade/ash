@@ -232,9 +232,30 @@ const TLAB_MAX_OBJ: usize = LINE_SIZE;
 /// difference could not produce a false positive.)
 #[inline(always)]
 fn thread_self_fast() -> u64 {
+    // A wasm thread is another instance of the module over the same memory,
+    // and the one thing that is its own is its thread-local block: `__tls_base`
+    // differs per thread, so the address of any thread-local is distinct per
+    // thread, stable for the thread's life, and one add to read. That is the
+    // identity everything in this file keys on -- which mutator is which,
+    // whose TLAB a block is, who asked to stop the world and who must answer.
+    //
+    // This used to be the constant 1, from before the target had threads.
+    // With threads that constant made every worker and main the same
+    // mutator: one record in the world, overwritten by whoever registered
+    // last; one TLAB entry, bump-allocated into by two threads at once; and a
+    // collector that saw no other mutator, so never stopped anyone and marked
+    // a heap another thread was still writing. `stop=0.00ms` in the stats was
+    // not a fast rendezvous. It was nobody to wait for.
+    #[cfg(target_family = "wasm")]
+    {
+        thread_local! {
+            static IDENTITY: u8 = const { 0 };
+        }
+        IDENTITY.with(|slot| slot as *const u8 as u64)
+    }
     // One agent, one identity. A target with no threads still has to answer,
     // and a constant is the honest answer rather than a syscall that lies.
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(unix, windows, target_family = "wasm")))]
     {
         1
     }

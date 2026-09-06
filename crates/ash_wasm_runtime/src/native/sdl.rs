@@ -34,6 +34,10 @@
 //! **Every object name is invented here.** `gl_create_*` hands out
 //! consecutive integers; nothing checks that a name later handed back was
 //! ever issued, because a recorder has nothing to check it against.
+//! Attribute and uniform locations are not object names, though: they are
+//! indices counted per program, and Heaps refuses an attribute at 32 or
+//! above. Handing those out of the same counter fails deep inside the first
+//! frame, a long way from the mistake.
 //!
 //! **Every query answers as WebGL2 would**, which is the point: Heaps asks a
 //! handful of questions at startup and picks a code path from the answers, so
@@ -73,6 +77,18 @@ pub(crate) struct Sdl {
     /// The next GL object name to hand out. Starts at 1: zero means "no
     /// object" to every GL that has ever existed.
     next_name: i32,
+    /// How many attribute slots each program has handed out, by program.
+    ///
+    /// Not the object-name counter: an attribute location is an index into
+    /// the vertex attribute array, small and counted per program, and a
+    /// driver has a fixed number of them. Heaps checks -- `if index >= 32
+    /// throw "assert"` -- so a shared counter fails once enough objects have
+    /// been made, which is deep inside the first frame and nowhere near the
+    /// cause.
+    attribs: BTreeMap<i32, i32>,
+    /// The same for uniforms, which have no such limit but are numbered per
+    /// program just as truly.
+    uniforms: BTreeMap<i32, i32>,
     frames: u32,
     limit: u32,
     trace: bool,
@@ -165,10 +181,17 @@ impl Sdl {
             "gl_has_extension" => 0,
             "gl_get_config_parameter" => 0,
             "gl_get_string" => 0,
-            "gl_get_attrib_location" | "gl_get_uniform_location" => {
-                let name = self.next_name;
-                self.next_name += 1;
-                i64::from(name)
+            "gl_get_attrib_location" => {
+                let next = self.attribs.entry(arg(0)).or_default();
+                let index = *next;
+                *next += 1;
+                i64::from(index)
+            }
+            "gl_get_uniform_location" => {
+                let next = self.uniforms.entry(arg(0)).or_default();
+                let index = *next;
+                *next += 1;
+                i64::from(index)
             }
 
             _ => 0,

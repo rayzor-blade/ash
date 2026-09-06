@@ -34,7 +34,7 @@
 //! so a program that never opens a socket runs there unchanged.
 
 use anyhow::{anyhow, Result};
-use wasmtime::{Caller, Extern, Linker};
+use wasmtime::{Caller, Linker};
 
 use super::Host;
 
@@ -575,10 +575,9 @@ fn guest_bytes<'a>(
     ptr: i32,
     len: i32,
 ) -> std::result::Result<(&'a mut [u8], &'a mut Host), i32> {
-    let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else {
+    let Some((data, host)) = super::guest_memory(caller) else {
         return Err(errno::BADF);
     };
-    let (data, host) = memory.data_and_store_mut(caller);
     let start = ptr as u32 as usize;
     let len = usize::try_from(len).map_err(|_| errno::INVAL)?;
     let end = start.checked_add(len).ok_or(errno::INVAL)?;

@@ -88,6 +88,11 @@ impl Program {
         // instructions, so a module built from it does not even parse without
         // this: "exceptions proposal not enabled".
         config.wasm_exceptions(true);
+        // A module built for `wasm32-wasip1-threads` has atomics in it and a
+        // shared memory under it. Neither costs anything when a module has
+        // neither, and refusing to load one is worse than being ready for it.
+        config.wasm_threads(true);
+        config.shared_memory(true);
         // Compiling a module is the cost of running one: the conformance
         // suite's module is 23MB and takes wasmtime six seconds and every
         // core, and isolation runs it once per case. wasmtime keeps compiled
@@ -123,11 +128,39 @@ impl Program {
                     || (module == "wasi" && import.name() == "thread-spawn");
                 let known_host = module == FIBER_YIELD_MODULE
                     && (import.name() == FIBER_YIELD_NAME
+                        || import.name() == "memory"
                         || import.name().starts_with("ash_host_"));
                 !(known_wasi || known_host)
             })
             .map(|import| format!("{}.{}", import.module(), import.name()))
             .collect()
+    }
+
+    /// The shared memory this module asks for, if it asks for one.
+    ///
+    /// Built to the type the module declares rather than to a size of the
+    /// host's choosing: the minimum is how much data the module has to write
+    /// before it runs, and the maximum is what the engine reserves so that
+    /// growing the memory never moves it out from under another thread.
+    fn shared_memory(&self) -> Result<Option<wasmtime::SharedMemory>> {
+        let Some(ty) = self.module.imports().find_map(|import| {
+            match (import.module(), import.name(), import.ty()) {
+                ("env", "memory", wasmtime::ExternType::Memory(ty)) => Some(ty),
+                _ => None,
+            }
+        }) else {
+            return Ok(None);
+        };
+        let maximum = ty.maximum().ok_or_else(|| {
+            anyhow!("the module imports a memory with no maximum, which cannot be shared")
+        })?;
+        let ty = wasmtime::MemoryType::shared(
+            u32::try_from(ty.minimum()).map_err(|_| anyhow!("the memory's minimum is too large"))?,
+            u32::try_from(maximum).map_err(|_| anyhow!("the memory's maximum is too large"))?,
+        );
+        wasmtime::SharedMemory::new(&self.engine, ty)
+            .map(Some)
+            .map_err(|e| anyhow!("creating the shared memory the module imports: {e}"))
     }
 
     /// Run the program to completion.
@@ -225,6 +258,14 @@ impl Program {
             .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
         install_fiber_yield(&mut linker)?;
         sockets::install(&mut linker)?;
+        // A module that shares its memory cannot make one: every thread
+        // instantiates that same module, and a memory it defined would be one
+        // per thread. So the host makes it, once, and hands it to all of them.
+        if let Some(memory) = self.shared_memory()? {
+            linker
+                .define(&store, "env", "memory", memory)
+                .map_err(|e| anyhow!("giving the module its shared memory: {e}"))?;
+        }
 
         let instance = linker
             .instantiate_async(&mut store, &self.module)
@@ -335,10 +376,9 @@ fn install_command(linker: &mut Linker<Host>) -> Result<()> {
                 if !allowed {
                     return -1;
                 }
-                let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                let Some((data, _)) = guest_memory(&mut caller) else {
                     return -1;
                 };
-                let (data, _) = memory.data_and_store_mut(&mut caller);
                 let (Ok(start), Ok(len)) = (usize::try_from(ptr), usize::try_from(len)) else {
                     return -1;
                 };
@@ -564,10 +604,9 @@ fn install_process(linker: &mut Linker<Host>) -> Result<()> {
                 if chunk.is_empty() {
                     return 0;
                 }
-                let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                let Some((data, _)) = guest_memory(&mut caller) else {
                     return -1;
                 };
-                let (data, _) = memory.data_and_store_mut(&mut caller);
                 let Some(dst) = data.get_mut(into..into.saturating_add(chunk.len())) else {
                     return -1;
                 };
@@ -603,14 +642,51 @@ fn install_process(linker: &mut Linker<Host>) -> Result<()> {
     Ok(())
 }
 
+/// The guest's memory as bytes, and the store's data beside it.
+///
+/// A module built for threads exports a `SharedMemory` and not a `Memory`,
+/// and wasmtime keeps the two apart deliberately: another thread may be
+/// writing a shared memory while a host function holds a slice of it, so
+/// `Memory`'s own accessors assert they are not looking at one. Matching on
+/// `Extern::Memory` alone does not fail loudly on such a module -- it reports
+/// that the guest exports no memory, and every host call that needs one
+/// starts returning errors.
+///
+/// Every use of this is a copy in or out at a pointer the guest passed and is
+/// waiting on the answer for: an argument buffer, or the destination for a
+/// reply. No other thread has a reason to be writing that range, whatever it
+/// is doing with the rest of memory.
+pub(crate) fn guest_memory<'a>(
+    caller: &'a mut Caller<'_, Host>,
+) -> Option<(&'a mut [u8], &'a mut Host)> {
+    match caller.get_export("memory")? {
+        wasmtime::Extern::Memory(memory) => Some(memory.data_and_store_mut(caller)),
+        wasmtime::Extern::SharedMemory(memory) => {
+            let cells = memory.data();
+            let (base, len) = (cells.as_ptr(), cells.len());
+            // SAFETY: two borrows that do not overlap -- the memory is not in
+            // the store's data -- which is the same split `Memory` makes for
+            // the unshared case and cannot express through the borrow
+            // checker. The base outlives the call because the instance holds
+            // the memory, and it does not move when the memory grows: a
+            // shared memory reserves its declared maximum up front, which is
+            // why declaring one is required.
+            unsafe {
+                Some((
+                    std::slice::from_raw_parts_mut(base.cast::<u8>().cast_mut(), len),
+                    &mut *(caller.data_mut() as *mut Host),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// A guest pointer and length as host bytes, or nothing if it does not name
 /// memory the guest has.
 fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<u8>> {
     let (start, len) = (usize::try_from(ptr).ok()?, usize::try_from(len).ok()?);
-    let wasmtime::Extern::Memory(memory) = caller.get_export("memory")? else {
-        return None;
-    };
-    let (data, _) = memory.data_and_store_mut(caller);
+    let (data, _) = guest_memory(caller)?;
     Some(data.get(start..start.checked_add(len)?)?.to_vec())
 }
 
@@ -826,10 +902,9 @@ fn install_sdl_manual(linker: &mut Linker<Host>) -> Result<()> {
                 if text.len() as i32 > len {
                     return 0;
                 }
-                let Some(wasmtime::Extern::Memory(memory)) = caller.get_export("memory") else {
+                let Some((data, _)) = guest_memory(&mut caller) else {
                     return 0;
                 };
-                let (data, _) = memory.data_and_store_mut(&mut caller);
                 let Ok(at) = usize::try_from(into) else {
                     return 0;
                 };

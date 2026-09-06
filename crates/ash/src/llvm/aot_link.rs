@@ -575,6 +575,11 @@ fn link_wasm_module(
     hdll_imports.dedup();
     let opts = ash_wasm_link::LinkOptions {
         fibers: fiber_transform_requested(),
+        // What the threads target is for: every thread instantiates this same
+        // module, so the memory has to be one the host makes and they all
+        // share, and the data has to be written into it once rather than once
+        // per instance.
+        shared_memory: triple.ends_with("-threads"),
         hdll_imports,
         hdll_data,
         ..Default::default()

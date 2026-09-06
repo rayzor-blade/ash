@@ -172,8 +172,12 @@ async fn load_one(
 ) -> Result<(Instance, wasmtime::Table)> {
     let module = Module::new(store.engine(), bytes)?;
 
+    // As an `Extern` rather than a `Memory`, because a program built for
+    // threads exports a shared memory and `get_memory` answers `None` for one.
+    // The library imports whichever kind the program has.
     let memory = main
-        .get_memory(&mut *store, "memory")
+        .get_export(&mut *store, "memory")
+        .filter(|e| matches!(e, Extern::Memory(_) | Extern::SharedMemory(_)))
         .ok_or_else(|| anyhow!("the program exports no memory to share"))?;
     let table = main
         .get_table(&mut *store, "__indirect_function_table")
@@ -256,7 +260,7 @@ async fn load_one(
         // answers the program.
         let found = if import.module() == "env" {
             match import.name() {
-                "memory" => Some(Extern::Memory(memory)),
+                "memory" => Some(memory.clone()),
                 "__indirect_function_table" => Some(Extern::Table(table)),
                 "__memory_base" => Some(Extern::Global(memory_base_global)),
                 "__table_base" => Some(Extern::Global(table_base_global)),

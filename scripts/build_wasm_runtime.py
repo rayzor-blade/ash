@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 
+# The default target. `--target wasm32-wasip1-threads` builds the same runtime
+# with atomics and a shared memory, for a host that can start threads.
 TRIPLE = "wasm32-wasip1"
 
 # libc entry points a native library may use that ash_std itself never calls,
@@ -207,6 +209,7 @@ def extract_library_libc(sysroot: pathlib.Path, into: pathlib.Path):
 
 
 def main() -> int:
+    global TRIPLE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--sysroot", default=None, help="WASI sysroot directory")
@@ -214,7 +217,12 @@ def main() -> int:
     ap.add_argument("--out", type=pathlib.Path, default=None,
                     help=f"where to write the object (default target/<profile>/{TRIPLE}/ash_runtime.o)")
     ap.add_argument("--cargo", default=os.environ.get("CARGO", "cargo"))
+    ap.add_argument("--target", default=TRIPLE,
+                    help=f"the wasm target to build for (default {TRIPLE})")
     args = ap.parse_args()
+
+    # Everything below is keyed on the target, so one name settles it.
+    TRIPLE = args.target
 
     sysroot = find_sysroot(args.sysroot)
     lld = find_lld()

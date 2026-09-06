@@ -10,3 +10,9 @@ dist/
 # Agent/session scratch, not project source
 .claude/
 ash_fileio_tmp/
+
+# Staged beside the example by a run, not source: the fixture copies ash's
+# runtime here under HashLink's name so the .hdll files bind to it.
+examples/heaps_base2d/bin/libhl*.dylib
+examples/heaps_base2d/bin/libhl*.so
+examples/heaps_base2d/bin/libhl*.dll

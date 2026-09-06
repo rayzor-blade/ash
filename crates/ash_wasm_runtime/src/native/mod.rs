@@ -283,23 +283,30 @@ fn install_command(linker: &mut Linker<Host>) -> Result<()> {
 /// host's.
 ///
 /// The guest's root is the directory this host preopened for it, which is
-/// this host's own working directory -- so a path the guest built from its
-/// `Sys.getCwd()` arrives here looking absolute and naming something under
-/// `.`. Only a token that does not exist as given and does exist relative to
-/// here is rewritten, so a genuine host path like `/bin/sh` is left alone.
+/// this host's own working directory, so a path the guest built from its
+/// `Sys.getCwd()` arrives looking absolute and names something under `.`.
+/// Dropping the leading separator is the whole translation, and it is right
+/// for every path the guest can produce, because that root is the only one it
+/// has.
+///
+/// This works on the string rather than on tokens: splitting on whitespace
+/// would take `"/temp/two words"` apart and put it back as two arguments. A
+/// separator only starts a path where a token does -- at the beginning, or
+/// after a space or a quote -- so those are the only places it is dropped.
 fn rebase_guest_paths(line: &str) -> String {
-    line.split_whitespace()
-        .map(|token| {
-            let Some(rest) = token.strip_prefix('/') else {
-                return token.to_string();
-            };
-            if std::path::Path::new(token).exists() || !std::path::Path::new(rest).exists() {
-                return token.to_string();
-            }
-            rest.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut out = String::with_capacity(line.len());
+    let mut starts_token = true;
+    for c in line.chars() {
+        if c == '/' && starts_token {
+            // The separator is dropped, and what follows is no longer at the
+            // start of a token.
+            starts_token = false;
+            continue;
+        }
+        starts_token = matches!(c, ' ' | '\t' | '"' | '\'');
+        out.push(c);
+    }
+    out
 }
 
 /// The platform's shell, answering the way `Sys.command` does everywhere else.

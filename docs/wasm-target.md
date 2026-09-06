@@ -885,12 +885,30 @@ host's own terms: `ash-wasm-run --threads`, or a browser page supplying the
 interface has for it and those threads run on the main scheduler.
 
 **That is threads that compute. Threads that allocate do not work yet**, which
-is why the native host says no unless asked. Two instances over one memory are
-two mutators on one heap and this collector is single-mutator: the same four
-threads, allocating arrays and maps instead of multiplying integers, end with a
-worker reaching `hlp_throw` with no trap installed and aborting, or in one run
-simply stopping at 0.6% CPU. That is the "single-mutator GC correctness first"
-above, arriving exactly where it was predicted.
+is why the native host says no unless asked -- and the reason is not the one
+this document predicted. It is worth writing down what it actually is, because
+"the collector is single-mutator" turned out to be wrong twice over.
+
+The collector stops the world in 0.00ms with four threads running, and
+collects in 0.09ms to 0.64ms. The rendezvous is not the problem.
+
+What was one problem, and is fixed: a worker registered its stack top as "the
+address of a local, plus a megabyte", the portable guess for a target that
+cannot say. On wasm a thread's stack is a block its own allocator handed it,
+anywhere in linear memory, so a megabyte above it is past the end -- and past
+the end of linear memory traps rather than reading zeroes. The collector
+faulted inside whatever allocation had triggered it. Registration happens in
+the thread's outermost frame, so the top needs no guessing.
+
+**What remains is not about threads at all, and that is the useful part.** The
+same allocating program, built for plain `wasm32-wasip1` with no threads
+target, no shared memory and no worker pool, loses an array that the main
+frame holds while its fibers allocate: native prints four checksums, wasm
+prints none. A collection is finding fewer roots on this target than it should.
+That reproduces single-threaded, in one process, with no agents and nothing to
+race -- which makes it a far easier thing to work on than it looked when it was
+only visible behind four Workers, and it is the thing standing between all of
+the above and a program that does anything real.
 
 Worth separating from it, because it is not about threads at all: that same
 allocating program is already wrong on plain `wasm32-wasip1`, with no threads

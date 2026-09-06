@@ -23,6 +23,20 @@ import sys.thread.Deque;
 	without the threads it passes, and the same shape with a `Deque<Int>`
 	rather than strings passes. It is not the dynamic sort -- adding that
 	alone to the passing version changes nothing.
+
+	And what a non-constant bound changes is that the array GROWS. Replace
+
+	    var expected = [for (i in 0...n) churn(i, 1)];
+
+	with an array that is sized once and then written,
+
+	    var expected = [];
+	    expected.resize(n);
+	    for (i in 0...n) expected[i] = churn(i, 1);
+
+	and it is correct, repeatedly -- same bound, same fibers, same
+	allocation. So the fault is on the growth path, where a backing store is
+	replaced by a larger one, and not in what holds the array.
 **/
 class RootLost {
 	static function churn(seed:Int, rounds:Int):Int {

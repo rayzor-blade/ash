@@ -197,14 +197,21 @@ fn driver() -> Result<Driver> {
 fn platform_args(dialect: Dialect) -> Vec<String> {
     let base: &[&str] = match (dialect, std::env::consts::OS) {
         (Dialect::Msvc, _) => &[
-            // Match the C runtime the ash_std static library was built
-            // against. rustc's x86_64-pc-windows-msvc target links the
-            // DYNAMIC CRT by default, while clang-cl defaults to the static
-            // one, and mixing them leaves the UCRT half-linked: the
-            // `legacy_stdio_definitions.lib` shim below resolves `_vsscanf_l`
-            // and then nothing provides the `__stdio_common_vsscanf` it
-            // forwards to. That is what 53 unresolved externals looked like.
-            "-MD",
+            // The C runtime is named rather than selected with `/MD`. That
+            // flag picks a runtime for a COMPILATION, and this invocation
+            // compiles nothing -- every input is already an object or a
+            // library -- so it has nothing to attach to and leaves the UCRT
+            // half linked: `legacy_stdio_definitions.lib` below resolves
+            // `_vsscanf_l`, and then nothing provides the
+            // `__stdio_common_vsscanf` it forwards to. That is what 53
+            // unresolved externals looked like.
+            //
+            // These three are the dynamic CRT, which is what rustc's
+            // x86_64-pc-windows-msvc target links, so the objects and
+            // `ash_std` agree about which runtime they are in.
+            "msvcrt.lib",
+            "ucrt.lib",
+            "vcruntime.lib",
             "kernel32.lib",
             "advapi32.lib",
             "bcrypt.lib",

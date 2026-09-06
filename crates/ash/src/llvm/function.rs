@@ -1764,6 +1764,17 @@ impl<'ctx> JITModule<'ctx> {
         store
             .set_volatile(true)
             .map_err(|e| anyhow!("marking the register pin volatile: {e:?}"))?;
+
+        // And null, because moving a register out of a wasm local moves it
+        // out of something the specification zeroes. A local starts at zero;
+        // a slot on the shadow stack starts holding whatever the last call to
+        // use those bytes left there. A register read before it is written
+        // was harmless when that read `undef` and folded away, and reads
+        // `0xffffffff` from a stale frame once the slot is real memory --
+        // which is a fault at the top of the address space, and which the
+        // collector would otherwise have traced as a pointer.
+        self.builder
+            .build_store(slot, self.context.ptr_type(AddressSpace::default()).const_null())?;
         Ok(())
     }
 

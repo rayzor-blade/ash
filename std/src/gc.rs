@@ -1598,6 +1598,15 @@ fn print_gc_stats_report() {
         growth_factor()
     );
     eprintln!("[gc] collections:      {}", n);
+    // Counted since the deadline was added and never reported, so a run whose
+    // collections were all thrown away looked like a run that collected. It
+    // is the one number here that means something is wrong rather than slow:
+    // any value but zero is a collection that did not happen because a
+    // mutator would not stop.
+    let abandoned = GC_STATS.stops_abandoned.load(Ordering::Relaxed);
+    if abandoned > 0 {
+        eprintln!("[gc] stops abandoned:  {abandoned}  <-- collections discarded");
+    }
     eprintln!(
         "[gc] blocks reclaimed: {} ({})",
         freed,

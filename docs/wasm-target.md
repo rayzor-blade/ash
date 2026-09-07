@@ -921,7 +921,9 @@ Measured after, on the allocating program that used to fail:
 | 8 | never tried | correct, 0.58s |
 
 The browser-shaped path -- the same module under node's `worker_threads` --
-prints the same numbers. `wasm32-wasip1` is untouched by this.
+prints the same numbers, and so does a real browser: four Haxe threads, each
+a Worker, allocating on one shared heap while the collector runs, answering
+what one thread answers. `wasm32-wasip1` is untouched by this.
 
 **What the nondeterminism was worth.** The same command hung, then hung, then
 passed. That is what said "race" and not "codegen", after four hypotheses that

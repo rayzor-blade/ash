@@ -245,6 +245,11 @@ prim render_pipeline_destroy(pipeline: i32) -> void
 prim encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) -> void
   js H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }] })
 
+# The same, with somewhere to keep depth. Cleared to 1.0, which is what a
+# `Less` test wants: everything is nearer than nothing.
+prim encoder_render_begin_depth(encoder: i32, view: i32, depth: i32, r: f64, g: f64, b: f64, a: f64) -> void
+  js H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }], depthStencilAttachment: { view: H.get("view", depth), depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" } })
+
 prim render_set_pipeline(encoder: i32, pipeline: i32) -> void
   js H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline))
 

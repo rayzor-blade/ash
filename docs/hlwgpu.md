@@ -421,7 +421,10 @@ desktop library that works is worth more than two halves that do not.
    ahead.
 6. **Capability.** Close the gap the IDL measures: the remaining enums, the
    descriptor members the builder now has somewhere to put, and the 30
-   operations. Blending landed with the builder; depth is next.
+   operations. Blending and depth landed with the builder; instancing,
+   multisampling, and multiple colour targets are the next descriptor members,
+   and `setViewport`, `setScissorRect` and the texture-to-texture copies the
+   next operations.
 7. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
@@ -467,9 +470,11 @@ A library is a good way to walk into the parts of a VM nobody has needed yet.
 arity, return kind and a bitmask of which arguments are floats
 (`ash_interp/src/interpreter/natives.rs`). A shape not in the table is a
 runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
-is `(i32, i32, f64, f64, f64, f64)` and no arm matched. One arm added. A
-float-heavy library will keep finding these, and the real answer eventually is
-a signature-directed dispatcher rather than a table.
+is `(i32, i32, f64, f64, f64, f64)` and no arm matched, and its depth variant
+needed a seven-argument one, of which the table had none at all. Two arms so
+far, one per new pass shape. A float-heavy library will keep finding these, and
+the real answer eventually is a signature-directed dispatcher rather than a
+table.
 
 ## A miss must not look like an answer
 

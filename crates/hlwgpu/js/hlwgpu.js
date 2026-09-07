@@ -452,6 +452,9 @@ export function hlwgpuImports(rt) {
     // Opens a pass that clears `view` and keeps what is drawn into it. The pass
     // belongs to the encoder until `encoder_render_end`.
     hlwgpu_encoder_render_begin: (encoder, view, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }] }); },
+    // The same, with somewhere to keep depth. Cleared to 1.0, which is what a
+    // `Less` test wants: everything is nearer than nothing.
+    hlwgpu_encoder_render_begin_depth: (encoder, view, depth, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }], depthStencilAttachment: { view: H.get("view", depth), depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" } }); },
     hlwgpu_render_set_pipeline: (encoder, pipeline) => { H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline)); },
     hlwgpu_render_set_vertex_buffer: (encoder, slot, buffer) => { H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer)); },
     hlwgpu_render_draw: (encoder, vertices, instances) => { H.pass(encoder).draw(vertices, instances); },

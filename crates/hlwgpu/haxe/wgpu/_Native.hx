@@ -291,6 +291,13 @@ class _Native {
 		return;
 	}
 
+	// The same, with somewhere to keep depth. Cleared to 1.0, which is what a
+	// `Less` test wants: everything is nearer than nothing.
+	@:hlNative("wgpu", "encoder_render_begin_depth")
+	public static function encoder_render_begin_depth(encoder : Int, view : Int, depth : Int, r : Float, g : Float, b : Float, a : Float) : Void {
+		return;
+	}
+
 	@:hlNative("wgpu", "render_set_pipeline")
 	public static function render_set_pipeline(encoder : Int, pipeline : Int) : Void {
 		return;

@@ -544,9 +544,19 @@ pub unsafe fn render_pipeline_destroy(pipeline: i32) {
 
 // -- render passes ----------------------------------------------------------
 
-pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
+/// Opens a pass that clears `view`, and `depth` if there is one.
+unsafe fn begin_pass(encoder: i32, view: i32, depth: i32, colour: wgpu::Color) {
     let entry = find!(ENCODERS, encoder);
     let view = find!(VIEWS, view);
+    let depth_view = if depth != 0 {
+        match VIEWS.lock().unwrap().get(depth) {
+            Some(found) => Some(found),
+            None => return,
+        }
+    } else {
+        None
+    };
+
     let mut held = entry.lock().unwrap();
     let pass = {
         let Some(encoder) = held.encoder.as_mut() else { return };
@@ -558,11 +568,22 @@ pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
+                        load: wgpu::LoadOp::Clear(colour),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: depth_view.as_ref().map(|view| {
+                    wgpu::RenderPassDepthStencilAttachment {
+                        view,
+                        // Nothing has been drawn, so nothing is nearer than
+                        // the far plane yet.
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: Default::default(),
@@ -570,6 +591,22 @@ pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f
             .forget_lifetime()
     };
     held.pass = Some(pass);
+}
+
+pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
+    begin_pass(encoder, view, 0, wgpu::Color { r, g, b, a });
+}
+
+pub unsafe fn encoder_render_begin_depth(
+    encoder: i32,
+    view: i32,
+    depth: i32,
+    r: f64,
+    g: f64,
+    b: f64,
+    a: f64,
+) {
+    begin_pass(encoder, view, depth, wgpu::Color { r, g, b, a });
 }
 
 pub unsafe fn render_set_pipeline(encoder: i32, pipeline: i32) {

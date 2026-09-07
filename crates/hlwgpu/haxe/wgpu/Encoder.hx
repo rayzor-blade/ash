@@ -16,6 +16,12 @@ abstract Encoder(Int) from Int to Int {
 		_Native.encoder_render_begin(this, target, r, g, b, a);
 	}
 
+	/** The same, with somewhere to keep depth. **/
+	public inline function beginRenderDepth(target : TextureView, depth : TextureView, r : Float, g : Float, b : Float,
+			a = 1.0) : Void {
+		_Native.encoder_render_begin_depth(this, target, depth, r, g, b, a);
+	}
+
 	public inline function setPipeline(pipeline : RenderPipeline) : Void {
 		_Native.render_set_pipeline(this, pipeline);
 	}

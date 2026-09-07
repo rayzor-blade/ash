@@ -1350,6 +1350,15 @@ impl HLInterpreter {
                     f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5));
                     0
                 }
+                // --- 7 args ---
+                (7, false, 0b111_1000) => {
+                    // Three objects then a colour: a render pass told its
+                    // attachments and what to clear them to.
+                    let f: unsafe extern "C" fn(i64, i64, i64, f64, f64, f64, f64) =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gi(2), gf(3), gf(4), gf(5), gf(6));
+                    0
+                }
                 // --- 8 args ---
                 (8, false, 0b0011_1100) => {
                     // Haxe graphics helpers commonly carry an object and

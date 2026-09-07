@@ -1373,12 +1373,31 @@ pub unsafe extern "C" fn hlp_clear_exc_value() {
     });
 }
 
+thread_local! {
+    /// One error value per thread, kept back for the case where the heap
+    /// cannot supply one.
+    ///
+    /// This is the runtime's way of raising an error, and an exhausted heap
+    /// is a thing programs raise errors about -- so allocating from the heap
+    /// to say the heap is full turned a catchable HL error into a Rust panic
+    /// that cannot even unwind across the `extern "C"` boundary it is called
+    /// through. Seen as `unwrap()` on `None` here, on a second thread, while
+    /// another was already reporting exhaustion.
+    ///
+    /// Reused rather than one per error: a program this far gone is not going
+    /// to read the second message, and a fresh one per raise would leak on a
+    /// loop that catches and retries.
+    static ERROR_RESERVE: std::cell::UnsafeCell<vdynamic> =
+        std::cell::UnsafeCell::new(unsafe { mem::zeroed() });
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
-    let d = crate::gc::gc_locked()
-        .allocate(mem::size_of::<hl::vdynamic>())
-        .unwrap()
-        .as_ptr() as *mut vdynamic;
+    let room = crate::gc::gc_locked().allocate(mem::size_of::<hl::vdynamic>());
+    let d = match room {
+        Some(value) => value.as_ptr() as *mut vdynamic,
+        None => ERROR_RESERVE.with(|reserve| reserve.get()),
+    };
     (*d).v.bytes = msg as *mut u8;
     (*d).t = crate::types::hlt_bytes();
 

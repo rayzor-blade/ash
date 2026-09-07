@@ -199,6 +199,8 @@ thread_local! {
             limit: Cell::new(0),
             block: Cell::new(usize::MAX),
             registered: Cell::new(false),
+            polls: AtomicU64::new(0),
+            site: AtomicU64::new(0),
         }
     };
 }
@@ -211,6 +213,15 @@ struct Tlab {
     /// Heap offset of the block this thread is bumping through, so a refill
     /// can hand the previous one back to the sweep.
     block: Cell<usize>,
+    /// How many times this thread has entered `gc_safepoint` with a stop
+    /// pending. Atomic because the collector reads it, by address, to say
+    /// whether a straggler is running safepoint code at all.
+    polls: AtomicU64,
+    /// The last blocking place this thread entered, as a `SITE_*` code. Only
+    /// written on paths that can wait, so it costs nothing in a loop that is
+    /// merely running -- and a straggler still showing the site it entered
+    /// two seconds ago is a straggler stuck there.
+    site: AtomicU64,
     /// Whether this thread is registered with `MUTATOR_WORLD`. Lives here only
     /// because the allocation fast path reads it: keeping it in its own
     /// `thread_local!` made every allocation pay a second TLS lookup.
@@ -349,6 +360,19 @@ struct MutatorRecord {
     /// happens once per collection instead -- at the snapshot below, where the
     /// mutator is already stopped and the table cannot move under us.
     scan_live: Option<(usize, usize)>,
+    /// This thread's safepoint counter, and what it read when the stop was
+    /// requested. A straggler that has not moved it has not run `gc_safepoint`
+    /// at all -- it is stuck in something -- while one that has is running it
+    /// and leaving without parking, which is a different fault entirely. The
+    /// message could never tell those apart.
+    ///
+    /// A raw address rather than a shared counter: the target lives in the
+    /// thread's own `Tlab`, which outlives the record, and reading it costs
+    /// the collector one atomic load.
+    polls: usize,
+    polls_at_stop: u64,
+    /// Where this thread last entered a place it could wait. See `mark_site`.
+    site: usize,
 }
 
 #[derive(Default)]
@@ -407,6 +431,9 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
             scan_ranges: Vec::new(),
             staged_scan_ranges: Vec::new(),
             scan_live: None,
+            polls: TLAB.with(|t| &t.polls as *const AtomicU64 as usize),
+            polls_at_stop: 0,
+            site: TLAB.with(|t| &t.site as *const AtomicU64 as usize),
         });
     }
     TLAB.with(|t| t.registered.set(true));
@@ -506,9 +533,16 @@ fn current_mutator_registered() -> bool {
 /// the only reference in a callee-saved register.
 #[inline(never)]
 pub(crate) fn gc_safepoint() {
-    if !GC_STOP_REQUESTED.load(Ordering::Acquire) || !current_mutator_registered() {
+    if !GC_STOP_REQUESTED.load(Ordering::Acquire) {
         return;
     }
+    // Only ever reached with a stop pending, so the steady-state cost of this
+    // is the branch above and nothing else.
+    TLAB.with(|t| t.polls.fetch_add(1, Ordering::Relaxed));
+    if !current_mutator_registered() {
+        return;
+    }
+    mark_site(SITE_SAFEPOINT_WORLD_LOCK);
     let thread = thread_self_fast();
     let mut saved_regs = [0usize; CALLEE_SAVED_WORDS];
     spill_callee_saved(&mut saved_regs);
@@ -553,6 +587,7 @@ pub(crate) fn gc_safepoint() {
         record.parked = false;
         record.stopped_sp = 0;
     }
+    mark_site(SITE_RUNNING);
     drop(world);
     if let Some((waited_ms, frames)) = late {
         eprintln!(
@@ -573,6 +608,11 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
     if blocking {
         gc_safepoint();
     }
+    mark_site(if blocking {
+        SITE_ENTER_BLOCKING
+    } else {
+        SITE_LEAVE_BLOCKING
+    });
     let thread = thread_self_fast();
     let mut saved_regs = [0usize; CALLEE_SAVED_WORDS];
     spill_callee_saved(&mut saved_regs);
@@ -615,6 +655,7 @@ pub(crate) fn gc_set_blocking(blocking: bool) -> bool {
     } else {
         world.mutators[index].stopped_sp = 0;
     }
+    mark_site(SITE_RUNNING);
     true
 }
 
@@ -639,6 +680,49 @@ impl Drop for StoppedWorld {
     }
 }
 
+/// A mutator's safepoint counter, by the address it published. Zero for a
+/// record that never published one.
+/// The blocking places a thread can be, for the straggler report.
+pub(crate) const SITE_SAFEPOINT_WORLD_LOCK: u64 = 1;
+pub(crate) const SITE_ENTER_BLOCKING: u64 = 2;
+pub(crate) const SITE_LEAVE_BLOCKING: u64 = 3;
+pub(crate) const SITE_LOCK_INNER: u64 = 4;
+pub(crate) const SITE_LOCK_CONDVAR: u64 = 5;
+pub(crate) const SITE_TLAB_REFILL: u64 = 6;
+pub(crate) const SITE_SCHEDULER_IDLE: u64 = 7;
+pub(crate) const SITE_RUNNING: u64 = 0;
+
+const SITE_NAMES: [&str; 8] = [
+    "running",
+    "safepoint-world-lock",
+    "enter-blocking",
+    "leave-blocking",
+    "gclock-inner",
+    "gclock-condvar",
+    "tlab-refill",
+    "scheduler-idle",
+];
+
+/// Record that this thread is entering (or has left) a place it can wait.
+#[inline]
+pub(crate) fn mark_site(site: u64) {
+    TLAB.with(|t| t.site.store(site, Ordering::Relaxed));
+}
+
+fn read_site(at: usize) -> u64 {
+    if at == 0 {
+        return 0;
+    }
+    unsafe { (*(at as *const AtomicU64)).load(Ordering::Relaxed) }
+}
+
+fn read_polls(at: usize) -> u64 {
+    if at == 0 {
+        return 0;
+    }
+    unsafe { (*(at as *const AtomicU64)).load(Ordering::Relaxed) }
+}
+
 fn stop_mutator_world() -> StoppedWorld {
     let collector = thread_self_fast();
     let mut world = MUTATOR_WORLD.state.lock().unwrap();
@@ -648,6 +732,9 @@ fn stop_mutator_world() -> StoppedWorld {
         world.collector = collector;
         GC_STOP_ASKED_NS.store(GC_EPOCH.elapsed().as_nanos() as u64, Ordering::Relaxed);
         GC_STOP_REQUESTED.store(true, Ordering::Release);
+        for record in world.mutators.iter_mut() {
+            record.polls_at_stop = read_polls(record.polls);
+        }
         crate::fiber::request_fiber_poll();
         // A mutator may already be sleeping in the GC-lock slow path. Wake it
         // so it can observe the stop request and publish its stack.
@@ -716,6 +803,37 @@ fn stop_mutator_world() -> StoppedWorld {
                 .filter(|m| m.thread != collector && !m.parked && m.blocking_depth == 0)
                 .map(|m| format!("{} {:#x}", m.role, m.thread))
                 .collect();
+            // The whole table, not just who is late. Naming the straggler
+            // says nothing about why it is one, and the answers that look
+            // alike from outside are told apart here: two records sharing a
+            // thread id means one of them can never be the one `gc_safepoint`
+            // parks, and a straggler already marked blocking means the count
+            // and the filter disagree.
+            if gc_stats_enabled() {
+                let table: Vec<String> = world
+                    .mutators
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{} {:#x}{}{}{}",
+                            m.role,
+                            m.thread,
+                            if m.thread == collector { " collector" } else { "" },
+                            if m.parked { " parked" } else { "" },
+                            if m.blocking_depth != 0 {
+                                format!(" blocking={}", m.blocking_depth)
+                            } else {
+                                format!(
+                                    " polls={} at={}",
+                                    read_polls(m.polls).saturating_sub(m.polls_at_stop),
+                                    SITE_NAMES[(read_site(m.site) as usize).min(7)]
+                                )
+                            },
+                        )
+                    })
+                    .collect();
+                eprintln!("[gc] mutators: {}", table.join(" | "));
+            }
             GC_STATS.stops_abandoned.fetch_add(1, Ordering::Relaxed);
             // Once by default: a program that does this does it repeatedly,
             // and a line per collection would bury everything else.
@@ -945,6 +1063,7 @@ fn release_tlab_region(gc: &mut ImmixAllocator) {
 
 #[cold]
 fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
+    mark_site(SITE_TLAB_REFILL);
     let mut gc = gc_locked();
     // A refill is a true safepoint, so a due trigger COLLECTS here instead
     // of deferring to the interpreter's next snapshot. During an
@@ -1757,11 +1876,13 @@ impl ReentrantGcLock {
             .is_ok()
         {
             self.depth.store(1, Ordering::Relaxed);
+            mark_site(SITE_RUNNING);
             return;
         }
         // Contended: register as a waiter (SeqCst pairs with release's
         // owner-store/waiters-load — see the comment there), then sleep.
         self.waiters.fetch_add(1, Ordering::SeqCst);
+        mark_site(SITE_LOCK_INNER);
         let mut g = self.inner.lock().unwrap();
         while self
             .owner
@@ -1773,11 +1894,13 @@ impl ReentrantGcLock {
                 gc_safepoint();
                 g = self.inner.lock().unwrap();
             } else {
+                mark_site(SITE_LOCK_CONDVAR);
                 g = self.cond.wait(g).unwrap();
             }
         }
         self.waiters.fetch_sub(1, Ordering::Relaxed);
         self.depth.store(1, Ordering::Relaxed);
+        mark_site(SITE_RUNNING);
         drop(g);
     }
 

@@ -587,6 +587,16 @@ fn worker_main(
         }
     }
     loop {
+        // Every time round, before anything else. A worker whose
+        // `schedule_step` keeps reporting progress never reaches the wait
+        // below, and nothing on this path allocates -- so it takes no lock,
+        // and a lock is where the rest of the runtime reaches a safepoint. It
+        // is then a registered mutator that is running, invisible to a world
+        // stop, and every collection is abandoned after two seconds until the
+        // heap fills. `block_yield` already names the shape that feeds it: a
+        // resumed-but-still-blocked fiber yields instantly and is counted as
+        // progress.
+        crate::gc::gc_safepoint();
         unsafe {
             drain_scheduler_commands();
             if schedule_step() {
@@ -600,18 +610,40 @@ fn worker_main(
                 .peek()
                 .map(|Reverse((deadline, _, _))| *deadline)
         });
-        let queue = endpoint.commands.lock().unwrap();
-        if !queue.is_empty() {
+        // Entered before the queue is locked, and never while holding it.
+        // Announcing a blocking section rendezvouses with a collection first,
+        // which parks this thread until the world restarts -- so doing it
+        // under this lock parks a thread holding it. Anyone who then wants to
+        // wake a waiter on this scheduler blocks in `push` on a plain mutex,
+        // where no safepoint is reached and the collector waits for them: the
+        // collector waits for the pusher, the pusher waits for this lock, and
+        // this thread waits for the collector. Measured as a world stop
+        // abandoned after two seconds with "1 of 5 mutators never reached a
+        // safepoint", every collection, until the heap filled.
+        // Peeked first, so a loop with work to do pays one lock and no
+        // blocking announcement -- which costs a world-lock round trip each
+        // way, on a loop that runs constantly.
+        if !endpoint.commands.lock().unwrap().is_empty() {
             continue;
         }
+        crate::gc::mark_site(crate::gc::SITE_SCHEDULER_IDLE);
         crate::gc::gc_set_blocking(true);
-        if let Some(deadline) = deadline {
-            let wait = deadline.saturating_duration_since(Instant::now());
-            let _ = endpoint.changed.wait_timeout(queue, wait).unwrap();
-        } else {
-            drop(endpoint.changed.wait(queue).unwrap());
+        {
+            // Re-checked under the lock: the peek above raced with anyone
+            // pushing, and a wait entered on a queue that filled meanwhile is
+            // a wait nothing will wake.
+            let queue = endpoint.commands.lock().unwrap();
+            if queue.is_empty() {
+                if let Some(deadline) = deadline {
+                    let wait = deadline.saturating_duration_since(Instant::now());
+                    let _ = endpoint.changed.wait_timeout(queue, wait).unwrap();
+                } else {
+                    drop(endpoint.changed.wait(queue).unwrap());
+                }
+            }
         }
         crate::gc::gc_set_blocking(false);
+        crate::gc::mark_site(crate::gc::SITE_RUNNING);
     }
 }
 

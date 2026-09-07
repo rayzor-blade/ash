@@ -1,7 +1,7 @@
 # hlwgpu
 
-WebGPU for HashLink: command encoders, bind groups, render and compute
-pipelines, WGSL shaders.
+WebGPU for HashLink: buffers, textures, WGSL shaders, render and compute
+pipelines. It is the layer you would build a renderer on, not a renderer.
 
 ```haxe
 var device = wgpu.Instance.create().adapter().device();
@@ -14,51 +14,59 @@ var pipeline = device.pipeline()
     .build();
 ```
 
-Builders are validated as you write them: an attribute with no vertex buffer
+Builders are validated as you write them. An attribute with no vertex buffer
 open, or a build with nowhere to draw, will not compile.
+
+`vertexBuffer().attributes(...)` works out the stride, the byte offsets and the
+shader locations from the formats you list. If you need a layout that is not
+packed, `attribute(format, offset, location)` places one by hand.
 
 ## Coordinates
 
-These are WebGPU's, and they are not OpenGL's. See `test/Conventions.hx`.
+WebGPU's coordinates are not OpenGL's. These are the two differences that catch
+people out:
 
-- **Clip space has +y upward**, and the first row of a texture is the **top**.
-  So +y lands in the early rows of a readback, and texture coordinates start
-  at the top-left.
-- **Depth runs 0 to 1**, not -1 to 1. A vertex at z = -0.5 is behind the near
-  plane and is clipped away rather than drawn in front of everything.
+- Clip space has +y pointing up, but the first row of a texture is the top row.
+  So geometry at +y comes back near the start of a readback buffer, and texture
+  coordinates start at the top left corner.
+- Depth runs from 0 to 1, not from -1 to 1. A vertex at z = -0.5 is behind the
+  near plane, so it is clipped away rather than drawn in front of everything.
+
+`test/Conventions.hx` checks both of these, because a symmetric test cannot.
 
 ## Destroying things
 
-Everything with a `destroy()` needs one. Nothing frees a buffer, texture or
-pipeline when it goes out of scope, and GPU memory is not the sort to leave
-to chance. Destroying twice is harmless.
+Call `destroy()` on anything that has it. Buffers, textures and pipelines are
+not freed when they go out of scope, so anything you do not destroy holds its
+GPU memory until the process exits. Destroying something twice is safe.
 
 ## Waiting
 
-Nothing in this library blocks. Work that takes time hands back a `Request`,
-which you can ask `ready` at any moment or `await` -- and awaiting yields
-between checks rather than spinning, so other threads keep running.
+Nothing in this library blocks. Anything that takes time gives you a `Request`
+instead: check `ready` whenever you like, or call `await()` to wait for the
+result. `await()` yields between checks rather than spinning, so your other
+threads keep running while the GPU works.
 
 ## Native target and Browser via wasm
 
-Natively this is `wgpu.hdll`. It holds the implementation, answers the VM
-directly, and needs nothing else -- any HashLink can load it.
+On desktop, hlwgpu is one native library, `wgpu.hdll`. HashLink loads it and
+calls straight into it, and there is nothing else to install.
 
-The browser route is **ash's**: ash is what compiles a HashLink program into a
-wasm module, runs it in a page, and loads native libraries alongside it. This
-library supplies its own half of that. A wasm module has neither a GPU nor
-JavaScript, so `wgpu.wasm` holds no implementation at all -- every primitive
-calls out, and `js/hlwgpu.js` is what answers. A page adds that with a script
-tag and merges what it exports into the imports the module is given. Nothing
-is compiled and nothing is rebuilt.
+In a browser your Haxe program runs as a WebAssembly module, which is
+something ash builds and hosts for you. A WebAssembly module cannot reach a GPU
+or call JavaScript on its own, so `wgpu.wasm` contains no GPU code at all. It
+forwards every call out to the page, and `js/hlwgpu.js` does the real work
+against `navigator.gpu`. Include that file with a script tag and pass what it
+exports to the module as imports; there is nothing to compile.
 
-`IMPORTS.md` is the same contract written out, for a host that is not a page.
+If you are writing your own host rather than using a browser, `IMPORTS.md`
+lists every function it has to provide.
 
-The native half is what the tests cover. The browser half is written, and
-generated from the same declaration, but has not been run yet.
+The desktop side is covered by tests. The browser side is written, and
+generated from the same source, but has not been run yet.
 
-## Drawing into a window
+## Getting a window to draw into
 
-Somewhere to draw has to come from somewhere. Anything that fits
-`wgpu.WindowSource` will do -- it reports where a native window is, and this
-library asks it nothing else.
+hlwgpu does not create windows. Give it anything matching `wgpu.WindowSource`,
+which is any object that can report where a native window lives, and it will
+create a surface on it.

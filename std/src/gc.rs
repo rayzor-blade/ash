@@ -2540,7 +2540,6 @@ impl ImmixAllocator {
     }
 
     fn maybe_collect(&mut self) {
-        set_collect_origin(3);
         // No automatic collections before the host runtime has entered user
         // code (hlp_gc_set_stack_top): during bootstrap (constants/class
         // descriptor init) both engines hold GC pointers in host-side Rust
@@ -2573,6 +2572,7 @@ impl ImmixAllocator {
                 return;
             }
         }
+        set_collect_origin(3);
         self.collect_garbage();
     }
 

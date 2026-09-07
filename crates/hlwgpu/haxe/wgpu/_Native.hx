@@ -296,4 +296,44 @@ class _Native {
 		return;
 	}
 
+	// A surface on a native window, from the raw handle fields `hlwindow` reports.
+	// Integers because the two libraries are separate: a Rust type cannot cross
+	// between them, the pointer inside it can.
+	// 
+	// A page has no such thing -- its surface comes from a canvas it already owns.
+	@:hlNative("wgpu", "surface_create")
+	public static function surface_create(instance : Int, platform : Int, wa : haxe.Int64, wb : haxe.Int64, da : haxe.Int64, db : haxe.Int64) : Int {
+		return 0;
+	}
+
+	// What this surface would rather be configured as, as a `wgpu.TextureFormat`.
+	@:hlNative("wgpu", "surface_preferred_format")
+	public static function surface_preferred_format(surface : Int, adapter : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "surface_configure")
+	public static function surface_configure(device : Int, surface : Int, width : Int, height : Int, format : Int) : Void {
+		return;
+	}
+
+	// The view to draw this frame into, or 0 if the surface needs configuring
+	// again -- which is what a resize looks like from here.
+	@:hlNative("wgpu", "surface_acquire")
+	public static function surface_acquire(surface : Int) : Int {
+		return 0;
+	}
+
+	// Hands the frame over, after the work drawing it has been submitted. A page
+	// presents at the end of its task, so this only releases the view there.
+	@:hlNative("wgpu", "surface_present")
+	public static function surface_present(queue : Int, surface : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "surface_destroy")
+	public static function surface_destroy(surface : Int) : Void {
+		return;
+	}
+
 }

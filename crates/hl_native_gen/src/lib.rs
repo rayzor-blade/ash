@@ -31,6 +31,10 @@
 //! The `js` line is that primitive's body in a page: an expression with the
 //! arguments in scope, plus `H` from the prelude. Rust bodies are not
 //! declared -- they are `imp::<name>`, and a mismatch is a link error.
+//!
+//! `js -` marks one a page genuinely cannot answer -- opening a window, when
+//! the page owns its own. The import still exists and still links; it says
+//! why instead of being missing.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -52,6 +56,9 @@ fn ty(name: &str) -> Option<Ty> {
         "i32" => Ty { letter: 'i', rust: "i32", haxe: "Int", wasm: "i32" },
         "bool" => Ty { letter: 'b', rust: "bool", haxe: "Bool", wasm: "i32" },
         "f64" => Ty { letter: 'd', rust: "f64", haxe: "Float", wasm: "f64" },
+        // For a pointer-sized value that has to survive the trip, such as a
+        // raw window handle.
+        "i64" => Ty { letter: 'l', rust: "i64", haxe: "haxe.Int64", wasm: "i64" },
         "bytes" => Ty { letter: 'B', rust: "*mut vbyte", haxe: "hl.Bytes", wasm: "i32" },
         "void" => Ty { letter: 'v', rust: "()", haxe: "Void", wasm: "" },
         _ => return None,
@@ -311,20 +318,29 @@ fn emit_js(d: &Decl, src: &str, prelude: &str) -> String {
          // `kinds.rs` comes from.\nconst KINDS = {{ {numbering} }};\n\n"
     );
     out.push_str(prelude.trim_end());
-    out.push_str(
+    let module = d.prefix.trim_end_matches('_');
+    let _ = write!(
+        out,
         "\n\n\n// The import object a page merges into `env`: one entry per primitive,\n\
-         // each body taken from the declaration.\nexport function hlwgpuImports(rt) {\n\
-         \x20 const H = makeHandles(rt);\n  return {\n",
+         // each body taken from the declaration.\nexport function {module}Imports(rt) {{\n\
+         \x20 const H = makeHandles(rt);\n  return {{\n"
     );
     for p in &d.prims {
         let args = p.args.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
         for line in &p.doc {
             let _ = writeln!(out, "    // {line}");
         }
-        let body = match p.ret.as_str() {
-            "void" => format!("{{ {}; }}", p.js),
-            "bool" => format!("({}) ? 1 : 0", p.js),
-            _ => p.js.clone(),
+        let body = if p.js == "-" {
+            format!(
+                "{{ throw new Error(\"{}: {} has no meaning in a page\"); }}",
+                d.library, p.name
+            )
+        } else {
+            match p.ret.as_str() {
+                "void" => format!("{{ {}; }}", p.js),
+                "bool" => format!("({}) ? 1 : 0", p.js),
+                _ => p.js.clone(),
+            }
         };
         let _ = writeln!(out, "    {}{}: ({args}) => {body},", d.prefix, p.name);
     }
@@ -440,8 +456,14 @@ pub fn generate(api: impl AsRef<Path>) -> io::Result<()> {
 
     // Best effort: a read-only checkout still builds, and the committed
     // copies are what a consumer reads.
+    // A library with no prelude gets none; a native-only one has nothing for
+    // a page to hold.
     let prelude = fs::read_to_string(&prelude_path).unwrap_or_default();
-    let _ = write_if_changed(&root.join("js/hlwgpu.js"), &emit_js(&decl, &src, &prelude));
+    let module = decl.prefix.trim_end_matches('_').to_string();
+    let _ = write_if_changed(
+        &root.join(format!("js/{module}.js")),
+        &emit_js(&decl, &src, &prelude),
+    );
     let _ = write_if_changed(
         &root.join(format!("haxe/{}/_Native.hx", decl.library)),
         &emit_haxe(&decl, &src),

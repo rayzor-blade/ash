@@ -330,12 +330,16 @@ thread had finished. `surface_present()` returns immediately and the Haxe frame
 loop yields, which is what lets the host resume on `requestAnimationFrame`. A
 frame ends where the *program* suspends.
 
-**Nothing in ash produces a native window handle today.** SDL is out and the
-library does not own windows, so on native the handle comes from the embedder --
-which is the correct layering for a consumable library, and also means native
-presentation needs something that does not yet exist here. An optional
-companion over `winit` is the obvious answer and is deliberately not part of
-hlwgpu.
+**The window comes from somewhere else.** `crates/hlwindow` is that somewhere
+on native: a small `winit` companion, its own `window.hdll`, which a program
+that renders offscreen or into a page's canvas never loads.
+
+The two libraries share no Rust type and no Haxe type. `hlwindow` reports its
+raw handle as a platform code and four integers; `hlwgpu` puts them back
+together. On the Haxe side `wgpu.WindowSource` is a structural type, so a
+`window.Window` satisfies it by shape and neither library names the other. That
+is what keeps hlwgpu depending on nothing while still being able to draw into
+a window.
 
 **v1 is headless-first** for that reason and a better one: offscreen textures
 and readback need no display, are exactly reproducible, and are the only way to
@@ -358,10 +362,10 @@ desktop library that works is worth more than two halves that do not.
    index buffers, and bind groups holding buffers, views and samplers
    together. A 2x2 texture on a 64x64 quad puts one texel in each quadrant,
    so the four expected colours are exact.
-5. **Presentation.** A surface from a window handle, swap chain, resize, plus
-   depth and blending. Ordered after the above deliberately: nothing here
-   produces a native window handle yet, while everything above is verifiable
-   offscreen without one.
+5. **Presentation.** DONE natively. A surface on a native window, configured,
+   acquired, drawn and presented every frame. `crates/hlwindow` is the small
+   `winit` companion that supplies the window; depth and blending are still
+   ahead.
 6. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
@@ -410,6 +414,20 @@ runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
 is `(i32, i32, f64, f64, f64, f64)` and no arm matched. One arm added. A
 float-heavy library will keep finding these, and the real answer eventually is
 a signature-directed dispatcher rather than a table.
+
+## A miss must not look like an answer
+
+`surface_preferred_format` mapped wgpu's format to ours and returned 0 for
+anything unrecognised -- and 0 is `Rgba8Unorm`, a real format. The first
+surface it met preferred `Bgra8UnormSrgb`, which the list did not have, so it
+answered "Rgba8Unorm" with confidence and `configure` panicked two calls later
+with a validation error that named neither the cause nor the caller. On screen
+it was a blank white window.
+
+It now answers -1, which is not a format. The same shape as the conformance
+harness reporting a compiler warning as the reason a suite failed: a default
+that is indistinguishable from a real result turns a clear failure into a
+puzzle. Any lookup added here should fail loudly rather than plausibly.
 
 ## Queued
 

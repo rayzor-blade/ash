@@ -231,3 +231,33 @@ prim render_set_index_buffer(encoder: i32, buffer: i32, format: i32) -> void
 
 prim render_draw_indexed(encoder: i32, indices: i32, instances: i32) -> void
   js H.pass(encoder).drawIndexed(indices, instances)
+
+# -- surfaces ---------------------------------------------------------------
+
+# A surface on a native window, from the raw handle fields `hlwindow` reports.
+# Integers because the two libraries are separate: a Rust type cannot cross
+# between them, the pointer inside it can.
+#
+# A page has no such thing -- its surface comes from a canvas it already owns.
+prim surface_create(instance: i32, platform: i32, wa: i64, wb: i64, da: i64, db: i64) -> i32
+  js -
+
+# What this surface would rather be configured as, as a `wgpu.TextureFormat`.
+prim surface_preferred_format(surface: i32, adapter: i32) -> i32
+  js 1
+
+prim surface_configure(device: i32, surface: i32, width: i32, height: i32, format: i32) -> void
+  js H.get("surface", surface).configure({ device: H.get("device", device), format: H.formatName(format), alphaMode: "opaque" })
+
+# The view to draw this frame into, or 0 if the surface needs configuring
+# again -- which is what a resize looks like from here.
+prim surface_acquire(surface: i32) -> i32
+  js H.put("view", H.get("surface", surface).getCurrentTexture().createView())
+
+# Hands the frame over, after the work drawing it has been submitted. A page
+# presents at the end of its task, so this only releases the view there.
+prim surface_present(queue: i32, surface: i32) -> void
+  js H.releaseFrame(surface)
+
+prim surface_destroy(surface: i32) -> void
+  js H.drop("surface", surface)

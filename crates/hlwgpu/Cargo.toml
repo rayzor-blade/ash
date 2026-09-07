@@ -16,7 +16,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 default = ["native"]
 # The implementation. Off for the wasm side module, which holds none: a
 # wasip1 module has no GPU, so the primitives forward and a host answers.
-native = ["dep:wgpu", "dep:pollster"]
+native = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
 
 [build-dependencies]
 hl_native_gen = { path = "../hl_native_gen" }
@@ -24,6 +24,8 @@ hl_native_gen = { path = "../hl_native_gen" }
 [dependencies]
 hl_abi = { path = "../hl_abi" }
 wgpu = { version = "30", optional = true }
+# Must resolve to the same version wgpu uses, or the handles are not its.
+raw-window-handle = { version = "0.6", optional = true }
 # Adapter enumeration is a future that is already resolved on every native
 # backend. In a page it genuinely is not, which is why the API is ticketed
 # either way -- see `adapter_request` in wgpu.api.

@@ -21,7 +21,7 @@ const GEN_MASK = (1 << GEN_BITS) - 1;
 
 // Texture formats, by index. Haxe's `wgpu.TextureFormat` and the match in
 // `imp.rs` are the same list in the same order.
-const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float"];
+const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float", "bgra8unorm-srgb"];
 
 // Vertex attribute formats, likewise `wgpu.VertexFormat`.
 const VERTEX_FORMATS = ["float32x2", "float32x3", "float32x4", "uint32"];
@@ -47,6 +47,7 @@ export function makeHandles(rt) {
   const canvases = new Map();
   const queueOf_ = new Map();
   const passes = new Map();
+  const frames = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -222,6 +223,16 @@ export function makeHandles(rt) {
     return p.getBindGroupLayout(group);
   }
 
+  // A page presents when its task ends, so all this does is let go of the
+  // view that `surface_acquire` handed out.
+  function releaseFrame(surface) {
+    const view = frames.get(surface);
+    if (view) {
+      drop("view", view);
+      frames.delete(surface);
+    }
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -261,7 +272,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes, resource, layoutOf,
+    beginPass, pass, endPass, formatName, attributes, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -367,5 +378,21 @@ export function hlwgpuImports(rt) {
     // `format` is 0 for uint16 and 1 for uint32.
     hlwgpu_render_set_index_buffer: (encoder, buffer, format) => { H.pass(encoder).setIndexBuffer(H.get("buffer", buffer), format === 1 ? "uint32" : "uint16"); },
     hlwgpu_render_draw_indexed: (encoder, indices, instances) => { H.pass(encoder).drawIndexed(indices, instances); },
+    // A surface on a native window, from the raw handle fields `hlwindow` reports.
+    // Integers because the two libraries are separate: a Rust type cannot cross
+    // between them, the pointer inside it can.
+    // 
+    // A page has no such thing -- its surface comes from a canvas it already owns.
+    hlwgpu_surface_create: (instance, platform, wa, wb, da, db) => { throw new Error("wgpu: surface_create has no meaning in a page"); },
+    // What this surface would rather be configured as, as a `wgpu.TextureFormat`.
+    hlwgpu_surface_preferred_format: (surface, adapter) => 1,
+    hlwgpu_surface_configure: (device, surface, width, height, format) => { H.get("surface", surface).configure({ device: H.get("device", device), format: H.formatName(format), alphaMode: "opaque" }); },
+    // The view to draw this frame into, or 0 if the surface needs configuring
+    // again -- which is what a resize looks like from here.
+    hlwgpu_surface_acquire: (surface) => H.put("view", H.get("surface", surface).getCurrentTexture().createView()),
+    // Hands the frame over, after the work drawing it has been submitted. A page
+    // presents at the end of its task, so this only releases the view there.
+    hlwgpu_surface_present: (queue, surface) => { H.releaseFrame(surface); },
+    hlwgpu_surface_destroy: (surface) => { H.drop("surface", surface); },
   };
 }

@@ -488,6 +488,7 @@ fn texture_format(which: i32) -> wgpu::TextureFormat {
         1 => wgpu::TextureFormat::Bgra8Unorm,
         2 => wgpu::TextureFormat::Rgba8UnormSrgb,
         3 => wgpu::TextureFormat::Depth32Float,
+        4 => wgpu::TextureFormat::Bgra8UnormSrgb,
         _ => wgpu::TextureFormat::Rgba8Unorm,
     }
 }
@@ -800,4 +801,171 @@ pub unsafe fn render_draw_indexed(encoder: i32, indices: i32, instances: i32) {
     if let Some(pass) = held.pass.as_mut() {
         pass.draw_indexed(0..indices.max(0) as u32, 0, 0..instances.max(1) as u32);
     }
+}
+
+// -- surfaces ---------------------------------------------------------------
+
+/// A surface and the frame currently acquired on it.
+///
+/// The frame has to be held between `acquire` and `present`: presenting is
+/// what consumes it, and the view handed out points into it.
+struct SurfaceEntry {
+    surface: wgpu::Surface<'static>,
+    frame: Option<wgpu::SurfaceTexture>,
+    view: i32,
+}
+
+slab!(SURFACES, Mutex<SurfaceEntry>, Kind::Surface);
+
+/// Puts a raw window handle back together from the integers that crossed.
+///
+/// `hlwindow` took it apart; the two libraries share no Rust type, only these
+/// numbers and the platform code that says how to read them.
+unsafe fn raw_handles(
+    platform: i32,
+    wa: i64,
+    wb: i64,
+    da: i64,
+    db: i64,
+) -> Option<(raw_window_handle::RawDisplayHandle, raw_window_handle::RawWindowHandle)> {
+    use raw_window_handle as rwh;
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+
+    Some(match platform {
+        1 => (
+            rwh::RawDisplayHandle::AppKit(rwh::AppKitDisplayHandle::new()),
+            rwh::RawWindowHandle::AppKit(rwh::AppKitWindowHandle::new(NonNull::new(
+                wa as *mut c_void,
+            )?)),
+        ),
+        2 => {
+            let mut window = rwh::Win32WindowHandle::new(std::num::NonZeroIsize::new(wa as isize)?);
+            window.hinstance = std::num::NonZeroIsize::new(wb as isize);
+            (
+                rwh::RawDisplayHandle::Windows(rwh::WindowsDisplayHandle::new()),
+                rwh::RawWindowHandle::Win32(window),
+            )
+        }
+        3 => {
+            let mut window = rwh::XlibWindowHandle::new(wa as u64);
+            window.visual_id = wb as u64;
+            (
+                rwh::RawDisplayHandle::Xlib(rwh::XlibDisplayHandle::new(
+                    NonNull::new(da as *mut c_void),
+                    db as i32,
+                )),
+                rwh::RawWindowHandle::Xlib(window),
+            )
+        }
+        4 => (
+            rwh::RawDisplayHandle::Wayland(rwh::WaylandDisplayHandle::new(NonNull::new(
+                da as *mut c_void,
+            )?)),
+            rwh::RawWindowHandle::Wayland(rwh::WaylandWindowHandle::new(NonNull::new(
+                wa as *mut c_void,
+            )?)),
+        ),
+        _ => return None,
+    })
+}
+
+pub unsafe fn surface_create(
+    instance: i32,
+    platform: i32,
+    wa: i64,
+    wb: i64,
+    da: i64,
+    db: i64,
+) -> i32 {
+    let instance = find!(INSTANCES, instance, 0);
+    let Some((display, window)) = raw_handles(platform, wa, wb, da, db) else {
+        return 0;
+    };
+    // Unsafe because nothing here can prove the window outlives the surface.
+    // The Haxe side owns both and closes them in order.
+    let made = instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+        raw_display_handle: Some(display),
+        raw_window_handle: window,
+    });
+    match made {
+        Ok(surface) => SURFACES
+            .lock()
+            .unwrap()
+            .put(Mutex::new(SurfaceEntry { surface, frame: None, view: 0 })),
+        Err(_) => 0,
+    }
+}
+
+pub unsafe fn surface_preferred_format(surface: i32, adapter: i32) -> i32 {
+    let entry = find!(SURFACES, surface, 0);
+    let adapter = find!(ADAPTERS, adapter, 0);
+    let held = entry.lock().unwrap();
+    let formats = held.surface.get_capabilities(&adapter).formats;
+    // -1 rather than a default, so a format this library has no name for
+    // cannot pass itself off as Rgba8Unorm and fail later inside configure.
+    match formats.first() {
+        Some(wgpu::TextureFormat::Rgba8Unorm) => 0,
+        Some(wgpu::TextureFormat::Bgra8Unorm) => 1,
+        Some(wgpu::TextureFormat::Rgba8UnormSrgb) => 2,
+        Some(wgpu::TextureFormat::Bgra8UnormSrgb) => 4,
+        _ => -1,
+    }
+}
+
+pub unsafe fn surface_configure(device: i32, surface: i32, width: i32, height: i32, format: i32) {
+    let entry = find!(DEVICES, device);
+    let surface = find!(SURFACES, surface);
+    let held = surface.lock().unwrap();
+    held.surface.configure(
+        &entry.device,
+        &wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: texture_format(format),
+            width: width.max(1) as u32,
+            height: height.max(1) as u32,
+            color_space: wgpu::SurfaceColorSpace::Auto,
+            present_mode: wgpu::PresentMode::Fifo,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        },
+    );
+}
+
+pub unsafe fn surface_acquire(surface: i32) -> i32 {
+    let entry = find!(SURFACES, surface, 0);
+    let mut held = entry.lock().unwrap();
+    // Suboptimal is still a frame -- a resize usually reports it before it
+    // reports Outdated, and refusing it would drop every frame in between.
+    let frame = match held.surface.get_current_texture() {
+        wgpu::CurrentSurfaceTexture::Success(frame)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+        _ => return 0,
+    };
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let handle = VIEWS.lock().unwrap().put(view);
+    held.frame = Some(frame);
+    held.view = handle;
+    handle
+}
+
+pub unsafe fn surface_present(queue: i32, surface: i32) {
+    let queue = find!(QUEUES, queue);
+    let entry = find!(SURFACES, surface);
+    let mut held = entry.lock().unwrap();
+    // The view points into the frame, so it goes first.
+    if held.view != 0 {
+        VIEWS.lock().unwrap().remove(held.view);
+        held.view = 0;
+    }
+    if let Some(frame) = held.frame.take() {
+        queue.present(frame);
+    }
+}
+
+pub unsafe fn surface_destroy(surface: i32) {
+    SURFACES.lock().unwrap().remove(surface);
 }

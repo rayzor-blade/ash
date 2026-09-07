@@ -1,0 +1,39 @@
+# A window, and the raw handles a graphics library needs to draw into it.
+#
+# Separate from hlwgpu on purpose: hlwgpu depends on nothing, and a program
+# that renders offscreen or into a page's canvas never loads this at all.
+#
+# Native only. A page has a window already and did not ask us for one, so
+# every primitive here says so rather than being missing.
+
+library window
+prefix hlwindow_
+kinds window
+
+prim open(title: bytes, width: i32, height: i32) -> i32
+  js -
+
+# Drains the events waiting and returns what happened: 1 if the window was
+# asked to close, 2 if it was resized. Never blocks.
+prim poll(window: i32) -> i32
+  js -
+
+prim width(window: i32) -> i32
+  js -
+
+prim height(window: i32) -> i32
+  js -
+
+# Which set of raw handles `raw` reports: 1 AppKit, 2 Win32, 3 Xlib,
+# 4 Wayland, 0 none this library knows.
+prim platform(window: i32) -> i32
+  js -
+
+# A pointer-sized field of the raw handle, by index: 0 and 1 are the window's,
+# 2 and 3 the display's. What each means depends on `platform`, and hlwgpu is
+# what puts them back together.
+prim raw(window: i32, which: i32) -> i64
+  js -
+
+prim close(window: i32) -> void
+  js -

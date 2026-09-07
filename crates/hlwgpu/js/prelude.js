@@ -14,7 +14,7 @@ const GEN_MASK = (1 << GEN_BITS) - 1;
 
 // Texture formats, by index. Haxe's `wgpu.TextureFormat` and the match in
 // `imp.rs` are the same list in the same order.
-const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float"];
+const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float", "bgra8unorm-srgb"];
 
 // Vertex attribute formats, likewise `wgpu.VertexFormat`.
 const VERTEX_FORMATS = ["float32x2", "float32x3", "float32x4", "uint32"];
@@ -40,6 +40,7 @@ export function makeHandles(rt) {
   const canvases = new Map();
   const queueOf_ = new Map();
   const passes = new Map();
+  const frames = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -215,6 +216,16 @@ export function makeHandles(rt) {
     return p.getBindGroupLayout(group);
   }
 
+  // A page presents when its task ends, so all this does is let go of the
+  // view that `surface_acquire` handed out.
+  function releaseFrame(surface) {
+    const view = frames.get(surface);
+    if (view) {
+      drop("view", view);
+      frames.delete(surface);
+    }
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -254,7 +265,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes, resource, layoutOf,
+    beginPass, pass, endPass, formatName, attributes, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

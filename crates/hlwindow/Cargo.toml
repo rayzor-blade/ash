@@ -1,0 +1,18 @@
+[package]
+name = "hlwindow"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A window for HashLink, over winit, so hlwgpu has something to draw into"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+hl_native_gen = { path = "../hl_native_gen" }
+
+[dependencies]
+hl_abi = { path = "../hl_abi" }
+winit = "0.30"
+raw-window-handle = "0.6"

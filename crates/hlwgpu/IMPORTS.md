@@ -62,3 +62,9 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_render_set_bind_group` | `encoder: i32`, `group: i32`, `bindgroup: i32` | `void` |
 | `hlwgpu_render_set_index_buffer` | `encoder: i32`, `buffer: i32`, `format: i32` | `void` |
 | `hlwgpu_render_draw_indexed` | `encoder: i32`, `indices: i32`, `instances: i32` | `void` |
+| `hlwgpu_surface_create` | `instance: i32`, `platform: i32`, `wa: i64`, `wb: i64`, `da: i64`, `db: i64` | `i32` |
+| `hlwgpu_surface_preferred_format` | `surface: i32`, `adapter: i32` | `i32` |
+| `hlwgpu_surface_configure` | `device: i32`, `surface: i32`, `width: i32`, `height: i32`, `format: i32` | `void` |
+| `hlwgpu_surface_acquire` | `surface: i32` | `i32` |
+| `hlwgpu_surface_present` | `queue: i32`, `surface: i32` | `void` |
+| `hlwgpu_surface_destroy` | `surface: i32` | `void` |

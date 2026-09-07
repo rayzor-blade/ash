@@ -342,9 +342,14 @@ desktop library that works is worth more than two halves that do not.
    `Instance.request()` reporting an adapter's name, backend and limits.
 2. **Compute.** DONE natively. Buffer upload, a WGSL kernel, dispatch, and a
    polled readback checked value by value.
-3. **Offscreen render.** Vertex and index buffers, a render pipeline, a render
-   pass into a texture, readback to PNG. Golden-image tests.
+3. **Offscreen render.** DONE natively. A vertex buffer, a render pipeline, a
+   pass into a texture, and a readback whose pixels are checked exactly.
+   Colours are 0 or 1 per channel so the unorm conversion is exact on any GPU;
+   PNG output is a convenience that has not been needed.
 4. **Presentation.** A surface from a window handle, swap chain, resize.
+   Index buffers, depth, and blending arrive here too -- that is where the
+   descriptors first get deep enough to need the packed layout above, which
+   is why nothing so far has one.
 5. **The page.** Milestones 1 to 3 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
@@ -381,6 +386,18 @@ the library has grown a dependency on us.
 - **A Heaps driver.** Downstream, and it needs hxsl work that is not this.
 - **A renderer, scene graph, or material system.** This is the layer under those.
 - **GL or WebGL.** The point of WebGPU is not writing that translation.
+
+## What building this found in ash
+
+A library is a good way to walk into the parts of a VM nobody has needed yet.
+
+**The interpreter dispatches a native through a hand-written table** keyed by
+arity, return kind and a bitmask of which arguments are floats
+(`ash_interp/src/interpreter/natives.rs`). A shape not in the table is a
+runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
+is `(i32, i32, f64, f64, f64, f64)` and no arm matched. One arm added. A
+float-heavy library will keep finding these, and the real answer eventually is
+a signature-directed dispatcher rather than a table.
 
 ## Queued
 

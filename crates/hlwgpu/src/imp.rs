@@ -3,6 +3,10 @@
 //! Serves the native library, and later a host answering the wasm imports.
 //! Nothing here is generated; `bindings` is the part that is.
 
+// A primitive's arity comes from `wgpu.api`, not from a style choice here:
+// these signatures have to match what the generated bindings call.
+#![allow(clippy::too_many_arguments)]
+
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -16,8 +20,18 @@ struct DeviceEntry {
     queue: i32,
 }
 
-/// An encoder is consumed by `finish()`, so it has to be takeable.
-type Encoder = Mutex<Option<wgpu::CommandEncoder>>;
+/// An encoder and whatever pass is open on it.
+///
+/// A `RenderPass` borrows its encoder, which a handle table cannot express, so
+/// `forget_lifetime` erases it and the two are kept together instead. The
+/// encoder is `Option` because `finish()` consumes it.
+#[derive(Default)]
+struct EncoderEntry {
+    encoder: Option<wgpu::CommandEncoder>,
+    pass: Option<wgpu::RenderPass<'static>>,
+}
+
+type Encoder = Mutex<EncoderEntry>;
 
 /// Plain `Mutex`es, not HL ones: threads a library makes are foreign to the
 /// VM, and HashLink's own locks give them no exclusion.
@@ -34,6 +48,9 @@ slab!(QUEUES, wgpu::Queue, Kind::Queue);
 slab!(BUFFERS, wgpu::Buffer, Kind::Buffer);
 slab!(SHADERS, wgpu::ShaderModule, Kind::Shader);
 slab!(PIPELINES, wgpu::ComputePipeline, Kind::Pipeline);
+slab!(RENDER_PIPELINES, wgpu::RenderPipeline, Kind::Renderpipeline);
+slab!(TEXTURES, wgpu::Texture, Kind::Texture);
+slab!(VIEWS, wgpu::TextureView, Kind::View);
 slab!(BINDGROUPS, wgpu::BindGroup, Kind::Bindgroup);
 slab!(ENCODERS, Encoder, Kind::Encoder);
 
@@ -357,7 +374,10 @@ pub unsafe fn encoder_create(device: i32) -> i32 {
     let encoder = entry
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    ENCODERS.lock().unwrap().put(Mutex::new(Some(encoder)))
+    ENCODERS
+        .lock()
+        .unwrap()
+        .put(Mutex::new(EncoderEntry { encoder: Some(encoder), pass: None }))
 }
 
 pub unsafe fn encoder_compute(
@@ -372,7 +392,7 @@ pub unsafe fn encoder_compute(
     let pipeline = find!(PIPELINES, pipeline);
     let bind_group = find!(BINDGROUPS, bindgroup);
     let mut held = encoder.lock().unwrap();
-    let Some(encoder) = held.as_mut() else { return };
+    let Some(encoder) = held.encoder.as_mut() else { return };
 
     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: None,
@@ -395,7 +415,7 @@ pub unsafe fn encoder_copy_buffer(
     let source = find!(BUFFERS, src);
     let target = find!(BUFFERS, dst);
     let mut held = encoder.lock().unwrap();
-    let Some(encoder) = held.as_mut() else { return };
+    let Some(encoder) = held.encoder.as_mut() else { return };
     encoder.copy_buffer_to_buffer(
         &source,
         src_offset.max(0) as u64,
@@ -409,7 +429,7 @@ pub unsafe fn encoder_submit(encoder: i32, queue: i32) {
     let handle = encoder;
     let encoder = find!(ENCODERS, handle);
     let queue = find!(QUEUES, queue);
-    let taken = encoder.lock().unwrap().take();
+    let taken = encoder.lock().unwrap().encoder.take();
     if let Some(encoder) = taken {
         queue.submit([encoder.finish()]);
     }
@@ -427,4 +447,229 @@ pub unsafe fn queue_work_done(device: i32, queue: i32) -> i32 {
         flag.store(true, Ordering::Release);
     });
     REQUESTS.lock().unwrap().waiting(done, result, device)
+}
+
+// -- textures ---------------------------------------------------------------
+
+/// The order `js/prelude.js` FORMATS and Haxe's `wgpu.TextureFormat` use.
+fn texture_format(which: i32) -> wgpu::TextureFormat {
+    match which {
+        1 => wgpu::TextureFormat::Bgra8Unorm,
+        2 => wgpu::TextureFormat::Rgba8UnormSrgb,
+        3 => wgpu::TextureFormat::Depth32Float,
+        _ => wgpu::TextureFormat::Rgba8Unorm,
+    }
+}
+
+/// Likewise `wgpu.VertexFormat`.
+fn vertex_format(which: i32) -> wgpu::VertexFormat {
+    match which {
+        1 => wgpu::VertexFormat::Float32x3,
+        2 => wgpu::VertexFormat::Float32x4,
+        3 => wgpu::VertexFormat::Uint32,
+        _ => wgpu::VertexFormat::Float32x2,
+    }
+}
+
+pub unsafe fn texture_create(device: i32, width: i32, height: i32, format: i32, usage: i32) -> i32 {
+    let entry = find!(DEVICES, device, 0);
+    let texture = entry.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: width.max(1) as u32,
+            height: height.max(1) as u32,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: texture_format(format),
+        usage: wgpu::TextureUsages::from_bits_truncate(usage as u32),
+        view_formats: &[],
+    });
+    TEXTURES.lock().unwrap().put(texture)
+}
+
+pub unsafe fn texture_view(texture: i32) -> i32 {
+    let texture = find!(TEXTURES, texture, 0);
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    VIEWS.lock().unwrap().put(view)
+}
+
+pub unsafe fn texture_destroy(texture: i32) {
+    TEXTURES.lock().unwrap().remove(texture);
+}
+
+pub unsafe fn view_destroy(view: i32) {
+    VIEWS.lock().unwrap().remove(view);
+}
+
+// -- render pipelines -------------------------------------------------------
+
+pub unsafe fn render_pipeline_create(
+    device: i32,
+    shader: i32,
+    vs: *mut vbyte,
+    fs: *mut vbyte,
+    format: i32,
+    stride: i32,
+    attrs: *mut vbyte,
+    count: i32,
+) -> i32 {
+    if attrs.is_null() || count <= 0 {
+        return 0;
+    }
+    let entry = find!(DEVICES, device, 0);
+    let module = find!(SHADERS, shader, 0);
+    let (vs, fs) = (ucs2_in(vs), ucs2_in(fs));
+
+    let raw = std::slice::from_raw_parts(attrs as *const i32, count as usize * 3);
+    let attributes: Vec<wgpu::VertexAttribute> = raw
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|a| wgpu::VertexAttribute {
+            format: vertex_format(a[0]),
+            offset: a[1].max(0) as u64,
+            shader_location: a[2].max(0) as u32,
+        })
+        .collect();
+
+    let buffers = [Some(wgpu::VertexBufferLayout {
+        array_stride: stride.max(0) as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &attributes,
+    })];
+    let targets = [Some(wgpu::ColorTargetState {
+        format: texture_format(format),
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+
+    let pipeline = entry
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some(vs.as_str()),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some(fs.as_str()),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: Default::default(),
+            cache: None,
+        });
+    RENDER_PIPELINES.lock().unwrap().put(pipeline)
+}
+
+pub unsafe fn render_pipeline_destroy(pipeline: i32) {
+    RENDER_PIPELINES.lock().unwrap().remove(pipeline);
+}
+
+// -- render passes ----------------------------------------------------------
+
+pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
+    let entry = find!(ENCODERS, encoder);
+    let view = find!(VIEWS, view);
+    let mut held = entry.lock().unwrap();
+    let pass = {
+        let Some(encoder) = held.encoder.as_mut() else { return };
+        encoder
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: Default::default(),
+            })
+            .forget_lifetime()
+    };
+    held.pass = Some(pass);
+}
+
+pub unsafe fn render_set_pipeline(encoder: i32, pipeline: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let pipeline = find!(RENDER_PIPELINES, pipeline);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_pipeline(&pipeline);
+    }
+}
+
+pub unsafe fn render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let buffer = find!(BUFFERS, buffer);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_vertex_buffer(slot.max(0) as u32, buffer.slice(..));
+    }
+}
+
+pub unsafe fn render_draw(encoder: i32, vertices: i32, instances: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.draw(0..vertices.max(0) as u32, 0..instances.max(1) as u32);
+    }
+}
+
+pub unsafe fn encoder_render_end(encoder: i32) {
+    let entry = find!(ENCODERS, encoder);
+    // Dropping the pass is what ends it.
+    entry.lock().unwrap().pass = None;
+}
+
+pub unsafe fn encoder_copy_texture_to_buffer(
+    encoder: i32,
+    texture: i32,
+    buffer: i32,
+    width: i32,
+    height: i32,
+    bytes_per_row: i32,
+) {
+    let entry = find!(ENCODERS, encoder);
+    let texture = find!(TEXTURES, texture);
+    let buffer = find!(BUFFERS, buffer);
+    let mut held = entry.lock().unwrap();
+    let Some(encoder) = held.encoder.as_mut() else { return };
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row.max(0) as u32),
+                rows_per_image: Some(height.max(1) as u32),
+            },
+        },
+        wgpu::Extent3d {
+            width: width.max(1) as u32,
+            height: height.max(1) as u32,
+            depth_or_array_layers: 1,
+        },
+    );
 }

@@ -12,6 +12,13 @@ const GEN_BITS = 7;
 const INDEX_MASK = (1 << INDEX_BITS) - 1;
 const GEN_MASK = (1 << GEN_BITS) - 1;
 
+// Texture formats, by index. Haxe's `wgpu.TextureFormat` and the match in
+// `imp.rs` are the same list in the same order.
+const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float"];
+
+// Vertex attribute formats, likewise `wgpu.VertexFormat`.
+const VERTEX_FORMATS = ["float32x2", "float32x3", "float32x4", "uint32"];
+
 // Limits `adapter_limit` can ask for, by index. Haxe's `wgpu.Limit` is the
 // same list in the same order.
 const LIMITS = [
@@ -32,6 +39,7 @@ export function makeHandles(rt) {
   let nextRequest = 1;
   const canvases = new Map();
   const queueOf_ = new Map();
+  const passes = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -169,6 +177,43 @@ export function makeHandles(rt) {
     return out;
   }
 
+  // A pass belongs to the encoder that opened it, until it is ended.
+  function beginPass(encoder, descriptor) {
+    passes.set(encoder, get("encoder", encoder).beginRenderPass(descriptor));
+  }
+
+  function pass(encoder) {
+    const p = passes.get(encoder);
+    if (!p) throw new Error(`hlwgpu: encoder ${encoder} has no open pass`);
+    return p;
+  }
+
+  function endPass(encoder) {
+    const p = passes.get(encoder);
+    if (p) {
+      p.end();
+      passes.delete(encoder);
+    }
+  }
+
+  function formatName(which) {
+    return FORMATS[which] ?? FORMATS[0];
+  }
+
+  // `count` triples of format, byte offset and shader location.
+  function attributes(ptr, count) {
+    const raw = new Int32Array(rt.memory.buffer, ptr, count * 3);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push({
+        format: VERTEX_FORMATS[raw[i * 3]] ?? VERTEX_FORMATS[0],
+        offset: raw[i * 3 + 1],
+        shaderLocation: raw[i * 3 + 2],
+      });
+    }
+    return out;
+  }
+
   function limitName(which) {
     return LIMITS[which] ?? null;
   }
@@ -190,6 +235,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
+    beginPass, pass, endPass, formatName, attributes,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

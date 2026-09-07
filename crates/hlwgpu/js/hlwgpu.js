@@ -3,7 +3,7 @@
 
 // The handle kind numbering, from the same line of the declaration that
 // `kinds.rs` comes from.
-const KINDS = { instance: 1, adapter: 2, device: 3, queue: 4, buffer: 5, texture: 6, view: 7, sampler: 8, shader: 9, bindgroup: 10, layout: 11, pipeline: 12, encoder: 13, pass: 14, surface: 15 };
+const KINDS = { instance: 1, adapter: 2, device: 3, queue: 4, buffer: 5, texture: 6, view: 7, sampler: 8, shader: 9, bindgroup: 10, pipeline: 11, renderpipeline: 12, encoder: 13, surface: 14 };
 
 // Runtime support for the primitives: a table mapping integer handles to
 // JavaScript objects, in-flight requests the guest polls, UTF-16 string
@@ -18,6 +18,13 @@ const INDEX_BITS = 20;
 const GEN_BITS = 7;
 const INDEX_MASK = (1 << INDEX_BITS) - 1;
 const GEN_MASK = (1 << GEN_BITS) - 1;
+
+// Texture formats, by index. Haxe's `wgpu.TextureFormat` and the match in
+// `imp.rs` are the same list in the same order.
+const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float"];
+
+// Vertex attribute formats, likewise `wgpu.VertexFormat`.
+const VERTEX_FORMATS = ["float32x2", "float32x3", "float32x4", "uint32"];
 
 // Limits `adapter_limit` can ask for, by index. Haxe's `wgpu.Limit` is the
 // same list in the same order.
@@ -39,6 +46,7 @@ export function makeHandles(rt) {
   let nextRequest = 1;
   const canvases = new Map();
   const queueOf_ = new Map();
+  const passes = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -176,6 +184,43 @@ export function makeHandles(rt) {
     return out;
   }
 
+  // A pass belongs to the encoder that opened it, until it is ended.
+  function beginPass(encoder, descriptor) {
+    passes.set(encoder, get("encoder", encoder).beginRenderPass(descriptor));
+  }
+
+  function pass(encoder) {
+    const p = passes.get(encoder);
+    if (!p) throw new Error(`hlwgpu: encoder ${encoder} has no open pass`);
+    return p;
+  }
+
+  function endPass(encoder) {
+    const p = passes.get(encoder);
+    if (p) {
+      p.end();
+      passes.delete(encoder);
+    }
+  }
+
+  function formatName(which) {
+    return FORMATS[which] ?? FORMATS[0];
+  }
+
+  // `count` triples of format, byte offset and shader location.
+  function attributes(ptr, count) {
+    const raw = new Int32Array(rt.memory.buffer, ptr, count * 3);
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push({
+        format: VERTEX_FORMATS[raw[i * 3]] ?? VERTEX_FORMATS[0],
+        offset: raw[i * 3 + 1],
+        shaderLocation: raw[i * 3 + 2],
+      });
+    }
+    return out;
+  }
+
   function limitName(which) {
     return LIMITS[which] ?? null;
   }
@@ -197,6 +242,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
+    beginPass, pass, endPass, formatName, attributes,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -268,5 +314,26 @@ export function hlwgpuImports(rt) {
     // natively the callback fires only when one is polled, and polling is what
     // `request_ready` does while waiting.
     hlwgpu_queue_work_done: (device, queue) => H.pending(H.get("queue", queue).onSubmittedWorkDone().then(() => 1)),
+    // `format` is `wgpu.TextureFormat`; `usage` is GPUTextureUsage's bits:
+    // 1 COPY_SRC, 2 COPY_DST, 4 TEXTURE_BINDING, 8 STORAGE_BINDING,
+    // 16 RENDER_ATTACHMENT.
+    hlwgpu_texture_create: (device, width, height, format, usage) => H.put("texture", H.get("device", device).createTexture({ size: [width, height], format: H.formatName(format), usage })),
+    hlwgpu_texture_view: (texture) => H.put("view", H.get("texture", texture).createView()),
+    hlwgpu_texture_destroy: (texture) => { H.drop("texture", texture); },
+    hlwgpu_view_destroy: (view) => { H.drop("view", view); },
+    // One vertex buffer, whose attributes are `count` triples of
+    // (`wgpu.VertexFormat`, byte offset, shader location).
+    hlwgpu_render_pipeline_create: (device, shader, vs, fs, format, stride, attrs, count) => H.put("renderpipeline", H.get("device", device).createRenderPipeline({ layout: "auto", vertex: { module: H.get("shader", shader), entryPoint: H.readStr(vs), buffers: [{ arrayStride: stride, attributes: H.attributes(attrs, count) }] }, fragment: { module: H.get("shader", shader), entryPoint: H.readStr(fs), targets: [{ format: H.formatName(format) }] }, primitive: { topology: "triangle-list" } })),
+    hlwgpu_render_pipeline_destroy: (pipeline) => { H.drop("renderpipeline", pipeline); },
+    // Opens a pass that clears `view` and keeps what is drawn into it. The pass
+    // belongs to the encoder until `encoder_render_end`.
+    hlwgpu_encoder_render_begin: (encoder, view, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }] }); },
+    hlwgpu_render_set_pipeline: (encoder, pipeline) => { H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline)); },
+    hlwgpu_render_set_vertex_buffer: (encoder, slot, buffer) => { H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer)); },
+    hlwgpu_render_draw: (encoder, vertices, instances) => { H.pass(encoder).draw(vertices, instances); },
+    hlwgpu_encoder_render_end: (encoder) => { H.endPass(encoder); },
+    // `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
+    // ours: a width of 64 RGBA pixels is exactly one row.
+    hlwgpu_encoder_copy_texture_to_buffer: (encoder, texture, buffer, width, height, bytes_per_row) => { H.get("encoder", encoder).copyTextureToBuffer({ texture: H.get("texture", texture) }, { buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, [width, height]); },
   };
 }

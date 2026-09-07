@@ -190,4 +190,73 @@ class _Native {
 		return 0;
 	}
 
+	// `format` is `wgpu.TextureFormat`; `usage` is GPUTextureUsage's bits:
+	// 1 COPY_SRC, 2 COPY_DST, 4 TEXTURE_BINDING, 8 STORAGE_BINDING,
+	// 16 RENDER_ATTACHMENT.
+	@:hlNative("wgpu", "texture_create")
+	public static function texture_create(device : Int, width : Int, height : Int, format : Int, usage : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "texture_view")
+	public static function texture_view(texture : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "texture_destroy")
+	public static function texture_destroy(texture : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "view_destroy")
+	public static function view_destroy(view : Int) : Void {
+		return;
+	}
+
+	// One vertex buffer, whose attributes are `count` triples of
+	// (`wgpu.VertexFormat`, byte offset, shader location).
+	@:hlNative("wgpu", "render_pipeline_create")
+	public static function render_pipeline_create(device : Int, shader : Int, vs : hl.Bytes, fs : hl.Bytes, format : Int, stride : Int, attrs : hl.Bytes, count : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "render_pipeline_destroy")
+	public static function render_pipeline_destroy(pipeline : Int) : Void {
+		return;
+	}
+
+	// Opens a pass that clears `view` and keeps what is drawn into it. The pass
+	// belongs to the encoder until `encoder_render_end`.
+	@:hlNative("wgpu", "encoder_render_begin")
+	public static function encoder_render_begin(encoder : Int, view : Int, r : Float, g : Float, b : Float, a : Float) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "render_set_pipeline")
+	public static function render_set_pipeline(encoder : Int, pipeline : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "render_set_vertex_buffer")
+	public static function render_set_vertex_buffer(encoder : Int, slot : Int, buffer : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "render_draw")
+	public static function render_draw(encoder : Int, vertices : Int, instances : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "encoder_render_end")
+	public static function encoder_render_end(encoder : Int) : Void {
+		return;
+	}
+
+	// `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
+	// ours: a width of 64 RGBA pixels is exactly one row.
+	@:hlNative("wgpu", "encoder_copy_texture_to_buffer")
+	public static function encoder_copy_texture_to_buffer(encoder : Int, texture : Int, buffer : Int, width : Int, height : Int, bytes_per_row : Int) : Void {
+		return;
+	}
+
 }

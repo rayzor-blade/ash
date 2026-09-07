@@ -17,7 +17,7 @@ prefix hlwgpu_
 # number is carried in the handle so that a buffer used where a texture
 # belongs is refused rather than reading a real object of the wrong type.
 # Rust and JavaScript both get this list from here; neither writes it out.
-kinds instance adapter device queue buffer texture view sampler shader bindgroup layout pipeline encoder pass surface
+kinds instance adapter device queue buffer texture view sampler shader bindgroup pipeline renderpipeline encoder surface
 
 # -- instance ---------------------------------------------------------------
 
@@ -151,3 +151,54 @@ prim encoder_submit(encoder: i32, queue: i32) -> void
 # `request_ready` does while waiting.
 prim queue_work_done(device: i32, queue: i32) -> i32
   js H.pending(H.get("queue", queue).onSubmittedWorkDone().then(() => 1))
+
+# -- textures ---------------------------------------------------------------
+
+# `format` is `wgpu.TextureFormat`; `usage` is GPUTextureUsage's bits:
+# 1 COPY_SRC, 2 COPY_DST, 4 TEXTURE_BINDING, 8 STORAGE_BINDING,
+# 16 RENDER_ATTACHMENT.
+prim texture_create(device: i32, width: i32, height: i32, format: i32, usage: i32) -> i32
+  js H.put("texture", H.get("device", device).createTexture({ size: [width, height], format: H.formatName(format), usage }))
+
+prim texture_view(texture: i32) -> i32
+  js H.put("view", H.get("texture", texture).createView())
+
+prim texture_destroy(texture: i32) -> void
+  js H.drop("texture", texture)
+
+prim view_destroy(view: i32) -> void
+  js H.drop("view", view)
+
+# -- render pipelines -------------------------------------------------------
+
+# One vertex buffer, whose attributes are `count` triples of
+# (`wgpu.VertexFormat`, byte offset, shader location).
+prim render_pipeline_create(device: i32, shader: i32, vs: bytes, fs: bytes, format: i32, stride: i32, attrs: bytes, count: i32) -> i32
+  js H.put("renderpipeline", H.get("device", device).createRenderPipeline({ layout: "auto", vertex: { module: H.get("shader", shader), entryPoint: H.readStr(vs), buffers: [{ arrayStride: stride, attributes: H.attributes(attrs, count) }] }, fragment: { module: H.get("shader", shader), entryPoint: H.readStr(fs), targets: [{ format: H.formatName(format) }] }, primitive: { topology: "triangle-list" } }))
+
+prim render_pipeline_destroy(pipeline: i32) -> void
+  js H.drop("renderpipeline", pipeline)
+
+# -- render passes ----------------------------------------------------------
+
+# Opens a pass that clears `view` and keeps what is drawn into it. The pass
+# belongs to the encoder until `encoder_render_end`.
+prim encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) -> void
+  js H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }] })
+
+prim render_set_pipeline(encoder: i32, pipeline: i32) -> void
+  js H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline))
+
+prim render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) -> void
+  js H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer))
+
+prim render_draw(encoder: i32, vertices: i32, instances: i32) -> void
+  js H.pass(encoder).draw(vertices, instances)
+
+prim encoder_render_end(encoder: i32) -> void
+  js H.endPass(encoder)
+
+# `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
+# ours: a width of 64 RGBA pixels is exactly one row.
+prim encoder_copy_texture_to_buffer(encoder: i32, texture: i32, buffer: i32, width: i32, height: i32, bytes_per_row: i32) -> void
+  js H.get("encoder", encoder).copyTextureToBuffer({ texture: H.get("texture", texture) }, { buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, [width, height])

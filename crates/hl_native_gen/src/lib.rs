@@ -51,6 +51,7 @@ fn ty(name: &str) -> Option<Ty> {
     Some(match name {
         "i32" => Ty { letter: 'i', rust: "i32", haxe: "Int", wasm: "i32" },
         "bool" => Ty { letter: 'b', rust: "bool", haxe: "Bool", wasm: "i32" },
+        "f64" => Ty { letter: 'd', rust: "f64", haxe: "Float", wasm: "f64" },
         "bytes" => Ty { letter: 'B', rust: "*mut vbyte", haxe: "hl.Bytes", wasm: "i32" },
         "void" => Ty { letter: 'v', rust: "()", haxe: "Void", wasm: "" },
         _ => return None,

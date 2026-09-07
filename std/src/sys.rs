@@ -87,7 +87,148 @@ unsafe fn pchar_to_os(p: *const vbyte) -> Option<OsString> {
 }
 
 unsafe fn pchar_to_path(p: *const vbyte) -> Option<PathBuf> {
-    pchar_to_os(p).map(PathBuf::from)
+    let path = pchar_to_os(p).map(PathBuf::from)?;
+    #[cfg(target_family = "wasm")]
+    let path = wasi_cwd::resolve(&path);
+    Some(path)
+}
+
+/// A working directory for a target that has none.
+///
+/// WASI has no `chdir`. A guest reaches the filesystem through preopened
+/// capabilities, not a path namespace it can walk, so there is nothing for
+/// `set_current_dir` to change and it fails -- which surfaced as
+/// `Sys.setCwd("..")` raising where every other target succeeds.
+///
+/// The directory is kept here instead, and every path this module resolves is
+/// taken relative to it. Doing that in `pchar_to_path` is the point: emulating
+/// only the getter and the setter would let `Sys.setCwd` report success and
+/// then leave `File.read` opening the old directory.
+#[cfg(target_family = "wasm")]
+mod wasi_cwd {
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// Where the program started, absolute, for reporting only.
+    static START: Mutex<Option<PathBuf>> = Mutex::new(None);
+    /// Where it is now, as a path relative to `START`.
+    ///
+    /// Relative on purpose. A preopen is named by path -- `.`, and whatever
+    /// else the host opened -- so `..` opens only because that is the name it
+    /// was given. Rewriting it to an absolute path matches no preopen and
+    /// fails, which is what a first attempt at this did to
+    /// `readDirectory("..")`.
+    static HERE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    fn start() -> PathBuf {
+        START
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_or_insert_with(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+            })
+            .clone()
+    }
+
+    /// Resolve `.` and `..` textually. `canonicalize` needs every component to
+    /// exist and to be reachable through a preopen, which is exactly what is
+    /// not true of the directory above the opened one.
+    fn normalise(path: &Path) -> PathBuf {
+        let mut out: Vec<Component> = Vec::new();
+        for part in path.components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => match out.last() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    // Nothing sits above the root, and a leading `..` has
+                    // nothing to cancel: it names a real place, so keep it.
+                    Some(Component::RootDir) => {}
+                    _ => out.push(part),
+                },
+                other => out.push(other),
+            }
+        }
+        if out.is_empty() {
+            return PathBuf::from(".");
+        }
+        out.iter().collect()
+    }
+
+    /// `target` as reached from `base`, both absolute.
+    fn relative_to(base: &Path, target: &Path) -> PathBuf {
+        let (base, target) = (normalise(base), normalise(target));
+        let mut b = base.components().peekable();
+        let mut t = target.components().peekable();
+        while b.peek().is_some() && b.peek() == t.peek() {
+            b.next();
+            t.next();
+        }
+        let mut out = PathBuf::new();
+        for _ in b {
+            out.push("..");
+        }
+        for part in t {
+            out.push(part);
+        }
+        if out.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            out
+        }
+    }
+
+    /// Whether the program has moved. Until it does, nothing here applies:
+    /// resolution stays exactly as it was, so a program that never calls
+    /// `Sys.setCwd` cannot be affected by any of this.
+    fn moved() -> Option<PathBuf> {
+        HERE.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The absolute path `Sys.getCwd` reports.
+    pub fn get() -> PathBuf {
+        match moved() {
+            Some(rel) => normalise(&start().join(rel)),
+            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        }
+    }
+
+    /// Move there, reporting whether the program can reach it. A directory
+    /// that cannot be listed is not one to move into: under WASI that means
+    /// the host never opened it, and accepting it would make every later path
+    /// wrong instead of this one call.
+    pub fn set(path: &Path) -> bool {
+        // Already resolved: `pchar_to_path` ran `resolve` on the way in.
+        // Resolving a second time would join it onto the current position,
+        // so restoring a saved absolute path would land back where it was
+        // instead of where it names.
+        let target = normalise(path);
+        if std::fs::read_dir(&target).is_err() {
+            return false;
+        }
+        *HERE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+        true
+    }
+
+    /// A path as the host must see it: relative, so that it meets a preopen.
+    ///
+    /// Untouched until the program has moved. Rewriting paths that were
+    /// already correct gains nothing and cost two passing tests when this
+    /// first tried it.
+    pub fn resolve(path: &Path) -> PathBuf {
+        let Some(rel) = moved() else {
+            return path.to_path_buf();
+        };
+        if path.is_absolute() {
+            return relative_to(&start(), path);
+        }
+        normalise(&rel.join(path))
+    }
 }
 
 /// Inverse of `pchar_to_os`.
@@ -761,6 +902,9 @@ pub unsafe extern "C" fn hlp_sys_create_dir(path: *const vbyte, mode: i32) -> bo
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_get_cwd() -> *mut vbyte {
+    #[cfg(target_family = "wasm")]
+    let dir = wasi_cwd::get();
+    #[cfg(not(target_family = "wasm"))]
     let Ok(dir) = std::env::current_dir() else {
         return std::ptr::null_mut();
     };
@@ -775,6 +919,11 @@ pub unsafe extern "C" fn hlp_sys_get_cwd() -> *mut vbyte {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_set_cwd(dir: *const vbyte) -> bool {
     match pchar_to_path(dir) {
+        // Already resolved against the working directory by the line above,
+        // so a relative move lands where it should.
+        #[cfg(target_family = "wasm")]
+        Some(p) => wasi_cwd::set(&p),
+        #[cfg(not(target_family = "wasm"))]
         Some(p) => std::env::set_current_dir(p).is_ok(),
         None => false,
     }

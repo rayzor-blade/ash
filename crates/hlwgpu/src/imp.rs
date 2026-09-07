@@ -627,6 +627,42 @@ pub unsafe fn render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) {
     }
 }
 
+pub unsafe fn render_set_viewport(
+    encoder: i32,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    min_depth: f64,
+    max_depth: f64,
+) {
+    let entry = find!(ENCODERS, encoder);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_viewport(
+            x as f32,
+            y as f32,
+            width as f32,
+            height as f32,
+            min_depth as f32,
+            max_depth as f32,
+        );
+    }
+}
+
+pub unsafe fn render_set_scissor_rect(encoder: i32, x: i32, y: i32, width: i32, height: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_scissor_rect(
+            x.max(0) as u32,
+            y.max(0) as u32,
+            width.max(0) as u32,
+            height.max(0) as u32,
+        );
+    }
+}
+
 pub unsafe fn render_draw(encoder: i32, vertices: i32, instances: i32) {
     let entry = find!(ENCODERS, encoder);
     let mut held = entry.lock().unwrap();
@@ -639,6 +675,82 @@ pub unsafe fn encoder_render_end(encoder: i32) {
     let entry = find!(ENCODERS, encoder);
     // Dropping the pass is what ends it.
     entry.lock().unwrap().pass = None;
+}
+
+/// The texture side of a copy, always the whole of mip level zero.
+fn whole_texture(texture: &wgpu::Texture) -> wgpu::TexelCopyTextureInfo<'_> {
+    wgpu::TexelCopyTextureInfo {
+        texture,
+        mip_level: 0,
+        origin: wgpu::Origin3d::ZERO,
+        aspect: wgpu::TextureAspect::All,
+    }
+}
+
+fn extent(width: i32, height: i32) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: width.max(1) as u32,
+        height: height.max(1) as u32,
+        depth_or_array_layers: 1,
+    }
+}
+
+pub unsafe fn encoder_copy_buffer_to_texture(
+    encoder: i32,
+    buffer: i32,
+    bytes_per_row: i32,
+    texture: i32,
+    width: i32,
+    height: i32,
+) {
+    let entry = find!(ENCODERS, encoder);
+    let buffer = find!(BUFFERS, buffer);
+    let texture = find!(TEXTURES, texture);
+    let mut held = entry.lock().unwrap();
+    let Some(encoder) = held.encoder.as_mut() else { return };
+    encoder.copy_buffer_to_texture(
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row.max(0) as u32),
+                rows_per_image: Some(height.max(1) as u32),
+            },
+        },
+        whole_texture(&texture),
+        extent(width, height),
+    );
+}
+
+pub unsafe fn encoder_copy_texture_to_texture(
+    encoder: i32,
+    src: i32,
+    dst: i32,
+    width: i32,
+    height: i32,
+) {
+    let entry = find!(ENCODERS, encoder);
+    let source = find!(TEXTURES, src);
+    let target = find!(TEXTURES, dst);
+    let mut held = entry.lock().unwrap();
+    let Some(encoder) = held.encoder.as_mut() else { return };
+    encoder.copy_texture_to_texture(
+        whole_texture(&source),
+        whole_texture(&target),
+        extent(width, height),
+    );
+}
+
+pub unsafe fn encoder_clear_buffer(encoder: i32, buffer: i32, offset: i32, size: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let buffer = find!(BUFFERS, buffer);
+    let mut held = entry.lock().unwrap();
+    let Some(encoder) = held.encoder.as_mut() else { return };
+    encoder.clear_buffer(
+        &buffer,
+        offset.max(0) as u64,
+        Some(size.max(0) as u64),
+    );
 }
 
 pub unsafe fn encoder_copy_texture_to_buffer(

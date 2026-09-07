@@ -42,12 +42,38 @@ abstract Encoder(Int) from Int to Int {
 		_Native.render_draw_indexed(this, indices, instances);
 	}
 
+	/** Where clip space lands in the target. Measured in pixels. **/
+	public inline function setViewport(x : Float, y : Float, width : Float, height : Float, minDepth = 0.0,
+			maxDepth = 1.0) : Void {
+		_Native.render_set_viewport(this, x, y, width, height, minDepth, maxDepth);
+	}
+
+	/** Cuts away anything drawn outside this rectangle, without squeezing it. **/
+	public inline function setScissorRect(x : Int, y : Int, width : Int, height : Int) : Void {
+		_Native.render_set_scissor_rect(this, x, y, width, height);
+	}
+
 	public inline function draw(vertices : Int, instances = 1) : Void {
 		_Native.render_draw(this, vertices, instances);
 	}
 
 	public inline function endRender() : Void {
 		_Native.encoder_render_end(this);
+	}
+
+	/** Uploads a buffer into a texture. `bytesPerRow` is a multiple of 256. **/
+	public inline function copyBufferToTexture(buffer : Buffer, bytesPerRow : Int, texture : Texture, width : Int,
+			height : Int) : Void {
+		_Native.encoder_copy_buffer_to_texture(this, buffer, bytesPerRow, texture, width, height);
+	}
+
+	public inline function copyTextureToTexture(src : Texture, dst : Texture, width : Int, height : Int) : Void {
+		_Native.encoder_copy_texture_to_texture(this, src, dst, width, height);
+	}
+
+	/** Zeroes part of a buffer without uploading zeroes to it. **/
+	public inline function clearBuffer(buffer : Buffer, offset : Int, size : Int) : Void {
+		_Native.encoder_clear_buffer(this, buffer, offset, size);
 	}
 
 	/** `bytesPerRow` must be a multiple of 256. That is WebGPU's rule. **/

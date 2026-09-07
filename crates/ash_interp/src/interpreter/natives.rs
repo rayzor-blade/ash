@@ -1359,6 +1359,14 @@ impl HLInterpreter {
                     f(gi(0), gi(1), gi(2), gf(3), gf(4), gf(5), gf(6));
                     0
                 }
+                (7, false, 0b111_1110) => {
+                    // An object then six floats: a viewport, which is a
+                    // rectangle and a depth range.
+                    let f: unsafe extern "C" fn(i64, f64, f64, f64, f64, f64, f64) =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gf(1), gf(2), gf(3), gf(4), gf(5), gf(6));
+                    0
+                }
                 // --- 8 args ---
                 (8, false, 0b0011_1100) => {
                     // Haxe graphics helpers commonly carry an object and

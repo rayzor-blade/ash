@@ -308,6 +308,20 @@ class _Native {
 		return;
 	}
 
+	// Where in the target the clip space -1..1 lands, and what depth range it
+	// maps onto.
+	@:hlNative("wgpu", "render_set_viewport")
+	public static function render_set_viewport(encoder : Int, x : Float, y : Float, width : Float, height : Float, min_depth : Float, max_depth : Float) : Void {
+		return;
+	}
+
+	// Throws away anything drawn outside this rectangle. Unlike a viewport it
+	// does not squeeze what is drawn, it cuts it.
+	@:hlNative("wgpu", "render_set_scissor_rect")
+	public static function render_set_scissor_rect(encoder : Int, x : Int, y : Int, width : Int, height : Int) : Void {
+		return;
+	}
+
 	@:hlNative("wgpu", "render_draw")
 	public static function render_draw(encoder : Int, vertices : Int, instances : Int) : Void {
 		return;
@@ -315,6 +329,23 @@ class _Native {
 
 	@:hlNative("wgpu", "encoder_render_end")
 	public static function encoder_render_end(encoder : Int) : Void {
+		return;
+	}
+
+	// The other direction. `bytes_per_row` is a multiple of 256 here too.
+	@:hlNative("wgpu", "encoder_copy_buffer_to_texture")
+	public static function encoder_copy_buffer_to_texture(encoder : Int, buffer : Int, bytes_per_row : Int, texture : Int, width : Int, height : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "encoder_copy_texture_to_texture")
+	public static function encoder_copy_texture_to_texture(encoder : Int, src : Int, dst : Int, width : Int, height : Int) : Void {
+		return;
+	}
+
+	// Zeroes a range of a buffer without uploading zeroes to it.
+	@:hlNative("wgpu", "encoder_clear_buffer")
+	public static function encoder_clear_buffer(encoder : Int, buffer : Int, offset : Int, size : Int) : Void {
 		return;
 	}
 

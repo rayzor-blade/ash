@@ -63,8 +63,13 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_encoder_render_begin_depth` | `encoder: i32`, `view: i32`, `depth: i32`, `r: f64`, `g: f64`, `b: f64`, `a: f64` | `void` |
 | `hlwgpu_render_set_pipeline` | `encoder: i32`, `pipeline: i32` | `void` |
 | `hlwgpu_render_set_vertex_buffer` | `encoder: i32`, `slot: i32`, `buffer: i32` | `void` |
+| `hlwgpu_render_set_viewport` | `encoder: i32`, `x: f64`, `y: f64`, `width: f64`, `height: f64`, `min_depth: f64`, `max_depth: f64` | `void` |
+| `hlwgpu_render_set_scissor_rect` | `encoder: i32`, `x: i32`, `y: i32`, `width: i32`, `height: i32` | `void` |
 | `hlwgpu_render_draw` | `encoder: i32`, `vertices: i32`, `instances: i32` | `void` |
 | `hlwgpu_encoder_render_end` | `encoder: i32` | `void` |
+| `hlwgpu_encoder_copy_buffer_to_texture` | `encoder: i32`, `buffer: i32`, `bytes_per_row: i32`, `texture: i32`, `width: i32`, `height: i32` | `void` |
+| `hlwgpu_encoder_copy_texture_to_texture` | `encoder: i32`, `src: i32`, `dst: i32`, `width: i32`, `height: i32` | `void` |
+| `hlwgpu_encoder_clear_buffer` | `encoder: i32`, `buffer: i32`, `offset: i32`, `size: i32` | `void` |
 | `hlwgpu_encoder_copy_texture_to_buffer` | `encoder: i32`, `texture: i32`, `buffer: i32`, `width: i32`, `height: i32`, `bytes_per_row: i32` | `void` |
 | `hlwgpu_sampler_create` | `device: i32`, `filter: i32`, `address: i32` | `i32` |
 | `hlwgpu_sampler_destroy` | `sampler: i32` | `void` |

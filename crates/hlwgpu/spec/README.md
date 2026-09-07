@@ -11,7 +11,7 @@ Measured against it on the day it was vendored:
 
 | | in the spec | reachable |
 |---|---|---|
-| operations | 66 | 36 |
+| operations | 66 | 41 |
 | dictionary members | 121 | few |
 | enum values | 278 | 57 |
 

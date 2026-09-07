@@ -256,11 +256,32 @@ prim render_set_pipeline(encoder: i32, pipeline: i32) -> void
 prim render_set_vertex_buffer(encoder: i32, slot: i32, buffer: i32) -> void
   js H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer))
 
+# Where in the target the clip space -1..1 lands, and what depth range it
+# maps onto.
+prim render_set_viewport(encoder: i32, x: f64, y: f64, width: f64, height: f64, min_depth: f64, max_depth: f64) -> void
+  js H.pass(encoder).setViewport(x, y, width, height, min_depth, max_depth)
+
+# Throws away anything drawn outside this rectangle. Unlike a viewport it
+# does not squeeze what is drawn, it cuts it.
+prim render_set_scissor_rect(encoder: i32, x: i32, y: i32, width: i32, height: i32) -> void
+  js H.pass(encoder).setScissorRect(x, y, width, height)
+
 prim render_draw(encoder: i32, vertices: i32, instances: i32) -> void
   js H.pass(encoder).draw(vertices, instances)
 
 prim encoder_render_end(encoder: i32) -> void
   js H.endPass(encoder)
+
+# The other direction. `bytes_per_row` is a multiple of 256 here too.
+prim encoder_copy_buffer_to_texture(encoder: i32, buffer: i32, bytes_per_row: i32, texture: i32, width: i32, height: i32) -> void
+  js H.get("encoder", encoder).copyBufferToTexture({ buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, { texture: H.get("texture", texture) }, [width, height])
+
+prim encoder_copy_texture_to_texture(encoder: i32, src: i32, dst: i32, width: i32, height: i32) -> void
+  js H.get("encoder", encoder).copyTextureToTexture({ texture: H.get("texture", src) }, { texture: H.get("texture", dst) }, [width, height])
+
+# Zeroes a range of a buffer without uploading zeroes to it.
+prim encoder_clear_buffer(encoder: i32, buffer: i32, offset: i32, size: i32) -> void
+  js H.get("encoder", encoder).clearBuffer(H.get("buffer", buffer), offset, size)
 
 # `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
 # ours: a width of 64 RGBA pixels is exactly one row.

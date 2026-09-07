@@ -418,12 +418,12 @@ desktop library that works is worth more than two halves that do not.
 5. **Presentation.** DONE natively. A surface on a native window, configured,
    acquired, drawn and presented every frame. `crates/hlwindow` is the small
    `winit` companion that supplies the window.
-6. **Capability.** Close the gap the IDL measures: the remaining enums, the
-   descriptor members the builder now has somewhere to put, and the 30
-   operations. Blending and depth landed with the builder; instancing,
-   multisampling, and multiple colour targets are the next descriptor members,
-   and `setViewport`, `setScissorRect` and the texture-to-texture copies the
-   next operations.
+6. **Capability.** Close the gap the IDL measures. Blending, depth, viewport,
+   scissor and the three missing copies have landed, and instancing turned out
+   to work already and only wanted a test: 41 of 66 operations. What is left
+   is queries, render bundles, indirect draws, error scopes, debug markers,
+   explicit layouts, and multisampling and multiple colour targets among the
+   descriptor members.
 7. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
@@ -477,7 +477,7 @@ arity, return kind and a bitmask of which arguments are floats
 runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
 is `(i32, i32, f64, f64, f64, f64)` and no arm matched, and its depth variant
 needed a seven-argument one, of which the table had none at all. Two arms so
-far, one per new kind of pass. A float-heavy library will keep finding these, and
+far, one per new kind of pass, plus a seventh for a viewport. A float-heavy library will keep finding these, and
 the real answer eventually is a signature-directed dispatcher rather than a
 table.
 

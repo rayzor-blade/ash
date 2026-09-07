@@ -457,8 +457,19 @@ export function hlwgpuImports(rt) {
     hlwgpu_encoder_render_begin_depth: (encoder, view, depth, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }], depthStencilAttachment: { view: H.get("view", depth), depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" } }); },
     hlwgpu_render_set_pipeline: (encoder, pipeline) => { H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline)); },
     hlwgpu_render_set_vertex_buffer: (encoder, slot, buffer) => { H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer)); },
+    // Where in the target the clip space -1..1 lands, and what depth range it
+    // maps onto.
+    hlwgpu_render_set_viewport: (encoder, x, y, width, height, min_depth, max_depth) => { H.pass(encoder).setViewport(x, y, width, height, min_depth, max_depth); },
+    // Throws away anything drawn outside this rectangle. Unlike a viewport it
+    // does not squeeze what is drawn, it cuts it.
+    hlwgpu_render_set_scissor_rect: (encoder, x, y, width, height) => { H.pass(encoder).setScissorRect(x, y, width, height); },
     hlwgpu_render_draw: (encoder, vertices, instances) => { H.pass(encoder).draw(vertices, instances); },
     hlwgpu_encoder_render_end: (encoder) => { H.endPass(encoder); },
+    // The other direction. `bytes_per_row` is a multiple of 256 here too.
+    hlwgpu_encoder_copy_buffer_to_texture: (encoder, buffer, bytes_per_row, texture, width, height) => { H.get("encoder", encoder).copyBufferToTexture({ buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, { texture: H.get("texture", texture) }, [width, height]); },
+    hlwgpu_encoder_copy_texture_to_texture: (encoder, src, dst, width, height) => { H.get("encoder", encoder).copyTextureToTexture({ texture: H.get("texture", src) }, { texture: H.get("texture", dst) }, [width, height]); },
+    // Zeroes a range of a buffer without uploading zeroes to it.
+    hlwgpu_encoder_clear_buffer: (encoder, buffer, offset, size) => { H.get("encoder", encoder).clearBuffer(H.get("buffer", buffer), offset, size); },
     // `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
     // ours: a width of 64 RGBA pixels is exactly one row.
     hlwgpu_encoder_copy_texture_to_buffer: (encoder, texture, buffer, width, height, bytes_per_row) => { H.get("encoder", encoder).copyTextureToBuffer({ texture: H.get("texture", texture) }, { buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, [width, height]); },

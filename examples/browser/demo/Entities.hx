@@ -235,6 +235,14 @@ class Entities {
 			if (due < spent) due = spent + period;
 		}
 
+		// Read before joining, while the threads are still drawing, because
+		// that is when a heap nothing is reclaiming shows it. A page can say
+		// the picture moved; only this says what it cost. `currentMemory` is
+		// blocks in use, so it is the retention measure directly: a build that
+		// traces dead neighbours reads hundreds of megabytes here against a
+		// live set of one or two.
+		var heap = hl.Gc.stats().currentMemory / (1024 * 1024);
+
 		var total = 0;
 		for (i in 0...bands) total += done.pop(true);
 		var elapsed = Sys.time() - started;
@@ -245,6 +253,7 @@ class Entities {
 			Sys.println('band $i: $f frames, ${Math.round(f / elapsed)}/s');
 		}
 		Sys.println('$total band-frames in ${Math.round(elapsed * 1000)}ms, ${Math.round(total / elapsed)}/s');
+		Sys.println('heap in use:   ${Math.round(heap)} MB while drawing');
 		Sys.println(shown > 0 ? '$shown frames presented' : "no display on this host; frames drawn but not shown");
 	}
 }

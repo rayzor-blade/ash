@@ -55,7 +55,12 @@ struct Cli {
     program_args: Vec<String>,
 
     /// Execution mode
-    #[arg(long, value_enum, default_value_t = Mode::Interp)]
+    ///
+    /// Hybrid by default: the plain `ash program.hl` should be the one worth
+    /// running, and that means compiling the hot code while the program runs
+    /// rather than interpreting all of it. Pass `--mode interp` to run
+    /// everything on the interpreter instead.
+    #[arg(long, value_enum, default_value_t = Mode::Hybrid)]
     mode: Mode,
 
     /// Compile to a native object file instead of running.
@@ -123,9 +128,13 @@ struct Cli {
 
     /// Threshold preset for the program's shape.
     ///
+    /// Defaults to `application`, the general shape. A program that knows
+    /// what it is -- a game with a frame budget, a server that runs for
+    /// weeks -- says so and gets thresholds to match.
+    ///
     /// Explicit --jit-threshold / --opt-threshold override the preset.
-    #[arg(long, value_enum)]
-    preset: Option<Preset>,
+    #[arg(long, value_enum, default_value_t = Preset::Application)]
+    preset: Preset,
 
     /// Invocations before promoting to the optimising tier in hybrid mode.
     ///
@@ -1603,7 +1612,7 @@ fn run() -> Result<()> {
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             // A preset supplies the thresholds; a flag the operator actually
             // typed still wins over it.
-            let preset_cfg = cli.preset.map(|p| p.to_tier().to_config());
+            let preset_cfg = Some(cli.preset.to_tier().to_config());
             let arg_given = |flag: &str| {
                 std::env::args().any(|a| a == flag || a.starts_with(&format!("{flag}=")))
             };

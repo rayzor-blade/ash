@@ -3,16 +3,51 @@
 WebGPU for HashLink: buffers, textures, WGSL shaders, render and compute
 pipelines. It is the layer you would build a renderer on, not a renderer.
 
+A triangle, drawn into a 256x256 texture:
+
 ```haxe
 var device = wgpu.Instance.create().adapter().device();
 var queue = device.queue;
 
+var target = device.texture(256, 256, Rgba8Unorm, RenderAttachment | CopySrc);
+var view = target.view();
+
+var corners = haxe.io.Bytes.alloc(24);
+for (i => value in [-0.8, -0.8, 0.8, -0.8, 0.0, 0.8]) {
+	corners.setFloat(i * 4, value);
+}
+var vertices = device.buffer(corners.length, Vertex | CopyDst);
+queue.write(vertices, 0, corners);
+
+var shader = device.shader("
+@vertex
+fn vs(@location(0) pos : vec2<f32>) -> @builtin(position) vec4<f32> {
+	return vec4<f32>(pos, 0.0, 1.0);
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+	return vec4<f32>(0.95, 0.45, 0.1, 1.0);
+}
+");
+
 var pipeline = device.pipeline()
-    .shader(device.shader(WGSL), "vs", "fs")
-    .vertexBuffer().attributes(Float32x2, Float32x4)
-    .target(Rgba8Unorm).blend(One, One)
-    .build();
+	.shader(shader, "vs", "fs")
+	.vertexBuffer().attributes(Float32x2)
+	.target(Rgba8Unorm)
+	.build();
+
+var encoder = device.encoder();
+encoder.beginRender(view, 0.06, 0.07, 0.09);
+encoder.setPipeline(pipeline);
+encoder.setVertexBuffer(0, vertices);
+encoder.draw(3);
+encoder.endRender();
+encoder.submit(queue);
 ```
+
+Read the result back with `Buffer.read` after a `copyTextureToBuffer`, or draw
+into a window instead by taking the view from a `Surface` each frame.
 
 Builders are validated as you write them. An attribute with no vertex buffer
 open, or a build with nowhere to draw, will not compile.

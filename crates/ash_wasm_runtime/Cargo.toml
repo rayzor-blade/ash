@@ -57,6 +57,9 @@ optional = true
 features = [
     "console",
     "Crypto",
+    "ImageData",
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
     "Performance",
     "Window",
     "WorkerGlobalScope",

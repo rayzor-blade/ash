@@ -88,6 +88,10 @@ impl Threads {
         set("environ", to_array(&self.environ));
 
         match spawn.call1(&JsValue::UNDEFINED, &request) {
+            // False rather than an exception: a page with no agent free is
+            // answering, not failing, and the thread runs on the scheduler
+            // instead. Only a throw is worth a console error.
+            Ok(answer) if answer.is_falsy() => -1,
             Ok(_) => id,
             Err(e) => {
                 web_sys::console::error_1(&JsValue::from_str(&format!(

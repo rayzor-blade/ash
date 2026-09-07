@@ -46,6 +46,8 @@ pub struct Host {
     /// The globals ash's link-time transform added, if the module carries it.
     /// Read from the same exports as the memory, and for the same reason.
     pub fibers: RefCell<Fibers>,
+    /// Where a frame goes, if the page gave this Worker somewhere to put one.
+    pub canvas: super::canvas::Canvas,
 }
 
 impl Host {
@@ -55,6 +57,7 @@ impl Host {
             sockets: RefCell::new(Sockets::default()),
             guest: RefCell::new(None),
             fibers: RefCell::new(Fibers::default()),
+            canvas: super::canvas::Canvas::default(),
         })
     }
 
@@ -127,6 +130,9 @@ pub fn imports(
     if let Some(memory) = memory {
         install(&env, "memory", memory.clone().into());
     }
+    // Always bound: an import nothing answers is a link error before a line
+    // runs, so a program that never draws still needs this to exist.
+    let _ = super::canvas::install(&env, host);
     let starting = Rc::clone(threads);
     bind!(&wasi, "thread-spawn", move |start_arg: i32| -> i32 {
         starting.spawn(start_arg)

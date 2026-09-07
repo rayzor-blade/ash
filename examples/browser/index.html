@@ -17,14 +17,20 @@
   .err { color: #d33; }
   .meta { opacity: .55; }
   .proof { display: flex; align-items: center; gap: .75rem; opacity: .8; }
+  #screen {
+    display: block; width: 100%; max-width: 46rem; height: auto;
+    margin: 0 0 1.5rem; border-radius: 4px; background: #0e0e12;
+    image-rendering: pixelated;
+  }
   #frames { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 4ch; }
 </style>
 
 <h1>Running HashLink in WebAssembly</h1>
 <p class="sub">HashLink bytecode compiled to a WebAssembly module by ash, with a
   browser compatible runtime.</p>
-<p class="sub"><a href="?">one thread</a> · <a href="?demo=threads">threads</a>
-  — running: <span id="which"></span></p>
+<p class="sub"><a href="?">one thread</a> · <a href="?demo=threads">threads</a> ·
+  <a href="?demo=entities">entities</a> — running: <span id="which"></span></p>
+<canvas id="screen" width="640" height="360" hidden></canvas>
 <pre id="out"></pre>
 <p class="proof">
   <span id="frames">0</span>
@@ -74,8 +80,10 @@ worker.onerror = (e) => write(`worker: ${e.message}`, "err");
 // has no environment to configure them through, and there is no count to
 // give -- the runtime asks for an agent per thread and this page answers by
 // starting a Worker, for as long as it keeps saying yes.
-const threaded = new URLSearchParams(location.search).get("demo") === "threads";
-const module = threaded ? "./threads.wasm" : "./demo.wasm";
+const demo = new URLSearchParams(location.search).get("demo");
+const threaded = demo === "threads" || demo === "entities";
+const drawing = demo === "entities";
+const module = drawing ? "./entities.wasm" : threaded ? "./threads.wasm" : "./demo.wasm";
 
 if (threaded && !self.crossOriginIsolated) {
   write(
@@ -86,9 +94,31 @@ if (threaded && !self.crossOriginIsolated) {
   );
 }
 
-document.getElementById("which").textContent = threaded
-  ? "threads — four Haxe threads, each in a Worker of its own"
-  : "single-threaded — strings, maps, closures, exceptions, arithmetic";
+// How many bands the drawing demo asks for. Nothing stops it exceeding the
+// agents this page warmed; the runtime takes what it gets and the demo says
+// when a thread got none.
+const wanted = Math.max(1, Math.min(12,
+  Number(new URLSearchParams(location.search).get("threads")) || 4));
 
-worker.postMessage({ module, args: [module.slice(2)] });
+document.getElementById("which").textContent = drawing
+  ? `entities — ${wanted} Haxe threads drawing one picture at once`
+  : threaded
+    ? "threads — four Haxe threads, each in a Worker of its own"
+    : "single-threaded — strings, maps, closures, exceptions, arithmetic";
+
+// The canvas goes to the worker, not the other way round: see worker.js.
+// `transferControlToOffscreen` hands ownership over, so nothing here draws to
+// it again -- which is the point, because this thread is free and the one
+// drawing is not.
+const args = [module.slice(2)];
+if (drawing) args.push(String(wanted));
+const message = { module, args };
+const transfer = [];
+if (drawing) {
+  const screen = document.getElementById("screen");
+  screen.hidden = false;
+  message.canvas = screen.transferControlToOffscreen();
+  transfer.push(message.canvas);
+}
+worker.postMessage(message, transfer);
 </script>

@@ -343,6 +343,25 @@ fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<
 
 
 
+/// Where a frame goes on a host with no screen: nowhere, and it says so.
+///
+/// The import has to exist -- an import nothing supplies is a link error
+/// before a line runs, so a program that draws would not start at all -- and
+/// answering zero is the same answer the interface gives a browser page that
+/// lent no canvas. A program that presents keeps running and counts, for
+/// itself, how many frames nobody saw -- which is what makes a drawing
+/// program testable without a display.
+fn install_canvas(linker: &mut Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap(
+            fibers::YIELD_MODULE,
+            "ash_host_canvas_present",
+            |_: Caller<'_, Host>, _data: i32, _w: i32, _h: i32| -> i32 { 0 },
+        )
+        .map_err(|e| anyhow!("installing the canvas present import: {e}"))?;
+    Ok(())
+}
+
 /// The WASI context a store gets: the program's arguments, what the operator
 /// opened for it, and the part of the host's environment it is entitled to.
 ///
@@ -439,6 +458,7 @@ fn linker_for(
     p1::add_to_linker_async(&mut linker, |host: &mut Host| &mut host.wasi)
         .map_err(|e| anyhow!("adding WASI to the linker: {e}"))?;
     fibers::install(&mut linker)?;
+    install_canvas(&mut linker)?;
     process::install(&mut linker)?;
     sockets::install(&mut linker)?;
     dylink::install(&mut linker)?;

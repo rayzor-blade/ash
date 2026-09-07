@@ -15,16 +15,19 @@ itself.
     cd examples/browser/demo && haxe -main Demo -hl demo.hl
     ASH_WASM_FIBERS=1 ash --build ../demo.wasm --target wasm32-wasip1 demo.hl
 
-    # the threaded program, and the other demo the page can run
+    # the threaded programs, and the other two demos the page can run
     haxe -cp . -main Threads -hl threads.hl
     ASH_WASM_FIBERS=1 ash --build ../threads.wasm \
       --target wasm32-wasip1-threads threads.hl
+    haxe -cp . -main Entities -hl entities.hl
+    ASH_WASM_FIBERS=1 ash --build ../entities.wasm \
+      --target wasm32-wasip1-threads entities.hl
 
     ./examples/browser/serve.py
 
 Then open <http://127.0.0.1:8731>. It starts a worker, which fetches the
-module and runs it; there is nothing to click. `?demo=threads` runs the other
-one.
+module and runs it; there is nothing to click. `?demo=threads` and
+`?demo=entities` run the other two.
 
 `serve.py` rather than `python3 -m http.server` because of the threaded demo:
 it needs a `SharedArrayBuffer`, a page only has one when it is cross-origin
@@ -59,6 +62,11 @@ It is also the one real bound on "as many threads as you like" in a page: the
 bound is how many agents the page warmed, not anything the runtime asked for.
 The runtime asks for an agent per thread and takes what it gets; a thread with
 none free runs on the main scheduler, and the page says so.
+
+That is what `spawn` returning false means, and why it is a return value
+rather than an exception: a busy page is answering the question, not failing
+at it. A throw is kept for the case where making the agent actually went
+wrong, and only that reaches the console.
 
 One thing to know when reading the output: the lines a thread prints arrive
 after the program's, because they are forwarded through `worker.js`, which
@@ -150,37 +158,65 @@ way it would with the file absent.
 Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
 `Sys.sleep` returns immediately.
 
-## Threads: concurrency, not parallelism
+## Fibers, which are the other mechanism
 
-A `sys.thread` worker suspends and resumes in the middle of its body, in a
-page. It does not run *alongside* anything: `Thread.create` gives a fiber, and
-control moves between fibers only where one of them blocks -- a `Deque.pop`, a
-lock, an explicit yield. One thread, one stack running at a time, taking turns.
+Threads above are Workers, each with its own instance over one shared memory.
+A fiber is the unrelated thing: one instance, one stack running at a time,
+control moving between fibers only where one of them blocks -- a `Deque.pop`,
+a lock, an explicit yield. `docs/wasm-fibers.md` calls it suspension rather
+than parallelism, and it is.
 
-That is why this needs no `SharedArrayBuffer` and no COOP/COEP headers: there
-is no second thread and nothing shared between threads to protect. The saving
-is real but it is the saving of a different feature. A program that expects
-two threads to make progress at once will not get it here, and a busy loop in
-a fiber starves every other fiber and the page with it.
+Both are needed and neither replaces the other. A thread that blocks has to be
+able to give its agent up, which is what the fiber transform is for; a page
+that warms no agent still runs a threaded program, on fibers, taking turns --
+and the threads demo says so when it happens.
 
-**Parallelism in a browser is a different mechanism entirely** -- Web Workers,
-each with its own instance, over one `SharedArrayBuffer` memory, which is what
-COOP/COEP are for. ash does not do that on wasm: its collector, its shadow
-stacks and its allocator are all written for one thread of execution, and a
-worker pool cannot multiplex them. `docs/wasm-fibers.md` says the same thing
-about the primitive itself -- "no parallelism (this is suspension, like the
-JSPI row, not the worker row)".
-
-What it is instead: ash's link-time transform rewrites the module so its
-frames can unwind back to a scheduler and rewind to exactly where they
-stopped, and the host drives the three globals that transform adds.
-`browser/fibers.rs` is the same thing `native::install_fiber_yield` does,
-against `WebAssembly.Global`.
+ash's link-time transform rewrites the module so its frames can unwind back to
+a scheduler and rewind to exactly where they stopped, and the host drives the
+three globals that transform adds. `browser/fibers.rs` is the same thing
+`native::install_fiber_yield` does, against `WebAssembly.Global`.
 
 A module built without `ASH_WASM_FIBERS=1` has no such globals. Every call
 answers zero and a fiber runs to completion at the point it would have
-suspended, which is what the native host does for the same module -- so the
-worker in this demo would reach its first `pop` and stay there.
+suspended -- so a worker in these demos would reach its first `pop` and stay
+there. It is why every build line above sets it.
+
+## Drawing
+
+`?demo=entities` gives every Haxe thread a horizontal band of one framebuffer
+and the entities inside it. No thread touches another's pixels, so there is no
+lock and nothing to contend for, and the picture is what the threads did: a
+band that stops moving is a thread that stopped.
+
+The threads never present. They write RGBA into the guest's own memory, and
+the main thread hands the host that address sixty times a second through one
+import, `ash_host_canvas_present`. That is the whole graphics interface --
+`std/src/canvas.rs` on the guest side, `browser/canvas.rs` on the page's.
+
+**It has to be an `OffscreenCanvas`.** The module runs in a Worker, and by the
+time it is drawing it is inside a call into wasm that will not return for the
+length of the program. A `<canvas>` belongs to the document and can only be
+drawn from the thread that owns it, which is exactly the thread that is not
+free. `transferControlToOffscreen()` moves the drawing surface to the worker
+instead, and the page keeps the element without keeping the right to draw on
+it. The page transfers it in the same message that starts the program, and
+`worker.js` puts it on `globalThis.ashCanvas` where the host finds it.
+
+Pixels are copied on the way out rather than passed. `ImageData` refuses a
+view onto a `SharedArrayBuffer`, and a threaded module's memory is one.
+
+Where the host has no canvas -- wasmtime, node, a page that transferred none
+-- `present` answers false and the program says frames were drawn and not
+shown. It is the same program either way; only the last line differs.
+
+Where an entity is is a function of the clock rather than of frames drawn,
+because a thread here draws thousands of frames a second while the host shows
+sixty. Per-frame movement would cross the screen between two shown frames.
+
+`?demo=entities&threads=8` asks for eight bands instead of four. The page
+warms one agent per core and no more, so asking for more threads than that is
+the way to see what a thread with no agent does: it runs on the main
+scheduler, taking turns with another band, and the page says which.
 
 ## Not yet
 

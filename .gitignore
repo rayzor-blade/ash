@@ -25,6 +25,8 @@ examples/browser/demo.wasm
 examples/browser/demo/demo.hl
 examples/browser/threads.wasm
 examples/browser/demo/threads.hl
+examples/browser/entities.wasm
+examples/browser/demo/entities.hl
 examples/browser/ash_browser.js
 examples/browser/ash_browser.d.ts
 examples/browser/ash_browser_bg.wasm

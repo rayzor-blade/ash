@@ -73,8 +73,10 @@ function warmAgents(count) {
 
 const spawn = (request) => {
   const worker = idle.pop();
-  if (!worker) throw new Error("no idle agent");
+  // False, not a throw: the host runs the thread on its scheduler instead.
+  if (!worker) return false;
   worker.postMessage(request);
+  return true;
 };
 
 (async () => {

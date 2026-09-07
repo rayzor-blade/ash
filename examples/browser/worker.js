@@ -68,18 +68,29 @@ function warmAgents(count) {
 // needs -- the compiled module, the shared memory, the thread id and the
 // argument the guest prepared -- and keeps only what it cannot delegate,
 // which is handing out the id.
+//
+// False when there is none free. The host takes that as an answer rather than
+// a failure and runs the thread on the scheduler, so a page that warmed fewer
+// agents than the program asks for still runs it.
 const spawn = (request) => {
   const worker = idle.pop();
   if (!worker) {
     post("meta", `thread ${request.tid}: no idle agent, running on the main scheduler`);
-    throw new Error("no idle agent");
+    return false;
   }
   post("meta", `thread ${request.tid}: handed to an agent (${idle.length} left idle)`);
   worker.postMessage(request);
+  return true;
 };
 
 self.onmessage = async (event) => {
-  const { module, args, environ } = event.data;
+  const { module, args, environ, canvas } = event.data;
+  // Where a frame goes. HashLink runs here, and this worker is inside the
+  // call into the program for as long as the program runs -- so nothing on
+  // the page can be asked to draw. An OffscreenCanvas the page transferred
+  // can be drawn from inside that call, and the host finds it here, beside
+  // the other things a page lends it.
+  if (canvas) self.ashCanvas = canvas;
   try {
     await init();
     // Before the program runs, and before it can ask for a thread.

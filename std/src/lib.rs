@@ -24,6 +24,7 @@ pub mod aot_native;
 pub mod array;
 pub mod buffer;
 pub mod bytes;
+pub mod canvas;
 pub mod cast;
 pub mod date;
 pub mod error;

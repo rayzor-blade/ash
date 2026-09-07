@@ -3,11 +3,11 @@ package wgpu;
 /** A pipeline with a vertex buffer layout open. **/
 abstract PipelineVertexBuffer(Int) from Int to Int {
 	/**
-		The fields of this buffer, packed one after another at consecutive
-		shader locations.
+		Describes the fields of this vertex buffer, packed one after another
+		and numbered from wherever the last buffer left off.
 
-		The usual case, and two fewer numbers per field to get wrong. Use
-		`attribute` where the placement is not that.
+		This is the usual case, and it saves you working out offsets. Use
+		`attribute` if you need to place a field somewhere specific.
 	**/
 	public function attributes(...formats : VertexFormat) : PipelineVertexBuffer {
 		for (format in formats) {
@@ -16,7 +16,7 @@ abstract PipelineVertexBuffer(Int) from Int to Int {
 		return this;
 	}
 
-	/** One field, placed exactly. **/
+	/** Describes one field at a byte offset and shader location you choose. **/
 	public inline function attribute(format : VertexFormat, offset : Int, location : Int) : PipelineVertexBuffer {
 		_Native.pipeline_attribute(this, format, offset, location);
 		return this;

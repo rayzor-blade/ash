@@ -8,6 +8,6 @@ enum abstract TextureFormat(Int) from Int to Int {
 	var Depth32Float = 3;
 	var Bgra8UnormSrgb = 4;
 
-	/** What `Surface.preferredFormat` answers for one we have no name for. **/
+	/** Returned by `Surface.preferredFormat` for a format hlwgpu cannot name. **/
 	var Unknown = -1;
 }

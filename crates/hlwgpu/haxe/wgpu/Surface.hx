@@ -28,8 +28,8 @@ abstract Surface(Int) from Int to Int {
 	}
 
 	/**
-		The view to draw this frame into, or 0 when the surface needs
-		configuring again -- which is what a resize looks like from here.
+		The view to draw this frame into. Returns 0 if the surface needs
+		configuring again, which is usually because the window was resized.
 	**/
 	public inline function acquire() : TextureView {
 		return _Native.surface_acquire(this);

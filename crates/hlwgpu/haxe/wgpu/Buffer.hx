@@ -13,10 +13,10 @@ abstract Buffer(Int) from Int to Int {
 	}
 
 	/**
-		Maps, copies out and unmaps. Waits for the mapping, which is what the
-		device gets polled for; null if it never mapped.
+		Reads `length` bytes back from the GPU, waiting for them to arrive.
+		Returns null if the buffer could not be mapped.
 
-		Only for a buffer created with `MapRead`.
+		The buffer must have been created with `MapRead`.
 	**/
 	public function read(device : Device, offset : Int, length : Int) : haxe.io.Bytes {
 		var mapping = new Request(_Native.buffer_map_begin(device, this, offset, length));

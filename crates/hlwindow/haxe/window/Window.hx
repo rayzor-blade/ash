@@ -3,8 +3,8 @@ package window;
 /**
 	A native window.
 
-	Reports the raw handles a graphics library needs to draw into it, so one
-	can be handed this directly.
+	Reports the raw handles a graphics library needs in order to draw into
+	it, so you can pass it to one directly.
 **/
 // A class rather than an abstract over the handle: an abstract carries its
 // methods but does not unify structurally, and letting a graphics

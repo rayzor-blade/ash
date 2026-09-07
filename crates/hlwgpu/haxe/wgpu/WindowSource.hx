@@ -1,9 +1,9 @@
 package wgpu;
 
 /**
-	Anything that can say where a native window is.
+	Anything that can report where a native window is.
 
-	Whatever opened the window fits this if it can answer both calls below.
+	Whatever created your window matches this if it implements both methods.
 **/
 typedef WindowSource = {
 	/** Which set of raw handles `surfaceHandle` reports. **/

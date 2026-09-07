@@ -356,6 +356,15 @@
       });
 
       // ---- benchmark section --------------------------------------------------
+
+      // Shared by both renderers: one element, optionally classed and styled.
+      var el = function (tag, cls, style) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (style) e.setAttribute('style', style);
+        return e;
+      };
+
       // Renders bench/conformance.json, published by the haxe-conformance
       // workflow. Everything here states what the run measured and nothing more:
       // a suite that never reached utest's tally reports "not reported yet"

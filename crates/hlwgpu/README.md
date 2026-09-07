@@ -39,12 +39,26 @@ Nothing in this library blocks. Work that takes time hands back a `Request`,
 which you can ask `ready` at any moment or `await` -- and awaiting yields
 between checks rather than spinning, so other threads keep running.
 
-## Where it runs
+## Native target and Browser via wasm
 
-Natively it is `wgpu.hdll`, which contains the implementation and loads in any
-HashLink. On wasm the primitives call out, because a wasm module has neither a
-GPU nor JavaScript, and `js/hlwgpu.js` is what a page answers them with.
-`IMPORTS.md` is the contract for any other host.
+Natively this is `wgpu.hdll`. It holds the implementation, answers the VM
+directly, and needs nothing else -- any HashLink can load it.
 
-Drawing into a window needs a window from somewhere: anything that fits
-`wgpu.WindowSource` will do.
+The browser route is **ash's**: ash is what compiles a HashLink program into a
+wasm module, runs it in a page, and loads native libraries alongside it. This
+library supplies its own half of that. A wasm module has neither a GPU nor
+JavaScript, so `wgpu.wasm` holds no implementation at all -- every primitive
+calls out, and `js/hlwgpu.js` is what answers. A page adds that with a script
+tag and merges what it exports into the imports the module is given. Nothing
+is compiled and nothing is rebuilt.
+
+`IMPORTS.md` is the same contract written out, for a host that is not a page.
+
+The native half is what the tests cover. The browser half is written, and
+generated from the same declaration, but has not been run yet.
+
+## Drawing into a window
+
+Somewhere to draw has to come from somewhere. Anything that fits
+`wgpu.WindowSource` will do -- it reports where a native window is, and this
+library asks it nothing else.

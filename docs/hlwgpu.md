@@ -436,6 +436,12 @@ desktop library that works is worth more than two halves that do not.
 Compute tests assert exact values. Render tests compare against golden images
 with a tolerance, because rasterisation differs between vendors.
 
+`test/Conventions.hx` pins what a symmetric test cannot see: that clip space
+has +y upward while a texture's first row is the top, and that depth runs 0 to
+1 rather than -1 to 1. Both are places someone arriving from OpenGL expects
+the opposite, and a flip in either would have been caught only incidentally,
+by the one textured test whose four quadrants differ.
+
 CI runs on the NUC against **lavapipe** (Mesa's software Vulkan): no GPU
 needed, deterministic, so a golden image means something. A real-GPU run is a
 separate, non-gating job.

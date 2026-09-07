@@ -249,34 +249,61 @@ stopping the world after 2021ms; 1 of 5 mutators never reached a safepoint*.
 polling helper. Cheap, easy to forget, and the symptom points nowhere near the
 cause.
 
-## Descriptors cross as one packed buffer
+## Descriptors are built by typed calls, never a blob
 
-WebGPU descriptors are deep: a render pipeline descriptor carries vertex buffer
-layouts carrying attribute arrays, plus blend state per colour target. Two ways
-to move one:
+WebGPU descriptors are deep: a render pipeline carries vertex buffer layouts
+carrying attribute arrays, plus blend state per colour target, depth, stencil
+and multisampling. Two ways to move one across:
 
-- **Builder primitives** -- many small calls accumulating state. Simple, but a
-  pipeline becomes dozens of boundary crossings in the wasm contexts, and each
-  one in a page is a wasm-to-JS hop.
-- **One packed `hl.Bytes` with a declared layout.**
+- **One packed `hl.Bytes` with a declared layout**, decoded on the far side.
+- **A sequence of calls, each taking typed scalars**, that accumulate into the
+  descriptor before one call builds the object.
 
-Take the packed buffer: one call per object, and the layout is declared in
-`wgpu.api` with everything else, so the Haxe encoder, the Rust decoder and the
-JavaScript decoder are generated from it.
+Take the calls. A packed buffer is an *untyped* blob: nothing checks it at
+either end except the generator that wrote both sides, so a layout mistake is a
+silent misread rather than a compile error, and it needs a Rust decoder and a
+JavaScript decoder that must agree. Typed calls have none of that -- every
+argument is an `i32`, `f64` or `bytes` the compiler checks on both sides, and
+there is no encoding to get wrong.
 
-There are genuinely two decoders now, which a Rust-only browser half would have
-avoided, and that is the price of the JS shim. It is a fair price -- neither is
-hand-written -- but it needs a gate: one test encodes every descriptor kind in
-Haxe and asserts the Rust and JavaScript decoders agree, so a generator bug
-cannot reach only one target.
+    pipeline_begin(device) -> builder
+    pipeline_vertex(builder, shader, entry, stride, step_mode)
+    pipeline_attribute(builder, format, offset, location)
+    pipeline_target(builder, format, blend_src, blend_dst, blend_op, write_mask)
+    pipeline_depth(builder, format, write_enabled, compare)
+    render_pipeline_build(builder) -> pipeline
 
-**Nothing has needed one yet**, four milestones in, and one reason is worth
-keeping. A bind group holds buffers, texture views and samplers, which looks
-like it needs a tagged entry per binding -- but the kind is already in the top
-four bits of every handle, so an array of plain `i32` says what each entry
-binds as without being told. The tag that existed to catch a buffer used as a
-texture turns out to be the descriptor. Depth and blending, in the milestone
-below, are where a real layout is finally unavoidable.
+What it costs is boundary crossings, and that cost lands where it does not
+matter: pipelines, layouts and bind group layouts are built once at load, not
+per frame. The earlier plan reached for the packed buffer to save crossings in
+a page, which was optimising the wrong thing at the price of the only static
+checking the boundary has.
+
+**Data still crosses as bytes**, because it is data: buffer contents, texture
+pixels, and a homogeneous array of handles. The rule is that *structure* never
+crosses as bytes -- if the far side has to know what field lives at what
+offset, it should be an argument instead.
+
+## Every layer is typed
+
+There is no `Dynamic` and no `untyped` in this library, and there should not
+be. Handles are `abstract X(Int)`, so a buffer cannot be passed where a texture
+belongs even though both are integers underneath. Enumerations are
+`enum abstract`, so a format is not an arbitrary number. Descriptors a program
+writes are typedefs with concrete field types, which means a structure literal
+is checked field by field:
+
+```haxe
+device.createRenderPipeline({
+    vertex: { module: shader, entryPoint: "vs", buffers: [...] },
+    fragment: { module: shader, entryPoint: "fs", targets: [...] },
+    depthStencil: { format: Depth24Plus, depthWriteEnabled: true, depthCompare: Less }
+});
+```
+
+That reads the way WebGPU reads, which is the point -- someone who has written
+WebGPU should recognise it -- and an unknown field or a wrong type is a
+compile error rather than something that shows up as a blank window.
 
 ## Shaders: WGSL, and nothing else
 

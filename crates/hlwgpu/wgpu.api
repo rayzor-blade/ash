@@ -244,7 +244,7 @@ prim surface_create(instance: i32, platform: i32, wa: i64, wb: i64, da: i64, db:
 
 # What this surface would rather be configured as, as a `wgpu.TextureFormat`.
 prim surface_preferred_format(surface: i32, adapter: i32) -> i32
-  js 1
+  js H.canvasFormat()
 
 prim surface_configure(device: i32, surface: i32, width: i32, height: i32, format: i32) -> void
   js H.get("surface", surface).configure({ device: H.get("device", device), format: H.formatName(format), alphaMode: "opaque" })

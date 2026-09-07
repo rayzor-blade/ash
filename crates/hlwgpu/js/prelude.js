@@ -226,6 +226,13 @@ export function makeHandles(rt) {
     }
   }
 
+  // What a canvas actually wants, rather than a guess. -1 for a name this
+  // library has none for, which is what the native side answers too.
+  function canvasFormat() {
+    const at = FORMATS.indexOf(navigator.gpu.getPreferredCanvasFormat());
+    return at < 0 ? -1 : at;
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -265,7 +272,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

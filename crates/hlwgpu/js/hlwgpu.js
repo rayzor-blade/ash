@@ -233,6 +233,13 @@ export function makeHandles(rt) {
     }
   }
 
+  // What a canvas actually wants, rather than a guess. -1 for a name this
+  // library has none for, which is what the native side answers too.
+  function canvasFormat() {
+    const at = FORMATS.indexOf(navigator.gpu.getPreferredCanvasFormat());
+    return at < 0 ? -1 : at;
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -272,7 +279,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -385,7 +392,7 @@ export function hlwgpuImports(rt) {
     // A page has no such thing -- its surface comes from a canvas it already owns.
     hlwgpu_surface_create: (instance, platform, wa, wb, da, db) => { throw new Error("wgpu: surface_create has no meaning in a page"); },
     // What this surface would rather be configured as, as a `wgpu.TextureFormat`.
-    hlwgpu_surface_preferred_format: (surface, adapter) => 1,
+    hlwgpu_surface_preferred_format: (surface, adapter) => H.canvasFormat(),
     hlwgpu_surface_configure: (device, surface, width, height, format) => { H.get("surface", surface).configure({ device: H.get("device", device), format: H.formatName(format), alphaMode: "opaque" }); },
     // The view to draw this frame into, or 0 if the surface needs configuring
     // again -- which is what a resize looks like from here.

@@ -32,6 +32,23 @@ use wasmparser::{RelocationEntry, RelocationType};
 
 use crate::object::{ImportKind, ObjImport, Object, SegmentInfo, SymbolTarget};
 
+/// Bytes reserved for the shadow stack unless a caller says otherwise.
+///
+/// wasm-ld's default is 64 KB, which is fine for a program whose stack usage
+/// is its own. It is not fine here: every module carries the ash runtime,
+/// and that runtime recurses -- the regex compiler over a pattern's syntax
+/// tree, XML parsing, the exception machinery. 64 KB overflowed on the Haxe
+/// conformance suite, and because the stack sits at the bottom of memory and
+/// grows down, the symptom was a fault just below zero (`0xffffff88`, -120)
+/// inside whatever happened to be allocating -- which reads as a heap bug and
+/// is not one.
+///
+/// 8 MB matches what a native thread gets by default. It costs address space
+/// and nothing else: the region is untouched until the stack reaches it, and
+/// a 32-bit address space has room to spare beside a heap measured in
+/// hundreds of megabytes.
+pub const DEFAULT_STACK_SIZE: u32 = 8 * 1024 * 1024;
+
 /// How the output is laid out.
 #[derive(Debug, Clone)]
 pub struct LinkOptions {
@@ -110,7 +127,7 @@ impl Default for LinkOptions {
         // One page, which is what LLD reserves, and what the module this
         // linker replaces was verified running with.
         Self {
-            stack_size: 65536,
+            stack_size: DEFAULT_STACK_SIZE,
             export_all_functions: false,
             tree_shake: true,
             roots: ["main", "ash_module_init", "_start", "_initialize"]

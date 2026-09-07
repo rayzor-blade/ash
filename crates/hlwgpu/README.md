@@ -68,6 +68,16 @@ own instead.
 
 ## Getting a window to draw into
 
-hlwgpu does not create windows. Give it anything matching `wgpu.WindowSource`,
-which is any object that can report where a native window lives, and it will
-create a surface on it.
+hlwgpu does not create windows. Implement `wgpu.WindowSource` on whatever
+provides yours, then pass it to `Surface.fromWindow`.
+
+```haxe
+typedef WindowSource = {
+    function surfacePlatform() : Int;
+    function surfaceHandle(which : Int) : haxe.Int64;
+}
+```
+
+`surfacePlatform` says which kind of native handle you are reporting, and
+`surfaceHandle` returns its fields: 0 and 1 for the window, 2 and 3 for the
+display.

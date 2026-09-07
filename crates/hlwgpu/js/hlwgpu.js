@@ -72,6 +72,7 @@ export function makeHandles(rt) {
   const queueOf_ = new Map();
   const passes = new Map();
   const frames = new Map();
+  const described = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -304,6 +305,39 @@ export function makeHandles(rt) {
     });
   }
 
+  // A pass is described before it is opened; these hold the description.
+  function resetPass(encoder) {
+    described.set(encoder, { colour: [], depth: null });
+  }
+
+  function describing(encoder) {
+    const d = described.get(encoder);
+    if (!d) throw new Error(`hlwgpu: encoder ${encoder} is not describing a pass`);
+    return d;
+  }
+
+  function addColour(encoder, view, clearValue) {
+    describing(encoder).colour.push({ view, clearValue, loadOp: "clear", storeOp: "store" });
+  }
+
+  function addDepth(encoder, view, clear) {
+    describing(encoder).depth = {
+      view,
+      depthClearValue: clear,
+      depthLoadOp: "clear",
+      depthStoreOp: "store",
+    };
+  }
+
+  function beginDescribedPass(encoder) {
+    const d = describing(encoder);
+    beginPass(encoder, {
+      colorAttachments: d.colour,
+      depthStencilAttachment: d.depth ?? undefined,
+    });
+    described.delete(encoder);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -343,7 +377,8 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, canvasFormat, attributes, packAttribute, buildPipeline, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, packAttribute, buildPipeline,
+    resetPass, addColour, addDepth, beginDescribedPass, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -449,12 +484,15 @@ export function hlwgpuImports(rt) {
     // Builds the pipeline and spends the builder.
     hlwgpu_render_pipeline_build: (builder) => H.buildPipeline(builder),
     hlwgpu_render_pipeline_destroy: (pipeline) => { H.drop("renderpipeline", pipeline); },
-    // Opens a pass that clears `view` and keeps what is drawn into it. The pass
-    // belongs to the encoder until `encoder_render_end`.
-    hlwgpu_encoder_render_begin: (encoder, view, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }] }); },
-    // The same, with somewhere to keep depth. Cleared to 1.0, which is what a
-    // `Less` test wants: everything is nearer than nothing.
-    hlwgpu_encoder_render_begin_depth: (encoder, view, depth, r, g, b, a) => { H.beginPass(encoder, { colorAttachments: [{ view: H.get("view", view), clearValue: { r, g, b, a }, loadOp: "clear", storeOp: "store" }], depthStencilAttachment: { view: H.get("view", depth), depthClearValue: 1.0, depthLoadOp: "clear", depthStoreOp: "store" } }); },
+    // A pass is described before it is opened, because it can have more than one
+    // colour target and may or may not have depth. `pass_reset` starts describing,
+    // `pass_begin` opens what was described.
+    hlwgpu_pass_reset: (encoder) => { H.resetPass(encoder); },
+    // Adds a colour target and what to clear it to. Their order is the order the
+    // fragment shader's `@location`s are numbered in.
+    hlwgpu_pass_colour: (encoder, view, r, g, b, a) => { H.addColour(encoder, H.get("view", view), { r, g, b, a }); },
+    hlwgpu_pass_depth: (encoder, view, clear) => { H.addDepth(encoder, H.get("view", view), clear); },
+    hlwgpu_pass_begin: (encoder) => { H.beginDescribedPass(encoder); },
     hlwgpu_render_set_pipeline: (encoder, pipeline) => { H.pass(encoder).setPipeline(H.get("renderpipeline", pipeline)); },
     hlwgpu_render_set_vertex_buffer: (encoder, slot, buffer) => { H.pass(encoder).setVertexBuffer(slot, H.get("buffer", buffer)); },
     // Where in the target the clip space -1..1 lands, and what depth range it

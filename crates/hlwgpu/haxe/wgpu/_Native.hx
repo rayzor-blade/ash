@@ -284,17 +284,28 @@ class _Native {
 		return;
 	}
 
-	// Opens a pass that clears `view` and keeps what is drawn into it. The pass
-	// belongs to the encoder until `encoder_render_end`.
-	@:hlNative("wgpu", "encoder_render_begin")
-	public static function encoder_render_begin(encoder : Int, view : Int, r : Float, g : Float, b : Float, a : Float) : Void {
+	// A pass is described before it is opened, because it can have more than one
+	// colour target and may or may not have depth. `pass_reset` starts describing,
+	// `pass_begin` opens what was described.
+	@:hlNative("wgpu", "pass_reset")
+	public static function pass_reset(encoder : Int) : Void {
 		return;
 	}
 
-	// The same, with somewhere to keep depth. Cleared to 1.0, which is what a
-	// `Less` test wants: everything is nearer than nothing.
-	@:hlNative("wgpu", "encoder_render_begin_depth")
-	public static function encoder_render_begin_depth(encoder : Int, view : Int, depth : Int, r : Float, g : Float, b : Float, a : Float) : Void {
+	// Adds a colour target and what to clear it to. Their order is the order the
+	// fragment shader's `@location`s are numbered in.
+	@:hlNative("wgpu", "pass_colour")
+	public static function pass_colour(encoder : Int, view : Int, r : Float, g : Float, b : Float, a : Float) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pass_depth")
+	public static function pass_depth(encoder : Int, view : Int, clear : Float) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pass_begin")
+	public static function pass_begin(encoder : Int) : Void {
 		return;
 	}
 

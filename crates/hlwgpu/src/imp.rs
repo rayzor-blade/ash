@@ -29,6 +29,11 @@ struct DeviceEntry {
 struct EncoderEntry {
     encoder: Option<wgpu::CommandEncoder>,
     pass: Option<wgpu::RenderPass<'static>>,
+    /// What the next pass will attach, in the order it was described. Held as
+    /// handles rather than views because the views have to outlive the
+    /// descriptor, and that is easier to arrange when the pass opens.
+    colour: Vec<(i32, wgpu::Color)>,
+    depth: Option<(i32, f64)>,
 }
 
 type Encoder = Mutex<EncoderEntry>;
@@ -408,7 +413,7 @@ pub unsafe fn encoder_create(device: i32) -> i32 {
     ENCODERS
         .lock()
         .unwrap()
-        .put(Mutex::new(EncoderEntry { encoder: Some(encoder), pass: None }))
+        .put(Mutex::new(EncoderEntry { encoder: Some(encoder), ..Default::default() }))
 }
 
 pub unsafe fn encoder_compute(
@@ -544,41 +549,74 @@ pub unsafe fn render_pipeline_destroy(pipeline: i32) {
 
 // -- render passes ----------------------------------------------------------
 
-/// Opens a pass that clears `view`, and `depth` if there is one.
-unsafe fn begin_pass(encoder: i32, view: i32, depth: i32, colour: wgpu::Color) {
+pub unsafe fn pass_reset(encoder: i32) {
     let entry = find!(ENCODERS, encoder);
-    let view = find!(VIEWS, view);
-    let depth_view = if depth != 0 {
-        match VIEWS.lock().unwrap().get(depth) {
-            Some(found) => Some(found),
+    let mut held = entry.lock().unwrap();
+    held.colour.clear();
+    held.depth = None;
+}
+
+pub unsafe fn pass_colour(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
+    let entry = find!(ENCODERS, encoder);
+    entry
+        .lock()
+        .unwrap()
+        .colour
+        .push((view, wgpu::Color { r, g, b, a }));
+}
+
+pub unsafe fn pass_depth(encoder: i32, view: i32, clear: f64) {
+    let entry = find!(ENCODERS, encoder);
+    entry.lock().unwrap().depth = Some((view, clear));
+}
+
+/// Opens what was described. Anything not attached by then is not in the pass.
+pub unsafe fn pass_begin(encoder: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let mut held = entry.lock().unwrap();
+
+    // Resolved before the descriptor is built, so the views outlive it.
+    let mut colour = Vec::with_capacity(held.colour.len());
+    for (handle, clear) in &held.colour {
+        match VIEWS.lock().unwrap().get(*handle) {
+            Some(view) => colour.push((view, *clear)),
             None => return,
         }
-    } else {
-        None
+    }
+    let depth = match held.depth {
+        Some((handle, clear)) => match VIEWS.lock().unwrap().get(handle) {
+            Some(view) => Some((view, clear)),
+            None => return,
+        },
+        None => None,
     };
 
-    let mut held = entry.lock().unwrap();
+    let attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = colour
+        .iter()
+        .map(|(view, clear)| {
+            Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(*clear),
+                    store: wgpu::StoreOp::Store,
+                },
+            })
+        })
+        .collect();
+
     let pass = {
         let Some(encoder) = held.encoder.as_mut() else { return };
         encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(colour),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: depth_view.as_ref().map(|view| {
+                color_attachments: &attachments,
+                depth_stencil_attachment: depth.as_ref().map(|(view, clear)| {
                     wgpu::RenderPassDepthStencilAttachment {
                         view,
-                        // Nothing has been drawn, so nothing is nearer than
-                        // the far plane yet.
                         depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
+                            load: wgpu::LoadOp::Clear(*clear as f32),
                             store: wgpu::StoreOp::Store,
                         }),
                         stencil_ops: None,
@@ -591,22 +629,8 @@ unsafe fn begin_pass(encoder: i32, view: i32, depth: i32, colour: wgpu::Color) {
             .forget_lifetime()
     };
     held.pass = Some(pass);
-}
-
-pub unsafe fn encoder_render_begin(encoder: i32, view: i32, r: f64, g: f64, b: f64, a: f64) {
-    begin_pass(encoder, view, 0, wgpu::Color { r, g, b, a });
-}
-
-pub unsafe fn encoder_render_begin_depth(
-    encoder: i32,
-    view: i32,
-    depth: i32,
-    r: f64,
-    g: f64,
-    b: f64,
-    a: f64,
-) {
-    begin_pass(encoder, view, depth, wgpu::Color { r, g, b, a });
+    held.colour.clear();
+    held.depth = None;
 }
 
 pub unsafe fn render_set_pipeline(encoder: i32, pipeline: i32) {

@@ -13,13 +13,22 @@ abstract Encoder(Int) from Int to Int {
 
 	/** Opens a pass that clears `target` and keeps what is drawn into it. **/
 	public inline function beginRender(target : TextureView, r : Float, g : Float, b : Float, a = 1.0) : Void {
-		_Native.encoder_render_begin(this, target, r, g, b, a);
+		renderPass().colour(target, r, g, b, a).begin();
 	}
 
 	/** The same, with somewhere to keep depth. **/
 	public inline function beginRenderDepth(target : TextureView, depth : TextureView, r : Float, g : Float, b : Float,
 			a = 1.0) : Void {
-		_Native.encoder_render_begin_depth(this, target, depth, r, g, b, a);
+		renderPass().colour(target, r, g, b, a).depth(depth).begin();
+	}
+
+	/**
+		Describes a pass with more than one colour target, or with depth. See
+		`RenderPassBuilder`.
+	**/
+	public inline function renderPass() : RenderPassBuilder {
+		_Native.pass_reset(this);
+		return cast this;
 	}
 
 	public inline function setPipeline(pipeline : RenderPipeline) : Void {

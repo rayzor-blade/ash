@@ -59,8 +59,10 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_pipeline_primitive` | `builder: i32`, `topology: i32`, `cull: i32`, `front: i32` | `void` |
 | `hlwgpu_render_pipeline_build` | `builder: i32` | `i32` |
 | `hlwgpu_render_pipeline_destroy` | `pipeline: i32` | `void` |
-| `hlwgpu_encoder_render_begin` | `encoder: i32`, `view: i32`, `r: f64`, `g: f64`, `b: f64`, `a: f64` | `void` |
-| `hlwgpu_encoder_render_begin_depth` | `encoder: i32`, `view: i32`, `depth: i32`, `r: f64`, `g: f64`, `b: f64`, `a: f64` | `void` |
+| `hlwgpu_pass_reset` | `encoder: i32` | `void` |
+| `hlwgpu_pass_colour` | `encoder: i32`, `view: i32`, `r: f64`, `g: f64`, `b: f64`, `a: f64` | `void` |
+| `hlwgpu_pass_depth` | `encoder: i32`, `view: i32`, `clear: f64` | `void` |
+| `hlwgpu_pass_begin` | `encoder: i32` | `void` |
 | `hlwgpu_render_set_pipeline` | `encoder: i32`, `pipeline: i32` | `void` |
 | `hlwgpu_render_set_vertex_buffer` | `encoder: i32`, `slot: i32`, `buffer: i32` | `void` |
 | `hlwgpu_render_set_viewport` | `encoder: i32`, `x: f64`, `y: f64`, `width: f64`, `height: f64`, `min_depth: f64`, `max_depth: f64` | `void` |

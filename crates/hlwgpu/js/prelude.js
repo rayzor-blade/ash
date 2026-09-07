@@ -44,6 +44,7 @@ export function makeHandles(rt) {
   const queueOf_ = new Map();
   const passes = new Map();
   const frames = new Map();
+  const described = new Map();
 
   // Stores an object and returns its handle: kind, generation, slot index.
   function put(kind, object) {
@@ -276,6 +277,39 @@ export function makeHandles(rt) {
     });
   }
 
+  // A pass is described before it is opened; these hold the description.
+  function resetPass(encoder) {
+    described.set(encoder, { colour: [], depth: null });
+  }
+
+  function describing(encoder) {
+    const d = described.get(encoder);
+    if (!d) throw new Error(`hlwgpu: encoder ${encoder} is not describing a pass`);
+    return d;
+  }
+
+  function addColour(encoder, view, clearValue) {
+    describing(encoder).colour.push({ view, clearValue, loadOp: "clear", storeOp: "store" });
+  }
+
+  function addDepth(encoder, view, clear) {
+    describing(encoder).depth = {
+      view,
+      depthClearValue: clear,
+      depthLoadOp: "clear",
+      depthStoreOp: "store",
+    };
+  }
+
+  function beginDescribedPass(encoder) {
+    const d = describing(encoder);
+    beginPass(encoder, {
+      colorAttachments: d.colour,
+      depthStencilAttachment: d.depth ?? undefined,
+    });
+    described.delete(encoder);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -315,7 +349,8 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, canvasFormat, attributes, packAttribute, buildPipeline, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, packAttribute, buildPipeline,
+    resetPass, addColour, addDepth, beginDescribedPass, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

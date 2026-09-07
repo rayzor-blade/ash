@@ -49,10 +49,17 @@ pub struct TargetAbi {
     /// anything -- so an object whose only reference is there is collected
     /// while it is still in use.
     ///
-    /// Keeping those registers in memory costs a load and a store where a
-    /// local would have been free, and it is the difference between a program
+    /// Keeping those registers in memory is the difference between a program
     /// that is correct and one that is correct until it collects at the wrong
-    /// moment.
+    /// moment. Turning it off puts the failure straight back: the array in
+    /// `crates/ash/test/tests/wasm/RootLost.hx` comes back holding another
+    /// object's bytes, three runs of three.
+    ///
+    /// It is not free. On a compute loop that allocates nothing, four calls
+    /// run in 1704ms against 764ms unpinned -- and the hot loop's wasm is
+    /// IDENTICAL either way, same instructions in the same order, so the cost
+    /// is not where it looks. Whatever it is has not been found; the
+    /// measurement is recorded rather than explained.
     pub pointer_registers_in_memory: bool,
 }
 

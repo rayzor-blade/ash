@@ -805,6 +805,10 @@ Add threads only after single-mutator GC correctness. The work includes shared
 memory, worker startup, mutator rendezvous, fiber semantics and host deployment
 documentation.
 
+(That prediction was wrong about which part was hard, and is left here because
+being wrong about it cost a day. The rendezvous was never the problem: see
+"Threads that allocate work too" below for what was.)
+
 **The linker's half of it is built.** `wasm32-wasip1-threads` links and runs,
 single-threaded, which took thread-local storage: ash's linker refused it
 outright and a threads object cannot do without it, since wasi-libc puts
@@ -884,38 +888,45 @@ host's own terms: `ash-wasm-run --threads`, or a browser page supplying the
 `spawn` function that makes a Worker. A host that says no answers the way the
 interface has for it and those threads run on the main scheduler.
 
-**That is threads that compute. Threads that allocate do not work yet**, which
-is why the native host says no unless asked -- and the reason is not the one
-this document predicted. It is worth writing down what it actually is, because
-"the collector is single-mutator" turned out to be wrong twice over.
+**Threads that allocate work too**, and what was stopping them was not the
+collector's design. It was that every thread on wasm said it was the same
+thread.
 
-The collector stops the world in 0.00ms with four threads running, and
-collects in 0.09ms to 0.64ms. The rendezvous is not the problem.
+`thread_self_fast` and `hlp_thread_current` both fell through to a constant --
+"one agent, one identity", written before the target had threads, under a
+`cfg(not(any(unix, windows)))` that wasi matches. Everything the runtime keys
+on identity therefore collapsed onto one entry: one mutator record in the
+collector's world, overwritten by whichever thread registered last, so
+`stop_mutator_world` found no other mutator, stopped nobody, and marked a heap
+another thread was still writing; one owner for the reentrant GC lock, so the
+allocator's slow path excluded nothing; one entry in the TLAB map, so two
+threads bump-allocated the same buffer; and one answer from
+`Thread.current()`, so anything a program keyed on it -- a mutex owner, a lock
+waiter -- excluded nothing either.
 
-What was one problem, and is fixed: a worker registered its stack top as "the
-address of a local, plus a megabyte", the portable guess for a target that
-cannot say. On wasm a thread's stack is a block its own allocator handed it,
-anywhere in linear memory, so a megabyte above it is past the end -- and past
-the end of linear memory traps rather than reading zeroes. The collector
-faulted inside whatever allocation had triggered it. Registration happens in
-the thread's outermost frame, so the top needs no guessing.
+The `stop=0.00ms` this document reported as a working rendezvous was the
+symptom, not the refutation: it was not a fast stop, it was nobody to wait
+for.
 
-**What remains is not about threads at all, and that is the useful part.** The
-same allocating program, built for plain `wasm32-wasip1` with no threads
-target, no shared memory and no worker pool, loses an array that the main
-frame holds while its fibers allocate: native prints four checksums, wasm
-prints none. A collection is finding fewer roots on this target than it should.
-That reproduces single-threaded, in one process, with no agents and nothing to
-race -- which makes it a far easier thing to work on than it looked when it was
-only visible behind four Workers, and it is the thing standing between all of
-the above and a program that does anything real.
+A wasm thread does have something of its own and cheap to read. `__tls_base`
+differs per thread, so the address of any thread-local is distinct per thread,
+stable for its life, and one add to fetch. That is the identity now.
 
-Worth separating from it, because it is not about threads at all: that same
-allocating program is already wrong on plain `wasm32-wasip1`, with no threads
-target, no shared memory and no pool. An array the main frame holds while
-fibers allocate comes back with somebody else's length. Whatever roots the
-main scheduler's frame on wasm does not, which is a rooting bug to find before
-any of the above is worth revisiting.
+Measured after, on the allocating program that used to fail:
+
+| threads | before | after |
+|---|---|---|
+| 2 | hung, trapped or passed, differently each run | 10 of 10 correct |
+| 4 | hung or trapped every time | correct, 0.21s |
+| 8 | never tried | correct, 0.58s |
+
+The browser-shaped path -- the same module under node's `worker_threads` --
+prints the same numbers. `wasm32-wasip1` is untouched by this.
+
+**What the nondeterminism was worth.** The same command hung, then hung, then
+passed. That is what said "race" and not "codegen", after four hypotheses that
+assumed the latter. A failure that is not reproducible is evidence about its
+own cause.
 
 What a thread does not share is its WASI context, its socket table and its
 loaded libraries: preview 1 has no way to hand one descriptor table to two

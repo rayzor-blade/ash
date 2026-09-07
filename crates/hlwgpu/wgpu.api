@@ -13,6 +13,11 @@
 library wgpu
 prefix hlwgpu_
 
+# `TextureFormat`, `VertexFormat`, `Limit`, `BufferUsage` and `TextureUsage`
+# are still written out by hand in three places -- the Haxe enum, the name
+# arrays in `js/prelude.js`, and the match in `src/imp.rs`. Adding a value
+# means all three. They should follow the ones below and be generated.
+#
 # Enumerations come from the WebGPU IDL: its values, in its order, so nothing
 # here is typed out and nothing can drift from the spec. The number that
 # crosses is the index.

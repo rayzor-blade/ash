@@ -1,9 +1,7 @@
 package wgpu;
 
 /**
-	What `Adapter.limit()` can be asked for. The same order as `LIMITS` in
-	`js/prelude.js` and the match in `imp.rs`; a limit is added to all three
-	or none.
+	What `Adapter.limit()` can be asked for.
 **/
 enum abstract Limit(Int) to Int {
 	var MaxTextureDimension1D = 0;

@@ -1,6 +1,6 @@
 package wgpu;
 
-/** The same list, in the same order, as `FORMATS` in `js/prelude.js`. **/
+/** How the texels of a texture are stored. **/
 enum abstract TextureFormat(Int) from Int to Int {
 	var Rgba8Unorm = 0;
 	var Bgra8Unorm = 1;

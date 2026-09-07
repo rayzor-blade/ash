@@ -3,7 +3,7 @@ package wgpu;
 /**
 	GPU memory.
 
-	Destroy it when finished: ash runs no finalizers, so nothing else will.
+	Destroy it when finished. Nothing frees it when it goes out of scope.
 **/
 abstract Buffer(Int) from Int to Int {
 	public var ok(get, never) : Bool;

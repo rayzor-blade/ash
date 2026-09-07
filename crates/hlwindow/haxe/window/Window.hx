@@ -3,11 +3,12 @@ package window;
 /**
 	A native window.
 
-	A class rather than an abstract over its handle, because that is what lets
-	it satisfy `wgpu.WindowSource` by shape -- an abstract carries its methods
-	but does not unify structurally. A program has one window or two, so the
-	allocation is not worth avoiding.
+	Reports the raw handles a graphics library needs to draw into it, so one
+	can be handed this directly.
 **/
+// A class rather than an abstract over the handle: an abstract carries its
+// methods but does not unify structurally, and satisfying a graphics
+// library's window shape is the whole point. One window costs one allocation.
 class Window {
 	var handle : Int;
 

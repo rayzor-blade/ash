@@ -1,6 +1,6 @@
 package wgpu;
 
-/** The same list, in the same order, as `VERTEX_FORMATS` in `js/prelude.js`. **/
+/** How one field of a vertex is stored. **/
 enum abstract VertexFormat(Int) from Int to Int {
 	var Float32x2 = 0;
 	var Float32x3 = 1;

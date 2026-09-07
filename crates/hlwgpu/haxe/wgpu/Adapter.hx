@@ -3,7 +3,7 @@ package wgpu;
 /**
 	A GPU the machine offers.
 
-	Destroy it when finished: ash runs no finalizers, so nothing else will.
+	Destroy it when finished. Nothing frees it when it goes out of scope.
 **/
 abstract Adapter(Int) from Int to Int {
 	public inline function new(handle : Int) {

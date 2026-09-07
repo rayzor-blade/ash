@@ -1,14 +1,6 @@
 package wgpu;
 
-/**
-	Something started on the GPU that has not finished.
-
-	Waiting happens here rather than inside the primitive. A primitive that
-	blocked could not work in a page: a promise settles only once the task
-	returns, and a call that never returns is a call that never gets an answer.
-	Looping here, in the program's own module, is what the fiber transform can
-	suspend.
-**/
+/** Work the GPU was asked for that has not finished yet. **/
 abstract Request(Int) from Int to Int {
 	public inline function new(id : Int) {
 		this = id;
@@ -22,8 +14,10 @@ abstract Request(Int) from Int to Int {
 	}
 
 	/**
-		Waits for the result, then collects it. Yields between polls so a page
-		can settle the promise this is waiting on.
+		Waits for the result and collects it.
+
+		Yields between checks rather than spinning, so other threads keep
+		running and a page stays responsive while the GPU works.
 	**/
 	public function await() : Int {
 		while (!_Native.request_ready(this)) {
@@ -32,16 +26,7 @@ abstract Request(Int) from Int to Int {
 		return _Native.request_result(this);
 	}
 
-	/**
-		Hands the rest of this slice back. On wasm the fiber transform turns
-		this into a suspension, which is what lets the host run; natively it
-		just lets another thread go.
-
-		A wait long enough to matter must also tell the collector, or a thread
-		parked here never reaches a safepoint. Nothing in this milestone waits
-		-- every request is settled before it is handed out -- so there is
-		nowhere yet to put that.
-	**/
+	/** Gives up the rest of this time slice. **/
 	static inline function yield() : Void {
 		Sys.sleep(0);
 	}

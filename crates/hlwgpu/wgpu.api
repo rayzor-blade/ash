@@ -122,9 +122,13 @@ prim compute_pipeline_create(device: i32, shader: i32, entry: bytes) -> i32
 prim pipeline_destroy(pipeline: i32) -> void
   js H.drop("pipeline", pipeline)
 
-# `buffers` is `count` handles, one per binding, in binding order.
-prim bind_group_create(device: i32, pipeline: i32, group: i32, buffers: bytes, count: i32) -> i32
-  js H.put("bindgroup", H.get("device", device).createBindGroup({ layout: H.get("pipeline", pipeline).getBindGroupLayout(group), entries: H.handles(buffers, count).map((h, i) => ({ binding: i, resource: { buffer: H.get("buffer", h) } })) }))
+# `bound` is `count` handles, one per binding, in binding order. Each may be a
+# buffer, a texture view or a sampler: a handle carries its own kind, so what
+# it binds as does not have to be said twice.
+#
+# The pipeline may be a compute or a render one.
+prim bind_group_create(device: i32, pipeline: i32, group: i32, bound: bytes, count: i32) -> i32
+  js H.put("bindgroup", H.get("device", device).createBindGroup({ layout: H.layoutOf(pipeline, group), entries: H.handles(bound, count).map((h, i) => ({ binding: i, resource: H.resource(h) })) }))
 
 prim bind_group_destroy(bindgroup: i32) -> void
   js H.drop("bindgroup", bindgroup)
@@ -202,3 +206,28 @@ prim encoder_render_end(encoder: i32) -> void
 # ours: a width of 64 RGBA pixels is exactly one row.
 prim encoder_copy_texture_to_buffer(encoder: i32, texture: i32, buffer: i32, width: i32, height: i32, bytes_per_row: i32) -> void
   js H.get("encoder", encoder).copyTextureToBuffer({ texture: H.get("texture", texture) }, { buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, [width, height])
+
+# -- samplers ---------------------------------------------------------------
+
+# `filter` is 0 nearest, 1 linear. `address` is 0 clamp-to-edge, 1 repeat.
+prim sampler_create(device: i32, filter: i32, address: i32) -> i32
+  js H.put("sampler", H.get("device", device).createSampler({ magFilter: filter === 1 ? "linear" : "nearest", minFilter: filter === 1 ? "linear" : "nearest", addressModeU: address === 1 ? "repeat" : "clamp-to-edge", addressModeV: address === 1 ? "repeat" : "clamp-to-edge" }))
+
+prim sampler_destroy(sampler: i32) -> void
+  js H.drop("sampler", sampler)
+
+# Unlike a copy out of a texture, this has no row alignment to honour.
+prim queue_write_texture(queue: i32, texture: i32, data: bytes, width: i32, height: i32, bytes_per_row: i32) -> void
+  js H.get("queue", queue).writeTexture({ texture: H.get("texture", texture) }, H.view(data, bytes_per_row * height), { bytesPerRow: bytes_per_row }, [width, height])
+
+# -- indexed drawing --------------------------------------------------------
+
+prim render_set_bind_group(encoder: i32, group: i32, bindgroup: i32) -> void
+  js H.pass(encoder).setBindGroup(group, H.get("bindgroup", bindgroup))
+
+# `format` is 0 for uint16 and 1 for uint32.
+prim render_set_index_buffer(encoder: i32, buffer: i32, format: i32) -> void
+  js H.pass(encoder).setIndexBuffer(H.get("buffer", buffer), format === 1 ? "uint32" : "uint16")
+
+prim render_draw_indexed(encoder: i32, indices: i32, instances: i32) -> void
+  js H.pass(encoder).drawIndexed(indices, instances)

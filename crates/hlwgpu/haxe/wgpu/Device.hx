@@ -30,13 +30,17 @@ abstract Device(Int) from Int to Int {
 		return _Native.compute_pipeline_create(this, module, @:privateAccess entry.bytes);
 	}
 
-	/** Buffers in binding order, for `group`. **/
-	public function bindGroup(pipeline : ComputePipeline, group : Int, buffers : Array<Buffer>) : BindGroup {
-		var packed = haxe.io.Bytes.alloc(buffers.length * 4);
-		for (i in 0...buffers.length) {
-			packed.setInt32(i * 4, buffers[i]);
+	/** Buffers, texture views and samplers in binding order, for `group`. **/
+	public function bindGroup(pipeline : Pipeline, group : Int, bound : Array<Binding>) : BindGroup {
+		var packed = haxe.io.Bytes.alloc(bound.length * 4);
+		for (i in 0...bound.length) {
+			packed.setInt32(i * 4, bound[i]);
 		}
-		return _Native.bind_group_create(this, pipeline, group, @:privateAccess packed.b, buffers.length);
+		return _Native.bind_group_create(this, pipeline, group, @:privateAccess packed.b, bound.length);
+	}
+
+	public inline function sampler(filter : FilterMode = Nearest, address : AddressMode = ClampToEdge) : Sampler {
+		return _Native.sampler_create(this, filter, address);
 	}
 
 	public inline function texture(width : Int, height : Int, format : TextureFormat, usage : TextureUsage) : Texture {

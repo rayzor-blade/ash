@@ -203,6 +203,25 @@ export function makeHandles(rt) {
     }
   }
 
+  // What a handle binds as. The kind is in the handle, so a bind group does
+  // not have to be told what each entry is.
+  function resource(handle) {
+    const kind = handle >>> (INDEX_BITS + GEN_BITS);
+    if (kind === KINDS.buffer) return { buffer: get("buffer", handle) };
+    if (kind === KINDS.view) return get("view", handle);
+    if (kind === KINDS.sampler) return get("sampler", handle);
+    throw new Error(`hlwgpu: handle ${handle} cannot be bound`);
+  }
+
+  // Compute and render pipelines both have bind group layouts.
+  function layoutOf(pipeline, group) {
+    const kind = pipeline >>> (INDEX_BITS + GEN_BITS);
+    const p = kind === KINDS.renderpipeline
+      ? get("renderpipeline", pipeline)
+      : get("pipeline", pipeline);
+    return p.getBindGroupLayout(group);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -242,7 +261,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes,
+    beginPass, pass, endPass, formatName, attributes, resource, layoutOf,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -300,8 +319,12 @@ export function hlwgpuImports(rt) {
     // Layout is inferred from the shader, so a bind group only needs its buffers.
     hlwgpu_compute_pipeline_create: (device, shader, entry) => H.put("pipeline", H.get("device", device).createComputePipeline({ layout: "auto", compute: { module: H.get("shader", shader), entryPoint: H.readStr(entry) } })),
     hlwgpu_pipeline_destroy: (pipeline) => { H.drop("pipeline", pipeline); },
-    // `buffers` is `count` handles, one per binding, in binding order.
-    hlwgpu_bind_group_create: (device, pipeline, group, buffers, count) => H.put("bindgroup", H.get("device", device).createBindGroup({ layout: H.get("pipeline", pipeline).getBindGroupLayout(group), entries: H.handles(buffers, count).map((h, i) => ({ binding: i, resource: { buffer: H.get("buffer", h) } })) })),
+    // `bound` is `count` handles, one per binding, in binding order. Each may be a
+    // buffer, a texture view or a sampler: a handle carries its own kind, so what
+    // it binds as does not have to be said twice.
+    // 
+    // The pipeline may be a compute or a render one.
+    hlwgpu_bind_group_create: (device, pipeline, group, bound, count) => H.put("bindgroup", H.get("device", device).createBindGroup({ layout: H.layoutOf(pipeline, group), entries: H.handles(bound, count).map((h, i) => ({ binding: i, resource: H.resource(h) })) })),
     hlwgpu_bind_group_destroy: (bindgroup) => { H.drop("bindgroup", bindgroup); },
     hlwgpu_encoder_create: (device) => H.put("encoder", H.get("device", device).createCommandEncoder()),
     // A whole compute pass: one pipeline, one bind group, one dispatch. Passes
@@ -335,5 +358,14 @@ export function hlwgpuImports(rt) {
     // `bytes_per_row` must be a multiple of 256, which is WebGPU's rule and not
     // ours: a width of 64 RGBA pixels is exactly one row.
     hlwgpu_encoder_copy_texture_to_buffer: (encoder, texture, buffer, width, height, bytes_per_row) => { H.get("encoder", encoder).copyTextureToBuffer({ texture: H.get("texture", texture) }, { buffer: H.get("buffer", buffer), bytesPerRow: bytes_per_row }, [width, height]); },
+    // `filter` is 0 nearest, 1 linear. `address` is 0 clamp-to-edge, 1 repeat.
+    hlwgpu_sampler_create: (device, filter, address) => H.put("sampler", H.get("device", device).createSampler({ magFilter: filter === 1 ? "linear" : "nearest", minFilter: filter === 1 ? "linear" : "nearest", addressModeU: address === 1 ? "repeat" : "clamp-to-edge", addressModeV: address === 1 ? "repeat" : "clamp-to-edge" })),
+    hlwgpu_sampler_destroy: (sampler) => { H.drop("sampler", sampler); },
+    // Unlike a copy out of a texture, this has no row alignment to honour.
+    hlwgpu_queue_write_texture: (queue, texture, data, width, height, bytes_per_row) => { H.get("queue", queue).writeTexture({ texture: H.get("texture", texture) }, H.view(data, bytes_per_row * height), { bytesPerRow: bytes_per_row }, [width, height]); },
+    hlwgpu_render_set_bind_group: (encoder, group, bindgroup) => { H.pass(encoder).setBindGroup(group, H.get("bindgroup", bindgroup)); },
+    // `format` is 0 for uint16 and 1 for uint32.
+    hlwgpu_render_set_index_buffer: (encoder, buffer, format) => { H.pass(encoder).setIndexBuffer(H.get("buffer", buffer), format === 1 ? "uint32" : "uint16"); },
+    hlwgpu_render_draw_indexed: (encoder, indices, instances) => { H.pass(encoder).drawIndexed(indices, instances); },
   };
 }

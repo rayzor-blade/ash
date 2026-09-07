@@ -16,6 +16,18 @@ const GEN_BITS: i32 = 7;
 const INDEX_MASK: i32 = (1 << INDEX_BITS) - 1;
 const GEN_MASK: i32 = (1 << GEN_BITS) - 1;
 
+/// The kind a handle carries, or 0 for one that is not a handle at all.
+///
+/// What lets a bind group take buffers, views and samplers without being told
+/// which is which.
+pub fn kind_of(handle: i32) -> i32 {
+    if handle <= 0 {
+        0
+    } else {
+        handle >> (INDEX_BITS + GEN_BITS)
+    }
+}
+
 /// Live objects of one kind.
 pub struct Slab<T> {
     kind: Kind,
@@ -213,6 +225,14 @@ mod tests {
         s.remove(b);
         assert_eq!(s.put(3) & INDEX_MASK, a & INDEX_MASK);
         assert_eq!(s.put(4) & INDEX_MASK, b & INDEX_MASK);
+    }
+
+    #[test]
+    fn a_handle_says_what_kind_it_is() {
+        let mut s = slab();
+        let h = s.put(1);
+        assert_eq!(kind_of(h), Kind::Buffer as i32);
+        assert_eq!(kind_of(0), 0, "and zero is nothing");
     }
 
     #[test]

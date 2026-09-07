@@ -196,6 +196,25 @@ export function makeHandles(rt) {
     }
   }
 
+  // What a handle binds as. The kind is in the handle, so a bind group does
+  // not have to be told what each entry is.
+  function resource(handle) {
+    const kind = handle >>> (INDEX_BITS + GEN_BITS);
+    if (kind === KINDS.buffer) return { buffer: get("buffer", handle) };
+    if (kind === KINDS.view) return get("view", handle);
+    if (kind === KINDS.sampler) return get("sampler", handle);
+    throw new Error(`hlwgpu: handle ${handle} cannot be bound`);
+  }
+
+  // Compute and render pipelines both have bind group layouts.
+  function layoutOf(pipeline, group) {
+    const kind = pipeline >>> (INDEX_BITS + GEN_BITS);
+    const p = kind === KINDS.renderpipeline
+      ? get("renderpipeline", pipeline)
+      : get("pipeline", pipeline);
+    return p.getBindGroupLayout(group);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -235,7 +254,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, attributes,
+    beginPass, pass, endPass, formatName, attributes, resource, layoutOf,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

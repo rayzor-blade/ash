@@ -37,7 +37,7 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_shader_destroy` | `shader: i32` | `void` |
 | `hlwgpu_compute_pipeline_create` | `device: i32`, `shader: i32`, `entry: i32` | `i32` |
 | `hlwgpu_pipeline_destroy` | `pipeline: i32` | `void` |
-| `hlwgpu_bind_group_create` | `device: i32`, `pipeline: i32`, `group: i32`, `buffers: i32`, `count: i32` | `i32` |
+| `hlwgpu_bind_group_create` | `device: i32`, `pipeline: i32`, `group: i32`, `bound: i32`, `count: i32` | `i32` |
 | `hlwgpu_bind_group_destroy` | `bindgroup: i32` | `void` |
 | `hlwgpu_encoder_create` | `device: i32` | `i32` |
 | `hlwgpu_encoder_compute` | `encoder: i32`, `pipeline: i32`, `bindgroup: i32`, `x: i32`, `y: i32`, `z: i32` | `void` |
@@ -56,3 +56,9 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_render_draw` | `encoder: i32`, `vertices: i32`, `instances: i32` | `void` |
 | `hlwgpu_encoder_render_end` | `encoder: i32` | `void` |
 | `hlwgpu_encoder_copy_texture_to_buffer` | `encoder: i32`, `texture: i32`, `buffer: i32`, `width: i32`, `height: i32`, `bytes_per_row: i32` | `void` |
+| `hlwgpu_sampler_create` | `device: i32`, `filter: i32`, `address: i32` | `i32` |
+| `hlwgpu_sampler_destroy` | `sampler: i32` | `void` |
+| `hlwgpu_queue_write_texture` | `queue: i32`, `texture: i32`, `data: i32`, `width: i32`, `height: i32`, `bytes_per_row: i32` | `void` |
+| `hlwgpu_render_set_bind_group` | `encoder: i32`, `group: i32`, `bindgroup: i32` | `void` |
+| `hlwgpu_render_set_index_buffer` | `encoder: i32`, `buffer: i32`, `format: i32` | `void` |
+| `hlwgpu_render_draw_indexed` | `encoder: i32`, `indices: i32`, `instances: i32` | `void` |

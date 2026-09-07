@@ -12,7 +12,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use hl_abi::{hlp_alloc_bytes, vbyte};
 use crate::bindings::kinds::Kind;
-use crate::handles::{PendingRequests, Slab};
+use crate::handles::{kind_of, PendingRequests, Slab};
 
 /// A device and the queue that came back with it.
 struct DeviceEntry {
@@ -51,6 +51,7 @@ slab!(PIPELINES, wgpu::ComputePipeline, Kind::Pipeline);
 slab!(RENDER_PIPELINES, wgpu::RenderPipeline, Kind::Renderpipeline);
 slab!(TEXTURES, wgpu::Texture, Kind::Texture);
 slab!(VIEWS, wgpu::TextureView, Kind::View);
+slab!(SAMPLERS, wgpu::Sampler, Kind::Sampler);
 slab!(BINDGROUPS, wgpu::BindGroup, Kind::Bindgroup);
 slab!(ENCODERS, Encoder, Kind::Encoder);
 
@@ -324,40 +325,70 @@ pub unsafe fn pipeline_destroy(pipeline: i32) {
     PIPELINES.lock().unwrap().remove(pipeline);
 }
 
+/// One entry of a bind group, held so the descriptor below can borrow it.
+enum Bound {
+    Buffer(Arc<wgpu::Buffer>),
+    View(Arc<wgpu::TextureView>),
+    Sampler(Arc<wgpu::Sampler>),
+}
+
 pub unsafe fn bind_group_create(
     device: i32,
     pipeline: i32,
     group: i32,
-    buffers: *mut vbyte,
+    bound: *mut vbyte,
     count: i32,
 ) -> i32 {
-    if buffers.is_null() || count <= 0 {
+    if bound.is_null() || count <= 0 {
         return 0;
     }
     let entry = find!(DEVICES, device, 0);
-    let pipeline = find!(PIPELINES, pipeline, 0);
-    let handles = std::slice::from_raw_parts(buffers as *const i32, count as usize);
+    let group = group.max(0) as u32;
 
-    // Held so the borrows below outlive the descriptor.
+    // A compute or a render pipeline; both have layouts, and the handle says
+    // which it is.
+    let layout = if kind_of(pipeline) == Kind::Renderpipeline as i32 {
+        find!(RENDER_PIPELINES, pipeline, 0).get_bind_group_layout(group)
+    } else {
+        find!(PIPELINES, pipeline, 0).get_bind_group_layout(group)
+    };
+
+    let handles = std::slice::from_raw_parts(bound as *const i32, count as usize);
     let mut found = Vec::with_capacity(handles.len());
     for handle in handles {
-        match BUFFERS.lock().unwrap().get(*handle) {
-            Some(buffer) => found.push(buffer),
+        // The kind is in the handle, so an entry does not have to say what it
+        // binds as -- and a wrong handle is refused here rather than bound as
+        // whatever it happens to overlap.
+        let one = match kind_of(*handle) {
+            k if k == Kind::Buffer as i32 => BUFFERS.lock().unwrap().get(*handle).map(Bound::Buffer),
+            k if k == Kind::View as i32 => VIEWS.lock().unwrap().get(*handle).map(Bound::View),
+            k if k == Kind::Sampler as i32 => {
+                SAMPLERS.lock().unwrap().get(*handle).map(Bound::Sampler)
+            }
+            _ => None,
+        };
+        match one {
+            Some(one) => found.push(one),
             None => return 0,
         }
     }
+
     let entries: Vec<wgpu::BindGroupEntry> = found
         .iter()
         .enumerate()
-        .map(|(binding, buffer)| wgpu::BindGroupEntry {
+        .map(|(binding, one)| wgpu::BindGroupEntry {
             binding: binding as u32,
-            resource: buffer.as_entire_binding(),
+            resource: match one {
+                Bound::Buffer(buffer) => buffer.as_entire_binding(),
+                Bound::View(view) => wgpu::BindingResource::TextureView(view),
+                Bound::Sampler(sampler) => wgpu::BindingResource::Sampler(sampler),
+            },
         })
         .collect();
 
     let bind_group = entry.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
-        layout: &pipeline.get_bind_group_layout(group.max(0) as u32),
+        layout: &layout,
         entries: &entries,
     });
     BINDGROUPS.lock().unwrap().put(bind_group)
@@ -672,4 +703,101 @@ pub unsafe fn encoder_copy_texture_to_buffer(
             depth_or_array_layers: 1,
         },
     );
+}
+
+// -- samplers ---------------------------------------------------------------
+
+pub unsafe fn sampler_create(device: i32, filter: i32, address: i32) -> i32 {
+    let entry = find!(DEVICES, device, 0);
+    let filter = if filter == 1 {
+        wgpu::FilterMode::Linear
+    } else {
+        wgpu::FilterMode::Nearest
+    };
+    let address = if address == 1 {
+        wgpu::AddressMode::Repeat
+    } else {
+        wgpu::AddressMode::ClampToEdge
+    };
+    let sampler = entry.device.create_sampler(&wgpu::SamplerDescriptor {
+        address_mode_u: address,
+        address_mode_v: address,
+        address_mode_w: address,
+        mag_filter: filter,
+        min_filter: filter,
+        ..Default::default()
+    });
+    SAMPLERS.lock().unwrap().put(sampler)
+}
+
+pub unsafe fn sampler_destroy(sampler: i32) {
+    SAMPLERS.lock().unwrap().remove(sampler);
+}
+
+pub unsafe fn queue_write_texture(
+    queue: i32,
+    texture: i32,
+    data: *mut vbyte,
+    width: i32,
+    height: i32,
+    bytes_per_row: i32,
+) {
+    if data.is_null() || width <= 0 || height <= 0 {
+        return;
+    }
+    let queue = find!(QUEUES, queue);
+    let texture = find!(TEXTURES, texture);
+    let bytes = std::slice::from_raw_parts(data, (bytes_per_row.max(0) * height) as usize);
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row.max(0) as u32),
+            rows_per_image: Some(height as u32),
+        },
+        wgpu::Extent3d {
+            width: width as u32,
+            height: height as u32,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+// -- indexed drawing --------------------------------------------------------
+
+pub unsafe fn render_set_bind_group(encoder: i32, group: i32, bindgroup: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let bind_group = find!(BINDGROUPS, bindgroup);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_bind_group(group.max(0) as u32, &*bind_group, &[]);
+    }
+}
+
+pub unsafe fn render_set_index_buffer(encoder: i32, buffer: i32, format: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let buffer = find!(BUFFERS, buffer);
+    let format = if format == 1 {
+        wgpu::IndexFormat::Uint32
+    } else {
+        wgpu::IndexFormat::Uint16
+    };
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.set_index_buffer(buffer.slice(..), format);
+    }
+}
+
+pub unsafe fn render_draw_indexed(encoder: i32, indices: i32, instances: i32) {
+    let entry = find!(ENCODERS, encoder);
+    let mut held = entry.lock().unwrap();
+    if let Some(pass) = held.pass.as_mut() {
+        pass.draw_indexed(0..indices.max(0) as u32, 0, 0..instances.max(1) as u32);
+    }
 }

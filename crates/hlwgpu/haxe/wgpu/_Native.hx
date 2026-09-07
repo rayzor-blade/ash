@@ -148,9 +148,13 @@ class _Native {
 		return;
 	}
 
-	// `buffers` is `count` handles, one per binding, in binding order.
+	// `bound` is `count` handles, one per binding, in binding order. Each may be a
+	// buffer, a texture view or a sampler: a handle carries its own kind, so what
+	// it binds as does not have to be said twice.
+	// 
+	// The pipeline may be a compute or a render one.
 	@:hlNative("wgpu", "bind_group_create")
-	public static function bind_group_create(device : Int, pipeline : Int, group : Int, buffers : hl.Bytes, count : Int) : Int {
+	public static function bind_group_create(device : Int, pipeline : Int, group : Int, bound : hl.Bytes, count : Int) : Int {
 		return 0;
 	}
 
@@ -256,6 +260,39 @@ class _Native {
 	// ours: a width of 64 RGBA pixels is exactly one row.
 	@:hlNative("wgpu", "encoder_copy_texture_to_buffer")
 	public static function encoder_copy_texture_to_buffer(encoder : Int, texture : Int, buffer : Int, width : Int, height : Int, bytes_per_row : Int) : Void {
+		return;
+	}
+
+	// `filter` is 0 nearest, 1 linear. `address` is 0 clamp-to-edge, 1 repeat.
+	@:hlNative("wgpu", "sampler_create")
+	public static function sampler_create(device : Int, filter : Int, address : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "sampler_destroy")
+	public static function sampler_destroy(sampler : Int) : Void {
+		return;
+	}
+
+	// Unlike a copy out of a texture, this has no row alignment to honour.
+	@:hlNative("wgpu", "queue_write_texture")
+	public static function queue_write_texture(queue : Int, texture : Int, data : hl.Bytes, width : Int, height : Int, bytes_per_row : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "render_set_bind_group")
+	public static function render_set_bind_group(encoder : Int, group : Int, bindgroup : Int) : Void {
+		return;
+	}
+
+	// `format` is 0 for uint16 and 1 for uint32.
+	@:hlNative("wgpu", "render_set_index_buffer")
+	public static function render_set_index_buffer(encoder : Int, buffer : Int, format : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "render_draw_indexed")
+	public static function render_draw_indexed(encoder : Int, indices : Int, instances : Int) : Void {
 		return;
 	}
 

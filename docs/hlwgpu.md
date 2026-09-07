@@ -270,6 +270,14 @@ hand-written -- but it needs a gate: one test encodes every descriptor kind in
 Haxe and asserts the Rust and JavaScript decoders agree, so a generator bug
 cannot reach only one target.
 
+**Nothing has needed one yet**, four milestones in, and one reason is worth
+keeping. A bind group holds buffers, texture views and samplers, which looks
+like it needs a tagged entry per binding -- but the kind is already in the top
+four bits of every handle, so an array of plain `i32` says what each entry
+binds as without being told. The tag that existed to catch a buffer used as a
+texture turns out to be the descriptor. Depth and blending, in the milestone
+below, are where a real layout is finally unavoidable.
+
 ## Shaders: WGSL, and nothing else
 
 WGSL is the only shading language a browser accepts. Natively `wgpu` will also
@@ -346,14 +354,18 @@ desktop library that works is worth more than two halves that do not.
    pass into a texture, and a readback whose pixels are checked exactly.
    Colours are 0 or 1 per channel so the unorm conversion is exact on any GPU;
    PNG output is a convenience that has not been needed.
-4. **Presentation.** A surface from a window handle, swap chain, resize.
-   Index buffers, depth, and blending arrive here too -- that is where the
-   descriptors first get deep enough to need the packed layout above, which
-   is why nothing so far has one.
-5. **The page.** Milestones 1 to 3 unchanged against `navigator.gpu`, which
+4. **Textured, indexed drawing.** DONE natively. Samplers, texture upload,
+   index buffers, and bind groups holding buffers, views and samplers
+   together. A 2x2 texture on a 64x64 quad puts one texel in each quadrant,
+   so the four expected colours are exact.
+5. **Presentation.** A surface from a window handle, swap chain, resize, plus
+   depth and blending. Ordered after the above deliberately: nothing here
+   produces a native window handle yet, while everything above is verifiable
+   offscreen without one.
+6. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
-6. **Later, separately.** A `winit` companion for native windows. hxsl, a
+7. **Later, separately.** A `winit` companion for native windows. hxsl, a
    Heaps driver, SPIR-V ingestion, ray queries.
 
 ## Testing

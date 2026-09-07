@@ -24,6 +24,18 @@ abstract Encoder(Int) from Int to Int {
 		_Native.render_set_vertex_buffer(this, slot, buffer);
 	}
 
+	public inline function setBindGroup(group : Int, bindings : BindGroup) : Void {
+		_Native.render_set_bind_group(this, group, bindings);
+	}
+
+	public inline function setIndexBuffer(buffer : Buffer, format : IndexFormat = Uint16) : Void {
+		_Native.render_set_index_buffer(this, buffer, format);
+	}
+
+	public inline function drawIndexed(indices : Int, instances = 1) : Void {
+		_Native.render_draw_indexed(this, indices, instances);
+	}
+
 	public inline function draw(vertices : Int, instances = 1) : Void {
 		_Native.render_draw(this, vertices, instances);
 	}

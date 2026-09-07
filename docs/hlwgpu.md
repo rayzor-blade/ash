@@ -73,7 +73,7 @@ embedder's host is not portable, and this one has to be.
 
 `wasi:webgpu` (wasi-gfx) is this interface on the standards track, and is the
 eventual answer for hosts that want one. Milestone 1 should look at whether it
-is usable yet; the declaration is shaped so the namespace can move.
+is usable yet; the declaration is written so the namespace can move.
 
 ## The interface is declared once, and hlwgpu owns every side
 
@@ -187,7 +187,7 @@ That is the lifetime model, not a defect to route around:
 ## No GC pointer may live in Rust
 
 `rust-heap-has-no-gc-root` is the most-repeated bug in this codebase -- four
-instances, one shape. The collector does not scan the malloc heap, so a
+instances, all the same mistake. The collector does not scan the malloc heap, so a
 `*mut vdynamic` whose only holder is a Rust `Vec`, `Box` or `HashMap` is
 unrooted and the next collection takes it.
 
@@ -341,7 +341,7 @@ cross-target code breaks in the target tested least. The library takes WGSL
 text and returns a shader module.
 
 hxsl translation, and a Heaps driver over this library, come later and are
-separate work. Nothing here is shaped around them.
+separate work. Nothing here is designed around them.
 
 ## Surfaces
 
@@ -390,7 +390,7 @@ that renders offscreen or into a page's canvas never loads.
 The two libraries share no Rust type and no Haxe type. `hlwindow` reports its
 raw handle as a platform code and four integers; `hlwgpu` puts them back
 together. On the Haxe side `wgpu.WindowSource` is a structural type, so a
-`window.Window` satisfies it by shape and neither library names the other. That
+`window.Window` satisfies it structurally and neither library names the other. That
 is what keeps hlwgpu depending on nothing while still being able to draw into
 a window.
 
@@ -474,11 +474,11 @@ A library is a good way to walk into the parts of a VM nobody has needed yet.
 
 **The interpreter dispatches a native through a hand-written table** keyed by
 arity, return kind and a bitmask of which arguments are floats
-(`ash_interp/src/interpreter/natives.rs`). A shape not in the table is a
+(`ash_interp/src/interpreter/natives.rs`). A signature not in the table is a
 runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
 is `(i32, i32, f64, f64, f64, f64)` and no arm matched, and its depth variant
 needed a seven-argument one, of which the table had none at all. Two arms so
-far, one per new pass shape. A float-heavy library will keep finding these, and
+far, one per new kind of pass. A float-heavy library will keep finding these, and
 the real answer eventually is a signature-directed dispatcher rather than a
 table.
 
@@ -491,7 +491,7 @@ answered "Rgba8Unorm" with confidence and `configure` panicked two calls later
 with a validation error that named neither the cause nor the caller. On screen
 it was a blank white window.
 
-It now answers -1, which is not a format. The same shape as the conformance
+It now answers -1, which is not a format. The same mistake as the conformance
 harness reporting a compiler warning as the reason a suite failed: a default
 that is indistinguishable from a real result turns a clear failure into a
 puzzle. Any lookup added here should fail loudly rather than plausibly.
@@ -507,7 +507,7 @@ puzzle. Any lookup added here should fail loudly rather than plausibly.
 
 - Whether `wasi:webgpu` is mature enough to be the import namespace. If it is,
   the wasm half is portable by standard rather than by documentation.
-- The shape of ash's one generic hook: whether a page passes extra `env`
+- The form of ash's one generic hook: whether a page passes extra `env`
   entries to `run()`, or registers them on a global the loader reads. The
   second needs no signature change and matches how `ashPresent` is already
   found.

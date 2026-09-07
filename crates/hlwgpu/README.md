@@ -1,7 +1,7 @@
 # hlwgpu
 
 WebGPU for HashLink: command encoders, bind groups, render and compute
-pipelines, WGSL shaders. Not a renderer -- the layer one is written on.
+pipelines, WGSL shaders.
 
 ```haxe
 var device = wgpu.Instance.create().adapter().device();
@@ -14,13 +14,12 @@ var pipeline = device.pipeline()
     .build();
 ```
 
-The builder's shape is checked as you write it: an attribute with no vertex
-buffer open, or a build with nowhere to draw, will not compile.
+Builders are validated as you write them: an attribute with no vertex buffer
+open, or a build with nowhere to draw, will not compile.
 
 ## Coordinates
 
-These are WebGPU's, and they are not OpenGL's. `test/Conventions.hx` is what
-keeps them that way.
+These are WebGPU's, and they are not OpenGL's. See `test/Conventions.hx`.
 
 - **Clip space has +y upward**, and the first row of a texture is the **top**.
   So +y lands in the early rows of a readback, and texture coordinates start

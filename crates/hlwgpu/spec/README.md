@@ -4,7 +4,7 @@
 fetched 2026-09-07. Auto-generated from the specification; not edited here.
 
 It is vendored because it is the checklist. hlwgpu does not have to look like
-this IDL -- its shape is its own -- but everything a browser's WebGPU can do
+this IDL -- its API is its own -- but everything a browser's WebGPU can do
 has to be reachable through it, and this is the list of what that is.
 
 Measured against it on the day it was vendored:

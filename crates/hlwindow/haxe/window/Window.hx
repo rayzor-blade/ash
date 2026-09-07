@@ -7,8 +7,9 @@ package window;
 	can be handed this directly.
 **/
 // A class rather than an abstract over the handle: an abstract carries its
-// methods but does not unify structurally, and satisfying a graphics
-// library's window shape is the whole point. One window costs one allocation.
+// methods but does not unify structurally, and letting a graphics
+// library use this directly is the whole point. One window costs one
+// allocation.
 class Window {
 	var handle : Int;
 

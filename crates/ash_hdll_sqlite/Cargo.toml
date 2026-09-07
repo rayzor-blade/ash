@@ -12,7 +12,7 @@ publish = false
 # runtime as a Rust crate would link a second copy of its `#[no_mangle]`
 # exports into this library, which is two definitions of one name.
 [dependencies]
-hl_abi = { path = "../hl_abi" }
+hl_abi = { workspace = true }
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [lib]

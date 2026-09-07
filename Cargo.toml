@@ -15,6 +15,9 @@ flexstr = { version = "0.9" }
 num_enum = {version = "0.7.3"}
 ash_std ={ path = "std" }
 ash_hdll_sqlite = { path = "crates/ash_hdll_sqlite" }
+# Its own repository: the HashLink C ABI is not specific to this VM, and the
+# libraries that use it are not all here. https://github.com/rayzor-blade/hl_abi
+hl_abi = { git = "https://github.com/rayzor-blade/hl_abi" }
 ash_native_call = { path = "crates/ash_native_call" }
 tinysdl = { path = "crates/tinysdl" }
 ash_browser = { path = "crates/ash_browser" }

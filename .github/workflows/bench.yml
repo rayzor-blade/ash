@@ -555,6 +555,10 @@ jobs:
         run: |
           mkdir -p website/bench
           cp site-data/results.json website/bench/results.json
+          # Served from the site so the install line is short enough to read
+          # out loud: ash.rayzor.tech/install.sh. Copied at deploy rather than
+          # committed twice, so the repo keeps one copy of each script.
+          cp install.sh install.ps1 website/
           if [ -f conf-data/conformance.json ]; then
             cp conf-data/conformance.json website/bench/conformance.json
             python3 -m json.tool website/bench/conformance.json > /dev/null

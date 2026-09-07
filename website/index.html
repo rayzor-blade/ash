@@ -6,9 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ash — HashLink Bytecode Runtime</title>
   <meta name="description"
-    content="Ash runs HashLink (.hl) bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM. Continuously benchmarked against HashLink's JIT and HL/C.">
+    content="Ash runs HashLink (.hl) bytecode compiled from Haxe. It runs the official Haxe test suite on every push, and it is faster than HashLink's own JIT.">
   <meta name="author" content="Damilare Akinlaja">
-  <meta name="keywords" content="HashLink, Haxe, bytecode, runtime, JIT, Cranelift, LLVM, Rust, virtual machine">
+  <meta name="keywords" content="HashLink, Haxe, bytecode, runtime, JIT, Rust, virtual machine">
   <meta name="robots" content="index, follow">
   <meta name="theme-color" content="#f5f1ea">
   <link rel="canonical" href="https://rayzor-blade.github.io/ash/">
@@ -16,13 +16,13 @@
   <meta property="og:site_name" content="Ash">
   <meta property="og:title" content="Ash — HashLink Bytecode Runtime">
   <meta property="og:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM — benchmarked against HashLink's JIT and HL/C on every push.">
+    content="A faster runner for HashLink bytecode. Drop-in, and tested against Haxe's own suite on every push.">
   <meta property="og:url" content="https://rayzor-blade.github.io/ash/">
   <meta property="og:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
   <meta name="twitter:description"
-    content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM.">
+    content="A faster runner for HashLink bytecode.">
   <meta name="twitter:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
   <script type="application/ld+json">
 {
@@ -31,7 +31,7 @@
   "name": "Ash",
   "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
-  "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
+  "description": "A runtime for HashLink bytecode compiled from Haxe. Faster than HashLink's own JIT, and tested against the official Haxe suite.",
   "url": "https://rayzor-blade.github.io/ash/",
   "image": "https://rayzor-blade.github.io/ash/ash-mark-tight.png",
   "license": "https://opensource.org/license/isc-license-txt",
@@ -266,13 +266,10 @@
         </a>
         <nav style="display:flex;align-items:center;gap:clamp(16px,3vw,32px);flex-wrap:wrap">
           <a href="#features" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Features</a>
-          <a href="#tiers" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Tiers</a>
           <a href="#setup" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
           <a href="heaps.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Heaps</a>
-          <a href="#benchmarks"
-            style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Benchmarks</a>
-          <a href="#conformance"
-            style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
+          <a href="conformance.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
+          <a href="benchmarks.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Benchmarks</a>
           <a href="#platforms" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Platforms</a>
           <a href="https://discord.gg/NYdr8eWxF4" target="_blank" rel="noopener" aria-label="Join the Ash Discord"
             style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg
@@ -305,8 +302,9 @@
             style="font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:clamp(38px,6vw,68px);line-height:1.08;letter-spacing:-0.01em;color:#221d1a;margin:0">
             A <span style="font-weight:700;color:#6D4C41">faster</span> Runner for<br>HashLink bytecode.</h1>
           <p style="font-size:clamp(15px,1.8vw,17.5px);line-height:1.65;color:#5c5450;max-width:520px;margin:24px 0 0">
-            Ash runs HashLink (<code>.hl</code>) bytecode compiled from Haxe. Execution is tiered: an interpreter runs
-            everything, hot functions are promoted to Cranelift, and the hottest are recompiled by LLVM.</p>
+            Ash runs the HashLink (<code>.hl</code>) bytecode your Haxe compiler already produces. Point it at a
+            file and it runs, no changes to your project. It gets faster as it goes: the code you run most is compiled
+            while your program is running.</p>
           <div style="display:flex;gap:14px;flex-wrap:wrap;margin:36px 0 0">
             <a href="#setup"
               style="background:#221d1a;color:#f5f1ea;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14.5px;white-space:nowrap">Get
@@ -317,7 +315,7 @@
           </div>
           <div
             style="display:flex;gap:10px;flex-wrap:wrap;margin:28px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a">
-            <span>Cranelift + LLVM 21</span><span>·</span><span>aarch64 &amp; x86_64</span><span>·</span><span>ISC
+            <span>macOS, Linux, Windows</span><span>·</span><span>aarch64 &amp; x86_64</span><span>·</span><span>ISC
               licensed</span>
           </div>
         </div>
@@ -334,12 +332,11 @@
           </div>
           <div
             style="padding:24px 22px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.95;overflow-x:auto">
-            <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash --mode
-                hybrid mandelbrot.hl</span></div>
-            <div style="color:#8a8078;white-space:nowrap">tier1 cranelift&nbsp;&nbsp;12 functions promoted</div>
-            <div style="color:#8a8078;white-space:nowrap">tier2 llvm&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;3
-              functions promoted</div>
-            <div style="color:#d8d2c9;white-space:nowrap">checksum: 112798515</div>
+            <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">haxe -hl
+                game.hl -main Main</span></div>
+            <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span
+                style="color:#eae6e1">ash game.hl</span></div>
+            <div style="color:#d8d2c9;white-space:nowrap">Hello from Haxe</div>
             <div><span style="color:#caa06f">$</span> <span class="cursor"
                 style="display:inline-block;width:8px;height:15px;background:#caa06f;vertical-align:text-bottom;animation:blink 1s steps(1) infinite;margin-left:6px"></span>
             </div>
@@ -356,9 +353,9 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:500;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         The <span style="font-weight:700;font-style:italic;color:#6D4C41">ash</span> approach to running HashLink</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">Two compiler
-        backends over a typed SSA IR, an Immix collector, cooperative fibers for <code>sys.thread</code>, and the
-        HashLink standard library rewritten in Rust.</p>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:640px;margin:0">Run the same
+        bytecode you already build. Ash speeds it up as it runs, ships as one binary, and can also compile your program
+        to a native executable or to WebAssembly.</p>
       <div
         style="margin-top:36px;display:flex;flex-wrap:wrap;gap:1px;background:rgba(34,29,26,0.12);border:1px solid rgba(34,29,26,0.12);border-radius:14px;overflow:hidden">
 
@@ -366,18 +363,18 @@
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">01</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Tiered execution</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Interpreter → Cranelift → LLVM. Functions
-            climb the ladder as they get hot, and compilation happens off the main thread.</p>
+            Faster while it runs</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Your program starts immediately, and the
+            code it runs most gets compiled in the background while it keeps going.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">02</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            AIR</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">A typed phi-SSA IR over HashLink bytecode,
-            with first-class trap regions, an effect lattice, and an alias model.</p>
+            Nothing to change</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Point ash at the <code>.hl</code> file
+            Haxe already produces. No recompiling, no flags, no changes to your project.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
@@ -393,99 +390,45 @@
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">04</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Immix collector</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Conservative stack-scanning Immix with a
-            demand-committed heap, adaptive triggers, and external-pressure accounting.</p>
+            Memory that behaves</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The collector only takes the memory your
+            program actually uses, and gives it back when it stops needing it.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">05</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Fibers</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0"><code>sys.thread</code> threads run as
-            cooperative stackful fibers, so code blocking on locks, deques or <code>Sys.sleep</code> still makes
-            progress on one OS thread.</p>
+            Threads that work</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0"><code>sys.thread</code> works as you
+            expect, including in the browser. Threads waiting on a lock or a sleep never hold up the rest.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">06</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Shared symbol table</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">One canonical <code>lib@symbol</code> →
-            address map, built at startup and consumed by the interpreter and both compiled tiers.</p>
+            Runs in a browser</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">Build the same program to WebAssembly and
+            ship it as a web page, threads and all.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">07</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            HDLL support</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">External HashLink dynamic libraries via
-            the standard <code>DEFINE_PRIM</code> resolver protocol.</p>
+            Your libraries still load</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The <code>.hdll</code> libraries you
+            already use keep working, loaded the same way HashLink loads them.</p>
         </div>
 
         <div style="flex:1 1 260px;min-width:0;background:#ffffff;padding:clamp(22px,5vw,30px)">
           <div style="font-family:'IBM Plex Mono',monospace;color:#a8703c;font-size:13px;margin-bottom:14px">08</div>
           <h3
             style="font-family:'IBM Plex Mono',monospace;font-size:16.5px;font-weight:600;color:#221d1a;margin:0 0 10px">
-            Embedded standard library</h3>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The HashLink standard library implemented
-            in Rust, built as a cdylib and embedded in the binary.</p>
-        </div>
-
-      </div>
-    </section>
-
-    <section id="tiers"
-      style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
-      <div
-        style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">
-        Execution tiers</div>
-      <h2
-        style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
-        Three rungs, one ladder</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Promotion is
-        brokered by <a href="https://github.com/darmie/beadie" target="_blank" rel="noopener">beadie</a>, which counts
-        invocations, compiles on background threads, and publishes code pointers atomically. <code>ash --jit-tier</code>
-        pins a single rung for testing.</p>
-      <div
-        style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:10px;overflow:hidden;max-width:860px;background:#ffffff">
-
-        <div
-          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
-          <div
-            style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#c7bdb2">
-            0</div>
-          <div
-            style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">
-            Interpreter</div>
-          <div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Runs everything, on NaN-boxed values.
-          </div>
-        </div>
-
-        <div
-          style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
-          <div
-            style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#c7bdb2">
-            1</div>
-          <div
-            style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">
-            Cranelift</div>
-          <div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Fast compilation — about 0.04 ms per
-            function — for warm functions at <code>opt_level=speed</code>.</div>
-        </div>
-
-        <div style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:20px 24px">
-          <div
-            style="width:34px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:15px;font-weight:700;color:#a8703c">
-            2</div>
-          <div
-            style="width:150px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:600;color:#221d1a">
-            LLVM 21 (MCJIT)</div>
-          <div style="flex:1 1 220px;min-width:0;font-size:14.5px;color:#5c5450">Full codegen for the hottest functions.
-            Whatever the Cranelift tier declines to lower falls through here rather than staying interpreted.</div>
+            One file to install</h3>
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0">The standard library is built in. There is
+            nothing to install beside it and no runtime to ship with your game.</p>
         </div>
 
       </div>
@@ -517,10 +460,10 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
               <div style="overflow-x:auto">
                 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">curl
-                    -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh</span></div>
+                    -fsSL https://ash.rayzor.tech/install.sh | sh</span></div>
               </div>
               <button class="copy-btn"
-                data-copy="curl -fsSL https://raw.githubusercontent.com/rayzor-blade/ash/main/install.sh | sh">Copy</button>
+                data-copy="curl -fsSL https://ash.rayzor.tech/install.sh | sh">Copy</button>
             </div>
           </div>
           <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:5px 0 8px">for Windows users in PowerShell:
@@ -530,10 +473,10 @@
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
               <div style="overflow-x:auto">
                 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">irm
-                    https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex</span></div>
+                    https://ash.rayzor.tech/install.ps1 | iex</span></div>
               </div>
               <button class="copy-btn"
-                data-copy="irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex">Copy</button>
+                data-copy="irm https://ash.rayzor.tech/install.ps1 | iex">Copy</button>
             </div>
           </div>
         </div>
@@ -545,7 +488,7 @@
               Compile Haxe to bytecode</h3>
           </div>
           <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Ash runs HashLink bytecode, so
-            build a <code>.hl</code> file with Haxe — or use one you already have.</p>
+            build a <code>.hl</code> file with Haxe, or use one you already have.</p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
@@ -564,30 +507,31 @@
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Run
               it</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">One binary, one flag set:
-            <code>--mode interp|hybrid|jit</code>, <code>--jit-tier auto|cranelift|llvm|off</code>, promotion
-            thresholds, and <code>--jit-log</code>.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px">Give it a
+            <code>.hl</code> file. Tell it what kind of program yours is and it tunes itself to match.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
               <div style="overflow-x:auto">
+                <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span
+                    style="color:#eae6e1">ash main.hl</span></div>
                 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash
-                    --mode hybrid main.hl</span></div>
+                    --preset game main.hl</span> <span style="color:#8a807a"># compile during load, not during play</span>
+                </div>
                 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash
-                    --mode hybrid --jit-tier cranelift --jit-log main.hl</span></div>
+                    --preset server main.hl</span> <span style="color:#8a807a"># runs for weeks</span></div>
                 <div style="white-space:nowrap"><span style="color:#caa06f">$</span> <span style="color:#eae6e1">ash
-                    --mode jit main.hl</span> <span style="color:#8a807a"># compile everything up front</span></div>
+                    --preset script main.hl</span> <span style="color:#8a807a"># starts and exits</span></div>
               </div>
               <button class="copy-btn"
-                data-copy="ash --mode hybrid main.hl&#10;ash --mode hybrid --jit-tier cranelift --jit-log main.hl&#10;ash --mode jit main.hl">Copy</button>
+                data-copy="ash main.hl&#10;ash --preset game main.hl&#10;ash --preset server main.hl&#10;ash --preset script main.hl">Copy</button>
             </div>
           </div>
           <div
             style="margin-top:14px;padding:14px 16px;border:1px dashed rgba(34,29,26,0.2);border-radius:8px;font-size:13px;line-height:1.65;color:#5c5450">
-            Building from source instead? That's the contributor path — Rust nightly and LLVM 21, with the
-            <code>std/</code> rebuild steps spelled out in the <a href="https://github.com/rayzor-blade/ash#building"
-              target="_blank" rel="noopener">README</a>.
+            Want to build it yourself, or work on ash? The steps are in the <a
+              href="https://github.com/rayzor-blade/ash#building" target="_blank" rel="noopener">README</a>.
           </div>
         </div>
         <div>
@@ -595,7 +539,7 @@
               style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#a8703c;font-weight:700">04</span>
             <h3 style="font-family:'IBM Plex Mono',monospace;font-size:19px;font-weight:600;color:#221d1a;margin:0">Build an executable</h3>
           </div>
-          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. Linking uses your system C toolchain &mdash; <code>cc</code>, <code>clang</code> or <code>gcc</code>, MSVC on Windows &mdash; the same one a C program needs; set <code>CC</code> to pick another.
+          <p style="font-size:14.5px;line-height:1.65;color:#5c5450;margin:0 0 16px"><code>--build</code> compiles and links in one command. It uses the C toolchain already on your machine, the same one a C program needs. Set <code>CC</code> if you want a different one.
           </p>
           <div
             style="background:#221d1a;border-radius:8px;padding:16px 18px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.9">
@@ -617,118 +561,31 @@
               <button class="copy-btn" data-copy="ash --build mygame.wasm --target wasm32-wasip1 mygame.hl">Copy</button>
             </div>
           </div>
-          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">Nothing else has to be installed: ash carries its own wasm linker. The standard library suite runs there byte-identical to native, exceptions included. The module asks a host only for what a sandbox cannot do alone &mdash; suspending a fiber, and opening a socket. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">The plan and its measurements</a>.
+          <p style="font-size:13.5px;line-height:1.6;color:#8a807a;margin:12px 0 0">There is nothing else to install: ash brings its own wasm linker. Your program behaves the same in the browser as it does natively, exceptions and all. <a href="https://github.com/darmie/ash/blob/main/docs/wasm-target.md" style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35)">How it works</a>.
           </p>
         </div>
       </div>
     </section>
 
-    <section id="benchmarks"
-      style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
-      <div
-        style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">
-        Benchmarks</div>
-      <h2
-        style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
-        Faster than HashLink's JIT</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across
-        fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured
-        against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — same
-        bytecode, every engine in a row timed on the same runner, every run checksum-verified. Numbers land fresh from
-        CI with each push to <code>main</code>.</p>
-
-      <div
-        style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
-        <div
-          style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid rgba(34,29,26,0.1)">
-          <div
-            style="display:flex;flex-wrap:wrap;gap:18px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#5c5450">
-            <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#c7bdb2;display:inline-block"></span>HashLink
-              JIT</span>
-            <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#a8703c;display:inline-block"></span>Ash</span>
-            <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#8a6a4a;display:inline-block"></span>HashLink
-              hl2-ir</span>
-            <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#221d1a;display:inline-block"></span>HashLink/C
-              <span style="color:#8a807a">(AOT, not a VM)</span></span>
-            <span style="display:flex;align-items:center;gap:7px;white-space:nowrap"><span
-                style="width:11px;height:11px;border-radius:2px;background:#6e7f8c;display:inline-block"></span>Haxe
-              JVM</span>
-          </div>
-          <div id="bench-scale-note"
-            style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8a807a;white-space:nowrap">lower is
-            better · median ms · 1.00× = HashLink JIT total</div>
-        </div>
-        <div id="bench-rows">
-          <div class="bench-row" id="bench-loading" style="border-bottom:none">
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">Loading
-              benchmark results…</div>
-            <noscript>
-              <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:6px 0">The
-                benchmark table needs JavaScript; the raw numbers live in <a
-                  href="bench/results.json">bench/results.json</a>.</div>
-            </noscript>
-          </div>
-        </div>
-        <div id="bench-footnote" style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6">Every bar is the
-          pure wall time of one run, verified against the benchmark's accepted checksums before it is published.
-          <strong style="color:#5c5450">Two kinds of row, marked AOT.</strong> The lanes tagged
-          <span class="aot-tag">AOT</span> — <code>Ash AOT</code> and <code>HashLink/C</code> — were compiled to a
-          native binary before timing began, so their bars are this bytecode running as ordinary compiled code. The
-          rest are still compiling inside the window being measured, which is the honest reason to read the two groups
-          apart rather than as one ranking. <code>haxe -hl main.c</code> emits C for the system compiler to build;
-          <code>ash</code> emits the object itself, with no C in the path. Both are built through LLVM — the HL/C
-          lane is compiled with <code>clang</code> rather than the default <code>cc</code>, because ash's back end is
-          LLVM by construction and leaving that unmatched would measure two compilers as much as two designs. Both
-          builds take one to six seconds and are
-          excluded from their bars, as is the Haxe JVM's; the VMs pay their compilation inside theirs. Each benchmark is
-          measured in
-          its own CI job, so the engines within a row share a machine but different rows may not — compare engines
-          within a row, not milliseconds across sweeps. Hover a number for the CPU that produced it.
-        </div>
-      </div>
-
-      <p id="bench-provenance"
-        style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
-
-    </section>
-
-    <section id="conformance"
+    <section id="proof"
       style="scroll-margin-top:90px;padding:clamp(48px,6vw,76px) clamp(24px,6vw,64px);max-width:1180px;margin:0 auto;border-top:1px solid rgba(34,29,26,0.1)">
       <div
         style="display:flex;align-items:center;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;color:#a8703c;margin:0 0 20px">
         Conformance</div>
       <h2
-        style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
-        Measured against Haxe's own test suite</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Being fast is
-        worth nothing if the answers are wrong. Ash runs the official Haxe test suite unmodified, from CI on every push.
-      </p>
+        style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(30px,4.6vw,58px);line-height:1.05;color:#221d1a;margin:0 0 18px;letter-spacing:-0.02em">
+        <span id="conf-pct" style="color:#a8703c">100%</span> of Haxe's own<br>test suite passes</h2>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:600px;margin:0">Speed is
+        worth nothing if the answers come out wrong. Ash runs Haxe's official test suite unmodified, on every push.
+        <span id="conf-sub"></span></p>
 
-      <div id="conf-engines" style="margin-top:32px;display:flex;flex-wrap:wrap;gap:16px"></div>
-
-      <div
-        style="margin-top:16px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
-        <div id="conf-rows">
-          <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">Loading
-            conformance results…</div>
-          <noscript>
-            <div style="font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#8a807a;padding:18px 24px">The
-              conformance table needs JavaScript; the raw results live in <a
-                href="bench/conformance.json">bench/conformance.json</a>.</div>
-          </noscript>
-        </div>
-        <div id="conf-footnote"
-          style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.1)">
-          The official Haxe test suite, unmodified, run on every push.</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin:34px 0 0">
+        <a href="conformance.html"
+          style="background:#221d1a;color:#f5f1ea;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-weight:600;font-size:14.5px;white-space:nowrap">See
+          the results &rarr;</a>
+        <a href="benchmarks.html"
+          style="border:1px solid rgba(34,29,26,0.22);color:#221d1a;padding:13px 26px;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:14.5px;white-space:nowrap">Benchmarks</a>
       </div>
-
-      <p id="conf-provenance"
-        style="margin:20px 0 0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:#8a807a"></p>
-
     </section>
 
     <section id="platforms"
@@ -739,10 +596,9 @@
       <h2
         style="font-family:'IBM Plex Mono',monospace;font-weight:700;font-size:clamp(28px,3.4vw,42px);line-height:1.15;color:#221d1a;margin:0 0 16px;letter-spacing:-0.01em">
         Supported platforms</h2>
-      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash <em>runs
-        on</em> aarch64 and x86_64 &mdash; one binary per platform, with the full interpreter → Cranelift → LLVM ladder
-        on each. What it <em>compiles for</em> is wider, because the target ABI is chosen before any bytecode is decoded:
-        layouts, calls and constants come out for the target named rather than for the machine doing the work.</p>
+      <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Ash
+        <em>runs on</em> macOS, Linux and Windows, on both Intel and ARM. What it can <em>build for</em> is wider: you
+        can compile on one machine for another, and for the browser.</p>
 
       <div
         style="margin-top:32px;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden;max-width:640px;background:#ffffff">
@@ -777,7 +633,10 @@
           <div
             style="width:220px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:13.5px;font-weight:600;color:#221d1a">
             WebAssembly</div>
-          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">wasm32-wasip1 &middot; ahead-of-time only, under a WASI host</div>
+          <div style="flex:1 1 200px;min-width:0;font-size:13.5px;color:#5c5450">Runs in a browser or under a WASI
+            host, threads included. <a href="conformance.html"
+              style="color:#a8703c;text-decoration:none;border-bottom:1px solid rgba(168,112,60,0.35);white-space:nowrap">See
+              how it scores &rarr;</a></div>
         </div>
         <div
           style="display:flex;flex-wrap:wrap;gap:12px 24px;align-items:baseline;padding:18px 24px;border-top:1px solid rgba(34,29,26,0.08)">
@@ -788,11 +647,8 @@
         </div>
         <div
           style="padding:14px 24px;font-size:12px;color:#8a807a;line-height:1.6;border-top:1px solid rgba(34,29,26,0.08)">
-          The last row emits and is checked in CI for word size and architecture; nothing links or runs
-          it, so treat it as the ABI working rather than as a supported platform. Benchmark numbers are
-          published from Linux x86_64 CI. A browser host is part-built: sockets are there, over WebSocket;
-          the WASI surface a page must supply and fiber suspension are not, so a module does not run in a
-          page yet.</div>
+          The last row builds and is checked in CI, but nothing runs it there yet. Benchmark numbers come
+          from Linux on x86_64.</div>
       </div>
     </section>
 
@@ -1239,6 +1095,32 @@
           msg.textContent = 'No published conformance run is available yet. (' + err.message + ')';
           mount.appendChild(msg);
         });
+
+      // The headline percentage comes from the same conformance.json the
+      // conformance page renders, so the landing page cannot drift from it.
+      // The markup ships a sensible number already: if the fetch fails the
+      // page still reads correctly rather than showing a gap.
+      fetch('bench/conformance.json', { cache: 'no-cache' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (data) {
+          if (!data) return;
+          var sum = data.summary || {};
+          var engines = sum.engines || {};
+          var names = Object.keys(engines);
+          var e = names.length ? engines[names[0]] : sum;
+          if (!e) return;
+          var ok = Number(e.cases_ok), total = Number(e.cases_attemptable);
+          if (!isFinite(ok) || !isFinite(total) || total <= 0) return;
+          var pct = Math.round((ok / total) * 1000) / 10;
+          var el = document.getElementById('conf-pct');
+          if (el) el.textContent = (pct === Math.round(pct) ? Math.round(pct) : pct) + '%';
+          var sub = document.getElementById('conf-sub');
+          if (sub) {
+            sub.textContent = ok.toLocaleString() + ' of ' + total.toLocaleString() +
+              ' test cases' + (names.length > 1 ? ', on ' + names.length + ' engines' : '') + '.';
+          }
+        })
+        .catch(function () { /* the built-in number stands */ });
     })();
   </script>
 </body>

@@ -59,7 +59,27 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <header style="position:sticky;top:0;z-index:20;background:rgba(245,241,234,.9);backdrop-filter:blur(10px);border-bottom:1px solid rgba(34,29,26,.1)">
 <div style="display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px clamp(24px,6vw,64px);max-width:1080px;margin:0 auto">
 <a href="index.html" style="display:flex;align-items:center;gap:9px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:24px;font-weight:700"><img src="ash-mark-tight.png" alt="Ash" style="height:36px;width:auto"><span style="padding-top:9px">ash</span></a>
-<nav style="display:flex;align-items:center;gap:24px;font-family:'IBM Plex Mono',monospace;font-size:13px"><a href="https://github.com/rayzor-blade/ash">GitHub</a><a href="https://discord.gg/NYdr8eWxF4" aria-label="Join the Ash Discord" style="display:inline-flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><path d="M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z"></path></svg>Discord</a></nav>
+        <nav style="display:flex;align-items:center;gap:clamp(16px,3vw,32px);flex-wrap:wrap">
+          <a href="index.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Home</a>
+          <a href="index.html#setup" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
+          <a href="heaps.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:#221d1a">Heaps</a>
+          <a href="conformance.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
+          <a href="benchmarks.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Benchmarks</a>
+          <a href="https://discord.gg/NYdr8eWxF4" target="_blank" rel="noopener" aria-label="Join the Ash Discord"
+            style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg
+              width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+              <path
+                d="M14.983 3l.123 .006c2.014 .214 3.527 .672 4.966 1.673a1 1 0 0 1 .371 .488c1.876 5.315 2.373 9.987 1.451 12.28c-1.003 2.005 -2.606 3.553 -4.394 3.553c-.732 0 -1.693 -.968 -2.328 -2.045a21.512 21.512 0 0 0 2.103 -.493a1 1 0 1 0 -.55 -1.924c-3.32 .95 -6.13 .95 -9.45 0a1 1 0 0 0 -.55 1.924c.717 .204 1.416 .37 2.103 .494c-.635 1.075 -1.596 2.044 -2.328 2.044c-1.788 0 -3.391 -1.548 -4.428 -3.629c-.888 -2.217 -.39 -6.89 1.485 -12.204a1 1 0 0 1 .371 -.488c1.439 -1.001 2.952 -1.459 4.966 -1.673a1 1 0 0 1 .935 .435l.063 .107l.651 1.285l.137 -.016a12.97 12.97 0 0 1 2.643 0l.134 .016l.65 -1.284a1 1 0 0 1 .754 -.54l.122 -.009zm-5.983 7a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15zm6 0a2 2 0 0 0 -1.977 1.697l-.018 .154l-.005 .149l.005 .15a2 2 0 1 0 1.995 -2.15z">
+              </path>
+            </svg>Discord</a>
+          <a href="https://github.com/rayzor-blade/ash" target="_blank" rel="noopener"
+            style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg
+              width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A7.995 7.995 0 0 0 16 8c0-4.42-3.58-8-8-8Z">
+              </path>
+            </svg>GitHub</a>
+        </nav>
 </div>
 </header>
 
@@ -236,7 +256,7 @@ html[data-platform="win"] [data-track="mac"]{display:none}
 <span style="color:#caa06f">&gt;</span> haxelib path heaps
 <span style="color:#caa06f">&gt;</span> haxelib path hlsdl</pre>
 <p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:22px">Ash itself installs globally, once:</p>
-<pre class="shell"><span style="color:#caa06f">&gt;</span> irm https://raw.githubusercontent.com/rayzor-blade/ash/main/install.ps1 | iex</pre>
+<pre class="shell"><span style="color:#caa06f">&gt;</span> irm https://ash.rayzor.tech/install.ps1 | iex</pre>
 <p style="line-height:1.7;color:#5c5450;max-width:760px;margin-top:18px">That puts <code>ash.exe</code> in <code>~\.ash\bin</code> and adds the directory to your user PATH. The HashLink runtime travels with it &mdash; <code>libhl.dll</code> and the <code>libhl.1.dll</code> alias that HashLink 1.x builds import &mdash; so there is nothing further to install, and nothing to copy per game.</p>
 </section>
 

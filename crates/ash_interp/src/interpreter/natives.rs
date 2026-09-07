@@ -1341,6 +1341,15 @@ impl HLInterpreter {
                         std::mem::transmute(func_ptr);
                     f(gi(0), gi(1), gi(2), gi(3), gi(4), gf(5))
                 }
+                (6, false, 0b111100) => {
+                    // An object and a target around four floats, which is what
+                    // a clear colour looks like:
+                    // wgpu's encoder_render_begin(encoder, view, r, g, b, a).
+                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64, f64) =
+                        std::mem::transmute(func_ptr);
+                    f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5));
+                    0
+                }
                 // --- 8 args ---
                 (8, false, 0b0011_1100) => {
                     // Haxe graphics helpers commonly carry an object and

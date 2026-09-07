@@ -106,7 +106,7 @@ impl Control {
             .ok_or_else(|| JsValue::from_str("atomic wait address out of bounds"))?
             as u32;
         let align = if wide { 8 } else { 4 };
-        if address % align != 0 {
+        if !address.is_multiple_of(align) {
             return Err(JsValue::from_str("unaligned atomic wait"));
         }
         let slot = if let Some(words) = &self.0 {

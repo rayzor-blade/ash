@@ -186,6 +186,11 @@ fn shared_memory(limits: MemoryLimits) -> Result<WebAssembly::Memory, JsValue> {
 /// calls `wasi_thread_start` rather than an entrypoint -- the guest's own
 /// `pthread_create` prepared `start_arg`, and everything about what this
 /// thread will do is in there.
+// Eight, and every one of them comes from the JavaScript that calls this:
+// `thread.js` in a page and `run-node-agent.js` under node both post exactly
+// this set and spread it positionally. Grouping them into a struct would put
+// a shape on the JS side of the boundary that JS has no reason to know.
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
 pub async fn run_thread(
     module: WebAssembly::Module,

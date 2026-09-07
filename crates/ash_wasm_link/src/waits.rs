@@ -77,82 +77,6 @@ pub fn instrument(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(module.finish())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wasm_encoder::{
-        CodeSection, ExportKind, ExportSection, Function, FunctionSection, MemArg, MemorySection,
-        MemoryType,
-    };
-
-    fn module(align: u32) -> Vec<u8> {
-        let mut module = wasm_encoder::Module::new();
-        let mut types = TypeSection::new();
-        types.ty().function([], [ValType::I32]);
-        module.section(&types);
-        let mut functions = FunctionSection::new();
-        functions.function(0);
-        module.section(&functions);
-        let mut memory = MemorySection::new();
-        memory.memory(MemoryType {
-            minimum: 1,
-            maximum: Some(1),
-            memory64: false,
-            shared: true,
-            page_size_log2: None,
-        });
-        module.section(&memory);
-        let mut exports = ExportSection::new();
-        exports.export("wait", ExportKind::Func, 0);
-        module.section(&exports);
-        let mut function = Function::new([]);
-        function.instruction(&Instruction::I32Const(0));
-        function.instruction(&Instruction::I32Const(1));
-        function.instruction(&Instruction::I64Const(0));
-        function.instruction(&Instruction::MemoryAtomicWait32(MemArg {
-            offset: 4,
-            align,
-            memory_index: 0,
-        }));
-        function.instruction(&Instruction::End);
-        let mut code = CodeSection::new();
-        code.function(&function);
-        module.section(&code);
-        module.finish()
-    }
-
-    #[test]
-    fn a_missing_import_section_is_inserted_and_exports_are_renumbered() {
-        let bytes = instrument(&module(2)).unwrap();
-        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
-            .validate_all(&bytes)
-            .unwrap();
-        let mut imports = 0;
-        for payload in Parser::new(0).parse_all(&bytes) {
-            match payload.unwrap() {
-                Payload::ImportSection(section) => imports = section.count(),
-                Payload::ExportSection(section) => {
-                    for export in section {
-                        assert_eq!(export.unwrap().index, 2);
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(imports, 2);
-        // Already instrumented modules contain no waits, so a second pass
-        // must not add imports or move indices again.
-        assert_eq!(instrument(&bytes).unwrap(), bytes);
-    }
-
-    #[test]
-    fn an_invalid_wait_cannot_become_a_valid_host_call() {
-        assert!(
-            instrument(&module(1)).is_err(),
-            "atomic alignment must be natural"
-        );
-    }
-}
 
 struct Waits {
     imports: u32,
@@ -241,5 +165,83 @@ impl Reencode for Waits {
         }
         code.function(&function);
         Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_encoder::{
+        CodeSection, ExportKind, ExportSection, Function, FunctionSection, MemArg, MemorySection,
+        MemoryType,
+    };
+
+    fn module(align: u32) -> Vec<u8> {
+        let mut module = wasm_encoder::Module::new();
+        let mut types = TypeSection::new();
+        types.ty().function([], [ValType::I32]);
+        module.section(&types);
+        let mut functions = FunctionSection::new();
+        functions.function(0);
+        module.section(&functions);
+        let mut memory = MemorySection::new();
+        memory.memory(MemoryType {
+            minimum: 1,
+            maximum: Some(1),
+            memory64: false,
+            shared: true,
+            page_size_log2: None,
+        });
+        module.section(&memory);
+        let mut exports = ExportSection::new();
+        exports.export("wait", ExportKind::Func, 0);
+        module.section(&exports);
+        let mut function = Function::new([]);
+        function.instruction(&Instruction::I32Const(0));
+        function.instruction(&Instruction::I32Const(1));
+        function.instruction(&Instruction::I64Const(0));
+        function.instruction(&Instruction::MemoryAtomicWait32(MemArg {
+            offset: 4,
+            align,
+            memory_index: 0,
+        }));
+        function.instruction(&Instruction::End);
+        let mut code = CodeSection::new();
+        code.function(&function);
+        module.section(&code);
+        module.finish()
+    }
+
+    #[test]
+    fn a_missing_import_section_is_inserted_and_exports_are_renumbered() {
+        let bytes = instrument(&module(2)).unwrap();
+        wasmparser::Validator::new_with_features(wasmparser::WasmFeatures::all())
+            .validate_all(&bytes)
+            .unwrap();
+        let mut imports = 0;
+        for payload in Parser::new(0).parse_all(&bytes) {
+            match payload.unwrap() {
+                Payload::ImportSection(section) => imports = section.count(),
+                Payload::ExportSection(section) => {
+                    for export in section {
+                        assert_eq!(export.unwrap().index, 2);
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(imports, 2);
+        // Already instrumented modules contain no waits, so a second pass
+        // must not add imports or move indices again.
+        assert_eq!(instrument(&bytes).unwrap(), bytes);
+    }
+
+    #[test]
+    fn an_invalid_wait_cannot_become_a_valid_host_call() {
+        assert!(
+            instrument(&module(1)).is_err(),
+            "atomic alignment must be natural"
+        );
     }
 }

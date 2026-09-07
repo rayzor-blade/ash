@@ -1388,7 +1388,7 @@ thread_local! {
     /// to read the second message, and a fresh one per raise would leak on a
     /// loop that catches and retries.
     static ERROR_RESERVE: std::cell::UnsafeCell<vdynamic> =
-        std::cell::UnsafeCell::new(unsafe { mem::zeroed() });
+        const { std::cell::UnsafeCell::new(unsafe { mem::zeroed() }) };
 }
 
 #[no_mangle]

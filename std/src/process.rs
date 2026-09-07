@@ -20,12 +20,11 @@
 //!   reconstructs that child so `new Process(...)` keeps succeeding for a
 //!   command that does not exist, as it does upstream.
 //!
-//! Handle lifetime differs from upstream the same way `file.rs` does.
-//! `hl_process_run` allocates through `hl_gc_alloc_finalizer`, so an
-//! abandoned handle still has its pipes closed when the GC reaps it. ash has
-//! no finalizer hook, so a `Process` that is never `close()`d holds its pipes
-//! and its unreaped child until exit. Upstream leaks the zombie in that case
-//! too (it forks without ever waiting); only the three descriptors are extra.
+//! Handle lifetime matches upstream, as `file.rs` does. `hl_process_run`
+//! allocates through `hl_gc_alloc_finalizer` there, so an abandoned handle
+//! still has its pipes closed when the GC reaps it; `finalize_process` is the
+//! callback that does it here. Both leak the zombie of a child nobody waited
+//! for -- upstream forks without ever waiting either.
 
 use std::ffi::{c_int, c_void, OsString};
 use std::io::{self, Read, Write};
@@ -33,7 +32,6 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::ptr;
 use std::sync::{Mutex, MutexGuard};
 
-use crate::bytes::hlp_alloc_bytes;
 use crate::hl::{hl_type_kind_HBYTES, varray, vbyte};
 use crate::types::hl_aptr;
 
@@ -48,9 +46,16 @@ const PROC_MAGIC: u64 = 0x4153_485f_5052_4f43;
 /// pointer to Rust-owned state.
 #[repr(C)]
 struct VProcess {
+    /// Word zero, because that is where the collector looks for a
+    /// `MEM_KIND_FINALIZER` block's callback.
+    finalize: Option<crate::gc::Finalizer>,
     magic: u64,
     state: *mut ProcState,
 }
+
+// The collector reads the callback out of word zero, so `finalize` has to BE
+// word zero. `repr(C)` fixes the order; this fixes the offset.
+const _: () = assert!(std::mem::offset_of!(VProcess, finalize) == 0);
 
 /// One lock per pipe rather than one per process. `process_exit` with a NULL
 /// `running` blocks until the child is gone, and the idiomatic Haxe shape is
@@ -365,7 +370,8 @@ pub unsafe extern "C" fn hlp_process_run(
         stdout: Mutex::new(sout),
         stderr: Mutex::new(serr),
     }));
-    let h = hlp_alloc_bytes(std::mem::size_of::<VProcess>() as c_int) as *mut VProcess;
+    let h = crate::gc::alloc_with_finalizer(std::mem::size_of::<VProcess>(), finalize_process)
+        as *mut VProcess;
     if h.is_null() {
         drop(Box::from_raw(state));
         return ptr::null_mut();
@@ -526,6 +532,25 @@ pub unsafe extern "C" fn hlp_process_close(p: *mut c_void) {
     drop(lock(&st.stdin).take());
     drop(lock(&st.stdout).take());
     drop(std::mem::replace(&mut *lock(&st.stderr), StderrSrc::Closed));
+}
+
+/// Called by the collector once nothing can reach the handle.
+///
+/// Closes the pipes, as `process_close` does, and then releases the state
+/// box: no caller can reach the handle to ask for it again, which is the one
+/// thing `process_close` cannot assume. Dropping a live `Child` does not
+/// reap it, so the zombie outlives this exactly as it outlives upstream's
+/// finalizer -- upstream forks without ever waiting either.
+unsafe extern "C" fn finalize_process(block: *mut c_void) {
+    hlp_process_close(block);
+    let h = block as *mut VProcess;
+    if (*h).magic != PROC_MAGIC {
+        return;
+    }
+    let state = std::mem::replace(&mut (*h).state, ptr::null_mut());
+    if !state.is_null() {
+        drop(Box::from_raw(state));
+    }
 }
 
 // DEFINE_PRIM(_VOID, process_kill, _PROCESS)

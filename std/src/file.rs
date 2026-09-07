@@ -7,13 +7,10 @@
 //! `haxe.io.Input` helper built on it (`readLine`, `readUntil`) walks a file
 //! that way.
 //!
-//! Handle lifetime differs from upstream in one respect. `hl_file_open`
-//! allocates through `hl_gc_alloc_finalizer`, so a handle dropped without
-//! `file_close` still has its `FILE*` closed when the GC reaps it. ash has no
-//! finalizer hook, so the OS handle and the Rust-side buffers behind an
-//! abandoned descriptor stay alive until the process exits. Every path in
-//! Haxe's `sys.io` closes explicitly, so this only bites code that leaks a
-//! `FileInput`/`FileOutput` on purpose.
+//! Handle lifetime matches upstream. `hl_file_open` allocates through
+//! `hl_gc_alloc_finalizer` there, so a handle dropped without `file_close`
+//! still has its `FILE*` closed when the GC reaps it; `alloc_handle` does the
+//! same here, and `finalize_fdesc` is the callback the collector runs.
 
 use std::ffi::{c_int, c_void};
 use std::fs::{File, OpenOptions};
@@ -39,9 +36,16 @@ const FDESC_MAGIC: u64 = 0x4153_485f_4644_5343;
 /// pointer to Rust-owned state that `file_close` releases.
 #[repr(C)]
 struct Fdesc {
+    /// Word zero, because that is where the collector looks. Everything else
+    /// in this struct follows it.
+    finalize: Option<crate::gc::Finalizer>,
     magic: u64,
     state: *mut Mutex<FileState>,
 }
+
+// The collector reads the callback out of word zero, so `finalize` has to BE
+// word zero. `repr(C)` fixes the order; this fixes the offset.
+const _: () = assert!(std::mem::offset_of!(Fdesc, finalize) == 0);
 
 enum Backing {
     File(File),
@@ -298,8 +302,16 @@ unsafe fn path_from_bytes(name: *const vbyte) -> Option<String> {
     Some(String::from_utf8_lossy(raw).into_owned())
 }
 
+/// Closes the descriptor of a handle that became unreachable without
+/// `file_close`. `hlp_file_close` is already idempotent and already checks the
+/// magic, so a handle the program did close leaves nothing for this to do.
+unsafe extern "C" fn finalize_fdesc(block: *mut c_void) {
+    hlp_file_close(block);
+}
+
 unsafe fn alloc_handle(state: FileState) -> *mut c_void {
-    let d = hlp_alloc_bytes(std::mem::size_of::<Fdesc>() as c_int) as *mut Fdesc;
+    let d = crate::gc::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc)
+        as *mut Fdesc;
     if d.is_null() {
         return ptr::null_mut();
     }

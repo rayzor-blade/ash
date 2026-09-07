@@ -32,6 +32,96 @@ const ALLOC_QUANTUM: usize = 16;
 const OBJECT_MARK: u8 = 0x80;
 const SPAN_OBJECT: u8 = (LINE_SIZE / ALLOC_QUANTUM + 1) as u8;
 
+/// Word zero of a `MEM_KIND_FINALIZER` block: `void (*)(void *block)`.
+///
+/// Upstream spells this `hl_gc_alloc_finalizer(size)`, a macro over
+/// `hl_gc_alloc_gen(&hlt_abstract, size, MEM_KIND_FINALIZER | MEM_ZERO)`, and
+/// every caller writes its callback into the first field of the struct it
+/// just allocated. `sys.c`'s `hl_fdopen` is the canonical shape.
+pub(crate) type Finalizer = unsafe extern "C" fn(*mut c_void);
+
+/// Callbacks taken from finalizable blocks that a collection found
+/// unreachable, waiting for a thread to drop the GC lock.
+///
+/// A finalizer body is arbitrary C. It may allocate, take the GC lock, or
+/// call back into the VM, so it cannot run inside the collector: the
+/// collector holds `&mut` on the allocator and is part-way through rewriting
+/// the block tables. Upstream calls them from its own sweep and lives with
+/// that. Here they are deferred to the first point at which the lock is
+/// provably free, which is `GcGuard::drop`.
+static PENDING_FINALIZERS: std::sync::Mutex<Vec<(usize, Finalizer)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// How many entries `PENDING_FINALIZERS` holds. Read on every outermost lock
+/// release -- a path every allocation takes -- so the check has to be one
+/// relaxed load and not a mutex acquisition.
+static PENDING_FINALIZER_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Allocate a GC block whose word zero holds `finalize`, for the collector to
+/// call once nothing can reach the block. ash's `hl_gc_alloc_finalizer`.
+///
+/// `size` must leave room for the pointer, so a caller's struct puts its own
+/// fields after it -- the layout upstream's `hl_fdopen` has.
+pub(crate) unsafe fn alloc_with_finalizer(size: usize, finalize: Finalizer) -> *mut c_void {
+    debug_assert!(size >= mem::size_of::<usize>());
+    let mut gc = gc_locked_init();
+    let Some(ptr) = gc.allocate(size) else {
+        return ptr::null_mut();
+    };
+    let p = ptr.as_ptr();
+    // Both under the one lock hold. A collection between the two would find a
+    // registered block with a null callback and quietly skip it.
+    gc.register_finalizable(p);
+    (p as *mut usize).write(finalize as *const () as usize);
+    p as *mut c_void
+}
+
+/// Call the finalizers a collection queued. The GC lock must NOT be held.
+fn run_pending_finalizers() {
+    thread_local! {
+        static RUNNING: Cell<bool> = const { Cell::new(false) };
+    }
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            RUNNING.with(|r| r.set(false));
+        }
+    }
+    // A body may allocate, which can trigger a collection that queues the
+    // next batch and then a release that would re-enter here from inside this
+    // loop. Those entries stay queued instead, for the next release to take.
+    // A body that longjmps past this guard leaves the flag set and stops the
+    // thread finalizing, which upstream would answer by not longjmping out of
+    // a finalizer either.
+    if RUNNING.with(|r| r.replace(true)) {
+        return;
+    }
+    let _running = Running;
+
+    // Swap the queue out rather than calling under its lock: a body that
+    // allocates enough to trigger a collection would otherwise deadlock
+    // against the collector queueing the next batch.
+    let due = {
+        let Ok(mut queue) = PENDING_FINALIZERS.lock() else {
+            return;
+        };
+        PENDING_FINALIZER_COUNT.store(0, Ordering::Relaxed);
+        mem::take(&mut *queue)
+    };
+    for (block, finalize) in due {
+        unsafe { finalize(block as *mut c_void) };
+    }
+}
+
+/// Release one level of the GC lock, and drain the finalizer queue if that
+/// freed it. Every release goes through here so the drain cannot be missed.
+fn gc_lock_release() {
+    if GC_LOCK.release() && PENDING_FINALIZER_COUNT.load(Ordering::Relaxed) != 0 {
+        run_pending_finalizers();
+    }
+}
+
 /// Zeroed atomic bytes are valid. Use calloc-style allocation so an arena's
 /// reservation does not eagerly touch a side table proportional to its cap.
 fn allocation_table(count: usize) -> Vec<std::sync::atomic::AtomicU8> {
@@ -1949,7 +2039,8 @@ impl ReentrantGcLock {
         drop(g);
     }
 
-    fn release(&self) {
+    /// Returns true if this dropped the last hold, leaving the lock free.
+    fn release(&self) -> bool {
         use std::sync::atomic::Ordering;
         // The token is needed ONLY by the assert below, and an opaque extern
         // call cannot be dead-code-eliminated in release — the shipped dylib
@@ -1966,7 +2057,7 @@ impl ReentrantGcLock {
         }
         if self.depth.load(Ordering::Relaxed) > 1 {
             self.depth.fetch_sub(1, Ordering::Relaxed);
-            return;
+            return false;
         }
         self.depth.store(0, Ordering::Relaxed);
         // SeqCst store then SeqCst load: either the releasing thread sees the
@@ -1979,6 +2070,7 @@ impl ReentrantGcLock {
             let _g = self.inner.lock().unwrap();
             self.cond.notify_all();
         }
+        true
     }
 
     /// Depth held by the CURRENT thread (0 if it is not the owner).
@@ -2025,7 +2117,7 @@ pub(crate) struct GcGuard(());
 
 impl Drop for GcGuard {
     fn drop(&mut self) {
-        GC_LOCK.release();
+        gc_lock_release();
     }
 }
 
@@ -2093,7 +2185,7 @@ pub unsafe extern "C" fn hlp_gc_lock() {
 /// Manually release one level of the GC lock.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_gc_unlock() {
-    GC_LOCK.release();
+    gc_lock_release();
 }
 
 struct ImmixHeap {
@@ -2270,6 +2362,15 @@ pub struct ImmixAllocator {
     /// mutator owns one id-0 main-stack descriptor; nonzero fiber ids are
     /// process-unique.
     fiber_stacks: Vec<FiberStackInfo>,
+    /// Heap offsets of blocks allocated with `MEM_KIND_FINALIZER`. Nothing
+    /// else records an allocation's kind: `hl_gc_alloc_gen` reads the kind
+    /// bits, uses them to decide what goes in word zero, and then calls
+    /// `allocate`, which takes only a size. So the collector cannot tell a
+    /// finalizable block from any other one, and this table is how it does.
+    ///
+    /// Small by construction. Only hdlls allocate this way, and they do it
+    /// per open file, socket or process rather than per object.
+    finalizables: HashSet<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -2501,6 +2602,7 @@ impl ImmixAllocator {
 
             fiber_stacks: Vec::new(),
             globals_range: None,
+            finalizables: HashSet::new(),
         }
     }
 
@@ -2917,6 +3019,89 @@ impl ImmixAllocator {
         );
     }
 
+    /// Record a block allocated with `MEM_KIND_FINALIZER`. Its word zero holds
+    /// a `void (*)(void *)` that the collector calls once the block dies.
+    ///
+    /// Called from `hl_gc_alloc_gen` while it still has the kind bits. The
+    /// caller has not written its callback yet -- a null word zero at
+    /// collection time simply means the block never got one, which is how
+    /// upstream reads it too.
+    pub(crate) fn register_finalizable(&mut self, ptr: *mut u8) {
+        let heap_start = self.heap.memory.as_ptr() as usize;
+        let addr = ptr as usize;
+        if addr >= heap_start && addr < heap_start + self.heap.memory.len {
+            self.finalizables.insert(addr - heap_start);
+        }
+    }
+
+    /// Queue the finalizers of blocks the trace did not reach.
+    ///
+    /// Runs between marking and sweeping, the only window in which the mark
+    /// bits stand: `sweep` clears them as it goes.
+    ///
+    /// A dead block is resurrected for this cycle. It and everything it points
+    /// at are marked, so the fields its finalizer reads are still there when
+    /// the callback runs after the world restarts -- otherwise `sweep` would
+    /// recycle its lines and another thread's TLAB could be handed the memory
+    /// first. It leaves the table in the same step, so the next collection
+    /// reclaims it as an ordinary unreachable object and the callback runs
+    /// at most once.
+    fn take_dead_finalizers(&mut self) {
+        if self.finalizables.is_empty() {
+            return;
+        }
+        let table = mem::take(&mut self.finalizables);
+        let mut dead = Vec::new();
+        let mut keep = HashSet::with_capacity(table.len());
+        for offset in table {
+            match self.heap.objects.get(offset / ALLOC_QUANTUM) {
+                Some(slot) if slot.load(Ordering::Relaxed) & OBJECT_MARK != 0 => {
+                    keep.insert(offset);
+                }
+                Some(_) => dead.push(offset),
+                // Out of range: the address was never one of ours, so there
+                // is nothing to reclaim and nothing to call.
+                None => {}
+            }
+        }
+        self.finalizables = keep;
+        if dead.is_empty() {
+            return;
+        }
+
+        let mut newly = Vec::new();
+        for &offset in &dead {
+            self.mark_allocation(offset, &mut newly);
+        }
+        if !newly.is_empty() {
+            self.conservative_trace(newly);
+        }
+
+        // Read word zero only now. It is a code address rather than a heap
+        // reference, so the trace above neither followed nor disturbed it.
+        // Clearing it after the read matches upstream's `*block = NULL` and
+        // makes a re-registration of the same address harmless.
+        let heap_start = self.heap.memory.as_ptr() as usize;
+        let mut queued = 0usize;
+        if let Ok(mut queue) = PENDING_FINALIZERS.lock() {
+            for offset in dead {
+                let slot = (heap_start + offset) as *mut usize;
+                let raw = unsafe { *slot };
+                if raw == 0 {
+                    continue;
+                }
+                unsafe { *slot = 0 };
+                queue.push((slot as usize, unsafe {
+                    mem::transmute::<usize, Finalizer>(raw)
+                }));
+                queued += 1;
+            }
+        }
+        if queued != 0 {
+            PENDING_FINALIZER_COUNT.fetch_add(queued, Ordering::Relaxed);
+        }
+    }
+
     /// Conservative mark: scan a memory range for values that look like heap pointers.
     /// For each match, claim the containing allocation and mark its lines.
     /// Returns newly claimed (heap offset, allocation size) pairs.
@@ -3130,6 +3315,10 @@ impl ImmixAllocator {
         let t_stop = t0.elapsed();
         let t_mark0 = Instant::now();
         self.mark_roots(&stopped_world.snapshots);
+        // Between the two phases on purpose: this reads the mark bits, and
+        // sweep clears them. Counted in the mark half rather than left out of
+        // the split, since it marks and traces.
+        self.take_dead_finalizers();
         let t_mark = t_mark0.elapsed();
         let t_sweep0 = Instant::now();
         let freed_blocks = self.sweep(&stopped_world.snapshots);
@@ -5321,5 +5510,147 @@ mod tests {
         );
 
         drop(gc);
+    }
+
+    /// Callback for the finalizer tests. Records the block it was handed
+    /// without dereferencing it, so a queue left over from a failed assert
+    /// cannot fault a later test.
+    static FINALIZED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static FINALIZED_BLOCK: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+    unsafe extern "C" fn record_finalized(block: *mut c_void) {
+        FINALIZED_BLOCK.store(block as usize, Ordering::SeqCst);
+        FINALIZED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn unmark(gc: &ImmixAllocator, at: usize) {
+        gc.heap.objects[at / ALLOC_QUANTUM].fetch_and(!OBJECT_MARK, Ordering::Relaxed);
+    }
+
+    fn word0(p: NonNull<u8>) -> usize {
+        unsafe { *(p.as_ptr() as *const usize) }
+    }
+
+    #[test]
+    fn an_unreachable_finalizable_block_is_resurrected_then_finalized_once() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let live = gc.allocate(16).unwrap();
+        let dead = gc.allocate(16).unwrap();
+        for p in [live, dead] {
+            unsafe { (p.as_ptr() as *mut usize).write(record_finalized as *const () as usize) };
+            gc.register_finalizable(p.as_ptr());
+        }
+        let (live_at, dead_at) = (offset(&gc, live), offset(&gc, dead));
+        let before = FINALIZED.load(Ordering::SeqCst);
+
+        // Only `live` is reachable.
+        let mut work = Vec::new();
+        gc.mark_allocation(live_at, &mut work);
+        gc.conservative_trace(work);
+        gc.take_dead_finalizers();
+
+        assert!(
+            gc.finalizables.contains(&live_at) && !gc.finalizables.contains(&dead_at),
+            "the pass must keep the reachable block and take the unreachable one"
+        );
+        assert!(
+            object_marked(&gc, dead_at),
+            "an unreachable finalizable block must be marked, or sweep recycles \
+             the lines its finalizer is about to read"
+        );
+        assert_eq!(word0(dead), 0, "the callback is taken out of word zero");
+        assert_eq!(
+            word0(live),
+            record_finalized as *const () as usize,
+            "a reachable block keeps its callback for a later cycle"
+        );
+        assert_eq!(
+            FINALIZED.load(Ordering::SeqCst),
+            before,
+            "nothing may run inside the collector"
+        );
+
+        run_pending_finalizers();
+        assert_eq!(FINALIZED.load(Ordering::SeqCst), before + 1);
+        assert_eq!(
+            FINALIZED_BLOCK.load(Ordering::SeqCst),
+            dead.as_ptr() as usize,
+            "the callback receives the block, as upstream's finalizers expect"
+        );
+
+        // The block is out of the table, so the cycle that actually reclaims
+        // it -- when it is no longer marked -- must not call it again.
+        unmark(&gc, dead_at);
+        gc.take_dead_finalizers();
+        run_pending_finalizers();
+        assert_eq!(
+            FINALIZED.load(Ordering::SeqCst),
+            before + 1,
+            "a finalizer ran twice for one block"
+        );
+
+        // And the block that survived the first pass is finalized when it
+        // does die, with the callback the first pass left alone.
+        unmark(&gc, live_at);
+        gc.take_dead_finalizers();
+        run_pending_finalizers();
+        assert_eq!(FINALIZED.load(Ordering::SeqCst), before + 2);
+        assert_eq!(FINALIZED_BLOCK.load(Ordering::SeqCst), live.as_ptr() as usize);
+    }
+
+    #[test]
+    fn a_finalizable_block_reached_from_another_object_survives() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let holder = gc.allocate(16).unwrap();
+        let held = gc.allocate(16).unwrap();
+        unsafe { (held.as_ptr() as *mut usize).write(record_finalized as *const () as usize) };
+        gc.register_finalizable(held.as_ptr());
+        // The only reference to `held` is a field of `holder`.
+        unsafe { (holder.as_ptr() as *mut usize).write(held.as_ptr() as usize) };
+        let before = FINALIZED.load(Ordering::SeqCst);
+
+        let mut work = Vec::new();
+        gc.mark_allocation(offset(&gc, holder), &mut work);
+        gc.conservative_trace(work);
+        gc.take_dead_finalizers();
+        run_pending_finalizers();
+
+        assert_eq!(
+            FINALIZED.load(Ordering::SeqCst),
+            before,
+            "a block the trace reached through a field is not garbage"
+        );
+        assert!(gc.finalizables.contains(&offset(&gc, held)));
+    }
+
+    #[test]
+    fn hl_gc_alloc_gen_records_the_finalizer_kind_and_leaves_word_zero_alone() {
+        const MEM_KIND_FINALIZER: i32 = 3;
+        const MEM_KIND_NOPTR: i32 = 2;
+        let mut ty: hl_type = unsafe { mem::zeroed() };
+
+        let block =
+            unsafe { crate::hl_compat::hl_gc_alloc_gen(&mut ty, 32, MEM_KIND_FINALIZER) } as usize;
+        let plain =
+            unsafe { crate::hl_compat::hl_gc_alloc_gen(&mut ty, 32, MEM_KIND_NOPTR) } as usize;
+
+        let gc = gc_locked_init();
+        let heap_start = gc.heap.memory.as_ptr() as usize;
+        assert!(
+            gc.finalizables.contains(&(block - heap_start)),
+            "a MEM_KIND_FINALIZER allocation must be recorded; nothing else \
+             carries the kind past this call"
+        );
+        assert!(
+            !gc.finalizables.contains(&(plain - heap_start)),
+            "only the finalizer kind is recorded"
+        );
+        drop(gc);
+
+        assert_eq!(
+            unsafe { *(block as *const usize) },
+            0,
+            "word zero belongs to the caller's finalizer field"
+        );
     }
 }

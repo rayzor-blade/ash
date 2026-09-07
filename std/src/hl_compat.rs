@@ -271,8 +271,15 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
     // radius, and no reported defect turns on it.
     const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
     const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
-    if flags & PAGE_KIND_MASK == MEM_KIND_DYNAMIC {
-        (*(p as *mut vdynamic)).t = t;
+    const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
+    match flags & PAGE_KIND_MASK {
+        MEM_KIND_DYNAMIC => (*(p as *mut vdynamic)).t = t,
+        // The kind bits reach no further than this function, so a block that
+        // wants a finalizer has to be recorded here or the collector will
+        // never know it from any other block. The caller writes its callback
+        // into word zero on return.
+        MEM_KIND_FINALIZER => gc.register_finalizable(p),
+        _ => {}
     }
     p as *mut c_void
 }

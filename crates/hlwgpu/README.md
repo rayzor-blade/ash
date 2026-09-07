@@ -1,9 +1,9 @@
 # hlwgpu
 
 WebGPU for HashLink: buffers, textures, WGSL shaders, render and compute
-pipelines. It is the layer you would build a renderer on, not a renderer.
+pipelines. 
 
-A triangle, drawn into a 256x256 texture:
+GPU triangle example:
 
 ```haxe
 var device = wgpu.Instance.create().adapter().device();
@@ -67,7 +67,7 @@ people out:
 - Depth runs from 0 to 1, not from -1 to 1. A vertex at z = -0.5 is behind the
   near plane, so it is clipped away rather than drawn in front of everything.
 
-`test/Conventions.hx` checks both of these, because a symmetric test cannot.
+See `test/Conventions.hx`
 
 ## Destroying things
 

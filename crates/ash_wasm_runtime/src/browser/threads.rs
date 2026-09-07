@@ -28,6 +28,7 @@ use wasm_bindgen::prelude::*;
 /// What a page needs to start one, and what it was given to do it with.
 #[derive(Default)]
 pub struct Threads {
+    control: super::control::Control,
     /// The page's `spawn`. Absent means this program cannot start a thread,
     /// which is the ordinary case for a build that never wanted one.
     spawn: Option<Function>,
@@ -42,7 +43,17 @@ pub struct Threads {
 
 impl Threads {
     pub fn new(spawn: Option<Function>, args: Vec<String>, environ: Vec<String>) -> Self {
+        Self::with_control(spawn, args, environ, super::control::Control::default())
+    }
+
+    pub(super) fn with_control(
+        spawn: Option<Function>,
+        args: Vec<String>,
+        environ: Vec<String>,
+        control: super::control::Control,
+    ) -> Self {
         Self {
+            control,
             spawn,
             module: RefCell::new(None),
             memory: RefCell::new(None),
@@ -66,6 +77,7 @@ impl Threads {
     /// module whose memory is its own -- nothing to share, so a second
     /// instance would be a second program -- and a `spawn` that threw.
     pub fn spawn(&self, start_arg: i32) -> i32 {
+        self.control.check();
         let Some(spawn) = &self.spawn else {
             return -1;
         };
@@ -86,6 +98,7 @@ impl Threads {
         set("memory", memory.clone().into());
         set("args", to_array(&self.args));
         set("environ", to_array(&self.environ));
+        set("control", self.control.buffer());
 
         match spawn.call1(&JsValue::UNDEFINED, &request) {
             // False rather than an exception: a page with no agent free is

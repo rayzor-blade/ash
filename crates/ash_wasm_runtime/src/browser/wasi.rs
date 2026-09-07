@@ -437,9 +437,11 @@ fn block_for(millis: f64) {
     });
 }
 
-/// `performance.now()`, and `Date.now()` where there is no `performance`.
+/// A common origin across Workers: their performance.now() origins differ,
+/// but the guest shares Instant values and GC stop timestamps between them.
 fn now_monotonic() -> f64 {
-    from_global::<web_sys::Performance>("performance").map_or_else(js_sys::Date::now, |p| p.now())
+    from_global::<web_sys::Performance>("performance")
+        .map_or_else(js_sys::Date::now, |p| p.time_origin() + p.now())
 }
 
 /// `crypto.getRandomValues`.

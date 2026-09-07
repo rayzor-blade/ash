@@ -265,12 +265,14 @@ dependencies = [
  "clap",
  "js-sys",
  "libc",
+ "tempfile",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasmparser 0.245.1",
  "wasmtime",
  "wasmtime-wasi",
+ "wat",
  "web-sys",
 ]
 

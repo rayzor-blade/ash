@@ -30,7 +30,7 @@ validate = ["dep:wasmparser"]
 # JavaScript anywhere in this path, and no wasm-bindgen.
 native = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:anyhow", "dep:clap", "dep:tokio", "dep:libc", "dep:ash_wasm_link", "validate"]
 # The browser host: the same contract, reached through web-sys.
-browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+browser = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:ash_wasm_link"]
 
 [dependencies]
 wasmparser = { version = "0.245", optional = true }
@@ -38,7 +38,7 @@ wasmtime = { version = "43", optional = true }
 wasmtime-wasi = { version = "43", optional = true }
 anyhow = { version = "1", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
-tokio = { version = "1", features = ["rt", "macros"], optional = true }
+tokio = { version = "1", features = ["rt", "macros", "sync"], optional = true }
 # The native host answers the guest's socket imports with the operating
 # system's sockets; on unix that is libc, and nowhere else is it anything.
 libc = { version = "0.2", optional = true }
@@ -66,3 +66,7 @@ features = [
     "Event",
     "CloseEvent",
 ]
+
+[dev-dependencies]
+wat = "1"
+tempfile = "3"

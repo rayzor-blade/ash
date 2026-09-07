@@ -37,7 +37,7 @@ self.onmessage = async (event) => {
   try {
     await ready;
     post({ kind: "meta", text: `thread ${tid}: agent entering` });
-    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? []);
+    await run_thread(module, memory, tid, startArg, args ?? [], environ ?? [], undefined, event.data.control);
     post({
       kind: "meta",
       text: `thread ${tid}: returned after ${Math.round(performance.now() - started)}ms`,

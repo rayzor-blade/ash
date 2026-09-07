@@ -22,7 +22,7 @@
 //! exported for a host that wants to initialise without running; calling it
 //! first here reaches the GC before the entrypoint has started it.
 
-use js_sys::{Function, Object, Reflect, Uint8Array, WebAssembly};
+use js_sys::{Function, Object, Reflect, SharedArrayBuffer, Uint8Array, WebAssembly};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -32,14 +32,14 @@ use std::rc::Rc;
 use super::fibers::Fibers;
 use super::imports::{imports, Host};
 use super::memory::Guest;
-use crate::imported_memory::{imported_memory, MemoryLimits};
 use super::threads::Threads;
+use crate::imported_memory::{imported_memory, MemoryLimits};
 
 /// How a run ended, as a page sees it.
 #[wasm_bindgen]
 pub struct Outcome {
-    status: i32,
-    trapped: Option<String>,
+    pub(super) status: i32,
+    pub(super) trapped: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -70,16 +70,23 @@ pub async fn run(
     environ: Vec<String>,
     spawn: Option<Function>,
 ) -> Result<Outcome, JsValue> {
-    let bytes = module.to_vec();
-    let host = Host::new(args.clone(), environ.clone());
+    let bytes = ash_wasm_link::waits::instrument(&module.to_vec())
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     // A threads build does not define its memory. It imports one, shared, so
     // that every thread instantiates against the same one -- and the host is
     // what makes it. See [`super::module::imported_memory`] for why the
     // limits are read out of the module rather than asked of the engine.
-    let shared = imported_memory(&bytes)
-        .map(shared_memory)
-        .transpose()?;
-    let threads = Rc::new(Threads::new(spawn, args, environ));
+    let shared = imported_memory(&bytes).map(shared_memory).transpose()?;
+    let control = if shared.is_some() {
+        super::control::Control::new()
+    } else {
+        Default::default()
+    };
+    let host = Host::with_control(args.clone(), environ.clone(), control.clone());
+    if let Some(memory) = &shared {
+        host.attach(Guest::new(memory.clone()));
+    }
+    let threads = Rc::new(Threads::with_control(spawn, args, environ, control.clone()));
 
     let (compiled, instance) =
         instantiate(&bytes, &imports(&host, shared.as_ref(), &threads)).await?;
@@ -109,7 +116,7 @@ pub async fn run(
             .map(|status| status.as_f64().unwrap_or(0.0) as i32),
     };
 
-    Ok(match outcome {
+    let outcome = match outcome {
         Ok(status) => Outcome {
             status,
             trapped: None,
@@ -129,7 +136,10 @@ pub async fn run(
                 },
             }
         }
-    })
+    };
+    let memory = host.guest.borrow().as_ref().map(|g| g.memory().clone());
+    control.finish(&outcome, memory.as_ref());
+    Ok(control.outcome().unwrap_or(outcome))
 }
 
 /// Compile and instantiate, and keep both: the instance to run, and the
@@ -185,21 +195,42 @@ pub async fn run_thread(
     args: Vec<String>,
     environ: Vec<String>,
     spawn: Option<Function>,
+    control: Option<SharedArrayBuffer>,
 ) -> Result<(), JsValue> {
-    let host = Host::new(args.clone(), environ.clone());
-    let threads = Rc::new(Threads::new(spawn, args, environ));
-    let ready = WebAssembly::instantiate_module(&module, &imports(&host, Some(&memory), &threads));
-    let instance: WebAssembly::Instance = JsFuture::from(ready).await?.unchecked_into();
-    let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
-
+    let control = super::control::Control::attach(control);
+    let host = Host::with_control(args.clone(), environ.clone(), control.clone());
     host.attach(Guest::new(memory.clone()));
-    host.attach_fibers(Fibers::from_exports(&exports));
-    // A thread may start a thread, so it is given what it would need to.
-    threads.attach(module, Some(memory));
+    let threads = Rc::new(Threads::with_control(spawn, args, environ, control.clone()));
+    let result = async {
+        let ready =
+            WebAssembly::instantiate_module(&module, &imports(&host, Some(&memory), &threads));
+        let instance: WebAssembly::Instance = JsFuture::from(ready).await?.unchecked_into();
+        let exports: Object = Reflect::get(&instance, &"exports".into())?.unchecked_into();
 
-    export(&exports, "wasi_thread_start")?
-        .call2(&JsValue::UNDEFINED, &tid.into(), &start_arg.into())
-        .map(|_| ())
+        host.attach(Guest::new(memory.clone()));
+        host.attach_fibers(Fibers::from_exports(&exports));
+        // A thread may start a thread, so it is given what it would need to.
+        threads.attach(module, Some(memory.clone()));
+
+        export(&exports, "wasi_thread_start")?
+            .call2(&JsValue::UNDEFINED, &tid.into(), &start_arg.into())
+            .map(|_| ())
+    }
+    .await;
+    if let Err(error) = &result {
+        let outcome = match host.wasi.borrow().exit_status() {
+            Some(status) => Outcome {
+                status,
+                trapped: None,
+            },
+            None => Outcome {
+                status: -1,
+                trapped: Some(format!("thread {tid}: {}", describe(error))),
+            },
+        };
+        control.finish(&outcome, Some(&memory));
+    }
+    result
 }
 
 fn export(exports: &Object, name: &str) -> Result<Function, JsValue> {

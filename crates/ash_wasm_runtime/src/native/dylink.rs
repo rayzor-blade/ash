@@ -37,7 +37,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use wasmtime::{AsContextMut, Extern, Global, GlobalType, Instance, Module, Mutability, Ref, Store, Val};
+use wasmtime::{
+    AsContextMut, Extern, Global, GlobalType, Instance, Module, Mutability, Ref, Store, Val,
+};
 
 use super::Host;
 
@@ -170,7 +172,7 @@ async fn load_one(
     bytes: &[u8],
     side: &ash_wasm_link::SideModule,
 ) -> Result<(Instance, wasmtime::Table)> {
-    let module = Module::new(store.engine(), bytes)?;
+    let module = Module::new(store.engine(), ash_wasm_link::waits::instrument(bytes)?)?;
 
     // As an `Extern` rather than a `Memory`, because a program built for
     // threads exports a shared memory and `get_memory` answers `None` for one.

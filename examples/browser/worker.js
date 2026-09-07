@@ -138,5 +138,11 @@ self.onmessage = async (event) => {
   } catch (e) {
     post("err", String(e && e.message ? e.message : e));
     self.postMessage({ kind: "done", status: -1, trapped: String(e) });
+  } finally {
+    // The run owns every agent, even one still executing after a sibling's
+    // fatal exit. No guest context may outlive its program.
+    for (const worker of agents) worker.terminate();
+    agents.length = 0;
+    idle.length = 0;
   }
 };

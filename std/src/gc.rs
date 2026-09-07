@@ -28,6 +28,23 @@ use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 const BLOCK_SIZE: usize = 32 * 1024; // 32 KB
 const LINE_SIZE: usize = 128; // 128 bytes
+const ALLOC_QUANTUM: usize = 16;
+const OBJECT_MARK: u8 = 0x80;
+const SPAN_OBJECT: u8 = (LINE_SIZE / ALLOC_QUANTUM + 1) as u8;
+
+/// Zeroed atomic bytes are valid. Use calloc-style allocation so an arena's
+/// reservation does not eagerly touch a side table proportional to its cap.
+fn allocation_table(count: usize) -> Vec<std::sync::atomic::AtomicU8> {
+    unsafe {
+        let layout = std::alloc::Layout::array::<std::sync::atomic::AtomicU8>(count)
+            .expect("allocation table layout");
+        let p = std::alloc::alloc_zeroed(layout) as *mut std::sync::atomic::AtomicU8;
+        if p.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Vec::from_raw_parts(p, count, count)
+    }
+}
 /// How far below a stack's top to scan when nothing says where it ends.
 ///
 /// WebAssembly has no call to ask how big a thread's stack is, and the
@@ -167,7 +184,7 @@ fn spill_callee_saved(_buf: &mut [usize; CALLEE_SAVED_WORDS]) {}
 //   objects in it are conservatively marked from the mutator stack like any
 //   others, and the bump cursor stays valid because the block stays ours;
 // * small objects never straddle a 128-byte line (the straddle check), so
-//   the conservative trace's line-granular scan always sees a whole object;
+//   their start can be found by searching only that line's metadata;
 // * `ASH_GC_STRESS` disables the TLAB outright — stress promises a
 //   collection every Nth allocation, and a bump path that skips the counter
 //   would quietly break that contract.
@@ -198,6 +215,8 @@ thread_local! {
             cur: Cell::new(0),
             limit: Cell::new(0),
             block: Cell::new(usize::MAX),
+            objects: Cell::new(std::ptr::null()),
+            heap_base: Cell::new(0),
             registered: Cell::new(false),
             polls: AtomicU64::new(0),
             site: AtomicU64::new(0),
@@ -213,6 +232,10 @@ struct Tlab {
     /// Heap offset of the block this thread is bumping through, so a refill
     /// can hand the previous one back to the sweep.
     block: Cell<usize>,
+    /// Stable side table, shared atomically with the stopped-world marker.
+    /// A bump publishes its boundary before returning the new allocation.
+    objects: Cell<*const std::sync::atomic::AtomicU8>,
+    heap_base: Cell<usize>,
     /// How many times this thread has entered `gc_safepoint` with a stop
     /// pending. Atomic because the collector reads it, by address, to say
     /// whether a straggler is running safepoint code at all.
@@ -574,7 +597,7 @@ pub(crate) fn gc_safepoint() {
     // 197.9ms and 254.7ms, for a stop whose mark and sweep together were 12ms.
     let late = if gc_stats_enabled() {
         let asked = GC_STOP_ASKED_NS.load(Ordering::Relaxed);
-        let waited_ms = (GC_EPOCH.elapsed().as_nanos() as u64 - asked) as f64 / 1e6;
+        let waited_ms = (GC_EPOCH.elapsed().as_nanos() as u64).saturating_sub(asked) as f64 / 1e6;
         (waited_ms > 20.0).then(|| (waited_ms, std::backtrace::Backtrace::force_capture()))
     } else {
         None
@@ -1016,6 +1039,10 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
                 }
                 let np = p + aligned;
                 if np <= t.limit.get() {
+                    unsafe {
+                        (*t.objects.get().add((p - t.heap_base.get()) / ALLOC_QUANTUM))
+                            .store((aligned / ALLOC_QUANTUM) as u8, Ordering::Relaxed);
+                    }
                     t.cur.set(np);
                     return Step::Bumped(p);
                 }
@@ -1045,6 +1072,8 @@ pub fn gc_alloc(size: usize) -> Option<NonNull<u8>> {
 fn adopt_tlab_region(gc: &mut ImmixAllocator, block: usize, cur: usize, limit: usize) {
     gc.heap.tlab_blocks.insert(thread_self_fast(), block);
     TLAB.with(|t| {
+        t.objects.set(gc.heap.objects.as_ptr());
+        t.heap_base.set(gc.heap.memory.as_ptr() as usize);
         t.block.set(block);
         t.cur.set(cur);
         t.limit.set(limit);
@@ -1091,6 +1120,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
             }
             let lo = rblock + start * LINE_SIZE;
             let span_bytes = len * LINE_SIZE;
+            gc.clear_allocation_metadata(lo, span_bytes);
             let base = unsafe { gc.heap.memory.as_mut_ptr().add(lo) };
             // Zeroed for the same reason a fresh block is: every caller of
             // this path is promised zeroed memory.
@@ -1109,6 +1139,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
                 base as usize + aligned,
                 base as usize + span_bytes,
             );
+            gc.record_allocation(lo, aligned);
             return Some(unsafe { NonNull::new_unchecked(base) });
         }
     }
@@ -1136,6 +1167,7 @@ fn tlab_refill_then_alloc(aligned: usize) -> Option<NonNull<u8>> {
         base as usize + aligned,
         base as usize + BLOCK_SIZE,
     );
+    gc.record_allocation(block, aligned);
     Some(unsafe { NonNull::new_unchecked(base) })
 }
 
@@ -2076,6 +2108,11 @@ struct ImmixHeap {
     /// occupies if this is an allocation start, or 0 for continuation lines.
     /// Enables the GC to mark all lines of a multi-line object.
     alloc_sizes: Vec<u32>,
+    /// One byte per 16-byte allocation quantum: 0 for no start, 1..8 for a
+    /// small allocation's size, SPAN_OBJECT for a line-aligned span. The high
+    /// bit is the object's claim bit. Unlike a line mark, it never makes an
+    /// unrelated neighbour reachable. Allocated once; TLAB pointers stay valid.
+    objects: Vec<std::sync::atomic::AtomicU8>,
     /// GC-heap bytes allocated since the last collection.
     bytes_since_gc: usize,
     /// Off-heap bytes charged via track_external since the last collection
@@ -2200,11 +2237,6 @@ impl Block {
     }
 }
 
-/// Plain copy of a block's marks, for the sweep audit.
-fn snapshot_marks(block: &Block) -> [bool; LINES_PER_BLOCK] {
-    std::array::from_fn(|i| block.is_marked(i))
-}
-
 struct RootSet {
     globals: Vec<*mut hl::vdynamic>,
     stack_roots: Vec<*mut hl::vdynamic>,
@@ -2252,73 +2284,90 @@ impl Default for ImmixAllocator {
     }
 }
 
-/// The span walk from [`ImmixAllocator::mark_allocation_at_line`], over shared
-/// borrows so the mark phase can run it from several threads. Everything it
-/// reads — `alloc_sizes`, `has_span`, the block table — is immutable for the
-/// duration of a collection; the only mutation is the claim bit.
-fn mark_allocation_shared(
+/// Resolve a candidate to its actual allocation, including interior pointers.
+/// Small starts are at most one line away; only spans can cross a line.
+fn containing_allocation(
     blocks: &[Block],
     alloc_sizes: &[u32],
-    line: usize,
-    out: &mut Vec<(usize, usize)>,
-) {
+    objects: &[std::sync::atomic::AtomicU8],
+    offset: usize,
+) -> Option<(usize, usize)> {
+    let quantum = offset / ALLOC_QUANTUM;
+    let floor = quantum / (LINE_SIZE / ALLOC_QUANTUM) * (LINE_SIZE / ALLOC_QUANTUM);
+    for start in (floor..=quantum).rev() {
+        let code = objects.get(start)?.load(Ordering::Relaxed) & !OBJECT_MARK;
+        if code == 0 {
+            continue;
+        }
+        let begin = start * ALLOC_QUANTUM;
+        let size = if code == SPAN_OBJECT {
+            alloc_sizes[begin / LINE_SIZE] as usize * LINE_SIZE
+        } else {
+            code as usize * ALLOC_QUANTUM
+        };
+        return (offset - begin < size).then_some((begin, size));
+    }
+    let line = offset / LINE_SIZE;
     let mut start = line;
     loop {
         let b = start / LINES_PER_BLOCK;
-        if blocks.get(b).is_none_or(|blk| !blk.has_span) {
-            start = line;
-            break;
+        if !blocks.get(b)?.has_span {
+            return None;
         }
         let floor = b * LINES_PER_BLOCK;
         while start > floor && alloc_sizes[start] == 0 {
             start -= 1;
         }
         if alloc_sizes[start] != 0 {
-            break;
+            let begin = start * LINE_SIZE;
+            let size = alloc_sizes[start] as usize * LINE_SIZE;
+            let code = objects[begin / ALLOC_QUANTUM].load(Ordering::Relaxed) & !OBJECT_MARK;
+            return (code == SPAN_OBJECT && offset - begin < size).then_some((begin, size));
         }
-        if start == 0 {
-            break;
-        }
-        start -= 1;
-    }
-    let num_lines = alloc_sizes[start] as usize;
-    let num_lines = if num_lines == 0 { 1 } else { num_lines };
-
-    let block_idx = line / LINES_PER_BLOCK;
-    let line_idx = line % LINES_PER_BLOCK;
-    if block_idx < blocks.len() && claim_line(&blocks[block_idx], line_idx) {
-        out.push((block_idx, line_idx));
-    }
-    for l in start..start + num_lines {
-        let block_idx = l / LINES_PER_BLOCK;
-        let line_idx = l % LINES_PER_BLOCK;
-        if block_idx < blocks.len() && claim_line(&blocks[block_idx], line_idx) {
-            out.push((block_idx, line_idx));
-        }
+        start = start.checked_sub(1)?;
     }
 }
 
-/// Scan one already-claimed line for heap pointers, claiming what it reaches.
-#[inline]
-fn scan_line_shared(
+/// Claim OBJECTS, not lines. Two reachable objects on a shared line must
+/// both be traced; an unreachable neighbour on that line must not be traced.
+fn mark_allocation_shared(
     blocks: &[Block],
     alloc_sizes: &[u32],
-    heap_start: usize,
-    heap_end: usize,
-    block_idx: usize,
-    line_idx: usize,
+    objects: &[std::sync::atomic::AtomicU8],
+    offset: usize,
     out: &mut Vec<(usize, usize)>,
 ) {
-    let line_start = heap_start + block_idx * BLOCK_SIZE + line_idx * LINE_SIZE;
-    for off in (0..LINE_SIZE).step_by(WORD) {
-        let val = unsafe { *((line_start + off) as *const usize) };
+    let Some((start, size)) = containing_allocation(blocks, alloc_sizes, objects, offset) else {
+        return;
+    };
+    let slot = &objects[start / ALLOC_QUANTUM];
+    if slot.load(Ordering::Relaxed) & OBJECT_MARK != 0
+        || slot.fetch_or(OBJECT_MARK, Ordering::Relaxed) & OBJECT_MARK != 0
+    {
+        return;
+    }
+    for line in start / LINE_SIZE..=(start + size - 1) / LINE_SIZE {
+        claim_line(&blocks[line / LINES_PER_BLOCK], line % LINES_PER_BLOCK);
+    }
+    out.push((start, size));
+}
+
+/// Trace only the allocation's bytes, never other objects sharing its lines.
+#[inline]
+fn scan_allocation_shared(
+    blocks: &[Block],
+    alloc_sizes: &[u32],
+    objects: &[std::sync::atomic::AtomicU8],
+    heap_start: usize,
+    heap_end: usize,
+    start: usize,
+    size: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    for off in (0..size).step_by(WORD) {
+        let val = unsafe { *((heap_start + start + off) as *const usize) };
         if val >= heap_start && val < heap_end {
-            let child_line = (val - heap_start) / LINE_SIZE;
-            let cb = child_line / LINES_PER_BLOCK;
-            let cl = child_line % LINES_PER_BLOCK;
-            if cb < blocks.len() && !blocks[cb].is_marked(cl) {
-                mark_allocation_shared(blocks, alloc_sizes, child_line, out);
-            }
+            mark_allocation_shared(blocks, alloc_sizes, objects, val - heap_start, out);
         }
     }
 }
@@ -2368,7 +2417,10 @@ impl ImmixAllocator {
     }
 
     pub fn new() -> Self {
-        let heap_size = heap_max_bytes();
+        Self::with_heap_size(heap_max_bytes())
+    }
+
+    fn with_heap_size(heap_size: usize) -> Self {
         let mut heap = ImmixHeap {
             memory: HeapMemory::new(heap_size),
             free_blocks: Vec::new(),
@@ -2378,6 +2430,7 @@ impl ImmixAllocator {
             current_block_end: 0,
             alloc_count: 0,
             alloc_sizes: vec![0u32; heap_size / LINE_SIZE],
+            objects: allocation_table(heap_size / ALLOC_QUANTUM),
             bytes_since_gc: 0,
             external_since_gc: 0,
             trigger_threshold: INITIAL_TRIGGER_BYTES,
@@ -2528,6 +2581,8 @@ impl ImmixAllocator {
     /// conservative scans of stale pointers into freed blocks.
     fn acquire_free_block(&mut self) -> Option<usize> {
         let addr = self.heap.free_blocks.pop()?;
+        self.clear_allocation_metadata(addr, BLOCK_SIZE);
+        self.blocks[addr / BLOCK_SIZE].has_span = false;
         self.heap.used_blocks.insert(addr);
         self.reclaim_block_pages(addr);
         clear_marks(&self.blocks[addr / BLOCK_SIZE]);
@@ -2540,6 +2595,26 @@ impl ImmixAllocator {
             );
         }
         Some(addr)
+    }
+
+    /// Only called for free memory, under the allocation lock. In particular,
+    /// a recycled span must forget its old large-object starts before a TLAB
+    /// publishes new small objects in it.
+    fn clear_allocation_metadata(&mut self, offset: usize, size: usize) {
+        for slot in &mut self.heap.objects[offset / ALLOC_QUANTUM..(offset + size) / ALLOC_QUANTUM]
+        {
+            *slot.get_mut() = 0;
+        }
+        self.heap.alloc_sizes[offset / LINE_SIZE..(offset + size) / LINE_SIZE].fill(0);
+    }
+
+    fn record_allocation(&self, offset: usize, size: usize) {
+        let code = if size <= LINE_SIZE {
+            (size / ALLOC_QUANTUM) as u8
+        } else {
+            SPAN_OBJECT
+        };
+        self.heap.objects[offset / ALLOC_QUANTUM].store(code, Ordering::Relaxed);
     }
 
     /// MADV_FREE_REUSE a block whose pages were previously handed back via
@@ -2587,17 +2662,16 @@ impl ImmixAllocator {
         // full 128-byte line ("each object gets its own line"), which
         // amplified an alloc-heavy workload five-fold: 5x the footprint, 5x
         // the memset, 5x the block churn and collections — mandelbrot spent
-        // 72.6% of its run in here. Lines are the MARK granularity, not the
-        // allocation granularity: reclaim is whole-block, so a marked line
-        // retaining a few neighbours costs nothing an entire retained block
-        // was not already costing.
+        // 72.6% of its run in here. Keep packing, but trace allocations
+        // independently: scanning their neighbours' pointers would join
+        // otherwise unrelated objects into unbounded retention chains.
         //
         // Two placement rules keep the conservative marker sound:
-        // * a small object never straddles a line, so a hit on its line
-        //   covers all of it;
+        // * a small object never straddles a line, so its start can be
+        //   found within that line;
         // * a multi-line object starts on a line boundary and its span is
-        //   recorded in `alloc_sizes`, exactly as before, so
-        //   `mark_allocation_at_line`'s walk-back still finds real starts.
+        //   recorded in `alloc_sizes`, so interior pointers can resolve back
+        //   across a block boundary to the containing allocation.
         let aligned_size = (size + 15) & !15;
 
         self.maybe_collect();
@@ -2635,7 +2709,12 @@ impl ImmixAllocator {
             // Zero the allocation — HashLink semantics require zeroed memory.
             // Reused GC blocks contain stale data that would be misinterpreted
             // as valid pointers by the conservative scanner and HDLL code.
-            std::ptr::write_bytes(ptr, 0, aligned_size);
+            let reserved = if aligned_size >= LINE_SIZE {
+                aligned_size.div_ceil(LINE_SIZE) * LINE_SIZE
+            } else {
+                aligned_size
+            };
+            std::ptr::write_bytes(ptr, 0, reserved);
             NonNull::new_unchecked(ptr)
         };
 
@@ -2662,6 +2741,7 @@ impl ImmixAllocator {
         } else {
             self.heap.allocation_point = point + aligned_size;
         }
+        self.record_allocation(point, aligned_size);
         self.heap.alloc_count += 1;
         self.heap.bytes_since_gc += aligned_size;
         GC_STATS
@@ -2702,6 +2782,8 @@ impl ImmixAllocator {
                     .drain(start_idx..start_idx + blocks_needed)
                     .collect();
                 for block in removed {
+                    self.clear_allocation_metadata(block, BLOCK_SIZE);
+                    self.blocks[block / BLOCK_SIZE].has_span = false;
                     self.heap.used_blocks.insert(block);
                     self.reclaim_block_pages(block);
                     clear_marks(&self.blocks[block / BLOCK_SIZE]);
@@ -2724,6 +2806,7 @@ impl ImmixAllocator {
                 for j in 1..num_lines {
                     self.heap.alloc_sizes[start_line + j] = 0;
                 }
+                self.record_allocation(start_addr, size);
                 return Some(unsafe {
                     let ptr = self.heap.memory.as_mut_ptr().add(start_addr);
                     std::ptr::write_bytes(ptr, 0, blocks_needed * BLOCK_SIZE);
@@ -2820,73 +2903,19 @@ impl ImmixAllocator {
         true
     }
 
-    /// Mark all lines belonging to the allocation that contains `line`.
-    /// Walks backwards to find the allocation start (line with alloc_sizes > 0),
-    /// then marks all lines from start to start+size.
-    /// Newly-marked `(block_idx, line_idx)` pairs are pushed onto `out`.
-    ///
-    /// The buffer is the caller's, not a fresh `Vec` per call: this runs once
-    /// per pointer the collector follows, which on bench_binary_trees is 1.97M
-    /// times per run, and returning an owned vector made that 1.97M
-    /// malloc/free pairs for a median of ONE element each. Threading the
-    /// caller's accumulator through halved total GC pause (113ms -> 55ms) with
-    /// every per-collection reclaim count byte-identical.
-    ///
-    /// `out` is always a caller-local accumulator, never a field of `self`, so
-    /// there is no aliasing hazard with the `&mut self` mark-bit writes.
-    fn mark_allocation_at_line(&mut self, line: usize, out: &mut Vec<(usize, usize)>) {
-        // Find the allocation start. Only multi-line spans record a start
-        // (`alloc_sizes > 0`); packed small objects never need one, so a
-        // block whose has_span flag is clear marks in O(1). The walk, when
-        // it runs, is bounded to span-bearing blocks: spans cannot begin in
-        // a block that never recorded one, so crossing into a span-free
-        // predecessor is proof there is no start to find.
-        let mut start = line;
-        loop {
-            let b = start / LINES_PER_BLOCK;
-            if self.blocks.get(b).is_none_or(|blk| !blk.has_span) {
-                start = line; // no span can cover `line`
-                break;
-            }
-            let floor = b * LINES_PER_BLOCK;
-            while start > floor && self.heap.alloc_sizes[start] == 0 {
-                start -= 1;
-            }
-            if self.heap.alloc_sizes[start] != 0 {
-                break;
-            }
-            if start == 0 {
-                break;
-            }
-            start -= 1; // cross into the previous block (large allocations)
-        }
-        let num_lines = self.heap.alloc_sizes[start] as usize;
-        let num_lines = if num_lines == 0 { 1 } else { num_lines };
-
-        // Small objects pack into lines with no `alloc_sizes` entry, so the
-        // walk-back can land on an EARLIER multi-line span that does not
-        // cover `line`. Reclaim is whole-block, so the only thing that must
-        // hold is that the hit line itself is marked — do that first,
-        // unconditionally.
-        {
-            let block_idx = line / LINES_PER_BLOCK;
-            let line_idx = line % LINES_PER_BLOCK;
-            if block_idx < self.blocks.len() && claim_line(&self.blocks[block_idx], line_idx) {
-                out.push((block_idx, line_idx));
-            }
-        }
-        for l in start..start + num_lines {
-            let block_idx = l / LINES_PER_BLOCK;
-            let line_idx = l % LINES_PER_BLOCK;
-            if block_idx < self.blocks.len() && claim_line(&self.blocks[block_idx], line_idx) {
-                out.push((block_idx, line_idx));
-            }
-        }
+    fn mark_allocation(&self, offset: usize, out: &mut Vec<(usize, usize)>) {
+        mark_allocation_shared(
+            &self.blocks,
+            &self.heap.alloc_sizes,
+            &self.heap.objects,
+            offset,
+            out,
+        );
     }
 
     /// Conservative mark: scan a memory range for values that look like heap pointers.
-    /// For each match, mark ALL lines of the containing allocation.
-    /// Returns list of newly-marked (block, line) pairs.
+    /// For each match, claim the containing allocation and mark its lines.
+    /// Returns newly claimed (heap offset, allocation size) pairs.
     fn conservative_scan_range(&mut self, start: usize, end: usize) -> Vec<(usize, usize)> {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
@@ -2917,14 +2946,7 @@ impl ImmixAllocator {
             // over-retains, which is the conservative contract already.
             let consider = |val: usize, this: &mut Self, out: &mut Vec<(usize, usize)>| {
                 if val >= heap_start && val < heap_end {
-                    let offset = val - heap_start;
-                    let line = offset / LINE_SIZE;
-                    let block_idx = line / LINES_PER_BLOCK;
-                    let line_idx = line % LINES_PER_BLOCK;
-                    if block_idx < this.blocks.len() && !this.blocks[block_idx].is_marked(line_idx)
-                    {
-                        this.mark_allocation_at_line(line, out);
-                    }
+                    this.mark_allocation(val - heap_start, out);
                 }
             };
             consider(raw, self, &mut newly_marked);
@@ -2949,8 +2971,8 @@ impl ImmixAllocator {
         newly_marked
     }
 
-    /// Transitively scan all newly-marked heap lines for more heap pointers.
-    /// When a new heap pointer is found, marks ALL lines of that allocation.
+    /// Transitively scan newly-marked allocations. Line bits only control
+    /// recycling; the worklist and duplicate suppression are object-granular.
     fn conservative_trace(&mut self, initial: Vec<(usize, usize)>) {
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
@@ -2960,14 +2982,15 @@ impl ImmixAllocator {
             let blocks = &self.blocks;
             let alloc_sizes = &self.heap.alloc_sizes;
             let mut worklist = initial;
-            while let Some((block_idx, line_idx)) = worklist.pop() {
-                scan_line_shared(
+            while let Some((start, size)) = worklist.pop() {
+                scan_allocation_shared(
                     blocks,
                     alloc_sizes,
+                    &self.heap.objects,
                     heap_start,
                     heap_end,
-                    block_idx,
-                    line_idx,
+                    start,
+                    size,
                     &mut worklist,
                 );
             }
@@ -2985,10 +3008,11 @@ impl ImmixAllocator {
             // Marking is pointer-chasing over the whole live set: latency-bound,
             // so several threads keep more misses outstanding. The world is
             // already stopped, which is why this needs no write barrier -- nothing
-            // mutates the heap while the trace runs, and a line is claimed exactly
+            // mutates the heap while the trace runs, and an object is claimed exactly
             // once however many threads reach it.
             let blocks: &[Block] = &self.blocks;
             let alloc_sizes: &[u32] = &self.heap.alloc_sizes;
+            let objects = &self.heap.objects;
             let queue = MarkQueue {
                 work: std::sync::Mutex::new(initial),
                 ready: std::sync::Condvar::new(),
@@ -3034,14 +3058,15 @@ impl ImmixAllocator {
                                     queue.idle.fetch_sub(1, Ordering::Relaxed);
                                 }
                             }
-                            while let Some((block_idx, line_idx)) = local.pop() {
-                                scan_line_shared(
+                            while let Some((start, size)) = local.pop() {
+                                scan_allocation_shared(
                                     blocks,
                                     alloc_sizes,
+                                    objects,
                                     heap_start,
                                     heap_end,
-                                    block_idx,
-                                    line_idx,
+                                    start,
+                                    size,
                                     &mut local,
                                 );
                                 if local.len() >= SPILL {
@@ -3205,7 +3230,7 @@ impl ImmixAllocator {
         let root_set = roots.borrow();
 
         // Mark explicit roots using conservative approach:
-        // Just mark the memory lines, then conservative_trace will follow pointers.
+        // Claim allocations, then conservative_trace follows their pointers.
         let heap_start = self.heap.memory.as_ptr() as usize;
         let heap_end = heap_start + self.heap.memory.len;
         let mut all_newly_marked = Vec::new();
@@ -3213,22 +3238,19 @@ impl ImmixAllocator {
         for &global_ptr in &root_set.globals {
             let addr = global_ptr as usize;
             if addr >= heap_start && addr < heap_end {
-                let line = (addr - heap_start) / LINE_SIZE;
-                self.mark_allocation_at_line(line, &mut all_newly_marked);
+                self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
         for &stack_ptr in &root_set.stack_roots {
             let addr = stack_ptr as usize;
             if addr >= heap_start && addr < heap_end {
-                let line = (addr - heap_start) / LINE_SIZE;
-                self.mark_allocation_at_line(line, &mut all_newly_marked);
+                self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
         for &persistent_ptr in &root_set.persistent_roots {
             let addr = persistent_ptr as usize;
             if addr >= heap_start && addr < heap_end {
-                let line = (addr - heap_start) / LINE_SIZE;
-                self.mark_allocation_at_line(line, &mut all_newly_marked);
+                self.mark_allocation(addr - heap_start, &mut all_newly_marked);
             }
         }
         // A native root is a SLOT, so read through it rather than marking the
@@ -3620,22 +3642,26 @@ impl ImmixAllocator {
         let mut freed: Vec<usize> = Vec::new();
         let (mut occ_blocks, mut occ_marked) = (0usize, 0usize);
         let mut occ_hist = [0usize; 6];
-        // The retained-heap half of the use-after-free audit needs this
-        // cycle's marks AFTER the loop below has reset them: only words in
-        // lines that were marked LIVE are meaningful referrers — dead lines
-        // are full of stale pointers by definition and would drown the
-        // signal.
-        let audit_marks: Option<std::collections::HashMap<usize, [bool; LINES_PER_BLOCK]>> =
-            if sweep_audit() {
-                Some(
-                    used_block_addrs
-                        .iter()
-                        .map(|&a| (a, snapshot_marks(&self.blocks[a / BLOCK_SIZE])))
-                        .collect(),
-                )
-            } else {
-                None
-            };
+        // Audit exactly the objects the tracer visited. Dead neighbours on
+        // a marked line can legitimately point into freed blocks.
+        let audit_objects = sweep_audit().then(|| {
+            let mut live = Vec::new();
+            for &block in &used_block_addrs {
+                for q in block / ALLOC_QUANTUM..(block + BLOCK_SIZE) / ALLOC_QUANTUM {
+                    if self.heap.objects[q].load(Ordering::Relaxed) & OBJECT_MARK != 0 {
+                        if let Some(object) = containing_allocation(
+                            &self.blocks,
+                            &self.heap.alloc_sizes,
+                            &self.heap.objects,
+                            q * ALLOC_QUANTUM,
+                        ) {
+                            live.push(object);
+                        }
+                    }
+                }
+            }
+            live
+        });
         // Hoisted: this was a linear scan of every TLAB for every swept block.
         let tlab_set: std::collections::HashSet<usize> =
             self.heap.tlab_blocks.values().copied().collect();
@@ -3654,6 +3680,13 @@ impl ImmixAllocator {
             // Nothing reached this block, so every bit is already clear and
             // the scan below could only confirm it.
             let touched = *block.any_marked.get_mut();
+            if touched {
+                for slot in &mut self.heap.objects
+                    [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
+                {
+                    *slot.get_mut() &= !OBJECT_MARK;
+                }
+            }
             *block.any_marked.get_mut() = false;
             let mut is_empty = true;
             let mut marked_lines = 0usize;
@@ -3842,20 +3875,25 @@ impl ImmixAllocator {
                 // Clear alloc_sizes for all lines in this freed block
                 let base_line = block_index * LINES_PER_BLOCK;
                 self.heap.alloc_sizes[base_line..base_line + LINES_PER_BLOCK].fill(0);
+                for slot in &mut self.heap.objects
+                    [block_addr / ALLOC_QUANTUM..(block_addr + BLOCK_SIZE) / ALLOC_QUANTUM]
+                {
+                    *slot.get_mut() = 0;
+                }
                 self.blocks[block_index].has_span = false;
                 freed.push(block_addr);
             }
         }
 
         // Second half of the use-after-free detector: pointers INTO a freed
-        // block from lines of the RETAINED heap that were marked LIVE this
+        // block from objects of the RETAINED heap that were marked LIVE this
         // cycle. The per-block audit above covers roots (globals /
         // interpreter ranges / machine stack); a live object whose only
-        // referrer is a heap field shows up here instead. Dead lines are
+        // referrer is a heap field shows up here instead. Dead objects are
         // skipped — stale pointers in garbage are expected, not evidence.
         // One O(retained heap) pass per collection, diagnosis-only.
         if !freed.is_empty() {
-            if let Some(marks) = &audit_marks {
+            if let Some(objects) = &audit_objects {
                 let base = self.heap.memory.as_ptr() as usize;
                 let seq = GC_STATS.collections.load(Ordering::Relaxed) + 1;
                 let in_freed = |w: usize| -> bool {
@@ -3865,25 +3903,17 @@ impl ImmixAllocator {
                     let off = (w - base) & !(BLOCK_SIZE - 1);
                     freed.contains(&off)
                 };
-                for &block_addr in self.heap.used_blocks.iter() {
-                    let Some(mark_bits) = marks.get(&block_addr) else {
-                        continue;
-                    };
-                    for (line_index, &live) in mark_bits.iter().enumerate() {
-                        if !live {
-                            continue;
+                for &(offset, size) in objects {
+                    let lo = base + offset;
+                    let mut p = lo;
+                    while p + WORD <= lo + size {
+                        let w = unsafe { *(p as *const usize) };
+                        if in_freed(w) {
+                            eprintln!(
+                                "[gc-audit] #{seq} live object word @{p:#x} points into freed block ({w:#x})"
+                            );
                         }
-                        let lo = base + block_addr + line_index * LINE_SIZE;
-                        let mut p = lo;
-                        while p + WORD <= lo + LINE_SIZE {
-                            let w = unsafe { *(p as *const usize) };
-                            if in_freed(w) {
-                                eprintln!(
-                                    "[gc-audit] #{seq} live line word @{p:#x} points into freed block ({w:#x})"
-                                );
-                            }
-                            p += WORD;
-                        }
+                        p += WORD;
                     }
                 }
             }
@@ -4207,10 +4237,9 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
 
 /// Byte span the collector reserved for the allocation containing `ptr`.
 ///
-/// Upstream answers this from a page's block size; ash's granule is the line,
-/// so a multi-line allocation reports its recorded span and a small object
-/// reports the one line it shares. Zero for anything outside the arena, which
-/// is what upstream returns for a pointer it did not hand out.
+/// Answers from the same containing-allocation lookup as the marker, so small
+/// allocations report their own reserved bytes, not their neighbours' line.
+/// Zero for foreign pointers, free space and padding between allocations.
 pub(crate) unsafe fn allocation_size(ptr: *const c_void) -> usize {
     let gc = gc_locked_init();
     let base = gc.heap.memory.as_ptr() as usize;
@@ -4218,29 +4247,13 @@ pub(crate) unsafe fn allocation_size(ptr: *const c_void) -> usize {
     if addr < base || addr >= base + gc.heap.memory.len {
         return 0;
     }
-    let line = (addr - base) / LINE_SIZE;
-    let mut start = line;
-    loop {
-        let b = start / LINES_PER_BLOCK;
-        if gc.blocks.get(b).is_none_or(|blk| !blk.has_span) {
-            start = line;
-            break;
-        }
-        let floor = b * LINES_PER_BLOCK;
-        while start > floor && gc.heap.alloc_sizes[start] == 0 {
-            start -= 1;
-        }
-        if gc.heap.alloc_sizes[start] != 0 || start == 0 {
-            break;
-        }
-        start -= 1;
-    }
-    let lines = gc.heap.alloc_sizes.get(start).copied().unwrap_or(0) as usize;
-    if lines == 0 {
-        LINE_SIZE
-    } else {
-        lines * LINE_SIZE
-    }
+    containing_allocation(
+        &gc.blocks,
+        &gc.heap.alloc_sizes,
+        &gc.heap.objects,
+        addr - base,
+    )
+    .map_or(0, |(_, size)| size)
 }
 
 /// Give the collector a chance to stop this thread.
@@ -4799,6 +4812,168 @@ pub(crate) unsafe fn gc_swap_exc_state(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tlab_bumps_publish_object_bounds_and_skip_line_tails() {
+        if !tlab_enabled() {
+            return; // Stress mode intentionally disables this allocation path.
+        }
+        // A fresh thread owns the test's TLS; no pointer into this isolated
+        // heap survives into another test or the process-wide allocator.
+        std::thread::spawn(|| {
+            let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+            let block = gc.acquire_free_block().unwrap();
+            let base = gc.heap.memory.as_ptr() as usize;
+            adopt_tlab_region(&mut gc, block, base + block, base + block + BLOCK_SIZE);
+            TLAB.with(|t| t.registered.set(true));
+            let a = gc_alloc(80).unwrap();
+            let b = gc_alloc(64).unwrap();
+            let c = gc_alloc(16).unwrap();
+            assert_eq!(offset(&gc, a), block);
+            assert_eq!(offset(&gc, b), block + LINE_SIZE);
+            assert_eq!(offset(&gc, c), block + LINE_SIZE + 64);
+            let find =
+                |at| containing_allocation(&gc.blocks, &gc.heap.alloc_sizes, &gc.heap.objects, at);
+            assert_eq!(find(block + 79), Some((block, 80)));
+            assert_eq!(find(block + 80), None, "the skipped tail is not an object");
+            assert_eq!(find(block + LINE_SIZE + 63), Some((block + LINE_SIZE, 64)));
+            assert_eq!(
+                find(block + LINE_SIZE + 64),
+                Some((block + LINE_SIZE + 64, 16))
+            );
+            release_tlab_region(&mut gc);
+            TLAB.with(|t| t.registered.set(false));
+        })
+        .join()
+        .unwrap();
+    }
+
+    fn offset(gc: &ImmixAllocator, p: NonNull<u8>) -> usize {
+        p.as_ptr() as usize - gc.heap.memory.as_ptr() as usize
+    }
+
+    fn object_marked(gc: &ImmixAllocator, at: usize) -> bool {
+        gc.heap.objects[at / ALLOC_QUANTUM].load(Ordering::Relaxed) & OBJECT_MARK != 0
+    }
+
+    #[test]
+    fn packed_neighbours_do_not_form_a_retention_chain() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let mut buffers = Vec::new();
+        let mut neighbours = Vec::new();
+        for _ in 0..64 {
+            buffers.push(gc.allocate(80).unwrap());
+            gc.allocate(16).unwrap(); // empty array
+            neighbours.push(gc.allocate(16).unwrap()); // next Haxe Array
+            gc.allocate(16).unwrap();
+        }
+        for i in 0..63 {
+            unsafe {
+                neighbours[i]
+                    .cast::<usize>()
+                    .as_ptr()
+                    .write(buffers[i + 1].as_ptr() as usize)
+            };
+        }
+        let mut work = Vec::new();
+        // An interior conservative pointer, like a numeric word overlapping
+        // the wasm heap, may retain ONE buffer, not every neighbour's graph.
+        gc.mark_allocation(offset(&gc, buffers[0]) + 7, &mut work);
+        gc.conservative_trace(work);
+        assert!(object_marked(&gc, offset(&gc, buffers[0])));
+        for i in 0..64 {
+            assert!(!object_marked(&gc, offset(&gc, neighbours[i])));
+            if i > 0 {
+                assert!(!object_marked(&gc, offset(&gc, buffers[i])));
+            }
+        }
+
+        // A second REAL root on that already-marked line must still trace.
+        let mut work = Vec::new();
+        gc.mark_allocation(offset(&gc, neighbours[0]), &mut work);
+        gc.conservative_trace(work);
+        assert!(object_marked(&gc, offset(&gc, buffers[1])));
+        assert!(!object_marked(&gc, offset(&gc, neighbours[1])));
+        assert!(!object_marked(&gc, offset(&gc, buffers[2])));
+    }
+
+    #[test]
+    fn allocation_lookup_checks_bounds_and_cross_block_spans() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 8);
+        let p = gc.allocate(160).unwrap();
+        let start = offset(&gc, p);
+        let small = gc.allocate(16).unwrap();
+        let next = offset(&gc, small);
+        let find =
+            |at| containing_allocation(&gc.blocks, &gc.heap.alloc_sizes, &gc.heap.objects, at);
+        assert_eq!(find(start + 159), Some((start, 256)));
+        assert_eq!(find(next + 15), Some((next, 16)));
+        assert_eq!(find(next + 16), None, "not an earlier span or a neighbour");
+        let large = gc.allocate(BLOCK_SIZE + 144).unwrap();
+        let begin = offset(&gc, large);
+        let mut work = Vec::new();
+        gc.mark_allocation(begin + BLOCK_SIZE + 140, &mut work);
+        assert_eq!(work, vec![(begin, BLOCK_SIZE + 256)]);
+        assert!(gc.blocks[begin / BLOCK_SIZE + 1].is_marked(1));
+        assert!(!gc.blocks[begin / BLOCK_SIZE + 1].is_marked(2));
+    }
+
+    #[test]
+    fn reused_lines_forget_old_spans_and_object_claims_reset() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let p = gc.allocate(256).unwrap();
+        let start = offset(&gc, p);
+        gc.clear_allocation_metadata(start, 256);
+        // A TLAB refilling this span records small starts, not the old span.
+        gc.record_allocation(start + 32, 16);
+        let mut work = Vec::new();
+        gc.mark_allocation(start + 36, &mut work);
+        assert_eq!(work, vec![(start + 32, 16)]);
+        assert!(!gc.blocks[start / BLOCK_SIZE].is_marked(1));
+        gc.sweep(&[]);
+        assert!(!object_marked(&gc, start + 32));
+        let mut again = Vec::new();
+        gc.mark_allocation(start + 36, &mut again);
+        assert_eq!(again, work);
+        gc.clear_allocation_metadata(start, BLOCK_SIZE);
+        assert_eq!(
+            containing_allocation(
+                &gc.blocks,
+                &gc.heap.alloc_sizes,
+                &gc.heap.objects,
+                start + 36
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parallel_markers_claim_each_object_once_even_on_the_same_line() {
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let a = gc.allocate(16).unwrap();
+        let b = gc.allocate(16).unwrap();
+        let (a, b) = (offset(&gc, a), offset(&gc, b));
+        let blocks = &gc.blocks;
+        let sizes = &gc.heap.alloc_sizes;
+        let objects = &gc.heap.objects;
+        let total = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(move || {
+                        let mut work = Vec::new();
+                        mark_allocation_shared(blocks, sizes, objects, a, &mut work);
+                        mark_allocation_shared(blocks, sizes, objects, b, &mut work);
+                        work.len()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .sum::<usize>()
+        });
+        assert_eq!(total, 2);
+    }
+
     /// The bump allocator and the sweep must agree where a line begins.
     ///
     /// One finds the boundary from the absolute address (`p & (LINE_SIZE-1)`)

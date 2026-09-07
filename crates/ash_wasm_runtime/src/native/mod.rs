@@ -24,6 +24,7 @@
 //! reports exactly which imports nothing satisfies, which during the port is
 //! the question being asked.
 
+mod control;
 pub(crate) mod dylink;
 mod fibers;
 mod process;
@@ -67,6 +68,8 @@ pub enum Outcome {
 /// never be mistaken for one -- closing guest socket 3 through `fd_close`
 /// would close the preopened working directory.
 pub(crate) struct Host {
+    _lifetime: control::InstanceGuard,
+    control: Arc<control::Control>,
     wasi: WasiP1Ctx,
     sockets: sockets::Table,
     /// What each `sys.io.Process` the guest started said. See
@@ -77,7 +80,6 @@ pub(crate) struct Host {
     /// A window and a frame, for a host with no screen. See [`sdl`].
     pub(crate) sdl: sdl::Sdl,
 }
-
 
 impl Program {
     /// Load a module, without running it.
@@ -97,6 +99,7 @@ impl Program {
         // neither, and refusing to load one is worse than being ready for it.
         config.wasm_threads(true);
         config.shared_memory(true);
+        config.epoch_interruption(true);
         // Compiling a module is the cost of running one: the conformance
         // suite's module is 23MB and takes wasmtime six seconds and every
         // core, and isolation runs it once per case. wasmtime keeps compiled
@@ -109,8 +112,9 @@ impl Program {
         }
         let engine =
             Engine::new(&config).map_err(|e| anyhow!("creating the wasmtime engine: {e}"))?;
-        let module = Module::from_file(&engine, path)
-            .map_err(|e| anyhow!("loading {}: {e}", path.display()))?;
+        let bytes = ash_wasm_link::waits::instrument(&std::fs::read(path)?)?;
+        let module =
+            Module::new(&engine, &bytes).map_err(|e| anyhow!("loading {}: {e}", path.display()))?;
         Ok(Self {
             engine,
             module,
@@ -191,7 +195,6 @@ impl Program {
             ));
         }
 
-        let mut store = store_for(&self.engine, args, dirs);
         // A module that shares its memory has a thread to spawn into; one
         // that does not has neither, and asks for neither.
         // The memory is made whenever the module imports one, because
@@ -200,8 +203,18 @@ impl Program {
         // answer: a module built for threads runs single-threaded perfectly
         // well, and `--threads` is how this one says yes.
         let memory = self.shared_memory()?;
+        let control = control::Control::new(self.engine.clone(), memory.clone());
+        let _run = control::RunGuard(control.clone());
+        let mut store = store_for(&self.engine, args, dirs, control.clone());
         let spawner = memory.clone().filter(|_| threads).map(|memory| {
-            Spawner::new(self.engine.clone(), self.module.clone(), memory, args, dirs)
+            Spawner::new(
+                self.engine.clone(),
+                self.module.clone(),
+                memory,
+                args,
+                dirs,
+                control.clone(),
+            )
         });
 
         let linker = linker_for(&self.engine, &store, memory.as_ref(), spawner.as_ref())?;
@@ -242,24 +255,32 @@ impl Program {
             })
             .ok_or_else(|| anyhow!("the module exports neither _start nor main"))?;
 
-        match entry.call(&mut store).await {
-            Ok(code) => Ok(Outcome::Exited(code)),
+        let result = tokio::select! {
+            result = entry.call(&mut store) => result,
+            _ = control.cancelled() => return Ok(control.outcome().expect("terminated guest")),
+        };
+        let outcome = match result {
+            Ok(code) => Outcome::Exited(code),
             Err(err) => {
                 // `proc_exit` unwinds by trapping, and a status is how it
                 // reports itself rather than a failure.
                 if let Some(exit) = err.downcast_ref::<wasmtime_wasi::I32Exit>() {
-                    return Ok(Outcome::Exited(exit.0));
+                    control.finish(Outcome::Exited(exit.0));
+                    return Ok(control.outcome().unwrap());
                 }
                 // A run that rendered what it was asked for, which is an
                 // ending rather than a failure: a main loop that never
                 // returns can only be left by unwinding it.
                 if err.downcast_ref::<sdl::FramesDone>().is_some() {
                     eprint!("{}", store.data().sdl.report());
-                    return Ok(Outcome::Exited(0));
+                    control.finish(Outcome::Exited(0));
+                    return Ok(control.outcome().unwrap());
                 }
-                Ok(Outcome::Trapped(format!("{err:?}")))
+                Outcome::Trapped(format!("{err:?}"))
             }
-        }
+        };
+        control.finish(outcome);
+        Ok(control.outcome().unwrap())
     }
 }
 
@@ -281,14 +302,6 @@ impl Entry {
         }
     }
 }
-
-
-
-
-
-
-
-
 
 /// The guest's memory as bytes, and the store's data beside it.
 ///
@@ -338,11 +351,6 @@ fn guest_slice(caller: &mut Caller<'_, Host>, ptr: i32, len: i32) -> Option<Vec<
     Some(data.get(start..start.checked_add(len)?)?.to_vec())
 }
 
-
-
-
-
-
 /// Where a frame goes on a host with no screen: nowhere, and it says so.
 ///
 /// The import has to exist -- an import nothing supplies is a link error
@@ -370,8 +378,13 @@ fn install_canvas(linker: &mut Linker<Host>) -> Result<()> {
 /// context built the same way rather than the same context -- which is what
 /// wasmtime's own wasi-threads does, and it means a file opened on one thread
 /// is not open on another.
-fn wasi_context(args: &[String], dirs: &[std::path::PathBuf]) -> WasiP1Ctx {
+fn wasi_context(
+    args: &[String],
+    dirs: &[std::path::PathBuf],
+    control: Arc<control::Control>,
+) -> WasiP1Ctx {
     let mut wasi = WasiCtxBuilder::new();
+    wasi.monotonic_clock(control::Clock(control));
     wasi.inherit_stdout().inherit_stderr();
     // The working directory, as the program's own. A native ash program
     // can write a file beside itself; a wasm one can only reach what the
@@ -434,17 +447,38 @@ fn wasi_context(args: &[String], dirs: &[std::path::PathBuf]) -> WasiP1Ctx {
 }
 
 /// A store with a fresh host in it.
-fn store_for(engine: &Engine, args: &[String], dirs: &[std::path::PathBuf]) -> Store<Host> {
-    Store::new(
+fn store_for(
+    engine: &Engine,
+    args: &[String],
+    dirs: &[std::path::PathBuf],
+    control: Arc<control::Control>,
+) -> Store<Host> {
+    let mut store = Store::new(
         engine,
         Host {
-            wasi: wasi_context(args, dirs),
+            _lifetime: control.enter(),
+            wasi: wasi_context(args, dirs, control.clone()),
+            control: control.clone(),
             sockets: sockets::Table::default(),
             processes: Vec::new(),
             libraries: dylink::Libraries::default(),
             sdl: sdl::Sdl::new(),
         },
-    )
+    );
+    store.epoch_deadline_callback(move |_| {
+        if control.outcome().is_some() {
+            Err(wasmtime::Error::msg("guest program terminated"))
+        } else {
+            Ok(wasmtime::UpdateDeadline::Continue(1))
+        }
+    });
+    store.set_epoch_deadline(1);
+    // A worker can create its store after the exit increment. Its initial
+    // deadline must then be due, not one epoch beyond an already-ended run.
+    if store.data().control.outcome().is_some() {
+        store.set_epoch_deadline(0);
+    }
+    store
 }
 
 /// Everything a store needs answered, including a thread to run in.
@@ -464,12 +498,6 @@ fn linker_for(
     dylink::install(&mut linker)?;
     sdl::install(&mut linker)?;
     threads::install(&mut linker, store, memory, spawner.cloned())?;
+    control::install(&mut linker)?;
     Ok(linker)
 }
-
-
-
-
-
-
-

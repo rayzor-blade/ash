@@ -33,10 +33,11 @@
 //! host's loader against `WebAssembly.instantiate`.
 
 pub mod canvas;
+pub(super) mod control;
 pub mod fibers;
 pub mod imports;
-pub mod run;
 pub mod memory;
+pub mod run;
 pub mod sockets;
 pub mod threads;
 pub mod wasi;

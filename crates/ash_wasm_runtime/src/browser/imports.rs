@@ -39,6 +39,7 @@ use super::wasi::Wasi;
 
 /// Everything a page holds on a program's behalf.
 pub struct Host {
+    pub(super) control: super::control::Control,
     pub wasi: RefCell<Wasi>,
     pub sockets: RefCell<Sockets>,
     /// Set once the module has been instantiated. See the note above.
@@ -52,7 +53,16 @@ pub struct Host {
 
 impl Host {
     pub fn new(args: Vec<String>, environ: Vec<String>) -> Rc<Self> {
+        Self::with_control(args, environ, super::control::Control::default())
+    }
+
+    pub(super) fn with_control(
+        args: Vec<String>,
+        environ: Vec<String>,
+        control: super::control::Control,
+    ) -> Rc<Self> {
         Rc::new(Self {
+            control,
             wasi: RefCell::new(Wasi::new(args, environ)),
             sockets: RefCell::new(Sockets::default()),
             guest: RefCell::new(None),
@@ -124,6 +134,40 @@ pub fn imports(
 
     install_wasi(&preview1, host);
     install_env(&env, host);
+    let h = host.clone();
+    let wait32 = Closure::wrap(Box::new(
+        move |address: u32, expected: i32, timeout: i64, offset: u64| -> Result<i32, JsValue> {
+            let guest = h
+                .guest
+                .borrow()
+                .clone()
+                .ok_or_else(|| JsValue::from_str("atomic wait without memory"))?;
+            h.control.wait(
+                guest.memory(),
+                address,
+                offset,
+                expected as i64,
+                timeout,
+                false,
+            )
+        },
+    )
+        as Box<dyn FnMut(u32, i32, i64, u64) -> Result<i32, JsValue>>);
+    install(&env, ash_wasm_link::waits::WAIT32, wait32.into_js_value());
+    let h = host.clone();
+    let wait64 = Closure::wrap(Box::new(
+        move |address: u32, expected: i64, timeout: i64, offset: u64| -> Result<i32, JsValue> {
+            let guest = h
+                .guest
+                .borrow()
+                .clone()
+                .ok_or_else(|| JsValue::from_str("atomic wait without memory"))?;
+            h.control
+                .wait(guest.memory(), address, offset, expected, timeout, true)
+        },
+    )
+        as Box<dyn FnMut(u32, i64, i64, u64) -> Result<i32, JsValue>>);
+    install(&env, ash_wasm_link::waits::WAIT64, wait64.into_js_value());
     // A threads build imports its memory rather than defining one, so that
     // every thread instantiates against the same one. The host made it; here
     // is where the module is given it.
@@ -150,12 +194,13 @@ pub fn imports(
 
 /// A guest accessor for the duration of one call, or `EFAULT`.
 macro_rules! guest {
-    ($host:expr) => {
+    ($host:expr) => {{
+        $host.control.check();
         match $host.guest.borrow().clone() {
             Some(g) => g,
             None => return errno::FAULT,
         }
-    };
+    }};
 }
 
 fn install_wasi(wasi: &Object, host: &Rc<Host>) {
@@ -251,14 +296,16 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(wasi, "sched_yield", move || -> i32 h.wasi.borrow().sched_yield());
+    bind!(wasi, "sched_yield", move || -> i32 {
+        h.control.check();
+        h.wasi.borrow().sched_yield()
+    });
 
     // `proc_exit` does not return. Recording the status and then throwing
     // unwinds the guest, which is how a trap reaches the embedder; letting it
     // return would run the program past its own end.
     let h = host.clone();
     bind!(wasi, "proc_exit", move |code: i32| exit_now(&h, code));
-
 
     // A page has no filesystem, so every call that names one is refused, and
     // every call naming a descriptor it never opened says so. See the note at
@@ -314,6 +361,14 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
 /// the `()` the import needs. Declaring the return type here settles it.
 fn exit_now(host: &Rc<Host>, code: i32) {
     host.wasi.borrow_mut().proc_exit(code);
+    let memory = host.guest.borrow().as_ref().map(|g| g.memory().clone());
+    host.control.finish(
+        &super::run::Outcome {
+            status: code,
+            trapped: None,
+        },
+        memory.as_ref(),
+    );
     wasm_bindgen::throw_str("ash: the program exited");
 }
 

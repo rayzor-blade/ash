@@ -11,7 +11,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use wasmtime::{Caller, Engine, Linker, Module};
 
-use super::{linker_for, store_for, Host};
+use super::{control::Control, linker_for, store_for, Host, Outcome};
 
 /// What a thread needs in order to become another instance of this program.
 ///
@@ -26,6 +26,7 @@ use super::{linker_for, store_for, Host};
 /// Everything `run` needed to make the first instance is therefore needed
 /// again from inside a host call, and this is it.
 pub(crate) struct Spawner {
+    control: Arc<Control>,
     engine: Engine,
     module: Module,
     memory: wasmtime::SharedMemory,
@@ -45,8 +46,10 @@ impl Spawner {
         memory: wasmtime::SharedMemory,
         args: &[String],
         dirs: &[PathBuf],
+        control: Arc<Control>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            control,
             engine,
             module,
             memory,
@@ -63,6 +66,9 @@ impl Spawner {
     /// `EAGAIN`. ash's own worker pool asks for threads and counts what it
     /// got, so a refusal costs it workers rather than the run.
     fn spawn(self: &Arc<Self>, start_arg: i32) -> i32 {
+        if self.control.outcome().is_some() {
+            return -1;
+        }
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -71,7 +77,12 @@ impl Spawner {
             .name(format!("wasi-thread-{id}"))
             .spawn(move || {
                 if let Err(e) = me.run_thread(id, start_arg) {
-                    eprintln!("[ash-wasm-run] thread {id}: {e}");
+                    let outcome = if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                        Outcome::Exited(exit.0)
+                    } else {
+                        Outcome::Trapped(format!("thread {id}: {e:?}"))
+                    };
+                    me.control.finish(outcome);
                 }
             });
         match started {
@@ -100,7 +111,7 @@ impl Spawner {
             .build()
             .map_err(|e| anyhow!("a runtime for the thread: {e}"))?;
         runtime.block_on(async {
-            let mut store = store_for(&self.engine, &self.args, &self.dirs);
+            let mut store = store_for(&self.engine, &self.args, &self.dirs, self.control.clone());
             let linker = linker_for(&self.engine, &store, Some(&self.memory), Some(self))?;
             let instance = linker
                 .instantiate_async(&mut store, &self.module)
@@ -117,7 +128,7 @@ impl Spawner {
             start
                 .call_async(&mut store, (id, start_arg))
                 .await
-                .map_err(|e| anyhow!("the thread trapped: {e:?}"))
+                .map_err(anyhow::Error::from)
         })
     }
 }

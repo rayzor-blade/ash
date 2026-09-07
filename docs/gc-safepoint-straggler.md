@@ -1,11 +1,13 @@
 # Collections that free nothing
 
-**Status: cause found, not fixed.** The mechanism below is supported by a
-control that removes the failure entirely. No production fix has been written.
+**Status: fixed; regression coverage added.** Object-granular tracing removes
+the packed-neighbour retention chain without rounding allocations to whole
+lines. Both wasm hosts propagate fatal worker outcomes and wake blocked atomic
+waits. The original mechanism and diagnostic evidence are retained below.
 
 ## What happens
 
-Collections succeed and reclaim nothing:
+Before the fix, collections succeeded and reclaimed nothing:
 
 ```
 #26 origin=exhaustion pause=512.10ms freed=0 blocks live=16384 blocks (512.0MB) free=0 blocks
@@ -132,34 +134,104 @@ Also ruled out: a lost wakeup on the GC lock's condvar (`wake_for_world_stop`
 is an unconditional `notify_all` under the lock); duplicate thread ids (all
 distinct); and collection *frequency* (`ASH_GC_TRIGGER_MB=8` gives 5/5 clean).
 
-## Known defects that are not the retention bug
+## Accompanying host and diagnostic fixes
 
-- **A worker's fatal exit does not stop the program.** `out_of_memory` calls
-  `std::process::exit`; the native host's spawned worker catches the error,
-  prints it, and returns, while `Program::run` awaits only the main instance.
-  The dead worker's GC registration survives. The node agent does the same and
-  the browser path needs the same audit. Simply deleting a timed-out mutator is
-  not the fix — the thread may have died holding runtime locks.
-- **Late-safepoint times print as `18446744073709.x ms`.** That is unsigned
-  underflow, not a real delay: each native worker gets a fresh WASI context and
-  wasmtime's default monotonic clock starts at *its* construction, while the
-  guest shares `GC_EPOCH` across workers. Needs a common time origin and
-  checked duration arithmetic. The browser has the same shape with per-Worker
-  `performance.now()`.
+- **Fatal worker outcomes now end the run.** Native stores share an exit/trap
+  outcome; the first one wins, preserving `proc_exit`'s status or the original
+  trap. Epoch interruption stops guest computation. Both hosts interpose
+  `memory.atomic.wait32/64` at load time, register the exact wait address, and
+  notify registered waits until they drain, closing the register/wait race.
+  Normal waits keep their original timeout, mismatch and notification
+  semantics. No mutex words are overwritten and no stale mutator is removed
+  to let an unsafe program continue.
+- **Browser agents share termination state directly.** The `spawn` request
+  now carries a `control` SharedArrayBuffer; the Worker passes it as the last
+  argument to `run_thread`. Waiting agents and host calls observe cancellation
+  without servicing their event queues. The example owner terminates its
+  agents when the run finishes. Unlike Wasmtime, JS engines offer no epoch
+  interrupt: a main Worker in a pure wasm loop without host calls still needs
+  its owner to terminate it. Native synchronous host I/O is not universally
+  preemptible either; this fix covers guest computation and atomic waits.
+- **Cross-thread clocks now share an origin.** Native WASI contexts use one
+  run-wide `Instant`; browser contexts use `performance.timeOrigin +
+  performance.now()`. Late-safepoint arithmetic also saturates rather than
+  wrapping into `18446744073709.x ms`.
 
-## Proposed direction
+## GC implementation
 
-Separate object tracing from line reclamation: keep compact start/size
-metadata for small allocations (TLAB included), resolve conservative
-candidates — interior pointers included — to the containing object, and scan
-only that object's bytes. Keep line bits for sweep and recycling, but an
-already-marked line must not suppress discovering another live object on it.
-Reset metadata on line recycling and block reuse, and validate span
-containment rather than promoting an earlier unrelated span. Use type and
-pointer maps where they exist, especially to exclude numeric fields like the
-double above; conservative roots stay where exact maps do not.
+`std/src/gc.rs` separates object tracing from line reclamation:
 
-Worth testing: a packed-neighbour chain with only its first allocation rooted;
-two live objects on one marked line; interior pointers; recycled spans and TLAB
-reuse; a numeric field whose bits land in the heap; allocating fibers; and a
-worker `proc_exit` while the main thread waits.
+- One atomic metadata byte per 16-byte allocation quantum records small
+  starts/sizes and an independent object mark. Spans use the existing line
+  size table. The table costs 6.25% of the heap reservation, is allocated
+  zeroed, and is touched as blocks are used; allocation packing is unchanged.
+- Both locked allocation and TLAB bumps publish object boundaries. Candidate
+  pointers, including interior pointers, resolve to their containing
+  allocation. Free space and a preceding span that does not contain the
+  candidate are rejected.
+- The serial and parallel marker queues contain allocations, not lines, and
+  trace only those allocations' bytes. Two live objects on one line are
+  claimed independently; a dead neighbour does not become reachable.
+- Line marks still govern sweep/recycling. Object claims reset each cycle;
+  boundaries reset when blocks or recycled lines are reused. Dedicated span
+  padding is zeroed too. The sweep audit inspects traced objects, not dead
+  neighbours sharing their lines.
+
+Tracing is still conservative **within** allocations and root ranges. Type/
+pointer maps and pointer-free allocation kinds remain follow-up precision
+work: a scalar may still retain the real object it happens to point into and
+that object's reference graph, but cannot acquire unrelated neighbours'
+graphs merely by sharing their mark line.
+
+## Validation and rebuilding
+
+With the packed allocator, 4 allocating fibers for 20 seconds, and the
+corrected `freed=` classifier:
+
+| Host / rate | Runs | Collections | Peak retained heap, rounded |
+| --- | ---: | ---: | ---: |
+| Wasmtime / 400 fps | 3 clean | 111 / 115 / 115 | 1 MB |
+| Wasmtime / 100000 fps | 3 clean | 200 / 235 / 258 | 1 MB |
+| Browser host under Node / 100000 fps | 2 clean | 378 / 416 | 1 MB |
+
+Logs are under `target/gc-straggler-fixed`,
+`target/gc-straggler-fixed-uncapped` and
+`target/gc-straggler-browser-fixed`. Running the **old leaking module** with
+the new hosts and a 64 MB cap still produces OOM, as expected, but now exits
+promptly in both hosts instead of leaving main in `Deque.pop` (logs:
+`gc-straggler-native-exit` and `gc-straggler-browser-exit`).
+
+After rebuilding the default demo and host bindings, another three Wasmtime
+runs (155 / 154 / 218 collections) and two Node runs (242 / 247) at 100000 fps
+were clean, also peaking at 1 MB. These logs are in
+`target/gc-straggler-final-native` and `target/gc-straggler-final-browser`.
+
+Regression tests cover the packed-neighbour chain, two roots on one line,
+interior pointers and span bounds, recycled metadata, real TLAB bumps, parallel
+claims, worker exit/trap during waits, and unchanged wait semantics. Native
+tests also cover compute-loop interruption and stores starting after exit.
+The native AOT smoke corpus is checked against JIT output as well.
+
+Rebuild **both** the linked guest runtime and the host; rebuilding only the
+host cannot remove retention in an already-linked module:
+
+```sh
+scripts/build_wasm_runtime.py --target wasm32-wasip1-threads
+ASH_WASM_FIBERS=1 target/release/ash --build examples/browser/entities.wasm \
+  --target wasm32-wasip1-threads examples/browser/demo/entities.hl
+cargo build --release -p ash_wasm_runtime
+cargo build --release -p ash_browser --target wasm32-unknown-unknown
+wasm-bindgen --target web --out-dir examples/browser \
+  target/wasm32-unknown-unknown/release/ash_browser.wasm
+scripts/gc_straggler_repro.py --runs 3 --fps 100000
+```
+
+The Node/browser regression is opt-in because it needs generated bindings:
+
+```sh
+wasm-bindgen --target nodejs --out-dir target/gc-straggler-browser-host \
+  target/wasm32-unknown-unknown/release/ash_browser.wasm
+cp examples/browser/run-node*.js target/gc-straggler-browser-host/
+ASH_BROWSER_HOST_DIR="$PWD/target/gc-straggler-browser-host" \
+  cargo test -p ash_wasm_runtime --release --test thread_exit -- --ignored
+```

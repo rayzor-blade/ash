@@ -219,6 +219,41 @@ ALL_SUITES = [*SUITES, "misc", *COMPILER_ONLY_SUITES]
 RE_FAIL = re.compile(r"\b(FAILED|ERROR|Error:)\b")
 RE_OK = re.compile(r"\bOK\b|\bSUCCESS\b|\ball tests? (?:passed|ok)\b", re.I)
 
+# utest names what it failed, in a shape worth reading:
+#
+#     testSetCwd: ERROR E
+#       SysError(Failed to set path to ../)
+#     testCommand: FAILURE .F
+#       line: 50, expected 0 but it is -1
+#
+# A whole-program suite is one process, so this is the only place those names
+# survive -- and they are the difference between "sys failed on wasm" and
+# knowing which eleven assertions to go and fix.
+RE_UTEST_CASE = re.compile(r"^\s*(\w+):\s+(FAILURE|ERROR)\b")
+RE_UTEST_WHY = re.compile(r"^\s+(line: \d+,|\w+Error\(|Expected|expected)")
+
+
+def utest_failures(out: str, limit: int = 6) -> str:
+    """The tests a utest run reported, with the first reason for each."""
+    lines = out.splitlines()
+    found = []
+    for i, line in enumerate(lines):
+        m = RE_UTEST_CASE.match(line)
+        if not m:
+            continue
+        why = ""
+        for follow in lines[i + 1:i + 4]:
+            if RE_UTEST_CASE.match(follow):
+                break
+            if RE_UTEST_WHY.match(follow):
+                why = follow.strip()
+                break
+        found.append(f"{m.group(1)} {m.group(2).lower()}" + (f" ({why})" if why else ""))
+    if not found:
+        return ""
+    shown = "; ".join(found[:limit])
+    return shown + (f"; +{len(found) - limit} more" if len(found) > limit else "")
+
 
 def run(cmd, cwd=None, timeout=900, env=None):
     return subprocess.run(
@@ -420,6 +455,12 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
         line = next((l for l in out.splitlines() if "panicked at" in l), "")
         return "PANIC", line.strip()[:160]
     if res.returncode != 0:
+        # What the suite said failed, before what happened to print last. The
+        # last line is as likely to be a compiler warning as a cause: `sys` on
+        # wasm reported `(WDeprecatedEnumAbstract)` for exactly that reason.
+        named = utest_failures(out)
+        if named:
+            return "FAIL", f"exit {res.returncode}: {named[:400]}"
         tail = [l for l in out.splitlines() if l.strip()][-1:] or [""]
         return "FAIL", f"exit {res.returncode}: {tail[0][:140]}"
     if RE_FAIL.search(out) and not RE_OK.search(out):

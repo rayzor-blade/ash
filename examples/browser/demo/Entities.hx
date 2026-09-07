@@ -190,9 +190,15 @@ class Entities {
 			var s = Std.parseFloat(args[1]);
 			if (!Math.isNaN(s) && s > 0) seconds = s;
 		}
-		// Third argument: the rate the bands hold themselves to. Only ever
-		// worth changing to take the cap off, which is how the collector is
-		// put under a load a page must never give it.
+		// Third argument: the rate the BANDS hold themselves to, and only
+		// them. Presenting stays at the display rate whatever this says --
+		// there was never a reason to show more frames than a display can,
+		// and a presenter told to run at a hundred thousand asks the fiber
+		// scheduler to park it a hundred thousand times a second, which
+		// deadlocks the program at startup and reproduces nothing.
+		//
+		// Uncapping the bands is how the collector is put under a load a page
+		// must never give it.
 		var fps = FPS;
 		if (args.length > 2) {
 			var f = Std.parseFloat(args[2]);
@@ -215,7 +221,7 @@ class Entities {
 		// picture of several threads writing one buffer.
 		var shown = 0;
 		var frame = fb.offset(pixels);
-		var period = 1 / fps;
+		var period = 1 / FPS;
 		var due = started + period;
 		while (Sys.time() - started < seconds) {
 			if (present(frame, W, H)) shown++;

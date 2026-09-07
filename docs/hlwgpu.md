@@ -279,6 +279,26 @@ per frame. The earlier plan reached for the packed buffer to save crossings in
 a page, which was optimising the wrong thing at the price of the only static
 checking the boundary has.
 
+**And the calls make the Haxe side a fluent builder whose type states carry
+the rules.** A run of calls has an order the primitives cannot check for
+themselves -- an attribute belongs to the vertex buffer opened last, a blend to
+the target opened last -- so each stage is a separate abstract over the same
+handle, and the compiler refuses a chain that does not make sense:
+
+```haxe
+device.pipeline()
+    .shader(shader, "vs", "fs")
+    .vertexBuffer(24).attribute(Float32x2, 0, 0).attribute(Float32x4, 8, 1)
+    .target(Rgba8Unorm).blend(One, One)
+    .build();
+```
+
+`attribute` exists only after a `vertexBuffer`, `blend` only after a `target`,
+and `build` only once there is something to draw into. Every state is an
+`abstract X(Int)` with `inline` methods, so none of it costs anything at
+runtime. `test/constraints.sh` checks it the only way a thing that must not
+compile can be checked: by trying.
+
 **Data still crosses as bytes**, because it is data: buffer contents, texture
 pixels, and a homogeneous array of handles. The rule is that *structure* never
 crosses as bytes -- if the far side has to know what field lives at what
@@ -288,8 +308,9 @@ offset, it should be an argument instead.
 
 There is no `Dynamic` and no `untyped` in this library, and there should not
 be. Handles are `abstract X(Int)`, so a buffer cannot be passed where a texture
-belongs even though both are integers underneath. Enumerations are
-`enum abstract`, so a format is not an arbitrary number. Descriptors a program
+belongs even though both are integers underneath. Enumerations are `enum abstract`, so a format is
+not an arbitrary number -- and they are **generated from the vendored IDL**, so
+their values and order are the spec's and nothing is typed out. Descriptors a program
 writes are typedefs with concrete field types, which means a structure literal
 is checked field by field:
 
@@ -393,10 +414,13 @@ desktop library that works is worth more than two halves that do not.
    acquired, drawn and presented every frame. `crates/hlwindow` is the small
    `winit` companion that supplies the window; depth and blending are still
    ahead.
-6. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
+6. **Capability.** Close the gap the IDL measures: the remaining enums, the
+   descriptor members the builder now has somewhere to put, and the 30
+   operations. Blending landed with the builder; depth is next.
+7. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
-7. **Later, separately.** A `winit` companion for native windows. hxsl, a
+8. **Later, separately.** A `winit` companion for native windows. hxsl, a
    Heaps driver, SPIR-V ingestion, ray queries.
 
 ## Testing

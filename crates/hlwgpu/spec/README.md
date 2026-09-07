@@ -13,8 +13,9 @@ Measured against it on the day it was vendored:
 |---|---|---|
 | operations | 66 | 36 |
 | dictionary members | 121 | few |
-| enum values | 278 | 15 |
+| enum values | 278 | 57 |
 
 The enums are where most of it lives: `GPUTextureFormat` alone has 101 values
-and hlwgpu names five. Those need no new primitives -- they are the contents of
-descriptors, and they should be generated from this file rather than typed out.
+and hlwgpu names five. They need no new primitives -- they are the contents of
+descriptors -- and seven of them are now generated from this file by
+`hl_native_gen`, named in `wgpu.api`. The rest should follow the same way.

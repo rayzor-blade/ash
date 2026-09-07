@@ -48,7 +48,15 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_texture_view` | `texture: i32` | `i32` |
 | `hlwgpu_texture_destroy` | `texture: i32` | `void` |
 | `hlwgpu_view_destroy` | `view: i32` | `void` |
-| `hlwgpu_render_pipeline_create` | `device: i32`, `shader: i32`, `vs: i32`, `fs: i32`, `format: i32`, `stride: i32`, `attrs: i32`, `count: i32` | `i32` |
+| `hlwgpu_pipeline_begin` | `device: i32` | `i32` |
+| `hlwgpu_pipeline_shader` | `builder: i32`, `shader: i32`, `vs: i32`, `fs: i32` | `void` |
+| `hlwgpu_pipeline_vertex_buffer` | `builder: i32`, `stride: i32`, `step: i32` | `void` |
+| `hlwgpu_pipeline_attribute` | `builder: i32`, `format: i32`, `offset: i32`, `location: i32` | `void` |
+| `hlwgpu_pipeline_target` | `builder: i32`, `format: i32`, `write_mask: i32` | `void` |
+| `hlwgpu_pipeline_blend` | `builder: i32`, `src: i32`, `dst: i32`, `op: i32`, `src_alpha: i32`, `dst_alpha: i32`, `op_alpha: i32` | `void` |
+| `hlwgpu_pipeline_depth` | `builder: i32`, `format: i32`, `write: i32`, `compare: i32` | `void` |
+| `hlwgpu_pipeline_primitive` | `builder: i32`, `topology: i32`, `cull: i32`, `front: i32` | `void` |
+| `hlwgpu_render_pipeline_build` | `builder: i32` | `i32` |
 | `hlwgpu_render_pipeline_destroy` | `pipeline: i32` | `void` |
 | `hlwgpu_encoder_render_begin` | `encoder: i32`, `view: i32`, `r: f64`, `g: f64`, `b: f64`, `a: f64` | `void` |
 | `hlwgpu_render_set_pipeline` | `encoder: i32`, `pipeline: i32` | `void` |

@@ -233,6 +233,20 @@ export function makeHandles(rt) {
     return at < 0 ? -1 : at;
   }
 
+  // Assembles what the builder calls accumulated, and spends the builder.
+  function buildPipeline(builder) {
+    const d = get("builder", builder);
+    const pipeline = get("device", d.device).createRenderPipeline({
+      layout: "auto",
+      vertex: { module: d.module, entryPoint: d.vs, buffers: d.vertex.buffers },
+      fragment: { module: d.module, entryPoint: d.fs, targets: d.fragment.targets },
+      primitive: d.primitive,
+      depthStencil: d.depthStencil ?? undefined,
+    });
+    drop("builder", builder);
+    return put("renderpipeline", pipeline);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -272,7 +286,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, canvasFormat, attributes, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, buildPipeline, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

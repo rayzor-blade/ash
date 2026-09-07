@@ -3,7 +3,28 @@
 
 // The handle kind numbering, from the same line of the declaration that
 // `kinds.rs` comes from.
-const KINDS = { instance: 1, adapter: 2, device: 3, queue: 4, buffer: 5, texture: 6, view: 7, sampler: 8, shader: 9, bindgroup: 10, pipeline: 11, renderpipeline: 12, encoder: 13, surface: 14 };
+const KINDS = { instance: 1, adapter: 2, device: 3, queue: 4, buffer: 5, texture: 6, view: 7, sampler: 8, shader: 9, bindgroup: 10, pipeline: 11, renderpipeline: 12, encoder: 13, surface: 14, builder: 15 };
+
+// BlendFactor from the WebGPU IDL, indexed as the declaration numbers it.
+const BLEND_FACTOR = ["zero", "one", "src", "one-minus-src", "src-alpha", "one-minus-src-alpha", "dst", "one-minus-dst", "dst-alpha", "one-minus-dst-alpha", "src-alpha-saturated", "constant", "one-minus-constant", "src1", "one-minus-src1", "src1-alpha", "one-minus-src1-alpha"];
+
+// BlendOperation from the WebGPU IDL, indexed as the declaration numbers it.
+const BLEND_OPERATION = ["add", "subtract", "reverse-subtract", "min", "max"];
+
+// CompareFunction from the WebGPU IDL, indexed as the declaration numbers it.
+const COMPARE_FUNCTION = ["never", "less", "equal", "less-equal", "greater", "not-equal", "greater-equal", "always"];
+
+// PrimitiveTopology from the WebGPU IDL, indexed as the declaration numbers it.
+const PRIMITIVE_TOPOLOGY = ["point-list", "line-list", "line-strip", "triangle-list", "triangle-strip"];
+
+// CullMode from the WebGPU IDL, indexed as the declaration numbers it.
+const CULL_MODE = ["none", "front", "back"];
+
+// FrontFace from the WebGPU IDL, indexed as the declaration numbers it.
+const FRONT_FACE = ["ccw", "cw"];
+
+// VertexStepMode from the WebGPU IDL, indexed as the declaration numbers it.
+const VERTEX_STEP_MODE = ["vertex", "instance"];
 
 // Runtime support for the primitives: a table mapping integer handles to
 // JavaScript objects, in-flight requests the guest polls, UTF-16 string
@@ -240,6 +261,20 @@ export function makeHandles(rt) {
     return at < 0 ? -1 : at;
   }
 
+  // Assembles what the builder calls accumulated, and spends the builder.
+  function buildPipeline(builder) {
+    const d = get("builder", builder);
+    const pipeline = get("device", d.device).createRenderPipeline({
+      layout: "auto",
+      vertex: { module: d.module, entryPoint: d.vs, buffers: d.vertex.buffers },
+      fragment: { module: d.module, entryPoint: d.fs, targets: d.fragment.targets },
+      primitive: d.primitive,
+      depthStencil: d.depthStencil ?? undefined,
+    });
+    drop("builder", builder);
+    return put("renderpipeline", pipeline);
+  }
+
   function formatName(which) {
     return FORMATS[which] ?? FORMATS[0];
   }
@@ -279,7 +314,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, canvasFormat, attributes, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, buildPipeline, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }
@@ -362,9 +397,22 @@ export function hlwgpuImports(rt) {
     hlwgpu_texture_view: (texture) => H.put("view", H.get("texture", texture).createView()),
     hlwgpu_texture_destroy: (texture) => { H.drop("texture", texture); },
     hlwgpu_view_destroy: (view) => { H.drop("view", view); },
-    // One vertex buffer, whose attributes are `count` triples of
-    // (`wgpu.VertexFormat`, byte offset, shader location).
-    hlwgpu_render_pipeline_create: (device, shader, vs, fs, format, stride, attrs, count) => H.put("renderpipeline", H.get("device", device).createRenderPipeline({ layout: "auto", vertex: { module: H.get("shader", shader), entryPoint: H.readStr(vs), buffers: [{ arrayStride: stride, attributes: H.attributes(attrs, count) }] }, fragment: { module: H.get("shader", shader), entryPoint: H.readStr(fs), targets: [{ format: H.formatName(format) }] }, primitive: { topology: "triangle-list" } })),
+    // A render pipeline is built by a run of calls rather than one descriptor:
+    // every argument stays a typed scalar the compiler checks, and there is no
+    // packed layout for the two sides to disagree about. The crossings cost
+    // nothing, because a pipeline is built at load and not per frame.
+    hlwgpu_pipeline_begin: (device) => H.put("builder", { device, vertex: { buffers: [] }, fragment: { targets: [] }, primitive: {}, depthStencil: null }),
+    hlwgpu_pipeline_shader: (builder, shader, vs, fs) => { const d = H.get("builder", builder); d.module = H.get("shader", shader); d.vs = H.readStr(vs); d.fs = H.readStr(fs); },
+    // Opens a vertex buffer layout; the attributes that follow belong to it.
+    hlwgpu_pipeline_vertex_buffer: (builder, stride, step) => { H.get("builder", builder).vertex.buffers.push({ arrayStride: stride, stepMode: VERTEX_STEP_MODE[step], attributes: [] }); },
+    hlwgpu_pipeline_attribute: (builder, format, offset, location) => { const b = H.get("builder", builder).vertex.buffers; b[b.length - 1].attributes.push({ format: VERTEX_FORMATS[format], offset, shaderLocation: location }); },
+    // Opens a colour target; a blend that follows belongs to it.
+    hlwgpu_pipeline_target: (builder, format, write_mask) => { H.get("builder", builder).fragment.targets.push({ format: H.formatName(format), writeMask: write_mask }); },
+    hlwgpu_pipeline_blend: (builder, src, dst, op, src_alpha, dst_alpha, op_alpha) => { const t = H.get("builder", builder).fragment.targets; t[t.length - 1].blend = { color: { srcFactor: BLEND_FACTOR[src], dstFactor: BLEND_FACTOR[dst], operation: BLEND_OPERATION[op] }, alpha: { srcFactor: BLEND_FACTOR[src_alpha], dstFactor: BLEND_FACTOR[dst_alpha], operation: BLEND_OPERATION[op_alpha] } }; },
+    hlwgpu_pipeline_depth: (builder, format, write, compare) => { H.get("builder", builder).depthStencil = { format: H.formatName(format), depthWriteEnabled: !!write, depthCompare: COMPARE_FUNCTION[compare] }; },
+    hlwgpu_pipeline_primitive: (builder, topology, cull, front) => { const p = H.get("builder", builder).primitive; p.topology = PRIMITIVE_TOPOLOGY[topology]; p.cullMode = CULL_MODE[cull]; p.frontFace = FRONT_FACE[front]; },
+    // Builds the pipeline and spends the builder.
+    hlwgpu_render_pipeline_build: (builder) => H.buildPipeline(builder),
     hlwgpu_render_pipeline_destroy: (pipeline) => { H.drop("renderpipeline", pipeline); },
     // Opens a pass that clears `view` and keeps what is drawn into it. The pass
     // belongs to the encoder until `encoder_render_end`.

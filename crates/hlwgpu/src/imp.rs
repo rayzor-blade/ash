@@ -538,72 +538,6 @@ pub unsafe fn view_destroy(view: i32) {
 
 // -- render pipelines -------------------------------------------------------
 
-pub unsafe fn render_pipeline_create(
-    device: i32,
-    shader: i32,
-    vs: *mut vbyte,
-    fs: *mut vbyte,
-    format: i32,
-    stride: i32,
-    attrs: *mut vbyte,
-    count: i32,
-) -> i32 {
-    if attrs.is_null() || count <= 0 {
-        return 0;
-    }
-    let entry = find!(DEVICES, device, 0);
-    let module = find!(SHADERS, shader, 0);
-    let (vs, fs) = (ucs2_in(vs), ucs2_in(fs));
-
-    let raw = std::slice::from_raw_parts(attrs as *const i32, count as usize * 3);
-    let attributes: Vec<wgpu::VertexAttribute> = raw
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|a| wgpu::VertexAttribute {
-            format: vertex_format(a[0]),
-            offset: a[1].max(0) as u64,
-            shader_location: a[2].max(0) as u32,
-        })
-        .collect();
-
-    let buffers = [Some(wgpu::VertexBufferLayout {
-        array_stride: stride.max(0) as u64,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &attributes,
-    })];
-    let targets = [Some(wgpu::ColorTargetState {
-        format: texture_format(format),
-        blend: None,
-        write_mask: wgpu::ColorWrites::ALL,
-    })];
-
-    let pipeline = entry
-        .device
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some(vs.as_str()),
-                buffers: &buffers,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some(fs.as_str()),
-                targets: &targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: Default::default(),
-            cache: None,
-        });
-    RENDER_PIPELINES.lock().unwrap().put(pipeline)
-}
-
 pub unsafe fn render_pipeline_destroy(pipeline: i32) {
     RENDER_PIPELINES.lock().unwrap().remove(pipeline);
 }
@@ -968,4 +902,282 @@ pub unsafe fn surface_present(queue: i32, surface: i32) {
 
 pub unsafe fn surface_destroy(surface: i32) {
     SURFACES.lock().unwrap().remove(surface);
+}
+
+// -- render pipeline builder ------------------------------------------------
+
+/// A render pipeline under construction.
+///
+/// Built by a run of calls rather than one packed descriptor, so every value
+/// crossing the boundary is a scalar the compiler checks on both sides.
+#[derive(Default)]
+struct PipelineBuild {
+    device: i32,
+    shader: i32,
+    vertex_entry: String,
+    fragment_entry: String,
+    buffers: Vec<(u64, wgpu::VertexStepMode, Vec<wgpu::VertexAttribute>)>,
+    targets: Vec<(wgpu::TextureFormat, wgpu::ColorWrites, Option<wgpu::BlendState>)>,
+    depth: Option<(wgpu::TextureFormat, bool, wgpu::CompareFunction)>,
+    primitive: wgpu::PrimitiveState,
+}
+
+slab!(BUILDERS, Mutex<PipelineBuild>, Kind::Builder);
+
+// The orders below are the WebGPU IDL's, which is where the Haxe enums and the
+// JavaScript name arrays come from too. wgpu's spelling is not derivable from
+// the spec's, so this one mapping is written out.
+fn blend_factor(i: i32) -> wgpu::BlendFactor {
+    use wgpu::BlendFactor as F;
+    match i {
+        1 => F::One,
+        2 => F::Src,
+        3 => F::OneMinusSrc,
+        4 => F::SrcAlpha,
+        5 => F::OneMinusSrcAlpha,
+        6 => F::Dst,
+        7 => F::OneMinusDst,
+        8 => F::DstAlpha,
+        9 => F::OneMinusDstAlpha,
+        10 => F::SrcAlphaSaturated,
+        11 => F::Constant,
+        12 => F::OneMinusConstant,
+        13 => F::Src1,
+        14 => F::OneMinusSrc1,
+        15 => F::Src1Alpha,
+        16 => F::OneMinusSrc1Alpha,
+        _ => F::Zero,
+    }
+}
+
+fn blend_operation(i: i32) -> wgpu::BlendOperation {
+    use wgpu::BlendOperation as O;
+    match i {
+        1 => O::Subtract,
+        2 => O::ReverseSubtract,
+        3 => O::Min,
+        4 => O::Max,
+        _ => O::Add,
+    }
+}
+
+fn compare_function(i: i32) -> wgpu::CompareFunction {
+    use wgpu::CompareFunction as C;
+    match i {
+        0 => C::Never,
+        2 => C::Equal,
+        3 => C::LessEqual,
+        4 => C::Greater,
+        5 => C::NotEqual,
+        6 => C::GreaterEqual,
+        7 => C::Always,
+        _ => C::Less,
+    }
+}
+
+fn topology(i: i32) -> wgpu::PrimitiveTopology {
+    use wgpu::PrimitiveTopology as T;
+    match i {
+        0 => T::PointList,
+        1 => T::LineList,
+        2 => T::LineStrip,
+        4 => T::TriangleStrip,
+        _ => T::TriangleList,
+    }
+}
+
+/// `none` is the absence of a face rather than a third face, which is why
+/// this one is an `Option` where the spec has an enum.
+fn cull_mode(i: i32) -> Option<wgpu::Face> {
+    match i {
+        1 => Some(wgpu::Face::Front),
+        2 => Some(wgpu::Face::Back),
+        _ => None,
+    }
+}
+
+fn front_face(i: i32) -> wgpu::FrontFace {
+    match i {
+        1 => wgpu::FrontFace::Cw,
+        _ => wgpu::FrontFace::Ccw,
+    }
+}
+
+fn step_mode(i: i32) -> wgpu::VertexStepMode {
+    match i {
+        1 => wgpu::VertexStepMode::Instance,
+        _ => wgpu::VertexStepMode::Vertex,
+    }
+}
+
+pub unsafe fn pipeline_begin(device: i32) -> i32 {
+    if DEVICES.lock().unwrap().get(device).is_none() {
+        return 0;
+    }
+    BUILDERS
+        .lock()
+        .unwrap()
+        .put(Mutex::new(PipelineBuild { device, ..Default::default() }))
+}
+
+/// Runs `body` on a builder, or does nothing.
+fn building(handle: i32, body: impl FnOnce(&mut PipelineBuild)) {
+    let Some(entry) = BUILDERS.lock().unwrap().get(handle) else {
+        return;
+    };
+    body(&mut entry.lock().unwrap());
+}
+
+pub unsafe fn pipeline_shader(builder: i32, shader: i32, vs: *mut vbyte, fs: *mut vbyte) {
+    let (vs, fs) = (ucs2_in(vs), ucs2_in(fs));
+    building(builder, |build| {
+        build.shader = shader;
+        build.vertex_entry = vs;
+        build.fragment_entry = fs;
+    });
+}
+
+pub unsafe fn pipeline_vertex_buffer(builder: i32, stride: i32, step: i32) {
+    building(builder, |build| {
+        build
+            .buffers
+            .push((stride.max(0) as u64, step_mode(step), Vec::new()));
+    });
+}
+
+pub unsafe fn pipeline_attribute(builder: i32, format: i32, offset: i32, location: i32) {
+    building(builder, |build| {
+        // Belongs to the buffer opened last; the Haxe builder's types are what
+        // stop this being reached with none open.
+        if let Some((_, _, attributes)) = build.buffers.last_mut() {
+            attributes.push(wgpu::VertexAttribute {
+                format: vertex_format(format),
+                offset: offset.max(0) as u64,
+                shader_location: location.max(0) as u32,
+            });
+        }
+    });
+}
+
+pub unsafe fn pipeline_target(builder: i32, format: i32, write_mask: i32) {
+    building(builder, |build| {
+        build.targets.push((
+            texture_format(format),
+            wgpu::ColorWrites::from_bits_truncate(write_mask as u32),
+            None,
+        ));
+    });
+}
+
+pub unsafe fn pipeline_blend(
+    builder: i32,
+    src: i32,
+    dst: i32,
+    op: i32,
+    src_alpha: i32,
+    dst_alpha: i32,
+    op_alpha: i32,
+) {
+    building(builder, |build| {
+        if let Some((_, _, blend)) = build.targets.last_mut() {
+            *blend = Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: blend_factor(src),
+                    dst_factor: blend_factor(dst),
+                    operation: blend_operation(op),
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: blend_factor(src_alpha),
+                    dst_factor: blend_factor(dst_alpha),
+                    operation: blend_operation(op_alpha),
+                },
+            });
+        }
+    });
+}
+
+pub unsafe fn pipeline_depth(builder: i32, format: i32, write: bool, compare: i32) {
+    building(builder, |build| {
+        build.depth = Some((texture_format(format), write, compare_function(compare)));
+    });
+}
+
+pub unsafe fn pipeline_primitive(builder: i32, topology_of: i32, cull: i32, front: i32) {
+    building(builder, |build| {
+        build.primitive = wgpu::PrimitiveState {
+            topology: topology(topology_of),
+            cull_mode: cull_mode(cull),
+            front_face: front_face(front),
+            ..Default::default()
+        };
+    });
+}
+
+pub unsafe fn render_pipeline_build(builder: i32) -> i32 {
+    let Some(entry) = BUILDERS.lock().unwrap().get(builder) else {
+        return 0;
+    };
+    let build = entry.lock().unwrap();
+    let device = find!(DEVICES, build.device, 0);
+    let module = find!(SHADERS, build.shader, 0);
+
+    // Held so the descriptor below can borrow them.
+    let layouts: Vec<wgpu::VertexBufferLayout> = build
+        .buffers
+        .iter()
+        .map(|(stride, step, attributes)| wgpu::VertexBufferLayout {
+            array_stride: *stride,
+            step_mode: *step,
+            attributes,
+        })
+        .collect();
+    let buffers: Vec<Option<wgpu::VertexBufferLayout>> =
+        layouts.into_iter().map(Some).collect();
+    let targets: Vec<Option<wgpu::ColorTargetState>> = build
+        .targets
+        .iter()
+        .map(|(format, write_mask, blend)| {
+            Some(wgpu::ColorTargetState {
+                format: *format,
+                blend: *blend,
+                write_mask: *write_mask,
+            })
+        })
+        .collect();
+    let depth_stencil = build
+        .depth
+        .map(|(format, write, compare)| wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(write),
+            depth_compare: Some(compare),
+            stencil: Default::default(),
+            bias: Default::default(),
+        });
+
+    let pipeline = device
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some(build.vertex_entry.as_str()),
+                buffers: &buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some(build.fragment_entry.as_str()),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: build.primitive,
+            depth_stencil,
+            multisample: Default::default(),
+            multiview_mask: Default::default(),
+            cache: None,
+        });
+    drop(build);
+    BUILDERS.lock().unwrap().remove(builder);
+    RENDER_PIPELINES.lock().unwrap().put(pipeline)
 }

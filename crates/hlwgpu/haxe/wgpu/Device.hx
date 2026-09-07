@@ -47,21 +47,19 @@ abstract Device(Int) from Int to Int {
 		return _Native.texture_create(this, width, height, format, usage);
 	}
 
-	/**
-		One vertex buffer, described by `stride` and its attributes.
+	/** Starts a render pipeline. See `PipelineBuilder`. **/
+	public inline function pipeline() : PipelineBuilder {
+		return _Native.pipeline_begin(this);
+	}
 
-		`module` supplies both stages, which is how a WGSL file usually reads.
-	**/
-	public function renderPipeline(module : Shader, vertex : String, fragment : String, format : TextureFormat, stride : Int, attributes : Array<VertexAttribute>) : RenderPipeline {
-		var packed = haxe.io.Bytes.alloc(attributes.length * 12);
-		for (i in 0...attributes.length) {
-			var a = attributes[i];
-			packed.setInt32(i * 12, a.format);
-			packed.setInt32(i * 12 + 4, a.offset);
-			packed.setInt32(i * 12 + 8, a.location);
+	/** One vertex buffer and one colour target, which is the common case. **/
+	public function renderPipeline(module : Shader, vertex : String, fragment : String, format : TextureFormat, stride : Int,
+			attributes : Array<VertexAttribute>) : RenderPipeline {
+		var layout = pipeline().shader(module, vertex, fragment).vertexBuffer(stride);
+		for (a in attributes) {
+			layout.attribute(a.format, a.offset, a.location);
 		}
-		return _Native.render_pipeline_create(this, module, @:privateAccess vertex.bytes, @:privateAccess fragment.bytes,
-			format, stride, @:privateAccess packed.b, attributes.length);
+		return layout.target(format).build();
 	}
 
 	public inline function encoder() : Encoder {

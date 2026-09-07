@@ -217,10 +217,55 @@ class _Native {
 		return;
 	}
 
-	// One vertex buffer, whose attributes are `count` triples of
-	// (`wgpu.VertexFormat`, byte offset, shader location).
-	@:hlNative("wgpu", "render_pipeline_create")
-	public static function render_pipeline_create(device : Int, shader : Int, vs : hl.Bytes, fs : hl.Bytes, format : Int, stride : Int, attrs : hl.Bytes, count : Int) : Int {
+	// A render pipeline is built by a run of calls rather than one descriptor:
+	// every argument stays a typed scalar the compiler checks, and there is no
+	// packed layout for the two sides to disagree about. The crossings cost
+	// nothing, because a pipeline is built at load and not per frame.
+	@:hlNative("wgpu", "pipeline_begin")
+	public static function pipeline_begin(device : Int) : Int {
+		return 0;
+	}
+
+	@:hlNative("wgpu", "pipeline_shader")
+	public static function pipeline_shader(builder : Int, shader : Int, vs : hl.Bytes, fs : hl.Bytes) : Void {
+		return;
+	}
+
+	// Opens a vertex buffer layout; the attributes that follow belong to it.
+	@:hlNative("wgpu", "pipeline_vertex_buffer")
+	public static function pipeline_vertex_buffer(builder : Int, stride : Int, step : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pipeline_attribute")
+	public static function pipeline_attribute(builder : Int, format : Int, offset : Int, location : Int) : Void {
+		return;
+	}
+
+	// Opens a colour target; a blend that follows belongs to it.
+	@:hlNative("wgpu", "pipeline_target")
+	public static function pipeline_target(builder : Int, format : Int, write_mask : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pipeline_blend")
+	public static function pipeline_blend(builder : Int, src : Int, dst : Int, op : Int, src_alpha : Int, dst_alpha : Int, op_alpha : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pipeline_depth")
+	public static function pipeline_depth(builder : Int, format : Int, write : Bool, compare : Int) : Void {
+		return;
+	}
+
+	@:hlNative("wgpu", "pipeline_primitive")
+	public static function pipeline_primitive(builder : Int, topology : Int, cull : Int, front : Int) : Void {
+		return;
+	}
+
+	// Builds the pipeline and spends the builder.
+	@:hlNative("wgpu", "render_pipeline_build")
+	public static function render_pipeline_build(builder : Int) : Int {
 		return 0;
 	}
 

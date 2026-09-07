@@ -88,16 +88,28 @@ impl Prim {
     }
 }
 
+/// An enumeration lifted from a WebIDL file: the spec's values, in the spec's
+/// order, so nothing is typed out and nothing can drift from it.
+struct Enum {
+    /// What to call it in Haxe and JavaScript.
+    name: String,
+    /// The values, in order. The index is the number that crosses.
+    values: Vec<String>,
+}
+
 struct Decl {
     library: String,
     prefix: String,
     kinds: Vec<String>,
+    enums: Vec<Enum>,
     prims: Vec<Prim>,
 }
 
 fn parse(text: &str) -> Result<Decl, String> {
     let (mut library, mut prefix) = (String::new(), String::new());
     let (mut kinds, mut prims) = (Vec::new(), Vec::<Prim>::new());
+    let mut enums: Vec<Enum> = Vec::new();
+    let mut idl = String::new();
     let mut doc: Vec<String> = Vec::new();
 
     for raw in text.lines() {
@@ -124,6 +136,16 @@ fn parse(text: &str) -> Result<Decl, String> {
                 return Err("a handle carries four bits of kind, so at most 15".into());
             }
             doc.clear();
+        } else if let Some(rest) = line.strip_prefix("idl ") {
+            idl = rest.trim().to_string();
+            doc.clear();
+        } else if let Some(rest) = line.strip_prefix("enum ") {
+            let mut parts = rest.split_whitespace();
+            let (Some(from), Some(name)) = (parts.next(), parts.next()) else {
+                return Err(format!("enum needs an IDL name and a name: {line}"));
+            };
+            enums.push(Enum { name: name.to_string(), values: idl_enum(&idl, from)? });
+            doc.clear();
         } else if let Some(rest) = line.strip_prefix("js ") {
             match prims.last_mut() {
                 Some(p) => p.js = rest.trim().to_string(),
@@ -142,7 +164,64 @@ fn parse(text: &str) -> Result<Decl, String> {
     if let Some(p) = prims.iter().find(|p| p.js.is_empty()) {
         return Err(format!("no js body for {}", p.name));
     }
-    Ok(Decl { library, prefix, kinds, prims })
+    Ok(Decl { library, prefix, kinds, enums, prims })
+}
+
+/// The values of one `enum` from a WebIDL file, in the order it declares them.
+fn idl_enum(path: &str, name: &str) -> Result<Vec<String>, String> {
+    if path.is_empty() {
+        return Err("an `enum` line needs an `idl` line before it".into());
+    }
+    let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").map_err(|e| e.to_string())?);
+    let text = fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"))?;
+    let opener = format!("enum {name} {{");
+    let at = text.find(&opener).ok_or_else(|| format!("{path} has no enum {name}"))?;
+    let body = &text[at + opener.len()..];
+    let end = body.find("};").ok_or_else(|| format!("{name} is not closed"))?;
+    let mut values = Vec::new();
+    let mut rest = &body[..end];
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else { break };
+        values.push(after[..close].to_string());
+        rest = &after[close + 1..];
+    }
+    if values.is_empty() {
+        return Err(format!("{name} has no values"));
+    }
+    Ok(values)
+}
+
+/// `one-minus-src-alpha` as `OneMinusSrcAlpha`.
+fn pascal(value: &str) -> String {
+    value
+        .split('-')
+        .map(|part| {
+            let mut c = part.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn emit_enum_haxe(e: &Enum, src: &str, idl: &str, package: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "// GENERATED from `{idl}` via `{src}`. Edit neither.");
+    let _ = writeln!(out, "\npackage {package};\n");
+    // One line, the way the hand-written enums beside it read.
+    let _ = writeln!(
+        out,
+        "/** `{}` from the WebGPU IDL: its values, in its order. **/",
+        e.name
+    );
+    let _ = writeln!(out, "enum abstract {}(Int) from Int to Int {{", e.name);
+    for (i, v) in e.values.iter().enumerate() {
+        let _ = writeln!(out, "\tvar {} = {i};", pascal(v));
+    }
+    out.push_str("}\n");
+    out
 }
 
 fn parse_prim(rest: &str, doc: Vec<String>) -> Result<Prim, String> {
@@ -303,6 +382,18 @@ fn emit_wasm(d: &Decl, src: &str) -> String {
     out
 }
 
+/// `BlendFactor` as `BLEND_FACTOR`, which is how JavaScript spells a constant.
+fn screaming(name: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in name.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.extend(c.to_uppercase());
+    }
+    out
+}
+
 fn emit_js(d: &Decl, src: &str, prelude: &str) -> String {
     let numbering = d
         .kinds
@@ -317,6 +408,21 @@ fn emit_js(d: &Decl, src: &str, prelude: &str) -> String {
          // The handle kind numbering, from the same line of the declaration that\n\
          // `kinds.rs` comes from.\nconst KINDS = {{ {numbering} }};\n\n"
     );
+    for e in &d.enums {
+        let values = e
+            .values
+            .iter()
+            .map(|v| format!("\"{v}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(
+            out,
+            "// {} from the WebGPU IDL, indexed as the declaration numbers it.\n\
+             const {} = [{values}];\n\n",
+            e.name,
+            screaming(&e.name)
+        );
+    }
     out.push_str(prelude.trim_end());
     let module = d.prefix.trim_end_matches('_');
     let _ = write!(
@@ -459,6 +565,12 @@ pub fn generate(api: impl AsRef<Path>) -> io::Result<()> {
     // A library with no prelude gets none; a native-only one has nothing for
     // a page to hold.
     let prelude = fs::read_to_string(&prelude_path).unwrap_or_default();
+    for e in &decl.enums {
+        let _ = write_if_changed(
+            &root.join(format!("haxe/{}/{}.hx", decl.library, e.name)),
+            &emit_enum_haxe(e, &src, "spec/webgpu.idl", &decl.library),
+        );
+    }
     let module = decl.prefix.trim_end_matches('_').to_string();
     let _ = write_if_changed(
         &root.join(format!("js/{module}.js")),

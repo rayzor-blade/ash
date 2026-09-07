@@ -13,11 +13,24 @@
 library wgpu
 prefix hlwgpu_
 
+# Enumerations come from the WebGPU IDL: its values, in its order, so nothing
+# here is typed out and nothing can drift from the spec. The number that
+# crosses is the index.
+idl spec/webgpu.idl
+
+enum GPUBlendFactor BlendFactor
+enum GPUBlendOperation BlendOperation
+enum GPUCompareFunction CompareFunction
+enum GPUPrimitiveTopology PrimitiveTopology
+enum GPUCullMode CullMode
+enum GPUFrontFace FrontFace
+enum GPUVertexStepMode VertexStepMode
+
 # The kinds of object a handle can name, numbered in this order from 1. The
 # number is carried in the handle so that a buffer used where a texture
 # belongs is refused rather than reading a real object of the wrong type.
 # Rust and JavaScript both get this list from here; neither writes it out.
-kinds instance adapter device queue buffer texture view sampler shader bindgroup pipeline renderpipeline encoder surface
+kinds instance adapter device queue buffer texture view sampler shader bindgroup pipeline renderpipeline encoder surface builder
 
 # -- instance ---------------------------------------------------------------
 
@@ -175,10 +188,39 @@ prim view_destroy(view: i32) -> void
 
 # -- render pipelines -------------------------------------------------------
 
-# One vertex buffer, whose attributes are `count` triples of
-# (`wgpu.VertexFormat`, byte offset, shader location).
-prim render_pipeline_create(device: i32, shader: i32, vs: bytes, fs: bytes, format: i32, stride: i32, attrs: bytes, count: i32) -> i32
-  js H.put("renderpipeline", H.get("device", device).createRenderPipeline({ layout: "auto", vertex: { module: H.get("shader", shader), entryPoint: H.readStr(vs), buffers: [{ arrayStride: stride, attributes: H.attributes(attrs, count) }] }, fragment: { module: H.get("shader", shader), entryPoint: H.readStr(fs), targets: [{ format: H.formatName(format) }] }, primitive: { topology: "triangle-list" } }))
+# A render pipeline is built by a run of calls rather than one descriptor:
+# every argument stays a typed scalar the compiler checks, and there is no
+# packed layout for the two sides to disagree about. The crossings cost
+# nothing, because a pipeline is built at load and not per frame.
+prim pipeline_begin(device: i32) -> i32
+  js H.put("builder", { device, vertex: { buffers: [] }, fragment: { targets: [] }, primitive: {}, depthStencil: null })
+
+prim pipeline_shader(builder: i32, shader: i32, vs: bytes, fs: bytes) -> void
+  js const d = H.get("builder", builder); d.module = H.get("shader", shader); d.vs = H.readStr(vs); d.fs = H.readStr(fs)
+
+# Opens a vertex buffer layout; the attributes that follow belong to it.
+prim pipeline_vertex_buffer(builder: i32, stride: i32, step: i32) -> void
+  js H.get("builder", builder).vertex.buffers.push({ arrayStride: stride, stepMode: VERTEX_STEP_MODE[step], attributes: [] })
+
+prim pipeline_attribute(builder: i32, format: i32, offset: i32, location: i32) -> void
+  js const b = H.get("builder", builder).vertex.buffers; b[b.length - 1].attributes.push({ format: VERTEX_FORMATS[format], offset, shaderLocation: location })
+
+# Opens a colour target; a blend that follows belongs to it.
+prim pipeline_target(builder: i32, format: i32, write_mask: i32) -> void
+  js H.get("builder", builder).fragment.targets.push({ format: H.formatName(format), writeMask: write_mask })
+
+prim pipeline_blend(builder: i32, src: i32, dst: i32, op: i32, src_alpha: i32, dst_alpha: i32, op_alpha: i32) -> void
+  js const t = H.get("builder", builder).fragment.targets; t[t.length - 1].blend = { color: { srcFactor: BLEND_FACTOR[src], dstFactor: BLEND_FACTOR[dst], operation: BLEND_OPERATION[op] }, alpha: { srcFactor: BLEND_FACTOR[src_alpha], dstFactor: BLEND_FACTOR[dst_alpha], operation: BLEND_OPERATION[op_alpha] } }
+
+prim pipeline_depth(builder: i32, format: i32, write: bool, compare: i32) -> void
+  js H.get("builder", builder).depthStencil = { format: H.formatName(format), depthWriteEnabled: !!write, depthCompare: COMPARE_FUNCTION[compare] }
+
+prim pipeline_primitive(builder: i32, topology: i32, cull: i32, front: i32) -> void
+  js const p = H.get("builder", builder).primitive; p.topology = PRIMITIVE_TOPOLOGY[topology]; p.cullMode = CULL_MODE[cull]; p.frontFace = FRONT_FACE[front]
+
+# Builds the pipeline and spends the builder.
+prim render_pipeline_build(builder: i32) -> i32
+  js H.buildPipeline(builder)
 
 prim render_pipeline_destroy(pipeline: i32) -> void
   js H.drop("renderpipeline", pipeline)

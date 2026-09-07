@@ -66,9 +66,6 @@ to the module as imports. Nothing needs compiling.
 `IMPORTS.md` lists every function a host has to provide, so you can write your
 own instead.
 
-The desktop side is covered by tests. The browser side is written, and
-generated from the same source, but has not been run yet.
-
 ## Getting a window to draw into
 
 hlwgpu does not create windows. Give it anything matching `wgpu.WindowSource`,

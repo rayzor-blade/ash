@@ -417,8 +417,7 @@ desktop library that works is worth more than two halves that do not.
    so the four expected colours are exact.
 5. **Presentation.** DONE natively. A surface on a native window, configured,
    acquired, drawn and presented every frame. `crates/hlwindow` is the small
-   `winit` companion that supplies the window; depth and blending are still
-   ahead.
+   `winit` companion that supplies the window.
 6. **Capability.** Close the gap the IDL measures: the remaining enums, the
    descriptor members the builder now has somewhere to put, and the 30
    operations. Blending and depth landed with the builder; instancing,
@@ -428,8 +427,8 @@ desktop library that works is worth more than two halves that do not.
 7. **The page.** Milestones 1 to 4 unchanged against `navigator.gpu`, which
    needs ash's one generic import hook and a browser to verify in. If any of
    it needs a Haxe-side `#if`, something above went wrong.
-8. **Later, separately.** A `winit` companion for native windows. hxsl, a
-   Heaps driver, SPIR-V ingestion, ray queries.
+8. **Later, separately.** hxsl, a Heaps driver, SPIR-V ingestion, ray
+   queries.
 
 ## Testing
 

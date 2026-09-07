@@ -1,7 +1,12 @@
 # hlwgpu
 
 WebGPU for HashLink: buffers, textures, WGSL shaders, render and compute
-pipelines. 
+pipelines.
+
+It runs on Vulkan, Metal and D3D12, with OpenGL as a fallback, through
+[wgpu](https://wgpu.rs), the implementation Firefox, Servo and Deno use. In a
+browser it runs on WebGPU. You do not pick the backend; `Adapter.backend` tells
+you which one you got.
 
 GPU triangle example:
 

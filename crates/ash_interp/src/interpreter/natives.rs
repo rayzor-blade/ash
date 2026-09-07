@@ -6,11 +6,6 @@
 //! A child module of `interpreter` so it reaches `HLInterpreter`'s private
 //! fields without widening them.
 
-/// Signatures nobody wrote out by hand. See `build.rs`.
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/float_dispatch.rs"));
-}
-
 use anyhow::{anyhow, Result};
 use std::ffi::c_void;
 
@@ -239,7 +234,6 @@ impl HLInterpreter {
                     func_ptr,
                     args,
                     &arg_kinds,
-                    float_mask,
                     ret_is_float,
                     ret_kind == hl::hl_type_kind_HF32,
                 ));
@@ -1110,292 +1104,62 @@ impl HLInterpreter {
     /// correct calling-convention instructions for each pattern.
     ///
     /// Returns the raw i64 result (float results are returned as their bit representation).
+    /// Call a native whose signature has a float in it, or returns one.
+    ///
+    /// Every signature is generated (see `build.rs`), so this only has to say
+    /// what each argument is and hand over its bits. Floats arrive as `f64`
+    /// from the interpreter and are narrowed here when the callee wants
+    /// `f32`, which is the one conversion the ABI will not do for us.
     pub(super) fn dispatch_float_native(
         &self,
         func_ptr: *mut std::ffi::c_void,
         args: &[NanBoxedValue],
         arg_kinds: &[hl::hl_type_kind],
-        float_mask: u32,
         ret_is_float: bool,
         ret_is_f32: bool,
     ) -> Result<i64> {
-        let gf = |i: usize| -> f64 { args[i].as_f64() };
-        let gf32 = |i: usize| -> f32 { args[i].as_f64() as f32 };
-        let gi = |i: usize| -> i64 { self.value_to_i64(args[i], arg_kinds[i]) };
-
-        let raw: i64 = unsafe {
-            match (args.len(), ret_is_float, float_mask) {
-                // --- 0 args ---
-                (0, true, 0b0) if ret_is_f32 => {
-                    let f: unsafe extern "C" fn() -> f32 = std::mem::transmute(func_ptr);
-                    (f() as f64).to_bits() as i64
-                }
-                (0, true, 0b0) => {
-                    // () -> f64
-                    let f: unsafe extern "C" fn() -> f64 = std::mem::transmute(func_ptr);
-                    f().to_bits() as i64
-                }
-                // --- 1 arg ---
-                (1, true, 0b0) if ret_is_f32 => {
-                    let f: unsafe extern "C" fn(i64) -> f32 = std::mem::transmute(func_ptr);
-                    (f(gi(0)) as f64).to_bits() as i64
-                }
-                (1, true, 0b0) => {
-                    // (i64) -> f64  e.g. date_get_time(t:Int)
-                    let f: unsafe extern "C" fn(i64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gi(0)).to_bits() as i64
-                }
-                (1, true, 0b1) if ret_is_f32 && arg_kinds[0] == hl::hl_type_kind_HF32 => {
-                    let f: unsafe extern "C" fn(f32) -> f32 = std::mem::transmute(func_ptr);
-                    (f(gf32(0)) as f64).to_bits() as i64
-                }
-                (1, true, 0b1) => {
-                    // (f64) -> f64  e.g. math_sqrt, math_abs, math_floor, ...
-                    let f: unsafe extern "C" fn(f64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gf(0)).to_bits() as i64
-                }
-                (1, false, 0b1) if arg_kinds[0] == hl::hl_type_kind_HF32 => {
-                    let f: unsafe extern "C" fn(f32) = std::mem::transmute(func_ptr);
-                    f(gf32(0));
-                    0
-                }
-                (1, false, 0b1) => {
-                    // (f64) -> i64  e.g. math_ffloor, math_isnan, math_isfinite
-                    let f: unsafe extern "C" fn(f64) -> i64 = std::mem::transmute(func_ptr);
-                    f(gf(0))
-                }
-                // --- 2 args ---
-                (2, false, 0b01) => {
-                    // (f64, i64) -> i64  e.g. hlp_ftos(d, len)
-                    let f: unsafe extern "C" fn(f64, i64) -> i64 = std::mem::transmute(func_ptr);
-                    f(gf(0), gi(1))
-                }
-                (2, true, 0b01) => {
-                    // (f64, i64) -> f64
-                    let f: unsafe extern "C" fn(f64, i64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gf(0), gi(1)).to_bits() as i64
-                }
-                (2, false, 0b10) if arg_kinds[1] == hl::hl_type_kind_HF32 => {
-                    let f: unsafe extern "C" fn(i64, f32) = std::mem::transmute(func_ptr);
-                    f(gi(0), gf32(1));
-                    0
-                }
-                (2, false, 0b10) => {
-                    // (i64, f64) -> i64
-                    let f: unsafe extern "C" fn(i64, f64) -> i64 = std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1))
-                }
-                (2, true, 0b10) if ret_is_f32 && arg_kinds[1] == hl::hl_type_kind_HF32 => {
-                    let f: unsafe extern "C" fn(i64, f32) -> f32 = std::mem::transmute(func_ptr);
-                    (f(gi(0), gf32(1)) as f64).to_bits() as i64
-                }
-                (2, true, 0b10) => {
-                    // (i64, f64) -> f64
-                    let f: unsafe extern "C" fn(i64, f64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1)).to_bits() as i64
-                }
-                (2, true, 0b11) => {
-                    // (f64, f64) -> f64  e.g. math_pow, math_atan2
-                    let f: unsafe extern "C" fn(f64, f64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1)).to_bits() as i64
-                }
-                (2, true, 0b00) if ret_is_f32 => {
-                    let f: unsafe extern "C" fn(i64, i64) -> f32 = std::mem::transmute(func_ptr);
-                    (f(gi(0), gi(1)) as f64).to_bits() as i64
-                }
-                (2, true, 0b00) => {
-                    // (i64, i64) -> f64
-                    let f: unsafe extern "C" fn(i64, i64) -> f64 = std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1)).to_bits() as i64
-                }
-                (2, false, 0b11) => {
-                    // (f64, f64) -> i64
-                    let f: unsafe extern "C" fn(f64, f64) -> i64 = std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1))
-                }
-                // --- 3 args ---
-                (3, true, 0b000) => {
-                    // (i64, i64, i64) -> f64  e.g. hlp_parse_float(bytes, pos, len)
-                    let f: unsafe extern "C" fn(i64, i64, i64) -> f64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2)).to_bits() as i64
-                }
-                (3, false, 0b001) => {
-                    // (f64, i64, i64) -> i64
-                    let f: unsafe extern "C" fn(f64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gi(1), gi(2))
-                }
-                (3, true, 0b001) => {
-                    // (f64, i64, i64) -> f64
-                    let f: unsafe extern "C" fn(f64, i64, i64) -> f64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gi(1), gi(2)).to_bits() as i64
-                }
-                (3, false, 0b011) => {
-                    // Two scalar values followed by comparison context.
-                    let f: unsafe extern "C" fn(f64, f64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1), gi(2))
-                }
-                (3, false, 0b100) if arg_kinds[2] == hl::hl_type_kind_HF32 => {
-                    // (i64, i64, f32) -> void, used by hlsdl's
-                    // gl_tex_parameterf(target, parameter, value).
-                    let f: unsafe extern "C" fn(i64, i64, f32) = std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf32(2));
-                    0
-                }
-                (3, false, 0b100) => {
-                    // (i64, i64, f64) -> i64
-                    let f: unsafe extern "C" fn(i64, i64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf(2))
-                }
-                (3, false, 0b111) => {
-                    // (f64, f64, f64) -> i64
-                    let f: unsafe extern "C" fn(f64, f64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1), gf(2))
-                }
-                (3, true, 0b111) => {
-                    // (f64, f64, f64) -> f64
-                    let f: unsafe extern "C" fn(f64, f64, f64) -> f64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1), gf(2)).to_bits() as i64
-                }
-                // --- 4 args ---
-                (4, false, 0b1110)
-                    if arg_kinds[1..].iter().all(|&k| k == hl::hl_type_kind_HF32) =>
-                {
-                    // OpenAL listener3f(parameter, x, y, z).
-                    let f: unsafe extern "C" fn(i64, f32, f32, f32) = std::mem::transmute(func_ptr);
-                    f(gi(0), gf32(1), gf32(2), gf32(3));
-                    0
-                }
-                (4, false, 0b1110) => {
-                    // Compiled AIR functions and native vector helpers with
-                    // a receiver followed by three doubles.
-                    let f: unsafe extern "C" fn(i64, f64, f64, f64) = std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1), gf(2), gf(3));
-                    0
-                }
-                (4, false, 0b1000) if arg_kinds[3] == hl::hl_type_kind_HF32 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, f32) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2), gf32(3))
-                }
-                (4, false, 0b1000) => {
-                    // AIR functions such as structural equality carry the
-                    // comparison epsilon after three pointer-like operands.
-                    let f: unsafe extern "C" fn(i64, i64, i64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2), gf(3))
-                }
-                (4, false, 0b0110) => {
-                    let f: unsafe extern "C" fn(i64, f64, f64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1), gf(2), gi(3))
-                }
-                (4, true, 0b0000) if ret_is_f32 => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> f32 =
-                        std::mem::transmute(func_ptr);
-                    (f(gi(0), gi(1), gi(2), gi(3)) as f64).to_bits() as i64
-                }
-                (4, true, 0b0000) => {
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64) -> f64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2), gi(3)).to_bits() as i64
-                }
-                (4, false, 0b1111) => {
-                    // (f64, f64, f64, f64) -> i64  e.g. gl_clear_color(r, g, b, a)
-                    let f: unsafe extern "C" fn(f64, f64, f64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1), gf(2), gf(3))
-                }
-                // --- 5 args ---
-                (5, false, 0b11100)
-                    if arg_kinds[2..].iter().all(|&k| k == hl::hl_type_kind_HF32) =>
-                {
-                    // OpenAL source3f/buffer3f(object, parameter, x, y, z).
-                    let f: unsafe extern "C" fn(i64, i64, f32, f32, f32) =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf32(2), gf32(3), gf32(4));
-                    0
-                }
-                (5, false, 0b11100) => {
-                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64) =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf(2), gf(3), gf(4));
-                    0
-                }
-                (5, false, 0b00011) => {
-                    let f: unsafe extern "C" fn(f64, f64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gf(0), gf(1), gi(2), gi(3), gi(4))
-                }
-                (5, false, 0b11110) => {
-                    let f: unsafe extern "C" fn(i64, f64, f64, f64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1), gf(2), gf(3), gf(4))
-                }
-                // --- 6 args ---
-                (6, false, 0b100000) => {
-                    // (i64, i64, i64, i64, i64, f64) -> i64
-                    // e.g. socket_select(read, write, other, tmp, size, timeout)
-                    let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, f64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2), gi(3), gi(4), gf(5))
-                }
-                // --- 8 args ---
-                (8, false, 0b0011_1100) => {
-                    // Haxe graphics helpers commonly carry an object and
-                    // flags around four scalar coordinates:
-                    // (i64, i64, f64, f64, f64, f64, i64, i64) -> word.
-                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64, f64, i64, i64) -> i64 =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5), gi(6), gi(7))
-                }
-                // Anything above named a signature explicitly, usually
-                // because it has an `f32` in it. Everything else is generated,
-                // so a shape is refused now only if it mixes `f32` in or takes
-                // more than eight arguments.
-                _ if !ret_is_f32
-                    && arg_kinds.iter().all(|&k| k != hl::hl_type_kind_HF32) =>
-                {
-                    let ints: Vec<i64> = (0..args.len())
-                        .map(|i| if float_mask >> i & 1 == 1 { 0 } else { gi(i) })
-                        .collect();
-                    let floats: Vec<f64> = (0..args.len())
-                        .map(|i| if float_mask >> i & 1 == 1 { gf(i) } else { 0.0 })
-                        .collect();
-                    match generated::dispatch_all_f64(
-                        func_ptr,
-                        &ints,
-                        &floats,
-                        ret_is_float,
-                        float_mask,
-                    ) {
-                        Some(raw) => raw,
-                        None => {
-                            return Err(anyhow!(
-                                "Float native dispatch: {} arguments is more than eight",
-                                args.len()
-                            ))
-                        }
-                    }
-                }
-                _ => {
-                    return Err(anyhow!(
-                        "Float native dispatch: {} args, float_mask={:#b}, ret_float={}: \
-                         an f32 in a combination nothing names",
-                        args.len(),
-                        float_mask,
-                        ret_is_float
-                    ));
-                }
+        // 0 integer, 1 f32, 2 f64: the numbering `dispatch_any` reads.
+        let code = |k: hl::hl_type_kind| -> u8 {
+            if k == hl::hl_type_kind_HF32 {
+                1
+            } else if k == hl::hl_type_kind_HF64 {
+                2
+            } else {
+                0
             }
         };
-        Ok(raw)
+        let kinds: Vec<u8> = arg_kinds[..args.len()].iter().map(|&k| code(k)).collect();
+
+        // Each argument is read from the one of these its kind names; the
+        // others are filled so the slices stay the same length.
+        let mut ints = vec![0i64; args.len()];
+        let mut f32s = vec![0f32; args.len()];
+        let mut f64s = vec![0f64; args.len()];
+        for (i, &kind) in kinds.iter().enumerate() {
+            match kind {
+                1 => f32s[i] = args[i].as_f64() as f32,
+                2 => f64s[i] = args[i].as_f64(),
+                _ => ints[i] = self.value_to_i64(args[i], arg_kinds[i]),
+            }
+        }
+
+        let ret_kind = if ret_is_f32 {
+            1
+        } else if ret_is_float {
+            2
+        } else {
+            0
+        };
+
+        unsafe { ash_native_call::dispatch(func_ptr, &ints, &f32s, &f64s, &kinds, ret_kind) }
+            .ok_or_else(|| {
+                anyhow!(
+                    "Native dispatch: no signature for {} arguments with kinds {:?} \
+                     returning kind {ret_kind}",
+                    args.len(),
+                    kinds
+                )
+            })
     }
 
     /// Convert a NanBoxedValue to an i64 for FFI passing.

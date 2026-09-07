@@ -281,6 +281,7 @@ dependencies = [
  "air",
  "anyhow",
  "ash_core",
+ "ash_native_call",
  "beadie",
  "cc",
  "inkwell",
@@ -296,6 +297,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "ash_native_call"
+version = "0.1.0"
 
 [[package]]
 name = "ash_std"

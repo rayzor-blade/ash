@@ -479,12 +479,21 @@ and a combination nobody had used was a clean runtime error but a wall all the
 same. It grew three arms in one afternoon once a graphics library started
 passing colours and viewports around.
 
-So it is generated now. `ash_interp/build.rs` writes all 1022 combinations of
-up to eight arguments whose floats are `f64`, and the hand-written arms stay in
-front of it for the `f32` cases, which cannot be generated without three states
-per argument and tens of thousands of arms. The three arms added by hand were
-then deleted; the tests that needed them still pass, which is what says the
-generated path is the one running.
+It is generated now, in `crates/ash_native_call`, and the hand-written table is
+gone entirely. Two things about the shape of that are worth keeping.
+
+**Not every signature fits.** There are three states per argument, not two:
+an `f32` is passed in half a vector register and reading it as an `f64` gets
+the wrong bits. Three states up to eight arguments is 29,523 signatures, and
+rustc was killed for running out of memory building it. What ships is every
+signature whose floats are all one type, at any arity, plus every mixed one up
+to five arguments: 3,771. Mixing `f32` and `f64` past five arguments is the
+only thing still refused, and the error now names the kinds rather than
+reciting a bitmask.
+
+**It is a separate crate so that editing the interpreter stays cheap.**
+Compiled into `ash_interp` the table took a rebuild from ten seconds to ninety.
+Beside it, and built unoptimised, the interpreter is back to eleven.
 
 ## A miss must not look like an answer
 

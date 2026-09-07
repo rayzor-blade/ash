@@ -4670,7 +4670,6 @@ impl HLInterpreter {
                     func_ptr,
                     args,
                     arg_kinds,
-                    float_mask,
                     ret_is_float,
                     ret_kind == hl::hl_type_kind_HF32,
                 )

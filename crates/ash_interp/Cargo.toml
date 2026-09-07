@@ -7,6 +7,7 @@ license = "MIT"
 description = "HashLink bytecode interpreter for ASH VM"
 
 [dependencies]
+ash_native_call = { workspace = true }
 ash_core = { path = "../ash" }
 air = { path = "../air" }
 anyhow = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "ash_native_call"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Calling a native whose signature is only known at run time"
+publish = false
+
+# None, and there should be none: this crate is one generated match.
+[dependencies]

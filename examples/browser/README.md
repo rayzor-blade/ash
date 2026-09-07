@@ -84,9 +84,11 @@ answers by starting a Worker, and it keeps answering for as long as the
 browser keeps saying yes. A page that supplies no `spawn` gets threads that
 take turns, and the demo says so.
 
-The demo computes rather than allocates so that what it times is the threads
-and not the collector. Threads that allocate work as well; `docs/wasm-target.md`
-has the program that checks it, and what was wrong before it did.
+The timed part computes rather than allocates, so that what it times is the
+threads and not the collector. The part after it does nothing but allocate, on
+four threads at once, and checks its answers against the same work done on one
+thread -- because that is the case that used to fail, and a page is where it
+matters that it no longer does.
 
 ## The module runs in a worker
 

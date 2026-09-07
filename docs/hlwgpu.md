@@ -471,15 +471,20 @@ the library has grown a dependency on us.
 
 A library is a good way to walk into the parts of a VM nobody has needed yet.
 
-**The interpreter dispatches a native through a hand-written table** keyed by
+**The interpreter dispatched a native through a hand-written table**, keyed by
 arity, return kind and a bitmask of which arguments are floats
-(`ash_interp/src/interpreter/natives.rs`). A signature not in the table is a
-runtime error, not a miscompile, but it is still a wall: `encoder_render_begin`
-is `(i32, i32, f64, f64, f64, f64)` and no arm matched, and its depth variant
-needed a seven-argument one, of which the table had none at all. Two arms so
-far, one per new kind of pass, plus a seventh for a viewport. A float-heavy library will keep finding these, and
-the real answer eventually is a signature-directed dispatcher rather than a
-table.
+(`ash_interp/src/interpreter/natives.rs`). A native is called by transmuting
+its address to a function pointer, so the signature has to exist in the source,
+and a combination nobody had used was a clean runtime error but a wall all the
+same. It grew three arms in one afternoon once a graphics library started
+passing colours and viewports around.
+
+So it is generated now. `ash_interp/build.rs` writes all 1022 combinations of
+up to eight arguments whose floats are `f64`, and the hand-written arms stay in
+front of it for the `f32` cases, which cannot be generated without three states
+per argument and tens of thousands of arms. The three arms added by hand were
+then deleted; the tests that needed them still pass, which is what says the
+generated path is the one running.
 
 ## A miss must not look like an answer
 

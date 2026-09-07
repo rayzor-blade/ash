@@ -6,6 +6,11 @@
 //! A child module of `interpreter` so it reaches `HLInterpreter`'s private
 //! fields without widening them.
 
+/// Signatures nobody wrote out by hand. See `build.rs`.
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/float_dispatch.rs"));
+}
+
 use anyhow::{anyhow, Result};
 use std::ffi::c_void;
 
@@ -1341,32 +1346,6 @@ impl HLInterpreter {
                         std::mem::transmute(func_ptr);
                     f(gi(0), gi(1), gi(2), gi(3), gi(4), gf(5))
                 }
-                (6, false, 0b111100) => {
-                    // An object and a target around four floats, which is what
-                    // a clear colour looks like:
-                    // wgpu's encoder_render_begin(encoder, view, r, g, b, a).
-                    let f: unsafe extern "C" fn(i64, i64, f64, f64, f64, f64) =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5));
-                    0
-                }
-                // --- 7 args ---
-                (7, false, 0b111_1000) => {
-                    // Three objects then a colour: a render pass told its
-                    // attachments and what to clear them to.
-                    let f: unsafe extern "C" fn(i64, i64, i64, f64, f64, f64, f64) =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gi(1), gi(2), gf(3), gf(4), gf(5), gf(6));
-                    0
-                }
-                (7, false, 0b111_1110) => {
-                    // An object then six floats: a viewport, which is a
-                    // rectangle and a depth range.
-                    let f: unsafe extern "C" fn(i64, f64, f64, f64, f64, f64, f64) =
-                        std::mem::transmute(func_ptr);
-                    f(gi(0), gf(1), gf(2), gf(3), gf(4), gf(5), gf(6));
-                    0
-                }
                 // --- 8 args ---
                 (8, false, 0b0011_1100) => {
                     // Haxe graphics helpers commonly carry an object and
@@ -1376,9 +1355,39 @@ impl HLInterpreter {
                         std::mem::transmute(func_ptr);
                     f(gi(0), gi(1), gf(2), gf(3), gf(4), gf(5), gi(6), gi(7))
                 }
+                // Anything above named a signature explicitly, usually
+                // because it has an `f32` in it. Everything else is generated,
+                // so a shape is refused now only if it mixes `f32` in or takes
+                // more than eight arguments.
+                _ if !ret_is_f32
+                    && arg_kinds.iter().all(|&k| k != hl::hl_type_kind_HF32) =>
+                {
+                    let ints: Vec<i64> = (0..args.len())
+                        .map(|i| if float_mask >> i & 1 == 1 { 0 } else { gi(i) })
+                        .collect();
+                    let floats: Vec<f64> = (0..args.len())
+                        .map(|i| if float_mask >> i & 1 == 1 { gf(i) } else { 0.0 })
+                        .collect();
+                    match generated::dispatch_all_f64(
+                        func_ptr,
+                        &ints,
+                        &floats,
+                        ret_is_float,
+                        float_mask,
+                    ) {
+                        Some(raw) => raw,
+                        None => {
+                            return Err(anyhow!(
+                                "Float native dispatch: {} arguments is more than eight",
+                                args.len()
+                            ))
+                        }
+                    }
+                }
                 _ => {
                     return Err(anyhow!(
-                        "Float native dispatch: {} args, float_mask={:#b}, ret_float={} not yet supported",
+                        "Float native dispatch: {} args, float_mask={:#b}, ret_float={}: \
+                         an f32 in a combination nothing names",
                         args.len(),
                         float_mask,
                         ret_is_float

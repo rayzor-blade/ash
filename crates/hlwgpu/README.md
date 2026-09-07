@@ -1,3 +1,5 @@
+<img src="./hlwgpu.png" width="250" alt="HashLink WebGPU" align="right" />
+
 # hlwgpu
 
 WebGPU for HashLink: buffers, textures, WGSL shaders, render and compute

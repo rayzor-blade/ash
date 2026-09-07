@@ -15,10 +15,16 @@ import sys.thread.Deque;
 	would not show that it no longer does.
 
 	Where an entity is is a function of the clock, not of how many frames have
-	been drawn. A thread here draws thousands of frames a second while the
-	host shows sixty, so per-frame movement would cross the screen between two
-	shown frames and the picture would be noise. Against the clock it is the
-	same picture at any rate, and the rate is left free to be the measurement.
+	been drawn, so the picture is the same picture whatever rate a band
+	manages.
+
+	Each band holds itself to the rate the host shows, and that is not a
+	politeness. Uncapped, a band draws around three thousand frames a second,
+	allocates some twenty megabytes a second doing it, and nobody sees more
+	than sixty of them: the frames past the sixtieth are invisible, and the
+	garbage behind them is not. Four threads of that bury the collector, every
+	stop-the-world pauses the thread that presents, and the picture arrives in
+	lurches. Drawing what is shown and no more is what makes it real time.
 
 	The main thread presents. It never touches the pixels: it hands the host
 	the address of the buffer the threads are writing, sixty times a second,
@@ -35,6 +41,10 @@ class Entities {
 	// How far back in time each trail sample is taken. Long enough to see,
 	// short enough that a trail stays inside its own band.
 	static inline var TRAIL_STEP = 0.035;
+	// What every band draws at and what the main thread presents at. One
+	// number, because a band drawing faster than this is drawing frames
+	// nobody will see.
+	static inline var FPS = 60.0;
 
 	@:hlNative("std", "canvas_present")
 	static function present(data:hl.Bytes, width:Int, height:Int):Bool {
@@ -78,7 +88,7 @@ class Entities {
 		return lo + (t <= span ? t : 2 * span - t);
 	}
 
-	static function band(id:Int, seconds:Float):Int {
+	static function band(id:Int, seconds:Float, fps:Float):Int {
 		var y0 = Std.int((H * id) / bands);
 		var y1 = Std.int((H * (id + 1)) / bands);
 		var colour = bandColour(id);
@@ -104,7 +114,9 @@ class Entities {
 		}
 
 		var frames = 0;
+		var period = 1 / fps;
 		var started = Sys.time();
+		var due = started + period;
 		var now = 0.0;
 		while (now < seconds) {
 			now = Sys.time() - started;
@@ -153,6 +165,15 @@ class Entities {
 			frames++;
 			// The host reads this to show that every band is still moving.
 			fb.setI32(id * 4, frames);
+
+			// Sleep out the rest of this frame's slice. Late is not made up
+			// for: a band that fell behind starts its next frame now rather
+			// than drawing several with no gap to catch up, which would show
+			// as a stutter and buy nothing.
+			var spent = Sys.time();
+			if (spent < due) Sys.sleep(due - spent);
+			due += period;
+			if (due < spent) due = spent + period;
 		}
 		return frames;
 	}
@@ -169,26 +190,43 @@ class Entities {
 			var s = Std.parseFloat(args[1]);
 			if (!Math.isNaN(s) && s > 0) seconds = s;
 		}
+		// Third argument: the rate the bands hold themselves to. Only ever
+		// worth changing to take the cap off, which is how the collector is
+		// put under a load a page must never give it.
+		var fps = FPS;
+		if (args.length > 2) {
+			var f = Std.parseFloat(args[2]);
+			if (!Math.isNaN(f) && f > 0) fps = f;
+		}
 
 		pixels = bands * 4;
 		fb = new hl.Bytes(pixels + W * H * 4);
 		for (i in 0...bands) fb.setI32(i * 4, 0);
 		for (p in 0...(W * H)) fb.setI32(pixels + p * 4, rgba(12, 12, 16));
 
-		Sys.println('$bands threads, one band each, ${W}x$H, ${seconds}s');
+		Sys.println('$bands threads, one band each, ${W}x$H at ${fps}fps, ${seconds}s');
 
 		var done = new Deque<Int>();
 		var started = Sys.time();
-		for (i in 0...bands) Thread.create(() -> done.add(band(i, seconds)));
+		for (i in 0...bands) Thread.create(() -> done.add(band(i, seconds, fps)));
 
 		// Present while they draw. Nothing is synchronised: a frame may catch
 		// a band mid-update, which at this rate is invisible and is the honest
 		// picture of several threads writing one buffer.
 		var shown = 0;
 		var frame = fb.offset(pixels);
+		var period = 1 / fps;
+		var due = started + period;
 		while (Sys.time() - started < seconds) {
 			if (present(frame, W, H)) shown++;
-			Sys.sleep(1 / 60);
+			// Against a deadline, not a fixed nap: showing a frame costs real
+			// time -- in a page it is a copy out of shared memory and a
+			// `putImageData` -- and sleeping a whole period on top of that
+			// would settle below the rate the bands are drawing at.
+			var spent = Sys.time();
+			if (spent < due) Sys.sleep(due - spent);
+			due += period;
+			if (due < spent) due = spent + period;
 		}
 
 		var total = 0;

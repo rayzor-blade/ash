@@ -82,7 +82,14 @@ const spawn = (request) => {
 (async () => {
   if (agents > 0) await warmAgents(agents);
   const bytes = new Uint8Array(fs.readFileSync(path));
-  const outcome = await run(bytes, [path, ...argv.slice(1)], [], agents > 0 ? spawn : undefined);
+  // A page has no environment to lend a program and this harness does, which
+  // is the one place the two hosts differ on purpose: it is how a diagnostic
+  // switch like ASH_GC_STATS reaches a guest that a browser could not be
+  // asked to set one for.
+  const environ = Object.entries(process.env)
+    .filter(([name]) => name.startsWith("ASH_"))
+    .map(([name, value]) => `${name}=${value}`);
+  const outcome = await run(bytes, [path, ...argv.slice(1)], environ, agents > 0 ? spawn : undefined);
   for (const worker of started) worker.terminate();
   if (outcome.trapped) {
     console.error(`trapped: ${outcome.trapped}`);

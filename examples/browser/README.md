@@ -209,9 +209,22 @@ Where the host has no canvas -- wasmtime, node, a page that transferred none
 -- `present` answers false and the program says frames were drawn and not
 shown. It is the same program either way; only the last line differs.
 
-Where an entity is is a function of the clock rather than of frames drawn,
-because a thread here draws thousands of frames a second while the host shows
-sixty. Per-frame movement would cross the screen between two shown frames.
+Where an entity is is a function of the clock rather than of frames drawn, so
+the picture is the same picture whatever rate a band manages.
+
+**Every band holds itself to sixty frames a second, and that is not a
+politeness.** Uncapped, a band draws around three thousand frames a second and
+allocates some twenty megabytes a second doing it, while nobody sees more than
+sixty: the frames past the sixtieth are invisible and the garbage behind them
+is not. Four threads of that bury the collector -- measured, a 512 MB heap
+full after fifteen collections, world stops abandoned after two seconds each
+-- and every one of those stops pauses the thread that presents. The picture
+arrives in lurches and then the program dies. Drawing what is shown and no
+more is what makes it real time; capped, the same run holds 60/s on all four
+bands for its whole length.
+
+A third argument takes the cap off (`entities.wasm 4 15 100000`). It is only
+worth doing to put the collector under a load a page must never give it.
 
 `?demo=entities&threads=8` asks for eight bands instead of four. The page
 warms one agent per core and no more, so asking for more threads than that is

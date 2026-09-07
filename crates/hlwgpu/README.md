@@ -52,15 +52,19 @@ threads keep running while the GPU works.
 On desktop, hlwgpu is one native library, `wgpu.hdll`. HashLink loads it and
 calls straight into it, and there is nothing else to install.
 
-In a browser your Haxe program runs as a WebAssembly module, which is
-something ash builds and hosts for you. A WebAssembly module cannot reach a GPU
-or call JavaScript on its own, so `wgpu.wasm` contains no GPU code at all. It
-forwards every call out to the page, and `js/hlwgpu.js` does the real work
-against `navigator.gpu`. Include that file with a script tag and pass what it
-exports to the module as imports; there is nothing to compile.
+For the browser we recommend [ash](https://ash.rayzor.tech), which builds a
+WebAssembly binary from the same HashLink bytecode you already have, and hosts
+it in a page.
 
-If you are writing your own host rather than using a browser, `IMPORTS.md`
-lists every function it has to provide.
+hlwgpu's wasm tooling is designed around ash's, but it is not tied to it. A
+WebAssembly module cannot reach a GPU or call JavaScript on its own, so
+`wgpu.wasm` contains no GPU code at all and forwards every call out to whatever
+is hosting it. In a page that is `js/hlwgpu.js`, which does the real work
+against `navigator.gpu`: include it with a script tag and pass what it exports
+to the module as imports. Nothing needs compiling.
+
+`IMPORTS.md` lists every function a host has to provide, so you can write your
+own instead.
 
 The desktop side is covered by tests. The browser side is written, and
 generated from the same source, but has not been run yet.

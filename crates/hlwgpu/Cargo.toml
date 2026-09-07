@@ -1,0 +1,30 @@
+[package]
+name = "hlwgpu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WebGPU for HashLink: the wgpu native library"
+publish = false
+
+[lib]
+# cdylib is the `.hdll` a HashLink VM loads; staticlib is what the wasm side
+# module is linked from; rlib is so tests and the future host crate can use
+# the same code without building it twice.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["native"]
+# The implementation. Off for the wasm side module, which holds none: a
+# wasip1 module has no GPU, so the primitives forward and a host answers.
+native = ["dep:wgpu", "dep:pollster"]
+
+[build-dependencies]
+hl_native_gen = { path = "../hl_native_gen" }
+
+[dependencies]
+hl_abi = { path = "../hl_abi" }
+wgpu = { version = "30", optional = true }
+# Adapter enumeration is a future that is already resolved on every native
+# backend. In a page it genuinely is not, which is why the API is ticketed
+# either way -- see `adapter_request` in wgpu.api.
+pollster = { version = "0.4", optional = true }

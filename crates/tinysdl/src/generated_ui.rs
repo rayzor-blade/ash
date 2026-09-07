@@ -14,7 +14,7 @@ use std::ffi::c_void;
 
 // Not every library needs all of it: `ui` boxes nothing.
 #[allow(unused_imports)]
-use crate::abi::*;
+use hl_abi::*;
 
 
 #[link(wasm_import_module = "env")]

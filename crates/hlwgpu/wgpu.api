@@ -1,0 +1,153 @@
+# The hlwgpu interface. One declaration; every side is generated from it.
+#
+#   scripts/gen_native_lib.py crates/hlwgpu/wgpu.api
+#
+# A `prim` line is the whole contract for one primitive: the name the Haxe
+# side asks for, its arguments and its return. The `js` line under it is that
+# primitive's body in a page, an expression with the arguments in scope plus
+# `H`, the prelude's handle table. Rust bodies are not declared because they
+# are `imp::<name>` by convention, and a mismatch is a link error.
+#
+# Types: i32, bool, bytes, void.
+
+library wgpu
+prefix hlwgpu_
+
+# The kinds of object a handle can name, numbered in this order from 1. The
+# number is carried in the handle so that a buffer used where a texture
+# belongs is refused rather than reading a real object of the wrong type.
+# Rust and JavaScript both get this list from here; neither writes it out.
+kinds instance adapter device queue buffer texture view sampler shader bindgroup layout pipeline encoder pass surface
+
+# -- instance ---------------------------------------------------------------
+
+# The entry point. Natively this is a wgpu Instance; in a page it is
+# `navigator.gpu` itself, which is why a page with WebGPU disabled returns 0
+# here rather than failing later with something less obvious.
+prim instance_create() -> i32
+  js H.put("instance", navigator.gpu)
+
+prim instance_destroy(inst: i32) -> void
+  js H.drop("instance", inst)
+
+# -- adapter ----------------------------------------------------------------
+
+# Returns a request id, not an adapter. `requestAdapter` is a promise in a
+# page and nothing may block on it, so async work is started here and
+# collected through `request_ready` / `request_result`. Natively it resolves
+# before this returns; the id exists anyway, so both look the same.
+#
+# `power` is 0 for low-power and 1 for high-performance.
+prim adapter_request(inst: i32, power: i32) -> i32
+  js H.pending(H.get("instance", inst).requestAdapter({ powerPreference: power === 1 ? "high-performance" : "low-power" }).then(a => a ? H.put("adapter", a) : 0))
+
+prim request_ready(request: i32) -> bool
+  js H.requestReady(request)
+
+# Only meaningful once `request_ready` is true. Reading early raises rather
+# than answering zero, so a caller that polls wrongly finds out here.
+prim request_result(request: i32) -> i32
+  js H.requestResult(request)
+
+# UTF-16 and NUL-terminated, which is what `String.fromUCS2` expects.
+prim adapter_name(adapter: i32) -> bytes
+  js H.str(H.get("adapter", adapter).info.description || H.get("adapter", adapter).info.vendor || "WebGPU adapter")
+
+# 0 unknown, 1 vulkan, 2 metal, 3 dx12, 4 gl, 5 webgpu.
+prim adapter_backend(adapter: i32) -> i32
+  js (H.get("adapter", adapter), 5)
+
+# One limit by index, so that adding a limit does not add a primitive. The
+# indices are declared once, in Haxe, as `wgpu.Limit`.
+prim adapter_limit(adapter: i32, which: i32) -> i32
+  js (H.get("adapter", adapter).limits[H.limitName(which)] | 0)
+
+prim adapter_destroy(adapter: i32) -> void
+  js H.drop("adapter", adapter)
+
+# -- device -----------------------------------------------------------------
+
+# The queue comes back with the device, so `device_queue` needs no request of
+# its own.
+prim device_request(adapter: i32) -> i32
+  js H.pending(H.get("adapter", adapter).requestDevice().then(d => H.putDevice(d)))
+
+prim device_queue(device: i32) -> i32
+  js H.queueOf(device)
+
+# Lets finished work report itself. A page does this from the event loop, so
+# there is nothing to do there.
+prim device_poll(device: i32) -> void
+  js H.get("device", device)
+
+prim device_destroy(device: i32) -> void
+  js H.dropDevice(device)
+
+# -- buffers ----------------------------------------------------------------
+
+# `usage` is WebGPU's GPUBufferUsage bitmask, which wgpu numbers identically:
+# 1 MAP_READ, 2 MAP_WRITE, 4 COPY_SRC, 8 COPY_DST, 128 STORAGE.
+prim buffer_create(device: i32, size: i32, usage: i32) -> i32
+  js H.put("buffer", H.get("device", device).createBuffer({ size, usage }))
+
+prim queue_write_buffer(queue: i32, buffer: i32, offset: i32, data: bytes, len: i32) -> void
+  js H.get("queue", queue).writeBuffer(H.get("buffer", buffer), offset, H.view(data, len))
+
+# Starts a read mapping. Poll it with `request_ready`, then `buffer_copy_out`.
+prim buffer_map_begin(device: i32, buffer: i32, offset: i32, size: i32) -> i32
+  js H.pending(H.get("buffer", buffer).mapAsync(1, offset, size).then(() => 1))
+
+# Copies from a mapped buffer into `out`. False if it was not mapped.
+prim buffer_copy_out(buffer: i32, offset: i32, out: bytes, len: i32) -> bool
+  js H.writeInto(out, H.get("buffer", buffer).getMappedRange(offset, len))
+
+prim buffer_unmap(buffer: i32) -> void
+  js H.get("buffer", buffer).unmap()
+
+prim buffer_destroy(buffer: i32) -> void
+  js H.drop("buffer", buffer)
+
+# -- shaders and pipelines --------------------------------------------------
+
+prim shader_create(device: i32, wgsl: bytes) -> i32
+  js H.put("shader", H.get("device", device).createShaderModule({ code: H.readStr(wgsl) }))
+
+prim shader_destroy(shader: i32) -> void
+  js H.drop("shader", shader)
+
+# Layout is inferred from the shader, so a bind group only needs its buffers.
+prim compute_pipeline_create(device: i32, shader: i32, entry: bytes) -> i32
+  js H.put("pipeline", H.get("device", device).createComputePipeline({ layout: "auto", compute: { module: H.get("shader", shader), entryPoint: H.readStr(entry) } }))
+
+prim pipeline_destroy(pipeline: i32) -> void
+  js H.drop("pipeline", pipeline)
+
+# `buffers` is `count` handles, one per binding, in binding order.
+prim bind_group_create(device: i32, pipeline: i32, group: i32, buffers: bytes, count: i32) -> i32
+  js H.put("bindgroup", H.get("device", device).createBindGroup({ layout: H.get("pipeline", pipeline).getBindGroupLayout(group), entries: H.handles(buffers, count).map((h, i) => ({ binding: i, resource: { buffer: H.get("buffer", h) } })) }))
+
+prim bind_group_destroy(bindgroup: i32) -> void
+  js H.drop("bindgroup", bindgroup)
+
+# -- commands ---------------------------------------------------------------
+
+prim encoder_create(device: i32) -> i32
+  js H.put("encoder", H.get("device", device).createCommandEncoder())
+
+# A whole compute pass: one pipeline, one bind group, one dispatch. Passes
+# with several dispatches get their own primitives when something needs them.
+prim encoder_compute(encoder: i32, pipeline: i32, bindgroup: i32, x: i32, y: i32, z: i32) -> void
+  js const p = H.get("encoder", encoder).beginComputePass(); p.setPipeline(H.get("pipeline", pipeline)); p.setBindGroup(0, H.get("bindgroup", bindgroup)); p.dispatchWorkgroups(x, y, z); p.end()
+
+prim encoder_copy_buffer(encoder: i32, src: i32, src_offset: i32, dst: i32, dst_offset: i32, size: i32) -> void
+  js H.get("encoder", encoder).copyBufferToBuffer(H.get("buffer", src), src_offset, H.get("buffer", dst), dst_offset, size)
+
+# Finishes the encoder and submits it. The encoder is spent afterwards.
+prim encoder_submit(encoder: i32, queue: i32) -> void
+  js H.get("queue", queue).submit([H.get("encoder", encoder).finish()]); H.drop("encoder", encoder)
+
+# Finishes when everything submitted so far has run. Takes the device because
+# natively the callback fires only when one is polled, and polling is what
+# `request_ready` does while waiting.
+prim queue_work_done(device: i32, queue: i32) -> i32
+  js H.pending(H.get("queue", queue).onSubmittedWorkDone().then(() => 1))

@@ -1,21 +1,43 @@
-//! The HashLink C ABI, as a library sees it.
+//! The HashLink C ABI, as a native library sees it.
 //!
 //! An HDLL includes `hl.h` and links against libhl; this is the same thing in
-//! Rust. Everything here is either a `#[repr(C)]` layout the runtime and this
-//! library must agree on, or a function the runtime exports -- so this file
-//! contributes no code of its own, and a library built on it links nothing of
-//! the runtime's into itself.
+//! Rust, shared by every library in this repo that is one.
 //!
-//! That is the whole reason it is written out rather than imported from
-//! `ash_std`: depending on the runtime as a Rust crate would put a second
-//! copy of its `#[no_mangle]` exports in this library's archive, and two
-//! strong definitions of one name cannot be linked.
+//! **This crate must never gain a dependency on `ash_std`, or define a symbol
+//! of its own.** Everything here is either a `#[repr(C)]` layout the runtime
+//! and a library must agree on, or a function the runtime exports, so a
+//! library built on it links nothing of the runtime into itself. Depending on
+//! the runtime as a Rust crate would put a second copy of its `#[no_mangle]`
+//! exports in the library's archive, and two strong definitions of one name
+//! cannot be linked.
 
-// These are `hl.h`'s names, and they are spelled its way on purpose: someone
-// checking this against the header should be able to read the two side by
-// side. The runtime's own bindings suppress the same lints for the same
-// reason.
+// These are `hl.h`'s names, spelled its way on purpose: someone checking this
+// against the header should be able to read the two side by side.
 #![allow(non_camel_case_types)]
+
+/// Export a primitive the way `DEFINE_PRIM` does: a resolver that reports the
+/// signature through an out-parameter and returns the real function.
+///
+/// Never the primitive itself -- storing the resolver and calling it as the
+/// primitive writes a signature string through whatever the first argument
+/// happens to be.
+#[macro_export]
+macro_rules! define_prim {
+    ($resolver:ident, $function:ident, $signature:literal) => {
+        /// # Safety
+        /// `sign` must be writable, which is what a caller of a `DEFINE_PRIM`
+        /// resolver passes.
+        #[no_mangle]
+        pub unsafe extern "C" fn $resolver(
+            sign: *mut *const ::std::ffi::c_char,
+        ) -> *mut ::std::ffi::c_void {
+            if !sign.is_null() {
+                *sign = concat!($signature, "\0").as_ptr() as *const ::std::ffi::c_char;
+            }
+            $function as *mut ::std::ffi::c_void
+        }
+    };
+}
 
 use std::ffi::c_void;
 use std::os::raw::c_int;
@@ -30,6 +52,15 @@ pub struct hl_type {
 /// A byte, in HashLink's spelling. `hl.Bytes` is a pointer to these, and a
 /// string's bytes are UTF-16.
 pub type vbyte = u8;
+
+/// A Haxe `String` as it crosses this boundary: `_STRING` is `_OBJ(_BYTES
+/// _I32)`, so the bytes and their length, and the bytes are UTF-16.
+#[repr(C)]
+pub struct vstring {
+    pub t: *mut hl_type,
+    pub bytes: *mut u16,
+    pub length: c_int,
+}
 
 /// A HashLink array: a header, then the elements.
 #[repr(C)]
@@ -94,6 +125,77 @@ extern "C" {
     pub fn malloc(size: usize) -> *mut c_void;
     pub fn free(ptr: *mut c_void);
     pub fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+}
+
+/// The bytes of a `String`, or null.
+///
+/// # Safety
+/// `s` must be a `vstring` the VM allocated, or null.
+#[inline]
+pub unsafe fn string_bytes(s: *mut vstring) -> i32 {
+    if s.is_null() {
+        0
+    } else {
+        (*s).bytes as i32
+    }
+}
+
+/// Its length in UTF-16 code units, which is not its length in bytes.
+///
+/// # Safety
+/// As [`string_bytes`].
+#[inline]
+pub unsafe fn string_length(s: *mut vstring) -> i32 {
+    if s.is_null() {
+        0
+    } else {
+        (*s).length
+    }
+}
+
+/// What a `Null<Int>` holds.
+///
+/// Boxed rather than raw, so this is a pointer to unwrap and not an integer.
+/// Null reads as zero, which is what every GL name of zero already means:
+/// "no object".
+///
+/// # Safety
+/// `d` must be a `vdynamic` the VM allocated, or null.
+#[inline]
+pub unsafe fn unbox_i32(d: *mut vdynamic) -> i32 {
+    if d.is_null() {
+        0
+    } else {
+        (*d).v.i
+    }
+}
+
+/// A `Null<Int>` holding `value`.
+///
+/// # Safety
+/// Calls the runtime's allocator, so the GC must be up -- which it is by the
+/// time any primitive here is reached.
+#[inline]
+pub unsafe fn box_i32(value: i32) -> *mut vdynamic {
+    let d = hlp_alloc_dynamic(hlp_type_i32());
+    if !d.is_null() {
+        (*d).v.i = value;
+    }
+    d
+}
+
+/// An array of nothing.
+///
+/// What a host with no screen has to say when asked to list its displays or
+/// its devices. An empty array rather than null, because the caller iterates
+/// it and null would be a crash where "none" is the truth.
+///
+/// # Safety
+/// Calls the runtime's allocator, so the GC must be up -- which it is by the
+/// time any primitive here is reached.
+#[inline]
+pub unsafe fn empty_array() -> *mut varray {
+    hlp_alloc_array(hlp_type_bytes(), 0)
 }
 
 /// Allocate through the program, never through a second allocator of our own.

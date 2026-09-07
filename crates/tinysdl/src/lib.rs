@@ -26,34 +26,9 @@
 
 #![cfg(target_family = "wasm")]
 
-mod abi;
-
-/// This library allocates through the program. See [`abi::ProgramAllocator`].
+/// This library allocates through the program. See [`hl_abi::ProgramAllocator`].
 #[global_allocator]
-static ALLOCATOR: abi::ProgramAllocator = abi::ProgramAllocator;
-
-/// Export a primitive the way `DEFINE_PRIM` does: a resolver that reports the
-/// signature through an out-parameter and returns the real function.
-///
-/// Never the primitive itself -- storing the resolver and calling it as the
-/// primitive writes a signature string through whatever the first argument
-/// happens to be.
-macro_rules! define_prim {
-    ($resolver:ident, $function:ident, $signature:literal) => {
-        /// # Safety
-        /// `sign` must be a writable pointer, which is what the caller of a
-        /// `DEFINE_PRIM` resolver passes.
-        #[no_mangle]
-        pub unsafe extern "C" fn $resolver(
-            sign: *mut *const std::ffi::c_char,
-        ) -> *mut std::ffi::c_void {
-            if !sign.is_null() {
-                *sign = concat!($signature, "\0").as_ptr() as *const std::ffi::c_char;
-            }
-            $function as *mut std::ffi::c_void
-        }
-    };
-}
+static ALLOCATOR: hl_abi::ProgramAllocator = hl_abi::ProgramAllocator;
 
 mod generated;
 mod manual;

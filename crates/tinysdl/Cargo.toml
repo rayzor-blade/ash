@@ -11,6 +11,7 @@ publish = false
 # reaches the runtime through the C ABI, the way an HDLL reaches libhl. See
 # src/abi.rs.
 [dependencies]
+hl_abi = { path = "../hl_abi" }
 
 [lib]
 crate-type = ["staticlib"]

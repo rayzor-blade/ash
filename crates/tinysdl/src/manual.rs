@@ -7,7 +7,7 @@
 
 use std::ffi::c_void;
 
-use crate::abi::*;
+use hl_abi::*;
 
 /// Longest string this asks the host for. GL's answers here are a vendor, a
 /// renderer and two version strings; a driver name is the long one and is

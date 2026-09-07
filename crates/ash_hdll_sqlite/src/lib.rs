@@ -32,11 +32,11 @@
 //! not have to drain the cursor to answer.
 
 
-mod abi;
 
-/// This library allocates through the program. See [`abi::ProgramAllocator`].
+
+/// This library allocates through the program. See [`hl_abi::ProgramAllocator`].
 #[global_allocator]
-static ALLOCATOR: abi::ProgramAllocator = abi::ProgramAllocator;
+static ALLOCATOR: hl_abi::ProgramAllocator = hl_abi::ProgramAllocator;
 
 /// A NUL-terminated UTF-16 string, as Rust.
 ///
@@ -55,7 +55,7 @@ unsafe fn ucs2_to_string(p: *const u16) -> String {
 use std::ffi::c_void;
 use std::os::raw::{c_char, c_int};
 
-use crate::abi::{
+use hl_abi::{
     hl_aptr, hlp_alloc_array, hlp_alloc_bytes, hlp_alloc_dynamic, hlp_type_array, hlp_type_bytes,
     hlp_type_dyn, hlp_type_f64, hlp_type_i32, varray, vbyte, vdynamic,
 };

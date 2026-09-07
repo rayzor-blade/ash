@@ -1,0 +1,11 @@
+[package]
+name = "hl_native_gen"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Emit every side of a HashLink native library from one declaration"
+publish = false
+
+# A build-dependency of the libraries it generates, so building one needs
+# nothing but cargo. No dependencies of its own for the same reason.
+[dependencies]

@@ -83,14 +83,40 @@ const spawn = (request) => {
   return true;
 };
 
+// Where a frame goes, and it is not here. HashLink runs in this worker, which
+// is inside the call into the program for as long as the program runs and so
+// never returns to its event loop -- and a canvas reaches the page at the end
+// of a task. Painting from here produced exactly one frame, after every
+// thread had finished.
+//
+// The framebuffer is in shared memory, so nothing has to be copied out of it
+// on this thread. This describes it to the page once, the page forwards that
+// to `display.js`, and that agent paints from it at display rate while the
+// program keeps drawing. Repeating the description every frame would be
+// pointless -- it is the same buffer -- so only a change is sent.
+let display = false;
+let described = "";
+self.ashPresent = ({ memory, address, width, height }) => {
+  if (!display) return false;
+  const key = `${address}:${width}:${height}`;
+  if (key !== described) {
+    try {
+      self.postMessage({ kind: "display", memory, address, width, height });
+    } catch (e) {
+      // A memory that is not shared cannot be handed to another agent, which
+      // is a single-threaded module: it has no display here.
+      display = false;
+      post("meta", `no display: ${e.message}`);
+      return false;
+    }
+    described = key;
+  }
+  return true;
+};
+
 self.onmessage = async (event) => {
-  const { module, args, environ, canvas } = event.data;
-  // Where a frame goes. HashLink runs here, and this worker is inside the
-  // call into the program for as long as the program runs -- so nothing on
-  // the page can be asked to draw. An OffscreenCanvas the page transferred
-  // can be drawn from inside that call, and the host finds it here, beside
-  // the other things a page lends it.
-  if (canvas) self.ashCanvas = canvas;
+  const { module, args, environ, display: wanted } = event.data;
+  display = !!wanted;
   try {
     await init();
     // Before the program runs, and before it can ask for a thread.

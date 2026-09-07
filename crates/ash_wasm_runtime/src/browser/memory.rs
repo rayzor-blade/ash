@@ -27,6 +27,19 @@ impl Guest {
         Self { memory }
     }
 
+    /// The memory itself, for the one case that must not copy: handing
+    /// another agent a window onto a region the guest keeps writing. Every
+    /// other access here copies, and should.
+    pub fn memory(&self) -> &WebAssembly::Memory {
+        &self.memory
+    }
+
+    /// Whether `len` bytes at `ptr` are inside the guest, asked without
+    /// reading them.
+    pub fn holds(&self, ptr: u32, len: u32) -> bool {
+        ptr.checked_add(len).is_some_and(|end| end <= self.len())
+    }
+
     /// A fresh view. Never stored: see the note above about growing.
     fn view(&self) -> Uint8Array {
         Uint8Array::new(&self.memory.buffer())

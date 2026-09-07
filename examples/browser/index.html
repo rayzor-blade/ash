@@ -66,10 +66,23 @@ const tick = () => {
 };
 requestAnimationFrame(tick);
 
+// The compositor, made only for a demo that draws. It owns the canvas: the
+// page gives up the right to draw on its own element, which is what keeps
+// this thread out of the paint path and leaves the counter above measuring a
+// thread with nothing to do.
+let display = null;
+
 worker.onmessage = ({ data }) => {
   if (data.kind === "done") {
     counting = false;
     document.title = data.trapped ? "HashLink in wasm — trapped" : "HashLink in wasm — done";
+    return;
+  }
+  // Where the program's framebuffer is, forwarded to the agent that paints.
+  // It is a description, not a frame: the memory is shared, so the pixels
+  // never travel and the program is not waited on for them.
+  if (data.kind === "display") {
+    if (display) display.postMessage(data);
     return;
   }
   write(data.text, data.kind === "err" ? "err" : data.kind === "meta" ? "meta" : "");
@@ -106,19 +119,20 @@ document.getElementById("which").textContent = drawing
     ? "threads — four Haxe threads, each in a Worker of its own"
     : "single-threaded — strings, maps, closures, exceptions, arithmetic";
 
-// The canvas goes to the worker, not the other way round: see worker.js.
-// `transferControlToOffscreen` hands ownership over, so nothing here draws to
-// it again -- which is the point, because this thread is free and the one
-// drawing is not.
+// The canvas goes to the compositor, not to the worker running HashLink and
+// not back to this thread. That worker never returns to its event loop while
+// a program runs, so a frame drawn there would not reach the page until the
+// program ended; this thread could paint, but then the counter above would
+// be measuring a thread with work to do. A third agent has neither problem.
 const args = [module.slice(2)];
 if (drawing) args.push(String(wanted));
-const message = { module, args };
-const transfer = [];
 if (drawing) {
   const screen = document.getElementById("screen");
   screen.hidden = false;
-  message.canvas = screen.transferControlToOffscreen();
-  transfer.push(message.canvas);
+  display = new Worker("./display.js");
+  display.onerror = (e) => write(`display: ${e.message}`, "err");
+  const canvas = screen.transferControlToOffscreen();
+  display.postMessage({ canvas }, [canvas]);
 }
-worker.postMessage(message, transfer);
+worker.postMessage({ module, args, display: drawing });
 </script>

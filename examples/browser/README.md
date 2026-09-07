@@ -188,26 +188,39 @@ and the entities inside it. No thread touches another's pixels, so there is no
 lock and nothing to contend for, and the picture is what the threads did: a
 band that stops moving is a thread that stopped.
 
-The threads never present. They write RGBA into the guest's own memory, and
-the main thread hands the host that address sixty times a second through one
-import, `ash_host_canvas_present`. That is the whole graphics interface --
-`std/src/canvas.rs` on the guest side, `browser/canvas.rs` on the page's.
+**The agent running HashLink cannot be the one that paints.** It is inside a
+call into the program for as long as the program runs and never returns to its
+event loop, and a canvas reaches the page at the end of a task. A frame drawn
+there does not arrive late; it does not arrive at all until the program ends.
+Measured, by drawing from there first: the whole run composited as a single
+frame, after every thread had finished.
 
-**It has to be an `OffscreenCanvas`.** The module runs in a Worker, and by the
-time it is drawing it is inside a call into wasm that will not return for the
-length of the program. A `<canvas>` belongs to the document and can only be
-drawn from the thread that owns it, which is exactly the thread that is not
-free. `transferControlToOffscreen()` moves the drawing surface to the worker
-instead, and the page keeps the element without keeping the right to draw on
-it. The page transfers it in the same message that starts the program, and
-`worker.js` puts it on `globalThis.ashCanvas` where the host finds it.
+So three agents, and each has exactly one reason to exist. `worker.js` runs
+the program and never paints. `display.js` owns the canvas and paints,
+because its event loop is free. The page's own thread does neither, because
+the frame counter it keeps is only evidence while it has nothing to do.
 
-Pixels are copied on the way out rather than passed. `ImageData` refuses a
-view onto a `SharedArrayBuffer`, and a threaded module's memory is one.
+The threads never present either. They write RGBA into the guest's own
+memory, and the main thread hands the host that address through one import,
+`ash_host_canvas_present` -- `std/src/canvas.rs` on the guest side,
+`browser/canvas.rs` on the page's. What crosses is a description, not a
+frame: the memory is shared, so the pixels never travel, and the compositor
+reads them at display rate while the program keeps writing them. Nothing is
+synchronised and nothing waits, which is what makes it real time. A frame can
+catch a band mid-update; at these rates that is invisible, and it is the
+honest picture of several threads writing one buffer.
 
-Where the host has no canvas -- wasmtime, node, a page that transferred none
--- `present` answers false and the program says frames were drawn and not
-shown. It is the same program either way; only the last line differs.
+`transferControlToOffscreen()` is what lets an agent own a `<canvas>` the page
+keeps in its document. Pixels are copied on the way in: `ImageData` refuses a
+view onto a `SharedArrayBuffer`, and a threaded module's memory is one. The
+compositor paints on an interval rather than an animation frame, because a
+worker has no `requestAnimationFrame`; each tick is a task, and a task that
+drew is what pushes a frame to the page.
+
+Where the page installs no sink -- wasmtime, node, the single-threaded demo
+whose memory cannot be handed to another agent -- `present` answers false and
+the program says frames were drawn and not shown. It is the same program
+either way; only the last line differs.
 
 Where an entity is is a function of the clock rather than of frames drawn, so
 the picture is the same picture whatever rate a band manages.
@@ -218,10 +231,9 @@ allocates some twenty megabytes a second doing it, while nobody sees more than
 sixty: the frames past the sixtieth are invisible and the garbage behind them
 is not. Four threads of that bury the collector -- measured, a 512 MB heap
 full after fifteen collections, world stops abandoned after two seconds each
--- and every one of those stops pauses the thread that presents. The picture
-arrives in lurches and then the program dies. Drawing what is shown and no
-more is what makes it real time; capped, the same run holds 60/s on all four
-bands for its whole length.
+-- and every one of those stops pauses the thread that presents. Drawing what
+is shown and no more is what makes it real time; capped, the same run holds
+60/s on all four bands for its whole length.
 
 A third argument takes the cap off (`entities.wasm 4 15 100000`). It is only
 worth doing to put the collector under a load a page must never give it.

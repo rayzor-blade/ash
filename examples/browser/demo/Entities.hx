@@ -35,7 +35,7 @@ import sys.thread.Deque;
 class Entities {
 	static inline var W = 640;
 	static inline var H = 360;
-	static inline var PER_BAND = 14;
+	static inline var PER_BAND = 40;
 	static inline var R = 7;
 	static inline var TRAIL = 12;
 	// How far back in time each trail sample is taken. Long enough to see,

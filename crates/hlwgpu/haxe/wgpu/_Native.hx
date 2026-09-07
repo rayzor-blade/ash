@@ -232,8 +232,18 @@ class _Native {
 	}
 
 	// Opens a vertex buffer layout; the attributes that follow belong to it.
+	// A stride of 0 means "as wide as the attributes turn out to be", worked out
+	// when the pipeline is built.
 	@:hlNative("wgpu", "pipeline_vertex_buffer")
 	public static function pipeline_vertex_buffer(builder : Int, stride : Int, step : Int) : Void {
+		return;
+	}
+
+	// Appends an attribute packed against the one before it, at the next free
+	// shader location. What a vertex layout almost always is, and one fewer pair
+	// of numbers to get wrong.
+	@:hlNative("wgpu", "pipeline_attribute_packed")
+	public static function pipeline_attribute_packed(builder : Int, format : Int) : Void {
 		return;
 	}
 

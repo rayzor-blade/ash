@@ -2,8 +2,13 @@ package wgpu;
 
 /** A pipeline with shaders, which still has nothing to draw into. **/
 abstract PipelineStages(Int) from Int to Int {
-	/** Opens a vertex buffer layout; attributes then belong to it. **/
-	public inline function vertexBuffer(stride : Int, step : VertexStepMode = Vertex) : PipelineVertexBuffer {
+	/**
+		Opens a vertex buffer layout; attributes then belong to it.
+
+		Leave `stride` alone and it is as wide as the attributes turn out to
+		be, which is what a packed layout wants.
+	**/
+	public inline function vertexBuffer(stride = 0, step : VertexStepMode = Vertex) : PipelineVertexBuffer {
 		_Native.pipeline_vertex_buffer(this, stride, step);
 		return cast this;
 	}

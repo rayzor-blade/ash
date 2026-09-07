@@ -1059,6 +1059,30 @@ pub unsafe fn pipeline_attribute(builder: i32, format: i32, offset: i32, locatio
     });
 }
 
+/// Appends packed against the previous attribute, at the next free location.
+///
+/// Locations count across every buffer of the pipeline; offsets restart with
+/// each buffer, because that is what an offset is relative to.
+pub unsafe fn pipeline_attribute_packed(builder: i32, format: i32) {
+    building(builder, |build| {
+        let location = build
+            .buffers
+            .iter()
+            .map(|(_, _, attributes)| attributes.len())
+            .sum::<usize>() as u32;
+        if let Some((_, _, attributes)) = build.buffers.last_mut() {
+            let offset = attributes
+                .last()
+                .map_or(0, |a| a.offset + a.format.size());
+            attributes.push(wgpu::VertexAttribute {
+                format: vertex_format(format),
+                offset,
+                shader_location: location,
+            });
+        }
+    });
+}
+
 pub unsafe fn pipeline_target(builder: i32, format: i32, write_mask: i32) {
     building(builder, |build| {
         build.targets.push((
@@ -1126,7 +1150,17 @@ pub unsafe fn render_pipeline_build(builder: i32) -> i32 {
         .buffers
         .iter()
         .map(|(stride, step, attributes)| wgpu::VertexBufferLayout {
-            array_stride: *stride,
+            // Zero means the caller did not say, so it is as wide as the
+            // attributes turned out to be.
+            array_stride: if *stride != 0 {
+                *stride
+            } else {
+                attributes
+                    .iter()
+                    .map(|a| a.offset + a.format.size())
+                    .max()
+                    .unwrap_or(0)
+            },
             step_mode: *step,
             attributes,
         })

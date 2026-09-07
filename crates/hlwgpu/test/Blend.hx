@@ -73,13 +73,12 @@ fn fs(in : VsOut) -> @location(0) vec4<f32> {
 		queue.write(vertices, 0, vertexData);
 
 		var shader = device.shader(SHADER);
+		// Position then colour, packed: the stride and both offsets follow
+		// from the formats, so there is nothing here to get wrong.
 		var pipeline = device.pipeline()
 			.shader(shader, "vs", "fs")
-			.vertexBuffer(24)
-				.attribute(Float32x2, 0, 0)
-				.attribute(Float32x4, 8, 1)
-			.target(Rgba8Unorm)
-				.blend(One, One)
+			.vertexBuffer().attributes(Float32x2, Float32x4)
+			.target(Rgba8Unorm).blend(One, One)
 			.build();
 
 		var encoder = device.encoder();

@@ -19,6 +19,9 @@ const FORMATS = ["rgba8unorm", "bgra8unorm", "rgba8unorm-srgb", "depth32float", 
 // Vertex attribute formats, likewise `wgpu.VertexFormat`.
 const VERTEX_FORMATS = ["float32x2", "float32x3", "float32x4", "uint32"];
 
+// Bytes each takes, in the same order. Grows with VERTEX_FORMATS.
+const VERTEX_FORMAT_SIZES = [8, 12, 16, 4];
+
 // Limits `adapter_limit` can ask for, by index. Haxe's `wgpu.Limit` is the
 // same list in the same order.
 const LIMITS = [
@@ -238,13 +241,39 @@ export function makeHandles(rt) {
     const d = get("builder", builder);
     const pipeline = get("device", d.device).createRenderPipeline({
       layout: "auto",
-      vertex: { module: d.module, entryPoint: d.vs, buffers: d.vertex.buffers },
+      vertex: {
+        module: d.module,
+        entryPoint: d.vs,
+        buffers: d.vertex.buffers.map((b) => ({
+          arrayStride: b.arrayStride || b.attributes.reduce(
+            (w, a) => Math.max(w, a.offset + VERTEX_FORMAT_SIZES[a.formatIndex]), 0),
+          stepMode: b.stepMode,
+          attributes: b.attributes.map(({ format, offset, shaderLocation }) =>
+            ({ format, offset, shaderLocation })),
+        })),
+      },
       fragment: { module: d.module, entryPoint: d.fs, targets: d.fragment.targets },
       primitive: d.primitive,
       depthStencil: d.depthStencil ?? undefined,
     });
     drop("builder", builder);
     return put("renderpipeline", pipeline);
+  }
+
+  // Packs an attribute against the previous one, at the next free location.
+  // Locations count across every buffer of the pipeline, not within one.
+  function packAttribute(builder, format) {
+    const buffers = get("builder", builder).vertex.buffers;
+    const into = buffers[buffers.length - 1];
+    const last = into.attributes[into.attributes.length - 1];
+    const offset = last ? last.offset + VERTEX_FORMAT_SIZES[last.formatIndex] : 0;
+    const location = buffers.reduce((n, b) => n + b.attributes.length, 0);
+    into.attributes.push({
+      format: VERTEX_FORMATS[format],
+      formatIndex: format,
+      offset,
+      shaderLocation: location,
+    });
   }
 
   function formatName(which) {
@@ -286,7 +315,7 @@ export function makeHandles(rt) {
     put, get, drop, pending, requestReady, requestResult,
     putDevice, queueOf, dropDevice,
     str, readStr, view, handles, writeInto,
-    beginPass, pass, endPass, formatName, canvasFormat, attributes, buildPipeline, resource, layoutOf, releaseFrame,
+    beginPass, pass, endPass, formatName, canvasFormat, attributes, packAttribute, buildPipeline, resource, layoutOf, releaseFrame,
     limitName, registerCanvas, canvas, LIMITS,
   };
 }

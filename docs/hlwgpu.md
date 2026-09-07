@@ -288,10 +288,15 @@ handle, and the compiler refuses a chain that does not make sense:
 ```haxe
 device.pipeline()
     .shader(shader, "vs", "fs")
-    .vertexBuffer(24).attribute(Float32x2, 0, 0).attribute(Float32x4, 8, 1)
+    .vertexBuffer().attributes(Float32x2, Float32x4)
     .target(Rgba8Unorm).blend(One, One)
     .build();
 ```
+
+`attributes` is variadic, and packs: the stride and every offset follow from
+the formats, at consecutive shader locations. Those are numbers a caller would
+otherwise compute by hand and occasionally get wrong -- `attribute(format,
+offset, location)` is still there for a layout that is not packed.
 
 `attribute` exists only after a `vertexBuffer`, `blend` only after a `target`,
 and `build` only once there is something to draw into. Every state is an

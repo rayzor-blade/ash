@@ -199,8 +199,16 @@ prim pipeline_shader(builder: i32, shader: i32, vs: bytes, fs: bytes) -> void
   js const d = H.get("builder", builder); d.module = H.get("shader", shader); d.vs = H.readStr(vs); d.fs = H.readStr(fs)
 
 # Opens a vertex buffer layout; the attributes that follow belong to it.
+# A stride of 0 means "as wide as the attributes turn out to be", worked out
+# when the pipeline is built.
 prim pipeline_vertex_buffer(builder: i32, stride: i32, step: i32) -> void
   js H.get("builder", builder).vertex.buffers.push({ arrayStride: stride, stepMode: VERTEX_STEP_MODE[step], attributes: [] })
+
+# Appends an attribute packed against the one before it, at the next free
+# shader location. What a vertex layout almost always is, and one fewer pair
+# of numbers to get wrong.
+prim pipeline_attribute_packed(builder: i32, format: i32) -> void
+  js H.packAttribute(builder, format)
 
 prim pipeline_attribute(builder: i32, format: i32, offset: i32, location: i32) -> void
   js const b = H.get("builder", builder).vertex.buffers; b[b.length - 1].attributes.push({ format: VERTEX_FORMATS[format], offset, shaderLocation: location })

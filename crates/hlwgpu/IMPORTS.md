@@ -51,6 +51,7 @@ NUL-terminated UTF-16 allocated through the program's `hlp_alloc_bytes`.
 | `hlwgpu_pipeline_begin` | `device: i32` | `i32` |
 | `hlwgpu_pipeline_shader` | `builder: i32`, `shader: i32`, `vs: i32`, `fs: i32` | `void` |
 | `hlwgpu_pipeline_vertex_buffer` | `builder: i32`, `stride: i32`, `step: i32` | `void` |
+| `hlwgpu_pipeline_attribute_packed` | `builder: i32`, `format: i32` | `void` |
 | `hlwgpu_pipeline_attribute` | `builder: i32`, `format: i32`, `offset: i32`, `location: i32` | `void` |
 | `hlwgpu_pipeline_target` | `builder: i32`, `format: i32`, `write_mask: i32` | `void` |
 | `hlwgpu_pipeline_blend` | `builder: i32`, `src: i32`, `dst: i32`, `op: i32`, `src_alpha: i32`, `dst_alpha: i32`, `op_alpha: i32` | `void` |

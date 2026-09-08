@@ -3,12 +3,11 @@
 //! Tier-1 code polls a re-tier slot at its loop headers, and when a tier-2 OSR
 //! entry is published the running loop jumps to it, spilling a register image
 //! on the way. If that image is not the one the entry reads, the loop resumes
-//! holding values that are not its own: it restarts, or exits early, and every
-//! run differs. Nothing crashes.
+//! holding values that are not its own.
 //!
-//! The fixture's counters are all loop-carried, so any of that shows up as a
-//! wrong total. Compared against the interpreter rather than a fixed number,
-//! so the test says "the tiers disagree" rather than restating the loop bound.
+//! The fixture's counters are all loop-carried, so that shows up as a wrong
+//! total. Compared against the interpreter rather than a fixed number, so a
+//! failure reads as "the tiers disagree".
 
 mod common;
 
@@ -39,9 +38,8 @@ fn a_hot_loop_keeps_its_counters_across_a_tier_handoff() {
     }
     let interp = run(&["--mode", "interp"], &[]);
 
-    // Repeated because the failure depends on when the tier-2 compile lands:
-    // one run in the original defect restarted the loop, another stopped
-    // early, and a third could have been correct by luck.
+    // Repeated: whether the hand-off happens at all depends on when the
+    // tier-2 compile lands, so one run can pass by luck.
     for attempt in 0..3 {
         let hybrid = run(&["--mode", "hybrid"], &[]);
         assert_eq!(

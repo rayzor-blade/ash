@@ -1161,16 +1161,12 @@ struct ThrowSite {
 
 static THROW_SITES: std::sync::Mutex<Vec<ThrowSite>> = std::sync::Mutex::new(Vec::new());
 
-/// Say something once when one site throws in a storm.
+/// Report once when one site throws in a storm.
 ///
-/// A program that throws thousands of times a second from a single line makes
-/// no progress and prints nothing: the exception is caught and retried, so it
-/// is not an error anywhere, and the loop is not stalled either, so
-/// `ASH_STALL_LOG` stays quiet too. The only way to see it was to already
-/// suspect it and set `ASH_TRACE_THROW`.
+/// A throw that is caught and retried is not an error anywhere, and a loop
+/// making progress is not a stall, so nothing else reports it.
 ///
-/// Semantics are unchanged. This counts and prints; the exception propagates
-/// exactly as it did.
+/// Counts and prints only; the exception propagates unchanged.
 unsafe fn note_throw_site(v: *mut vdynamic) {
     let threshold = throw_storm_threshold();
     if threshold == 0 {

@@ -1,23 +1,13 @@
 //! One ascending region for every JIT section, on Windows x86-64.
 //!
-//! RuntimeDyld has no real image to compute RVAs against, so it fakes
-//! `__ImageBase` as the lowest section address it has seen — and memoises it
-//! on first use (`RuntimeDyldCOFFX86_64.h`). Every JIT function here carries
-//! `.pdata`/`.xdata`, because `frame-pointer=all` is set and nothing sets
-//! `nounwind`, and each of those is three `IMAGE_REL_AMD64_ADDR32NB`
-//! relocations against that frozen value. The relocation is fatal when an
-//! address sits below it or more than 4GB above:
-//!
-//! ```text
-//! LLVM ERROR: IMAGE_REL_AMD64_ADDR32NB relocation requires an ordered section layout
-//! ```
-//!
-//! The tiered JIT adds an object to the same MCJIT for every promotion and
-//! every OSR entry, and LLVM's default memory manager places their sections
-//! with independent hints that fall back to letting the OS choose. So the
-//! first object freezes the base and a later one eventually lands under it.
-//! Exposure grows with promotion count, which is why this kills a long run
-//! rather than a short one.
+//! RuntimeDyld has no real image, so it fakes `__ImageBase` as the lowest
+//! section address it has seen and memoises it on first use
+//! (`RuntimeDyldCOFFX86_64.h`). Every JIT function carries `.pdata`/`.xdata`,
+//! and each of those is three `IMAGE_REL_AMD64_ADDR32NB` relocations against
+//! that value, which is fatal for an address below it or more than 4GB above.
+//! Since the tiered JIT adds an object to the same MCJIT per promotion, and
+//! LLVM's default manager lets the OS place their sections, a later object can
+//! land under the frozen base.
 //!
 //! Serving every section from one reserved region, upward, is the layout
 //! RuntimeDyld's own comment asks the memory manager to provide: the first

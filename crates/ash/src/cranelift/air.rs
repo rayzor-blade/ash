@@ -249,33 +249,17 @@ struct RetierState {
 static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierState>>> =
     std::sync::Mutex::new(None);
 
-/// OFF, because the hand-off loses the loop's live registers.
+/// Whether a loop already running tier-1 code may hand itself to tier 2.
 ///
-/// A loop already running tier-1 code polls its re-tier slot, finds the
-/// address of an LLVM OSR entry and jumps to it, spilling a register image on
-/// the way out (`emit_retier_poll`). That image is what the exit happens to
-/// have materialized -- the header's phis plus dominating definitions still in
-/// `self.vals` -- and the entry reads its slots by its own `value_reg`
-/// numbering. When the two disagree the loop resumes holding values that are
-/// not its own.
+/// Off: the exit spills the register image it has materialized, and the entry
+/// reads its slots by its own `value_reg` numbering, so a loop can resume
+/// holding values that are not its own. Making it correct means spilling the
+/// entry's live-in set, the way `try_osr_transfer` fills a buffer from an
+/// interpreted frame.
 ///
-/// Measured on a 200,000-iteration loop calling a function that throws and
-/// catches: one run jumped from i=49959 back to i=0 and ran the whole range
-/// again, ending at 249,960 iterations; others exited early at i≈40,000. Every
-/// run differs. `ASH_CL_RETIER=0` was already the switch, and it is now the
-/// default.
-///
-/// Neither register count nor AIR config differs in the failing case -- both
-/// were checked -- so the disagreement is in WHICH registers the exit spills,
-/// not how many. Fixing it means having the exit spill exactly the entry's
-/// live-in set, the way `try_osr_transfer` fills a buffer from an interpreted
-/// frame. Until then a loop finishes in tier-1 code and tier 2 takes over at
-/// the next call: one loop of lost speed, no lost answers.
-///
-/// What turning it on was worth, measured on an idle x86_64 box, for whoever
-/// takes that on: method_call 194ms -> 153ms, closure_call 269ms -> 176ms,
-/// mandelbrot 313ms -> 305ms, against 8ms and 5ms costs on free_call and
-/// inlined_call. `ASH_CL_RETIER=1` restores it.
+/// `ASH_CL_RETIER=1` turns it on. It is worth having: method_call 194ms ->
+/// 153ms, closure_call 269ms -> 176ms, mandelbrot 313ms -> 305ms, against 8ms
+/// and 5ms on free_call and inlined_call.
 pub fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "1"))

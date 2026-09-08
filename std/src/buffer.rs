@@ -28,25 +28,13 @@ pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     (*buffer_ptr).blen = 16;
     (*buffer_ptr).data = std::ptr::null_mut();
 
-    // Rooted on wasm ONLY, and released again by `hlp_buffer_content`.
+    // Rooted on wasm only, and released by `hlp_buffer_content`.
     //
-    // Everywhere else the caller's stack keeps it alive, as upstream relies on
-    // (`buffer.c` uses `hl_gc_alloc_raw` and roots nothing): a value live
-    // across a call is in a callee-saved register or on the stack, and
-    // `mark_roots` scans both, spilling the registers before it probes.
-    //
-    // That argument does not hold on wasm. A value live across a call can stay
-    // in a wasm local, which lives in the engine's frame rather than in linear
-    // memory, so the collector cannot see it -- the open problem
-    // `docs/wasm/README.md` records under "GC roots". A buffer held only there
-    // is collected while `hlp_buffer_val` is still appending to it.
-    //
-    // The root is scoped rather than permanent. Both of these were registered
-    // from the first commit in this repo and never released, because
-    // `unregister_persistent` had no callers, so every buffer and every chunk
-    // survived to process exit and each collection re-marked all of them.
-    // `Std.string` of anything but an Int or Float allocates one, which made
-    // the cost superlinear in the number of such calls.
+    // Elsewhere the caller's stack keeps it alive, as upstream relies on: a
+    // value live across a call sits in a callee-saved register or on the
+    // stack, and `mark_roots` scans both. On wasm it can sit in a wasm local,
+    // which is in the engine's frame rather than linear memory, where the
+    // collector cannot see it.
     #[cfg(target_family = "wasm")]
     gc.register_persistent(buffer_ptr as *mut vdynamic);
 
@@ -241,10 +229,8 @@ pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) ->
         *len = (*b).totlen;
     }
 
-    // The buffer's contents are now in `buf`, so the root `hlp_alloc_buffer`
-    // took on wasm has done its job. Releasing it here is what keeps that root
-    // scoped instead of permanent; a buffer abandoned without ever reaching
-    // this call stays rooted, which is the old behaviour for that one case.
+    // The contents are in `buf` now, so the wasm root has done its job. A
+    // buffer abandoned without reaching this call stays rooted.
     #[cfg(target_family = "wasm")]
     gc.unregister_persistent(b as *mut vdynamic);
 

@@ -20,10 +20,17 @@ const EXPECTED: &str = "opened 4000";
 const FD_LIMIT: u32 = 256;
 
 #[cfg(unix)]
-fn run_under_fd_limit(mode: &[&str]) -> (String, String) {
+fn run_under_fd_limit(mode: &[&str], label: &str) -> (String, String) {
     let hl = tests_dir().join("test_finalizers.hl");
     assert!(hl.exists(), "fixture not built: {}", hl.display());
-    let probe = std::env::temp_dir().join(format!("ash_finalizers_{}.txt", std::process::id()));
+    // Per test, not just per process: these two run concurrently, and sharing
+    // one probe let whichever finished first delete the file the other was
+    // still reopening -- an Eof or a SysError rather than the descriptor
+    // exhaustion this is looking for.
+    let probe = std::env::temp_dir().join(format!(
+        "ash_finalizers_{}_{label}.txt",
+        std::process::id()
+    ));
 
     // `ulimit` rather than a `pre_exec` setrlimit, so the limit is visible in
     // the command if this ever has to be reproduced by hand.
@@ -52,7 +59,7 @@ fn assert_finalizes(mode: &[&str], label: &str) {
         eprintln!("skipping {label}: haxe not on PATH");
         return;
     }
-    let (stdout, stderr) = run_under_fd_limit(mode);
+    let (stdout, stderr) = run_under_fd_limit(mode, label);
     assert!(
         stdout.contains(EXPECTED),
         "{label}: the collector did not close abandoned file handles.\n\

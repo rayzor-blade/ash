@@ -1137,9 +1137,115 @@ fn throw_trace_enabled() -> bool {
     *V.get_or_init(|| std::env::var("ASH_TRACE_THROW").is_ok())
 }
 
+/// How many throws from one site in one second count as a storm.
+///
+/// `ASH_THROW_STORM=0` turns the warning off; any other integer sets the
+/// threshold. The default is high enough that no test throws through it --
+/// output on this path is compared between engines, and an extra line breaks
+/// every jit-vs-interp diff that exercises exceptions.
+fn throw_storm_threshold() -> u32 {
+    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("ASH_THROW_STORM") {
+        Ok(v) => v.trim().parse().unwrap_or(1000),
+        Err(_) => 1000,
+    })
+}
+
+/// Throws seen from one site, and whether it has been reported.
+struct ThrowSite {
+    pc: usize,
+    count: u32,
+    since: std::time::Instant,
+    reported: bool,
+}
+
+static THROW_SITES: std::sync::Mutex<Vec<ThrowSite>> = std::sync::Mutex::new(Vec::new());
+
+/// Say something once when one site throws in a storm.
+///
+/// A program that throws thousands of times a second from a single line makes
+/// no progress and prints nothing: the exception is caught and retried, so it
+/// is not an error anywhere, and the loop is not stalled either, so
+/// `ASH_STALL_LOG` stays quiet too. The only way to see it was to already
+/// suspect it and set `ASH_TRACE_THROW`.
+///
+/// Semantics are unchanged. This counts and prints; the exception propagates
+/// exactly as it did.
+unsafe fn note_throw_site(v: *mut vdynamic) {
+    let threshold = throw_storm_threshold();
+    if threshold == 0 {
+        return;
+    }
+    // The innermost HAXE frame, not the innermost frame. Frame zero is inside
+    // the runtime -- `hlp_error` and whatever raised through it -- which is
+    // the same address whatever the program did, so keying on it would merge
+    // every site that throws the same way and name none of them.
+    //
+    // The two symbol tables hold Haxe functions and nothing else, so the first
+    // frame either can name is the program's own. A throw with no such frame
+    // keys on frame zero and reports an address, which is still one line
+    // instead of none.
+    let site = EXCEPTION_STACK.with(|saved| {
+        let frames = saved.borrow();
+        frames
+            .iter()
+            .find_map(|&pc| {
+                aot_symbol_for_pc(pc).map(|name| (pc, Some(name)))
+            })
+            .or_else(|| frames.first().map(|&pc| (pc, None)))
+    });
+    let Some((pc, name)) = site else {
+        return;
+    };
+    let Ok(mut sites) = THROW_SITES.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let Some(site) = sites.iter_mut().find(|s| s.pc == pc) else {
+        // Bounded: a program with thousands of distinct throwing sites is not
+        // the shape this looks for, and the list is walked on every throw.
+        if sites.len() < 64 {
+            sites.push(ThrowSite {
+                pc,
+                count: 1,
+                since: now,
+                reported: false,
+            });
+        }
+        return;
+    };
+    if site.reported {
+        return;
+    }
+    if now.duration_since(site.since) > std::time::Duration::from_secs(1) {
+        site.count = 1;
+        site.since = now;
+        return;
+    }
+    site.count += 1;
+    if site.count < threshold {
+        return;
+    }
+    site.reported = true;
+    let count = site.count;
+    drop(sites);
+
+    let where_ = match name {
+        Some(name) => name.to_string(),
+        None => format!("{pc:#x}"),
+    };
+    eprintln!(
+        "[ash] throw storm: {count} throws in under a second from {where_} -- \
+         {}. Nothing is wrong with the VM; the program is throwing and \
+         retrying. ASH_THROW_STORM=0 silences this.",
+        describe_exception(v)
+    );
+}
+
 unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     if capture_stack {
         capture_exception_stack();
+        note_throw_site(v);
     }
     // Trace throws only on request: an unconditional line here differs
     // between engines (the interpreter throws through its own machinery)

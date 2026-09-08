@@ -117,9 +117,19 @@ in the game directory, or on `PATH`.
   xmm6-15 non-volatile. Compiles-but-corrupts, so it is a runtime blocker for
   Reflect and constructors that neither CI nor the Heaps example reaches.
   This is the largest remaining item.
+- **The MCJIT `__ImageBase` abort.** A long x86-64 run dies with
+  `LLVM ERROR: IMAGE_REL_AMD64_ADDR32NB relocation requires an ordered section
+  layout`. RuntimeDyld fakes `__ImageBase` as the lowest section address it has
+  seen and caches it on the first object; every later tier promotion adds
+  another object to the same engine, and the first section to land below that
+  frozen value aborts the process. See `docs/windows-mcjit-imagebase.md` for
+  the mechanism, the options and how to verify a fix.
 - **The Win64 longjmp/SEH question is untested, not resolved.** Win64
   `longjmp` performs a real SEH unwind, which wants `.pdata`/`.xdata` for
-  every frame between throw and trap — which JIT-emitted frames do not have.
+  every frame between throw and trap. JIT-emitted frames do carry it — nothing
+  under `crates/ash/src/llvm/` sets `nounwind`, and `frame-pointer=all` is on
+  every function — so the question is whether that data is correct and
+  reachable, not whether it exists.
   HashLink zeroes the jmp_buf's frame slot so longjmp degrades to a register
   restore; ash does not, and nothing run on Windows so far throws across a
   JIT frame. The first program that does is the test.

@@ -33,8 +33,13 @@ fn remove_waiter(waiters: &mut VecDeque<Waiter>, waiter: Waiter) {
 
 #[repr(C)]
 struct HlMutex {
+    /// Word zero: the collector's finalizer slot, and the flag the free
+    /// below guards on. Upstream's `hl_mutex` names it `free` and uses it the
+    /// same way.
+    free: Option<crate::gc::Finalizer>,
     state: std::sync::Mutex<MutexState>,
 }
+const _: () = assert!(std::mem::offset_of!(HlMutex, free) == 0);
 
 struct MutexState {
     owner: Option<u64>,
@@ -106,13 +111,23 @@ unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
-    Box::into_raw(Box::new(HlMutex {
-        state: std::sync::Mutex::new(MutexState {
-            owner: None,
-            depth: 0,
-            waiters: VecDeque::new(),
-        }),
-    })) as *mut c_void
+    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
+        as *mut HlMutex;
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    // Raw memory: write the field rather than assigning, which would drop
+    // whatever the previous occupant's bytes look like.
+    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(MutexState {
+        owner: None,
+        depth: 0,
+        waiters: VecDeque::new(),
+    }));
+    p as *mut c_void
+}
+
+unsafe extern "C" fn finalize_mutex(block: *mut c_void) {
+    hlp_mutex_free(block);
 }
 
 #[no_mangle]
@@ -139,9 +154,17 @@ pub unsafe extern "C" fn hlp_mutex_release(m: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_free(m: *mut c_void) {
-    if !m.is_null() {
-        drop(Box::from_raw(m as *mut HlMutex));
+    if m.is_null() {
+        return;
     }
+    let p = m as *mut HlMutex;
+    // Upstream's `if( l->free ) { destroy; l->free = NULL; }`. The slot is
+    // the flag, so an explicit free and a later collection cannot both run
+    // this, and a block freed here is one the collector then skips.
+    if (*p).free.take().is_none() {
+        return;
+    }
+    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 // HDLLs call HashLink's public C API names directly, while Haxe bytecode
@@ -178,8 +201,13 @@ pub unsafe extern "C" fn hl_mutex_free(m: *mut c_void) {
 
 #[repr(C)]
 struct HlSemaphore {
+    /// Word zero: the collector's finalizer slot, and the flag the free
+    /// below guards on. Upstream's `hl_semaphore` names it `free` and uses it the
+    /// same way.
+    free: Option<crate::gc::Finalizer>,
     state: std::sync::Mutex<SemaphoreState>,
 }
+const _: () = assert!(std::mem::offset_of!(HlSemaphore, free) == 0);
 
 struct SemaphoreState {
     value: i32,
@@ -216,12 +244,20 @@ unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant>
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
-    Box::into_raw(Box::new(HlSemaphore {
-        state: std::sync::Mutex::new(SemaphoreState {
-            value,
-            waiters: VecDeque::new(),
-        }),
-    })) as *mut c_void
+    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
+        as *mut HlSemaphore;
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(SemaphoreState {
+        value,
+        waiters: VecDeque::new(),
+    }));
+    p as *mut c_void
+}
+
+unsafe extern "C" fn finalize_semaphore(block: *mut c_void) {
+    hlp_semaphore_free(block);
 }
 
 unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool {
@@ -292,9 +328,14 @@ pub unsafe extern "C" fn hlp_semaphore_release(sem: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_free(sem: *mut c_void) {
-    if !sem.is_null() {
-        drop(Box::from_raw(sem as *mut HlSemaphore));
+    if sem.is_null() {
+        return;
     }
+    let p = sem as *mut HlSemaphore;
+    if (*p).free.take().is_none() {
+        return;
+    }
+    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 #[no_mangle]
@@ -331,8 +372,13 @@ pub unsafe extern "C" fn hl_semaphore_free(sem: *mut c_void) {
 
 #[repr(C)]
 struct HlCondition {
+    /// Word zero: the collector's finalizer slot, and the flag the free
+    /// below guards on. Upstream's `hl_condition` names it `free` and uses it the
+    /// same way.
+    free: Option<crate::gc::Finalizer>,
     state: std::sync::Mutex<ConditionState>,
 }
+const _: () = assert!(std::mem::offset_of!(HlCondition, free) == 0);
 
 struct ConditionState {
     owner: Option<u64>,
@@ -400,14 +446,22 @@ unsafe fn condition_mutex_release(c: *mut HlCondition) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
-    Box::into_raw(Box::new(HlCondition {
-        state: std::sync::Mutex::new(ConditionState {
-            owner: None,
-            depth: 0,
-            mutex_waiters: VecDeque::new(),
-            waiters: VecDeque::new(),
-        }),
-    })) as *mut c_void
+    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
+        as *mut HlCondition;
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(ConditionState {
+        owner: None,
+        depth: 0,
+        mutex_waiters: VecDeque::new(),
+        waiters: VecDeque::new(),
+    }));
+    p as *mut c_void
+}
+
+unsafe extern "C" fn finalize_condition(block: *mut c_void) {
+    hlp_condition_free(block);
 }
 
 #[no_mangle]
@@ -493,9 +547,14 @@ pub unsafe extern "C" fn hlp_condition_broadcast(c: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_free(c: *mut c_void) {
-    if !c.is_null() {
-        drop(Box::from_raw(c as *mut HlCondition));
+    if c.is_null() {
+        return;
     }
+    let p = c as *mut HlCondition;
+    if (*p).free.take().is_none() {
+        return;
+    }
+    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 #[no_mangle]
@@ -618,18 +677,56 @@ struct DequeState {
     waiters: VecDeque<Waiter>,
 }
 
+#[repr(C)]
 struct HlDeque {
+    /// Word zero: the collector's finalizer slot, and the flag
+    /// `finalize_deque` guards on. Upstream's `hl_deque` names it `free`.
+    free: Option<crate::gc::Finalizer>,
     state: std::sync::Mutex<DequeState>,
 }
+const _: () = assert!(std::mem::offset_of!(HlDeque, free) == 0);
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
-    Box::into_raw(Box::new(HlDeque {
-        state: std::sync::Mutex::new(DequeState {
-            queue: VecDeque::new(),
-            waiters: VecDeque::new(),
-        }),
-    })) as *mut c_void
+    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
+        as *mut HlDeque;
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    ptr::addr_of_mut!((*p).state).write(std::sync::Mutex::new(DequeState {
+        queue: VecDeque::new(),
+        waiters: VecDeque::new(),
+    }));
+    p as *mut c_void
+}
+
+/// Releases a deque nothing can reach any more.
+///
+/// Anything still queued was rooted by `deque_root` and would stay rooted for
+/// the life of the process otherwise -- so a dropped deque with messages in it
+/// would pin them, and the collector would keep tracing from objects no
+/// program can name. A pointer queued twice roots once, so this unroots once
+/// per distinct pointer, as `hlp_deque_pop` does.
+unsafe extern "C" fn finalize_deque(block: *mut c_void) {
+    let p = block as *mut HlDeque;
+    if (*p).free.take().is_none() {
+        return;
+    }
+    // Collect under the deque lock, unroot after releasing it: the GC lock is
+    // only ever taken after the deque lock, never the other way round.
+    let queued: HashSet<usize> = match (*p).state.lock() {
+        Ok(state) => state
+            .queue
+            .iter()
+            .filter(|msg| !msg.is_null())
+            .map(|msg| *msg as usize)
+            .collect(),
+        Err(_) => HashSet::new(),
+    };
+    for msg in queued {
+        crate::gc::gc_remove_persistent(msg as *mut vdynamic);
+    }
+    ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
 
 /// A queued message is a GC object whose only reference is the Vec above,
@@ -724,17 +821,30 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
 // Thread-local storage
 // ============================================================================
 
+#[repr(C)]
 struct HlTls {
+    /// Word zero: the collector's finalizer slot, and the flag `hlp_tls_free`
+    /// guards on. Upstream's `hl_tls` names it `free`.
+    free: Option<crate::gc::Finalizer>,
     gc_value: bool,
     values: std::sync::Mutex<HashMap<u64, *mut c_void>>,
 }
+const _: () = assert!(std::mem::offset_of!(HlTls, free) == 0);
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_alloc(gc_value: bool) -> *mut c_void {
-    Box::into_raw(Box::new(HlTls {
-        gc_value,
-        values: std::sync::Mutex::new(HashMap::new()),
-    })) as *mut c_void
+    let p =
+        crate::gc::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls) as *mut HlTls;
+    if p.is_null() {
+        return ptr::null_mut();
+    }
+    ptr::addr_of_mut!((*p).gc_value).write(gc_value);
+    ptr::addr_of_mut!((*p).values).write(std::sync::Mutex::new(HashMap::new()));
+    p as *mut c_void
+}
+
+unsafe extern "C" fn finalize_tls(block: *mut c_void) {
+    hlp_tls_free(block);
 }
 
 #[no_mangle]
@@ -782,19 +892,27 @@ pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
     if tls.is_null() {
         return;
     }
-    let tls = Box::from_raw(tls as *mut HlTls);
-    if tls.gc_value {
-        let values = tls.values.lock().unwrap();
-        let unique: HashSet<usize> = values
-            .values()
-            .filter(|value| !value.is_null())
-            .map(|value| *value as usize)
-            .collect();
+    let p = tls as *mut HlTls;
+    if (*p).free.take().is_none() {
+        return;
+    }
+    if (*p).gc_value {
+        // Collected under the values lock and unrooted after it is released,
+        // to keep the deque's lock order: the GC lock is taken after, never
+        // before.
+        let unique: HashSet<usize> = match (*p).values.lock() {
+            Ok(values) => values
+                .values()
+                .filter(|value| !value.is_null())
+                .map(|value| *value as usize)
+                .collect(),
+            Err(_) => HashSet::new(),
+        };
         for value in unique {
             crate::gc::gc_remove_persistent(value as *mut vdynamic);
         }
-        drop(values);
     }
+    ptr::drop_in_place(ptr::addr_of_mut!((*p).values));
 }
 
 #[no_mangle]

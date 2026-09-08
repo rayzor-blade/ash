@@ -310,8 +310,8 @@ unsafe extern "C" fn finalize_fdesc(block: *mut c_void) {
 }
 
 unsafe fn alloc_handle(state: FileState) -> *mut c_void {
-    let d = crate::gc::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc)
-        as *mut Fdesc;
+    let d =
+        crate::gc::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc) as *mut Fdesc;
     if d.is_null() {
         return ptr::null_mut();
     }

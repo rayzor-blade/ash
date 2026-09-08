@@ -3079,8 +3079,15 @@ impl ImmixAllocator {
 
         // Read word zero only now. It is a code address rather than a heap
         // reference, so the trace above neither followed nor disturbed it.
-        // Clearing it after the read matches upstream's `*block = NULL` and
-        // makes a re-registration of the same address harmless.
+        //
+        // And LEAVE it set. Upstream calls the finalizer without clearing the
+        // slot (allocator.c gc_call_finalizers), which is what lets a body
+        // guard on its own slot: `hl_mutex_free` is `if( l->free ) { destroy;
+        // l->free = NULL; }`, so it doubles as the "not freed yet" flag and
+        // an explicit free makes the collector skip the block. Clearing it
+        // here made every finalizer written that way do nothing. Removing the
+        // block from the table, not clearing the slot, is what stops a second
+        // call.
         let heap_start = self.heap.memory.as_ptr() as usize;
         let mut queued = 0usize;
         if let Ok(mut queue) = PENDING_FINALIZERS.lock() {
@@ -3090,7 +3097,6 @@ impl ImmixAllocator {
                 if raw == 0 {
                     continue;
                 }
-                unsafe { *slot = 0 };
                 queue.push((slot as usize, unsafe {
                     mem::transmute::<usize, Finalizer>(raw)
                 }));
@@ -5223,7 +5229,17 @@ mod tests {
             unsafe { hl_unregister_thread() };
         });
 
+        // Registered mutators, so both waits below have to be visible to a
+        // collector or it cannot stop this thread. Without that, a collection
+        // asked for by ANOTHER test in this binary stalls three ways until its
+        // two-second deadline fires: the worker parks inside its safepoint
+        // loop, this thread blocks in `join` without parking, and the
+        // collector waits for this thread. Measured: closing it did not move
+        // the rate of the abandoned-collection failure below, so that failure
+        // has another cause too. This is still the contract a registered
+        // thread owes the collector.
         while !ready.load(Ordering::Acquire) {
+            gc_safepoint();
             std::thread::yield_now();
         }
         {
@@ -5232,7 +5248,12 @@ mod tests {
             gc.collect_garbage();
         }
         finish.store(true, Ordering::Release);
+        // `join` cannot poll, so publish this thread as blocked for its
+        // duration: the collector then scans it where it stands instead of
+        // waiting for a safepoint it will not reach until the worker exits.
+        let was_blocking = gc_set_blocking(true);
         worker.join().unwrap();
+        gc_set_blocking(was_blocking);
         unsafe { hl_unregister_thread() };
     }
 
@@ -5407,12 +5428,29 @@ mod tests {
         );
 
         // ── hlp_gc_major runs a real cycle ────────────────────────────────
+        //
+        // Retried, because one call is not guaranteed to collect: a cycle whose
+        // world stop misses `STOP_THE_WORLD_DEADLINE` is abandoned, and
+        // `collect_garbage` returns having done nothing. That is deliberate for
+        // an automatic trigger -- "giving up costs a deferred collection,
+        // waiting costs the program" -- and this binary runs its tests in
+        // parallel, so another test's thread can be the one that fails to park.
+        // Asserting on a single call made this test fail about one run in ten
+        // with "collections 0 -> 0", on this commit and well before it.
         let collections_before = GC_STATS.collections.load(Ordering::Relaxed);
-        unsafe { hlp_gc_major() };
-        let collections_after = GC_STATS.collections.load(Ordering::Relaxed);
+        let mut collections_after = collections_before;
+        for _ in 0..8 {
+            unsafe { hlp_gc_major() };
+            collections_after = GC_STATS.collections.load(Ordering::Relaxed);
+            if collections_after > collections_before {
+                break;
+            }
+            std::thread::yield_now();
+        }
         assert!(
             collections_after > collections_before,
-            "hlp_gc_major ran no cycle: collections {collections_before} -> {collections_after}"
+            "hlp_gc_major ran no cycle in 8 attempts: \
+             collections {collections_before} -> {collections_after}"
         );
         // ...and it ran on its own account rather than riding a trigger that
         // happened to fire: 6 is `ORIGIN_NAMES`' "explicit", and nothing else
@@ -5512,12 +5550,21 @@ mod tests {
         drop(gc);
     }
 
+    /// `PENDING_FINALIZERS` is process-wide and `run_pending_finalizers`
+    /// drains ALL of it, so two of these tests running at once would each run
+    /// the other's callbacks -- and the one that asserts its callback did NOT
+    /// run would see the other's increment. They take this in turn instead.
+    static FINALIZER_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn finalizer_test_turn() -> std::sync::MutexGuard<'static, ()> {
+        FINALIZER_TEST.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Callback for the finalizer tests. Records the block it was handed
     /// without dereferencing it, so a queue left over from a failed assert
     /// cannot fault a later test.
     static FINALIZED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    static FINALIZED_BLOCK: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
+    static FINALIZED_BLOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     unsafe extern "C" fn record_finalized(block: *mut c_void) {
         FINALIZED_BLOCK.store(block as usize, Ordering::SeqCst);
         FINALIZED.fetch_add(1, Ordering::SeqCst);
@@ -5533,6 +5580,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_finalizable_block_is_resurrected_then_finalized_once() {
+        let _turn = finalizer_test_turn();
         let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
         let live = gc.allocate(16).unwrap();
         let dead = gc.allocate(16).unwrap();
@@ -5558,7 +5606,12 @@ mod tests {
             "an unreachable finalizable block must be marked, or sweep recycles \
              the lines its finalizer is about to read"
         );
-        assert_eq!(word0(dead), 0, "the callback is taken out of word zero");
+        assert_eq!(
+            word0(dead),
+            record_finalized as *const () as usize,
+            "word zero must still be set when the callback runs: upstream \
+             finalizers guard on it"
+        );
         assert_eq!(
             word0(live),
             record_finalized as *const () as usize,
@@ -5595,11 +5648,62 @@ mod tests {
         gc.take_dead_finalizers();
         run_pending_finalizers();
         assert_eq!(FINALIZED.load(Ordering::SeqCst), before + 2);
-        assert_eq!(FINALIZED_BLOCK.load(Ordering::SeqCst), live.as_ptr() as usize);
+        assert_eq!(
+            FINALIZED_BLOCK.load(Ordering::SeqCst),
+            live.as_ptr() as usize
+        );
+    }
+
+    /// The `hl_mutex_free` idiom: do the work only if word zero is still set,
+    /// then clear it, so an explicit free and a collection cannot both run it.
+    static GUARDED_RAN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    unsafe extern "C" fn guarded_finalize(block: *mut c_void) {
+        let slot = block as *mut usize;
+        if *slot == 0 {
+            return;
+        }
+        *slot = 0;
+        GUARDED_RAN.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn a_finalizer_that_guards_on_its_own_slot_still_runs() {
+        let _turn = finalizer_test_turn();
+        let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+        let block = gc.allocate(16).unwrap();
+        unsafe { (block.as_ptr() as *mut usize).write(guarded_finalize as *const () as usize) };
+        gc.register_finalizable(block.as_ptr());
+        let before = GUARDED_RAN.load(Ordering::SeqCst);
+
+        gc.take_dead_finalizers();
+        run_pending_finalizers();
+        assert_eq!(
+            GUARDED_RAN.load(Ordering::SeqCst),
+            before + 1,
+            "the collector cleared word zero before calling, so the body \
+             took itself for already freed"
+        );
+        assert_eq!(word0(block), 0, "the body clears its own slot");
+
+        // Explicitly freeing first is the other half of the same contract:
+        // a null slot means the collector has nothing to call.
+        let other = gc.allocate(16).unwrap();
+        unsafe { (other.as_ptr() as *mut usize).write(guarded_finalize as *const () as usize) };
+        gc.register_finalizable(other.as_ptr());
+        unsafe { guarded_finalize(other.as_ptr() as *mut c_void) };
+        let after_explicit = GUARDED_RAN.load(Ordering::SeqCst);
+        gc.take_dead_finalizers();
+        run_pending_finalizers();
+        assert_eq!(
+            GUARDED_RAN.load(Ordering::SeqCst),
+            after_explicit,
+            "a block freed explicitly must not be finalized again"
+        );
     }
 
     #[test]
     fn a_finalizable_block_reached_from_another_object_survives() {
+        let _turn = finalizer_test_turn();
         let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
         let holder = gc.allocate(16).unwrap();
         let held = gc.allocate(16).unwrap();
@@ -5629,6 +5733,13 @@ mod tests {
         const MEM_KIND_NOPTR: i32 = 2;
         let mut ty: hl_type = unsafe { mem::zeroed() };
 
+        // Held across the allocation AND the check. The block's only reference
+        // is a Rust local, on a stack the collector does not scan because this
+        // thread registered no stack top -- so a collection on any other
+        // thread in this binary would finalize it and drop it from the table
+        // before the assertion could see it. Every collection runs under this
+        // lock, so holding it is what makes the two steps one.
+        let _lock = gc_guard();
         let block =
             unsafe { crate::hl_compat::hl_gc_alloc_gen(&mut ty, 32, MEM_KIND_FINALIZER) } as usize;
         let plain =

@@ -4,9 +4,36 @@ use fancy_regex::{Regex, RegexBuilder};
 
 use crate::{error::hlp_error, hl::vbyte, strings::str_to_uchar_ptr};
 
+/// The `EReg` handle itself, in GC memory.
+///
+/// A compiled pattern is expensive and a program builds them in loops, so
+/// leaving them to be freed at exit is not an option. Upstream's `ereg` is a
+/// `hl_gc_alloc_finalizer` block for the same reason.
+#[repr(C)]
 struct RegexpState {
+    /// Word zero, where the collector looks. Upstream names it the same.
+    finalize: Option<crate::gc::Finalizer>,
     regex: Regex,
     last_groups: Option<Vec<Option<(i32, i32)>>>,
+}
+
+// The collector reads the callback out of word zero, so `finalize` has to BE
+// word zero, and the block has to satisfy the struct's alignment.
+const _: () = assert!(std::mem::offset_of!(RegexpState, finalize) == 0);
+const _: () = assert!(std::mem::align_of::<RegexpState>() <= 16);
+
+/// Frees the compiled pattern of an `EReg` nothing can reach any more, the way
+/// upstream's `regexp_finalize` frees its `pcre16` one.
+///
+/// Guards on word zero and clears it, which is upstream's idiom for making a
+/// free run once however it is reached.
+unsafe extern "C" fn regexp_finalize(block: *mut c_void) {
+    let state = block as *mut RegexpState;
+    if (*state).finalize.take().is_none() {
+        return;
+    }
+    std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).regex));
+    std::ptr::drop_in_place(std::ptr::addr_of_mut!((*state).last_groups));
 }
 
 unsafe fn read_utf16z(bytes: *const vbyte) -> Vec<u16> {
@@ -75,10 +102,16 @@ pub unsafe extern "C" fn hlp_regexp_new_options(
     let Some(regex) = build_regex(&pattern, &opts) else {
         return std::ptr::null_mut();
     };
-    Box::into_raw(Box::new(RegexpState {
-        regex,
-        last_groups: None,
-    })) as *mut c_void
+    let state = crate::gc::alloc_with_finalizer(std::mem::size_of::<RegexpState>(), regexp_finalize)
+        as *mut RegexpState;
+    if state.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Raw memory, so write the fields rather than assigning: an assignment
+    // would drop whatever the previous occupant's bytes look like.
+    std::ptr::addr_of_mut!((*state).regex).write(regex);
+    std::ptr::addr_of_mut!((*state).last_groups).write(None);
+    state as *mut c_void
 }
 
 #[no_mangle]

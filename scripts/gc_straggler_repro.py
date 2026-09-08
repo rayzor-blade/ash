@@ -4,8 +4,7 @@
 The bug is **false retention**: collections run, stop the world in under a
 millisecond, mark for hundreds of milliseconds, and free nothing, while the
 live set is a few megabytes. The heap climbs to its cap and a thread raises
-out-of-memory. Everything else follows from that. See
-`docs/gc-safepoint-straggler.md`.
+out-of-memory. Everything else follows from that.
 
 What this script measures is therefore *what a collection reclaimed*, not
 whether the program hung:

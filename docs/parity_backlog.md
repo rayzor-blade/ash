@@ -1,52 +1,30 @@
-# Parity Backlog
+# Parity backlog
 
-This file tracks parity deltas between `ash_cli` and HashLink oracle runs.
+Open parity deltas between `ash_cli` and the HashLink oracle. **Nothing is open.**
 
-## Entry Template
+Add an entry when a case diverges; delete it when the fix lands. A list of
+entries marked `fixed` is history, and git already holds that.
 
-- Case: `<case-name>`
-- Mode: `interp | hybrid-default | hybrid-heavy`
-- Category: `vm-semantic | std-native | gc-rooting | tier-boundary | unsupported-opcode | infra`
-- Owner: `<name>`
-- Status: `open | in_progress | blocked | fixed`
-- First Seen: `YYYY-MM-DD`
-- Linked PR: `<url-or-sha>`
-- Notes: `<root cause and fix summary>`
+## Entry format
 
-## Current
+```
+- Case:       <case-name>
+- Mode:       interp | hybrid-default | hybrid-heavy
+- Category:   vm-semantic | std-native | gc-rooting | tier-boundary |
+              unsupported-opcode | infra
+- Owner:      <name>
+- Status:     open | in_progress | blocked
+- First seen: YYYY-MM-DD
+- Linked PR:  <url-or-sha>
+- Notes:      root cause and fix
+```
 
-- Case: `TestMapDebug2`
-- Mode: `interp | hybrid-default`
-- Category: `vm-semantic`
-- Owner: `unassigned`
-- Status: `fixed`
-- First Seen: `2026-02-27`
-- Linked PR: `n/a`
-- Notes: `Fixed by post-call destination-kind coercion and dynamic array boxing/unboxing in interpreter call/array paths.`
+## Standing exception
 
-- Case: `TestMapDebug3`
-- Mode: `interp | hybrid-default`
-- Category: `infra`
-- Owner: `unassigned`
-- Status: `fixed`
-- First Seen: `2026-02-27`
-- Linked PR: `n/a`
-- Notes: `Pointer payload issue fixed. Remaining order sensitivity differs under haxe --interp fallback; fallback_expectation set to exit_only until HashLink artifact oracle is available.`
+The four map cases (`TestMapDebug2`, `TestMapDebug3`, `TestMapIter`,
+`TestMapSimple`) were fixed on 2026-02-27 by post-call destination-kind
+coercion and dynamic array boxing in the interpreter's call and array paths.
 
-- Case: `TestMapIter`
-- Mode: `interp | hybrid-default`
-- Category: `infra`
-- Owner: `unassigned`
-- Status: `fixed`
-- First Seen: `2026-02-27`
-- Linked PR: `n/a`
-- Notes: `Pointer payload issue fixed. Remaining key/value iteration order differs under haxe --interp fallback; fallback_expectation set to exit_only until HashLink artifact oracle is available.`
-
-- Case: `TestMapSimple`
-- Mode: `interp | hybrid-default`
-- Category: `vm-semantic`
-- Owner: `unassigned`
-- Status: `fixed`
-- First Seen: `2026-02-27`
-- Linked PR: `n/a`
-- Notes: `Fixed by post-call destination-kind coercion and dynamic array boxing/unboxing in interpreter call/array paths.`
+Their iteration order still differs under the `haxe --interp` fallback oracle,
+so their `fallback_expectation` stays `exit_only` until a HashLink artifact
+oracle exists. Do not tighten it against the fallback.

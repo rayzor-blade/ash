@@ -1,12 +1,10 @@
 # Ahead-of-time compilation
 
-`ash --build` compiles a whole HashLink program to a native binary: no
-bytecode file, no interpreter, no JIT, no warmup. It starts at full speed and
-stays there.
+`ash --build` compiles a whole HashLink program to a native binary: no bytecode
+file, no interpreter, no JIT, no warmup.
 
-The cost is on the build side. Compiling a large program is a real compile, not
-a JIT promotion, and this page is mostly about what that costs and how to
-control it.
+The cost is on the build side — a large program is a real compile, not a JIT
+promotion. Most of this page is what that costs and how to control it.
 
 ## Quick start
 
@@ -15,8 +13,7 @@ ash --build prog prog.hl
 ./prog
 ```
 
-That is the whole build. `ash` emits the code, links it, and finds the runtime
-itself: beside the `ash` binary first, then the usual library directories, then
+`ash` emits the code, links it, and finds the runtime itself: beside the `ash` binary first, then the usual library directories, then
 `--runtime <path>` or `ASH_RUNTIME` if you want to name one.
 
 `--emit-aot prog.o` stops at the object file instead, for a caller that does
@@ -38,9 +35,8 @@ may import: upstream HDLLs link the versioned `libhl.1.dylib`, ash's own
 ash --build game game.hl
 ```
 
-The one thing left to you is the `.hdll` files. An AOT binary looks in its own
-directory first, then the working directory, and nowhere else, so an HDLL one
-directory up is an HDLL that does not exist.
+You supply the `.hdll` files. An AOT binary looks in its own directory, then
+the working directory, and nowhere else.
 
 If no runtime is installed anywhere, `ash` writes out the copy it carries
 inside itself, so this works on a machine that has never built the workspace.
@@ -67,8 +63,7 @@ Measured on a game of 8,577 functions, on a ten-core Apple M-series machine:
 | 4 | 42 s | 4.3 GB |
 | 8 | 45 s | 4.9 GB |
 
-Two things in that table are worth understanding, because they decide how you
-should set it.
+Two things decide how to set it.
 
 **The jump from one shard to two is not parallelism.** One shard is the
 single-module path, where the optimizer sees all 9,021 bodies at once, and its
@@ -82,10 +77,9 @@ discard the parts it does not own.
 own copy of the program while it decides what to keep. Peak is reached while
 those copies exist, so freeing memory afterwards does not lower it.
 
-So the dial is simple, and the default already sits at the knee: half the
-machine's cores, never fewer than two or more than six. Set `ASH_AOT_SHARDS=2`
-on a memory-constrained machine, `ASH_AOT_SHARDS=1` for the smallest possible
-footprint if you can wait, and leave it alone otherwise.
+The default sits at the knee: half the machine's cores, never fewer than two or
+more than six. Use `ASH_AOT_SHARDS=2` on a memory-constrained machine, `1` for
+the smallest footprint if you can wait, and leave it alone otherwise.
 
 ## Knobs
 
@@ -130,14 +124,13 @@ The one thing it looks for is that runtime object, `ash_runtime.o`, in a
 directory named for the target beside `ash`, then the usual library
 directories; `--runtime` or `ASH_RUNTIME` names it directly.
 
-Two things are worth knowing before the first build.
+Two things affect the first build.
 
 **The result is a library, not a command.** It exports `main` and
-`ash_module_init` and imports what only a host can answer: WASI, plus fiber
-suspension, plus sockets. A wasm module cannot switch its own stacks -- the
-call frames are the engine's, not the program's -- so an ash program running
-there is suspended by whoever embeds it. The import contract is written down
-in [`wasm-target.md`](wasm-target.md).
+`ash_module_init`, and imports what only a host can answer: WASI, fiber
+suspension and sockets. A wasm module cannot switch its own stacks, so an ash
+program there is suspended by whoever embeds it. The import contract is in
+[`wasm-target.md`](wasm-target.md).
 
 **Only what the program can reach is emitted.** Functions nothing calls are
 dropped, which is about a third of the module. What counts as reachable is

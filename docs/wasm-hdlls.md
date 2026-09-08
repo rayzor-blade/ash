@@ -1,18 +1,16 @@
 # Native libraries on wasm
 
-A Haxe program that names an HDLL used to build for wasm and then raise at the
-first primitive it reached, because a wasm module cannot `dlopen` anything.
-The way out was to compile the library into the runtime -- which `fmt` and
-`sqlite` still are -- and that does not scale: a library present in the
-runtime object is in every module whether the program uses it or not, and
-SQLite alone is 1.67 MB of a 3.96 MB hello world.
+A native library is its own `.wasm`, shipped beside the program and loaded at
+start-up. The demo library below is **925 bytes**.
 
-A native library is now its own `.wasm`, shipped beside the program and loaded
-at start-up. The demo library in this document is **925 bytes**.
+A wasm module cannot `dlopen`, so a program naming an HDLL used to raise at the
+first primitive it reached. Compiling the library into the runtime instead does
+not scale: it is then in every module whether the program uses it or not, and
+SQLite alone was 1.67 MB of a 3.96 MB hello world.
 
 ## Why not a component
 
-The Component Model is the wrong boundary here, and not by a little.
+The Component Model is the wrong boundary at this seam.
 
 `DEFINE_PRIM` signatures pass `vbyte*`, `varray*`, `vdynamic*` and
 `vclosure*` -- addresses in the heap ash's collector scans. A library
@@ -74,11 +72,10 @@ raises for a missing HDLL.
 ## Where a library gets everything else
 
 A side module brings almost nothing with it. `wasm-ld -shared` resolves
-undefined symbols by importing them rather than by pulling archive members, so
-even `-lc` changes nothing: a library's libc comes from whoever hosts it. That
-is the model, not a gap in it.
+undefined symbols by importing them rather than pulling archive members, so even
+`-lc` changes nothing — a library's libc comes from whoever hosts it, by design.
 
-So three parties answer a library's imports:
+Three parties answer a library's imports:
 
 - **`env`** is the program: its memory, its table, and the runtime and libc
   functions it exports.
@@ -192,11 +189,9 @@ namespace the program itself reaches suspension and sockets through. So a
 library like this needs nothing exported on its behalf, and the program's ABI
 does not widen at all.
 
-The cost is that such a library only runs where the host answers those
-imports. That is the honest position for a capability a sandbox does not
-have: the native host and the browser host each supply what they can, and a
-library asking for something neither has fails to load with the name in the
-message.
+The cost is that such a library runs only where the host answers those imports.
+The native and browser hosts each supply what they can, and a library asking for
+something neither has fails to load with the name in the message.
 
 ## What is not done yet
 
@@ -204,8 +199,7 @@ message.
   steps run against `WebAssembly.instantiate`, and the fetch is what makes
   this worth doing: `program.wasm` small, each library fetched only if used.
 - **Lazy loading.** Everything beside the program is loaded at start-up.
-  Loading on first use needs instantiation from inside a guest call, which is
-  a knot worth tying only once there is a reason to.
+  Loading on first use needs instantiation from inside a guest call.
 - **Unloading.** Nothing frees a library's data or its table slots.
 - **`fmt` is still compiled in**, and should stay: its digests and zlib
   streams are pure computation, small, and a program that hashes has no other

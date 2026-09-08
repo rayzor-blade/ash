@@ -1,10 +1,6 @@
-# MBHaxe on Ash
+# MBHaxe on ash
 
-MBHaxe must be tested with RandomityGuy's matching dependency family. Ash's
-decommissioned Rust `ash_sdl` crate is not ABI or behaviorally interchangeable
-with that game's SDL2 HSDL bindings and must never be copied into the fixture.
-
-Use the repository workflow rather than assembling the directory by hand:
+Build the fixture with the script, never by hand:
 
 ```bash
 cargo build --release --bin ash
@@ -13,74 +9,65 @@ cd target/mbhaxe/run
 ./ash --mode interp marblegame.hl
 ```
 
-The native directory supplies the game's non-SDL extensions, such as `fmt`,
-`ui`, `uv`, `openal`, and `datachannel`. Its `sdl.hdll` is deliberately ignored.
-The script always builds SDL itself from the pinned
-`RandomityGuy/hashlink:libs/sdl` C sources and their Haxe externs, linked to
-SDL2 and the staged Ash compatibility runtime.
+The script recreates `target/mbhaxe/run` every run, records source commits and
+artifact hashes in `PROVENANCE.txt`, and refuses to continue unless:
 
-Every run recreates `target/mbhaxe/run` and validates that:
+- `sdl.hdll` has no `ash_sdl` or `target/*/deps/libsdl` provenance;
+- it links SDL2, not SDL3;
+- it resolves `@rpath/libhl.dylib` beside the staged `ash`;
+- MBHaxe's expected window and shader exports are present;
+- `ash`, `libhl.dylib`, `sdl.hdll` and SDL2 are all the host architecture.
 
-- `sdl.hdll` contains no `ash_sdl` or Cargo `target/*/deps/libsdl` provenance;
-- it links SDL2, never SDL3;
-- it resolves `@rpath/libhl.dylib` beside the staged `ash` executable;
-- the key window and shader exports expected by MBHaxe exist;
-- `ash`, `libhl.dylib`, `sdl.hdll` and the linked SDL2 are all the host's
-  architecture; and
-- all source commits and artifact hashes are recorded in `PROVENANCE.txt`.
+## SDL comes from the pinned sources
 
-## Architecture
+The script always builds `sdl.hdll` itself, from
+`RandomityGuy/hashlink:libs/sdl` and its Haxe externs. The decommissioned
+`ash_sdl` crate is not ABI-compatible with those bindings; do not substitute
+it. Any `sdl.hdll` in `--native-dir` is ignored.
 
-A Mac can carry both Homebrew prefixes at once — `/usr/local` from the Intel
-era and `/opt/homebrew` for arm64 — each with its own `pkg-config` and its own
-SDL2. Whichever leads `PATH` wins, so an unqualified `pkg-config sdl2` on an
-arm64 host happily reports the x86_64 install, and the build then dies inside
-`SDL_cpuinfo.h` dragging x86 intrinsics into an arm64 translation unit. The
-script chooses SDL2 by inspecting the library with `lipo` rather than trusting
-the search order, and refuses when no matching build exists.
+Pinned revisions are at the top of
+[`scripts/prepare_mbhaxe.sh`](../scripts/prepare_mbhaxe.sh). Update them as one
+reviewed set — the Haxe HSDL externs and the native SDL sources move together.
 
-The staged binaries are checked the same way. An architecture mismatch does
-not fail at load with a useful message: dyld reports the library as simply
-"not found", which reads as a missing HDLL and sends you looking somewhere
-else entirely.
+## Architecture is checked, not assumed
+
+A Mac can carry both Homebrew prefixes: `/usr/local` (Intel) and
+`/opt/homebrew` (arm64), each with its own `pkg-config` and SDL2. Whichever
+leads `PATH` wins, so `pkg-config sdl2` on an arm64 host can report the x86_64
+install, and the build then dies in `SDL_cpuinfo.h` pulling x86 intrinsics into
+an arm64 translation unit. The script picks SDL2 with `lipo` instead of
+trusting `PATH`, and refuses when no matching build exists.
+
+It checks the staged binaries the same way, because dyld reports an
+architecture mismatch as "not found" — which reads as a missing HDLL and sends
+you looking in the wrong place.
 
 ## Native HDLLs
 
-The pinned build registers `hlsdl`, `datachannel` and `hlopenal`, so the
-bytecode can reference natives from all three. `sdl.hdll` is always built
-here; the rest come from `--native-dir`, and without them the script names
-exactly which are missing rather than leaving them to surface as a load
+`--native-dir` supplies the non-SDL extensions: `fmt`, `ui`, `uv`, `openal`,
+`datachannel`. The pinned build registers `hlsdl`, `datachannel` and
+`hlopenal`. Missing ones are named up front rather than surfacing as a load
 failure at launch.
 
 Take that directory from a shipped macOS build, not from the component
-repositories. `RandomityGuy/hashlink`'s darwin release is an x86_64 nightly
-from 2022, and the `hxDatachannel` release archive carries a Windows PE DLL —
-neither loads on an arm64 Mac. A release `.dmg` carries universal
-(`x86_64 arm64`) binaries:
+repositories: `RandomityGuy/hashlink`'s darwin release is an x86_64 nightly
+from 2022, and the `hxDatachannel` archive carries a Windows PE DLL. Neither
+loads on an arm64 Mac. A release `.dmg` carries universal binaries:
 
 ```bash
 gh release download 1.3.0-mbu --repo RandomityGuy/MBHaxe --pattern '*Mac.dmg'
 hdiutil attach -nobrowse -readonly MBHaxe-Ultra-Mac.dmg
 cp "/Volumes/Marble Blast Ultra/MarbleBlast Ultra.app/Contents/Frameworks"/* native/
-rm native/sdl.hdll native/libhl.1.dylib     # this fixture supplies both
+rm native/sdl.hdll native/libhl.1.dylib     # the fixture supplies both
 ```
 
-The HDLLs bring their own third-party dependencies (`libopenal`, `libpng`,
-`libuv`, the vorbis family), so `--native-dir` stages `.dylib` files as well
-as `.hdll` files. Any `libhl` there is skipped: supplying Ash's runtime
-instead of upstream's is the whole point.
+Stage `.dylib` files alongside the `.hdll` files — the HDLLs bring their own
+dependencies (`libopenal`, `libpng`, `libuv`, vorbis). Any `libhl` there is skipped,
+since the fixture is meant to run ash's runtime rather than upstream's.
 
-Those binaries are staged **byte for byte** and the script verifies it — the
-fixture is only evidence if it runs what the game ships, unmodified. Nothing
-is re-signed except what this script builds, since re-signing rewrites the
-signature and changes the hash.
+Those binaries are staged **byte for byte** and verified, since the fixture is
+only evidence if it runs what the game ships. Nothing is re-signed except what
+the script builds, because re-signing changes the hash.
 
-Upstream links its HDLLs against `@rpath/libhl.1.dylib`, HashLink's versioned
-install name. Rather than patch them, Ash's runtime is staged under that name
-too, so the shipped binaries resolve Ash by their own unmodified load
-commands.
-
-The pinned source revisions live at the top of
-[`scripts/prepare_mbhaxe.sh`](../scripts/prepare_mbhaxe.sh). Update them as one
-reviewed dependency set; do not update the Haxe HSDL externs independently of
-the native HashLink SDL sources.
+ash's runtime is also staged as `libhl.1.dylib`, HashLink's versioned install
+name, so upstream's unmodified load commands resolve it without patching.

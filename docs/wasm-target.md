@@ -1,428 +1,21 @@
-# hl2wasm — a WebAssembly target from optimized AIR
+# The wasm target
 
-**Goal.** Turn HL bytecode into a `.wasm` module through the AIR and native
-AOT pipeline, so Heaps and other Haxe frameworks have a WebAssembly target to
-build against.
+ash compiles HL bytecode to a `.wasm` module through the same AIR and AOT
+pipeline the native target uses. `wasm32-wasip1` is the target; a browser runs
+the same core module through a WASI preview-1 shim.
 
-**First target.** `wasm32-wasip1`, as a command module runnable by Wasmtime.
-A browser runs the same core module through a WASI Preview 1 shim. A smaller
-`wasm32-unknown-unknown` target with a custom host ABI can follow if its size
-or embedding benefits justify maintaining a second platform surface.
+The route is **AIR → LLVM IR → wasm32 object → WASI link**. LLVM's WebAssembly
+backend supplies structured control flow and function-table lowering, so a
+direct AIR→wasm backend would add CFG structuring, instruction selection, ABI
+lowering, relocations and debug metadata while leaving every runtime problem
+below untouched.
 
-**HDLL boundary.** Native AOT now supports HDLLs: it detects non-`std`
-primitives, links the shared runtime, stages it beside the executable, and
-resolves `DEFINE_PRIM` entries at startup. That work is complete for native
-AOT and is not a wasm blocker. A native `.hdll` still cannot be loaded inside
-a wasm sandbox. A wasm build must reject non-`std` natives clearly; framework
-authors guard them with `#if wasm` or provide a separate wasm/host import.
+Native `.hdll` files cannot load in a sandbox. A wasm build rejects non-`std`
+natives; framework authors guard them with `#if wasm` or supply a host import.
 
----
+## Building one
 
-## Current state
-
-Measured in September 2026, not inferred from the old spike:
-
-* **The AIR pipeline is whole-program capable.** `--emit-optimized` runs every
-  function through AIR and writes ordinary HL bytecode. The existing corpus
-  executes equivalently under stock HashLink.
-* **Native AOT works end to end.** `ash --build` lowers the complete program,
-  emits code and data objects, links the static runtime for `std`-only
-  programs, and links the shared runtime for programs using HDLLs. The AOT
-  smoke and benchmark lanes exercise the same CLI path users invoke.
-* **LLVM's WebAssembly backend accepts a complete Ash AOT module.** This
-  command succeeds for the full `bench_fib` program, not a hand-written LLVM
-  function:
-
-      ash --emit-aot /tmp/ash-fib-wasi.o \
-          --target wasm32-wasip1 --quiet bench_fib.hl
-
-  The result is a WebAssembly relocatable object. Linking it temporarily with
-  `--allow-undefined` produces a valid core module containing 372 defined
-  functions, a 370-entry `funcref` table, an element segment, and 110
-  `call_indirect` sites.
-* **Function-pointer lowering is substantially done.** In AOT mode,
-  `ash_functions` contains real function symbols or null and generated calls
-  do not use interpreter stub sentinels. LLVM and `wasm-ld` lower those
-  function addresses into the WebAssembly table. Dynamic closures and
-  runtime-produced callbacks still need integration tests, but an explicit
-  sentinel-to-table compiler rewrite is no longer the plan.
-* **The runtime is a real static library.** `ash_std` now builds as `staticlib`
-  as well as `cdylib` and `rlib`. The former fake-archive problem is gone.
-
-At the time, the permissively linked `bench_fib.wasm` imported 72 unresolved
-`hlp_*`, `hl_*` and `_setjmp` functions -- diagnostic evidence that codegen
-reached the runtime boundary, not a runnable binary. That is history now:
-`ash --build out.wasm --target wasm32-wasip1 prog.hl` emits and links in one
-command, against a real `libash_std.a` and a wasi sysroot, and the module it
-produces runs. The shell scripts and the four-function JavaScript host that
-stood in for a runtime have been deleted; `ash-wasm-run` is the host, and
-`crates/ash_cli/tests/wasm_target.rs` is the check.
-
-## Target ABI: done, and checked
-
-`TargetAbi` now exists (`crates/ash/src/target_abi.rs`) and is chosen before
-anything is decoded. It carries the triple, pointer width, every HashLink
-layout derived from that width, and the target's capabilities. The decoder
-takes it (`BytecodeDecoder::decode_for_abi`), so enum offsets are computed for
-the target rather than inherited from the compiler process; lowering asks it
-for field offsets and array element sizes; the module's triple and data layout
-are set before a single body is emitted, and the middle end runs on that
-machine.
-
-What that produces for `bench_fib` at `wasm32-wasip1`, measured rather than
-assumed: 32-bit data layout in the IR, no `hlp_*` declaration taking a
-pointer-width `i64`, an object `wasm-tools` validates, and, linked
-permissively, a core module that also validates -- 372 functions, a 370-entry
-`funcref` table, 110 `call_indirect` sites, exports for `main` and
-`ash_module_init`, and 73 imports of which every one is an `hlp_*`, `hl_*` or
-`setjmp` symbol. `cargo test -p ash --test wasm_target` is that check, and it
-fails if an import outside the runtime's own surface ever appears.
-
-The first thing it caught was a data symbol. `ash_fiber_poll_epoch` -- the loop
-safe point's word -- was referenced directly, and WebAssembly has no
-relocation that reaches an undefined data symbol, while `--allow-undefined`
-covers functions only. The answer is not to drop the safe point: **fibers are
-part of the wasm target, driven by the host**, and that word is what a host
-scheduler ticks. Generated code now reaches it through a pointer that
-`ash_late_init` fills from the runtime's getter, which is the same indirection
-a Mach-O dylib already needed for the same reason. `TargetAbi` records it as
-`direct_data_relocations`.
-
-The remaining items below were the original list; those still open are marked.
-
-Known examples:
-
-* ~~`layout.rs` fixes `HL_WSIZE` at 8 and fixes the `varray` payload at offset
-  24.~~ Done: word size is a parameter, and the AOT paths pass the target's.
-* ~~enum layout in `bytecode.rs` uses the compiler process's pointer size.~~
-  Done: `decode_for_abi` passes the target's pointer size.
-* AOT constants assume an eight-byte object header.
-* AOT helper signatures use `i64` where the Rust runtime takes `usize`, which
-  is `i32` on wasm32.
-* AOT data reads `hl_runtime_obj` offsets with host `offset_of!`.
-* `RefData` uses the host binding's `size_of::<varray>()`.
-* static closure emission assumes the 64-bit-only `stackCount` field and a
-  32-byte `vclosure`.
-
-HashLink's C ABI supports both `HL_WSIZE=4` and `HL_WSIZE=8`; these are Ash
-implementation assumptions, not limitations of HL bytecode. They must be
-replaced by one target ABI description used by decoding/layout, LLVM
-lowering, AOT data emission, and the runtime.
-
-## Route
-
-Keep **AIR → LLVM IR → wasm32 object → WASI link**. The experiment has now
-answered Route A's main question: LLVM's WebAssembly backend accepts the
-complete generated module and supplies the structured control-flow and
-function-table lowering.
-
-Do not build a direct AIR→wasm backend first. It would add CFG structuring,
-instruction selection, ABI lowering, relocations and debug metadata while
-leaving every runtime problem below untouched.
-
----
-
-## Delivery phases
-
-Each phase has an artifact or test that decides whether it is complete.
-
-### Phase 0 — full Ash IR to a wasm object ✅ DONE
-
-The old `wasm_spike` proved only that LLVM could emit a hand-written `add`
-function. Native AOT has superseded it: the CLI now lowers and emits all of
-`bench_fib` for `wasm32-wasip1`, and `wasm-ld` builds its function table and
-indirect calls.
-
-Keep the tiny spike only as a toolchain diagnostic. Replace its status as the
-project's wasm smoke test once Phase 3 runs a real Ash program.
-
-### Phase 1 — make the compiler target-aware ✅ SUBSTANTIALLY DONE
-
-`TargetAbi` exists and is threaded through decoding, layout, lowering and the
-middle end; the wasm32 and 64-bit layout fixtures pass, and the emitted module
-is validated by an external toolchain (see "Target ABI: done, and checked").
-What remains of this phase is the exhaustive C-header fixture: the layouts
-asserted today are the ones the emitter uses, not every structure that crosses
-the program/runtime boundary.
-
-The original plan follows.
-
-Create a `TargetAbi` (name provisional) before decoding or lowering. It owns:
-
-* triple, LLVM target machine and data layout;
-* pointer-sized LLVM integer type, size and alignment;
-* HashLink value, object, array, enum, virtual and closure layouts;
-* C ABI types such as `size_t`, `intptr_t` and function pointers;
-* target capabilities: WASI, threads, SJLJ/EH and native dynamic loading.
-
-Set the LLVM module triple and data layout before emitting any type or body.
-Run the middle end with this target machine instead of recreating the host
-machine. Parameterise or remove every host `size_of!`, `offset_of!` and
-hard-coded pointer-width offset used by emitted code.
-
-The bytecode decoder should retain semantic enum information rather than
-committing it permanently to the host layout. Native JITs can still select the
-host ABI; wasm AOT selects the wasm32 ABI.
-
-Add ABI fixtures compiled from `hl.h` for both 32- and 64-bit layouts. They
-must verify every structure consumed on both sides of the program/runtime
-boundary, not merely the few structures currently checked against the host
-MCJIT engine.
-
-*Done when:* a wasm32 layout test covers all shared structures and generated
-IR contains no host-derived layout constant or pointer-sized `i64` ABI
-parameter.
-
-### Phase 2 — build a single-threaded WASI runtime
-
-**DONE, except for setjmp.** `ash_std` compiles for `wasm32-wasip1`, builds as
-an archive, and a real program links against it:
-
-```
-cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
-```
-
-`bench_fib` linked against that archive is a 3.2 MB module with 3,275
-functions, a 983-entry table and 2,458 indirect call sites, and `ash wasm`
-reports **27 imports, 25 of them WASI**. The two that are not are `_setjmp`
-and `longjmp`, and they are the whole of what is left.
-
-WASI's `libsetjmp.a` does not define those names. It defines `__wasm_setjmp`,
-`__wasm_setjmp_test` and `__wasm_longjmp` -- the lowered forms LLVM's
-WebAssembly SJLJ pass rewrites a `setjmp` call into. So resolving them is not
-a linker argument but a codegen mode, and it has to be on for BOTH halves:
-`-Cllvm-args=-wasm-enable-sjlj` when rustc builds the runtime, and the same
-option on the target machine ash emits the program with. That is phase 4's
-first task rather than phase 2's last, and it is now the only thing between
-here and a module that runs.
-
-How the 103 errors went, for anyone doing this again on another target:
-
-| cause | count | what it was |
-|---|---|---|
-| two-way `cfg` with no third arm | 12, plus 54 cascading | a function written for unix and windows evaluates to `()` anywhere else; `sys.rs` failing that way took `socket.rs` with it |
-| sockets | 58 | preview 1's half implemented, the rest asked of the host |
-| 32-bit object layout | 18 | `stackCount` exists only on 64-bit, `vdynamic` gains `__pad` on 32-bit; now behind two constructors in `types.rs` so one place knows |
-| a 4 GB constant | 1 | `HEAP_MAX_CEILING` does not fit a 32-bit `usize` |
-| the heap | 1 | no `mmap`; a bounded non-reclaiming region from the allocator instead |
-| NaN-boxed word scanning | 6 | the tags are 64-bit patterns typed `usize` |
-| dynamic loading, subprocesses, threads, longjmp | 7 | refusals |
-
-One of those deserves its own line, because it is a correctness gap rather
-than a refusal: **`ash_static_call` cannot work on wasm.** The native
-implementations marshal arguments into registers and jump; wasm has no
-registers and its indirect calls name a signature the validator checks, so a
-call whose shape is only known at run time cannot be assembled. The compiler
-knows every signature it emits, so the answer is a trampoline per signature
-and a lookup here. Until then reflection and `Reflect.callMethod` return null
-on this target.
-
-The two gates that were in the way before any of this are also gone:
-
-* bindgen had no C library to parse `hl.h` against. It now takes a WASI
-  sysroot -- `WASI_SYSROOT`, else the usual install paths (`brew install
-  wasi-libc` supplies one in 10 MB) -- and `-mexception-handling`, without
-  which WASI's `setjmp.h` refuses to be included at all, since setjmp there
-  IS exception handling.
-* `krio-fiber` was an unconditional dependency and cannot work here: a wasm
-  module has no addressable stack and no instruction that moves between two.
-  It is now native-only, and `std/src/fiber_host.rs` is the wasm backend --
-  same four operations, with the one that must suspend routed to the host.
-
-What that unblocked, for the record, was 114 compiler errors spread like
-this:
-
-| file | errors | what they are |
-|---|---|---|
-| `socket.rs` | 58 | a facility WASI preview 1 does not have |
-| `sys.rs` | 10 | process and OS services |
-| `obj.rs` | 10 | **32-bit layout**: `stackCount` is absent from a 32-bit `vclosure`, `vdynamic` gains `__pad` |
-| `process.rs` | 9 | subprocesses |
-| `gc.rs` | 8 | the heap wants `mmap`; linear memory has no such call |
-| `fiber.rs` | 4 | what the host backend does not yet cover |
-| `buffer.rs`, `fun.rs`, `aot_native.rs`, `error.rs`, `debugger.rs` | 13 | `dlopen`, `longjmp` spelling, small ABI differences |
-
-About eighty of them are one decision rather than eighty: socket, process,
-thread and debugger are 109 natives that a sandbox cannot provide, and they
-should compile to explicit "unsupported" errors rather than be ported. The
-rest -- roughly twenty-five -- are the real work: the 32-bit object layout,
-a heap in linear memory, and the fiber backend.
-
-
-
-Target `wasm32-wasip1` first. Rust supports it as a Tier 2 cross target and
-supplies Rust `std`, WASI libc libraries and common OS services. Building a
-Rust `staticlib`, using an external linker, and running bindgen against C
-headers still calls for a configured [WASI SDK](https://github.com/WebAssembly/wasi-sdk).
-
-`cargo check -p ash_std --target wasm32-wasip1` currently stops in bindgen:
-
-    ./hl.h:213:10: fatal error: 'stdlib.h' file not found
-
-Give bindgen the WASI SDK sysroot, or check in generated target bindings.
-Then make the runtime compile by providing or gating:
-
-* `HeapMemory` backed by stable linear memory; no `mmap`, `VirtualAlloc`,
-  unmap, `madvise`, or page handback;
-* one non-zero mutator identity for the initial single-threaded target;
-* WASI paths for stdout, clocks, randomness and allowed file operations;
-* explicit unsupported errors for process creation, sockets, native library
-  loading, threads and fibers;
-* target-specific dependencies so `krio-fiber` and native loader code are not
-  required by the single-threaded artifact.
-
-Preserve the mutator/collector interface even when it has one member, so the
-later threads target does not require replacing the GC API.
-
-*Done when:* `ash_std` produces a wasm32 archive and a small linked fixture can
-initialise it, allocate an object, build a string, and print it under
-Wasmtime.
-
-### The host, in Rust: `crates/ash_wasm_runtime`
-
-Three parts, and which side of the module boundary each sits on is the design.
-
-`guest` is compiled **into** the program: `ash_std` depends on it when built
-for wasm, so its contents are ordinary Rust linkage and not wasm imports.
-Everything that can be done inside the sandbox belongs there, and most things
-can, because WASI already gives the standard library a clock, randomness,
-stdout and a filesystem. The fiber backend lives there now, moved out of
-`ash_std` itself.
-
-`native` is a `wasmtime` host, and it is what the conformance lane will use:
-no browser, no JavaScript, no `wasm-bindgen`. wasmtime's own fibers answer the
-suspending import, so the capability a browser gets from JSPI is available
-here without a browser. The browser host is not written yet: it will be the same
-contract behind `web-sys`, and the only JavaScript in that path will be glue
-`wasm-bindgen` generates, which is build output in the way an object file is.
-
-One import crosses the boundary today, `env.ash_host_fiber_yield`, and it has
-to: a wasm module has no addressable stack and no instruction that moves
-between two, so suspension is the one operation it cannot perform for itself.
-
-### Reading a module: `ash wasm`
-
-The compiler can read back what it emitted, which during the port is the
-question actually being asked:
-
-```
-ash wasm prog.wasm             # the report
-ash wasm --validate prog.wasm  # runnable or not, and fail if not
-```
-
-The report gives functions, indirect call sites, tables, exports, and the
-imports grouped by whether a host could supply them. `--validate` answers one
-question for a build gate and exits non-zero when the answer is no, naming
-what is missing. On today's `bench_fib.wasm` -- emitted, but linked without
-the runtime -- it reports all 72 `hlp_*` symbols as unsatisfied. When that
-list is empty, the module needs only WASI and the fiber import, and phase 3
-is done.
-
-It reads the module with ash's own parser rather than an external tool, so a
-build machine needs nothing installed and `cargo test -p ash --test
-wasm_target` asserts on a struct rather than on someone's text output.
-`ash-wasm-run` is the same thing plus an engine, for actually running one.
-
-### Sockets: every call is a host import
-
-A sandbox does not simply lack sockets; it lacks them in a way that looks like
-having some. WASI preview 1 names `sock_accept`, `sock_recv`, `sock_send` and
-`sock_shutdown` and nothing that creates a descriptor, connects, binds,
-listens, resolves a name or waits on a set -- and the four it names are
-unusable under wasmtime, whose preview 1 answers `ENOTSOCK` to every one of
-them and whose descriptor table cannot hold a socket. Rust's own `std::net`
-compiles on this target and answers `Unsupported` to everything, measured,
-including under `wasmtime -S inherit-network`. A guest built on that half had
-a socket layer that could only fail, and a `close` routed through `fd_close`
-would have closed a WASI *file* at that number (3 is the preopened working
-directory).
-
-So the guest's `socket.rs` -- the `cfg(not(any(unix, windows)))` arm, which
-is also what any future target that is neither unix nor windows compiles --
-asks the host for all of it, through one `env` block of twelve imports. Every
-argument and result is an `i32`; the pointers are guest addresses the host
-reads through the exported memory:
-
-```
-env.ash_host_socket_open(udp)                -> fd >= 0            | -errno
-env.ash_host_socket_connect(fd, ip, port)    -> 0                  | errno   AGAIN/INPROGRESS: still connecting
-env.ash_host_socket_bind(fd, ip, port)       -> 0                  | errno   the host sets SO_REUSEADDR first
-env.ash_host_socket_listen(fd, backlog)      -> 0                  | errno
-env.ash_host_socket_accept(fd)               -> fd >= 0            | -errno  AGAIN: non-blocking, nothing pending
-env.ash_host_socket_send(fd, buf, len)       -> bytes >= 0         | -errno
-env.ash_host_socket_recv(fd, buf, len)       -> bytes > 0, 0 = EOF | -errno
-env.ash_host_socket_shutdown(fd, how)        -> 0                  | errno   how: 1 read, 2 write
-env.ash_host_socket_close(fd)                -> 0                  | errno
-env.ash_host_socket_name(fd, which, out)     -> 0                  | errno   which: 0 local, 1 peer; out[0] = s_addr, out[1] = port
-env.ash_host_socket_set(fd, opt, value)      -> 0                  | errno   opt: 0 blocking, 1 TCP_NODELAY, 2 SO_BROADCAST, 3 timeout ms
-env.ash_host_socket_poll(fds, nfds, timeout) -> ready count >= 0   | -errno  timeout in ms, negative waits forever
-```
-
-Descriptors are the host's own namespace, starting at 0 and private to these
-imports; they never meet a WASI fd. `ip` is an `s_addr` -- the four octets in
-wire order read as an int, the value `sys.net.Host.ip` carries -- and `port`
-is in host order. Errors cross as WASI preview 1 errno numbers, the one
-numbering guest and hosts agree on: `ADDRINUSE` 3, `AGAIN` 6, `ALREADY` 7,
-`BADF` 8, `CONNREFUSED` 14, `CONNRESET` 15, `INPROGRESS` 26, `INVAL` 28, `IO`
-29, `NOTCONN` 53, `NOTSOCK` 57, `NOTSUP` 58, `PIPE` 64, `TIMEDOUT` 73. The
-guest turns `AGAIN`/`ALREADY`/`INPROGRESS` into the -1 that `sys.net.Socket`
-reads as `Blocked` and everything else into -2, the same split the unix
-runtime makes from `errno`.
-
-`poll` takes an array of 8-byte records, `{ fd: i32, events: u16, revents:
-u16 }`, with ash's own bits -- `RD` 1, `WR` 2, `PRI` 4, `ERR` 8, `HUP` 16,
-`NVAL` 32 -- because `POLLIN` is a different number on Darwin and on Linux and
-a pass-through would be right on one kernel and wrong on the next. The guest's
-`select` builds one record per distinct descriptor from its three sets and
-folds the answer back: read-ready on `RD|HUP|ERR`, write-ready on `WR|ERR`,
-exceptional on `PRI` alone. `socket_fd_size` is 0 on this target, so
-`Socket.select` never allocates a scratch buffer.
-
-"Optional" means a host without sockets answers `-NOTSUP`/`NOTSUP` and the
-program sees the refusal a kernel would have given, at the call rather than as
-a missing symbol at load. Who answers what:
-
-* **`ash-wasm-run`** (`crates/ash_wasm_runtime/src/native/sockets.rs`)
-  implements all twelve over the operating system's sockets through `libc`,
-  keyed by a table from guest descriptor to OS fd. The imports are
-  synchronous host functions, so a blocking `accept`, `recv` or `poll` holds
-  the host thread; the host runs one guest, so nothing waits behind it.
-  Readiness is evaluated with `select(2)`, not `poll(2)`: measured on Darwin,
-  `poll` reports a stream whose peer has closed as `POLLIN|POLLPRI|POLLHUP`
-  and not writable, while `select` -- and the unix runtime, and the Haxe
-  suite's expectations -- say readable and writable and not exceptional. On
-  Windows the same twelve imports are installed and every one answers
-  `NOTSUP`. `unit.spec.sys.net.TestSocket` passes under this host with the
-  same 19 successes as the native binary.
-* **The browser host** (`crates/ash_wasm_runtime/src/browser/sockets.rs`)
-  implements the client half over WebSocket -- `open`, `connect`, `send`,
-  `recv`, `shutdown`, `close`, `set`, and a `poll` that answers what is ready
-  now without waiting, since a page's one thread is the event loop -- and
-  refuses `bind`, `listen`, `accept` and `name`, because a page cannot listen
-  and sees no addresses. Connecting reports `AGAIN` until the socket is up, as
-  a non-blocking connect does anywhere; and WebSocket delivers whole messages
-  while `recv` hands back bytes, so messages are queued whole and drained by
-  count. A relay can bridge a WebSocket to TCP for a peer that speaks
-  something else.
-
-Not in the import set yet: datagram addressing (`send_to`/`recv_from` refuse
-with `NOTSUP`, though a UDP socket can be opened and bound) and name
-resolution, which a guest with no resolver leaves at the dotted-quad parse.
-
-### It runs
-
-```
-BenchFib 102334155
-```
-
-That is `bench_fib` compiled by ash to `wasm32-wasip1`, linked against the
-wasm runtime, executed by `ash-wasm-run` under wasmtime, and it is the same
-number the native build prints. `test_basic` is identical to its native
-output line for line.
-
-The recipe, until `ash --build` learns the target:
-
-```
+```bash
 RUSTFLAGS="-Cllvm-args=-wasm-enable-sjlj -Ctarget-feature=+exception-handling" \
   cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
 
@@ -435,15 +28,20 @@ rust-lld -flavor wasm --no-entry --export-dynamic \
 ash-wasm-run prog.wasm
 ```
 
+`ash wasm prog.wasm` reports functions, indirect call sites, tables, exports
+and imports grouped by whether a host can supply them. `ash wasm --validate`
+exits non-zero and names what is missing. It uses ash's own parser, so a build
+machine needs nothing installed.
+
 ### Rebuilding `ash_runtime.o`
 
-`ash_runtime.o` is ash_std, a wasi libc and libsetjmp joined into one
-relocatable object. Nothing rebuilds it automatically, so it goes stale the
-moment ash_std gains an export that `ash_module_init` calls -- the module
-links, then fails at instantiate with `unknown import: env::<name>`.
-`crates/ash/tests/wasm_runtime_fresh.rs` fails instead, naming the symbol.
+`ash_runtime.o` is ash_std, wasi libc and libsetjmp joined into one relocatable
+object. Nothing rebuilds it automatically, so it goes stale the moment ash_std
+gains an export `ash_module_init` calls — the module links, then fails at
+instantiate with `unknown import: env::<name>`.
+`crates/ash/tests/wasm_runtime_fresh.rs` fails first, naming the symbol.
 
-```
+```bash
 cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
 
 rust-lld -flavor wasm -r -o target/release/wasm32-wasip1/ash_runtime.o \
@@ -452,467 +50,238 @@ rust-lld -flavor wasm -r -o target/release/wasm32-wasip1/ash_runtime.o \
 ```
 
 `--no-whole-archive` is load-bearing. Without it libc's `crt1` and the
-long-double `printf` are force-included, and the module then imports
-`__main_argc_argv` and `__multc3` -- and there is no wasm compiler-rt to
-satisfy the latter. A correct object is about 6.35MB; the broken one was 6.89MB.
+long-double `printf` are force-included, the module imports `__main_argc_argv`
+and `__multc3`, and there is no wasm compiler-rt to satisfy the latter. A
+correct object is about 6.35 MB; the broken one was 6.89 MB.
 
-Four things that each cost a cycle to find:
+Two toolchain requirements: `rust-lld` must be no older than the installed
+wasi-libc, or it fails on the linker-defined `__wasm_first_page_end`; and the
+engine needs the exceptions proposal (`wasmtime -W exceptions`, or
+`Config::wasm_exceptions`, which `ash-wasm-run` sets).
 
-* **`setjmp` is a codegen mode.** Both halves need
-  `-wasm-enable-sjlj` AND `+exception-handling`; the backend refuses one
-  without the other ("is using setjmp/longjmp but does not have
-  +exception-handling target feature"). The emitter sets both for a wasm
-  triple, reaching for LLVM's option parser because `-wasm-enable-sjlj` is a
-  command-line option rather than a target-machine setting.
-* **The engine needs the exceptions proposal.** A module built that way does
-  not parse without it: `wasmtime -W exceptions`, or `Config::wasm_exceptions`
-  in a host. `ash-wasm-run` sets it.
-* **`rust-lld` version matters.** Anything older than the wasi-libc installed
-  fails on `__wasm_first_page_end`, a linker-defined symbol. The newest
-  toolchain's `rust-lld` works; a 2024 nightly's does not.
-* **`std::process::id()` aborts on wasi** rather than returning an error, and
-  five places called it. One helper now answers 1 there, since every caller
-  wanted a seed or a filename rather than a real pid.
+## Target ABI
 
-**A function pointer is a small integer here, and that broke dispatch.** The
-tiered runtime names a not-yet-compiled body by a `findex + 1` sentinel and
-tells it from a real function by magnitude: below `0x100000` is a sentinel,
-because no native code address ever is. On WebAssembly a function pointer is
-a table index, below a couple of thousand in a program this size, so every
-real function answered the test. `hlp_call_method` handed one to the closure
-runner, the runner called back into `hlp_call_method`, and the pair recursed
-until the shadow stack pointer wrapped -- which surfaced as an out-of-bounds
-access at `0xffffffb0` and looked nothing like what it was.
+`TargetAbi` (`crates/ash/src/target_abi.rs`) is chosen before anything is
+decoded. It carries the triple, pointer width, every HashLink layout derived
+from that width, and the target's capabilities. `BytecodeDecoder::decode_for_abi`
+takes it, so enum offsets are computed for the target rather than inherited
+from the compiler process; lowering asks it for field offsets and array element
+sizes; the module's triple and data layout are set before a body is emitted.
 
-Ten places asked that question and now one does, in
-`fiber::is_stub_sentinel`, which answers no on wasm: nothing there creates a
-sentinel, since the target has no interpreter and no tiers. Sorting and
-mapping with closures now run and match native exactly.
+`cargo test -p ash --test wasm_target` fails if an import outside the runtime's
+own surface appears.
 
-The first attempt at that predicate was wrong in an instructive way. It asked
-whether the interpreter's stub RESOLVER was installed, on the theory that no
-resolver means no sentinels. `--mode jit` creates sentinels without
-installing one, so the smoke corpus caught it immediately: the JIT run of
-`test_std_reflect_type` went silent. Whether a code pointer can be a small
-integer is a property of the target, not of what the host installed.
+**No relocation reaches an undefined data symbol**, and `--allow-undefined`
+covers functions only. `ash_fiber_poll_epoch` — the loop safepoint's word —
+was referenced directly and broke the link. Generated code reaches it through a
+pointer `ash_late_init` fills from the runtime's getter, the same indirection a
+Mach-O dylib needs. `TargetAbi` records this as `direct_data_relocations`.
 
-**Dynamic calls work now, by looking a shape up rather than building one.**
-`ash_static_call` places values in the registers a C call expects and jumps,
-which is a shape a run-time value can take; WebAssembly has no registers and
-checks the signature of every indirect call, so it cannot. But the compiler
-sees every function type in the program, so it emits one trampoline per
-distinct signature -- `(fun, args, out) -> ptr`, unpacking the arguments,
-making one statically-typed call, storing the result -- and registers them
-under a key the runtime computes from the `hl_type` it holds
-(`crates/ash/src/llvm/aot_trampoline.rs`). A miss reports itself by key and
-argument count rather than guessing, which is how each of the following was
-found:
+Still host-derived, and each is a bug waiting on a 32-bit target: AOT constants
+assuming an eight-byte object header, AOT helper signatures using `i64` where
+the runtime takes `usize`, AOT data reading `hl_runtime_obj` offsets with host
+`offset_of!`, `RefData` using the host `size_of::<varray>()`, and static
+closure emission assuming a 32-byte `vclosure` with `stackCount`.
 
-* **A method's closure form is not in the type table.** `hlp_get_closure_type`
-  builds one at run time by dropping `this`, so the emitter registers that
-  form for every method as well as the type itself. `(HOBJ) -> HBOOL` reached
-  the runtime and found nothing; decoding the key said which shape it was.
-* **`emit_module_init` runs during `build`**, long before the CLI asks for
-  trampolines, so the registration call was written when the table was still
-  empty and the sweep then deleted an unreferenced table. It belongs in
-  `ash_late_init`, which runs after.
-* **The count is a `usize`.** Declaring it `i64` gave `rust-lld: warning:
-  function signature mismatch`, which is a warning and a corrupt call.
+## setjmp is a codegen mode, not a link flag
 
-## Exceptions: an object that links, runs, and cannot catch
+WASI's `libsetjmp.a` does not define `_setjmp`/`longjmp`. It defines
+`__wasm_setjmp`, `__wasm_setjmp_test` and `__wasm_longjmp` — the forms LLVM's
+WebAssembly SJLJ pass rewrites a `setjmp` call into. So both halves need
+`-wasm-enable-sjlj` **and** `+exception-handling`; the backend refuses one
+without the other.
 
-`test_stdlib` then reached the exceptions section and printed "thrown Wasm
-exception" where native prints "caught: test error". The throw was leaving
-the program as an engine-level exception instead of arriving at the Haxe
-handler.
+**An object with only half the rewrite links and runs.** Ours referenced
+`__wasm_setjmp` and not `__wasm_setjmp_test`, so the program was correct until
+it threw, and then printed "thrown Wasm exception" instead of catching.
 
-A trap in compiled ash code is a `setjmp`. WebAssembly has no `setjmp`, so
-the backend rewrites it into the exceptions proposal: `__wasm_setjmp` to
-register a jump target, and `__wasm_setjmp_test` inside a catch block to ask
-whether an arriving `__wasm_longjmp` belongs to this frame. Our object
-referenced the first and not the second, and **an object with only the first
-half links and runs**. Nothing warns. The program is correct until it throws.
+The missing half cannot be passed as a flag. Expressing the catch side needs
+the target machine's *exception model* to be `wasm`, because `TargetPassConfig`
+adds `LowerInvoke` whenever the asm info reports no exception handling, and
+that pass deletes the `invoke`s the rewrite just created. `llc` takes
+`-exception-model=wasm`; the LLVM C API has no equivalent, so neither llvm-sys
+nor inkwell does. The WebAssembly target tries to infer it, but
+`basicCheckForEHAndSjLj` runs after `initAsmInfo()`, so the asm info keeps
+`ExceptionHandling::None` for life.
 
-The missing half is not a flag we failed to pass but one that cannot be
-passed. `-wasm-enable-sjlj` performs the rewrite; expressing the catch side
-needs the target machine's *exception model* to be `wasm` as well, because
-`TargetPassConfig` adds `LowerInvoke` whenever the asm info reports no
-exception handling, and that pass deletes the very `invoke`s the rewrite just
-created. `llc` takes `-exception-model=wasm` and clang assigns the field
-directly. The LLVM C API does neither: `LLVMCreateTargetMachine` builds a
-default `TargetOptions` and copies only the ABI name into it, and none of the
-six `LLVMTargetMachineOptionsSet*` entry points names the exception model. It
-is absent from the C API, so it is absent from llvm-sys and from inkwell.
+ash therefore carries one C++ translation unit,
+`crates/ash/cpp/wasm_exception_model.cpp`, setting both fields after
+construction. Fifteen lines. Without it a wasm build is refused rather than
+emitted wrong.
 
-The WebAssembly target does try to infer it -- `basicCheckForEHAndSjLj`
-promotes the model when the option is set -- but the constructor calls
-`initAsmInfo()` on the line *above*, so the asm info is built from the
-un-promoted model and keeps `ExceptionHandling::None` for the rest of its
-life. That ordering is why `llc -wasm-enable-sjlj` alone reproduces our
-broken object exactly, and why the same IR compiles correctly through clang.
+ash also passes `-wasm-use-legacy-eh=false`: LLVM still defaults to the
+withdrawn `try`/`catch`, which no current engine accepts.
 
-So ash carries one C++ translation unit,
-`crates/ash/cpp/wasm_exception_model.cpp`, which sets both fields after
-construction through public members: the option the late passes read, and the
-asm info the pass pipeline reads. Fifteen lines, compiled against the headers
-of the LLVM `llvm-config` reports. Without it a wasm build is refused rather
-than emitted wrong.
+The regression test asserts on *both* halves of the lowering, because the
+broken form is the one that looks fine.
 
-One more encoding choice sits on top. LLVM still defaults to the withdrawn
-`try`/`catch` instructions, which no current engine accepts -- wasmtime
-rejected the module asking for `legacy_exceptions` by name -- while the
-proposal as standardised is `try_table` and `exnref`. ash passes
-`-wasm-use-legacy-eh=false` so the module it emits is the one engines
-implement.
+## A function pointer is a small integer here
 
-`test_stdlib` on wasm is now byte-identical to native across all 63 lines.
-`test_exceptions`, `test_basic`, `test_closures` and `bench_fib` match too.
-The regression is guarded in `wasm_target.rs` by asserting on *both* halves
-of the lowering, because the broken form is the one that looks fine.
+The tiered runtime names a not-yet-compiled body with a `findex + 1` sentinel
+and tells it from real code by magnitude — below `0x100000` is a sentinel,
+because no native code address is. On wasm a function pointer is a table index
+in the low hundreds, so every real function answered the test. `hlp_call_method`
+handed one to the closure runner, which called back into `hlp_call_method`,
+recursing until the shadow stack wrapped — surfacing as an out-of-bounds access
+at `0xffffffb0`.
 
-### Phase 3 — link and run a real Ash program
+One place asks that question now, `fiber::is_stub_sentinel`, and it answers no
+on wasm: nothing there creates a sentinel, since the target has no interpreter
+and no tiers. Whether a code pointer can be a small integer is a property of
+the target, not of what the host installed — an earlier version keyed on
+whether the stub resolver was installed, and `--mode jit` creates sentinels
+without one.
 
-Add a wasm branch to `ash --build` instead of passing a wasm object to the
-native `cc`/`clang` driver. The link owns:
+## Dynamic calls use trampolines, not registers
 
-* program object plus wasm32 `ash_std` archive;
-* WASI libc, compiler builtins and startup objects;
-* one deliberate command entrypoint (`_start` calling `main`) and exported
-  memory;
-* section GC and an explicit import allow-list;
-* no `--allow-undefined` escape hatch in a shipping build.
+`ash_static_call` places values in registers and jumps. WebAssembly has no
+registers and checks the signature of every indirect call, so a call whose
+shape is known only at run time cannot be assembled.
 
-For the first runnable milestone, use a bounded, non-reclaiming heap or disable
-collection. That isolates ABI, startup and linking from the root-discovery
-work without pretending the result is production-ready.
+The compiler sees every function type in the program, so it emits one
+trampoline per distinct signature — `(fun, args, out) -> ptr`, unpacking
+arguments, making one statically-typed call, storing the result — registered
+under a key computed from the `hl_type`
+(`crates/ash/src/llvm/aot_trampoline.rs`). A miss reports its key and argument
+count rather than guessing.
 
-The current `main(argc, argv)` may continue ignoring arguments for this
-milestone. Argument forwarding is required before the target is declared
-complete.
+Three things that found: a method's closure form is not in the type table, so
+the emitter registers the `hlp_get_closure_type` shape as well; registration
+belongs in `ash_late_init`, not `emit_module_init`, which runs during `build`
+before trampolines exist; and the count is a `usize` — declaring it `i64` gives
+`rust-lld: warning: function signature mismatch`, which is a warning and a
+corrupt call.
 
-*Done when:* `ash --build bench_fib.wasm --target wasm32-wasip1 bench_fib.hl`
-runs under Wasmtime, prints the reference checksum, and imports only the
-expected `wasi_snapshot_preview1` surface.
+## The host crate
 
-### Phase 4 — production GC and exceptions
+`crates/ash_wasm_runtime`, in three parts, and which side of the module
+boundary each sits on is the design.
 
-#### Roots
+**`guest`** is compiled *into* the program — `ash_std` depends on it for wasm —
+so its contents are ordinary Rust linkage, not imports. Everything doable
+inside the sandbox belongs there, and most is, because WASI supplies a clock,
+randomness, stdout and a filesystem.
 
-krio now supplies the other half of the rendezvous this needs:
-`cluster.stop_the_world(agent, || ...)` guarantees no other agent is inside a
-task step while the closure runs, and the loop safepoint ash already emits is
-what an agent polls to reach the barrier. The division is the useful one --
-krio guarantees *when* it is safe to scan, ash decides *what* to scan -- and
-it leaves root discovery exactly where this section says it is: the hard part,
-and still ash's.
+**`native`** is a wasmtime host and is what the conformance lane uses: no
+browser, no JavaScript, no wasm-bindgen. wasmtime's own fibers answer the
+suspending import.
 
+**`browser`** is the same contract behind a WASI preview-1 shim.
 
-Linear-memory allocation is not the difficult GC problem. Root discovery is.
-The current collector scans native stacks and callee-saved registers
-conservatively. WebAssembly locals and operand-stack values are not addresses
-in linear memory, so scanning the LLVM shadow stack finds only spills and
-address-taken values.
+One import crosses the boundary and must: `env.ash_host_fiber_yield`. A wasm
+module has no addressable stack and no instruction that moves between two, so
+suspension is the one operation it cannot perform for itself.
 
-Add explicit roots for pointer-bearing AIR values, using LLVM's GC-root
-support or an Ash shadow-root frame. Optimisation must not promote a live
-pointer out of the root set. Runtime Rust code also needs scoped roots for raw
-pointers held across an allocating call; generated-code roots alone are not
-enough.
+### Why not `web-sys`
 
-Do not accept “works with optimisation off” as proof. The backend may still
-place values in wasm locals.
+It supplies the wrong things — `web-sys` is generated from WebIDL (DOM, WebGL,
+`Worker`), while the runtime wants operating-system services, which is WASI.
+And it costs the target: `web-sys` rides on wasm-bindgen, whose supported
+target is `wasm32-unknown-unknown` — no libc, no clock, no stdout, no files,
+and no `setjmp`, which is the trap model. The result would run in a browser and
+nowhere else, so no wasmtime, no CI lane, no server embedding.
 
-#### Exceptions
+What a browser genuinely adds — JSPI, `Worker` + `SharedArrayBuffer`, WebGL —
+is something a *host* provides, and the module already has interfaces for each.
+A browser host written in Rust may use `web-sys` freely, on the other side of
+those imports.
 
-The old premise that wasm has no `setjmp` is stale. WebAssembly exception
-handling is part of Core 3.0, LLVM has WebAssembly SJLJ lowering, and WASI SDK
-ships optional `libsetjmp` support. Preserve the existing trap model first:
+## Sockets: twelve host imports
 
-* enable WebAssembly SJLJ/EH consistently for program and runtime objects;
-* link `libsetjmp`;
-* use the target's `setjmp`/`longjmp` symbols rather than native
-  `_setjmp`/`_longjmp` assumptions;
-* validate nested traps, rethrows and the outer entrypoint shield in both
-  Wasmtime and the browser engine chosen for CI.
+WASI preview 1 names `sock_accept`, `sock_recv`, `sock_send` and
+`sock_shutdown` and nothing that creates, connects, binds, listens, resolves or
+waits — and under wasmtime those four answer `ENOTSOCK` anyway. Rust's
+`std::net` compiles here and answers `Unsupported` to everything, including
+under `-S inherit-network`. A `close` routed through `fd_close` would have
+closed a WASI *file* at that number.
 
-Explicit AIR result-tag lowering remains the fallback if SJLJ portability or
-cost is unacceptable.
+So the guest asks the host for all of it. Every argument and result is an
+`i32`; pointers are guest addresses the host reads through exported memory:
 
-Native frame-pointer stack walking does not work on wasm. Name-section/source
-map based call stacks are separate from exception control flow and may land
-after catch/throw correctness.
+```
+env.ash_host_socket_open(udp)                -> fd >= 0            | -errno
+env.ash_host_socket_connect(fd, ip, port)    -> 0                  | errno
+env.ash_host_socket_bind(fd, ip, port)       -> 0                  | errno   host sets SO_REUSEADDR
+env.ash_host_socket_listen(fd, backlog)      -> 0                  | errno
+env.ash_host_socket_accept(fd)               -> fd >= 0            | -errno
+env.ash_host_socket_send(fd, buf, len)       -> bytes >= 0         | -errno
+env.ash_host_socket_recv(fd, buf, len)       -> bytes > 0, 0 = EOF | -errno
+env.ash_host_socket_shutdown(fd, how)        -> 0                  | errno   how: 1 read, 2 write
+env.ash_host_socket_close(fd)                -> 0                  | errno
+env.ash_host_socket_name(fd, which, out)     -> 0                  | errno   which: 0 local, 1 peer
+env.ash_host_socket_set(fd, opt, value)      -> 0                  | errno   opt: 0 blocking, 1 NODELAY, 2 BROADCAST, 3 timeout ms
+env.ash_host_socket_poll(fds, nfds, timeout) -> ready >= 0         | -errno  timeout ms, negative waits
+```
 
-*Done when:* allocation-heavy programs pass with collection forced at every
-safe point, and the native AOT exception corpus passes unchanged as wasm.
+Descriptors are the host's own namespace starting at 0; they never meet a WASI
+fd. `ip` is an `s_addr` in wire order, `port` in host order. Errors cross as
+WASI preview-1 errno numbers, the one numbering both sides agree on. The guest
+turns `AGAIN`/`ALREADY`/`INPROGRESS` into the -1 `sys.net.Socket` reads as
+`Blocked`, everything else into -2.
 
-## Why the runtime does not use `web-sys`
+`poll` takes 8-byte records `{ fd: i32, events: u16, revents: u16 }` with ash's
+own bits (`RD` 1, `WR` 2, `PRI` 4, `ERR` 8, `HUP` 16, `NVAL` 32), because
+`POLLIN` differs between Darwin and Linux and a pass-through would be right on
+one kernel and wrong on the next.
 
-It comes up because the browser is the destination, and `web-sys` is how Rust
-talks to a browser. It is the wrong layer for this crate, for three reasons
-that are worth writing down once.
+`ash-wasm-run` implements all twelve over `libc`. It evaluates readiness with
+`select(2)`, not `poll(2)`: on Darwin `poll` reports a stream whose peer closed
+as `POLLIN|POLLPRI|POLLHUP` and not writable, while `select` — and the unix
+runtime, and the Haxe suite — say readable, writable, not exceptional. On
+Windows all twelve answer `NOTSUP`.
 
-**It supplies the wrong things.** `web-sys` is generated from WebIDL: the DOM,
-WebGL, `Worker`, `crypto`, `performance`. The runtime does not want those. It
-wants a clock, randomness, stdout and a filesystem -- operating-system
-services, which is what WASI is. Measured against the actual port: of the
-errors left in `ash_std` for `wasm32-wasip1`, the ones outside `socket.rs` are
-seventeen struct-layout mismatches (a 32-bit `vclosure` has no `stackCount`, a
-32-bit `vdynamic` gains padding), a heap that wants `mmap`, and cfg fallout.
-`web-sys` fixes none of them. It is not a shortcut through this work; it is
-orthogonal to it.
+The browser host implements the client half over WebSocket and refuses `bind`,
+`listen`, `accept` and `name`, since a page cannot listen. WebSocket delivers
+whole messages while `recv` hands back bytes, so messages are queued whole and
+drained by count.
 
-**It costs the target.** `web-sys` rides on `wasm-bindgen`, whose supported
-target is `wasm32-unknown-unknown` -- a target with no libc and a std whose OS
-layer is stubbed out. No clock, no stdout, no files, and no `setjmp`, which is
-the trap model. Everything WASI hands over for free would have to be rebuilt
-against JavaScript, and the result would run in a browser and nowhere else:
-no `wasmtime`, so no CI lane and no server embedding. It also changes the link
-model, since `wasm-bindgen` expects to post-process a module rustc produced
-and to ship JS glue beside it, where ash links its own LLVM-emitted object
-against the runtime archive with `wasm-ld`.
+Not implemented: datagram addressing and name resolution.
 
-**The browser's extra capabilities are the harness's, not the runtime's.**
-What a browser genuinely offers beyond WASI is JSPI for suspending a fiber,
-`Worker` plus `SharedArrayBuffer` for threads, and later WebGL, audio and
-input for Heaps. Every one of those is something a host provides to the
-module, and the module already has the interfaces: one import for fiber
-suspension, the mutator interface for threads, HDLL-shaped imports for a
-framework backend. A browser host that wants to be written in Rust rather
-than JavaScript can use `web-sys` freely -- in its own crate, compiled for
-its own target, on the other side of those imports.
+## GC roots are the open correctness problem
 
-So: one runtime, built for `wasm32-wasip1`, reaching the browser through a
-small WASI preview-1 shim (phase 5). `web-sys` belongs to the host harness and
-to the framework backend, and using it there costs the runtime nothing.
+Linear-memory allocation is easy; root discovery is not. The collector scans
+native stacks and callee-saved registers conservatively, but WebAssembly locals
+and operand-stack values are not addresses in linear memory, so scanning the
+LLVM shadow stack finds only spills and address-taken values.
 
-### Phase 5 — browser ABI and conformance
+The work is explicit roots for pointer-bearing AIR values, plus scoped roots
+for raw pointers Rust holds across an allocating call. Optimisation must not
+promote a live pointer out of the root set, and "works with optimisation off"
+is not proof — the backend may still place values in wasm locals.
 
-Ship a small WASI Preview 1 loader for Node and browsers, covering stdout,
-clock, randomness, arguments/environment and memory. Canvas, WebGL, audio and
-input belong to an embedder/framework API rather than the language runtime.
+krio supplies the rendezvous half: `cluster.stop_the_world(agent, || ...)`
+guarantees no other agent is inside a task step. krio decides *when* it is safe
+to scan; ash still decides *what*.
 
-Run the Haxe conformance suite per case, as the interpreter lane does.
+## Threads
 
-**The denominator is measured, and it is almost the whole suite: 1,186 of
-1,195 cases, 99.2%.**
-
-A case can only run on wasm if every native it calls can. That set is
-observable without a wasm runtime: run the case under the interpreter with
-`ASH_TRACE_NATIVE=1`, which prints one line per native call with its library,
-and take the union. Two subtractions matter, and getting them wrong moves the
-answer by an order of magnitude:
-
-* **The suite's own startup is not the case.** Running a case name that does
-  not exist gives the baseline -- 38 natives, including `hlp_ssl_init`,
-  `hlp_socket_init` and `hlp_thread_current`. Counting those against every
-  case excludes every case.
-* **A mutex is not a thread.** `hlp_mutex_*`, `hlp_lock_*`, the thread-locals
-  and the atomics are all implementable single-threaded, and wasm has atomics
-  besides. Only real thread creation, sockets, subprocesses, the debugger and
-  dynamic loading are genuinely out of reach. Treating all 109 natives of
-  `thread.rs` as impossible put the answer at 10.5%; it is 99.2%.
-
-The nine cases out of scope, and why:
-
-| case | why |
-|---|---|
-| `unit.TestMisc`, `unit.spec.TestUnicode`, `unit.spec.haxe.crypto.TestSha1`, `TestMd5`, `TestHmac`, `unit.spec.haxe.zip.TestCompress`, `unit.issues.Issue2861`, `unit.issues.Issue5090` | the `fmt` HDLL, which a sandbox cannot load |
-| `unit.spec.sys.net.TestSocket` | passes since the twelve `env.ash_host_socket_*` imports (see Sockets above); a host without them answers `NOTSUP` and the case reads as an error there |
-
-Those eight `fmt` cases are compression and hashing, not language semantics:
-they come back into scope the day `fmt`'s primitives are provided by the wasm
-build rather than by a native library. The score is reported against the 1,186
-with these nine named, never quietly dropped.
-
-Add focused wasm tests before the broad suite:
-
-* object, enum, array, virtual and closure layouts;
-* direct, indirect, dynamic and reflective calls;
-* GC stress across generated code and runtime helpers;
-* nested exceptions and uncaught reporting;
-* import allow-list and code-size checks;
-* identical program output under Wasmtime and the browser runner.
-
-*Done when:* the same `.wasm` runs unmodified under Wasmtime and the browser
-loader, and the published conformance result is reproducible in CI.
-
-### Phase 6 — threads, fibers and Heaps
-
-Threads and fibers are different problems here, and only one of them is
-deferred.
-
-**Fibers are part of the target, driven by the host.** A fiber is cooperative:
-it suspends at a point the program chose, and something outside decides when it
-resumes. On a native target that something is `krio-fiber` switching stacks.
-A wasm module cannot switch its own stack, so `std/src/fiber_host.rs` is the
-backend there: the same four operations the scheduler above uses, with the one
-that must suspend routed to a single import, `ash_host_fiber_yield`.
-
-Deliberately one import and not a topology, because there are three ways to
-implement it and they trade differently:
+Fibers are part of the target. A wasm module cannot switch its own stack, so
+`std/src/fiber_host.rs` routes the one operation that must suspend to
+`ash_host_fiber_yield`. Three implementations trade differently:
 
 | how | needs | costs |
 |---|---|---|
-| engine suspension (JSPI, `wasmtime` async) | an engine that has it, which as of Safari 27 is all three | none beyond the call; single-threaded, no headers |
-| a worker per fiber over shared memory, parked on `Atomics.wait` | `wasm32-wasip1-threads`, and COOP/COEP in a browser | a fiber becomes an OS thread; every collection becomes a rendezvous |
-| Asyncify | nothing | roughly double the code size, and a tax on every call |
+| engine suspension (JSPI, wasmtime async) | an engine that has it — as of Safari 27, all three | nothing beyond the call; single-threaded |
+| a worker per fiber over shared memory | `wasm32-wasip1-threads`, COOP/COEP in a browser | a fiber becomes an OS thread; every collection is a rendezvous |
+| Asyncify | nothing | roughly double the code size, a tax on every call |
 
-The middle row is the one that works with no engine feature, and it is why
-this cannot simply be declared solved by shared memory and workers: it pulls
-the whole threads target forward into the first release, and it prices a fiber
-at a thread when ash's scheduler is M:N. Where JSPI exists it is strictly
-cheaper. So the module marks where it may be suspended, the harness decides
-how, and the choice can differ between the browser and the server without the
-program changing.
+**Suspension is not parallelism.** JSPI suspends one call stack on one agent,
+which is what a cooperative fiber needs and is not what a program expecting two
+threads to progress at once gets. A program that blocks the main thread on
+`lock.wait()` and expects a worker to keep computing needs the middle row.
+[`wasm-threads.md`](wasm-threads.md) records what krio built underneath it.
 
-**Suspension is not parallelism, and the table above is only about
-suspension.** JSPI suspends and resumes one call stack on one agent, which is
-what a cooperative fiber needs and is not what a Haxe program expecting two
-threads to make progress at once gets. A producer/consumer pair works under
-it; a program that blocks the main thread on `lock.wait()` and expects a
-worker to keep computing does not, because there is one agent and it is the
-one that blocked. Workers over shared memory are the only row that gives
-both. [`wasm-threads.md`](wasm-threads.md) is the companion that records what
-krio has built underneath that row, what it measured, and the three traps
-that cost real time to find.
+**Every thread said it was the same thread**, and that — not the collector —
+was what stopped allocating threads from working. `thread_self_fast` and
+`hlp_thread_current` both fell through to a constant under a
+`cfg(not(any(unix, windows)))` that wasi matches. So the collector's world held
+one mutator record, `stop_mutator_world` found nobody to stop and marked a heap
+another thread was writing; the reentrant GC lock had one owner; the TLAB map
+had one entry, so two threads bump-allocated the same buffer. The `stop=0.00ms`
+this document once reported as a working rendezvous was the symptom.
 
-**krio reached the same conclusion, and settled the engine question.** Its
-"krio Across Workers" design note records JSPI as having landed in all three
-engines -- Chrome 137+, Firefox 153+, Safari 27 beta -- which promotes engine
-suspension from a one-browser bet to the route a browser host should take by
-default, and it quotes this document's own pricing of the worker-per-fiber
-alternative back at us. It also plans `krio-fiber` as a JSPI backend at that
-tier, with two new crates beside it: `krio-parallel` for work stealing over
-`Send` tasks, and `krio-wasm` as the only crate that knows about JS, workers
-or COOP/COEP. Two consequences for ash. The backend in
-`ash_wasm_runtime::guest` is an interim: when krio's JSPI backend lands, the
-wasm build should take it and keep the shim only for hosts without JSPI. And
-the import stays as it is either way -- with JSPI a host binds
-`ash_host_fiber_yield` to a suspending function, which is exactly what that
-import is for.
-
-What the compiler owes all three is the same, and it already emits it: a safe
-point in every loop and a word the scheduler can tick, the epoch reached
-through a pointer since wasm cannot relocate an undefined data symbol.
-
-**Threads are deferred.** Do not make `wasm32-wasip1-threads` part of the first
-release. The target exists, but Rust still describes it as in flux, engines
-need WASI-threads support, and browser shared memory imposes COOP/COEP
-deployment requirements. A Worker is not by itself a replacement for stackful
-fiber semantics.
-
-Add threads only after single-mutator GC correctness. The work includes shared
-memory, worker startup, mutator rendezvous, fiber semantics and host deployment
-documentation.
-
-(That prediction was wrong about which part was hard, and is left here because
-being wrong about it cost a day. The rendezvous was never the problem: see
-"Threads that allocate work too" below for what was.)
-
-**The linker's half of it is built.** `wasm32-wasip1-threads` links and runs,
-single-threaded, which took thread-local storage: ash's linker refused it
-outright and a threads object cannot do without it, since wasi-libc puts
-`errno` there and `ash_std` has thread-locals in five files. `.tdata` is placed
-twice -- once as the template a new thread copies from, once as the main
-thread's own block, which `__tls_base` starts at -- a `MEMORY_ADDR_TLS_SLEB`
-relocation writes an offset within the block rather than an address, and
-`__wasm_init_tls` is synthesised to point `__tls_base` at a thread's own block
-and copy the template into it. Eight test programs print the same thing on both
-targets, the GC and exception ones included, and those read a thread-local on
-every allocation and every throw.
-
-The shape a second thread needs is built too, and the threads triple asks for
-it. A thread on wasm is another instance of the same module over the same
-memory, so the memory becomes `env.memory` --
-imported, shared, and carrying the 1GiB maximum the Rust target declares. The
-data image cannot then be an active segment, because an active segment is
-written at instantiation and the second instance would put the program's
-initial data back over everything the first had reached: every allocation,
-every global, the collector's own bookkeeping, with nothing trapping. So it
-becomes one passive segment, and a `__wasm_init_memory` races every instance
-on a flag word placed above the image -- the winner copies the data in, hands
-the main thread its thread-locals and runs the constructors; the losers wait
-on that word rather than on nothing. `__tls_base` starts at zero there, so an
-instance that reads a thread-local before it has been given a block traps
-rather than quietly reading the main thread's.
-
-A test instantiates that module twice over one shared memory with a sentinel
-written in between. Without the guard the sentinel is gone, which is exactly
-what a second thread would do to the first one's heap.
-
-**And Haxe threads run at the same time.** `ash-wasm-run` makes the memory the
-module imports and answers `wasi.thread-spawn` by instantiating the module
-again on an operating system thread and calling `wasi_thread_start`. It
-allocates nothing for the thread and knows nothing about what it will do: the
-guest's own entry sets `__stack_pointer` from the structure `pthread_create`
-filled in, so a thread runs on a shadow stack its own allocator gave it, and
-sets `__tls_base` to a block `__copy_tls` made by calling this linker's
-`__wasm_init_tls`. Which is what the second copy of the thread-local data is
-for -- a thread starting later copies the template, not whatever the main
-thread has since stored there.
-
-One thing in `std` stood between that and any parallelism, and it is worth
-recording because the shape recurs: three places decided "compiled body or
-interpreter stub" by comparing the function pointer against a limit, and on
-wasm a function pointer IS a small integer -- a table index in the low
-hundreds -- so every real one looked like a stub. `is_stub_sentinel` already
-knew that; those three were copies of the test rather than callers of it. Ash
-therefore sent every Haxe thread to the main scheduler on the one target where
-every body is compiled before the program runs.
-
-Measured on 8 performance cores, four hundred million iterations per thread:
-
-| threads | in parallel | one after another | speedup |
-|---|---|---|---|
-| 1 | 504ms | 251ms | 0.50x |
-| 2 | 514ms | 499ms | 0.97x |
-| 4 | 527ms | 1002ms | 1.90x |
-| 8 | 548ms | 1998ms | 3.65x |
-
-The wall clock barely moves from one thread to eight while the serial time
-grows eightfold. The flat ~250ms is instantiating the module for a thread,
-paid about once because the instantiations overlap too -- which also prices a
-Haxe thread here, and it is not a goroutine yet.
-
-**Nothing configures this.** There is no worker count on wasm and no
-environment to read one from -- a page has neither. A wasm worker runs a fiber
-body straight through, having no stack to switch away from, so a pool of N
-could only ever run N Haxe threads and would make the next one wait for one of
-them to finish. So the pool grows instead: an agent per live thread, asked for
-when the thread is created, and as many as the host will give. The fiber goes
-with the agent as it starts rather than being handed over once it reports
-ready, so four threads wait for one agent to appear rather than four in a row.
-
-Whether there is a host willing to give one is the host's to answer, in the
-host's own terms: `ash-wasm-run --threads`, or a browser page supplying the
-`spawn` function that makes a Worker. A host that says no answers the way the
-interface has for it and those threads run on the main scheduler.
-
-**Threads that allocate work too**, and what was stopping them was not the
-collector's design. It was that every thread on wasm said it was the same
-thread.
-
-`thread_self_fast` and `hlp_thread_current` both fell through to a constant --
-"one agent, one identity", written before the target had threads, under a
-`cfg(not(any(unix, windows)))` that wasi matches. Everything the runtime keys
-on identity therefore collapsed onto one entry: one mutator record in the
-collector's world, overwritten by whichever thread registered last, so
-`stop_mutator_world` found no other mutator, stopped nobody, and marked a heap
-another thread was still writing; one owner for the reentrant GC lock, so the
-allocator's slow path excluded nothing; one entry in the TLAB map, so two
-threads bump-allocated the same buffer; and one answer from
-`Thread.current()`, so anything a program keyed on it -- a mutex owner, a lock
-waiter -- excluded nothing either.
-
-The `stop=0.00ms` this document reported as a working rendezvous was the
-symptom, not the refutation: it was not a fast stop, it was nobody to wait
-for.
-
-A wasm thread does have something of its own and cheap to read. `__tls_base`
-differs per thread, so the address of any thread-local is distinct per thread,
-stable for its life, and one add to fetch. That is the identity now.
-
-Measured after, on the allocating program that used to fail:
+`__tls_base` differs per thread, so the address of any thread-local is distinct,
+stable for the thread's life, and one add to fetch. That is the identity now.
 
 | threads | before | after |
 |---|---|---|
@@ -920,75 +289,77 @@ Measured after, on the allocating program that used to fail:
 | 4 | hung or trapped every time | correct, 0.21s |
 | 8 | never tried | correct, 0.58s |
 
-The browser-shaped path -- the same module under node's `worker_threads` --
-prints the same numbers, and so does a real browser: four Haxe threads, each
-a Worker, allocating on one shared heap while the collector runs, answering
-what one thread answers. `wasm32-wasip1` is untouched by this.
+Parallelism on 8 performance cores, 400M iterations per thread: 1 thread 0.50x,
+2 threads 0.97x, 4 threads 1.90x, 8 threads 3.65x. The flat ~250ms floor is
+instantiating the module for a thread, paid about once because the
+instantiations overlap.
 
-**What the nondeterminism was worth.** The same command hung, then hung, then
-passed. That is what said "race" and not "codegen", after four hypotheses that
-assumed the latter. A failure that is not reproducible is evidence about its
-own cause.
+**Nothing configures the pool.** A page has no environment to read a worker
+count from, and a wasm worker runs a fiber body straight through, so a pool of
+N could only run N Haxe threads. The pool grows instead: an agent per live
+thread, as many as the host will give. A host that says no runs those threads
+on the main scheduler.
 
-What a thread does not share is its WASI context, its socket table and its
-loaded libraries: preview 1 has no way to hand one descriptor table to two
-instances, so each thread builds its own, exactly as wasmtime's own
-wasi-threads does. A file opened on one thread is not open on another.
+A thread does not share its WASI context, socket table or loaded libraries:
+preview 1 cannot hand one descriptor table to two instances, so each thread
+builds its own, as wasmtime's own wasi-threads does. A file opened on one
+thread is not open on another.
 
-**And in a browser.** A page starts a Worker where wasmtime starts an
-operating system thread, and everything else is the same: `run` hands the
-page's `spawn` the compiled module, the shared memory, the thread id and the
-guest's `startArg`, and the Worker calls `run_thread`. Measured in a browser
-on the same machine: 338ms for four threads against 1016ms one after another,
-3.01x. The same shape under node's `worker_threads`, which is how it is
-checked without a browser, gives 2.17x and the same four answers.
+### What the linker had to learn
 
-Two things a page costs that a host does not.
+A thread is another instance of the same module over the same memory, so the
+memory becomes `env.memory` — imported, shared, carrying the 1GiB maximum the
+Rust target declares. The data image cannot then be an active segment: the
+second instance would write the program's initial data back over everything the
+first had reached, with nothing trapping. It becomes one passive segment, and
+`__wasm_init_memory` races every instance on a flag word above the image — the
+winner copies the data in and runs constructors, the losers wait on that word.
 
-Shared memory needs `SharedArrayBuffer`, which needs cross-origin isolation --
-COOP and COEP on every response the app serves. `examples/browser/serve.py`
-exists to say so, because without them the memory constructor throws where it
-reads as the module being broken.
+Thread-local storage took `.tdata` placed twice, once as the template a new
+thread copies and once as the main thread's own block, a
+`MEMORY_ADDR_TLS_SLEB` relocation writing an offset rather than an address, and
+a synthesised `__wasm_init_tls`. `__tls_base` starts at zero, so an instance
+reading a thread-local before it has a block traps rather than quietly reading
+the main thread's.
 
-And the agents must be warmed before the program starts. Creating a Worker
-needs the creating agent to return to its event loop, and the agent asking for
-a thread is inside a synchronous call into wasm that will not return until
-that thread has answered; a Worker created at that moment never loads, and the
-program waits for it forever. That was measured too, by getting it wrong: a
-hang with no output, against 3.01x once the same agents were started first.
-Emscripten's `PTHREAD_POOL_SIZE` exists for this. It is also the one real
-bound on how many threads a page can run -- not a number the runtime asked
-for, but how many agents the page kept warm, with a thread that finds none
-free running on the main scheduler.
+### In a browser
 
-Heaps follows the single-threaded language/runtime target. Its rendering work
-is a framework-side wasm/WebGL backend. Ash's acceptance gate is that Heaps'
-non-rendering code, allocation, exceptions, reflection and callbacks are
-correct before graphics-specific imports are introduced.
+A page starts a Worker where wasmtime starts an OS thread. Measured: 338ms for
+four threads against 1016ms serial, 3.01x. Under node's `worker_threads`,
+2.17x.
 
----
+Two things a page costs that a host does not:
 
-## Risk register
+- **Shared memory needs cross-origin isolation** — COOP and COEP on every
+  response. `examples/browser/serve.py` exists to say so; without them the
+  memory constructor throws in a way that reads as the module being broken.
+- **Agents must be warmed before the program starts.** Creating a Worker needs
+  the creating agent to return to its event loop, and the agent asking for a
+  thread is inside a synchronous call into wasm that will not return until the
+  thread answers. A Worker created at that moment never loads. This is also the
+  real bound on how many threads a page can run.
 
-| risk | current evidence | deciding measurement |
-|---|---|---|
-| **32-bit ABI** | the full module emits, but several generated layouts still use host/8-byte constants | exhaustive C-header vs `TargetAbi` layout fixtures plus runtime allocation tests |
-| **GC roots** | native conservative scanning cannot see values kept only in wasm locals | collect at every safe point across generated and runtime code |
-| **Exceptions** | LLVM/WASI now has an SJLJ route, but Ash emits native symbol spellings and flags | unchanged nested trap/rethrow corpus on Wasmtime and browser CI |
-| **Indirect calls** | LLVM/`wasm-ld` already emits a table, element segment and `call_indirect` | closures, vtables, reflection and runtime-created callbacks |
-| **Runtime surface** | `ash_std` currently fails before compilation at bindgen; several modules have only Unix/Windows branches | wasm archive with no unintended imports, followed by stdlib/conformance lanes |
-| **Code size** | no runtime has yet been linked into a real program | stripped `bench_fib.wasm` and `test_stdlib.wasm`, with per-section accounting |
-| **Threads** | target and proposals exist, but the scheduler/fiber implementation is native | separate post-MVP worker, GC rendezvous and deployment tests |
+## Conformance
 
-GC roots and the 32-bit ABI are the correctness risks. Exceptions and indirect
-calls now have credible toolchain answers, but still need Ash integration
-tests. Code size is measured only after the correct runtime links; the current
-permissive module is not representative.
+**1,186 of 1,195 cases are in scope, 99.2%.** A case can run on wasm if every
+native it calls can, which is observable without a wasm runtime: run it under
+the interpreter with `ASH_TRACE_NATIVE=1` and take the union.
+
+Two subtractions decide the answer. The suite's own startup is not the case —
+running a nonexistent case name gives a 38-native baseline including
+`hlp_ssl_init` and `hlp_socket_init`, and counting those against every case
+excludes every case. And a mutex is not a thread: `hlp_mutex_*`, `hlp_lock_*`,
+thread-locals and atomics are all implementable single-threaded. Treating all
+109 natives of `thread.rs` as impossible put the answer at 10.5%.
+
+The nine out of scope: eight need the `fmt` HDLL (compression and hashing, not
+language semantics — they return the day `fmt`'s primitives are provided by the
+wasm build), and `unit.spec.sys.net.TestSocket` passes only on a host that
+implements the socket imports. Report against 1,186 with these named, never
+quietly dropped.
 
 ## What this is not
 
-* Not a wasm interpreter for HL. It emits compiled wasm.
-* Not a replacement for the native interpreter, Cranelift, LLVM JIT or native
-  AOT outputs.
-* Not a way to load native `.hdll` files in a sandbox. A future wasm-native
-  extension/import ABI would be a different artifact and contract.
+- Not a wasm interpreter for HL. It emits compiled wasm.
+- Not a replacement for the interpreter, Cranelift, LLVM JIT or native AOT.
+- Not a way to load native `.hdll` files in a sandbox.

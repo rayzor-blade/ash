@@ -1,138 +1,121 @@
-# Loop vectorization in AIR: what widens, what refuses, and why
+# AIR loop vectorization
 
-Status 2026-09-03. **AIR widens loops.** `air::v2::passes::widen` runs at O3,
-widens by a fixed factor of four with a scalar epilogue, and all three tiers
-plus the SSA walker execute the vector instructions it produces. `serialize`
-scalarizes them back, so the opcode paths never see a vector.
+`air::v2::passes::widen` widens loops by four with a scalar epilogue. It runs
+at O3 only. All three tiers and the SSA walker execute the vector instructions;
+`serialize` scalarizes them back, so the opcode paths never see a vector.
 
-That is a change from this document's earlier status, which read "nothing in
-the product vectorizes a loop". What has *not* changed is the corpus: one loop
-per program widens, and the reasons the rest refuse are measured below rather
-than guessed at.
+`ASH_AIR_NO_WIDEN=1` turns it off. Try that first against a wrong answer: the
+widener is the only O3 pass that rewrites arithmetic, so an unchanged result
+with it off rules it out and points at the inliner or SROA instead.
 
-`ASH_AIR_NO_WIDEN=1` turns the pass off. It is the first thing to try against a
-wrong answer, because the widener is the one O3 pass that rewrites arithmetic,
-so "same result with the widener off" separates it from the inliner and SROA.
+## The instructions
 
-## What ships
+`VecLoad`, `VecStore`, `VecSplat`, `VecBinOp`, `VecReduce`. Only the widener
+produces them, only at O3, and only after `serialize` has taken its scalar
+snapshot. Vector values never reach de-SSA and never need an HL register.
 
-Five instructions carry vectors through the IR: `VecLoad`, `VecStore`,
-`VecSplat`, `VecBinOp`, `VecReduce`. They are produced only by the widener,
-only at O3, and they are valid only after `serialize` has taken its scalar
-snapshot — vector values never reach de-SSA and never need an HL register,
-which is what makes them cheap to represent.
+Supported: runtime trip counts through the epilogue, guard hoisting, affine
+addressing (`i << 2`, `i + k`, `i * c`), contiguity from the element's byte
+width, and integer reductions, whose partials collapse through a `VecReduce` on
+a block spliced onto the exit edge.
 
-Working today: runtime trip counts through a scalar epilogue, guard hoisting,
-affine addressing (`i << 2`, `i + k`, `i * c`), contiguity decided by the
-element's own byte width, and integer reductions, whose vector partials are
-collapsed by a `VecReduce` on a block spliced onto the exit edge.
+The width gate is `lanes_fit`: `element_bytes * 4 <= 16`. An `i64` at four
+lanes is 256 bits, which no NEON register holds.
 
-The width gate is `lanes_fit`: `element_bytes * 4 <= 16`. An `i64` element at
-four lanes is 256 bits, which no NEON register holds, and the consequences of
-emitting one are in rule 4 below.
+## Four soundness rules
 
-## The four soundness rules
-
-Each was learned from a wrong answer, not from a failing build. Every one of
-them produced IR that verified.
+Each came from a wrong answer, not a failing build. Every one produced IR that
+verified.
 
 1. **Only a loop-invariant scalar may be broadcast.** `acc += i * 3 + 1`
-   splatted the lane-zero term four times and a hot-loop test returned
-   497032704 where the answer is 1198000000.
+   splatted the lane-zero term four times and returned 497032704 instead of
+   1198000000.
 2. **Every use of a widened value must be one the emit stage rewrites.** A
-   widened value reaching a phi, a field store, or anything past the loop is
-   still naming a definition that was just replaced.
-3. **What comes after the loop is the remainder's value, not the vector
-   loop's.** The vector loop stops at `start + (n & ~3)`, so `return i` past it
-   was up to three short. Verification passes either way, because both values
-   are defined and in scope.
-4. **The IR must not hold a vector the machine cannot.** A widened `i64x4`
-   made Cranelift refuse the whole function and LLVM's own-module path refuse
-   it too, and because a tier-0 refusal was not remembered, a stub-bridge call
-   re-lowered the same function on every call: 311,362 declines in 156 seconds,
-   with the game frozen and its audio still playing. The rule that lowering
-   must be total covers *types*, not only instructions.
+   widened value reaching a phi, a field store, or anything past the loop still
+   names a definition that was just replaced.
+3. **What follows the loop is the remainder's value, not the vector loop's.**
+   The vector loop stops at `start + (n & ~3)`, so `return i` after it was up
+   to three short. Verification passes either way — both values are defined and
+   in scope.
+4. **The IR must not hold a vector the machine cannot.** A widened `i64x4` made
+   both Cranelift and LLVM's own-module path refuse the function, and because a
+   tier-0 refusal was not remembered, a stub-bridge call re-lowered it every
+   call: 311,362 declines in 156 seconds, game frozen with audio still playing.
+   Totality of lowering covers *types*, not just instructions.
 
-Two more that generalize past this pass: a pass that deletes a definition must
-call `compact_values`, and a pass that mints a constant is only safe for
-consumers that read AIR rather than the serialized form.
+Two more that outlive this pass: a pass that deletes a definition must call
+`compact_values`, and a pass that mints a constant is only safe for consumers
+reading AIR rather than the serialized form.
 
-## What the corpus says
+## What the corpus widens
 
-Measure with `cargo run --example vec_survey -- <file.hl>`; `ASH_VEC_ONLY=`
-spells out every loop. The survey reads the pass's own record through
-`take_outcomes`, because re-running the analysis on transformed IR reports
-every success as a refusal, and it drops the optimized-IR cache between files
-since that cache is keyed by findex alone.
-
-One loop widens per program, and it is the same one every time: the stdlib's
-array fill. The blockers, in order:
+Exactly one loop widens in each program in the corpus, and it is the stdlib's
+array fill every time.
 
 | blocker | count | what it is |
 |---|---|---|
-| call in body | 47 | a Haxe array write carries the grow-on-demand call in its bounds-check slow path |
+| call in body | 47 | a Haxe array write carries grow-on-demand in its bounds-check slow path |
 | may alias | 26 | a store paired with an access through a base the analysis cannot separate |
-| bounds-check diamond | — | an array read is `i <u len ? a[i] : 0`, so the value reaches the accumulator through a phi |
+| bounds-check diamond | — | `i <u len ? a[i] : 0`, so the value reaches the accumulator through a phi |
 
-The "may alias" count went *up*, from one, when affine addressing made those
-addresses visible at all. That is a better answer than not seeing them.
+"May alias" rose from one when affine addressing made those addresses visible
+at all, which is a better answer than not seeing them. The diamond is rule 2 in
+another form, and it is why reductions widen nothing new.
 
-The diamond is rule 2 in a different costume, and it is why reductions widen
-nothing new. Removing it needs if-conversion under a lane mask, and that is the
-next piece of work.
+Measure with `cargo run --example vec_survey -- <file.hl>`; `ASH_VEC_ONLY=`
+lists every loop. The survey reads the pass's own record via `take_outcomes`,
+because re-running the analysis on transformed IR reports every success as a
+refusal, and it drops the optimized-IR cache between files since that cache is
+keyed by findex alone.
 
-## Which loops could ever vectorize
+## Which loops could ever widen
 
-| loop | across iterations? | why |
+| loop | widens? | why |
 |---|---|---|
-| nbody `advance` inner `j` loop | no, as written | `bodies[j].x` reads a field of a per-iteration pointer: array-of-structs, so consecutive lanes are not contiguous and would need a gather NEON does not have |
-| nbody final `for (body in bodies)` | yes, easily | elementwise over an array, no loop-carried values |
-| mandelbrot escape loop | no | `z = z² + c` is serial by construction |
-| mandelbrot pixel loop | in principle | vectorize across pixels, but trip counts diverge per lane, so it needs masking and a per-lane exit |
-| call benches | no | loop-carried multiply chain, chosen so the work survives optimization |
+| nbody `advance` inner `j` | no, as written | `bodies[j].x` is array-of-structs, so lanes are not contiguous and would need a gather NEON lacks |
+| nbody `for (body in bodies)` | yes | elementwise, no loop-carried values |
+| mandelbrot escape | no | `z = z² + c` is serial |
+| mandelbrot pixel loop | in principle | trip counts diverge per lane, so it needs masking and per-lane exit |
+| call benches | no | loop-carried multiply chain, chosen to survive optimization |
 
-nbody is worth dwelling on, because it is the loop everyone expects to widen.
-It refuses on data layout, and LLVM hits the same wall from the other side:
-asked to vectorize the same loop, LLVM emits SLP across the x/y/z triple
-instead, packing two of three spatial components into one register and
-collapsing them immediately with a horizontal `faddp`, while `fsqrt` and `fdiv`
-stay scalar. One iteration still computes one body pair. The largest unlock
-here is not the transform, it is an array-of-structs to struct-of-arrays layout
-change, or gather support.
+nbody refuses on data layout, and LLVM hits the same wall from the other side:
+asked to vectorize it, LLVM emits SLP across the x/y/z triple, packs two of
+three components into one register, collapses them with a horizontal `faddp`,
+and leaves `fsqrt` and `fdiv` scalar. One iteration still computes one body
+pair. The unlock is an array-of-structs to struct-of-arrays layout change, or
+gather support — not a better transform.
 
-The Cranelift tier emits no SIMD of its own: a full CLIF dump for nbody
-contains eighteen scalar floating-point instructions and zero vector types. It
-executes the vectors AIR hands it, and finds none by itself.
+The Cranelift tier emits no SIMD of its own. A full CLIF dump for nbody has
+eighteen scalar floating-point instructions and zero vector types; it executes
+the vectors AIR hands it and finds none itself.
 
-## What is next, in order
+## Next, in order
 
-1. **If-conversion under a lane mask**, which retires the bounds-check diamond
-   and lets reductions over array reads widen.
-2. **A per-width vector factor** — `f64x2`, `i64x2` — so 64-bit elements widen
-   by two rather than being refused by `lanes_fit`.
-3. **Hoisting the grow-on-demand call** out of an array write's slow path,
-   which needs something to vouch that the callee is "ensure capacity".
+1. **If-conversion under a lane mask** — retires the bounds-check diamond and
+   lets reductions over array reads widen.
+2. **Per-width vector factor** (`f64x2`, `i64x2`) so 64-bit elements widen by
+   two instead of being refused by `lanes_fit`.
+3. **Hoist grow-on-demand** out of an array write's slow path, which needs
+   something to vouch that the callee is "ensure capacity".
 4. **Alias disambiguation** strong enough to separate a store from an access
    through an unrelated base, or a runtime overlap guard where it cannot.
-5. **Masked, divergent loops** last: per-lane exit masks are strictly harder
-   than the uniform case.
+5. **Masked, divergent loops** last: per-lane exit masks are strictly harder.
 
-Both sibling projects stalled at the same place, which is worth knowing before
-spending months here: zyntax's three vectorization passes have no memory
-dependence analysis and emit no runtime overlap guard, and rayzor's
-`LoopVectorizationPass` is O3-only, requires a compile-time-constant trip
-count, and does no dependence analysis either. In both, the SIMD that actually
-ships came from hand-written kernels rather than the automatic pass.
+Both sibling projects stalled in the same place. zyntax's three vectorization
+passes have no memory dependence analysis and emit no runtime overlap guard;
+rayzor's `LoopVectorizationPass` is O3-only, needs a compile-time-constant trip
+count, and does no dependence analysis either. In both, the SIMD that shipped
+was hand-written kernels.
 
 ## Testing
 
-Gate any change on `o3_preserves_semantics`, which executes a widened loop with
-an epilogue and compares against the unoptimized version, and on the parity
-matrix: `TestVectorize` covers lengths zero through twelve against the width of
-four. Floating-point reduction reassociation changes results, so a float
-reduction needs the same explicit policy decision the FMA contraction already
-documents.
+Gate changes on `o3_preserves_semantics`, which executes a widened loop with an
+epilogue against the unoptimized version, and on the parity matrix:
+`TestVectorize` covers lengths zero through twelve against a width of four.
 
-Any widened stdlib loop is instantiated once per element type, so test the wide
-ones: `Array<Int>` and `Array<haxe.Int64>` are different code, and rule 4 was
+Float reduction reassociation changes results, so it needs the same explicit
+policy decision FMA contraction already has.
+
+Test the wide element types. A widened stdlib loop is instantiated per element
+type, so `Array<Int>` and `Array<haxe.Int64>` are different code — rule 4 was
 found in the second.

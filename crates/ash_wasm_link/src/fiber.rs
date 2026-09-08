@@ -1,6 +1,6 @@
 //! The fiber transform, built one checkable piece at a time.
 //!
-//! The design is `docs/wasm-fibers.md`. This module holds the rewrite; what
+//! The design is `docs/wasm/fibers.md`. This module holds the rewrite; what
 //! is here so far is its foundation, which is the part with no precedent we
 //! can copy.
 //!
@@ -14,7 +14,7 @@
 //! Binaryen solves this with a separate `Flatten` pass that rewrites the whole
 //! function into a form where nothing is ever on the stack across a call.
 //! That pass aborts on `try_table`, which every module ash links contains, so
-//! it is not available to us (`docs/wasm-fibers.md` has the stack trace).
+//! it is not available to us (`docs/wasm/fibers.md` has the stack trace).
 //!
 //! [`empty_stack_at_calls`] does the same job locally and without a tree. At
 //! each call site the operand stack is popped into locals and pushed straight

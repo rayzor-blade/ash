@@ -170,7 +170,7 @@ Nothing waits. `poll_oneoff` reports its subscriptions expired at once, so
 Threads above are Workers, each with its own instance over one shared memory.
 A fiber is the unrelated thing: one instance, one stack running at a time,
 control moving between fibers only where one of them blocks -- a `Deque.pop`,
-a lock, an explicit yield. `docs/wasm-fibers.md` calls it suspension rather
+a lock, an explicit yield. `docs/wasm/fibers.md` calls it suspension rather
 than parallelism, and it is.
 
 Both are needed and neither replaces the other. A thread that blocks has to be
@@ -254,4 +254,4 @@ scheduler, taking turns with another band, and the page says which.
 
 **Loading a native library.** `ash_host_dlopen` answers "no such library", so
 a primitive from one raises when it is reached. The steps are the native
-host's loader (`docs/wasm-hdlls.md`) against `WebAssembly.instantiate`.
+host's loader (`docs/wasm/hdlls.md`) against `WebAssembly.instantiate`.

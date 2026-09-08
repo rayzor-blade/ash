@@ -535,7 +535,7 @@ fn install_env(env: &Object, host: &Rc<Host>) {
 
     // Loading a native library in a page is the same steps against
     // `WebAssembly.instantiate`, and is not written yet: see
-    // `docs/wasm-hdlls.md`. Answering zero is "no such library", which the
+    // `docs/wasm/hdlls.md`. Answering zero is "no such library", which the
     // guest reports only if a primitive is actually reached.
     for name in ["ash_host_dlopen", "ash_host_dlsym"] {
         install(env, name, constant(0).into());

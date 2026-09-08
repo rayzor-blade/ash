@@ -143,7 +143,7 @@ fn wrapping_every_body_renumbers_every_branch_that_leaves_one() {
 ///
 /// This is the one number in the fiber design that nothing could predict:
 /// whether ash's own output keeps values on the stack across calls, and how
-/// much it costs to get them into locals. `docs/wasm-fibers.md` §7 took its
+/// much it costs to get them into locals. `docs/wasm/fibers.md` took its
 /// operand-stack statistics from a disassembly's folded rendering and said so;
 /// this counts them.
 #[test]

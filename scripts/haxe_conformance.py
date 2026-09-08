@@ -414,7 +414,7 @@ def wasm_hdll_sources(ash: str) -> list[pathlib.Path]:
     """The wasm side modules ash was built with, if any.
 
     A wasm program loads a native library from a `.wasm` beside it rather than
-    from an HDLL -- see docs/wasm-hdlls.md -- so the wasm arms need these
+    from an HDLL -- see docs/wasm/hdlls.md -- so the wasm arms need these
     staged the way the other arms need the .hdll files. Built by
     scripts/build_wasm_hdll.py; absent is not an error, it just means a
     program reaching one of those primitives raises.
@@ -598,7 +598,7 @@ def wasm_runner(ash: str) -> str:
 # here and not in engine_env.
 WASM_ARMS = {
     "wasm": {},
-    # The link-time fiber transform (docs/wasm-fibers.md). Reporting-only: it
+    # The link-time fiber transform (docs/wasm/fibers.md). Reporting-only: it
     # says whether instrumenting every function in the suspend set changes any
     # answer, which validation cannot.
     "wasm-fibers": {"ASH_WASM_FIBERS": "1"},

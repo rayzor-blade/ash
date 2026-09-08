@@ -1,7 +1,7 @@
 //! The `sqlite` HDLL, as a wasm side module.
 //!
 //! Its own crate and its own `.wasm`, loaded beside a program that asks for
-//! it -- see `docs/wasm-hdlls.md`. Compiled into the runtime it cost 1.67 MB
+//! it -- see `docs/wasm/hdlls.md`. Compiled into the runtime it cost 1.67 MB
 //! of every module, hello world included, because a library present in the
 //! runtime object is also reachable from it.
 //!

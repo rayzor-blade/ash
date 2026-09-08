@@ -1,7 +1,7 @@
 //! MVP for ahead-of-time compilation: AIR -> LLVM -> object file, with the
 //! runtime referenced by symbol rather than by baked address.
 //!
-//! This is the fork described in docs/wasm-target.md: everything up to
+//! This is the fork described in docs/wasm/README.md: everything up to
 //! `run_middle_end` is target-independent, and only the tail differs between
 //! JIT (`get_function_address`) and AOT (`emit_object`).
 //!

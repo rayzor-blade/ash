@@ -9,7 +9,7 @@
 //! than something the host ABI leaked in.
 //!
 //! The last check is the one that catches a cross-compile regression. Until
-//! the wasm runtime exists (docs/wasm-target.md, phase 2) the module is linked
+//! the wasm runtime exists (docs/wasm/README.md) the module is linked
 //! permissively, so the imports ARE the program's runtime boundary, listed.
 //! Anything appearing there that is not an `hlp_*`, `hl_*` or a setjmp form
 //! means generated code called something only a native host provides.

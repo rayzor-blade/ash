@@ -118,7 +118,7 @@ pub struct LinkOptions {
     /// Off by default, and the gate is not that the code path is skipped but
     /// that the emitted module is byte-identical: with this false, `link`
     /// returns exactly what `emit` produced and nothing in
-    /// [`crate::fiber`] runs. See `docs/wasm-fibers.md`.
+    /// [`crate::fiber`] runs. See `docs/wasm/fibers.md`.
     pub fibers: bool,
 }
 

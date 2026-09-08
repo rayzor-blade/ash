@@ -1,6 +1,6 @@
 //! How much of a real module a fiber transform would have to instrument.
 //!
-//! `docs/wasm-fibers.md` records this number, and it decides whether the
+//! `docs/wasm/fibers.md` records this number, and it decides whether the
 //! transform is worth building: every instrumented function pays code size and
 //! a state check on every call. The figure there was first obtained with a
 //! throwaway script, which is not a thing anyone can re-run after the emitter
@@ -135,7 +135,7 @@ fn the_suspend_set_over_a_real_module() {
     all.extend(ash_wasm_link::fiber::imports_named(&bytes, BLOCKING).expect("reading imports"));
 
     // Written out so the set can be diffed against another instrumenter's.
-    // `docs/wasm-fibers.md` §6 makes ours being a subset of Binaryen's the
+    // `docs/wasm/fibers.md` makes ours being a subset of Binaryen's the
     // exit condition for this step, and a count alone cannot show that.
     if let Ok(path) = std::env::var("ASH_LINK_TEST_NAMES") {
         let names = names(&bytes);

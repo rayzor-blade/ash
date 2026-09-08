@@ -163,7 +163,7 @@ pub struct JITModule<'ctx> {
     /// process. Natives become `External` declarations the linker resolves
     /// against `libash_std.a` instead of absolute addresses baked into the
     /// IR, because an address valid in THIS process means nothing in the one
-    /// that will run the object. See `docs/wasm-target.md`.
+    /// that will run the object. See `docs/wasm/README.md`.
     pub(crate) aot: bool,
     /// Compile reached functions into independent modules and dispatch calls
     /// through `functions_ptrs`. This is the LLVM half of compiled-only JIT:

@@ -1,7 +1,7 @@
 //! Suspending a fiber in a page.
 //!
 //! Not JSPI, and not a worker parked on `Atomics.wait`. ash already carries a
-//! link-time transform (`docs/wasm-fibers.md`) that rewrites a module so its
+//! link-time transform (`docs/wasm/fibers.md`) that rewrites a module so its
 //! frames can unwind themselves back to a scheduler and rewind to exactly
 //! where they stopped, and it works: the Haxe threads suite goes from a
 //! timeout to 22 of 22 under it. A module built with `ASH_WASM_FIBERS=1`

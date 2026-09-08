@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a native library as a wasm side module -- an HDLL a program loads.
 
-`docs/wasm-hdlls.md` explains what one is and why it is a `dylink.0` side
+`docs/wasm/hdlls.md` explains what one is and why it is a `dylink.0` side
 module rather than a component. This builds the ones that ship with ash.
 
     scripts/build_wasm_hdll.py                    # all of them, release

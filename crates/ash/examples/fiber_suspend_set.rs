@@ -1,7 +1,7 @@
 //! How much of a program would a link-time fiber transform have to instrument?
 //!
 //! The wasm-level answer is discouraging and is recorded in
-//! `docs/wasm-fibers.md`: an indirect call there can reach any address-taken
+//! `docs/wasm/fibers.md`: an indirect call there can reach any address-taken
 //! function of a matching wasm type, and a Haxe program has thousands of
 //! functions sharing a few dozen signatures, so the suspend set closes over
 //! 86% of the module whatever the seeds are.

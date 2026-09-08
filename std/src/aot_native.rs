@@ -204,7 +204,7 @@ unsafe fn library(lib: &str) -> *mut c_void {
 /// Nothing heavier belongs here: a library named from this file is reachable
 /// from it and therefore in every module, which is what sqlite was until it
 /// became `sqlite.wasm` -- 1.67 MB of a 3.96 MB hello world. See
-/// `docs/wasm-hdlls.md`.
+/// `docs/wasm/hdlls.md`.
 /// The other entry is not a shim for a missing library. `sys.ssl.Lib` is
 /// written as
 ///

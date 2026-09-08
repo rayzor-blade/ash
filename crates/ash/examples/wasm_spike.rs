@@ -1,5 +1,5 @@
-//! Phase 0 of docs/wasm-target.md: can LLVM's WebAssembly backend emit an
-//! object from the IR our AIR lowering produces?
+//! The original probe for docs/wasm/README.md: can LLVM's WebAssembly backend
+//! emit an object from the IR our AIR lowering produces?
 //!
 //! Deliberately minimal. No runtime, no GC, no linking — this exists to find
 //! out, in a day rather than after a runtime port, whether the lowering says
@@ -86,6 +86,6 @@ fn main() -> anyhow::Result<()> {
     println!();
     println!("NEXT: lower one of those to LLVM IR through llvm/function.rs and");
     println!("emit THAT. Blocked on JITModule owning an MCJIT engine — see");
-    println!("docs/wasm-target.md Phase 2.");
+    println!("docs/wasm/README.md.");
     Ok(())
 }

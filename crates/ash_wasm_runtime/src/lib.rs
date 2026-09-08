@@ -42,7 +42,7 @@
 //! tests, and review of the rest.
 //!
 //! The second row is the whole reason a host exists rather than a library.
-//! [`guest`] holds the program's side of it; `docs/wasm-target.md` explains
+//! [`guest`] holds the program's side of it; `docs/wasm/README.md` explains
 //! why choosing between JSPI, a worker pool and Asyncify is the host's
 //! business and not the program's.
 //!
@@ -58,7 +58,7 @@
 //! `HUP` 16, `NVAL` 32), not any libc's. A host without sockets installs the
 //! twelve and answers `NOTSUP`; the guest then fails the call the way a
 //! kernel would have, instead of failing to instantiate. The full table is in
-//! `docs/wasm-target.md`.
+//! `docs/wasm/README.md`.
 //!
 //! # Not done yet
 //!

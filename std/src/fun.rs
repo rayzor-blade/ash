@@ -47,7 +47,7 @@ pub unsafe extern "C" fn empty_static_call(
 /// The real answer is for the compiler to emit one trampoline per distinct
 /// signature -- it knows them all -- and for this to become a lookup. Until
 /// then a dynamic call fails here rather than silently returning something,
-/// which costs reflection and `Reflect.callMethod`; see docs/wasm-target.md.
+/// which costs reflection and `Reflect.callMethod`; see docs/wasm/README.md.
 ///
 /// # Safety
 /// Mirrors the native signature; touches none of its arguments.

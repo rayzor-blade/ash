@@ -25,7 +25,7 @@
 //! Thread-local storage is laid out, because a `wasm32-wasip1-threads` object
 //! cannot do without it -- wasi-libc puts `errno` there, and `ash_std` has
 //! thread-locals in five files. It is one more relocation type and three more
-//! globals; `docs/wasm-target.md` records what that does and does not buy.
+//! globals; `docs/wasm/README.md` records what that does and does not buy.
 //!
 //! Refusing rather than dropping has already earned itself: a survey of these
 //! objects reported no constructors, and the runtime object turned out to

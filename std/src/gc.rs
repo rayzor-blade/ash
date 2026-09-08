@@ -3151,7 +3151,7 @@ impl ImmixAllocator {
             // something where a machine word is one. On a 32-bit target the
             // pattern does not fit a `usize` and the scan below would be
             // reading half a value; roots there have to be explicit rather
-            // than found by scanning (docs/wasm-target.md, phase 4).
+            // than found by scanning (docs/wasm/README.md, "GC roots").
             #[cfg(target_pointer_width = "64")]
             {
                 const NAN_TAG: usize = 0x7FF8_0000_0000_0000;

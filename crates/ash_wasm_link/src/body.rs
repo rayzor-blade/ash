@@ -4,7 +4,7 @@
 //! instruction: a body is a byte range, a relocation is a fixed-width write at
 //! a known offset inside it, and `emit` copies the range out untouched. That
 //! is deliberate and it is why the crate is small. But a fiber transform has
-//! to instrument bodies -- see `docs/wasm-fibers.md` -- and instrumenting
+//! to instrument bodies -- see `docs/wasm/fibers.md` -- and instrumenting
 //! means decoding, changing, and re-encoding, which is a capability the crate
 //! does not have.
 //!

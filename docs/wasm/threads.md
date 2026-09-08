@@ -1,8 +1,8 @@
 # Shared memory and Workers on wasm
 
-Companion to [`wasm-target.md`](wasm-target.md), which decides the route. This
-records what krio has built underneath the worker-per-fiber row, what it
-measured, and what it costs to use.
+Companion to [README.md](README.md), which decides the route. This records
+what krio has built underneath the worker-per-fiber row, what it measured, and
+what it costs to use.
 
 Threads should still stay out of a first release. This is the map for when they
 come back.
@@ -72,7 +72,7 @@ Runnable: `examples/browser-demo/` in krio.
 exports a mutable `__stack_pointer` and that does not help: it names the shadow
 stack in linear memory, while call frames and the operand stack live inside the
 engine, so swapping it moves the data half and leaves the control half behind.
-ash's own transform is the answer — see [`wasm-fibers.md`](wasm-fibers.md).
+ash's own transform is the answer — see [fibers.md](fibers.md).
 
 krio's complementary piece is small: `krio_fiber::set_suspender(fn())` routes
 `yield_now()` to a host suspender on targets with no native switch, so library

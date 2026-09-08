@@ -130,7 +130,7 @@ Two things affect the first build.
 `ash_module_init`, and imports what only a host can answer: WASI, fiber
 suspension and sockets. A wasm module cannot switch its own stacks, so an ash
 program there is suspended by whoever embeds it. The import contract is in
-[`wasm-target.md`](wasm-target.md).
+[`wasm/README.md`](wasm/README.md).
 
 **Only what the program can reach is emitted.** Functions nothing calls are
 dropped, which is about a third of the module. What counts as reachable is

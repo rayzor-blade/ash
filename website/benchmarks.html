@@ -11,19 +11,19 @@
   <meta name="keywords" content="HashLink, Haxe, bytecode, runtime, JIT, Cranelift, LLVM, Rust, virtual machine">
   <meta name="robots" content="index, follow">
   <meta name="theme-color" content="#f5f1ea">
-  <link rel="canonical" href="https://rayzor-blade.github.io/ash/">
+  <link rel="canonical" href="https://ash.rayzor.tech/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Ash">
   <meta property="og:title" content="Ash — HashLink Bytecode Runtime">
   <meta property="og:description"
     content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM — benchmarked against HashLink's JIT and HL/C on every push.">
-  <meta property="og:url" content="https://rayzor-blade.github.io/ash/">
-  <meta property="og:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
+  <meta property="og:url" content="https://ash.rayzor.tech/">
+  <meta property="og:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="Ash — HashLink Bytecode Runtime">
   <meta name="twitter:description"
     content="A faster runner for HashLink bytecode. Tiered execution: interpreter, Cranelift, and LLVM.">
-  <meta name="twitter:image" content="https://rayzor-blade.github.io/ash/ash-mark-tight.png">
+  <meta name="twitter:image" content="https://ash.rayzor.tech/ash-mark-tight.png">
   <script type="application/ld+json">
 {
   "@context": "https://schema.org",
@@ -32,8 +32,8 @@
   "operatingSystem": "macOS, Linux, Windows",
   "applicationCategory": "DeveloperApplication",
   "description": "A runtime for HashLink bytecode compiled from Haxe, with tiered execution: interpreter, Cranelift, and LLVM.",
-  "url": "https://rayzor-blade.github.io/ash/",
-  "image": "https://rayzor-blade.github.io/ash/ash-mark-tight.png",
+  "url": "https://ash.rayzor.tech/",
+  "image": "https://ash.rayzor.tech/ash-mark-tight.png",
   "license": "https://opensource.org/license/isc-license-txt",
   "author": { "@type": "Person", "name": "Damilare Akinlaja" },
   "codeRepository": "https://github.com/rayzor-blade/ash"
@@ -264,10 +264,13 @@
         </a>
         <nav style="display:flex;align-items:center;gap:clamp(16px,3vw,32px);flex-wrap:wrap">
           <a href="index.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Home</a>
-          <a href="index.html#setup" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
+          <a href="index.html#setup"
+            style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Setup</a>
           <a href="heaps.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Heaps</a>
-          <a href="conformance.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
-          <a href="benchmarks.html" style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:#221d1a">Benchmarks</a>
+          <a href="conformance.html"
+            style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:#5c5450">Conformance</a>
+          <a href="benchmarks.html"
+            style="font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;color:#221d1a">Benchmarks</a>
           <a href="https://discord.gg/NYdr8eWxF4" target="_blank" rel="noopener" aria-label="Join the Ash Discord"
             style="display:flex;align-items:center;gap:6px;padding:8px 16px;border:1px solid rgba(34,29,26,0.2);border-radius:6px;color:#221d1a;font-family:'IBM Plex Mono',monospace;font-size:13px;white-space:nowrap"><svg
               width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
@@ -295,9 +298,9 @@
         Faster than HashLink's JIT</h2>
       <p style="font-size:clamp(15px,1.6vw,17px);line-height:1.65;color:#5c5450;max-width:680px;margin:0">Across
         fib(40), Mandelbrot, n-body, inlined calls, method calls, and free-function calls, Ash's tiered JIT is measured
-        against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — same
-        bytecode, every engine in a row timed on the same runner, every run checksum-verified. Numbers land fresh from
-        CI with each push to <code>main</code>.</p>
+        against HashLink's released JIT, its in-development hl2-ir JIT, and its ahead-of-time HL/C output — all run the
+        same bytecode and are checksum-verified. These numbers refresh automatically from the CI pipeline with each push
+        to <code>main</code>.</p>
 
       <div
         style="margin-top:32px;background:#ffffff;border:1px solid rgba(34,29,26,0.12);border-radius:12px;overflow:hidden">
@@ -548,4 +551,5 @@
     })();
   </script>
 </body>
+
 </html>

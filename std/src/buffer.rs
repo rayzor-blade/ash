@@ -28,9 +28,21 @@ pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     (*buffer_ptr).blen = 16;
     (*buffer_ptr).data = std::ptr::null_mut();
 
-    // Register the buffer as a root to prevent it from being collected
-    gc.register_persistent(buffer_ptr as *mut vdynamic);
-
+    // No root. Upstream allocates this with `hl_gc_alloc_raw` and keeps it
+    // alive through the caller's stack alone (buffer.c), and every caller here
+    // does the same: `hlp_value_to_string` and `hlp_type_str` hold it in a
+    // local for its whole life, and `hl_alloc_buffer` hands it to an hdll that
+    // holds it on the C stack. All of those are inside a registered mutator's
+    // scanned range, callee-saved registers included -- `mark_roots` spills
+    // them before probing.
+    //
+    // It was rooted from the first commit in this repo, and permanently: this
+    // and the chunk below were the only two `register_persistent` calls that
+    // nothing ever undid, because `unregister_persistent` has no callers. So
+    // every buffer and every chunk survived for the life of the process, and
+    // each collection re-marked all of them. `Std.string` of anything but an
+    // Int or Float allocates one, which made the cost superlinear in the
+    // number of such calls rather than proportional to what was live.
     buffer_ptr
 }
 
@@ -74,8 +86,10 @@ pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, l
     // Update total length
     (*b).totlen += len;
 
-    // Register the stringitem as a root
-    gc.register_persistent(it as *mut vdynamic);
+    // No root, for the reason `hlp_alloc_buffer` gives -- and additionally
+    // because a chunk could never have needed its own one. It is reachable
+    // through `b->data` and the `next` chain, so tracing the buffer reaches
+    // every chunk and the `str` block each one owns.
 }
 
 #[no_mangle]

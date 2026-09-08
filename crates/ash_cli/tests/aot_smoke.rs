@@ -191,20 +191,37 @@ fn every_aot_binary_matches_the_jit() {
             ));
             continue;
         }
-        let (jit, aot) = (jit.text, aot.text);
-        if normalize(&jit) != normalize(&aot) {
-            let jit = normalize(&jit);
-            let aot = normalize(&aot);
-            let first = jit
+        if normalize(&jit.text) != normalize(&aot.text) {
+            let jit_out = normalize(&jit.text);
+            let aot_out = normalize(&aot.text);
+            let first = jit_out
                 .lines()
-                .zip(aot.lines())
+                .zip(aot_out.lines())
                 .find(|(a, b)| a != b)
                 .map(|(a, b)| format!("  jit: {a}\n  aot: {b}"))
                 .unwrap_or_else(|| {
+                    // Every line they both printed agreed, so the shorter run
+                    // stopped early rather than saying something different.
+                    // Exit status is what tells you why -- and it is the only
+                    // thing that does when the binary dies before printing
+                    // anything at all, which a bare line count cannot express.
+                    let (jn, an) = (jit_out.lines().count(), aot_out.lines().count());
+                    let short = if an < jn { "the binary" } else { "the jit" };
                     format!(
-                        "  jit has {} lines, aot {}",
-                        jit.lines().count(),
-                        aot.lines().count()
+                        "  {short} stopped early; every line they share agreed\n  \
+                         jit: {jn} lines, exited ok={}\n  \
+                         aot: {an} lines, exited ok={}\n  \
+                         last line both printed: {}\n  \
+                         next line the jit printed: {}",
+                        jit.ok,
+                        aot.ok,
+                        jit_out
+                            .lines()
+                            .zip(aot_out.lines())
+                            .last()
+                            .map(|(a, _)| a)
+                            .unwrap_or("<none>"),
+                        jit_out.lines().nth(an.min(jn)).unwrap_or("<none>"),
                     )
                 });
             failures.push(format!("{name}: differs from the JIT\n{first}"));

@@ -206,6 +206,37 @@ macro_rules! phase_timer {
 /// "JIT has not been linked in." — a release-only failure that does not
 /// reproduce under `cargo build`. Calling it explicitly makes the binary
 /// independent of how aggressively the linker prunes.
+/// Create the MCJIT engine every module is added to.
+///
+/// On Windows x86-64 it gets a memory manager that keeps sections in one
+/// ascending region; see `win_jit_memory` for what goes wrong without it.
+/// Everywhere else LLVM's default manager is correct and this is the plain
+/// constructor.
+fn create_execution_engine<'ctx>(
+    module: &inkwell::module::Module<'ctx>,
+) -> Result<inkwell::execution_engine::ExecutionEngine<'ctx>, inkwell::support::LLVMString> {
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        if let Some(memory) = crate::llvm::win_jit_memory::OrderedJitMemory::reserve() {
+            return module.create_mcjit_execution_engine_with_memory_manager(
+                memory,
+                OptimizationLevel::Aggressive,
+                inkwell::targets::CodeModel::JITDefault,
+                false,
+                false,
+            );
+        }
+        // Reserving hundreds of megabytes of address space does not normally
+        // fail on 64-bit. If it does, an unordered engine still runs; say so,
+        // because the ADDR32NB abort it can hit is otherwise unattributable.
+        eprintln!(
+            "[jit] could not reserve a JIT region; sections are unordered and a long \
+             run may abort with IMAGE_REL_AMD64_ADDR32NB"
+        );
+    }
+    module.create_jit_execution_engine(OptimizationLevel::Aggressive)
+}
+
 fn link_in_mcjit() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(inkwell::execution_engine::ExecutionEngine::link_in_mc_jit);
@@ -334,9 +365,8 @@ impl<'ctx> JITModule<'ctx> {
 
         link_in_mcjit();
         let module = context.create_module("Hashlink");
-        let execution_engine = module
-            .create_jit_execution_engine(OptimizationLevel::Aggressive)
-            .expect("Failed to initialize execution engine");
+        let execution_engine =
+            create_execution_engine(&module).expect("Failed to initialize execution engine");
         // MCJIT must be created while the module still names the host. AOT is
         // retargeted immediately afterwards, before program IR is emitted.
         target_abi.apply_to_module(&module)?;
@@ -764,9 +794,8 @@ impl<'ctx> JITModule<'ctx> {
 
         link_in_mcjit();
         let llvm_module = context.create_module("Hashlink");
-        let execution_engine = llvm_module
-            .create_jit_execution_engine(OptimizationLevel::Aggressive)
-            .expect("Failed to initialize execution engine");
+        let execution_engine =
+            create_execution_engine(&llvm_module).expect("Failed to initialize execution engine");
         // Same order as the non-tiered constructor: MCJIT is created while the
         // module still names the host, then the ABI is installed. Without this
         // the module carries no triple at all, and the middle end -- which

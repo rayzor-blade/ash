@@ -10,6 +10,7 @@ pub mod stub_bridge;
 pub mod tbaa;
 pub mod type_utils;
 pub mod types;
+pub mod win_jit_memory;
 
 #[cfg(test)]
 mod module_test;

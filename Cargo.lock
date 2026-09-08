@@ -195,6 +195,7 @@ dependencies = [
  "once_cell",
  "rustc-demangle",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

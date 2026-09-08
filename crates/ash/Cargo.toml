@@ -49,3 +49,14 @@ cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev
 bindgen = "0.70.1"
 cc = "1"
 
+
+# The JIT section allocator on Windows x86-64 (llvm/win_jit_memory.rs) needs
+# VirtualAlloc/VirtualProtect directly: LLVM's default manager places sections
+# where the OS chooses, which is what the ADDR32NB relocation cannot survive.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+] }

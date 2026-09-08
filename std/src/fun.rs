@@ -259,7 +259,10 @@ pub unsafe extern "C" fn ash_static_call(
 ///   Integer/pointer args → rdi, rsi, rdx, rcx, r8, r9  (6 regs, independent counter)
 ///   Float args           → xmm0–xmm7                   (8 regs, independent counter)
 ///   Return               → rax (integer) / xmm0 (float)
-#[cfg(target_arch = "x86_64")]
+///
+/// Windows has its own arm below: none of this applies there, starting with
+/// `rdi`/`rsi`, which are callee-saved rather than argument registers.
+#[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
 #[no_mangle]
 pub unsafe extern "C" fn ash_static_call(
     fun: *mut c_void,
@@ -341,6 +344,103 @@ pub unsafe extern "C" fn ash_static_call(
     );
 
     // Handle return value
+    let ret_kind = (*ft.ret).kind;
+    match ret_kind {
+        hl_type_kind_HVOID => ptr::null_mut(),
+        hl_type_kind_HF32 => {
+            (*out).v.f = fresult as f32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HF64 => {
+            (*out).v.d = fresult;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+            (*out).v.i = result as i32;
+            ptr::null_mut()
+        }
+        hl_type_kind_HI64 => {
+            (*out).v.i64_ = result as i64;
+            ptr::null_mut()
+        }
+        _ => result as *mut c_void,
+    }
+}
+
+/// Dynamic function call for x86_64 Windows.
+///
+/// Win64 is not System V in any of the ways that matter here. The argument
+/// registers are `rcx`, `rdx`, `r8`, `r9`, and `rdi`/`rsi` are callee-saved
+/// rather than arguments at all, so the System V arm above put every argument
+/// somewhere the callee never reads. There is ONE counter across both banks:
+/// argument *i* takes slot *i* whatever its type, so a float in position 1
+/// goes to `xmm1` and leaves `rdx` unused. And the caller owns 32 bytes of
+/// shadow space above the return address, which the callee is entitled to
+/// write to before touching anything else.
+///
+/// Return values follow System V: `rax` for integers and pointers, `xmm0` for
+/// floats.
+///
+/// Arguments past the fourth would go on the stack. They are dropped here, as
+/// the System V arm drops its seventh integer, rather than being silently
+/// mispassed.
+#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
+#[no_mangle]
+pub unsafe extern "C" fn ash_static_call(
+    fun: *mut c_void,
+    t: *mut hl_type,
+    args: *mut *mut c_void,
+    out: *mut vdynamic,
+) -> *mut c_void {
+    let ft = (*t).__bindgen_anon_1.fun.as_ref().unwrap();
+    let nargs = ft.nargs as usize;
+
+    // One slot per argument position, not one per bank.
+    let mut ivals = [0usize; 4];
+    let mut fvals = [0.0f64; 4];
+
+    for i in 0..nargs.min(4) {
+        let arg_t = *ft.args.add(i);
+        let kind = (*arg_t).kind;
+        let p = *args.add(i);
+        match kind {
+            hl_type_kind_HF32 => fvals[i] = *(p as *const f32) as f64,
+            hl_type_kind_HF64 => fvals[i] = *(p as *const f64),
+            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
+                let val = (*(p as *const f64)) as i32;
+                ivals[i] = val as i64 as usize; // sign-extend
+            }
+            hl_type_kind_HI64 => ivals[i] = *(p as *const i64) as usize,
+            _ => ivals[i] = p as usize,
+        }
+    }
+
+    let result: usize;
+    let fresult: f64;
+
+    core::arch::asm!(
+        // 32 bytes of shadow space, on a stack aligned so that the call
+        // leaves the callee's own rsp at 8 mod 16. `r11` is volatile under
+        // this ABI, so it can hold the old stack pointer across the call.
+        "mov r11, rsp",
+        "and rsp, -16",
+        "sub rsp, 32",
+        "call r10",
+        "mov rsp, r11",
+        in("r10") fun,
+        out("rax") result,
+        in("rcx") ivals[0],
+        in("rdx") ivals[1],
+        in("r8") ivals[2],
+        in("r9") ivals[3],
+        inout("xmm0") fvals[0] => fresult,
+        in("xmm1") fvals[1],
+        in("xmm2") fvals[2],
+        in("xmm3") fvals[3],
+        lateout("r11") _,
+        clobber_abi("C"),
+    );
+
     let ret_kind = (*ft.ret).kind;
     match ret_kind {
         hl_type_kind_HVOID => ptr::null_mut(),

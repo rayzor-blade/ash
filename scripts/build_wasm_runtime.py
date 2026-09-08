@@ -112,6 +112,12 @@ def find_sysroot(explicit: str | None) -> pathlib.Path:
         if r.returncode == 0:
             candidates.append(pathlib.Path(r.stdout.strip()) / "share" / "wasi-sysroot")
     candidates += [
+        # Both Homebrew prefixes, because `brew` above is whichever one leads
+        # PATH: an arm64 Mac can carry the Intel install at /usr/local too, and
+        # asking the wrong one gives a prefix with nothing in it. Each candidate
+        # is checked for libc.a below, so naming both costs nothing.
+        pathlib.Path("/opt/homebrew/opt/wasi-libc/share/wasi-sysroot"),
+        pathlib.Path("/usr/local/opt/wasi-libc/share/wasi-sysroot"),
         pathlib.Path("/opt/wasi-sdk/share/wasi-sysroot"),
         pathlib.Path("/usr/local/wasi-sdk/share/wasi-sysroot"),
         pathlib.Path("/usr/share/wasi-sysroot"),

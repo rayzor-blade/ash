@@ -253,6 +253,76 @@ The order that de-risks fastest:
    wasm locals.
 3. **Then the browser**, with the three traps above checked explicitly.
 
+## How ash's threads work here
+
+**Every thread said it was the same thread**, and that — not the collector —
+was what stopped allocating threads from working. `thread_self_fast` and
+`hlp_thread_current` both fell through to a constant under a
+`cfg(not(any(unix, windows)))` that wasi matches. So the collector's world held
+one mutator record, `stop_mutator_world` found nobody to stop and marked a heap
+another thread was writing; the reentrant GC lock had one owner; the TLAB map
+had one entry, so two threads bump-allocated the same buffer. The `stop=0.00ms`
+this document once reported as a working rendezvous was the symptom.
+
+`__tls_base` differs per thread, so the address of any thread-local is distinct,
+stable for the thread's life, and one add to fetch. That is the identity now.
+
+| threads | before | after |
+|---|---|---|
+| 2 | hung, trapped or passed, differently each run | 10 of 10 correct |
+| 4 | hung or trapped every time | correct, 0.21s |
+| 8 | never tried | correct, 0.58s |
+
+Parallelism on 8 performance cores, 400M iterations per thread: 1 thread 0.50x,
+2 threads 0.97x, 4 threads 1.90x, 8 threads 3.65x. The flat ~250ms floor is
+instantiating the module for a thread, paid about once because the
+instantiations overlap.
+
+**Nothing configures the pool.** A page has no environment to read a worker
+count from, and a wasm worker runs a fiber body straight through, so a pool of
+N could only run N Haxe threads. The pool grows instead: an agent per live
+thread, as many as the host will give. A host that says no runs those threads
+on the main scheduler.
+
+A thread does not share its WASI context, socket table or loaded libraries:
+preview 1 cannot hand one descriptor table to two instances, so each thread
+builds its own, as wasmtime's own wasi-threads does. A file opened on one
+thread is not open on another.
+
+### What the linker had to learn
+
+A thread is another instance of the same module over the same memory, so the
+memory becomes `env.memory` — imported, shared, carrying the 1GiB maximum the
+Rust target declares. The data image cannot then be an active segment: the
+second instance would write the program's initial data back over everything the
+first had reached, with nothing trapping. It becomes one passive segment, and
+`__wasm_init_memory` races every instance on a flag word above the image — the
+winner copies the data in and runs constructors, the losers wait on that word.
+
+Thread-local storage took `.tdata` placed twice, once as the template a new
+thread copies and once as the main thread's own block, a
+`MEMORY_ADDR_TLS_SLEB` relocation writing an offset rather than an address, and
+a synthesised `__wasm_init_tls`. `__tls_base` starts at zero, so an instance
+reading a thread-local before it has a block traps rather than quietly reading
+the main thread's.
+
+### In a browser
+
+A page starts a Worker where wasmtime starts an OS thread. Measured: 338ms for
+four threads against 1016ms serial, 3.01x. Under node's `worker_threads`,
+2.17x.
+
+Two things a page costs that a host does not:
+
+- **Shared memory needs cross-origin isolation** — COOP and COEP on every
+  response. `examples/browser/serve.py` exists to say so; without them the
+  memory constructor throws in a way that reads as the module being broken.
+- **Agents must be warmed before the program starts.** Creating a Worker needs
+  the creating agent to return to its event loop, and the agent asking for a
+  thread is inside a synchronous call into wasm that will not return until the
+  thread answers. A Worker created at that moment never loads. This is also the
+  real bound on how many threads a page can run.
+
 ## Related
 
 In krio: `crates/krio-wasm/src/agent.rs` (spawn contract),

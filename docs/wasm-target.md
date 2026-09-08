@@ -13,27 +13,17 @@ below untouched.
 Native `.hdll` files cannot load in a sandbox. A wasm build rejects non-`std`
 natives; framework authors guard them with `#if wasm` or supply a host import.
 
-## Building one
+## Building and inspecting
 
-```bash
-RUSTFLAGS="-Cllvm-args=-wasm-enable-sjlj -Ctarget-feature=+exception-handling" \
-  cargo rustc -p ash_std --target wasm32-wasip1 --release --crate-type staticlib
-
-ash --emit-aot prog.o --target wasm32-wasip1 prog.hl
-
-rust-lld -flavor wasm --no-entry --export-dynamic \
-  -L$(brew --prefix wasi-libc)/share/wasi-sysroot/lib/wasm32-wasip1 \
-  -o prog.wasm prog.o target/wasm32-wasip1/release/libash_std.a -lc -lsetjmp
-
-ash-wasm-run prog.wasm
-```
+`ash --build game.wasm --target wasm32-wasip1 game.hl` does the whole thing;
+[aot.md](aot.md#webassembly) covers it. `ash-wasm-run` runs the result.
 
 `ash wasm prog.wasm` reports functions, indirect call sites, tables, exports
 and imports grouped by whether a host can supply them. `ash wasm --validate`
 exits non-zero and names what is missing. It uses ash's own parser, so a build
 machine needs nothing installed.
 
-### Rebuilding `ash_runtime.o`
+## Rebuilding `ash_runtime.o`
 
 `ash_runtime.o` is ash_std, wasi libc and libsetjmp joined into one relocatable
 object. Nothing rebuilds it automatically, so it goes stale the moment ash_std
@@ -176,24 +166,22 @@ suspension is the one operation it cannot perform for itself.
 
 It supplies the wrong things — `web-sys` is generated from WebIDL (DOM, WebGL,
 `Worker`), while the runtime wants operating-system services, which is WASI.
-And it costs the target: `web-sys` rides on wasm-bindgen, whose supported
-target is `wasm32-unknown-unknown` — no libc, no clock, no stdout, no files,
-and no `setjmp`, which is the trap model. The result would run in a browser and
-nowhere else, so no wasmtime, no CI lane, no server embedding.
+And it rides on wasm-bindgen, whose target is `wasm32-unknown-unknown`: no
+libc, no clock, no stdout, no files, and no `setjmp`, which is the trap model.
+The result would run in a browser and nowhere else, so no wasmtime, no CI lane,
+no server embedding.
 
-What a browser genuinely adds — JSPI, `Worker` + `SharedArrayBuffer`, WebGL —
-is something a *host* provides, and the module already has interfaces for each.
-A browser host written in Rust may use `web-sys` freely, on the other side of
-those imports.
+What a browser adds beyond WASI — JSPI, `Worker` + `SharedArrayBuffer`, WebGL —
+is something a *host* provides, and the module already has an interface for
+each. A browser host written in Rust may use `web-sys` freely, on the other
+side of those imports.
 
 ## Sockets: twelve host imports
 
-WASI preview 1 names `sock_accept`, `sock_recv`, `sock_send` and
-`sock_shutdown` and nothing that creates, connects, binds, listens, resolves or
-waits — and under wasmtime those four answer `ENOTSOCK` anyway. Rust's
-`std::net` compiles here and answers `Unsupported` to everything, including
-under `-S inherit-network`. A `close` routed through `fd_close` would have
-closed a WASI *file* at that number.
+WASI preview 1 has no usable sockets: it names four calls and nothing that
+creates, connects, binds, listens, resolves or waits, and under wasmtime those
+four answer `ENOTSOCK`. Rust's `std::net` compiles here and answers
+`Unsupported` to everything, `-S inherit-network` included.
 
 So the guest asks the host for all of it. Every argument and result is an
 `i32`; pointers are guest addresses the host reads through exported memory:
@@ -253,91 +241,15 @@ krio supplies the rendezvous half: `cluster.stop_the_world(agent, || ...)`
 guarantees no other agent is inside a task step. krio decides *when* it is safe
 to scan; ash still decides *what*.
 
-## Threads
+## Threads and fibers
 
-Fibers are part of the target. A wasm module cannot switch its own stack, so
-`std/src/fiber_host.rs` routes the one operation that must suspend to
-`ash_host_fiber_yield`. Three implementations trade differently:
-
-| how | needs | costs |
-|---|---|---|
-| engine suspension (JSPI, wasmtime async) | an engine that has it — as of Safari 27, all three | nothing beyond the call; single-threaded |
-| a worker per fiber over shared memory | `wasm32-wasip1-threads`, COOP/COEP in a browser | a fiber becomes an OS thread; every collection is a rendezvous |
-| Asyncify | nothing | roughly double the code size, a tax on every call |
-
-**Suspension is not parallelism.** JSPI suspends one call stack on one agent,
-which is what a cooperative fiber needs and is not what a program expecting two
-threads to progress at once gets. A program that blocks the main thread on
-`lock.wait()` and expects a worker to keep computing needs the middle row.
-[`wasm-threads.md`](wasm-threads.md) records what krio built underneath it.
-
-**Every thread said it was the same thread**, and that — not the collector —
-was what stopped allocating threads from working. `thread_self_fast` and
-`hlp_thread_current` both fell through to a constant under a
-`cfg(not(any(unix, windows)))` that wasi matches. So the collector's world held
-one mutator record, `stop_mutator_world` found nobody to stop and marked a heap
-another thread was writing; the reentrant GC lock had one owner; the TLAB map
-had one entry, so two threads bump-allocated the same buffer. The `stop=0.00ms`
-this document once reported as a working rendezvous was the symptom.
-
-`__tls_base` differs per thread, so the address of any thread-local is distinct,
-stable for the thread's life, and one add to fetch. That is the identity now.
-
-| threads | before | after |
-|---|---|---|
-| 2 | hung, trapped or passed, differently each run | 10 of 10 correct |
-| 4 | hung or trapped every time | correct, 0.21s |
-| 8 | never tried | correct, 0.58s |
-
-Parallelism on 8 performance cores, 400M iterations per thread: 1 thread 0.50x,
-2 threads 0.97x, 4 threads 1.90x, 8 threads 3.65x. The flat ~250ms floor is
-instantiating the module for a thread, paid about once because the
-instantiations overlap.
-
-**Nothing configures the pool.** A page has no environment to read a worker
-count from, and a wasm worker runs a fiber body straight through, so a pool of
-N could only run N Haxe threads. The pool grows instead: an agent per live
-thread, as many as the host will give. A host that says no runs those threads
-on the main scheduler.
-
-A thread does not share its WASI context, socket table or loaded libraries:
-preview 1 cannot hand one descriptor table to two instances, so each thread
-builds its own, as wasmtime's own wasi-threads does. A file opened on one
-thread is not open on another.
-
-### What the linker had to learn
-
-A thread is another instance of the same module over the same memory, so the
-memory becomes `env.memory` — imported, shared, carrying the 1GiB maximum the
-Rust target declares. The data image cannot then be an active segment: the
-second instance would write the program's initial data back over everything the
-first had reached, with nothing trapping. It becomes one passive segment, and
-`__wasm_init_memory` races every instance on a flag word above the image — the
-winner copies the data in and runs constructors, the losers wait on that word.
-
-Thread-local storage took `.tdata` placed twice, once as the template a new
-thread copies and once as the main thread's own block, a
-`MEMORY_ADDR_TLS_SLEB` relocation writing an offset rather than an address, and
-a synthesised `__wasm_init_tls`. `__tls_base` starts at zero, so an instance
-reading a thread-local before it has a block traps rather than quietly reading
-the main thread's.
-
-### In a browser
-
-A page starts a Worker where wasmtime starts an OS thread. Measured: 338ms for
-four threads against 1016ms serial, 3.01x. Under node's `worker_threads`,
-2.17x.
-
-Two things a page costs that a host does not:
-
-- **Shared memory needs cross-origin isolation** — COOP and COEP on every
-  response. `examples/browser/serve.py` exists to say so; without them the
-  memory constructor throws in a way that reads as the module being broken.
-- **Agents must be warmed before the program starts.** Creating a Worker needs
-  the creating agent to return to its event loop, and the agent asking for a
-  thread is inside a synchronous call into wasm that will not return until the
-  thread answers. A Worker created at that moment never loads. This is also the
-  real bound on how many threads a page can run.
+A wasm module cannot switch its own stack, so `std/src/fiber_host.rs` routes
+the one operation that must suspend to `ash_host_fiber_yield`. There are three
+ways to implement that and they trade differently — see
+[`wasm-threads.md`](wasm-threads.md) for the comparison, what krio built under
+the worker row, and how ash's own threads work on this target.
+[`wasm-fibers.md`](wasm-fibers.md) is the transform that needs no engine
+feature at all.
 
 ## Conformance
 

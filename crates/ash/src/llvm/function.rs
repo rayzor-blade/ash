@@ -85,6 +85,14 @@ pub enum FuncPtr {
 /// it; see [`FunctionCompiler::pin_register`].
 const GC_REGISTER_PIN: &str = "ash_gc_register_pin";
 
+/// Whether `New` allocates through the sized entry. `ASH_ALLOC_SIZED=0` sends
+/// every allocation back through `hlp_alloc_obj`, which is how the two are
+/// compared without a rebuild.
+fn sized_alloc_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("ASH_ALLOC_SIZED").as_deref(), Ok("0")))
+}
+
 impl<'ctx> JITModule<'ctx> {
     /// Tag an access as touching the object field at `field_index` of
     /// `type_index`. Keyed by byte offset — see [`super::tbaa`] for why that
@@ -3918,18 +3926,60 @@ impl<'ctx> JITModule<'ctx> {
                             .initialized_type_cache
                             .get(&type_index)
                             .expect("Expected to get type");
-                        let fun = self
-                            .func_cache
-                            .iter()
-                            .find(|(_, f)| {
-                                f.get_name().to_string_lossy() == "std_hlp_alloc_obj_caller"
-                            })
-                            .expect("Expected to find native function hlp_alloc_obj")
-                            .1;
-
                         // type_ is already a pointer constant (inttoptr), pass directly
                         let type_ptr = type_.into_pointer_value();
-                        let result = self.builder.build_call(*fun, &[type_ptr.into()], "call")?;
+
+                        // What `hlp_alloc_obj` re-derives per allocation is
+                        // fixed for a type: the size, and whether the class
+                        // binds closures into fields at construction. Both are
+                        // known here, so an ordinary class allocates through
+                        // the sized entry and skips them. A struct keeps the
+                        // general path -- it has no type header to stamp.
+                        let sized = (type_kind == hl_type_kind_HOBJ && sized_alloc_enabled())
+                            .then(|| {
+                                let no_bindings = self.types_[type_index]
+                                    .obj
+                                    .as_ref()
+                                    .is_some_and(|o| o.bindings.is_empty());
+                                let size = crate::layout::object_layout_for(
+                                    &self.types_,
+                                    type_index,
+                                    self.target_abi.pointer_bytes() as i32,
+                                )
+                                .map(|l| l.size);
+                                match (no_bindings, size) {
+                                    (true, Some(size)) if size > 0 => Some(size as u64),
+                                    _ => None,
+                                }
+                            })
+                            .flatten();
+
+                        let result = if let Some(size) = sized {
+                            let i64_type = self.context.i64_type();
+                            let fun = self.declare_native(
+                                "hlp_alloc_obj_sized",
+                                &[
+                                    self.context.ptr_type(AddressSpace::default()).into(),
+                                    i64_type.into(),
+                                ],
+                                Some(self.context.ptr_type(AddressSpace::default()).into()),
+                            );
+                            self.builder.build_call(
+                                fun,
+                                &[type_ptr.into(), i64_type.const_int(size, false).into()],
+                                "call",
+                            )?
+                        } else {
+                            let fun = self
+                                .func_cache
+                                .iter()
+                                .find(|(_, f)| {
+                                    f.get_name().to_string_lossy() == "std_hlp_alloc_obj_caller"
+                                })
+                                .expect("Expected to find native function hlp_alloc_obj")
+                                .1;
+                            self.builder.build_call(*fun, &[type_ptr.into()], "call")?
+                        };
                         self.builder.build_store(
                             registers[dst.0 as usize],
                             result.try_as_basic_value().basic().unwrap(),

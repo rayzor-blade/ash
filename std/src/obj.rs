@@ -193,6 +193,60 @@ pub unsafe extern "C" fn hlp_alloc_obj(t: *mut hl::hl_type) -> *mut hl::vdynamic
     o as *mut vdynamic
 }
 
+/// Allocate an object whose shape the caller resolved at compile time.
+///
+/// [`hlp_alloc_obj`] re-derives per allocation what a JIT call site already
+/// knows statically: it null-checks `t.obj`, null-checks `rt` and
+/// `rt.methods`, may resolve the proto, loads `rt.size`, then walks the
+/// bindings. All of that is fixed for a given type, and the emitter has the
+/// size from `crate::layout` and the binding list from the bytecode.
+///
+/// So this takes the size and does the two things that are actually per
+/// object: allocate, and stamp the type header. The emitter uses it only for
+/// an HOBJ with no bindings; everything else still goes through the general
+/// path.
+///
+/// `size` must be the instance size `hl_runtime_obj` would have reported.
+/// `layout`'s tests pin it against the runtime, and the debug assertion below
+/// re-checks it wherever a resolved `rt` is available to compare with.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_alloc_obj_sized(t: *mut hl_type, size: usize) -> *mut vdynamic {
+    debug_assert!(!t.is_null(), "hlp_alloc_obj_sized on a null type");
+    #[cfg(debug_assertions)]
+    {
+        let obj = (*t).__bindgen_anon_1.obj;
+        if !obj.is_null() {
+            let rt = (*obj).rt;
+            if !rt.is_null() && !(*rt).methods.is_null() {
+                debug_assert_eq!(
+                    (*rt).size as usize,
+                    size,
+                    "compile-time layout disagrees with the runtime instance size"
+                );
+                debug_assert_eq!((*rt).nbindings, 0, "sized alloc used on a bound class");
+            }
+        }
+    }
+    // Resolving the proto is a SIDE EFFECT the rest of the runtime depends on,
+    // not part of allocating: `hl_get_obj_proto` is what fills in the type's
+    // `vobj_proto` and `rt`, and nothing else does it for a type whose objects
+    // are only ever created here. Skipping it left every AOT-built String
+    // without a proto, and the printer fell back to naming the type -- every
+    // program printed "String" and exited 0. Under the JIT the interpreter
+    // happened to resolve them first, so only the AOT smoke test caught it.
+    let obj = (*t).__bindgen_anon_1.obj;
+    if !obj.is_null() {
+        let rt = (*obj).rt;
+        if rt.is_null() || (*rt).methods.is_null() {
+            hl_get_obj_proto(t);
+        }
+    }
+    let ptr = crate::gc::gc_alloc(size).unwrap_or_else(|| crate::gc::out_of_memory("an object"));
+    let o = ptr.as_ptr() as *mut hl::vobj;
+    (*o).t = t;
+    o as *mut vdynamic
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_dynamic(t: *mut hl_type) -> *mut vdynamic {
     // let flags = mem_kind | MEM_ZERO;

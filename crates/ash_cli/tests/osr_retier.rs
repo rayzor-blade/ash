@@ -55,7 +55,9 @@ fn run(hl: &Path, mode: &[&str], extra: &[(&str, &str)]) -> (String, String) {
         .env_remove("ASH_TEST_RETIER_AFTER")
         .env_remove("ASH_RETIER_TEST_PLAIN")
         .env("ASH_OSR", "1")
-        .env("ASH_CL_RETIER", "0")
+        // Not pinned: the first test below is here to check the shipped
+        // default, and pinning it meant that default was never exercised.
+        .env_remove("ASH_CL_RETIER")
         .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
         .stderr(Stdio::from(std::fs::File::create(&stderr).unwrap()));
     for (k, v) in extra {
@@ -85,13 +87,17 @@ fn run(hl: &Path, mode: &[&str], extra: &[(&str, &str)]) -> (String, String) {
     (line, log)
 }
 
+/// The divergence that `f042e3e` mitigated by refusing the hand-off, run
+/// against whatever the default is now. It reported 249,960 iterations on one
+/// run and about 40,000 on others before `37adeba` transferred the loop's live
+/// registers; the attempts are repeated because it never failed every time.
 #[test]
-fn a_hot_loop_keeps_its_counters_with_the_default_mitigation() {
+fn a_hot_loop_keeps_its_counters_across_a_re_tier() {
     let hl = fixture("TestOsrRetier");
     let (interp, _) = run(&hl, &["--mode", "interp"], &[]);
-    for attempt in 0..3 {
-        let (hybrid, _) = run(&hl, &["--mode", "hybrid"], &[]);
-        assert_eq!(hybrid, interp, "attempt {attempt}");
+    for attempt in 0..6 {
+        let (hybrid, log) = run(&hl, &["--mode", "hybrid"], &[]);
+        assert_eq!(hybrid, interp, "attempt {attempt}\n{log}");
     }
 }
 

@@ -131,8 +131,14 @@ compiled loop on wasm cannot be stopped.
 
 ## Compiled-to-compiled re-tier snapshots
 
-`ASH_CL_RETIER=1` lets a running Cranelift loop transfer to LLVM. It remains
-**off by default** pending broader production/performance coverage.
+A running Cranelift loop transfers to LLVM when it gets hot, which is **on by
+default**. `ASH_CL_RETIER=0` refuses the hand-off, so "is this a re-tier bug"
+is answerable without a rebuild.
+
+It was off by default for a day, as the mitigation for the hand-off dropping
+the loop's live registers. Transferring typed SSA snapshots fixed that at the
+root; keeping the mitigation cost closure_call 249ms against 145ms and
+method_call 189ms against 138ms.
 
 The former exit inferred a de-SSA register image from header phis and
 materialized dominating definitions. The LLVM entry restored values by its

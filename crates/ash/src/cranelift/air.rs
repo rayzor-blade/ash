@@ -229,10 +229,20 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
 type RetierRegistry = HashMap<(usize, usize), Vec<std::sync::Arc<crate::retier::Site>>>;
 static RETIER: std::sync::Mutex<Option<RetierRegistry>> = std::sync::Mutex::new(None);
 
-/// Explicit opt-in until snapshot transfers have broader production coverage.
+/// Whether a loop running in this tier may be handed up to LLVM mid-flight.
+///
+/// On by default. `ASH_CL_RETIER=0` refuses the hand-off, which is what makes
+/// "is this a re-tier bug" answerable by one environment variable rather than
+/// a rebuild.
+///
+/// It was off by default for a day, as the mitigation for a hand-off that
+/// dropped the loop's live registers. `37adeba` fixed that at the root by
+/// transferring typed SSA snapshots, and leaving the mitigation in place cost
+/// what the hand-off was buying: closure_call 249ms against 145ms and
+/// method_call 189ms against 138ms, hybrid-auto on this Mac.
 pub fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| !std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "0"))
 }
 
 pub(super) fn retier_state_for(

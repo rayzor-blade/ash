@@ -175,7 +175,21 @@ pub fn set_positions(start: usize, runs: Vec<SourceRun>) {
 /// is what names the call. A frame with no run covering it gets nothing, and
 /// the caller falls back to the function's own entry position.
 pub fn position_of(pc: usize) -> Option<(u32, u32)> {
-    let hit = lookup(pc)?;
+    // Blocking, unlike `lookup`. That one answers the crash handler, which
+    // cannot afford to wait on a lock a faulting thread may hold; this one
+    // runs while an ordinary trace is being built, and a `try_lock` that lost
+    // to a compile on another thread would drop the line and report the
+    // function's entry instead -- intermittently, and only under load.
+    let hit = {
+        let m = map().lock().ok()?;
+        let at = m.partition_point(|r| r.start <= pc);
+        let r = *m.get(at.checked_sub(1)?)?;
+        let offset = pc.checked_sub(r.start)?;
+        if r.size > 0 && offset >= r.size {
+            return None;
+        }
+        Hit { range: r, offset }
+    };
     let offset = u32::try_from(hit.offset).ok()?.saturating_sub(1);
     let runs = hit.range.positions;
     let at = runs.partition_point(|run| run.start <= offset).checked_sub(1)?;

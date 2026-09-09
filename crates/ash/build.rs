@@ -323,30 +323,72 @@ fn main() {
     // PROFILE is "debug" or "release"; ash_std may only have been built in
     // debug, so fall back to it.
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let mut candidates = vec![
-        target_dir.join(&target).join(&profile).join(&lib_filename),
-        target_dir.join(&profile).join(&lib_filename),
-    ];
+    // Two directories per profile because both spellings are real: `cargo
+    // build` writes <target-dir>/<profile>/, `--target <triple>` writes
+    // <target-dir>/<triple>/<profile>/, and which one a toolchain picks is not
+    // ours to decide. Within a profile take the NEWEST rather than the first
+    // that exists -- a leftover in the other directory is otherwise preferred
+    // forever, and embedding a runtime older than the compiler that calls into
+    // it is how a promotion ends up naming a helper no symbol answers to.
+    let for_profile = |prof: &str| {
+        vec![
+            target_dir.join(&target).join(prof).join(&lib_filename),
+            target_dir.join(prof).join(&lib_filename),
+        ]
+    };
+    let preferred = for_profile(&profile);
+    let mut candidates = preferred.clone();
     if profile != "debug" {
-        candidates.push(target_dir.join(&target).join("debug").join(&lib_filename));
-        candidates.push(target_dir.join("debug").join(&lib_filename));
+        candidates.extend(for_profile("debug"));
     }
 
     for c in &candidates {
         println!("cargo:rerun-if-changed={}", c.display());
     }
 
-    let lib_path = candidates.iter().find(|p| p.exists()).unwrap_or_else(|| {
-        panic!(
-            "Could not find the ash_std cdylib to embed. Build it first:\n\
+    let newest_of = |paths: &[PathBuf]| -> Option<PathBuf> {
+        paths
+            .iter()
+            .filter(|p| p.exists())
+            .max_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+            .cloned()
+    };
+    // The requested profile wins even when a debug build is newer: silently
+    // running an unoptimized runtime under a release binary is its own trap,
+    // and the profile mismatch below reports it when there is no alternative.
+    let lib_path = newest_of(&preferred)
+        .or_else(|| newest_of(&candidates))
+        .unwrap_or_else(|| {
+            panic!(
+                "Could not find the ash_std cdylib to embed. Build it first:\n\
                  \x20   cargo build -p ash_std\n\
                  Tried:\n{}",
-            candidates
-                .iter()
-                .map(|p| format!("  {}\n", p.display()))
-                .collect::<String>()
-        )
-    });
+                candidates
+                    .iter()
+                    .map(|p| format!("  {}\n", p.display()))
+                    .collect::<String>()
+            )
+        });
+    let lib_path = &lib_path;
+
+    // The cdylib is embedded as-is; nothing here rebuilds it. So a runtime
+    // older than the sources it was built from gets embedded silently, and the
+    // mismatch only shows where the JIT emits a call to a helper that runtime
+    // does not export -- a compile refusal at best, and on a program that
+    // stages its own runtime beside it, at the point of use.
+    let std_src_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("../../std/src");
+    if let Some(newest) = newest_mtime(&std_src_dir) {
+        let embedded = fs::metadata(lib_path).and_then(|m| m.modified()).ok();
+        if embedded.is_some_and(|e| e < newest) {
+            println!(
+                "cargo:warning=the ash_std cdylib at {} is OLDER than std/src. \
+                 It is embedded as-is, so ash may emit calls to runtime helpers \
+                 it does not export. Rebuild it: cargo build -p ash_std",
+                lib_path.display()
+            );
+        }
+    }
 
     // Falling back to a debug cdylib in a release build is legal but almost
     // never intended: the embedded runtime is everything the JIT calls into —
@@ -380,4 +422,26 @@ fn main() {
     let output_path = out_dir.join("libash_std.a");
 
     fs::write(&output_path, &lib_bytes).expect("Failed to write cdylib binary file");
+}
+
+/// Newest modification time anywhere under `dir`, or `None` if it cannot be
+/// read. Used to tell a stale embedded runtime from a current one.
+fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in fs::read_dir(&d).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if let Ok(t) = entry.metadata().and_then(|m| m.modified()) {
+                if newest.is_none_or(|n| t > n) {
+                    newest = Some(t);
+                }
+            }
+        }
+    }
+    newest
 }

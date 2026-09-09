@@ -107,6 +107,12 @@ pub fn init() {
     if INITIALIZED.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Anchor the whole run before anything can return early: phases use it as
+    // their denominator, sampling compares it against CPU time to tell whether
+    // the thread was starved, and the tier log stamps promotion latency with
+    // it. That last one is why it cannot sit behind the ASH_PROFILE check --
+    // it read 0.0ms for every install when it did.
+    WALL_START.get_or_init(Instant::now);
     let spec = match std::env::var("ASH_PROFILE") {
         Ok(v) if !v.is_empty() && v != "0" => v,
         _ => return,
@@ -117,10 +123,6 @@ pub fn init() {
         _ => (true, true),
     };
     PHASES_ON.store(phases, Ordering::SeqCst);
-
-    // Anchor the whole run: phases use it as their denominator, and sampling
-    // compares it against CPU time to tell whether the thread was starved.
-    WALL_START.get_or_init(Instant::now);
     if sampling {
         match sampler::start() {
             Ok(()) => SAMPLING_ON.store(true, Ordering::SeqCst),
@@ -130,6 +132,18 @@ pub fn init() {
 }
 
 static WALL_START: OnceLock<Instant> = OnceLock::new();
+
+/// Milliseconds since the run was anchored in [`init`], or 0 before that.
+///
+/// The tier log stamps its lines with this. A compile duration says what the
+/// backend cost; it does not say how long the function ran on the interpreter
+/// first, and promotion latency is execute time by any measure that matters.
+pub fn run_elapsed_ms() -> f64 {
+    WALL_START
+        .get()
+        .map(|t| t.elapsed().as_secs_f64() * 1e3)
+        .unwrap_or(0.0)
+}
 
 /// CPU time consumed by the *calling* thread, in milliseconds.
 ///

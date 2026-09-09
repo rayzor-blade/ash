@@ -291,30 +291,11 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
         }
-        // `ASH_FIBER_POLLS=0` emits none. MEASUREMENT ONLY: `hlp_fiber_poll`
-        // calls `gc_safepoint`, so without a poll at its loop headers a
-        // compiled loop never reaches a safepoint -- the collector cannot stop
-        // the world (`collect_garbage` returns early when it fails to) and a
-        // fiber in a tight loop never yields to another Haxe thread.
-        //
-        // What they cost, measured on the NUC, hybrid-auto, ABBA, 4 medians
-        // per arm, on against off:
-        //
-        //   method_call  11.0%   closure_call  7.1%   nbody  6.2%
-        //   binary_trees -0.1%   mandelbrot    0.2%   deltablue 2.3%
-        //
-        // Not the poll's own work: it reads the epoch, compares and branches,
-        // and returns immediately when no fiber is active. It is that the call
-        // in the CFG makes the register allocator spill the loop's live state
-        // around every site -- nbody's `advance` carries 41 loads and 15 stores
-        // against 23 and 6 for the same source through a compiler that emits no
-        // polls, with identical fsqrt, fdiv, FMA and fmul counts. The rows that
-        // do not move are the ones whose loops are memory-bound, where the
-        // extra spills are not on the critical path.
-        //
-        // So the 6-11% is available to a poll that does not clobber: a
-        // register-preserving convention for the helper, or an implicit poll
-        // off a guarded page, which the unix fault handler could already serve.
+        // `hlp_fiber_poll` calls `gc_safepoint`, so a loop whose header has no
+        // poll never reaches one: the collector cannot stop the world, and a
+        // fiber spinning in that loop never yields. `ASH_FIBER_POLLS=0` emits
+        // none, and `ASH_POLL_MEMORY` relaxes what the helper may write; both
+        // are for measuring what a poll costs, neither is sound to run with.
         let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         for bi in 0..air.blocks.len() {
@@ -350,6 +331,15 @@ impl<'ctx> JITModule<'ctx> {
                 0,
             );
             f.add_attribute(inkwell::attributes::AttributeLoc::Function, cold);
+            if let Some(effects) = super::poll_memory_effects() {
+                f.add_attribute(
+                    inkwell::attributes::AttributeLoc::Function,
+                    self.context.create_enum_attribute(
+                        inkwell::attributes::Attribute::get_named_enum_kind_id("memory"),
+                        effects,
+                    ),
+                );
+            }
             f
         });
         self.builder.position_at_end(entry);

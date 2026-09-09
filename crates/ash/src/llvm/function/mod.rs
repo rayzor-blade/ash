@@ -100,6 +100,26 @@ pub(super) fn fiber_polls_enabled() -> bool {
 /// Whether `New` allocates through the sized entry. `ASH_ALLOC_SIZED=0` sends
 /// every allocation back through `hlp_alloc_obj`, which is how the two are
 /// compared without a rebuild.
+/// Memory effects for `hlp_fiber_poll`, as the LLVM `memory(...)` attribute's
+/// encoded value. `None` declares nothing, which LLVM reads as
+/// `memory(readwrite)` -- correct, because past a yield another fiber runs
+/// Haxe code and writes the same heap.
+///
+/// `ASH_POLL_MEMORY=inaccessible` narrows it, dropping the barrier that stops
+/// LICM hoisting loads out of a polling loop while keeping the call itself.
+/// For measurement only; not sound to run with.
+pub(super) fn poll_memory_effects() -> Option<u64> {
+    static VALUE: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| match std::env::var("ASH_POLL_MEMORY").as_deref() {
+        // `MemoryEffects` packs two bits of ModRef per location, indexed
+        // ArgMem, InaccessibleMem, ErrnoMem, Other. ModRef is 3, so
+        // inaccessible-only readwrite is 3 << 2.
+        Ok("inaccessible") => Some(3 << 2),
+        Ok("none") => Some(0),
+        _ => None,
+    })
+}
+
 pub(super) fn sized_alloc_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| !matches!(std::env::var("ASH_ALLOC_SIZED").as_deref(), Ok("0")))

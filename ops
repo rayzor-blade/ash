@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976008,"nonce":"MKTlIwquMICT9eS9tm5AC6BTuAs=","message":"Fixed. Constants had no GC root because they were held in a Rust-only Vec; the corpus is bit-identical under `ASH_GC_STRESS=1` now. Spot-checked: `ASH_GC_STRESS=1 --mode interp test_stdlib.hl` completes correctly.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1788976008,"nonce":"F6SARF4XEX1rDhC3Av+2ETXd1XU=","status":2}]}

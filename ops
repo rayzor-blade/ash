@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976007,"nonce":"oc2xlSG70FV5zbtg4X63EnCAsxA=","message":"Fixed. `--mode hybrid test_mandelbrot_small.hl` exits 0 on the release binary; no post-main SIGSEGV.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1788976008,"nonce":"zQB1caMmQVk2K4TCvVyZi/fHnnM=","status":2}]}

@@ -4692,6 +4692,28 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, registers[array.0 as usize], "arrsize_ptr")?
                     .into_pointer_value();
+                // The size of no array is 0, which is what the interpreter
+                // answers; loading it would fault. Same diamond as `GetType`.
+                let current_fn = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|b| b.get_parent())
+                    .ok_or_else(|| anyhow!("ArraySize: builder is not inside a function"))?;
+                let null_block = self.context.append_basic_block(current_fn, "arrsize_null");
+                let load_block = self.context.append_basic_block(current_fn, "arrsize_load");
+                let cont_block = self.context.append_basic_block(current_fn, "arrsize_cont");
+                let is_null = self.builder.build_is_null(arr, "arrsize_is_null")?;
+                self.builder
+                    .build_conditional_branch(is_null, null_block, load_block)?;
+
+                self.builder.position_at_end(null_block);
+                self.builder.build_store(
+                    registers[dst.0 as usize],
+                    self.context.i32_type().const_zero(),
+                )?;
+                self.builder.build_unconditional_branch(cont_block)?;
+
+                self.builder.position_at_end(load_block);
                 // varray.size is at offset 16
                 let size_gep = unsafe {
                     self.builder.build_gep(
@@ -4711,6 +4733,9 @@ impl<'ctx> JITModule<'ctx> {
                     self.tbaa.tag(i, self.tbaa.array_len());
                 }
                 self.builder.build_store(registers[dst.0 as usize], size)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+
+                self.builder.position_at_end(cont_block);
             }
 
             // --- GetTID: get type kind ---
@@ -4723,6 +4748,32 @@ impl<'ctx> JITModule<'ctx> {
                 let src_type_kind = self.types_[f.regs[src.0 as usize].0].kind;
                 if src_val.is_pointer_value() {
                     let obj = src_val.into_pointer_value();
+                    // A null source answers with the register's STATIC kind,
+                    // which is what the interpreter returns and is a constant
+                    // here. Both shapes below dereference, so the guard wraps
+                    // them rather than each load.
+                    let current_fn = self
+                        .builder
+                        .get_insert_block()
+                        .and_then(|b| b.get_parent())
+                        .ok_or_else(|| anyhow!("GetTID: builder is not inside a function"))?;
+                    let null_block = self.context.append_basic_block(current_fn, "gettid_null");
+                    let load_block = self.context.append_basic_block(current_fn, "gettid_load");
+                    let cont_block = self.context.append_basic_block(current_fn, "gettid_cont");
+                    let is_null = self.builder.build_is_null(obj, "gettid_is_null")?;
+                    self.builder
+                        .build_conditional_branch(is_null, null_block, load_block)?;
+
+                    self.builder.position_at_end(null_block);
+                    self.builder.build_store(
+                        registers[dst.0 as usize],
+                        self.context
+                            .i32_type()
+                            .const_int(src_type_kind as u64, false),
+                    )?;
+                    self.builder.build_unconditional_branch(cont_block)?;
+
+                    self.builder.position_at_end(load_block);
                     if src_type_kind == hl_type_kind_HTYPE {
                         // Source is hl_type* — kind is directly at offset 0
                         let kind =
@@ -4743,6 +4794,8 @@ impl<'ctx> JITModule<'ctx> {
                         )?;
                         self.builder.build_store(registers[dst.0 as usize], kind)?;
                     }
+                    self.builder.build_unconditional_branch(cont_block)?;
+                    self.builder.position_at_end(cont_block);
                 } else {
                     // Compile-time: type kind is known
                     let type_idx = f.regs[src.0 as usize].0;

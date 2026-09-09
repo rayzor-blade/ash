@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976008,"nonce":"8jevS6PMjwquNPv4BR9kL26TcMQ=","message":"Fixed. `ASH_GC_STRESS=1` on `bench_binary_trees.hl` in hybrid completes with the reference checksum -104864 and exit 0.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1788976008,"nonce":"QYruDp1dFwZkvSPV2AWgOvUpwOg=","status":2}]}

@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976023,"nonce":"NB7THDete3dnm0FinkRlTo2Ut6o=","message":"Still open, confirmed by spot check: `Opcode::ArraySize` in `llvm/function/opcode.rs` loads the array pointer and GEPs to the size field with no null test.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788976605,"nonce":"Yqm3BPI0rfFNhz934UVchAvdYnY=","added":["perf-risk"],"removed":null}]}

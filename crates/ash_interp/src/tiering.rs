@@ -1086,7 +1086,7 @@ pub(crate) fn compile_with_cranelift(
         tier.backend.compile_findex(bead, &tier.ctx, findex)
     }));
     match result {
-        Ok(Ok((addr, meta))) => {
+        Ok(Ok((addr, mut meta))) => {
             ctx.cranelift_promotions.fetch_add(1, Ordering::Relaxed);
             // A signature wider than the interpreter's fixed-arity ladder gets
             // a second, uniform-ABI entry compiled for it. Cranelift knows the
@@ -1124,6 +1124,8 @@ pub(crate) fn compile_with_cranelift(
                 ash_core::profile::Tier::Cranelift,
                 addr,
             );
+            // After registration, which is what the map attaches to.
+            ash_core::jit_map::set_positions(addr, std::mem::take(&mut meta.positions));
             if ctx.tier_log {
                 eprintln!(
                     "[tier] install findex={findex} name={} tier=cranelift addr={addr:#x} ops={} in {:.2}ms on {}",

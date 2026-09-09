@@ -176,9 +176,30 @@ impl AshCraneliftBackend {
             // `super::air::lower_best`.
             super::air::lower_best(self, ctx, findex)?
         };
-        let code = {
+        // The source map only when something asked for positions: without it
+        // every srcloc is the default and the map is empty anyway, and
+        // reading it costs a pass over the emitted runs per compile.
+        let want_positions = crate::air_pipeline::trace_positions();
+        let (code, positions) = {
             let _phase = crate::profile::scope("clif codegen");
-            self.inner.compile(bead, def).map_err(|e| {
+            let compiled = if want_positions {
+                self.inner
+                    .compile_with_source_map(bead, def)
+                    .map(|(code, spans)| {
+                        let runs = spans
+                            .into_iter()
+                            .map(|s| crate::jit_map::SourceRun {
+                                start: s.start,
+                                end: s.end,
+                                packed: s.loc,
+                            })
+                            .collect();
+                        (code, runs)
+                    })
+            } else {
+                self.inner.compile(bead, def).map(|code| (code, Vec::new()))
+            };
+            compiled.map_err(|e| {
                 let msg = e.to_string();
                 let detail = format!("{e:?}");
                 // A verifier or regalloc-checker error is not a decline — it
@@ -205,6 +226,7 @@ impl AshCraneliftBackend {
                 arg_kinds,
                 ret_kind,
                 num_ops,
+                positions,
             },
         ))
     }
@@ -217,6 +239,10 @@ pub struct LoweredMeta {
     pub arg_kinds: Vec<hl::hl_type_kind>,
     pub ret_kind: hl::hl_type_kind,
     pub num_ops: usize,
+    /// Source runs over the emitted code, empty unless positions were asked
+    /// for. Handed to `jit_map::set_positions` once the body is registered --
+    /// which happens in the caller, after this returns.
+    pub positions: Vec<crate::jit_map::SourceRun>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

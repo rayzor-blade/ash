@@ -74,7 +74,14 @@ impl Pass for CellForwarding {
                 // An escaped cell can be written through its address by
                 // anything that calls or writes, so only pure work and plain
                 // reads may sit between its store and the load.
-                if ins.effect() > Effect::ReadMem {
+                //
+                // A position marker is the exception. It is `WriteMem` so that
+                // a shadow-stack backend cannot reorder or drop it, but what
+                // it writes is that backend's frame slot, which no AIR cell
+                // can alias -- `write_class` already reports it as aliasing
+                // nothing. Treating it as a barrier ends every forwarding run
+                // at every line boundary, and lowering emits one there.
+                if ins.effect() > Effect::ReadMem && !matches!(ins, Instr::Pos { .. }) {
                     live.retain(|c, _| !escaped.contains(c));
                 }
                 match ins {

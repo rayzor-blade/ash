@@ -317,7 +317,6 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 [[package]]
 name = "beadie"
 version = "0.3.0"
-source = "git+https://github.com/darmie/beadie#aeb960069918df08a47c8b9848d3c5e09b4dff76"
 dependencies = [
  "beadie-backend",
  "beadie-core",
@@ -327,7 +326,6 @@ dependencies = [
 [[package]]
 name = "beadie-backend"
 version = "0.3.0"
-source = "git+https://github.com/darmie/beadie#aeb960069918df08a47c8b9848d3c5e09b4dff76"
 dependencies = [
  "beadie-core",
  "crossbeam-channel",
@@ -337,7 +335,6 @@ dependencies = [
 [[package]]
 name = "beadie-core"
 version = "0.3.0"
-source = "git+https://github.com/darmie/beadie#aeb960069918df08a47c8b9848d3c5e09b4dff76"
 dependencies = [
  "crossbeam-channel",
  "crossbeam-epoch",
@@ -347,7 +344,6 @@ dependencies = [
 [[package]]
 name = "beadie-cranelift"
 version = "0.3.0"
-source = "git+https://github.com/darmie/beadie#aeb960069918df08a47c8b9848d3c5e09b4dff76"
 dependencies = [
  "anyhow",
  "beadie-backend",

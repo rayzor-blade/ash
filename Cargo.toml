@@ -52,3 +52,12 @@ lto = "fat"
 codegen-units = 1
 opt-level = 3
 debug = false
+
+# BUILDS ONLY BESIDE A beadie CHECKOUT until the beadie commit that adds
+# `compile_with_source_map` is pushed. Replace this whole section with a rev
+# pin on that commit; CI has no ../beadie and cannot build until it is gone.
+[patch."https://github.com/darmie/beadie"]
+beadie = { path = "../beadie/crates/beadie" }
+beadie-core = { path = "../beadie/crates/beadie-core" }
+beadie-backend = { path = "../beadie/crates/beadie-backend" }
+beadie-cranelift = { path = "../beadie/crates/beadie-cranelift" }

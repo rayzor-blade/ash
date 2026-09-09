@@ -431,10 +431,25 @@ pub fn shadow_frames() -> bool {
     SHADOW_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The per-op positions `f` lowers with: its debug table when this process
-/// builds for a shadow-stack target, nothing otherwise.
+/// Whether lowering records source positions at all.
+///
+/// Two consumers want them. A shadow-stack target stores each one into its
+/// frame, which is the only way a wasm module can name a frame. The Cranelift
+/// tier turns them into srclocs, so a compiled frame can report the line it
+/// is stopped on rather than the line its function opens with.
+///
+/// `ASH_TRACE_LINES=1` asks for the second. It is not free: a marker carries
+/// `Effect::WriteMem`, so it is a barrier to the memory passes, and lowering
+/// emits one at every position change.
+pub fn trace_positions() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    shadow_frames() || *ASKED.get_or_init(|| std::env::var_os("ASH_TRACE_LINES").is_some())
+}
+
+/// The per-op positions `f` lowers with: its debug table when something will
+/// read them, nothing otherwise.
 fn positions_of(f: &HLFunction) -> Option<&[i32]> {
-    shadow_frames().then(|| f.debug.as_slice())
+    trace_positions().then(|| f.debug.as_slice())
 }
 
 /// The one optimization level, from `ASH_AIR_LEVEL`.

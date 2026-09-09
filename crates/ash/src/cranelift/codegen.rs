@@ -35,7 +35,7 @@ use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
-    SigRef, Signature, StackSlot, StackSlotData, StackSlotKind, Type, Value,
+    SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value,
 };
 use cranelift_frontend::FunctionBuilder;
 
@@ -1771,10 +1771,16 @@ impl AirCodegen<'_, '_> {
             // can see. The interpreter drops it too.
             Instr::Prefetch { .. } => {}
 
-            // A source position for a shadow call stack. This tier keeps
-            // none -- its frames are machine frames the runtime can walk --
-            // and lowering only emits the marker for a target that does.
-            Instr::Pos { .. } => {}
+            // Compile-time only: the marker emits no code, it labels the
+            // code that follows. Cranelift carries the label through
+            // regalloc and emission and hands back the runs it covers, which
+            // is how a compiled frame reports the line it is stopped on
+            // rather than the line its function opens with.
+            Instr::Pos { file, line } => {
+                if let Some(packed) = crate::jit_map::pack_position(*file, *line) {
+                    self.b.set_srcloc(SourceLoc::new(packed));
+                }
+            }
 
             // Haxe uses the non-zero OAsm modes as backend register hints;
             // neither interpreter observes them. Cranelift owns its register

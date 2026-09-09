@@ -42,6 +42,9 @@ pub(super) struct TraceSite {
     pub function_index: usize,
     pub pc: usize,
     pub interpreted: bool,
+    /// The exact `(file, line)` the tier recorded for this frame's address.
+    /// Set only for a compiled frame whose tier kept a source map.
+    pub position: Option<(i32, i32)>,
 }
 
 impl std::fmt::Display for TraceFrame {
@@ -140,7 +143,13 @@ impl HLInterpreter {
         // A recursive chain repeats one function; the walks above answer per
         // native frame, so collapsing adjacent repeats is what keeps a
         // compiled frame and its bridge caller from being listed twice.
-        fn push(sites: &mut Vec<TraceSite>, function_index: usize, pc: usize, interpreted: bool) {
+        fn push(
+            sites: &mut Vec<TraceSite>,
+            function_index: usize,
+            pc: usize,
+            interpreted: bool,
+            position: Option<(i32, i32)>,
+        ) {
             if sites.last().map(|s| s.function_index) == Some(function_index) {
                 return;
             }
@@ -148,23 +157,24 @@ impl HLInterpreter {
                 function_index,
                 pc,
                 interpreted,
+                position,
             });
         }
         let mut sites: Vec<TraceSite> = Vec::new();
-        for function_index in self.compiled_stack_functions(frame_hint) {
-            push(&mut sites, function_index, 0, false);
+        for (function_index, position) in self.compiled_stack_functions(frame_hint) {
+            push(&mut sites, function_index, 0, false, position);
         }
         for i in (0..self.jit_bridge_callers.len()).rev() {
             if sites.len() >= Self::MAX_TRACE_FRAMES {
                 return sites;
             }
-            push(&mut sites, self.jit_bridge_callers[i], 0, false);
+            push(&mut sites, self.jit_bridge_callers[i], 0, false, None);
         }
         for frame in self.stack.iter().rev() {
             if sites.len() >= Self::MAX_TRACE_FRAMES {
                 return sites;
             }
-            push(&mut sites, frame.function_index, frame.pc, true);
+            push(&mut sites, frame.function_index, frame.pc, true, None);
         }
         sites
     }
@@ -190,6 +200,9 @@ impl HLInterpreter {
     /// same way the UTF-16 symbol path does.
     fn site_key(&self, bytecode: &DecodedBytecode, site: &TraceSite) -> Option<(usize, i32, i32)> {
         let func = bytecode.functions.get(site.function_index)?;
+        if let Some((file, line)) = site.position {
+            return Some((func.findex as usize, file, line));
+        }
         if !site.interpreted {
             return Some(Self::stack_symbol_key(func, site.pc));
         }
@@ -284,9 +297,12 @@ impl HLInterpreter {
     /// Capture return addresses from the native stack. Generated code ranges
     /// are registered by both AIR V2 backends, so this works for Cranelift,
     /// LLVM promotion, and a stack containing frames from both tiers.
-    pub(super) fn compiled_stack_functions(&self, _frame_hint: *const usize) -> Vec<usize> {
+    pub(super) fn compiled_stack_functions(
+        &self,
+        _frame_hint: *const usize,
+    ) -> Vec<(usize, Option<(i32, i32)>)> {
         const MAX_FRAMES: usize = 256;
-        let mut functions = Vec::new();
+        let mut functions: Vec<(usize, Option<(i32, i32)>)> = Vec::new();
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if !_frame_hint.is_null() {
@@ -322,8 +338,11 @@ impl HLInterpreter {
                                 if let Some(function_index) =
                                     func_of(&self.targets, findex as usize)
                                 {
-                                    if functions.last().copied() != Some(function_index) {
-                                        functions.push(function_index);
+                                    if functions.last().map(|(f, _)| *f) != Some(function_index) {
+                                        functions.push((
+                                            function_index,
+                                            Self::jit_position(return_pc),
+                                        ));
                                     }
                                 }
                             }
@@ -373,11 +392,21 @@ impl HLInterpreter {
             let Some(function_index) = func_of(&self.targets, findex as usize) else {
                 continue;
             };
-            if functions.last().copied() != Some(function_index) {
-                functions.push(function_index);
+            if functions.last().map(|(f, _)| *f) != Some(function_index) {
+                functions.push((function_index, Self::jit_position(*pc as usize)));
             }
         }
         functions
+    }
+
+    /// The `(file, line)` a tier recorded for `pc`, when it recorded any.
+    ///
+    /// Only Cranelift does, and only when positions were asked for. Without
+    /// one a compiled frame falls back to its function's entry position,
+    /// which names the right function and the line it opens on.
+    fn jit_position(pc: usize) -> Option<(i32, i32)> {
+        let (file, line) = ash_core::jit_map::position_of(pc)?;
+        Some((i32::try_from(file).ok()?, i32::try_from(line).ok()?))
     }
 
     /// Render the live interpreter and generated-code frames as HashLink

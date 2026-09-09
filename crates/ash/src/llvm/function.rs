@@ -2119,37 +2119,38 @@ impl<'ctx> JITModule<'ctx> {
         let cfg = air::v2::CfgInfo::build(air);
         let loops = air::v2::LoopForest::analyze(air, &cfg);
         let mut poll_headers = vec![false; air.blocks.len()];
-        for lp in &loops.loops {
-            if included.get(lp.header.idx()).copied().unwrap_or(false) {
-                poll_headers[lp.header.idx()] = true;
+        if fiber_polls_enabled() {
+            for lp in &loops.loops {
+                if included.get(lp.header.idx()).copied().unwrap_or(false) {
+                    poll_headers[lp.header.idx()] = true;
+                }
             }
         }
-        // `ASH_FIBER_POLLS=0` emits none. MEASUREMENT ONLY, and it does not
-        // measure what it looks like it measures.
+        // `ASH_FIBER_POLLS=0` emits none. MEASUREMENT ONLY: `hlp_fiber_poll`
+        // calls `gc_safepoint`, so without a poll at its loop headers a
+        // compiled loop never reaches a safepoint -- the collector cannot stop
+        // the world (`collect_garbage` returns early when it fails to) and a
+        // fiber in a tight loop never yields to another Haxe thread.
         //
-        // The poll costs more than the three instructions it reads as: the
-        // fast path is a load of the epoch, a compare and a branch, but the
-        // call in the CFG makes the register allocator spill the loop's live
-        // state around every site. On nbody that is 41 loads and 15 stores
-        // against 23 and 6 for the same source compiled by another Haxe
-        // compiler with no polls -- identical fsqrt, fdiv, FMA and fmul counts,
-        // so the whole difference is spill traffic and control flow.
+        // What they cost, measured on the NUC, hybrid-auto, ABBA, 4 medians
+        // per arm, on against off:
         //
-        // Removing them is nevertheless a large LOSS, measured on the NUC,
-        // hybrid-auto, ABBA, 4 medians per arm -- polls on against off:
+        //   method_call  11.0%   closure_call  7.1%   nbody  6.2%
+        //   binary_trees -0.1%   mandelbrot    0.2%   deltablue 2.3%
         //
-        //   closure_call  122.9ms -> 282.2ms      nbody  399.5ms -> 478.9ms
-        //   method_call   106.0ms -> 176.7ms
+        // Not the poll's own work: it reads the epoch, compares and branches,
+        // and returns immediately when no fiber is active. It is that the call
+        // in the CFG makes the register allocator spill the loop's live state
+        // around every site -- nbody's `advance` carries 41 loads and 15 stores
+        // against 23 and 6 for the same source through a compiler that emits no
+        // polls, with identical fsqrt, fdiv, FMA and fmul counts. The rows that
+        // do not move are the ones whose loops are memory-bound, where the
+        // extra spills are not on the critical path.
         //
-        // closure_call lands on 282.2 with polls off and 282.3 with
-        // ASH_CL_RETIER=0, so suppressing them costs the Cranelift-to-LLVM
-        // hand-off. Why a poll emitted on the LLVM side gates a hand-off the
-        // Cranelift side polls for is NOT established; `has_polls` reaches only
-        // the poll blocks and the epoch alloca here. The polls pay for
-        // themselves either way: the thing to try is keeping them and stopping
-        // the spills -- a register-preserving convention for the helper, or an
-        // implicit poll off a guarded page -- not removing them.
-        let has_polls = fiber_polls_enabled() && poll_headers.iter().any(|poll| *poll);
+        // So the 6-11% is available to a poll that does not clobber: a
+        // register-preserving convention for the helper, or an implicit poll
+        // off a guarded page, which the unix fault handler could already serve.
+        let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         for bi in 0..air.blocks.len() {
             if blocks[bi].is_empty() {

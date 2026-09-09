@@ -272,7 +272,7 @@ description = "Hot integer loop; the case the promotion counters are read on."
 
 # Floating-point kernel. `expectation = "checksum"` with an explicit accepted
 # set, because the answer legitimately differs by FMA policy — see
-# BACKLOG.md, "Cross-tier FMA policy". Recording *which* checksum came back
+# the cross-tier FMA policy issue. Recording *which* checksum came back
 # tells you whether the hot function ran compiled and under what fusion.
 [[bench]]
 name = "mandelbrot_small"
@@ -303,7 +303,7 @@ checksums = [
   { value = "112790102", label = "unfused" },
   { value = "112798515", label = "fused" },
   # ash's own LLVM tier at 875x500. Same fusion *presence* as hxcpp, different
-  # fusion *pattern*. BACKLOG.md documents the gap.
+  # fusion *pattern*.
   { value = "112798587", label = "fused-llvm" },
   # With LLVM's middle-end running, mem2reg puts more multiply/add pairs in one
   # block, so ash's `contract` flag fuses more of them. A third fusion pattern,
@@ -312,7 +312,7 @@ checksums = [
   # Hybrid with OSR: an unfused interpreted prefix, then a Cranelift OSR
   # entry whose AIR `Fma` lowers to a hardware fma, then LLVM after tier-up.
   # Stable across runs (the transfer point is tick-deterministic). The
-  # cross-tier FMA policy note in BACKLOG.md covers why these coexist.
+  # cross-tier FMA policy issue covers why these coexist.
   { value = "112798265", label = "fused-osr-mixed" },
   # SROA scalarized the Complex loop, so the AIR-level `Fma` peephole now
   # forms the fused ops on scalars and every engine executing that AIR agrees
@@ -320,7 +320,7 @@ checksums = [
   { value = "112798500", label = "fused-air-cranelift" },
   # ...while the LLVM tier additionally contracts the mul/add pairs the AIR
   # peephole left behind. A fifth pattern, not a wrong answer; unifying the
-  # policy so both compiled tiers agree by construction stays in BACKLOG.md.
+  # policy so both compiled tiers agree by construction is tracked in git-bug.
   { value = "112798779", label = "fused-air-llvm" },
   # A sixth pattern, from the AOT lane. It optimizes the whole module ONCE at
   # the end rather than per promotion, so the contraction pass sees every body

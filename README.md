@@ -222,4 +222,6 @@ rejects any `sdl.hdll` produced by Ash's decommissioned Rust SDL shim.
 
 ## Status
 
-Known gaps, open defects and planned work are tracked in [BACKLOG.md](BACKLOG.md).
+Known gaps, open defects and planned work are tracked with
+[git-bug](https://github.com/git-bug/git-bug), embedded in this repository's git
+object store. `git-bug bug` lists them, `git-bug termui` browses them.

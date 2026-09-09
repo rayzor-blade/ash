@@ -185,7 +185,7 @@ Fusion is what every reference implementation does; the unfused number appears
 nowhere but a strict interpreter. A checksum **outside** this set is `INVALID`,
 and a run whose *label* changed against a baseline is called out in the
 comparison even when the time is flat — the FP policy moving is a behaviour
-change. Background: `BACKLOG.md`, "Cranelift middle tier", cross-tier FMA
+change. Background: the cross-tier FMA
 policy.
 
 ---
@@ -406,13 +406,13 @@ including `hybrid-llvm` with `llvm=6`.** Six functions were LLVM-promoted and
 the answer still matched the strict interpreter bit-for-bit, so the hot inner
 loop is either not among the promoted six or is not being contracted. Only
 `full-jit` returns `fused`. That single column is the whole reason the
-checksum's *label* is recorded rather than just checked — see BACKLOG.md,
-cross-tier FMA policy.
+checksum's *label* is recorded rather than just checked — see the cross-tier
+FMA policy issue (`git-bug bug 9921932`).
 
 And the gate did its job on its first full run: `mapiter/full-jit` and
 `map_simple/full-jit` came back **INVALID**. Both complete in ~1 s — faster than
 several `OK` rows — while printing a different wrong number every time. Filed in
-BACKLOG.md under JIT & tiering.
+git-bug: "--mode jit returns heap addresses for Int-valued Map iteration".
 
 ---
 

@@ -22,7 +22,7 @@
 //! re-checks whatever it produces. So the set of functions the tier accepts is
 //! identical whether `ASH_AIR` is on or off: optimization changes the code the
 //! tier compiles, never which functions it takes. That is deliberate — the
-//! opcode gate refuses the object model for a reason recorded in `BACKLOG.md`,
+//! opcode gate refuses the object model for a reason recorded in git-bug,
 //! and widening it is a separate decision from wiring up the pipeline.
 //! [`gate_report`] measures what widening *would* buy without taking it.
 //!

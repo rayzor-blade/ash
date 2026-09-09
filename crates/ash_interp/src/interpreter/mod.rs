@@ -249,6 +249,23 @@ type NameTable = Rc<HashMap<usize, String>>;
 /// The image the cached table was built for, and the table.
 type NameTableCache = RefCell<Option<(usize, NameTable)>>;
 
+/// The compiled entry was never entered, so the call may be retried on a lower
+/// tier.
+///
+/// Only failures raised BEFORE control reaches compiled code carry this. One
+/// raised after it may have already allocated, mutated a field or written
+/// output, and re-running the body would repeat all of it.
+#[derive(Debug, Clone)]
+pub struct CompiledEntryRefused(pub String);
+
+impl std::fmt::Display for CompiledEntryRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CompiledEntryRefused {}
+
 /// Carries a thrown HL exception value up through the Rust call stack.
 /// Distinguishable from other errors so callers can catch it via downcast.
 #[derive(Debug, Clone)]
@@ -3986,29 +4003,23 @@ impl HLInterpreter {
                             }
                             return Ok(v);
                         }
-                        Err(e) if e.is::<HLExceptionPropagation>() => {
-                            // A Haxe `throw` crossing a compiled frame is that
-                            // program running correctly, not the compiler
-                            // failing. Treating it as a failed invoke did two
-                            // wrong things at once: it retired the findex
-                            // permanently -- one throw and every later call
-                            // interprets, with the top tier's code installed
-                            // and unreachable -- and it re-entered the
-                            // function from its first opcode, so every side
-                            // effect the compiled attempt had already
-                            // committed happened twice. A counter incremented
-                            // before a throw read 400001 against the
-                            // interpreter's and the whole-module JIT's 400000.
-                            //
-                            // The compiled-only path above already says this
-                            // in its comment; the hybrid path did not.
-                            return Err(e);
-                        }
-                        Err(e) => {
+                        Err(e) if e.is::<CompiledEntryRefused>() => {
+                            // Never entered, so nothing has happened yet and
+                            // the interpreter may run the body from its first
+                            // opcode.
                             self.record_tiered_fallback(
                                 findex,
-                                format!("compiled invoke failed: {}", e),
+                                format!("compiled entry refused: {}", e),
                             );
+                        }
+                        Err(e) => {
+                            // Entered, so the body may already have allocated,
+                            // mutated a field or written output. Running it
+                            // again would repeat that, and a Haxe `throw`
+                            // crossing a compiled frame arrives here too --
+                            // that is the program behaving, not the compiler
+                            // failing.
+                            return Err(e);
                         }
                     }
                 }
@@ -4565,11 +4576,11 @@ impl HLInterpreter {
         // knew the exact arity at compile time.
         let uniform_addr = entry.uniform_addr;
         if uniform_addr == 0 && args.len() > 8 {
-            return Err(anyhow!(
+            return Err(anyhow::Error::new(CompiledEntryRefused(format!(
                 "Compiled call {} has {} args (max 8, no uniform entry)",
                 findex,
                 args.len()
-            ));
+            ))));
         }
 
         self.sync_gc_scan_roots();

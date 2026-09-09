@@ -555,6 +555,15 @@ pub struct HLInterpreter {
     call_stack_symbols: Vec<usize>,
     /// Stack captured at the most recent non-rethrow exception origin.
     exception_stack_symbols: Vec<usize>,
+    /// The same frames as `call_stack_symbols`, before they were named.
+    call_stack_sites: Vec<stack::TraceSite>,
+    /// Those frames, named, as the trace renderer wants them.
+    ///
+    /// A throw out of compiled code captures here and lands at a native trap
+    /// boundary once the longjmp has run, by which point its frames are gone
+    /// and the boundary has no bytecode to name them against either. Rendering
+    /// at the capture is what lets that boundary report a stack at all.
+    call_stack_frames: Vec<std::sync::Arc<stack::TraceFrame>>,
     /// Recursion OSR probes, to throttle entry-build retries.
     recursion_osr_probes: u64,
     /// Optional tiered runtime (hybrid mode).
@@ -924,6 +933,8 @@ impl HLInterpreter {
             stall_reported_at: std::time::Instant::now(),
             call_stack_symbols: Vec::new(),
             exception_stack_symbols: Vec::new(),
+            call_stack_sites: Vec::new(),
+            call_stack_frames: Vec::new(),
             recursion_osr_probes: 0,
             tiered_runtime: None,
         }
@@ -3842,8 +3853,10 @@ impl HLInterpreter {
                     // follow-up probe race the short-lived native exception
                     // on Darwin and hid the original SQLite error behind a
                     // misleading SIGSEGV.
-                    let exception =
+                    let mut exception =
                         self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                    exception.stack =
+                        self.call_stack_frames.clone();
                     if !fn_clear_exc.is_null() {
                         type FnClearExc = unsafe extern "C" fn();
                         unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };
@@ -4788,8 +4801,13 @@ impl HLInterpreter {
                 if !exc_ptr.is_null() {
                     // Preserve the pending exception until formatting has
                     // finished, matching the other native trap boundaries.
-                    let exception =
+                    let mut exception =
                         self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
+                    // Walked where the throw happened, not here: the longjmp
+                    // that reached this boundary already unwound the frames
+                    // it came from.
+                    exception.stack =
+                        self.call_stack_frames.clone();
                     if !fn_clear_exc.is_null() {
                         type FnClearExc = unsafe extern "C" fn();
                         unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };

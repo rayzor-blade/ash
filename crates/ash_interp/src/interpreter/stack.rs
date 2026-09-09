@@ -32,6 +32,18 @@ pub struct TraceFrame {
     pub line: i32,
 }
 
+/// One frame of the live stack, before it is named.
+///
+/// `interpreted` picks the debug table to resolve `pc` against: an AIR shim
+/// renumbers opcodes, so a walker frame must resolve against the body that
+/// actually ran, while a compiled frame reports its function's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TraceSite {
+    pub function_index: usize,
+    pub pc: usize,
+    pub interpreted: bool,
+}
+
 impl std::fmt::Display for TraceFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.file {
@@ -43,6 +55,18 @@ impl std::fmt::Display for TraceFrame {
 
 impl HLInterpreter {
     pub(super) fn capture_call_stack(&self, bytecode: &DecodedBytecode) -> Vec<Arc<TraceFrame>> {
+        self.frames_for_sites(bytecode, &self.trace_sites(std::ptr::null()))
+    }
+
+    /// Name `sites`, which may have been walked earlier.
+    ///
+    /// A throw out of compiled code is captured where it is raised and read
+    /// back after the longjmp, so the two are separate steps.
+    pub(super) fn frames_for_sites(
+        &self,
+        bytecode: &DecodedBytecode,
+        sites: &[TraceSite],
+    ) -> Vec<Arc<TraceFrame>> {
         let bc = self.reloaded_bytecode.unwrap_or(bytecode);
         let names = self.function_name_table(bc);
         // Same reasoning as the UTF-16 symbols this module interns for the
@@ -65,24 +89,24 @@ impl HLInterpreter {
                 *slot = Some((bc_key, HashMap::new()));
             }
             let cache = &mut slot.as_mut().expect("just populated").1;
-            self.stack
+            sites
                 .iter()
-                .rev()
-                .map(|frame| {
+                .map(|site| {
+                    let function_index = site.function_index;
                     // Never drop a frame: a trace that silently omits the
                     // frames it could not name is worse than one that admits
                     // them, since the gap is invisible and the caller looks
                     // like the callee.
-                    let Some(func) = bc.functions.get(frame.function_index) else {
+                    let Some(func) = bc.functions.get(function_index) else {
                         return Arc::new(TraceFrame {
                             symbol: Arc::from(
-                                format!("<unresolved findex {}>", frame.function_index).as_str(),
+                                format!("<unresolved findex {function_index}>").as_str(),
                             ),
                             file: None,
                             line: 0,
                         });
                     };
-                    let key = Self::stack_symbol_key(func, frame.pc);
+                    let key = self.site_key(bc, site).unwrap_or((function_index, -1, 0));
                     Arc::clone(cache.entry(key).or_insert_with(|| {
                         let (findex, file_idx, line) = key;
                         let name = names.get(&findex).cloned().unwrap_or_else(|| func.name());
@@ -102,6 +126,49 @@ impl HLInterpreter {
         })
     }
 
+    /// Every frame on the live stack, innermost first.
+    ///
+    /// All three sources, in the order Haxe expects. Reading only
+    /// `self.stack` is why `--mode jit` reported an uncaught exception with
+    /// no frames at all: nothing runs on the interpreter there, so the list
+    /// was always empty and the renderer had nothing to anchor on.
+    ///
+    /// Compiled frames come from a native walk and carry no pc of their own,
+    /// so they report their function's entry until a tier records positions.
+    /// Interpreter frames carry the pc they are stopped at.
+    pub(super) fn trace_sites(&self, frame_hint: *const usize) -> Vec<TraceSite> {
+        // A recursive chain repeats one function; the walks above answer per
+        // native frame, so collapsing adjacent repeats is what keeps a
+        // compiled frame and its bridge caller from being listed twice.
+        fn push(sites: &mut Vec<TraceSite>, function_index: usize, pc: usize, interpreted: bool) {
+            if sites.last().map(|s| s.function_index) == Some(function_index) {
+                return;
+            }
+            sites.push(TraceSite {
+                function_index,
+                pc,
+                interpreted,
+            });
+        }
+        let mut sites: Vec<TraceSite> = Vec::new();
+        for function_index in self.compiled_stack_functions(frame_hint) {
+            push(&mut sites, function_index, 0, false);
+        }
+        for i in (0..self.jit_bridge_callers.len()).rev() {
+            if sites.len() >= Self::MAX_TRACE_FRAMES {
+                return sites;
+            }
+            push(&mut sites, self.jit_bridge_callers[i], 0, false);
+        }
+        for frame in self.stack.iter().rev() {
+            if sites.len() >= Self::MAX_TRACE_FRAMES {
+                return sites;
+            }
+            push(&mut sites, frame.function_index, frame.pc, true);
+        }
+        sites
+    }
+
     /// The `(findex, file, line)` a frame symbolicates to. Two reads off the
     /// debug table and no allocation, so it can key the symbol cache.
     fn stack_symbol_key(func: &HLFunction, pc: usize) -> (usize, i32, i32) {
@@ -114,6 +181,24 @@ impl HLInterpreter {
         let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
         let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
         (func.findex as usize, file_idx, line)
+    }
+
+    /// The `(findex, file, line)` a site symbolicates to, without interning.
+    ///
+    /// Mirrors what `stack_symbol` and `interpreter_stack_symbol` look up,
+    /// split out so a caller holding `&self` -- the trace renderer -- keys the
+    /// same way the UTF-16 symbol path does.
+    fn site_key(&self, bytecode: &DecodedBytecode, site: &TraceSite) -> Option<(usize, i32, i32)> {
+        let func = bytecode.functions.get(site.function_index)?;
+        if !site.interpreted {
+            return Some(Self::stack_symbol_key(func, site.pc));
+        }
+        Some(match self.ssa.body(site.function_index) {
+            Some(prep) if !prep.shim.debug.is_empty() => {
+                Self::stack_symbol_key(prep.shim, site.pc)
+            }
+            _ => Self::stack_symbol_key(self.air.body(bytecode, site.function_index), site.pc),
+        })
     }
 
     /// Pointer to the interned UTF-16 symbol for `key`, built once.
@@ -144,37 +229,6 @@ impl HLInterpreter {
             .entry(key)
             .or_insert_with(|| symbol.into_boxed_slice())
             .as_ptr() as usize
-    }
-
-    fn stack_symbol(
-        &mut self,
-        bytecode: &DecodedBytecode,
-        function_index: usize,
-        pc: usize,
-    ) -> Option<usize> {
-        let key = Self::stack_symbol_key(bytecode.functions.get(function_index)?, pc);
-        Some(self.intern_stack_symbol(bytecode, key))
-    }
-
-    fn interpreter_stack_symbol(
-        &mut self,
-        bytecode: &DecodedBytecode,
-        function_index: usize,
-        pc: usize,
-    ) -> Option<usize> {
-        bytecode.functions.get(function_index)?;
-        // AIR V2's serializer renumbers opcodes. Cache::prepare builds a
-        // matching debug table for that optimized body, so frame.pc must be
-        // resolved against the body the interpreter actually executes rather
-        // than the original bytecode function at the same numeric index.
-        // The walker's own body first: it publishes pcs into the serialized
-        // opcodes and carries the debug table built for them. `air.body` is
-        // the right answer only for the path that executes those opcodes.
-        let key = match self.ssa.body(function_index) {
-            Some(prep) if !prep.shim.debug.is_empty() => Self::stack_symbol_key(prep.shim, pc),
-            _ => Self::stack_symbol_key(self.air.body(bytecode, function_index), pc),
-        };
-        Some(self.intern_stack_symbol(bytecode, key))
     }
 
     /// Return true when the loader owns `pc` as part of the executable or a
@@ -347,46 +401,15 @@ impl HLInterpreter {
         bytecode: &DecodedBytecode,
         frame_hint: *const usize,
     ) -> Vec<usize> {
-        let compiled = self.compiled_stack_functions(frame_hint);
-        let mut symbols: Vec<usize> = Vec::with_capacity(compiled.len() + self.stack.len() + 1);
-        for &function_index in &compiled {
-            // Cranelift does not currently expose per-instruction native PC
-            // offsets. Use the function's first debug position; the opaque
-            // token remains structurally valid and identifies the exact Haxe
-            // function while source-map plumbing is added independently.
-            if let Some(symbol) = self.stack_symbol(bytecode, function_index, 0) {
-                symbols.push(symbol);
-            }
-        }
-        let mut last = compiled.last().copied();
-        // Indexed rather than iterated: symbolicating borrows the interpreter
-        // mutably to fill the cache.
-        for i in (0..self.jit_bridge_callers.len()).rev() {
-            if symbols.len() >= Self::MAX_TRACE_FRAMES {
-                break;
-            }
-            let function_index = self.jit_bridge_callers[i];
-            if last == Some(function_index) {
+        let sites = self.trace_sites(frame_hint);
+        let mut symbols: Vec<usize> = Vec::with_capacity(sites.len() + 1);
+        for site in &sites {
+            let Some(key) = self.site_key(bytecode, site) else {
                 continue;
-            }
-            if let Some(symbol) = self.stack_symbol(bytecode, function_index, 0) {
-                symbols.push(symbol);
-                last = Some(function_index);
-            }
+            };
+            symbols.push(self.intern_stack_symbol(bytecode, key));
         }
-        for i in (0..self.stack.len()).rev() {
-            if symbols.len() >= Self::MAX_TRACE_FRAMES {
-                break;
-            }
-            let (function_index, pc) = (self.stack[i].function_index, self.stack[i].pc);
-            if last == Some(function_index) {
-                continue;
-            }
-            if let Some(symbol) = self.interpreter_stack_symbol(bytecode, function_index, pc) {
-                symbols.push(symbol);
-                last = Some(function_index);
-            }
-        }
+        self.call_stack_sites = sites;
 
         // NativeStackTrace deliberately discards the outermost raw entry.
         // HashLink's platform unwinders naturally include a C runtime frame;
@@ -405,6 +428,9 @@ impl HLInterpreter {
         frame_hint: *const usize,
     ) -> usize {
         self.call_stack_symbols = self.stack_symbols(bytecode, frame_hint);
+        let sites = std::mem::take(&mut self.call_stack_sites);
+        self.call_stack_frames = self.frames_for_sites(bytecode, &sites);
+        self.call_stack_sites = sites;
         self.call_stack_symbols.len()
     }
 

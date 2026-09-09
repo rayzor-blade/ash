@@ -60,3 +60,9 @@ git = "https://github.com/darmie/krio"
 # crate's docs for why only fiber suspension crosses the module boundary.
 [target.'cfg(target_family = "wasm")'.dependencies]
 ash_wasm_runtime = { path = "../crates/ash_wasm_runtime", default-features = false, features = ["guest"] }
+
+# The trace renderer, shared with the CLI so a standalone binary reports an
+# uncaught exception the same way. Native only: a wasm module pays for every
+# byte it links, and its frames come from the shadow stack instead.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+ash_trace = { path = "../crates/ash_trace" }

@@ -149,10 +149,10 @@ name = "ash"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ariadne",
  "ash_core",
  "ash_interp",
  "ash_std",
+ "ash_trace",
  "ash_wasm_runtime",
  "clap",
  "inkwell",
@@ -239,6 +239,7 @@ name = "ash_std"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash_trace",
  "ash_wasm_runtime",
  "bindgen",
  "cc",
@@ -251,6 +252,13 @@ dependencies = [
  "once_cell",
  "winapi",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "ash_trace"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
 ]
 
 [[package]]

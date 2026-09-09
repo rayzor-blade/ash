@@ -1207,12 +1207,56 @@ impl<'ctx> JITModule<'ctx> {
                 ],
                 "",
             )?;
+
+            // Each body's entry position, packed the way a shadow frame packs
+            // one. A native frame is named from the machine stack, which says
+            // which function it is and not where in it, so this is the whole
+            // of what an ahead-of-time trace can say about a line. A findex
+            // with no debug info stays 0, which the runtime reads as "none".
+            let i64_type = self.context.i64_type();
+            let mut entry_pos: Vec<u64> = vec![0; nfun];
+            for f in &self.bytecode.functions {
+                let at = f.findex as usize;
+                if at >= nfun {
+                    continue;
+                }
+                // The body's OWN first op, and only when it carries a real
+                // line. Scanning forward for the first non-zero line instead
+                // walks into whatever the body inlined: a synthetic entry
+                // function reported a line in ArrayBase.hx, which the renderer
+                // then anchored a report on. A body that opens without a
+                // position gets none, and its frame stays unlocated.
+                let Some(found) = f.debug.get(..2).filter(|e| e[0] >= 0 && e[1] > 0) else {
+                    continue;
+                };
+                // `file + 1`, so that a packed position is never 0 for a body
+                // that has one: file 0 line 0 is exactly what "none" means.
+                entry_pos[at] = ((found[0] as u64 + 1) << 32) | (found[1] as u64);
+            }
+            let pos_arr = i64_type.const_array(
+                &entry_pos
+                    .iter()
+                    .map(|p| i64_type.const_int(*p, false))
+                    .collect::<Vec<_>>(),
+            );
+            let pos_global =
+                self.intern_global(pos_arr.as_basic_value_enum(), "ash_function_positions");
+            let pos_ty = void_type.fn_type(&[ptr_type.into(), size_type.into()], false);
+            let register_pos = self.aot_symbol("hlp_register_aot_positions", pos_ty);
+            self.builder.build_indirect_call(
+                pos_ty,
+                register_pos,
+                &[
+                    pos_global.into(),
+                    size_type.const_int(nfun as u64, false).into(),
+                ],
+                "",
+            )?;
         }
-        // The debug-file table, for a target whose frames record their own
-        // positions: a shadow frame holds (file index, line), and the runtime
-        // needs the names to format a trace. A native binary names its frames
-        // from the machine stack and has no use for the table.
-        if self.target_abi.shadow_call_stack {
+        // The debug-file table. A shadow frame holds (file index, line) and a
+        // native frame holds its function's entry position, and both need the
+        // names to format a trace.
+        {
             let files = self.bytecode.debug_files.clone();
             let mut file_ptrs: Vec<PointerValue<'ctx>> = Vec::with_capacity(files.len());
             for file in &files {

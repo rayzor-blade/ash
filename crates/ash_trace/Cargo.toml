@@ -1,0 +1,18 @@
+[package]
+name = "ash_trace"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "Rendering an exception trace over the program's own source"
+publish = false
+
+# Held by both the CLI and the runtime. The runtime is what a standalone AOT
+# binary links, and it cannot depend on the CLI; the CLI cannot depend on the
+# runtime as a Rust crate either, because that links a second copy of its
+# `#[no_mangle]` exports. So the renderer lives on its own.
+[dependencies]
+ariadne = "0.5"
+
+[lints]
+workspace = true

@@ -161,8 +161,36 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
 /// `hlp_throw` also prevents the JIT runner from dereferencing GC objects.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
-    eprintln!("[ash] uncaught exception: {}", describe_exception(v));
+    let message = describe_exception(v);
+    // Over the source when it is reachable, which is the same choice the CLI
+    // makes for an interpreted run; the flat list otherwise.
+    #[cfg(not(target_family = "wasm"))]
+    if print_exception_report(&message) {
+        return;
+    }
+    eprintln!("[ash] uncaught exception: {message}");
     print_exception_stack();
+}
+
+/// Render the captured frames over the program's source. False when there is
+/// nothing to render against, which leaves the flat list to the caller.
+#[cfg(not(target_family = "wasm"))]
+unsafe fn print_exception_report(message: &str) -> bool {
+    let frames = EXCEPTION_STACK.with(|saved| saved.borrow().clone());
+    if frames.is_empty() {
+        return false;
+    }
+    let parts: Vec<(String, Option<&'static str>, i32)> =
+        frames.iter().filter_map(|&pc| aot_frame_parts(pc)).collect();
+    let borrowed: Vec<ash_trace::Frame<'_>> = parts
+        .iter()
+        .map(|(symbol, file, line)| ash_trace::Frame {
+            symbol,
+            file: *file,
+            line: *line,
+        })
+        .collect();
+    ash_trace::render(message, &borrowed)
 }
 
 /// One captured frame as text, or None when nothing can name it.
@@ -383,9 +411,16 @@ static AOT_SYMBOL_TEXT: std::sync::Mutex<Vec<(usize, &'static [u16])>> =
 /// "" where the emitter had none. A shadow frame is keyed by findex rather
 /// than by address, so this is how it is named.
 static AOT_NAMES_BY_FINDEX: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-/// The module's debug-file table, by the index a shadow frame's position
-/// carries; see `hlp_register_aot_debug_files`.
+/// The module's debug-file table, by the index a position carries; see
+/// `hlp_register_aot_debug_files`.
 static AOT_DEBUG_FILES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+/// Each body's entry position by findex, `(file << 32) | line`, 0 for none.
+#[cfg(not(target_family = "wasm"))]
+static AOT_POSITIONS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+/// Body start address to findex, sorted, so a pc reaches its position.
+#[cfg(not(target_family = "wasm"))]
+static AOT_FINDEX_BY_START: std::sync::Mutex<Vec<(usize, u32)>> =
+    std::sync::Mutex::new(Vec::new());
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_register_aot_symbols(
@@ -398,6 +433,8 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
     }
     let mut table = Vec::with_capacity(count);
     let mut by_findex = Vec::with_capacity(count);
+    #[cfg(not(target_family = "wasm"))]
+    let mut starts_by_findex: Vec<(usize, u32)> = Vec::with_capacity(count);
     for i in 0..count {
         let start = *starts.add(i) as usize;
         let name = *names.add(i);
@@ -415,10 +452,18 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
         if start == 0 || name.is_null() {
             continue;
         }
+        #[cfg(not(target_family = "wasm"))]
+        starts_by_findex.push((start, i as u32));
         table.push((start, text));
     }
     table.sort_by_key(|(start, _)| *start);
     table.dedup_by_key(|(start, _)| *start);
+    #[cfg(not(target_family = "wasm"))]
+    {
+        starts_by_findex.sort_by_key(|(start, _)| *start);
+        starts_by_findex.dedup_by_key(|(start, _)| *start);
+        *AOT_FINDEX_BY_START.lock().unwrap_or_else(|e| e.into_inner()) = starts_by_findex;
+    }
     *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
     *AOT_NAMES_BY_FINDEX
         .lock()
@@ -469,6 +514,88 @@ pub unsafe extern "C" fn hlp_register_aot_debug_files(
         })
         .collect();
     *AOT_DEBUG_FILES.lock().unwrap_or_else(|e| e.into_inner()) = table;
+}
+
+/// Each body's entry position, by findex, registered by an ahead-of-time
+/// binary after its symbols.
+///
+/// A native frame is named from the machine stack, which says which function
+/// a pc is in and not where in it, so a whole body reports one position. It
+/// is what `--mode jit` reports for a compiled frame, for the same reason.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_register_aot_positions(positions: *const u64, count: usize) {
+    #[cfg(not(target_family = "wasm"))]
+    if !positions.is_null() {
+        *AOT_POSITIONS.lock().unwrap_or_else(|e| e.into_inner()) =
+            std::slice::from_raw_parts(positions, count).to_vec();
+    }
+    #[cfg(target_family = "wasm")]
+    let _ = (positions, count);
+}
+
+/// The findex whose body contains `pc`, bounded the way `aot_symbol_for_pc`
+/// bounds its own answer.
+#[cfg(not(target_family = "wasm"))]
+fn aot_findex_for_pc(pc: usize) -> Option<u32> {
+    let table = AOT_FINDEX_BY_START.lock().unwrap_or_else(|e| e.into_inner());
+    let i = match table.binary_search_by_key(&pc, |(s, _)| *s) {
+        Ok(i) => i,
+        Err(0) => return None,
+        Err(i) => i - 1,
+    };
+    let (start, findex) = table[i];
+    let end = table
+        .get(i + 1)
+        .map(|(next, _)| *next)
+        .unwrap_or(start.saturating_add(AOT_MAX_BODY_BYTES));
+    (pc < end).then_some(findex)
+}
+
+/// `pc` as a name, a file and a line, for the source-annotated renderer.
+///
+/// The flat list resolves the same frame to one string; a report over the
+/// source needs the parts apart, and formatting then parsing back is how that
+/// goes wrong.
+#[cfg(not(target_family = "wasm"))]
+fn aot_frame_parts(pc: usize) -> Option<(String, Option<&'static str>, i32)> {
+    let raw = unsafe { aot_symbol_via_dladdr(pc) }?;
+    let Some(findex) = aot_findex_for_pc(pc) else {
+        return Some((aot_display_name(&raw, None), None, 0));
+    };
+    let name = aot_display_name(&raw, Some(findex));
+    let pos = AOT_POSITIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(findex as usize)
+        .copied()
+        .unwrap_or(0);
+    if pos == 0 {
+        return Some((name, None, 0));
+    }
+    // The emitter stores `file + 1`, so that a body at file 0 line 0 is
+    // distinguishable from a body with no position at all.
+    let file = AOT_DEBUG_FILES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get((pos >> 32) as usize - 1)
+        .copied()
+        .filter(|f| !f.is_empty());
+    Some((name, file, pos as u32 as i32))
+}
+
+/// The same two corrections a shadow frame's name gets: the emitter's
+/// `#<hash>` marks a function no class declares, which Haxe's own parser
+/// reads as a local function, and a static's declaring type is the `$Class`
+/// object where HashLink names the class.
+#[cfg(not(target_family = "wasm"))]
+fn aot_display_name(name: &str, findex: Option<u32>) -> String {
+    if name.starts_with('#') || name.is_empty() {
+        return match findex {
+            Some(findex) => format!("fun${findex}"),
+            None => String::from("fun"),
+        };
+    }
+    name.strip_prefix('$').unwrap_or(name).to_owned()
 }
 
 /// No shadow stack on a target whose machine stack the runtime can walk: a

@@ -224,89 +224,63 @@ pub fn body_for<'a>(ctx: &CraneliftTierContext, func: &'a HLFunction) -> Body<'a
 // Cranelift -> LLVM re-tier slots
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-function re-tier state: for every OSR-eligible loop header, a leaked
-/// `AtomicU64` slot the compiled code polls, plus one leaked spill buffer
-/// (one u64 per serialized register). Publishing an LLVM OSR entry address
-/// into a slot makes any frame looping at that header — whether it entered
-/// through the ordinary call path or through a Cranelift OSR entry — spill
-/// its register image and tail into the top tier on its next iteration.
-///
-/// Keyed by findex; single-threaded execution is the tier's standing
-/// invariant, so one buffer per function is enough.
-struct RetierState {
-    /// serialized header pc -> slot address
-    slots: std::collections::HashMap<usize, u64>,
-    /// How many 64-bit slots a register image needs (`reg * 8` addressing).
-    ///
-    /// A COUNT, not a buffer: the image is spilled into a stack slot owned by
-    /// the frame taking the exit. One shared buffer per findex was a data race
-    /// the moment two threads ran the same function — every fiber executing it
-    /// spilled to the same addresses, so one frame entered the OSR body with
-    /// another's live values.
-    nregs: usize,
-}
+// The registry retains sites for as long as generated code can name them.
+// AIR identity and program identity distinguish generations with equal pcs.
+type RetierRegistry = HashMap<(usize, usize), Vec<std::sync::Arc<crate::retier::Site>>>;
+static RETIER: std::sync::Mutex<Option<RetierRegistry>> = std::sync::Mutex::new(None);
 
-static RETIER: std::sync::Mutex<Option<std::collections::HashMap<usize, RetierState>>> =
-    std::sync::Mutex::new(None);
-
-/// Whether a loop already running tier-1 code may hand itself to tier 2.
-///
-/// Off: the exit spills the register image it has materialized, and the entry
-/// reads its slots by its own `value_reg` numbering, so a loop can resume
-/// holding values that are not its own. Making it correct means spilling the
-/// entry's live-in set, the way `try_osr_transfer` fills a buffer from an
-/// interpreted frame.
-///
-/// `ASH_CL_RETIER=1` turns it on. It is worth having: method_call 194ms ->
-/// 153ms, closure_call 269ms -> 176ms, mandelbrot 313ms -> 305ms, against 8ms
-/// and 5ms on free_call and inlined_call.
+/// Explicit opt-in until snapshot transfers have broader production coverage.
 pub fn retier_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("ASH_CL_RETIER").is_ok_and(|v| v == "1"))
 }
 
-/// Allocate (once) and return this function's re-tier state as codegen wants
-/// it: AIR header block id -> slot address, plus the buffer address.
-fn retier_alloc(
+pub(super) fn retier_state_for(
     findex: usize,
-    headers: &[(u32, usize)], // (block id, serialized pc)
-    nregs: usize,
-) -> (HashMap<u32, u64>, usize) {
+    program: usize,
+    opt: &std::sync::Arc<crate::air_pipeline::Optimized>,
+) -> HashMap<u32, std::sync::Arc<crate::retier::Site>> {
+    use std::sync::Arc;
+    if !retier_enabled() {
+        return HashMap::new();
+    }
+    let plan = crate::osr::analyze(&opt.ir);
+    if !plan.eligible() {
+        return HashMap::new();
+    }
     let mut guard = RETIER.lock().expect("retier mutex poisoned");
-    let map = guard.get_or_insert_with(Default::default);
-    let st = map.entry(findex).or_insert_with(|| {
-        let mut slots = std::collections::HashMap::new();
-        for &(_, pc) in headers {
-            let slot: &'static std::sync::atomic::AtomicU64 =
-                Box::leak(Box::new(std::sync::atomic::AtomicU64::new(0)));
-            slots.insert(pc, slot as *const _ as u64);
+    let sites = guard
+        .get_or_insert_with(Default::default)
+        .entry((program, findex))
+        .or_default();
+    let mut exits = HashMap::new();
+    for h in plan.entry_headers {
+        if !retier_worth_polling(&opt.ir, h) {
+            continue;
         }
-        RetierState {
-            slots,
-            nregs: nregs.max(1),
-        }
-    });
-    let exits = headers
-        .iter()
-        .filter_map(|&(b, pc)| st.slots.get(&pc).map(|&s| (b, s)))
-        .collect();
-    (exits, st.nregs)
-}
-
-/// The already-allocated re-tier state for `findex`, mapped onto `block_pcs`
-/// (for the OSR-entry compile, which runs after the main compile allocated
-/// the slots). Empty when the function has none.
-pub(super) fn retier_state_for(findex: usize, block_pcs: &[usize]) -> (HashMap<u32, u64>, usize) {
-    let guard = RETIER.lock().expect("retier mutex poisoned");
-    let Some(st) = guard.as_ref().and_then(|m| m.get(&findex)) else {
-        return (HashMap::new(), 0);
-    };
-    let exits = block_pcs
-        .iter()
-        .enumerate()
-        .filter_map(|(b, pc)| st.slots.get(pc).map(|&s| (b as u32, s)))
-        .collect();
-    (exits, st.nregs)
+        let existing = sites
+            .iter()
+            .find(|s| s.layout.header.0 == h && Arc::ptr_eq(&s.layout.air, opt));
+        let site = if let Some(site) = existing {
+            site.clone()
+        } else {
+            match crate::retier::Layout::new(findex, opt.clone(), air::v2::ir::BlockId(h)) {
+                Ok(layout) => {
+                    let site = Arc::new(crate::retier::Site::new(layout));
+                    sites.push(site.clone());
+                    site
+                }
+                Err(e) => {
+                    if std::env::var_os("ASH_OSR_LOG").is_some() {
+                        eprintln!("[retier] declined findex={findex} header={h}: {e}");
+                    }
+                    continue;
+                }
+            }
+        };
+        exits.insert(h, site);
+    }
+    exits
 }
 
 /// Whether a loop header should carry a re-tier poll.
@@ -381,39 +355,23 @@ fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
     })
 }
 
-/// Publish an LLVM OSR entry address into the slot for `(findex, pc)`.
-/// Returns whether a slot existed. Ordering: the code must be finalized
-/// before this store; any frame can take the exit on its next iteration.
-pub fn publish_retier_target(findex: usize, pc: usize, code: u64) -> bool {
-    let guard = RETIER.lock().expect("retier mutex poisoned");
-    let Some(&slot) = guard
+/// Exact layouts requested by compiled exits for this program.
+pub fn retier_targets(findex: usize, program: usize) -> Vec<std::sync::Arc<crate::retier::Site>> {
+    RETIER
+        .lock()
+        .expect("retier mutex poisoned")
         .as_ref()
-        .and_then(|m| m.get(&findex))
-        .and_then(|st| st.slots.get(&pc))
-    else {
-        return false;
-    };
-    // SAFETY: the slot is a leaked AtomicU64 allocated in retier_alloc.
-    unsafe {
-        (*(slot as *const std::sync::atomic::AtomicU64))
-            .store(code, std::sync::atomic::Ordering::Release);
-    }
-    true
+        .and_then(|m| m.get(&(program, findex)))
+        .cloned()
+        .unwrap_or_default()
 }
 
-/// Serialized AIR V2 loop-header sites carrying Cranelift re-tier polls.
-///
-/// Hybrid execution normally discovers these sites from interpreted
-/// back-edges. Compiled-only JIT has no interpreted frames, so its LLVM
-/// promotion path asks the baseline directly which OSR entries can be
-/// published back into the running Cranelift body.
-pub fn retier_sites(findex: usize) -> Vec<usize> {
-    let guard = RETIER.lock().expect("retier mutex poisoned");
-    guard
-        .as_ref()
-        .and_then(|m| m.get(&findex))
-        .map(|state| state.slots.keys().copied().collect())
-        .unwrap_or_default()
+/// Probed positions are scheduling hints only, never snapshot identities.
+pub fn retier_sites(findex: usize, program: usize) -> Vec<usize> {
+    retier_targets(findex, program)
+        .iter()
+        .map(|s| s.layout.pc)
+        .collect()
 }
 
 pub fn codegen_from_air() -> bool {
@@ -496,38 +454,8 @@ fn lower_air_codegen(
     let opt = air_pipeline::optimized(ctx.air_module(), func)
         .map_err(|e| anyhow::anyhow!("{} failed: {}", e.stage, e.brief()))?;
 
-    // Re-tier exits: one polled slot per OSR-eligible loop header, gated on
-    // the same eligibility the LLVM entry builder uses — a slot nothing can
-    // ever fill would be a dead branch in a hot loop.
-    let (osr_exits, osr_buf) = if retier_enabled() {
-        let plan = crate::osr::analyze(&opt.ir);
-        if plan.eligible() {
-            let headers: Vec<(u32, usize)> = plan
-                .entry_headers
-                .iter()
-                .filter(|&&h| retier_worth_polling(&opt.ir, h))
-                .filter_map(|&h| opt.ser.block_pcs.get(h as usize).map(|&pc| (h, pc)))
-                .collect();
-            if std::env::var("ASH_OSR_LOG").is_ok() {
-                eprintln!(
-                    "[retier] findex={findex} eligible={:?} polled={:?}",
-                    plan.entry_headers, headers
-                );
-            }
-            if headers.is_empty() {
-                (HashMap::new(), 0)
-            } else {
-                retier_alloc(findex, &headers, opt.ser.reg_types.len())
-            }
-        } else {
-            (HashMap::new(), 0)
-        }
-    } else {
-        (HashMap::new(), 0)
-    };
-
-    let result =
-        super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits, osr_buf);
+    let osr_exits = retier_state_for(findex, ctx.bytecode() as *const _ as usize, &opt);
+    let result = super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits);
     if let Err(error) = &result {
         if cfg.log {
             eprintln!("[air] findex={findex} codegen declined: {error:#}");

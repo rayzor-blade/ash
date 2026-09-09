@@ -20,7 +20,7 @@
 //!   block-structured form instead of a flat opcode array.
 
 pub mod air;
-pub use air::{publish_retier_target, retier_enabled, retier_sites};
+pub use air::{retier_enabled, retier_sites, retier_targets};
 pub mod backend;
 pub mod codegen;
 pub mod lower;

@@ -1,52 +1,133 @@
-//! A hot loop must survive being handed to another tier mid-flight.
-//!
-//! Tier-1 code polls a re-tier slot at its loop headers, and when a tier-2 OSR
-//! entry is published the running loop jumps to it, spilling a register image
-//! on the way. If that image is not the one the entry reads, the loop resumes
-//! holding values that are not its own.
-//!
-//! The fixture's counters are all loop-carried, so that shows up as a wrong
-//! total. Compared against the interpreter rather than a fixed number, so a
-//! failure reads as "the tiers disagree".
-
+//! Re-tier snapshots must preserve the answer AND actually be exercised.
 mod common;
 
 use common::{ash_cli_bin, haxe_available, tests_dir};
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
-fn run(mode: &[&str], extra: &[(&str, &str)]) -> String {
-    let hl = tests_dir().join("test_osr_retier.hl");
-    assert!(hl.exists(), "fixture not built: {}", hl.display());
+fn scratch() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("ash-retier-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn fixture(main: &str) -> PathBuf {
+    if !haxe_available() {
+        let name = match main {
+            "TestOsrRetier" => "test_osr_retier.hl",
+            "TestRetierSnapshot" => "test_retier_snapshot.hl",
+            _ => panic!("unknown fixture"),
+        };
+        let path = tests_dir().join(name);
+        assert!(
+            path.exists(),
+            "missing compiled fixture: {}",
+            path.display()
+        );
+        return path;
+    }
+    let path = scratch().join(format!("{main}.hl"));
+    let out = Command::new("haxe")
+        .arg("-cp")
+        .arg(tests_dir())
+        .args(["-main", main, "-hl"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "haxe: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    path
+}
+
+fn run(hl: &Path, mode: &[&str], extra: &[(&str, &str)]) -> (String, String) {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let stdout = scratch().join(format!("{id}.stdout"));
+    let stderr = scratch().join(format!("{id}.stderr"));
     let mut cmd = Command::new(ash_cli_bin());
-    cmd.args(mode).arg(&hl);
+    cmd.args(mode)
+        .arg(hl)
+        .env_remove("ASH_TEST_RETIER_AFTER")
+        .env_remove("ASH_RETIER_TEST_PLAIN")
+        .env("ASH_OSR", "1")
+        .env("ASH_CL_RETIER", "0")
+        .stdout(Stdio::from(std::fs::File::create(&stdout).unwrap()))
+        .stderr(Stdio::from(std::fs::File::create(&stderr).unwrap()));
     for (k, v) in extra {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("failed to run ash");
-    String::from_utf8_lossy(&out.stdout)
+    let mut child = cmd.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("guest timed out; {}", stderr.display());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let log = std::fs::read_to_string(stderr).unwrap();
+    assert!(status.success(), "guest failed: {status}\n{log}");
+    let out = std::fs::read_to_string(stdout).unwrap();
+    let line = out
         .lines()
         .find(|l| l.starts_with("iters="))
-        .unwrap_or("<no result line>")
-        .to_string()
+        .unwrap_or_else(|| panic!("missing result line: {out}\n{log}"))
+        .to_owned();
+    (line, log)
 }
 
 #[test]
-fn a_hot_loop_keeps_its_counters_across_a_tier_handoff() {
-    if !haxe_available() {
-        eprintln!("skipping: haxe not on PATH");
-        return;
-    }
-    let interp = run(&["--mode", "interp"], &[]);
-
-    // Repeated: whether the hand-off happens at all depends on when the
-    // tier-2 compile lands, so one run can pass by luck.
+fn a_hot_loop_keeps_its_counters_with_the_default_mitigation() {
+    let hl = fixture("TestOsrRetier");
+    let (interp, _) = run(&hl, &["--mode", "interp"], &[]);
     for attempt in 0..3 {
-        let hybrid = run(&["--mode", "hybrid"], &[]);
-        assert_eq!(
-            hybrid, interp,
-            "attempt {attempt}: hybrid disagrees with the interpreter.\n\
-             A loop handed to another tier mid-flight resumed with the wrong \
-             registers; see ASH_CL_RETIER in crates/ash/src/cranelift/air.rs."
+        let (hybrid, _) = run(&hl, &["--mode", "hybrid"], &[]);
+        assert_eq!(hybrid, interp, "attempt {attempt}");
+    }
+}
+
+#[test]
+fn forced_snapshots_from_ordinary_and_osr_entries_preserve_live_state() {
+    let hl = fixture("TestRetierSnapshot");
+    for plain in ["0", "1"] {
+        let (interp, _) = run(
+            &hl,
+            &["--mode", "interp"],
+            &[("ASH_RETIER_TEST_PLAIN", plain)],
         );
+        for (mode, source) in [("jit", "ordinary"), ("hybrid", "osr")] {
+            let (answer, log) = run(
+                &hl,
+                &[
+                    "--mode",
+                    mode,
+                    "--jit-threshold",
+                    "1",
+                    "--opt-threshold",
+                    "10000",
+                ],
+                &[
+                    ("ASH_CL_RETIER", "1"),
+                    ("ASH_TEST_RETIER_AFTER", "4096"),
+                    ("ASH_OSR_LOG", "1"),
+                    ("ASH_RETIER_TEST_PLAIN", plain),
+                ],
+            );
+            assert_eq!(answer, interp, "{mode}, plain={plain}\n{log}");
+            assert!(
+                log.lines().any(|l| l.starts_with("[retier] taken ")
+                    && l.ends_with(&format!("source={source}"))),
+                "{mode}, plain={plain} never took the intended compiled hand-off\n{log}"
+            );
+        }
     }
 }

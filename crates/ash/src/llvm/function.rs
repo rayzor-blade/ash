@@ -1193,15 +1193,36 @@ impl<'ctx> JITModule<'ctx> {
         header_pc: usize,
         optimized: &crate::air_pipeline::Optimized,
     ) -> Result<u64> {
+        self.compile_snapshot_entry(findex, header_pc, optimized, None)
+    }
+
+    /// A separate ABI: slots name exact SSA inputs, not de-SSA registers.
+    pub fn compile_retier_entry(&mut self, layout: &crate::retier::Layout) -> Result<u64> {
+        self.compile_snapshot_entry(layout.findex, layout.pc, &layout.air, Some(layout))
+    }
+
+    fn compile_snapshot_entry(
+        &mut self,
+        findex: usize,
+        header_pc: usize,
+        optimized: &crate::air_pipeline::Optimized,
+        snapshot: Option<&crate::retier::Layout>,
+    ) -> Result<u64> {
         let _phase = crate::profile::scope("llvm osr entry");
-        let header = optimized
-            .ser
-            .block_pcs
-            .iter()
-            .position(|&pc| pc == header_pc)
-            .ok_or_else(|| {
-                anyhow!("osr header pc {header_pc} is not an AIR block in findex {findex}")
-            })?;
+        let header = if let Some(layout) = snapshot {
+            // Empty blocks can share a serialized pc. A typed snapshot names
+            // its exact AIR header, not the first block with that pc.
+            layout.header.idx()
+        } else {
+            optimized
+                .ser
+                .block_pcs
+                .iter()
+                .position(|&pc| pc == header_pc)
+                .ok_or_else(|| {
+                    anyhow!("osr header pc {header_pc} is not an AIR block in findex {findex}")
+                })?
+        };
         let source = self
             .bytecode
             .functions
@@ -1209,7 +1230,10 @@ impl<'ctx> JITModule<'ctx> {
             .find(|f| f.findex as usize == findex)
             .cloned()
             .ok_or_else(|| anyhow!("osr findex {findex} is not a bytecode function"))?;
-        let name = format!("osr_{findex}_{header_pc}");
+        let name = match snapshot {
+            Some(layout) => format!("retier_{}_{}", findex, layout.id),
+            None => format!("osr_{findex}_{header_pc}"),
+        };
         if let Ok(addr) = self.execution_engine.get_function_address(&name) {
             if addr != 0 {
                 return Ok(addr as u64);
@@ -1275,6 +1299,7 @@ impl<'ctx> JITModule<'ctx> {
                 AirBlockId(header as u32),
                 header_pc,
                 &name,
+                snapshot,
             )
         });
 
@@ -1414,8 +1439,11 @@ impl<'ctx> JITModule<'ctx> {
         header: AirBlockId,
         header_pc: usize,
         name: &str,
+        snapshot: Option<&crate::retier::Layout>,
     ) -> Result<()> {
-        // `(ptr) -> ret`, where ret is the function's own return type.
+        // `(ptr) -> ret`. Compiled snapshots match Cranelift's entry ABI:
+        // sub-word integer returns are zero-extended to i32. Keep the
+        // interpreter OSR signature unchanged.
         let type_fun = self.bytecode.types[source.type_.0]
             .fun
             .clone()
@@ -1424,6 +1452,9 @@ impl<'ctx> JITModule<'ctx> {
         let ret_any = self.get_or_create_any_type(type_fun.ret.0)?;
         let fn_ty = match ret_any {
             AnyTypeEnum::VoidType(t) => t.fn_type(&[ptr_ty.into()], false),
+            AnyTypeEnum::IntType(t) if snapshot.is_some() && t.get_bit_width() < 32 => {
+                self.context.i32_type().fn_type(&[ptr_ty.into()], false)
+            }
             AnyTypeEnum::IntType(t) => t.fn_type(&[ptr_ty.into()], false),
             AnyTypeEnum::FloatType(t) => t.fn_type(&[ptr_ty.into()], false),
             AnyTypeEnum::PointerType(t) => t.fn_type(&[ptr_ty.into()], false),
@@ -1485,22 +1516,34 @@ impl<'ctx> JITModule<'ctx> {
         }
         let cell_base = air.values.len();
 
-        // Reconstruct every AIR value and pinned cell from the de-SSA
-        // register image. Definitions inside the selected region overwrite
-        // their seed before use; live-ins and header phis retain the value
-        // Cranelift spilled for their original HashLink register.
+        // Reconstruct the header state using the selected transfer ABI.
+        // Compiled snapshots seed exact SSA inputs; interpreter entries
+        // retain the original de-SSA register-image convention.
         let buf = function
             .get_nth_param(0)
             .ok_or_else(|| anyhow!("osr entry has no buffer parameter"))?
             .into_pointer_value();
-        for (i, value) in air.values.iter().enumerate() {
-            let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i])?;
-            self.builder.build_store(registers[i], restored)?;
-        }
-        for (ci, cell) in air.cells.iter().enumerate() {
-            let slot = cell_base + ci;
-            let restored = self.load_air_osr_slot(buf, cell.reg, reg_types[slot])?;
-            self.builder.build_store(registers[slot], restored)?;
+        if let Some(layout) = snapshot {
+            for (offset, input) in layout.slots.iter().enumerate() {
+                let index = match input.input {
+                    crate::retier::Input::Value(v) => v.idx(),
+                    crate::retier::Input::Cell(c) => cell_base + c.idx(),
+                };
+                let restored = self.load_air_osr_slot(buf, offset as u32, reg_types[index])?;
+                self.builder.build_store(registers[index], restored)?;
+            }
+        } else {
+            // Preserve the interpreter ABI. Re-tier entries never read an
+            // unspecified slot or seed multiple SSA values from one register.
+            for (i, value) in air.values.iter().enumerate() {
+                let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i])?;
+                self.builder.build_store(registers[i], restored)?;
+            }
+            for (ci, cell) in air.cells.iter().enumerate() {
+                let slot = cell_base + ci;
+                let restored = self.load_air_osr_slot(buf, cell.reg, reg_types[slot])?;
+                self.builder.build_store(registers[slot], restored)?;
+            }
         }
 
         let mut included = vec![false; air.blocks.len()];
@@ -1773,8 +1816,10 @@ impl<'ctx> JITModule<'ctx> {
         // `0xffffffff` from a stale frame once the slot is real memory --
         // which is a fault at the top of the address space, and which the
         // collector would otherwise have traced as a pointer.
-        self.builder
-            .build_store(slot, self.context.ptr_type(AddressSpace::default()).const_null())?;
+        self.builder.build_store(
+            slot,
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        )?;
         Ok(())
     }
 

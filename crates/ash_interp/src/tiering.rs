@@ -1153,7 +1153,10 @@ pub(crate) fn compile_with_cranelift(
             // function. LLVM will compile matching entries and publish them
             // into these slots while the baseline keeps running.
             if ctx.compiled_only {
-                let sites = ash_core::cranelift::retier_sites(findex);
+                let sites = ash_core::cranelift::retier_sites(
+                    findex,
+                    tier.ctx.bytecode() as *const _ as usize,
+                );
                 if !sites.is_empty() {
                     ctx.hot_loop_pcs
                         .lock()
@@ -1707,6 +1710,32 @@ pub(crate) fn osr_plan_for(
     Some((sites, optimized, cfg))
 }
 
+fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) {
+    let Some(program) = ctx.bytecode_ptr() else {
+        return;
+    };
+    for site in ash_core::cranelift::retier_targets(findex, program as *const _ as usize) {
+        if site.target() != 0 {
+            continue;
+        }
+        let layout = &site.layout;
+        let compiled = module
+            .compile_retier_entry(layout)
+            .and_then(|code| site.publish(layout, code));
+        if osr_logging() {
+            match compiled {
+                Ok(()) => eprintln!(
+                    "[retier] published layout={} findex={findex} pc={} inputs={}",
+                    layout.id,
+                    layout.pc,
+                    layout.slots.len()
+                ),
+                Err(e) => eprintln!("[retier] declined layout={}: {e:#}", layout.id),
+            }
+        }
+    }
+}
+
 pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     let Some((sites, optimized, cfg)) = osr_plan_for(ctx, findex) else {
         return;
@@ -1731,20 +1760,12 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
             }
         }
     }
+    publish_retier_entries(ctx, &mut module.0, findex);
     drop(guard);
     if entries.is_empty() {
         return;
     }
-    // Publish into the Cranelift re-tier slots: any frame still looping in
-    // tier-1 code takes the exit on its next iteration. The staging map
-    // below serves interpreter frames the same way.
-    for e in &entries {
-        if ash_core::cranelift::publish_retier_target(findex, e.site as usize, e.code as u64)
-            && osr_logging()
-        {
-            eprintln!("[osr] re-tier slot filled findex={findex} pc={}", e.site);
-        }
-    }
+    // Interpreter entries are never published to compiled snapshot exits.
     if osr_logging() {
         eprintln!(
             "[osr] staged {} entr{} for findex={findex}",
@@ -1901,6 +1922,7 @@ pub(crate) fn compile_with_llvm(
         // the frame waited 43ms for the whole promote when the entry alone
         // was ready at ~15ms, and it ran the middle tier for every one of
         // those iterations.
+        publish_retier_entries(ctx, module, findex);
         if let Some((sites, optimized, cfg)) = osr_plan.as_ref() {
             let mut entries: Vec<OsrEntry> = Vec::new();
             for &pc in sites.iter() {
@@ -1917,19 +1939,6 @@ pub(crate) fn compile_with_llvm(
                             );
                         }
                     }
-                }
-            }
-            for e in &entries {
-                if ash_core::cranelift::publish_retier_target(
-                    findex,
-                    e.site as usize,
-                    e.code as u64,
-                ) && osr_logging()
-                {
-                    eprintln!(
-                        "[osr] re-tier slot filled early findex={findex} pc={}",
-                        e.site
-                    );
                 }
             }
             if !entries.is_empty() && !ctx.compiled_only {

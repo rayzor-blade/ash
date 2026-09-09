@@ -15,11 +15,15 @@ different so you can tell what went wrong. Everyday flags are in
 | `--jit-log` | flag | Log every promotion, decline and tier crossing |
 | `--hot-reload` | flag | Route direct calls through indirect dispatch so code can be swapped |
 
-Pinning a tier is how you attribute a wrong answer to an engine:
+Pinning a tier tests execution without a cross-tier hand-off:
 
 ```bash
 ash --mode hybrid --jit-tier cranelift --jit-log program.hl
 ```
+
+If both pinned tiers are correct but the ladder is not, that implicates the
+transition, not either backend in isolation. `ASH_OSR=0` separates mid-frame
+transfers from promotion at the next call.
 
 `--jit-threshold 1` promotes everything immediately, which is the fastest way
 to reach compiled code from a small test program.
@@ -111,8 +115,8 @@ In order, cheapest first:
 
 1. `ASH_AIR_NO_WIDEN=1` — the widener is the only O3 pass that rewrites
    arithmetic, so an unchanged result rules it out.
-2. `--jit-tier cranelift` / `--jit-tier llvm` / `--jit-tier off` — attribute it
-   to an engine, or to the interpreter.
+2. `--jit-tier cranelift` / `--jit-tier llvm` / `--jit-tier off` — compare the
+   engines without a cross-tier hand-off. If all pass, investigate the ladder.
 3. `ASH_AOT_SHARDS=1` for an AOT binary — the single-module path.
 4. `ASH_LLVM_PASSES=off`, then `ASH_AOT_NO_OPT=1`.
 
@@ -124,3 +128,59 @@ allocation slow path; `fiber::park`'s loops and `hlp_fiber_poll`;
 `gc_set_blocking(true)`; `worker_main`'s loop head. The TLAB bump path polls
 nothing, and AOT wasm emits no safepoint of its own — so a thread in a tight
 compiled loop on wasm cannot be stopped.
+
+## Compiled-to-compiled re-tier snapshots
+
+`ASH_CL_RETIER=1` lets a running Cranelift loop transfer to LLVM. It remains
+**off by default** pending broader production/performance coverage.
+
+The former exit inferred a de-SSA register image from header phis and
+materialized dominating definitions. The LLVM entry restored values by its
+own register numbering. The sharp failure was an exit from a Cranelift OSR
+entry: values loaded by its synthetic prologue were not represented by that
+walk. A throwing callee exposed the publication window, rather than causing
+the corrupted counters itself.
+
+Re-tiering now has a separate ABI from interpreter OSR. A shared layout owns
+one immutable AIR version and names an exact header, after its phis but
+before its instructions. Its eight-byte slots identify SSA values and cells,
+not originating registers. Cranelift spills those inputs from current block
+parameters, dominating values, OSR-prologue bindings and current cell storage;
+LLVM restores only those declared inputs. Every word is initialized, floats
+use raw bits, and the buffer belongs to the activation. Missing source values
+decline the exit. Vector inputs and oversized snapshots are refused.
+
+Publication slots belong to a program/AIR version/header layout, and the
+publisher must supply that same layout. Equal register counts or serialized
+pcs are not compatibility checks; even empty AIR blocks can share a pc.
+Target publication uses release/acquire synchronization. The interpreter's
+existing register-image entry remains separate and unchanged.
+
+Use `ASH_OSR_LOG=1` to distinguish a compiled entry being published from a
+transfer actually being taken:
+
+```text
+[retier] published layout=2 findex=257 pc=11 inputs=11
+[retier] taken layout=2 source=osr
+```
+
+`source=ordinary` is an exit from a normal Cranelift call; `source=osr` is an
+exit from its OSR entry. The regression's `ASH_TEST_RETIER_AFTER=N` hook holds
+off the transfer until the Nth poll in an activation, then waits up to 30
+seconds for publication. It aborts on timeout rather than passing a test that
+never transferred. This is a test hook, not a tuning option: it requires a
+loop whose promotion has been requested. No counter/helper is emitted unless
+the hook is set.
+
+```sh
+cargo test -p ash_core --lib retier::tests
+cargo test --release -p ash --test osr_retier -- --nocapture
+```
+
+The integration tests require an actual hand-off from each entry path, compare
+three million iterations against the interpreter, and cover both throwing
+and non-throwing callees, pointer and float state, swapping header phis, and
+a narrow scalar return through the compiled-entry ABI.
+They also retain the default-off mitigation regression and reject missing
+result lines or unsuccessful processes. Haxe rebuilds the fixtures when
+available; otherwise the committed bytecode is used.

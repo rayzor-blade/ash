@@ -202,13 +202,10 @@ pub fn lower_air_function(
     ctx: &CraneliftTierContext,
     findex: usize,
     air: &AirFunction,
-    // Re-tier exits: AIR block id of an OSR-eligible loop header -> address
-    // of a leaked AtomicU64 slot. The header polls the slot; when the broker
-    // publishes an LLVM OSR entry address there, the frame spills its
-    // register image into a stack slot of its own and tail-calls the entry.
-    // Empty map (and 0 registers) compiles the function with no exits.
-    osr_exits: &HashMap<u32, u64>,
-    osr_image_regs: usize,
+    // Re-tier exits: AIR header -> shared snapshot/publication contract.
+    // The frame spills its typed inputs into activation-local storage and
+    // calls the matching LLVM entry. An empty map emits no exits.
+    osr_exits: &HashMap<u32, std::sync::Arc<crate::retier::Site>>,
 ) -> Result<LoweredFunction> {
     let bytecode = ctx.bytecode();
     let func_idx = ctx
@@ -268,8 +265,9 @@ pub fn lower_air_function(
             nargs: tf.args.len(),
             ret_class: entry_return_class(ret_kind),
             osr_exits,
-            osr_image_regs,
             osr_image_slot: None,
+            is_osr: false,
+            retier_test_count: None,
             fiber_poll_epoch_slot: None,
         };
         cg.run()?;
@@ -307,7 +305,7 @@ pub fn compile_osr_entry(
     ctx: &CraneliftTierContext,
     bead: &std::sync::Arc<beadie::Bead>,
     findex: usize,
-    opt: &crate::air_pipeline::Optimized,
+    opt: &std::sync::Arc<crate::air_pipeline::Optimized>,
     site: usize,
 ) -> Result<usize> {
     let air = &opt.ir;
@@ -354,7 +352,7 @@ pub fn compile_osr_entry(
     // The frame that enters here is exactly the one a later LLVM promote
     // wants to lift out, so the entry polls the same re-tier slots the
     // function's ordinary compile allocated.
-    let (osr_exits, osr_image_regs) = super::air::retier_state_for(findex, &opt.ser.block_pcs);
+    let osr_exits = super::air::retier_state_for(findex, ctx.bytecode() as *const _ as usize, opt);
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();
     {
@@ -372,8 +370,9 @@ pub fn compile_osr_entry(
             nargs: 0, // parameters are dead in an OSR body; values come from buf
             ret_class: entry_return_class(ret_kind),
             osr_exits: &osr_exits,
-            osr_image_regs,
             osr_image_slot: None,
+            is_osr: true,
+            retier_test_count: None,
             fiber_poll_epoch_slot: None,
         };
         cg.run_osr(header)?;
@@ -577,12 +576,10 @@ struct AirCodegen<'a, 'b> {
     nargs: usize,
     ret_class: AbiClass,
     /// See [`lower_air_function`]: loop-header re-tier exits.
-    osr_exits: &'a HashMap<u32, u64>,
-    /// Slots a spilled register image needs. The image itself lives in
-    /// [`Self::osr_image_slot`], per frame — see [`RetierState`].
-    osr_image_regs: usize,
-    /// Lazily created stack slot holding this frame's spilled image.
+    osr_exits: &'a HashMap<u32, std::sync::Arc<crate::retier::Site>>,
     osr_image_slot: Option<StackSlot>,
+    is_osr: bool,
+    retier_test_count: Option<StackSlot>,
     /// Last runtime poll generation handled by this compiled activation.
     fiber_poll_epoch_slot: Option<StackSlot>,
 }
@@ -628,23 +625,14 @@ impl AirCodegen<'_, '_> {
             self.init_fiber_poll_epoch()?;
         }
 
-        // Re-tier exits: each participating loop header gets a body block the
-        // poll falls through to, and a cold exit block that hands the frame
-        // to the LLVM OSR entry. The register image a header must spill is
-        // decided by dominance, so the tree is built once, lazily.
-        let dom_cfg = if self.osr_exits.is_empty() {
-            None
-        } else {
-            Some(air::v2::CfgInfo::build(self.f))
-        };
-
+        self.init_retier_test_counter();
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             if bid.0 != 0 {
                 self.b.switch_to_block(blk);
             }
-            if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
-                self.emit_retier_poll(bid, slot, cfg)?;
+            if let Some(site) = self.osr_exits.get(&bid.0).cloned() {
+                self.emit_retier_poll(&site)?;
             }
             if poll_headers[bid.idx()] {
                 self.emit_fiber_poll()?;
@@ -662,125 +650,146 @@ impl AirCodegen<'_, '_> {
         Ok(())
     }
 
-    /// Poll the re-tier slot at a loop header; on a published LLVM OSR entry,
-    /// spill the register image and tail into it.
-    ///
-    /// The image is the value each serialized register holds at the header:
-    /// the header's own phis first (they are the live-in joins), then the
-    /// nearest dominating definition of every other register. Registers with
-    /// no dominating definition are left as whatever the per-function buffer
-    /// already holds — the entry restores every register, but the compiled
-    /// region only reads the live ones, and a live register always has a
-    /// dominating definition or a header phi.
-    ///
-    /// Single-threaded by design, like the interpreter that feeds this tier:
-    /// the spill buffer is one leaked allocation per compiled function.
-    /// This frame's register-image spill slot, created on first use.
-    ///
-    /// Sized from the function's register count so `reg * 8` addressing
-    /// matches what the OSR entry loads.
     fn osr_image_slot(&mut self) -> StackSlot {
         if let Some(slot) = self.osr_image_slot {
             return slot;
         }
-        let bytes = (self.osr_image_regs.max(1) * 8) as u32;
+        let count = self
+            .osr_exits
+            .values()
+            .map(|s| s.layout.slots.len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
         let slot = self.b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            bytes,
+            (count * 8) as u32,
             3,
         ));
         self.osr_image_slot = Some(slot);
         slot
     }
 
-    fn emit_retier_poll(
-        &mut self,
-        header: BlockId,
-        slot: u64,
-        cfg: &air::v2::CfgInfo,
-    ) -> Result<()> {
+    fn init_retier_test_counter(&mut self) {
+        if crate::retier::test_after().is_none() || self.osr_exits.is_empty() {
+            return;
+        }
+        let slot =
+            self.b
+                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.b.ins().stack_store(types::I64, zero, slot, 0);
+        self.retier_test_count = Some(slot);
+    }
+
+    fn emit_retier_poll(&mut self, site: &std::sync::Arc<crate::retier::Site>) -> Result<()> {
+        use crate::retier::Input;
+        if !std::ptr::eq(self.f, &site.layout.air.ir) {
+            bail!("re-tier exit and snapshot belong to different AIR versions");
+        }
+        // Never silently leave a required slot unwritten. Values bound by
+        // the OSR prologue are legitimate sources; original AIR dominance
+        // alone does not describe the emitted entry's definitions.
+        for slot in &site.layout.slots {
+            if let Input::Value(v) = slot.input {
+                if !self.is_void(v) && self.vals[v.idx()].is_none() {
+                    if std::env::var_os("ASH_OSR_LOG").is_some() {
+                        eprintln!(
+                            "[retier] exit refused layout={} unavailable v{}",
+                            site.layout.id, v.0
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+        }
         let body = self.b.create_block();
         let exit = self.b.create_block();
         self.b.set_cold_block(exit);
-
-        let slot_addr = self.b.ins().iconst(types::I64, slot as i64);
-        // A PLAIN load, deliberately: an acquire load is a barrier, and one
-        // barrier per iteration serialized mandelbrot's FP pipeline (371ms
-        // -> 619ms measured). A naturally-aligned pointer-width load is
-        // indivisible on both targets, the publisher stores a pointer to
-        // code that was finalized before the store, and the consumer's only
-        // use of the value is as a branch target — an address dependency,
-        // which no reordering can break. Missing a publication for a few
-        // iterations is also harmless: the next iteration takes the exit.
-        let target = self
-            .b
-            .ins()
-            .load(types::I64, MemFlagsData::trusted(), slot_addr, 0);
-        self.b.ins().brif(target, exit, &[], body, &[]);
-
-        // ---- cold exit: spill the image, call the entry, return ----------
-        self.b.switch_to_block(exit);
-
-        let mut image: HashMap<u32, ValueId> = HashMap::new();
-        for phi in &self.f.blocks[header.idx()].phis {
-            if self.has_machine_value(phi.dst) {
-                image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
-            }
-        }
-        let mut b = header.idx();
-        while cfg.dom.idom[b] != b {
-            b = cfg.dom.idom[b];
-            for ins in self.f.blocks[b].instrs.iter().rev() {
-                if let Some(d) = ins.dst() {
-                    if self.has_machine_value(d) && self.vals[d.idx()].is_some() {
-                        image.entry(self.f.value_reg(d)).or_insert(d);
-                    }
-                }
-            }
-            for phi in &self.f.blocks[b].phis {
-                if self.has_machine_value(phi.dst) {
-                    image.entry(self.f.value_reg(phi.dst)).or_insert(phi.dst);
-                }
-            }
-        }
-
-        // Deterministic emission order.
-        let mut spill: Vec<(u32, ValueId)> = image.into_iter().collect();
-        spill.sort_unstable_by_key(|&(r, _)| r);
-        // The image belongs to THIS frame. It used to be one leaked buffer per
-        // findex, which every activation on every thread spilled into: with
-        // more than one VM worker, two fibers running the same function raced
-        // on the same addresses and one entered the OSR body carrying the
-        // other's live registers.
-        let image = self.osr_image_slot();
-        for (reg, vid) in spill {
-            let v = self.get(vid)?;
-            // Narrow stores leave the slot's high bytes stale; the entry
-            // truncates every load to the register's width, so that is fine.
+        let target = if let Some(counter) = self.retier_test_count {
+            let mut sig = Signature::new(self.ctx.call_conv());
+            sig.params
+                .extend([AbiParam::new(types::I64), AbiParam::new(types::I64)]);
+            sig.returns.push(AbiParam::new(types::I64));
+            let sig = self.b.import_signature(sig);
+            let helper = self
+                .b
+                .ins()
+                .iconst(types::I64, crate::retier::test_poll as *const () as i64);
+            let site_ptr = self
+                .b
+                .ins()
+                .iconst(types::I64, std::sync::Arc::as_ptr(site) as i64);
+            let count_ptr = self.b.ins().stack_addr(types::I64, counter, 0);
+            let call = self
+                .b
+                .ins()
+                .call_indirect(sig, helper, &[site_ptr, count_ptr]);
+            self.b.inst_results(call)[0]
+        } else {
+            let addr = self.b.ins().iconst(types::I64, site.address() as i64);
             self.b
                 .ins()
-                .stack_store(types::I64, v, image, (u32::from(reg) * 8) as i32);
+                .atomic_load(types::I64, MemFlagsData::trusted(), addr)
+        };
+        self.b.ins().brif(target, exit, &[], body, &[]);
+        self.b.switch_to_block(exit);
+        let image = self.osr_image_slot();
+        for (index, slot) in site.layout.slots.iter().enumerate() {
+            let value = match slot.input {
+                Input::Value(v) if self.is_void(v) => self.b.ins().iconst(types::I64, 0),
+                Input::Value(v) => self.get(v)?,
+                Input::Cell(c) => {
+                    let ty = self.cell_clif_ty(slot.ty)?;
+                    self.b
+                        .ins()
+                        .stack_load(types::I64, ty, self.cells[c.idx()], 0)
+                }
+            };
+            // Completely initialized words, floats preserved as raw bits.
+            let ty = self.b.func.dfg.value_type(value);
+            let bits = if ty.is_float() {
+                let int = if ty == types::F32 {
+                    types::I32
+                } else {
+                    types::I64
+                };
+                self.b.ins().bitcast(int, MemFlagsData::new(), value)
+            } else {
+                value
+            };
+            let bits = if self.b.func.dfg.value_type(bits).bits() < 64 {
+                self.b.ins().uextend(types::I64, bits)
+            } else {
+                bits
+            };
+            self.b
+                .ins()
+                .stack_store(types::I64, bits, image, (index * 8) as i32);
         }
-
-        let mut call_sig = Signature::new(self.ctx.call_conv());
-        call_sig.params.push(AbiParam::new(types::I64));
+        if std::env::var_os("ASH_OSR_LOG").is_some() {
+            let mut sig = Signature::new(self.ctx.call_conv());
+            sig.params
+                .extend([AbiParam::new(types::I64), AbiParam::new(types::I64)]);
+            let sig = self.b.import_signature(sig);
+            let helper = self.b.ins().iconst(
+                types::I64,
+                crate::retier::record_transfer as *const () as i64,
+            );
+            let id = self.b.ins().iconst(types::I64, site.layout.id as i64);
+            let kind = self.b.ins().iconst(types::I64, self.is_osr as i64);
+            self.b.ins().call_indirect(sig, helper, &[id, kind]);
+        }
+        let mut sig = Signature::new(self.ctx.call_conv());
+        sig.params.push(AbiParam::new(types::I64));
         if let Some(ty) = self.ret_class.clif_type() {
-            call_sig.returns.push(AbiParam::new(ty));
+            sig.returns.push(AbiParam::new(ty));
         }
-        let sig_ref = self.b.import_signature(call_sig);
-        let buf_addr = self.b.ins().stack_addr(types::I64, image, 0);
-        let call = self.b.ins().call_indirect(sig_ref, target, &[buf_addr]);
-        let results: Vec<Value> = self.b.inst_results(call).to_vec();
-        match results.first() {
-            Some(&r) => {
-                self.b.ins().return_(&[r]);
-            }
-            None => {
-                self.b.ins().return_(&[]);
-            }
-        }
-
-        // ---- warm fall-through -------------------------------------------
+        let sig = self.b.import_signature(sig);
+        let buf = self.b.ins().stack_addr(types::I64, image, 0);
+        let call = self.b.ins().call_indirect(sig, target, &[buf]);
+        let results = self.b.inst_results(call).to_vec();
+        self.b.ins().return_(&results);
         self.b.switch_to_block(body);
         Ok(())
     }
@@ -830,6 +839,7 @@ impl AirCodegen<'_, '_> {
         self.b.append_block_params_for_function_params(entry);
         self.b.switch_to_block(entry);
         let buf = self.b.block_params(entry)[0];
+        self.init_retier_test_counter();
 
         let poll_headers = self.fiber_poll_headers();
         if poll_headers.iter().any(|poll| *poll) {
@@ -936,16 +946,11 @@ impl AirCodegen<'_, '_> {
         let hblk = self.blocks[header].expect("header emitted");
         self.b.ins().jump(hblk, &args);
 
-        let dom_cfg = if self.osr_exits.is_empty() {
-            None
-        } else {
-            Some(air::v2::CfgInfo::build(self.f))
-        };
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             self.b.switch_to_block(blk);
-            if let (Some(&slot), Some(cfg)) = (self.osr_exits.get(&bid.0), dom_cfg.as_ref()) {
-                self.emit_retier_poll(bid, slot, cfg)?;
+            if let Some(site) = self.osr_exits.get(&bid.0).cloned() {
+                self.emit_retier_poll(&site)?;
             }
             if poll_headers[bid.idx()] {
                 self.emit_fiber_poll()?;

@@ -33,6 +33,7 @@ pub mod llvm;
 pub mod native_lib;
 pub mod opcodes;
 pub mod osr;
+pub mod retier;
 pub mod profile;
 pub mod reachable;
 pub mod reload;

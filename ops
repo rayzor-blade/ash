@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788975788,"nonce":"xJZEOa3T7uLllQak5tIySySJ3S0=","added":["bug","area:jit"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976009,"nonce":"RNMWj1942cAG/tcxASbSy7aFOaU=","message":"Fixed. `FunctionLookupError` no longer exists anywhere in `crates/`.","files":null}]}

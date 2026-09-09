@@ -306,6 +306,45 @@ impl<'ctx> JITModule<'ctx> {
         self.native_function_resolver.resolve_function("std", name)
     }
 
+    /// Split control flow on `ptr` being null, for an opcode HL defines on
+    /// null where the lowering would otherwise dereference.
+    ///
+    /// Returns `(null_block, load_block, cont_block)` with the conditional
+    /// branch already emitted and the builder left on `null_block`. Each arm
+    /// stores its own answer into the destination and branches to `cont`,
+    /// which is why this hands back blocks rather than taking closures: the
+    /// arms differ in what they store, and several need the register table
+    /// the caller already holds borrowed.
+    fn null_guard(
+        &self,
+        tag: &str,
+        ptr: inkwell::values::PointerValue<'ctx>,
+    ) -> Result<(
+        inkwell::basic_block::BasicBlock<'ctx>,
+        inkwell::basic_block::BasicBlock<'ctx>,
+        inkwell::basic_block::BasicBlock<'ctx>,
+    )> {
+        let current_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| anyhow!("{tag}: builder is not inside a function"))?;
+        let null_block = self
+            .context
+            .append_basic_block(current_fn, &format!("{tag}_null"));
+        let load_block = self
+            .context
+            .append_basic_block(current_fn, &format!("{tag}_load"));
+        let cont_block = self
+            .context
+            .append_basic_block(current_fn, &format!("{tag}_cont"));
+        let is_null = self.builder.build_is_null(ptr, &format!("{tag}_is_null"))?;
+        self.builder
+            .build_conditional_branch(is_null, null_block, load_block)?;
+        self.builder.position_at_end(null_block);
+        Ok((null_block, load_block, cont_block))
+    }
+
     /// A body-shaped placeholder for a helper that did not resolve.
     ///
     /// `llvm.trap` and not a call to `hlp_error`: building an error path needs

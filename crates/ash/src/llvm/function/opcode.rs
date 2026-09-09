@@ -3838,10 +3838,21 @@ impl<'ctx> JITModule<'ctx> {
                         "unref_ptr",
                     )?
                     .into_pointer_value();
+                // Dereferencing no reference yields null, as the interpreter
+                // answers, rather than faulting.
+                let (_, load_block, cont_block) = self.null_guard("unref", ptr)?;
+                self.builder.build_store(
+                    registers[dst.0 as usize],
+                    reg_types[dst.0 as usize].const_zero(),
+                )?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
                 let val = self
                     .builder
                     .build_load(reg_types[dst.0 as usize], ptr, "unref_val")?;
                 self.builder.build_store(registers[dst.0 as usize], val)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
 
             // --- Setref: store through pointer ---
@@ -3854,12 +3865,19 @@ impl<'ctx> JITModule<'ctx> {
                         "setref_ptr",
                     )?
                     .into_pointer_value();
+                // Storing through no reference does nothing, as in the
+                // interpreter -- the null arm falls straight through.
+                let (_, load_block, cont_block) = self.null_guard("setref", ptr)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
                 let val = self.builder.build_load(
                     reg_types[value.0 as usize],
                     registers[value.0 as usize],
                     "setref_val",
                 )?;
                 self.builder.build_store(ptr, val)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
 
             // --- InstanceClosure: allocate closure binding obj as first arg ---
@@ -4358,6 +4376,14 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, registers[value.0 as usize], "enumidx_ptr")?
                     .into_pointer_value();
+                // The index of no enum value is 0, as the interpreter answers.
+                let (_, load_block, cont_block) = self.null_guard("enumidx", venum_ptr)?;
+                self.builder.build_store(
+                    registers[dst.0 as usize],
+                    self.context.i32_type().const_zero(),
+                )?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
                 // venum.index is i32 at offset 8
                 let index_gep = unsafe {
                     self.builder.build_gep(
@@ -4375,6 +4401,8 @@ impl<'ctx> JITModule<'ctx> {
                         .build_load(self.context.i32_type(), index_gep, "enumidx_val")?;
                 self.builder
                     .build_store(registers[dst.0 as usize], index_val)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
             Opcode::EnumField {
                 dst,
@@ -4387,6 +4415,14 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, registers[value.0 as usize], "enumfield_ptr")?
                     .into_pointer_value();
+                // A field of no enum value is null, as the interpreter answers.
+                let (_, load_block, cont_block) = self.null_guard("enumfield", venum_ptr)?;
+                self.builder.build_store(
+                    registers[dst.0 as usize],
+                    reg_types[dst.0 as usize].const_zero(),
+                )?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
 
                 let value_type_idx = f.regs[value.0 as usize].0;
                 let tenum = self.types_[value_type_idx]
@@ -4410,6 +4446,8 @@ impl<'ctx> JITModule<'ctx> {
                     "enumfield_val",
                 )?;
                 self.builder.build_store(registers[dst.0 as usize], val)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
             Opcode::SetEnumField { value, field, src } => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -4417,6 +4455,11 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, registers[value.0 as usize], "setenumfield_ptr")?
                     .into_pointer_value();
+                // Setting a field of no enum value does nothing, as in the
+                // interpreter -- the null arm falls straight through.
+                let (_, load_block, cont_block) = self.null_guard("setenumfield", venum_ptr)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(load_block);
                 let src_val = self.builder.build_load(
                     reg_types[src.0 as usize],
                     registers[src.0 as usize],
@@ -4456,6 +4499,8 @@ impl<'ctx> JITModule<'ctx> {
                     )?
                 };
                 self.builder.build_store(param_ptr, src_val)?;
+                self.builder.build_unconditional_branch(cont_block)?;
+                self.builder.position_at_end(cont_block);
             }
 
             // --- Memory access ---

@@ -5268,7 +5268,14 @@ impl HLInterpreter {
                 frame.registers.set(dst.0, val);
             }
             Opcode::Int { dst, ptr } => {
-                let val = bytecode.ints[ptr.0];
+                // Through the cache, not `bytecode.ints[ptr.0]`: a pass may
+                // have minted this constant, and a minted one is named by an
+                // index past the end of the module's pool.
+                let val = self
+                    .air
+                    .int_at(bytecode, func_idx, ptr.0)
+                    .ok_or_else(|| anyhow!("Int operand {} names no constant", ptr.0))?;
+                let frame = self.stack.last_mut().unwrap();
                 frame.registers.set(dst.0, NanBoxedValue::from_i32(val));
             }
             Opcode::Float { dst, ptr } => {

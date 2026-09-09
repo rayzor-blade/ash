@@ -257,7 +257,12 @@ enum Body {
     /// body is live), so it cannot be a borrow of the cache that produced it.
     /// Leaking is bounded by the number of functions the program actually
     /// executes, and mirrors how hot reload leaks its swapped-in bytecode.
-    Ready(&'static HLFunction),
+    /// The body, and the int-pool entries the pipeline had to mint for it.
+    ///
+    /// A minted constant is named by an index PAST the module's pool, so a
+    /// consumer that indexes `bytecode.ints` directly reads out of bounds.
+    /// The list is almost always empty; only a widened loop mints.
+    Ready(&'static HLFunction, &'static [i32]),
     /// The pipeline refused this one; its raw opcodes run from here on.
     Raw,
 }
@@ -395,6 +400,7 @@ impl Cache {
         };
         self.bodies[func_idx] = match prepared {
             Ok(ser) => {
+                let minted: Box<[i32]> = ser.new_ints.clone().into_boxed_slice();
                 let mut opt = raw.clone();
                 opt.ops = ser.ops;
                 // air numbers types with u32, ash with usize; same indices.
@@ -432,7 +438,7 @@ impl Cache {
                     }
                 }
                 self.optimized += 1;
-                Body::Ready(Box::leak(Box::new(opt)))
+                Body::Ready(Box::leak(Box::new(opt)), Box::leak(minted))
             }
             Err(e) => {
                 // Silent by default: a refusal is a missed optimization, not a
@@ -455,8 +461,23 @@ impl Cache {
     #[inline]
     pub fn body<'b>(&self, bytecode: &'b DecodedBytecode, func_idx: usize) -> &'b HLFunction {
         match self.bodies.get(func_idx) {
-            Some(&Body::Ready(f)) => f,
+            Some(&Body::Ready(f, _)) => f,
             _ => &bytecode.functions[func_idx],
+        }
+    }
+
+    /// An `Opcode::Int` operand, resolved against the module pool and then
+    /// against whatever the pipeline minted for this function.
+    ///
+    /// Indexing `bytecode.ints` alone is an out-of-bounds read on any function
+    /// a pass minted a constant for.
+    pub fn int_at(&self, bytecode: &DecodedBytecode, func_idx: usize, idx: usize) -> Option<i32> {
+        if let Some(v) = bytecode.ints.get(idx) {
+            return Some(*v);
+        }
+        match self.bodies.get(func_idx) {
+            Some(&Body::Ready(_, minted)) => minted.get(idx - bytecode.ints.len()).copied(),
+            _ => None,
         }
     }
 

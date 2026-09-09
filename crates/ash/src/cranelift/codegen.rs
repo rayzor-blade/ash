@@ -2637,7 +2637,13 @@ impl AirCodegen<'_, '_> {
             for ins in &blk.instrs {
                 if let Instr::Int { dst, idx } = ins {
                     if *dst == v {
-                        return self.ctx.bytecode().ints.get(*idx).map(|&i| i as i64);
+                        // Through `int_at`: a minted constant is named by an
+                        // index past the pool, and the pool alone answers None
+                        // for it, silently skipping the peephole.
+                        return self
+                            .f
+                            .int_at(*idx, |i| self.ctx.bytecode().ints.get(i).copied())
+                            .map(|i| i as i64);
                     }
                 }
             }

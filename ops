@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788975790,"nonce":"IVY/5hfikz1dB+pWbnPGJ5Js1Mk=","added":["bug","area:tooling"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976009,"nonce":"x0F3sYRkwFH//JJxXykAn4gECrQ=","message":"Fixed. Neither the `ASH_DUMP_TYPES` block in `ash_cli` nor the post-main `hlp_sys_get_loop` print exists any more.","files":null}]}

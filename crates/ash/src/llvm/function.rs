@@ -85,6 +85,14 @@ pub enum FuncPtr {
 /// it; see [`FunctionCompiler::pin_register`].
 const GC_REGISTER_PIN: &str = "ash_gc_register_pin";
 
+/// Whether compiled loops carry a fiber/GC safepoint poll at their headers.
+/// `ASH_FIBER_POLLS=0` turns them off; see the call site for why that is a
+/// measurement switch and not a tuning knob.
+fn fiber_polls_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("ASH_FIBER_POLLS").as_deref(), Ok("0")))
+}
+
 /// Whether `New` allocates through the sized entry. `ASH_ALLOC_SIZED=0` sends
 /// every allocation back through `hlp_alloc_obj`, which is how the two are
 /// compared without a rebuild.
@@ -2116,7 +2124,32 @@ impl<'ctx> JITModule<'ctx> {
                 poll_headers[lp.header.idx()] = true;
             }
         }
-        let has_polls = poll_headers.iter().any(|poll| *poll);
+        // `ASH_FIBER_POLLS=0` emits none. MEASUREMENT ONLY, and it does not
+        // measure what it looks like it measures.
+        //
+        // The poll costs more than the three instructions it reads as: the
+        // fast path is a load of the epoch, a compare and a branch, but the
+        // call in the CFG makes the register allocator spill the loop's live
+        // state around every site. On nbody that is 41 loads and 15 stores
+        // against 23 and 6 for the same source compiled by another Haxe
+        // compiler with no polls -- identical fsqrt, fdiv, FMA and fmul counts,
+        // so the whole difference is spill traffic and control flow.
+        //
+        // Removing them is nevertheless a large LOSS, measured on the NUC,
+        // hybrid-auto, ABBA, 4 medians per arm -- polls on against off:
+        //
+        //   closure_call  122.9ms -> 282.2ms      nbody  399.5ms -> 478.9ms
+        //   method_call   106.0ms -> 176.7ms
+        //
+        // closure_call lands on 282.2 with polls off and 282.3 with
+        // ASH_CL_RETIER=0, so suppressing them costs the Cranelift-to-LLVM
+        // hand-off. Why a poll emitted on the LLVM side gates a hand-off the
+        // Cranelift side polls for is NOT established; `has_polls` reaches only
+        // the poll blocks and the epoch alloca here. The polls pay for
+        // themselves either way: the thing to try is keeping them and stopping
+        // the spills -- a register-preserving convention for the helper, or an
+        // implicit poll off a guarded page -- not removing them.
+        let has_polls = fiber_polls_enabled() && poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         for bi in 0..air.blocks.len() {
             if blocks[bi].is_empty() {

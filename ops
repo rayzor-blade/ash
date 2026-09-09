@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788975784,"nonce":"DeKsIqzDE65UsuDa6Ckgrm4P9L4=","added":["bug","area:jit"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976007,"nonce":"cTHwA7cw22w8C1JT4cWqm3+HpnI=","message":"Fixed. Verified on the release binary: `--mode jit test_map_simple.hl` prints `value: 42` (not a heap address) and `--mode jit test_mapiter.hl` iterates correctly.","files":null}]}

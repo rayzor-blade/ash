@@ -19,8 +19,8 @@ use super::module::{
 };
 use super::passes::{
     DeadCodeElim, FmaPeephole, GlobalValueNumbering, Inlining, LoopInvariantCodeMotion,
-    NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, ScalarReplacement,
-    TailRecursionElim,
+    NullCheckElim, OptLevel, Pass, PassManager, PassOptions, PassStats, RedundantGuardElim,
+    ScalarReplacement, TailRecursionElim,
 };
 use super::serialize::{serialize, Serialized};
 use super::verify::{check_cfg_equivalent, condense_cfg, verify};
@@ -2800,6 +2800,104 @@ fn nullcheck_elim_follows_copies() {
     let mut f = lower(&ops, &[t(5); 3]).unwrap();
     let stats = run_pass(&mut f, &NullCheckElim, PassOptions::default());
     assert_eq!(stats.eliminated, 1);
+}
+
+#[test]
+fn redundant_guard_elim_drops_a_bounds_check_the_loop_guard_proved() {
+    // for (i in 0...n) { if (i < n) ... else throw }  -- the inner test asks
+    // what the loop guard just answered. Both compare the SAME n, which is
+    // what makes it provable in SSA.
+    // r0 i, r1 n, r2 step, r3 exc
+    let regs = vec![t(3), t(3), t(3), t(5)];
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        }, // i = 0
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        }, // n
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        }, // step = 1
+        Opcode::Label,
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 3,
+        }, // exit when i >= n
+        Opcode::JSLt {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 1,
+        }, // guard: i < n -> ok
+        Opcode::Throw { exc: Reg(3) },
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(0),
+            b: Reg(2),
+        },
+        Opcode::JAlways { offset: -5 },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &regs).unwrap();
+    let before = f.dump();
+    let stats = run_pass(&mut f, &RedundantGuardElim, PassOptions::default());
+    assert_eq!(stats.eliminated, 1, "guard not removed:\n{before}");
+    verify(&f).unwrap_or_else(|e| panic!("verify: {e}\n{}", f.dump()));
+}
+
+#[test]
+fn redundant_guard_elim_keeps_a_guard_on_a_different_value() {
+    // The bounds test is against m, not the n the loop guard proved.
+    let regs = vec![t(3), t(3), t(3), t(3), t(5)];
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(0),
+            ptr: RefInt(0),
+        },
+        Opcode::Int {
+            dst: Reg(1),
+            ptr: RefInt(1),
+        },
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(2),
+        },
+        Opcode::Int {
+            dst: Reg(3),
+            ptr: RefInt(3),
+        }, // m, unrelated
+        Opcode::Label,
+        Opcode::JSGte {
+            a: Reg(0),
+            b: Reg(1),
+            offset: 3,
+        },
+        Opcode::JSLt {
+            a: Reg(0),
+            b: Reg(3),
+            offset: 1,
+        },
+        Opcode::Throw { exc: Reg(4) },
+        Opcode::Add {
+            dst: Reg(0),
+            a: Reg(0),
+            b: Reg(2),
+        },
+        Opcode::JAlways { offset: -5 },
+        Opcode::Ret { ret: Reg(0) },
+    ];
+    let mut f = lower(&ops, &regs).unwrap();
+    let stats = run_pass(&mut f, &RedundantGuardElim, PassOptions::default());
+    assert_eq!(
+        stats.eliminated,
+        0,
+        "removed an unproven guard:\n{}",
+        f.dump()
+    );
 }
 
 #[test]

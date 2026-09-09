@@ -479,18 +479,22 @@ impl<'ctx> JITModule<'ctx> {
                             .flatten();
 
                         let result = if let Some(size) = sized {
-                            let i64_type = self.context.i64_type();
+                            // `size` is a `usize` in the runtime, so it is the
+                            // target's pointer width -- i32 on wasm32, where a
+                            // hardcoded i64 makes the module fail validation
+                            // at the call.
+                            let size_type = self.target_abi.pointer_int_type(self.context);
                             let fun = self.declare_native(
                                 "hlp_alloc_obj_sized",
                                 &[
                                     self.context.ptr_type(AddressSpace::default()).into(),
-                                    i64_type.into(),
+                                    size_type.into(),
                                 ],
                                 Some(self.context.ptr_type(AddressSpace::default()).into()),
                             );
                             self.builder.build_call(
                                 fun,
-                                &[type_ptr.into(), i64_type.const_int(size, false).into()],
+                                &[type_ptr.into(), size_type.const_int(size, false).into()],
                                 "call",
                             )?
                         } else {

@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":1,"timestamp":1788975785,"nonce":"KaSmCjAA3sMXu2MI7Kpr/JL57+4=","title":"Hybrid test_mandelbrot_small SIGSEGVs after main","message":"Exit 139 after printing the correct checksum. Reproduces on baseline.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788975785,"nonce":"w77QQO+GT69l+OQr5QbmxTKqNTo=","added":["bug","area:jit"],"removed":null}]}

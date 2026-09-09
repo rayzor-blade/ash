@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976006,"nonce":"v+b8HQn8MN6eJDiCQ+EojPqqBIo=","message":"Fixed. `interpreter/mod.rs` now matches `Opcode::EndTrap { exc: _ }` and carries a comment saying the operand is Haxe's `OEndTrap of bool`, a flag rather than a register. No register is cleared.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1788976006,"nonce":"FHolKRryniYWktYRogTXckKYoqk=","status":2}]}

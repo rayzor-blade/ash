@@ -15,26 +15,24 @@ name: benchmarks
 # fails that benchmark's leg. The aggregate publishes whatever legs survived.
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "crates/**"
-      - "std/**"
-      - "bench/**"
-      - "scripts/**"
-      - "website/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/bench.yml"
-  # Conformance runs on its own workflow and takes ~24 min against this
-  # sweep's ~12, both starting from the same push. So at deploy time the only
-  # SUCCESSFUL conformance run is always the PREVIOUS commit's, and the site
-  # was published one commit behind for ever -- a +45-case improvement sat
-  # unpublished because of exactly this. Rather than make the deploy sit and
-  # wait for it, let conformance's completion trigger a republish of its own.
-  # The heavy jobs below are skipped on that path; only deploy-site runs, and
-  # it reuses the newest sweep's benchmark numbers.
+  # Daily, and by hand when a change could plausibly move a number. NOT on
+  # push: every benchmark is its own matrix job on its own runner drawn from a
+  # heterogeneous pool, so a row is one sample from a wide distribution and a
+  # commit-to-commit comparison reads that noise as a result. Sweeps have
+  # reported a benchmark twice as slow, and a headline row losing to the JVM,
+  # with the engine unchanged. Running per push spent runner time manufacturing
+  # those. Attribute a performance change from a same-machine A/B instead.
+  #
+  # 04:17 UTC rather than on the hour: scheduled workflows queue behind
+  # everything else that asked for midnight.
+  schedule:
+    - cron: "17 4 * * *"
+
+  # Conformance runs per push on its own workflow, so its results move far
+  # more often than a sweep does. Its completion republishes the site on its
+  # own rather than waiting for one: the heavy jobs below are skipped on this
+  # path, only deploy-site runs, and it reuses the newest sweep's benchmark
+  # numbers alongside the fresh conformance ones.
   workflow_run:
     workflows: ["haxe-conformance"]
     types: [completed]

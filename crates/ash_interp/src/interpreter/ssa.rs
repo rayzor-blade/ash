@@ -148,6 +148,7 @@ impl HLInterpreter {
                         if let Some(exc) = exc {
                             if matches!(ins, air::v2::Instr::NullCheck { .. }) {
                                 self.capture_exception_stack(bc);
+                                self.note_throw_site(exc);
                             }
                             let frame = self.stack.last_mut().unwrap();
                             if let Some((handler, cell_slot)) = frame.trap_stack.pop() {
@@ -202,8 +203,15 @@ impl HLInterpreter {
                     };
                 }
                 air::v2::Terminator::Throw { exc } => {
+                    // The terminator's own pc: the instruction loop above sets
+                    // `frame.pc` per instruction, and a block whose whole body
+                    // is a throw runs none of them.
+                    if let Some(&pc) = prep.term_pcs.get(block) {
+                        self.stack.last_mut().unwrap().pc = pc;
+                    }
                     self.capture_exception_stack(bc);
                     let val = get(self, *exc);
+                    self.note_throw_site(val);
                     let frame = self.stack.last_mut().unwrap();
                     match frame.trap_stack.pop() {
                         Some((handler, cell_slot)) => {

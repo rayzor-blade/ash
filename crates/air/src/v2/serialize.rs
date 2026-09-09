@@ -75,6 +75,13 @@ pub struct Serialized {
     /// instruction that raised, and every instruction in a block would
     /// otherwise share the block's line.
     pub instr_pcs: Vec<Vec<usize>>,
+    /// Opcode index each block's terminator is emitted at, indexed by
+    /// [`BlockId`].
+    ///
+    /// A throwing terminator is the only instruction in a block that can raise
+    /// without appearing in `instr_pcs`, so a block whose whole body is
+    /// `throw` had no pc to report and named entry zero of the debug table.
+    pub term_pcs: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +319,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     let mut ops: Vec<Opcode> = Vec::new();
     let mut starts = vec![0usize; ne];
     let mut instr_pcs: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
+    let mut term_pcs: Vec<usize> = vec![0; f.blocks.len()];
     let mut sites: Vec<Site> = Vec::new();
 
     let rg = |v: ValueId| Reg(f.value_reg(v));
@@ -386,6 +394,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
                         }
                     }
                 }
+                term_pcs[*b] = ops.len();
                 match &blk.term {
                     Terminator::Ret { value } => ops.push(Opcode::Ret { ret: rg(*value) }),
                     Terminator::Throw { exc } => ops.push(Opcode::Throw { exc: rg(*exc) }),
@@ -531,6 +540,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
         num_regs,
         block_pcs,
         instr_pcs,
+        term_pcs,
     })
 }
 

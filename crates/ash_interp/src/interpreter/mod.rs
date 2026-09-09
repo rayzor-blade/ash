@@ -406,6 +406,8 @@ pub struct HLInterpreter {
     fn_get_obj_rt: *mut c_void,
     /// Resolved stdlib function pointer: hlp_make_dyn
     fn_make_dyn: *mut c_void,
+    /// Resolved stdlib function pointer: hlp_note_throw_site
+    fn_note_throw_site: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_array
     fn_alloc_array: *mut c_void,
     /// HashLink's sentinel body for closures created by hlp_make_var_args.
@@ -718,6 +720,9 @@ impl HLInterpreter {
         let fn_make_dyn = native_resolver
             .resolve_function("std", "hlp_make_dyn")
             .unwrap_or(std::ptr::null_mut());
+        let fn_note_throw_site = native_resolver
+            .resolve_function("std", "hlp_note_throw_site")
+            .unwrap_or(std::ptr::null_mut());
         let fn_alloc_array = native_resolver
             .resolve_function("std", "hlp_alloc_array")
             .unwrap_or(std::ptr::null_mut());
@@ -855,6 +860,7 @@ impl HLInterpreter {
             fn_alloc_obj,
             fn_get_obj_rt,
             fn_make_dyn,
+            fn_note_throw_site,
             fn_alloc_array,
             fn_fun_var_args,
             fn_alloc_enum,
@@ -4961,8 +4967,11 @@ impl HLInterpreter {
             // copy was a heap allocation per dispatch on exactly those. The
             // sampler charged 2% of a whole nbody run to `Opcode::clone`.
             let op = &func.ops[pc];
-            if matches!(op, Opcode::Throw { .. }) {
+            if let Opcode::Throw { exc } = op {
                 self.capture_exception_stack(bytecode);
+                if let Some(thrown) = self.stack.last().map(|f| f.registers.get(exc.0)) {
+                    self.note_throw_site(thrown);
+                }
             }
             if env_flag!("ASH_TRACE_ASSERT") {
                 eprintln!(
@@ -4987,6 +4996,7 @@ impl HLInterpreter {
                     if let Some(exc) = exc {
                         if matches!(op, Opcode::NullCheck { .. }) {
                             self.capture_exception_stack(bytecode);
+                            self.note_throw_site(exc);
                         }
                         let frame = self.stack.last_mut().unwrap();
                         if let Some((target_pc, exc_reg)) = frame.trap_stack.pop() {

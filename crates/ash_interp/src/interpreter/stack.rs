@@ -105,7 +105,12 @@ impl HLInterpreter {
     /// The `(findex, file, line)` a frame symbolicates to. Two reads off the
     /// debug table and no allocation, so it can key the symbol cache.
     fn stack_symbol_key(func: &HLFunction, pc: usize) -> (usize, i32, i32) {
-        let debug_pc = pc.min(func.ops.len().saturating_sub(1));
+        // Clamped against the debug table rather than the opcode list. An AIR
+        // shim carries the debug table for the body the walker executes but
+        // leaves `ops` empty, and clamping by `ops.len()` pinned every frame
+        // the walker symbolicated to entry zero. The two are the same length
+        // for a body that has its opcodes.
+        let debug_pc = pc.min((func.debug.len() / 2).saturating_sub(1));
         let file_idx = func.debug.get(debug_pc * 2).copied().unwrap_or(-1);
         let line = func.debug.get(debug_pc * 2 + 1).copied().unwrap_or(0);
         (func.findex as usize, file_idx, line)
@@ -424,6 +429,33 @@ impl HLInterpreter {
     pub(super) fn capture_exception_stack(&mut self, bytecode: &DecodedBytecode) {
         self.prepare_call_stack(bytecode, std::ptr::null());
         self.exception_stack_symbols = self.call_stack_symbols.clone();
+    }
+
+    /// Count one throw against the site that raised it.
+    ///
+    /// Compiled code reaches the same counter through `hlp_throw`, which the
+    /// interpreter never calls, so it hands the site over itself. Call after
+    /// `capture_exception_stack`: symbol zero is the function that raised, and
+    /// interning makes it the same token every time that site throws, which is
+    /// what the counter keys on. Resolving it back to a name costs nothing
+    /// until a site actually reports.
+    pub(super) fn note_throw_site(&mut self, value: NanBoxedValue) {
+        if self.fn_note_throw_site.is_null() {
+            return;
+        }
+        let Some(&site) = self.exception_stack_symbols.first() else {
+            return;
+        };
+        // Only a pointer is worth describing. A register may hold an unboxed
+        // scalar wide enough to pass for an address.
+        let thrown = if value.is_ptr() {
+            value.as_ptr() as *mut c_void
+        } else {
+            std::ptr::null_mut()
+        };
+        let note: unsafe extern "C" fn(usize, *mut c_void) =
+            unsafe { std::mem::transmute(self.fn_note_throw_site) };
+        unsafe { note(site, thrown) };
     }
 
     pub(super) fn stack_raw_native(

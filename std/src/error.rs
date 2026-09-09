@@ -165,6 +165,29 @@ pub unsafe extern "C" fn hlp_print_uncaught_exception(v: *mut hl::vdynamic) {
     print_exception_stack();
 }
 
+/// One captured frame as text, or None when nothing can name it.
+///
+/// A captured frame is an opaque token, not a program counter: `stack_symbols`
+/// makes one per Haxe function on the stack, compiled frames included, and the
+/// resolver hands back UTF-16.
+unsafe fn frame_text(frame: usize) -> Option<String> {
+    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
+    if callback == 0 {
+        return None;
+    }
+    let callback: ResolveSymbol = std::mem::transmute(callback);
+    let mut buffer = [0u8; 512];
+    let mut len: i32 = buffer.len() as i32;
+    let text = callback(frame as *mut c_void, buffer.as_mut_ptr(), &mut len);
+    if text.is_null() || len <= 0 {
+        return None;
+    }
+    // `len` counts code units, and the resolver may answer from storage of
+    // its own rather than the buffer it was handed.
+    let units = std::slice::from_raw_parts(text as *const u16, len as usize);
+    Some(String::from_utf16_lossy(units))
+}
+
 /// The frames the throw recorded, as far as anything can name them.
 ///
 /// The stack is captured at the throw and the symbolizer is whatever the
@@ -181,25 +204,11 @@ unsafe fn print_exception_stack() {
     if frames.is_empty() {
         return;
     }
-    let callback = RESOLVE_SYMBOL.load(Ordering::Acquire);
-    if callback == 0 {
-        return;
-    }
-    let callback: ResolveSymbol = std::mem::transmute(callback);
     for frame in frames {
-        let mut buffer = [0u8; 512];
-        let mut len: i32 = buffer.len() as i32;
-        let text = callback(frame as *mut c_void, buffer.as_mut_ptr(), &mut len);
-        if text.is_null() || len <= 0 {
-            eprintln!("[ash]   at {frame:#x}");
-            continue;
+        match frame_text(frame) {
+            Some(text) => eprintln!("[ash]   at {text}"),
+            None => eprintln!("[ash]   at {frame:#x}"),
         }
-        // UTF-16, and `len` counts code units rather than bytes: the
-        // symbolizer answers in the same encoding HashLink's strings use, and
-        // it may point at storage of its own rather than the buffer it was
-        // handed.
-        let units = std::slice::from_raw_parts(text as *const u16, len as usize);
-        eprintln!("[ash]   at {}", String::from_utf16_lossy(units));
     }
 }
 
@@ -1161,38 +1170,39 @@ struct ThrowSite {
 
 static THROW_SITES: std::sync::Mutex<Vec<ThrowSite>> = std::sync::Mutex::new(Vec::new());
 
+/// The interpreter's entry to the counter below.
+///
+/// Interpreted code never reaches `hlp_throw`: it raises a Rust error that the
+/// throwing frame's own trap catches, so it counts from where it raises and
+/// passes the symbol token for that site itself.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_note_throw_site(site: usize, v: *mut vdynamic) {
+    if site != 0 {
+        note_throw_site_at(site, v);
+    }
+}
+
+unsafe fn note_throw_site(v: *mut vdynamic) {
+    // Frame zero, which is the innermost Haxe function: a captured frame is a
+    // symbol token per Haxe function, so there are no runtime frames above it
+    // to skip.
+    let Some(pc) = EXCEPTION_STACK.with(|saved| saved.borrow().first().copied()) else {
+        return;
+    };
+    note_throw_site_at(pc, v);
+}
+
 /// Report once when one site throws in a storm.
 ///
 /// A throw that is caught and retried is not an error anywhere, and a loop
 /// making progress is not a stall, so nothing else reports it.
 ///
 /// Counts and prints only; the exception propagates unchanged.
-unsafe fn note_throw_site(v: *mut vdynamic) {
+unsafe fn note_throw_site_at(pc: usize, v: *mut vdynamic) {
     let threshold = throw_storm_threshold();
     if threshold == 0 {
         return;
     }
-    // The innermost HAXE frame, not the innermost frame. Frame zero is inside
-    // the runtime -- `hlp_error` and whatever raised through it -- which is
-    // the same address whatever the program did, so keying on it would merge
-    // every site that throws the same way and name none of them.
-    //
-    // The two symbol tables hold Haxe functions and nothing else, so the first
-    // frame either can name is the program's own. A throw with no such frame
-    // keys on frame zero and reports an address, which is still one line
-    // instead of none.
-    let site = EXCEPTION_STACK.with(|saved| {
-        let frames = saved.borrow();
-        frames
-            .iter()
-            .find_map(|&pc| {
-                aot_symbol_for_pc(pc).map(|name| (pc, Some(name)))
-            })
-            .or_else(|| frames.first().map(|&pc| (pc, None)))
-    });
-    let Some((pc, name)) = site else {
-        return;
-    };
     let Ok(mut sites) = THROW_SITES.lock() else {
         return;
     };
@@ -1226,10 +1236,17 @@ unsafe fn note_throw_site(v: *mut vdynamic) {
     let count = site.count;
     drop(sites);
 
-    let where_ = match name {
-        Some(name) => name.to_string(),
-        None => format!("{pc:#x}"),
-    };
+    let where_ = frame_text(pc).unwrap_or_else(|| format!("{pc:#x}"));
+    // One line per Haxe site, not per token. A function that storms in hybrid
+    // throws from both the interpreter and its compiled copy, which carry
+    // separate tokens for the same source position.
+    static REPORTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    if let Ok(mut reported) = REPORTED.lock() {
+        if reported.contains(&where_) {
+            return;
+        }
+        reported.push(where_.clone());
+    }
     eprintln!(
         "[ash] throw storm: {count} throws in under a second from {where_} -- \
          {}. Nothing is wrong with the VM; the program is throwing and \

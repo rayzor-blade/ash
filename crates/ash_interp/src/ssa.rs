@@ -128,6 +128,9 @@ pub struct Prepared {
     /// Bytecode pc of each instruction, indexed by block then position, so a
     /// frame can name the instruction that raised rather than its block.
     pub instr_pcs: &'static [Vec<usize>],
+    /// Bytecode pc of each block's terminator, so a block that ends in a
+    /// throw can name the line it throws from.
+    pub term_pcs: &'static [usize],
     /// Which values are live where, for building an OSR entry's live state.
     pub liveness: &'static air::v2::liveness::Liveness,
     /// Type of each serialized register, for encoding that state.
@@ -253,6 +256,7 @@ impl Cache {
                         // table is kept.
                         let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
                         let instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
+                        let term_pcs: Vec<usize> = ser_view.term_pcs.clone();
                         let cfg = air::v2::CfgInfo::build(&ir);
                         let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
                         let osr_reg_types: Vec<TypeRef> = ser_view
@@ -295,6 +299,7 @@ impl Cache {
                             cell_base,
                             block_pcs: Box::leak(block_pcs.into_boxed_slice()),
                             instr_pcs: Box::leak(instr_pcs.into_boxed_slice()),
+                            term_pcs: Box::leak(term_pcs.into_boxed_slice()),
                             liveness: Box::leak(Box::new(liveness)),
                             osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
                             cfg: air_cfg,

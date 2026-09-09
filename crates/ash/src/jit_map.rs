@@ -192,7 +192,9 @@ pub fn position_of(pc: usize) -> Option<(u32, u32)> {
     };
     let offset = u32::try_from(hit.offset).ok()?.saturating_sub(1);
     let runs = hit.range.positions;
-    let at = runs.partition_point(|run| run.start <= offset).checked_sub(1)?;
+    let at = runs
+        .partition_point(|run| run.start <= offset)
+        .checked_sub(1)?;
     let run = runs[at];
     if offset >= run.end {
         return None;
@@ -278,7 +280,11 @@ mod tests {
             // Zero is "no position" and all-ones is Cranelift's own default,
             // so a real position must be neither.
             assert_ne!(packed, 0, "{file}:{line} packed to the empty marker");
-            assert_ne!(packed, u32::MAX, "{file}:{line} packed to SourceLoc's default");
+            assert_ne!(
+                packed,
+                u32::MAX,
+                "{file}:{line} packed to SourceLoc's default"
+            );
             assert_eq!(unpack_position(packed), Some((file, line)));
         }
         // Out of range records nothing rather than a wrong line.
@@ -294,10 +300,22 @@ mod tests {
         set_positions(
             D,
             vec![
-                SourceRun { start: 0, end: 0x20, packed: pack_position(3, 10).unwrap() },
-                SourceRun { start: 0x20, end: 0x40, packed: pack_position(3, 11).unwrap() },
+                SourceRun {
+                    start: 0,
+                    end: 0x20,
+                    packed: pack_position(3, 10).unwrap(),
+                },
+                SourceRun {
+                    start: 0x20,
+                    end: 0x40,
+                    packed: pack_position(3, 11).unwrap(),
+                },
                 // A gap at 0x40..0x60 that no run covers.
-                SourceRun { start: 0x60, end: 0x80, packed: pack_position(4, 99).unwrap() },
+                SourceRun {
+                    start: 0x60,
+                    end: 0x80,
+                    packed: pack_position(4, 99).unwrap(),
+                },
             ],
         );
         // A return address is taken as belonging to the run BEFORE it, so an

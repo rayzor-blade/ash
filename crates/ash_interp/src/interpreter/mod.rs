@@ -3855,8 +3855,7 @@ impl HLInterpreter {
                     // misleading SIGSEGV.
                     let mut exception =
                         self.format_hl_exception(NanBoxedValue::from_ptr(exc_ptr as usize));
-                    exception.stack =
-                        self.call_stack_frames.clone();
+                    exception.stack = self.call_stack_frames.clone();
                     if !fn_clear_exc.is_null() {
                         type FnClearExc = unsafe extern "C" fn();
                         unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };
@@ -4806,8 +4805,7 @@ impl HLInterpreter {
                     // Walked where the throw happened, not here: the longjmp
                     // that reached this boundary already unwound the frames
                     // it came from.
-                    exception.stack =
-                        self.call_stack_frames.clone();
+                    exception.stack = self.call_stack_frames.clone();
                     if !fn_clear_exc.is_null() {
                         type FnClearExc = unsafe extern "C" fn();
                         unsafe { (std::mem::transmute::<*mut c_void, FnClearExc>(fn_clear_exc))() };

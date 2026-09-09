@@ -180,8 +180,10 @@ unsafe fn print_exception_report(message: &str) -> bool {
     if frames.is_empty() {
         return false;
     }
-    let parts: Vec<(String, Option<&'static str>, i32)> =
-        frames.iter().filter_map(|&pc| aot_frame_parts(pc)).collect();
+    let parts: Vec<(String, Option<&'static str>, i32)> = frames
+        .iter()
+        .filter_map(|&pc| aot_frame_parts(pc))
+        .collect();
     let borrowed: Vec<ash_trace::Frame<'_>> = parts
         .iter()
         .map(|(symbol, file, line)| ash_trace::Frame {
@@ -419,8 +421,7 @@ static AOT_DEBUG_FILES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::
 static AOT_POSITIONS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 /// Body start address to findex, sorted, so a pc reaches its position.
 #[cfg(not(target_family = "wasm"))]
-static AOT_FINDEX_BY_START: std::sync::Mutex<Vec<(usize, u32)>> =
-    std::sync::Mutex::new(Vec::new());
+static AOT_FINDEX_BY_START: std::sync::Mutex<Vec<(usize, u32)>> = std::sync::Mutex::new(Vec::new());
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_register_aot_symbols(
@@ -462,7 +463,9 @@ pub unsafe extern "C" fn hlp_register_aot_symbols(
     {
         starts_by_findex.sort_by_key(|(start, _)| *start);
         starts_by_findex.dedup_by_key(|(start, _)| *start);
-        *AOT_FINDEX_BY_START.lock().unwrap_or_else(|e| e.into_inner()) = starts_by_findex;
+        *AOT_FINDEX_BY_START
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = starts_by_findex;
     }
     *AOT_SYMBOLS.lock().unwrap_or_else(|e| e.into_inner()) = table;
     *AOT_NAMES_BY_FINDEX
@@ -537,7 +540,9 @@ pub unsafe extern "C" fn hlp_register_aot_positions(positions: *const u64, count
 /// bounds its own answer.
 #[cfg(not(target_family = "wasm"))]
 fn aot_findex_for_pc(pc: usize) -> Option<u32> {
-    let table = AOT_FINDEX_BY_START.lock().unwrap_or_else(|e| e.into_inner());
+    let table = AOT_FINDEX_BY_START
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let i = match table.binary_search_by_key(&pc, |(s, _)| *s) {
         Ok(i) => i,
         Err(0) => return None,

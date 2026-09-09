@@ -2560,14 +2560,13 @@ impl MarkPool {
         static POOL: OnceLock<MarkPool> = OnceLock::new();
         POOL.get_or_init(|| {
             let size = mark_threads();
-            let pool = MarkPool {
+            MarkPool {
                 state: std::sync::Mutex::new((0, None)),
                 wake: std::sync::Condvar::new(),
                 left: std::sync::Mutex::new(0),
                 finished: std::sync::Condvar::new(),
                 size,
-            };
-            pool
+            }
         })
     }
 

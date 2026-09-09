@@ -207,9 +207,7 @@ impl HLInterpreter {
             return Some(Self::stack_symbol_key(func, site.pc));
         }
         Some(match self.ssa.body(site.function_index) {
-            Some(prep) if !prep.shim.debug.is_empty() => {
-                Self::stack_symbol_key(prep.shim, site.pc)
-            }
+            Some(prep) if !prep.shim.debug.is_empty() => Self::stack_symbol_key(prep.shim, site.pc),
             _ => Self::stack_symbol_key(self.air.body(bytecode, site.function_index), site.pc),
         })
     }
@@ -339,10 +337,8 @@ impl HLInterpreter {
                                     func_of(&self.targets, findex as usize)
                                 {
                                     if functions.last().map(|(f, _)| *f) != Some(function_index) {
-                                        functions.push((
-                                            function_index,
-                                            Self::jit_position(return_pc),
-                                        ));
+                                        functions
+                                            .push((function_index, Self::jit_position(return_pc)));
                                     }
                                 }
                             }

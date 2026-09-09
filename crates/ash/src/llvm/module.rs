@@ -104,6 +104,18 @@ pub struct JITModule<'ctx> {
     /// Each has a slot the startup routine fills by dlopen/dlsym,
     /// because there is no symbol to bind at emit time.
     pub(crate) aot_hdll_natives: Vec<(String, String)>,
+    /// Runtime helpers that would not resolve, and the ones a compile has hit.
+    ///
+    /// `declare_native` returns a `FunctionValue` rather than a `Result`, so a
+    /// helper it cannot resolve becomes a trapping stub and is recorded here
+    /// instead. `promote_function_strict` clears
+    /// `natives_missing_in_compile` before lowering and refuses the function if
+    /// anything landed in it, which leaves that findex interpreted rather than
+    /// installing a body that would trap. `poisoned_natives` makes the check
+    /// survive the stub cache: a second function reaching the same helper gets
+    /// the cached stub and must still be refused.
+    pub(crate) poisoned_natives: std::cell::RefCell<std::collections::HashSet<String>>,
+    pub(crate) natives_missing_in_compile: std::cell::RefCell<Vec<String>>,
     /// Whether this object must take the runtime as a shared library.
     ///
     /// Decided from the bytecode's natives BEFORE anything is lowered,
@@ -393,6 +405,8 @@ impl<'ctx> JITModule<'ctx> {
             name_to_findex: None,
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
+            poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
+            natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),
@@ -825,6 +839,8 @@ impl<'ctx> JITModule<'ctx> {
             name_to_findex: None,
             findex_to_name: None,
             aot_hdll_natives: Vec::new(),
+            poisoned_natives: std::cell::RefCell::new(std::collections::HashSet::new()),
+            natives_missing_in_compile: std::cell::RefCell::new(Vec::new()),
             aot_shared_runtime: false,
             findexes: HashMap::new(),
             func_cache: HashMap::new(),

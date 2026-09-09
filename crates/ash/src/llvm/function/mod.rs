@@ -232,6 +232,14 @@ impl<'ctx> JITModule<'ctx> {
     ) -> FunctionValue<'ctx> {
         let caller_name = format!("__native_{}_caller", name);
         if let Some(f) = self.module.get_function(&caller_name) {
+            // A cached stub for a helper that never resolved still poisons the
+            // function being compiled, so the record has to happen on the hit
+            // as well as on the miss.
+            if self.poisoned_natives.borrow().contains(name) {
+                self.natives_missing_in_compile
+                    .borrow_mut()
+                    .push(name.to_string());
+            }
             return f;
         }
 
@@ -256,14 +264,70 @@ impl<'ctx> JITModule<'ctx> {
             return self.aot_runtime_fn(name, fn_type);
         }
 
-        let func_addr = self
-            .native_function_resolver
-            .resolve_function("std", name)
-            .unwrap_or_else(|_| panic!("Failed to resolve native function: {}", name))
-            as usize;
+        // A helper the loaded runtime does not export -- a staged `libhl` older
+        // than the `ash` beside it is how that happens. Record it and return a
+        // stub, so this stays infallible for its callers;
+        // `promote_function_strict` refuses any function that reached one and
+        // it keeps running on the tier below.
+        let func_addr = match self.resolve_runtime_helper(name) {
+            Ok(addr) => addr as usize,
+            Err(err) => {
+                self.poisoned_natives.borrow_mut().insert(name.to_string());
+                self.natives_missing_in_compile
+                    .borrow_mut()
+                    .push(name.to_string());
+                eprintln!(
+                    "[ash] runtime helper {name} unresolved ({err}); refusing to compile callers"
+                );
+                return self.trapping_stub(&caller_name, fn_type);
+            }
+        };
 
         self.generate_native_caller_with_addr(&caller_name, fn_type, func_addr)
             .unwrap_or_else(|e| panic!("Failed to generate caller for {}: {}", name, e))
+    }
+
+    /// Resolve one of ash's own runtime helpers.
+    ///
+    /// `ASH_TEST_UNRESOLVED_NATIVE=<name>[,<name>...]` reports the listed
+    /// helpers as missing however the runtime actually answers, which is the
+    /// only way to reach the refusal path without staging a runtime older than
+    /// the compiler.
+    fn resolve_runtime_helper(&self, name: &str) -> Result<*mut std::ffi::c_void> {
+        static FORCED: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let forced = FORCED.get_or_init(|| {
+            std::env::var("ASH_TEST_UNRESOLVED_NATIVE")
+                .map(|v| v.split(',').map(|n| n.trim().to_string()).collect())
+                .unwrap_or_default()
+        });
+        if forced.iter().any(|n| n == name) {
+            return Err(anyhow!("forced missing by ASH_TEST_UNRESOLVED_NATIVE"));
+        }
+        self.native_function_resolver.resolve_function("std", name)
+    }
+
+    /// A body-shaped placeholder for a helper that did not resolve.
+    ///
+    /// `llvm.trap` and not a call to `hlp_error`: building an error path needs
+    /// `hlp_error` to resolve, which is no more certain than the helper that
+    /// just did not. The promote path refuses any function reaching one, but
+    /// the whole-module path has no such gate, so the body aborts on a defined
+    /// signal rather than leaving bare `unreachable` for something to execute.
+    fn trapping_stub(&self, name: &str, fn_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
+        let saved = self.builder.get_insert_block();
+        let f = self.module.add_function(name, fn_type, None);
+        let entry = self.context.append_basic_block(f, "entry");
+        self.builder.position_at_end(entry);
+        if let Some(trap) = inkwell::intrinsics::Intrinsic::find("llvm.trap")
+            .and_then(|t| t.get_declaration(&self.module, &[]))
+        {
+            let _ = self.builder.build_call(trap, &[], "trap");
+        }
+        let _ = self.builder.build_unreachable();
+        if let Some(block) = saved {
+            self.builder.position_at_end(block);
+        }
+        f
     }
 
     /// Get or declare an external native function, avoiding builder position clobber.
@@ -854,6 +918,7 @@ impl<'ctx> JITModule<'ctx> {
                 "promotion of findex {findex} denied by ASH_NO_PROMOTE"
             ));
         }
+        self.natives_missing_in_compile.borrow_mut().clear();
         // Promotion currently targets bytecode functions only.
         if !self.findexes.contains_key(&findex) {
             return Err(anyhow!(
@@ -1041,6 +1106,29 @@ impl<'ctx> JITModule<'ctx> {
             self.release_parked_functions(&parked);
             result?;
             self.record_optimized_functions(&parked);
+        }
+
+        // A body that reached an unresolved helper carries a stub where the
+        // call belongs, so it must not install. The caller reads a tier
+        // failure as a reason to blacklist, which leaves the findex on the
+        // tier below.
+        {
+            let missing = self.natives_missing_in_compile.borrow();
+            if !missing.is_empty() {
+                let mut names: Vec<&str> = missing.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                names.dedup();
+                return Err(anyhow!(
+                    "Strict promotion failed: findex {} calls unresolved runtime {} ({})",
+                    findex,
+                    if names.len() == 1 {
+                        "helper"
+                    } else {
+                        "helpers"
+                    },
+                    names.join(", ")
+                ));
+            }
         }
 
         let function = *self.func_cache.get(&findex).ok_or_else(|| {

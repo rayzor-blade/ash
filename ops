@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976010,"nonce":"ukfp1ukZ5EM69AFOZvJjQYNO69Y=","message":"Fixed for the TLS half: `hlp_tls_get`/`hlp_tls_alloc` key their value map on `crate::fiber::current_owner()`, so TLS is per-fiber rather than pthread-keyed.","files":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1788976010,"nonce":"IoSojAq572SHI4ITxDx6EmA03ac=","status":2}]}

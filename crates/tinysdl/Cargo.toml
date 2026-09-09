@@ -15,3 +15,10 @@ hl_abi = { workspace = true }
 
 [lib]
 crate-type = ["staticlib"]
+
+# No test harness. This is a staticlib whose global allocator forwards to the
+# host program, and it serves alignments up to 16 because that is what
+# wasi-libc's malloc guarantees. libtest allocates a cache-line-aligned
+# channel before it runs anything, so the harness aborts on startup with no
+# tests to run.
+test = false

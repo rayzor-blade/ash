@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":5,"timestamp":1788975791,"nonce":"wJjXqb07nF5fhrVPngHezJvFaJQ=","added":["bug","area:tooling"],"removed":null}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1788976010,"nonce":"RDSqlhMQivENevLWFNmcy1/8DcQ=","message":"Fixed. `crates/ash/build.rs` builds a candidate list -- triple-qualified and plain, release then debug -- tries each, and panics only after listing everything it tried.","files":null}]}

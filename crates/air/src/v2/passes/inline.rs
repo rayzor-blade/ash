@@ -210,11 +210,19 @@ impl Pass for Inlining<'_> {
 /// Code size in instructions. `Param` is the function's entry-register
 /// surface, not computation, and emits nothing, so it does not count against
 /// any budget.
+/// What a callee costs, for the budgets above.
+///
+/// `Param` defines a value and emits nothing. `Pos` emits nothing either --
+/// it labels the code that follows for a backend that records positions --
+/// and lowering emits one wherever the line changes, so counting them makes
+/// every callee look bigger exactly when traces are asked for. That pushed
+/// small constructors over `inline_max_callee`, and an un-inlined constructor
+/// is what stops SROA erasing an allocation-bound program's allocations.
 fn instr_count(f: &Function) -> usize {
     f.blocks
         .iter()
         .flat_map(|b| b.instrs.iter())
-        .filter(|i| !matches!(i, Instr::Param { .. }))
+        .filter(|i| !matches!(i, Instr::Param { .. } | Instr::Pos { .. }))
         .count()
 }
 

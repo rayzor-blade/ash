@@ -407,7 +407,7 @@ the answer still matched the strict interpreter bit-for-bit, so the hot inner
 loop is either not among the promoted six or is not being contracted. Only
 `full-jit` returns `fused`. That single column is the whole reason the
 checksum's *label* is recorded rather than just checked — see the cross-tier
-FMA policy issue (`git-bug bug 9921932`).
+FMA policy issue (`git-bug bug show b10e7db`).
 
 And the gate did its job on its first full run: `mapiter/full-jit` and
 `map_simple/full-jit` came back **INVALID**. Both complete in ~1 s — faster than

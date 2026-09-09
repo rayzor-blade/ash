@@ -223,5 +223,38 @@ rejects any `sdl.hdll` produced by Ash's decommissioned Rust SDL shim.
 ## Status
 
 Known gaps, open defects and planned work are tracked with
-[git-bug](https://github.com/git-bug/git-bug), embedded in this repository's git
-object store. `git-bug bug` lists them, `git-bug termui` browses them.
+[git-bug](https://github.com/git-bug/git-bug). Issues are git objects under
+`refs/bugs/*`, so they travel with a clone and never appear in the working tree.
+
+```sh
+brew install git-bug                 # or: go install github.com/git-bug/git-bug@latest
+git-bug pull                         # fetch issues (a plain `git pull` does not)
+git-bug bug                          # list: id, status, title
+git-bug bug --label area:gc --status open
+git-bug bug show <id>
+git-bug termui                       # browse; `git-bug webui` for a browser UI
+```
+
+Filing needs an identity once per clone:
+
+```sh
+git-bug user new -n "<name>" -e "<email>" --non-interactive
+printf '%s\n\n%s\n' "<title>" "<body>" > /tmp/issue.md
+git-bug bug new -F /tmp/issue.md --non-interactive
+git-bug bug label new <id> bug area:gc
+```
+
+`-F` is read the way git reads a commit message: the first line is the title,
+then a blank line, then the body. `-t` is ignored when `-F` is given.
+
+Every issue carries a kind (`bug`, `perf`, `debt`) and an area (`area:gc`,
+`area:air`, `area:jit`, `area:aot`, `area:cranelift`, `area:runtime`,
+`area:interp`, `area:tooling`, `area:ci`, `area:conformance`,
+`area:portability`); `priority:high` marks work that blocks something else. Run
+`git-bug label` for the current set. Filter with the `--label` flag rather than a
+`label:` query term — the query parser cannot handle the colon inside the label
+name.
+
+Close an issue when the work lands and name it in the commit message.
+`git-bug push` publishes issue changes; an ordinary `git push` does not carry
+them.

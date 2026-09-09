@@ -10,7 +10,7 @@ unexpected_cfgs = { level = "warn", check-cfg = [] }
 [workspace.dependencies]
 anyhow = "1.0.91"
 inkwell = { version = "0.8.0", features = ["llvm21-1-prefer-static"] }
-beadie = { git = "https://github.com/darmie/beadie", features = ["cranelift"] }
+beadie = { git = "https://github.com/darmie/beadie", rev = "868d1069eeda1ea162460273869597a9b0866ebf", features = ["cranelift"] }
 flexstr = { version = "0.9" }
 num_enum = {version = "0.7.3"}
 ash_std ={ path = "std" }
@@ -52,12 +52,3 @@ lto = "fat"
 codegen-units = 1
 opt-level = 3
 debug = false
-
-# BUILDS ONLY BESIDE A beadie CHECKOUT until the beadie commit that adds
-# `compile_with_source_map` is pushed. Replace this whole section with a rev
-# pin on that commit; CI has no ../beadie and cannot build until it is gone.
-[patch."https://github.com/darmie/beadie"]
-beadie = { path = "../beadie/crates/beadie" }
-beadie-core = { path = "../beadie/crates/beadie-core" }
-beadie-backend = { path = "../beadie/crates/beadie-backend" }
-beadie-cranelift = { path = "../beadie/crates/beadie-cranelift" }

@@ -932,14 +932,55 @@ fn classify(pc: u64, jit: &[crate::jit_map::CodeRange]) -> (Bucket, String) {
         } else {
             Bucket::Native
         };
-        return (bucket, format!("[{obj} +unexported]"));
+        let off = mapping_of(pc).map(|(_, base)| pc - base).unwrap_or(0);
+        return (bucket, format!("[{obj}+{off:#x}]"));
     }
     (Bucket::Unknown, format!("{:#x}", pc))
+}
+
+/// Basename and load bias of the mapping containing `pc`.
+///
+/// `dladdr` cannot name a static function, and ash's hot runtime paths are all
+/// static -- a binary_trees profile put a fifth of itself in
+/// `[ash +unexported]`. An offset makes that resolvable after the fact:
+///
+/// ```text
+/// llvm-nm --defined-only --print-size --numeric-sort <image>
+/// ```
+///
+/// then find the symbol covering `offset + segment start`. The bias here is
+/// the lowest executable MAPPING, which the kernel reports page-aligned --
+/// resolving against the ELF segment's `p_vaddr` instead shifts everything by
+/// the offset within that page and lands in a neighbouring function. It named
+/// `invalid_cast`, which unconditionally throws and so cannot have been
+/// running at all, and the real owner was `gc_alloc` 0xa80 bytes earlier.
+#[cfg(target_os = "linux")]
+fn mapping_of(pc: usize) -> Option<(String, usize)> {
+    mapping_table()
+        .iter()
+        .find(|(lo, hi, _)| (*lo..*hi).contains(&pc))
+        .map(|(_, _, n)| {
+            let base = mapping_table()
+                .iter()
+                .filter(|(_, _, other)| other == n)
+                .map(|(lo, _, _)| *lo)
+                .min()
+                .unwrap_or(0);
+            (n.clone(), base)
+        })
 }
 
 /// Basename of the mapping containing `pc`, from /proc/self/maps (cached).
 #[cfg(target_os = "linux")]
 fn mapping_name(pc: usize) -> Option<String> {
+    mapping_table()
+        .iter()
+        .find(|(lo, hi, _)| (*lo..*hi).contains(&pc))
+        .map(|(_, _, n)| n.clone())
+}
+
+#[cfg(target_os = "linux")]
+fn mapping_table() -> &'static [(usize, usize, String)] {
     use std::sync::OnceLock;
     static MAPS: OnceLock<Vec<(usize, usize, String)>> = OnceLock::new();
     let maps = MAPS.get_or_init(|| {
@@ -969,9 +1010,7 @@ fn mapping_name(pc: usize) -> Option<String> {
         }
         v
     });
-    maps.iter()
-        .find(|(lo, hi, _)| (*lo..*hi).contains(&pc))
-        .map(|(_, _, n)| n.clone())
+    maps.as_slice()
 }
 
 /// Resolve `pc` to `(symbol, image path)` via `dladdr`.

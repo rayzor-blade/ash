@@ -2513,6 +2513,190 @@ struct MarkQueue {
     done: AtomicBool,
 }
 
+/// The slices one marking worker reads, as raw parts.
+///
+/// The world is stopped for the whole job and `MarkPool::run` does not return
+/// until every worker has left it, so these outlive every read. Passing
+/// borrows instead is what forced `std::thread::scope`, and that spawned and
+/// joined the entire worker set on EVERY collection: 18 collections of
+/// binary_trees cost 147 `clone3` calls, and marking with 8 threads came out
+/// 12% slower than marking with one.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy)]
+struct MarkJob {
+    blocks: (*const Block, usize),
+    alloc_sizes: (*const u32, usize),
+    objects: (*const std::sync::atomic::AtomicU8, usize),
+    heap_start: usize,
+    heap_end: usize,
+    queue: *const MarkQueue,
+    threads: usize,
+}
+
+// Read-only for the duration of a job, which runs entirely inside a stopped
+// world. Nothing here is dereferenced outside `MarkPool::run`.
+#[cfg(not(target_family = "wasm"))]
+unsafe impl Send for MarkJob {}
+#[cfg(not(target_family = "wasm"))]
+unsafe impl Sync for MarkJob {}
+
+/// Marking threads that outlive a collection.
+///
+/// A worker parks on `wake` between jobs rather than being created for one.
+/// `seq` is what tells a waking worker whether the job it can see is one it
+/// has already run, so a spurious wakeup does not re-trace the heap.
+#[cfg(not(target_family = "wasm"))]
+struct MarkPool {
+    state: std::sync::Mutex<(u64, Option<MarkJob>)>,
+    wake: std::sync::Condvar,
+    left: std::sync::Mutex<usize>,
+    finished: std::sync::Condvar,
+    size: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl MarkPool {
+    fn get() -> &'static MarkPool {
+        static POOL: OnceLock<MarkPool> = OnceLock::new();
+        POOL.get_or_init(|| {
+            let size = mark_threads();
+            let pool = MarkPool {
+                state: std::sync::Mutex::new((0, None)),
+                wake: std::sync::Condvar::new(),
+                left: std::sync::Mutex::new(0),
+                finished: std::sync::Condvar::new(),
+                size,
+            };
+            pool
+        })
+    }
+
+    /// Start the workers. Separate from `get` because the threads need the
+    /// `&'static` the OnceLock only hands back after initialisation.
+    fn start(&'static self) {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        STARTED.call_once(|| {
+            for _ in 0..self.size {
+                // A marking thread must not be scanned as a mutator, and it
+                // never runs VM code, so it registers nothing with the GC.
+                std::thread::Builder::new()
+                    .name("ash-gc-mark".into())
+                    .spawn(move || self.worker())
+                    .expect("gc marking thread");
+            }
+        });
+    }
+
+    fn worker(&'static self) {
+        let mut ran = 0u64;
+        loop {
+            let job = {
+                let mut state = self.state.lock().expect("mark pool poisoned");
+                while state.0 == ran || state.1.is_none() {
+                    state = self.wake.wait(state).expect("mark pool poisoned");
+                }
+                ran = state.0;
+                state.1.expect("a new sequence always carries a job")
+            };
+            mark_worker(&job);
+            let mut left = self.left.lock().expect("mark pool poisoned");
+            *left -= 1;
+            if *left == 0 {
+                self.finished.notify_all();
+            }
+        }
+    }
+
+    /// Run `job` on every worker and return once all of them have left it.
+    fn run(&'static self, job: MarkJob) {
+        self.start();
+        {
+            let mut left = self.left.lock().expect("mark pool poisoned");
+            *left = self.size;
+        }
+        {
+            let mut state = self.state.lock().expect("mark pool poisoned");
+            state.0 += 1;
+            state.1 = Some(job);
+        }
+        self.wake.notify_all();
+        let mut left = self.left.lock().expect("mark pool poisoned");
+        while *left > 0 {
+            left = self.finished.wait(left).expect("mark pool poisoned");
+        }
+    }
+}
+
+/// One worker's share of a marking job.
+#[cfg(not(target_family = "wasm"))]
+fn mark_worker(job: &MarkJob) {
+    // Safety: see `MarkJob`. The job runs inside a stopped world and the
+    // caller outlives it.
+    let blocks: &[Block] = unsafe { std::slice::from_raw_parts(job.blocks.0, job.blocks.1) };
+    let alloc_sizes: &[u32] =
+        unsafe { std::slice::from_raw_parts(job.alloc_sizes.0, job.alloc_sizes.1) };
+    let objects: &[std::sync::atomic::AtomicU8] =
+        unsafe { std::slice::from_raw_parts(job.objects.0, job.objects.1) };
+    let queue: &MarkQueue = unsafe { &*job.queue };
+    let threads = job.threads;
+    let heap_start = job.heap_start;
+    let heap_end = job.heap_end;
+    const BATCH: usize = 64;
+    const SPILL: usize = 512;
+    let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
+    loop {
+        if local.is_empty() {
+            let mut work = queue.work.lock().expect("mark queue poisoned");
+            loop {
+                if !work.is_empty() {
+                    let take = work.len().min(BATCH);
+                    let at = work.len() - take;
+                    local.extend(work.drain(at..));
+                    break;
+                }
+                if queue.done.load(Ordering::Relaxed) {
+                    return;
+                }
+                // Everyone idle with an empty queue means the
+                // trace is finished: a thread only reaches
+                // here having drained its own local list.
+                let idle = queue.idle.fetch_add(1, Ordering::Relaxed) + 1;
+                if idle == threads {
+                    queue.done.store(true, Ordering::Relaxed);
+                    queue.ready.notify_all();
+                    return;
+                }
+                // Timed, so a lost wakeup cannot strand anyone.
+                let (w, _) = queue
+                    .ready
+                    .wait_timeout(work, std::time::Duration::from_micros(200))
+                    .expect("mark queue poisoned");
+                work = w;
+                queue.idle.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        while let Some((start, size)) = local.pop() {
+            scan_allocation_shared(
+                blocks,
+                alloc_sizes,
+                objects,
+                heap_start,
+                heap_end,
+                start,
+                size,
+                &mut local,
+            );
+            if local.len() >= SPILL {
+                let half = local.len() / 2;
+                let mut work = queue.work.lock().expect("mark queue poisoned");
+                work.extend(local.drain(..half));
+                drop(work);
+                queue.ready.notify_all();
+            }
+        }
+    }
+}
+
 impl ImmixAllocator {
     #[inline(always)]
     fn current_stack_addr() -> usize {
@@ -3214,67 +3398,14 @@ impl ImmixAllocator {
                 idle: std::sync::atomic::AtomicUsize::new(0),
                 done: AtomicBool::new(false),
             };
-            let queue = &queue;
-
-            std::thread::scope(|scope| {
-                for _ in 0..threads {
-                    scope.spawn(move || {
-                        const BATCH: usize = 64;
-                        const SPILL: usize = 512;
-                        let mut local: Vec<(usize, usize)> = Vec::with_capacity(SPILL * 2);
-                        loop {
-                            if local.is_empty() {
-                                let mut work = queue.work.lock().expect("mark queue poisoned");
-                                loop {
-                                    if !work.is_empty() {
-                                        let take = work.len().min(BATCH);
-                                        let at = work.len() - take;
-                                        local.extend(work.drain(at..));
-                                        break;
-                                    }
-                                    if queue.done.load(Ordering::Relaxed) {
-                                        return;
-                                    }
-                                    // Everyone idle with an empty queue means the
-                                    // trace is finished: a thread only reaches
-                                    // here having drained its own local list.
-                                    let idle = queue.idle.fetch_add(1, Ordering::Relaxed) + 1;
-                                    if idle == threads {
-                                        queue.done.store(true, Ordering::Relaxed);
-                                        queue.ready.notify_all();
-                                        return;
-                                    }
-                                    // Timed, so a lost wakeup cannot strand anyone.
-                                    let (w, _) = queue
-                                        .ready
-                                        .wait_timeout(work, std::time::Duration::from_micros(200))
-                                        .expect("mark queue poisoned");
-                                    work = w;
-                                    queue.idle.fetch_sub(1, Ordering::Relaxed);
-                                }
-                            }
-                            while let Some((start, size)) = local.pop() {
-                                scan_allocation_shared(
-                                    blocks,
-                                    alloc_sizes,
-                                    objects,
-                                    heap_start,
-                                    heap_end,
-                                    start,
-                                    size,
-                                    &mut local,
-                                );
-                                if local.len() >= SPILL {
-                                    let half = local.len() / 2;
-                                    let mut work = queue.work.lock().expect("mark queue poisoned");
-                                    work.extend(local.drain(..half));
-                                    drop(work);
-                                    queue.ready.notify_all();
-                                }
-                            }
-                        }
-                    });
-                }
+            MarkPool::get().run(MarkJob {
+                blocks: (blocks.as_ptr(), blocks.len()),
+                alloc_sizes: (alloc_sizes.as_ptr(), alloc_sizes.len()),
+                objects: (objects.as_ptr(), objects.len()),
+                heap_start,
+                heap_end,
+                queue: &queue as *const MarkQueue,
+                threads,
             });
         }
     }

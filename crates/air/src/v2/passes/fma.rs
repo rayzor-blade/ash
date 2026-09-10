@@ -74,6 +74,9 @@ struct Plan {
     c: ValueId,
     /// Negation destination for the two negating forms.
     neg: Option<ValueId>,
+    /// Whether the negation may reuse the register the product frees. False
+    /// when a multiplicand lives there, which the negation would clobber.
+    neg_reuses_product: bool,
 }
 
 impl Pass for FmaPeephole {
@@ -101,7 +104,11 @@ impl Pass for FmaPeephole {
                         .dst()
                         .expect("planned Mul defines a value");
                     let ty = f.value_ty(prod);
-                    let reg = f.value_reg(prod);
+                    let reg = if p.neg_reuses_product {
+                        f.value_reg(prod)
+                    } else {
+                        f.new_reg(ty)
+                    };
                     p.neg = Some(f.new_value(ty, reg));
                 }
             }
@@ -234,13 +241,12 @@ fn plan_block(f: &Function, counts: &[usize], b: usize) -> Vec<Plan> {
             let prod_reg = f.value_reg(cand);
             let (ra, rbb) = (f.value_reg(ma), f.value_reg(mb));
             if !reg_untouched_between(f, b, mk, k, ra) || !reg_untouched_between(f, b, mk, k, rbb) {
+                if std::env::var("ASH_FMA_WHY").is_ok() {
+                    eprintln!("[fma] refuse {form:?}: operand reg written between mul and use");
+                }
                 continue;
             }
-            if matches!(form, Form::NegAddend | Form::NegProduct)
-                && (ra == prod_reg || rbb == prod_reg)
-            {
-                continue;
-            }
+            let neg_reuses_product = ra != prod_reg && rbb != prod_reg;
             plans.push(Plan {
                 mul: mk,
                 user: k,
@@ -249,6 +255,7 @@ fn plan_block(f: &Function, counts: &[usize], b: usize) -> Vec<Plan> {
                 b: mb,
                 c: other,
                 neg: None,
+                neg_reuses_product,
             });
             consumed.push(cand);
             break;

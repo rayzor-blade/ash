@@ -272,6 +272,19 @@ struct ImportKey {
     name: String,
 }
 
+/// What a host can be expected to provide. MUST agree with
+/// `ash_wasm_runtime`'s `validate::is_host_supplied`: a module this accepts
+/// and that one refuses fails at instantiate instead of at link, which is the
+/// whole failure this check exists to move earlier.
+fn host_can_supply(module: &str, name: &str) -> bool {
+    module.starts_with("wasi_")
+        || (module == "env" && name.starts_with("ash_host_"))
+        || module == "GOT.mem"
+        || module == "GOT.func"
+        || (module == "env" && (name == "__linear_memory" || name == "__indirect_function_table"))
+        || (module == "env" && name == "__c_longjmp")
+}
+
 impl Layout {
     /// Output index of `__wasm_call_ctors`, which is always the first
     /// function the linker writes itself.
@@ -586,6 +599,29 @@ fn plan(
             import_index.insert(key.clone(), index);
             imports.push((key, out_type));
         }
+    }
+
+    // Every import the output declares has to be one a host can actually
+    // supply. A runtime helper reaching here means the runtime object does
+    // not define it -- normally because it is older than the compiler that
+    // emitted the call -- and the module would link, then fail at instantiate
+    // naming a symbol, which reads as a linker fault rather than a stale
+    // artifact. Refuse it here, where the recipe is worth printing.
+    let unsuppliable: Vec<String> = imports
+        .iter()
+        .map(|(k, _)| k)
+        .filter(|k| !host_can_supply(&k.module, &k.name))
+        .map(|k| format!("{}.{}", k.module, k.name))
+        .collect();
+    if !unsuppliable.is_empty() {
+        bail!(
+            "the linked module would import {} symbol(s) no host can supply: {}.\n\
+             These come from the runtime object, so it is older than the compiler \
+             that emitted the calls. Rebuild it:\n\
+             \x20   scripts/build_wasm_runtime.py",
+            unsuppliable.len(),
+            unsuppliable.join(", ")
+        );
     }
 
     // --- function index space: imports, then whatever survives ---
@@ -2421,5 +2457,31 @@ fn val_type(v: &wasmparser::ValType) -> wasm_encoder::ValType {
         wasmparser::ValType::F64 => E::F64,
         wasmparser::ValType::V128 => E::V128,
         wasmparser::ValType::Ref(_) => E::FUNCREF,
+    }
+}
+
+#[cfg(test)]
+mod host_import_tests {
+    use super::host_can_supply;
+
+    #[test]
+    fn a_runtime_helper_is_not_something_a_host_supplies() {
+        // The two that shipped a module failing at instantiate: both are
+        // defined by the runtime object, so seeing either as an import means
+        // that object is older than the compiler.
+        assert!(!host_can_supply("env", "hlp_alloc_obj_sized"));
+        assert!(!host_can_supply("env", "hlp_register_aot_positions"));
+        assert!(!host_can_supply("env", "hlp_hash_gen"));
+    }
+
+    #[test]
+    fn wasi_and_the_host_prefix_and_the_linker_placeholders_are_supplied() {
+        assert!(host_can_supply("wasi_snapshot_preview1", "fd_write"));
+        assert!(host_can_supply("env", "ash_host_fiber_suspend"));
+        assert!(host_can_supply("GOT.mem", "errno"));
+        assert!(host_can_supply("GOT.func", "anything"));
+        assert!(host_can_supply("env", "__linear_memory"));
+        assert!(host_can_supply("env", "__indirect_function_table"));
+        assert!(host_can_supply("env", "__c_longjmp"));
     }
 }

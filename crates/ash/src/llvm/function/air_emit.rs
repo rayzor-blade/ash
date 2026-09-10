@@ -464,6 +464,120 @@ impl<'ctx> JITModule<'ctx> {
                         };
                         self.builder.build_store(registers[dst.idx()], result)?;
                     }
+                    // Arithmetic and bitwise, translated from AIR. All
+                    // thirteen: `can_trap` marks the ops GVN may not reuse, not
+                    // ops needing emitted trap code -- division lowers to a
+                    // plain sdiv here as it does everywhere else.
+                    AirInstr::BinOp { op, dst, a, b } => {
+                        let av = self.builder.build_load(
+                            reg_types[a.idx()],
+                            registers[a.idx()],
+                            "air_a",
+                        )?;
+                        let bv = self.builder.build_load(
+                            reg_types[b.idx()],
+                            registers[b.idx()],
+                            "air_b",
+                        )?;
+                        let out: BasicValueEnum = match (av, bv) {
+                            (BasicValueEnum::IntValue(x), BasicValueEnum::IntValue(y)) => {
+                                let bd = &self.builder;
+                                match op {
+                                    AirBinOp::Add => bd.build_int_add(x, y, "air_add")?,
+                                    AirBinOp::Sub => bd.build_int_sub(x, y, "air_sub")?,
+                                    AirBinOp::Mul => bd.build_int_mul(x, y, "air_mul")?,
+                                    AirBinOp::Shl => bd.build_left_shift(x, y, "air_shl")?,
+                                    AirBinOp::SShr => {
+                                        bd.build_right_shift(x, y, true, "air_sshr")?
+                                    }
+                                    AirBinOp::UShr => {
+                                        bd.build_right_shift(x, y, false, "air_ushr")?
+                                    }
+                                    AirBinOp::And => bd.build_and(x, y, "air_and")?,
+                                    AirBinOp::Or => bd.build_or(x, y, "air_or")?,
+                                    AirBinOp::Xor => bd.build_xor(x, y, "air_xor")?,
+                                    AirBinOp::SDiv => bd.build_int_signed_div(x, y, "air_sdiv")?,
+                                    AirBinOp::UDiv => bd.build_int_unsigned_div(x, y, "air_udiv")?,
+                                    AirBinOp::SMod => bd.build_int_signed_rem(x, y, "air_smod")?,
+                                    AirBinOp::UMod => bd.build_int_unsigned_rem(x, y, "air_umod")?,
+                                }
+                                .into()
+                            }
+                            (BasicValueEnum::FloatValue(x), BasicValueEnum::FloatValue(y)) => {
+                                let fv = match op {
+                                    AirBinOp::Add => {
+                                        self.builder.build_float_add(x, y, "air_fadd")?
+                                    }
+                                    AirBinOp::Sub => {
+                                        self.builder.build_float_sub(x, y, "air_fsub")?
+                                    }
+                                    AirBinOp::Mul => {
+                                        self.builder.build_float_mul(x, y, "air_fmul")?
+                                    }
+                                    AirBinOp::SDiv => {
+                                        self.builder.build_float_div(x, y, "air_fdiv")?
+                                    }
+                                    AirBinOp::SMod => {
+                                        self.builder.build_float_rem(x, y, "air_frem")?
+                                    }
+                                    _ => return Err(anyhow!("AIR BinOp {op:?} on floats")),
+                                };
+                                // `contract`, so the FMA peephole's pairs can
+                                // still fuse -- the same flag the opcode path
+                                // sets on these three.
+                                if let Some(inst) = fv.as_instruction() {
+                                    inst.set_fast_math_flags(1 << 5);
+                                }
+                                fv.into()
+                            }
+                            _ => {
+                                return Err(anyhow!("AIR BinOp {op:?} on mismatched operand types"))
+                            }
+                        };
+                        self.builder.build_store(registers[dst.idx()], out)?;
+                    }
+                    // Constants, translated from AIR rather than rebuilt as
+                    // HL opcodes first. AIR is the IR the backend consumes;
+                    // reconstructing bytecode to reach the same emitter is
+                    // work the compiler should not be doing, and it is where
+                    // a decision made twice drifts apart.
+                    AirInstr::Int { dst, idx } => {
+                        let global = self
+                            .ensure_int_global(*idx)
+                            .ok_or_else(|| anyhow!("AIR Int names no constant: {idx}"))?;
+                        let v = self.builder.build_load(
+                            self.context.i32_type(),
+                            global.as_pointer_value(),
+                            "air_int",
+                        )?;
+                        let v = self.cast_for_call(v, reg_types[dst.idx()])?;
+                        self.builder.build_store(registers[dst.idx()], v)?;
+                    }
+                    AirInstr::Float { dst, idx } => {
+                        let global = self
+                            .ensure_float_global(*idx)
+                            .ok_or_else(|| anyhow!("AIR Float names no constant: {idx}"))?;
+                        let v = self.builder.build_load(
+                            self.context.f64_type(),
+                            global.as_pointer_value(),
+                            "air_float",
+                        )?;
+                        // The pool is f64; an HF32 destination is a 4-byte slot.
+                        self.store_float_as_reg(
+                            &registers,
+                            &reg_types,
+                            dst.idx(),
+                            v.into_float_value(),
+                        )?;
+                    }
+                    AirInstr::Bool { dst, value } => {
+                        let v = self.context.bool_type().const_int(*value as u64, false);
+                        self.builder.build_store(registers[dst.idx()], v)?;
+                    }
+                    AirInstr::Null { dst } => {
+                        let v = self.context.ptr_type(AddressSpace::default()).const_null();
+                        self.builder.build_store(registers[dst.idx()], v)?;
+                    }
                     AirInstr::Fma { dst, a, b, c } => {
                         self.emit_air_fma(*dst, *a, *b, *c, &registers, &reg_types)?;
                     }

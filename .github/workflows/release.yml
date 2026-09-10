@@ -1,8 +1,9 @@
 name: release
 
 # Prebuilt binaries for the install.sh path. A pushed v* tag publishes a
-# versioned release; a manual dispatch rebuilds the rolling `nightly` release
-# (kept marked latest so `releases/latest/download/...` always resolves).
+# versioned release; the nightly schedule and a manual dispatch both rebuild
+# the rolling `nightly` release (kept marked latest so
+# `releases/latest/download/...` always resolves).
 # One self-contained tarball per platform: the binary embeds ash_std and
 # links LLVM statically; on macOS the few remaining Homebrew dylibs are
 # bundled beside it (see scripts/package_release.sh).
@@ -11,6 +12,10 @@ on:
   push:
     tags:
       - "v*"
+  # 02:00 UTC, which leaves the ~90 minutes a three-platform build can take
+  # clear of the benchmark sweep at 04:17 and the gates after it.
+  schedule:
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -310,7 +315,7 @@ jobs:
           make_latest: true
 
       - name: Publish rolling nightly
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly

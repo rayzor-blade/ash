@@ -353,6 +353,28 @@ impl HLInterpreter {
                 self.stack.last_mut().unwrap().registers.set($v.0, val)
             }};
         }
+        /// Narrow an integer result to its destination's declared width.
+        ///
+        /// `HUI8` and `HUI16` are a byte and a half-word in every compiled
+        /// tier, and HashLink's `store` copies `r->size` bytes. A walker
+        /// register is a NaN box with no width, so without this `255 + 1` in a
+        /// `hl.UI8` reads 256 where compiled code reads 0. Applied at the
+        /// arithmetic results only, not inside `set!`: every store would then
+        /// pay a type-table lookup, and only arithmetic can leave the range.
+        macro_rules! narrow {
+            ($v:expr, $val:expr) => {{
+                let val = $val;
+                if val.is_i32() {
+                    match kind!($v) {
+                        hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(val.as_i32() & 0xFF),
+                        hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(val.as_i32() & 0xFFFF),
+                        _ => val,
+                    }
+                } else {
+                    val
+                }
+            }};
+        }
         /// Static HL kind of a value, via the shim's per-value type table.
         macro_rules! kind {
             ($v:expr) => {
@@ -535,7 +557,7 @@ impl HLInterpreter {
                         b.0
                     )
                 })?;
-                set!(dst, r);
+                set!(dst, narrow!(dst, r));
             }
             I::Fma { dst, a, b, c } => {
                 // Deliberately two roundings, not `mul_add`. The FMA peephole
@@ -596,7 +618,7 @@ impl HLInterpreter {
                         }
                     }
                 };
-                set!(dst, r);
+                set!(dst, narrow!(dst, r));
             }
 
             // ---- calls -------------------------------------------------

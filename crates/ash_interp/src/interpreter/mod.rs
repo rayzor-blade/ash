@@ -228,6 +228,32 @@ const DEMAND_UNDER_LOOP: u8 = 2;
 /// `self.stack` across the lookup. Taking the table alone keeps the borrow
 /// field-disjoint, which is what the two HashMap fields gave for free.
 #[inline(always)]
+/// Narrow an integer result to the destination register's declared width.
+///
+/// `HUI8` and `HUI16` registers are a byte and a half-word everywhere else: the
+/// compiled tiers load and store them at that width, and HashLink's `store`
+/// copies `r->size` bytes. An interpreter register is a NaN box with no width,
+/// so without this `255 + 1` in a `hl.UI8` reads 256 where compiled code reads
+/// 0. Both kinds are unsigned, so this masks rather than sign-extends.
+fn narrow_to_reg(
+    bytecode: &DecodedBytecode,
+    func: &HLFunction,
+    reg: u32,
+    v: NanBoxedValue,
+) -> NanBoxedValue {
+    if !v.is_i32() {
+        return v;
+    }
+    let Some(t) = func.regs.get(reg as usize) else {
+        return v;
+    };
+    match bytecode.types[t.0].kind {
+        hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(v.as_i32() & 0xFF),
+        hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(v.as_i32() & 0xFFFF),
+        _ => v,
+    }
+}
+
 fn func_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
     match targets.get(findex) {
         Some(CallTarget::Func(i)) => Some(*i as usize),
@@ -5339,7 +5365,9 @@ impl HLInterpreter {
                         b.0
                     ));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::Sub { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5351,7 +5379,9 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("Sub: incompatible types"));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::Mul { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5363,7 +5393,9 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("Mul: incompatible types"));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::SDiv { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5375,7 +5407,9 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("SDiv: incompatible types or div by zero"));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::UDiv { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5383,7 +5417,9 @@ impl HLInterpreter {
                 let result = va
                     .binary_int_op(vb, IntBinOp::UDiv)
                     .ok_or_else(|| anyhow!("UDiv: incompatible types or div by zero"))?;
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::SMod { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5395,7 +5431,9 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("SMod: incompatible types or div by zero"));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::UMod { dst, a, b } => {
                 let va = frame.registers.get(a.0);
@@ -5439,7 +5477,9 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("Neg: unsupported type {:?}", val));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::Not { dst, src } => {
                 let val = frame.registers.get(src.0);
@@ -5452,14 +5492,22 @@ impl HLInterpreter {
                 } else {
                     return Err(anyhow!("Not: unsupported type {:?}", val));
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::Incr { dst } => {
                 let val = frame.registers.get(dst.0);
                 if val.is_i32() {
-                    frame
-                        .registers
-                        .set(dst.0, NanBoxedValue::from_i32(val.as_i32().wrapping_add(1)));
+                    frame.registers.set(
+                        dst.0,
+                        narrow_to_reg(
+                            bytecode,
+                            func,
+                            dst.0,
+                            NanBoxedValue::from_i32(val.as_i32().wrapping_add(1)),
+                        ),
+                    );
                 } else if val.is_i64() {
                     frame.registers.set(
                         dst.0,
@@ -5474,9 +5522,15 @@ impl HLInterpreter {
             Opcode::Decr { dst } => {
                 let val = frame.registers.get(dst.0);
                 if val.is_i32() {
-                    frame
-                        .registers
-                        .set(dst.0, NanBoxedValue::from_i32(val.as_i32().wrapping_sub(1)));
+                    frame.registers.set(
+                        dst.0,
+                        narrow_to_reg(
+                            bytecode,
+                            func,
+                            dst.0,
+                            NanBoxedValue::from_i32(val.as_i32().wrapping_sub(1)),
+                        ),
+                    );
                 } else if val.is_i64() {
                     frame.registers.set(
                         dst.0,
@@ -6268,7 +6322,9 @@ impl HLInterpreter {
                         hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool((val as i32) != 0),
                         _ => NanBoxedValue::from_ptr(val as usize),
                     };
-                    frame.registers.set(dst.0, result);
+                    frame
+                        .registers
+                        .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
                 } else {
                     frame.registers.set(dst.0, NanBoxedValue::null());
                 }
@@ -6374,7 +6430,9 @@ impl HLInterpreter {
                         }
                     }
                 };
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::SetEnumField { value, field, src } => {
                 let val = frame.registers.get(value.0);
@@ -6469,7 +6527,9 @@ impl HLInterpreter {
                 let base = frame.registers.get(reg.0);
                 let off = frame.registers.get(offset.0);
                 let result = NanBoxedValue::from_ptr(base.as_ptr() + off.as_i32() as usize);
-                frame.registers.set(dst.0, result);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
             }
             Opcode::Prefetch { .. } => {
                 // No-op on interpreter

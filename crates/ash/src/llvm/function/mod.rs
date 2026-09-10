@@ -2846,14 +2846,8 @@ impl<'ctx> JITModule<'ctx> {
     /// underscore, giving `__setjmp`, which is what libSystem exports, and
     /// ELF does not, giving `_setjmp`, which is what libc exports.
     /// Whether the emitted call passes Win64's frame argument.
-    ///
-    /// Only where ash declares `_setjmp` itself and a linker binds it, which
-    /// is the AOT path. The JIT calls the address of the runtime's own
-    /// binding instead, and giving that the second argument took Windows from
-    /// passing to failing at its first throw -- measured, both directions, on
-    /// the only machine that can say.
     fn emits_setjmp_frame(&self) -> bool {
-        self.aot && self.target_abi.setjmp_takes_frame
+        self.target_abi.setjmp_takes_frame
     }
 
     /// `_setjmp`'s type for this target.

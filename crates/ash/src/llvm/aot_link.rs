@@ -469,8 +469,15 @@ fn head_looks_like_side_module(path: &Path) -> bool {
 }
 
 fn side_modules_beside(out: &Path) -> Vec<(PathBuf, ash_wasm_link::SideModule)> {
-    let Some(dir) = out.parent() else {
-        return Vec::new();
+    // `Path::new("f.wasm").parent()` is `Some("")`, not `None`, and reading
+    // "" fails -- so a bare output name found no libraries and the program
+    // got the narrow ABI without a word said. It then refused every library
+    // at run time for want of `__indirect_function_table`, which reads as a
+    // build that was never told about them rather than one that was told in
+    // the wrong shape.
+    let dir = match out.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
     };
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();

@@ -1673,6 +1673,11 @@ def main(argv=None) -> int:
         if rows_m:
             engine_summaries[m] = summarize_engine_rows(rows_m, successful)
     headline = next((m for m in modes if m in engine_summaries), None)
+    # An engine asked for that produced no rows at all ran nothing: its
+    # programs skipped, or none of them enumerated a case. That has to be
+    # said where the numbers are read, because the headline belongs to ONE
+    # engine and a silent engine leaves it looking like a clean sweep.
+    silent_engines = [m for m in modes if m not in engine_summaries]
     ash_rows = ([r for r in all_ash_rows if r.get("engine") == f"ash:{headline}"]
                 if headline else all_ash_rows)
     ash_empty = [r for r in report["results"]
@@ -1732,6 +1737,9 @@ def main(argv=None) -> int:
         "suite_pct": round(100.0 * passes / total, 1) if total else None,
         "headline_engine": headline,
         "engines": engine_summaries,
+        # Asked for and measured nothing. Absence from `engines` says the same
+        # thing, but only to a reader who knows what was requested.
+        "engines_not_measured": silent_engines,
     }
 
     # Per-case isolation, when it ran. This is the only conformance figure the
@@ -1775,6 +1783,10 @@ def main(argv=None) -> int:
               f"{sm['cases_empty']} empty on this target]")
     print(f"\n{tests_passed}/{tests_accepted} tests passed across all suites")
     print(f"{passes}/{total} suites passed")
+    if silent_engines:
+        print(f"{len(silent_engines)} engine(s) asked for but NOT MEASURED: "
+              f"{', '.join(silent_engines)} -- every number above is only "
+              f"about {headline or 'the engines that ran'}")
     if ash_empty:
         names = ", ".join(f"{r['suite']}/{r.get('program', '')}" for r in ash_empty)
         print(f"{len(ash_empty)} program(s) EMPTY on this target, excluded "

@@ -1016,6 +1016,29 @@ def print_summary(results: list[dict]) -> None:
         for r in failed:
             print(f"  {r['benchmark']}/{r['mode']}: {r['status']} — {r['detail']}")
 
+    # Named, and grouped by the mode that lost them. A count alone reads the
+    # same whether a comparison ran and found nothing or never had subjects to
+    # compare: a sweep of tiering behaviour whose promotion-heavy programs all
+    # skipped still reports OK throughout.
+    skipped = [r for r in results if r["status"] == STATUS_SKIP]
+    if skipped:
+        print()
+        print("Skipped runs (these comparisons cover fewer programs):")
+        by_mode: dict[str, list[dict]] = {}
+        for r in skipped:
+            by_mode.setdefault(r["mode"], []).append(r)
+        for mode in sorted(by_mode):
+            rows = by_mode[mode]
+            ran = sum(
+                1
+                for r in results
+                if r["mode"] == mode and r["status"] != STATUS_SKIP
+            )
+            where = "every mode" if mode == "-" else f"mode {mode}"
+            print(f"  {where}: {len(rows)} skipped, {ran} ran")
+            for r in rows:
+                print(f"    {r['benchmark']}: {r['detail'] or 'no reason recorded'}")
+
 
 # ── baseline comparison ─────────────────────────────────────────────────────
 

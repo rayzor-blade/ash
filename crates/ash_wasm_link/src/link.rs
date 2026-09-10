@@ -393,7 +393,7 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
     // of `apply_relocations` would leave every later patch landing across an
     // opcode boundary in a module that still validates. By this point every
     // relocation has been spent and nothing reads an offset again.
-    let (module, dispatch) = crate::fiber::instrument(&module, &opts.hdll_imports)?;
+    let (module, dispatch) = crate::fiber::instrument(&module)?;
     // What the transform actually did, which was computed and then dropped.
     // `refused` and `unsavable` are the numbers that matter: a function the
     // transform declined cannot suspend, so a fiber that tries to suspend

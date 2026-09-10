@@ -220,7 +220,7 @@ fn the_fiber_transform_on_a_real_module() {
         eprintln!("set ASH_LINK_TEST_MODULE to a linked .wasm to instrument a real program");
         return;
     };
-    let (out, report) = ash_wasm_link::fiber::instrument(&bytes, &[]).expect("the fiber transform");
+    let (out, report) = ash_wasm_link::fiber::instrument(&bytes).expect("the fiber transform");
     eprintln!(
         "{} functions instrumented, {} refused ({} holding a value that cannot be saved); \
          {} ladders, {} blocks, {} br_table entries, {} unwind checks, {} traps, \

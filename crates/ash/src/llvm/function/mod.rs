@@ -2845,6 +2845,17 @@ impl<'ctx> JITModule<'ctx> {
     /// it on both object formats that matter here: Mach-O prepends an
     /// underscore, giving `__setjmp`, which is what libSystem exports, and
     /// ELF does not, giving `_setjmp`, which is what libc exports.
+    /// Whether the emitted call passes Win64's frame argument.
+    ///
+    /// Only where ash declares `_setjmp` itself and a linker binds it, which
+    /// is the AOT path. The JIT calls the address of the runtime's own
+    /// binding instead, and giving that the second argument took Windows from
+    /// passing to failing at its first throw -- measured, both directions, on
+    /// the only machine that can say.
+    fn emits_setjmp_frame(&self) -> bool {
+        self.aot && self.target_abi.setjmp_takes_frame
+    }
+
     /// `_setjmp`'s type for this target.
     ///
     /// Win64 spells it `_setjmp(env, frame)` and its `longjmp` reads that
@@ -2852,7 +2863,7 @@ impl<'ctx> JITModule<'ctx> {
     /// the buffer alone.
     fn setjmp_signature(&self) -> inkwell::types::FunctionType<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        if self.target_abi.setjmp_takes_frame {
+        if self.emits_setjmp_frame() {
             self.context
                 .i32_type()
                 .fn_type(&[ptr_type.into(), ptr_type.into()], false)
@@ -2874,7 +2885,7 @@ impl<'ctx> JITModule<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let setjmp_ptr = self.setjmp_ptr()?;
         let args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
-            if self.target_abi.setjmp_takes_frame {
+            if self.emits_setjmp_frame() {
                 vec![buf.into(), ptr_type.const_null().into()]
             } else {
                 vec![buf.into()]

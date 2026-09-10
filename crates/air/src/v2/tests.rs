@@ -6170,7 +6170,6 @@ fn widening_emits_vector_instructions_that_verify() {
     );
 }
 
-#[test]
 /// A byte element must not be widened at VF 4: `i8x4` is 32 bits, and a
 /// backend names the widths its ISA has -- on aarch64 the 128-bit set. The
 /// lane count has to come from the element width (rayzor's Cranelift backend
@@ -6230,6 +6229,7 @@ fn an_induction_closed_by_add_still_widens() {
     );
 }
 
+#[test]
 fn a_widened_function_scalarizes_back_to_runnable_bytecode() {
     let (ops, regs) = widen_fixture();
     let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");

@@ -31,11 +31,13 @@ const REQUIRED: &[&str] = &[
     "hlp_error",
     "hlp_gc_init",
     "hlp_register_aot_debug_files",
+    "hlp_register_aot_positions",
     // Not module init: every compiled body of a wasm module opens and closes
-    // its shadow frame through these, so a runtime without them fails the
-    // same way, at instantiate.
+    // its shadow frame through these, and allocates through the sized
+    // helper, so a runtime without them fails the same way, at instantiate.
     "hlp_shadow_push",
     "hlp_shadow_pop",
+    "hlp_alloc_obj_sized",
 ];
 
 /// How to rebuild it, quoted in the failure so nobody has to go looking.

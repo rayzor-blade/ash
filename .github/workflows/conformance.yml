@@ -53,7 +53,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rustfmt # ash_std's bindgen pretty-prints through it
+          # rustfmt: ash_std's bindgen pretty-prints through it.
+          # rust-src: a wasm side module is position-independent, so `core`
+          # and `std` have to be rebuilt for it -- `-Z build-std`, which
+          # cannot work without the sources.
+          components: rustfmt, rust-src
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -113,6 +117,9 @@ jobs:
           # unresolved, so each of its tests throws and lands as an ERROR --
           # eleven of them, against a native arm that passes. That read as a
           # wasm defect for as long as this step was missing.
+          # The sysroot is kept but wasi-sdk's own clang is not, so name the
+          # one apt installed: `clang` unqualified is not guaranteed to exist.
+          CC_wasm32_wasip1=clang-21 AR_wasm32_wasip1=llvm-ar-21 \
           ./scripts/build_wasm_hdll.py --only sqlite --sysroot ~/wasi-sysroot \
             || echo "::warning::sqlite.wasm did not build; the sys suite's sqlite tests will error on the wasm arms"
 

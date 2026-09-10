@@ -38,6 +38,16 @@ pub struct TargetAbi {
     /// function instead pushes a frame at entry, records its source position
     /// as it goes, and pops on return, and the runtime reads that.
     pub shadow_call_stack: bool,
+    /// `_setjmp` takes the frame to unwind to as a second argument.
+    ///
+    /// Win64's `setjmp` is `_setjmp(env, _AddressOfReturnAddress())`, and
+    /// `longjmp` there reads that frame to decide whether to unwind with SEH.
+    /// Called with one argument the field holds whatever was in the register,
+    /// and the unwind walks it. Ash abandons the frames between the trap and
+    /// the throw deliberately -- it restores the GC lock depth and the shadow
+    /// stack itself -- so the frame it wants is the null one, which is Win64's
+    /// own spelling for "do not unwind".
+    pub setjmp_takes_frame: bool,
     /// Whether a register that can hold a heap pointer must live in memory.
     ///
     /// The collector finds roots by scanning memory it can address. On every
@@ -93,6 +103,7 @@ impl TargetAbi {
             native_dynamic_loading: !wasm,
             direct_data_relocations: !wasm,
             shadow_call_stack: wasm,
+            setjmp_takes_frame: lower.contains("windows") && pointer_bytes == 8,
             pointer_registers_in_memory: wasm,
         })
     }

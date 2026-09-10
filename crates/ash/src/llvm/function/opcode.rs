@@ -3730,25 +3730,8 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap()
                     .into_pointer_value();
 
-                // 2. Call _setjmp(buf_ptr) via indirect call (system function, not in stdlib)
-                let setjmp_ptr = self.setjmp_ptr()?;
-                let setjmp_fn_type = i32_type.fn_type(&[ptr_type.into()], false);
-                let setjmp_call = self.builder.build_indirect_call(
-                    setjmp_fn_type,
-                    setjmp_ptr,
-                    &[buf_ptr.into()],
-                    "setjmp_ret",
-                )?;
-                // Mark as returns_twice so LLVM doesn't misoptimize around setjmp at O3
-                let rt_kind =
-                    inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice");
-                let rt_attr = self.context.create_enum_attribute(rt_kind, 0);
-                setjmp_call.add_attribute(inkwell::attributes::AttributeLoc::Function, rt_attr);
-                let setjmp_result = setjmp_call
-                    .try_as_basic_value()
-                    .basic()
-                    .unwrap()
-                    .into_int_value();
+                // 2. Arm the trap.
+                let setjmp_result = self.build_setjmp_call(buf_ptr, "setjmp_ret")?;
 
                 // 3. Branch: 0 → normal (protected code), non-zero → handler
                 let is_exception = self.builder.build_int_compare(

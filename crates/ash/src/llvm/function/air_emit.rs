@@ -1612,23 +1612,7 @@ impl<'ctx> JITModule<'ctx> {
                     .basic()
                     .ok_or_else(|| anyhow!("hlp_setup_trap_jit returned void"))?
                     .into_pointer_value();
-                let setjmp_ptr = self.setjmp_ptr()?;
-                let setjmp = self.builder.build_indirect_call(
-                    i32_type.fn_type(&[ptr_type.into()], false),
-                    setjmp_ptr,
-                    &[buf.into()],
-                    "air_setjmp",
-                )?;
-                let returns_twice = self.context.create_enum_attribute(
-                    inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
-                    0,
-                );
-                setjmp.add_attribute(inkwell::attributes::AttributeLoc::Function, returns_twice);
-                let jumped = setjmp
-                    .try_as_basic_value()
-                    .basic()
-                    .ok_or_else(|| anyhow!("_setjmp returned void"))?
-                    .into_int_value();
+                let jumped = self.build_setjmp_call(buf, "air_setjmp")?;
                 let is_exception = self.builder.build_int_compare(
                     IntPredicate::NE,
                     jumped,

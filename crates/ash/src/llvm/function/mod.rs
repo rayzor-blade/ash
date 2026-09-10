@@ -2845,16 +2845,67 @@ impl<'ctx> JITModule<'ctx> {
     /// it on both object formats that matter here: Mach-O prepends an
     /// underscore, giving `__setjmp`, which is what libSystem exports, and
     /// ELF does not, giving `_setjmp`, which is what libc exports.
+    /// `_setjmp`'s type for this target.
+    ///
+    /// Win64 spells it `_setjmp(env, frame)` and its `longjmp` reads that
+    /// frame to decide whether to unwind with SEH. Everywhere else it takes
+    /// the buffer alone.
+    fn setjmp_signature(&self) -> inkwell::types::FunctionType<'ctx> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        if self.target_abi.setjmp_takes_frame {
+            self.context
+                .i32_type()
+                .fn_type(&[ptr_type.into(), ptr_type.into()], false)
+        } else {
+            self.context.i32_type().fn_type(&[ptr_type.into()], false)
+        }
+    }
+
+    /// Arm `buf` and answer 0 on the way in, non-zero when a throw lands here.
+    ///
+    /// The null frame is Win64's own spelling for "do not unwind": ash
+    /// abandons the frames between the trap and the throw on purpose, having
+    /// restored the GC lock depth and the shadow stack itself.
+    fn build_setjmp_call(
+        &self,
+        buf: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let setjmp_ptr = self.setjmp_ptr()?;
+        let args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
+            if self.target_abi.setjmp_takes_frame {
+                vec![buf.into(), ptr_type.const_null().into()]
+            } else {
+                vec![buf.into()]
+            };
+        let call =
+            self.builder
+                .build_indirect_call(self.setjmp_signature(), setjmp_ptr, &args, name)?;
+        // Without this every pass that asks "does this call return twice"
+        // answers no, and a value live across the jump ends up in a register
+        // the longjmp path never restores.
+        let returns_twice = self.context.create_enum_attribute(
+            inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
+            0,
+        );
+        call.add_attribute(inkwell::attributes::AttributeLoc::Function, returns_twice);
+        Ok(call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("_setjmp returned void"))?
+            .into_int_value())
+    }
+
     fn setjmp_ptr(&self) -> Result<PointerValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         if self.aot {
             const SYMBOL: &str = "_setjmp";
+            let signature = self.setjmp_signature();
             let function = self.module.get_function(SYMBOL).unwrap_or_else(|| {
-                let declared = self.module.add_function(
-                    SYMBOL,
-                    self.context.i32_type().fn_type(&[ptr_type.into()], false),
-                    Some(inkwell::module::Linkage::External),
-                );
+                let declared =
+                    self.module
+                        .add_function(SYMBOL, signature, Some(inkwell::module::Linkage::External));
                 // The same attribute a C header gives `setjmp`. Call sites
                 // carry it too, but the declaration is what makes every pass
                 // that asks "does this function call something that returns
@@ -3754,23 +3805,7 @@ impl<'ctx> JITModule<'ctx> {
             .basic()
             .unwrap()
             .into_pointer_value();
-        let setjmp_ptr = self.setjmp_ptr()?;
-        let setjmp_call = self.builder.build_indirect_call(
-            i32_type.fn_type(&[ptr_type.into()], false),
-            setjmp_ptr,
-            &[buf.into()],
-            "outer_setjmp",
-        )?;
-        let returns_twice = self.context.create_enum_attribute(
-            inkwell::attributes::Attribute::get_named_enum_kind_id("returns_twice"),
-            0,
-        );
-        setjmp_call.add_attribute(inkwell::attributes::AttributeLoc::Function, returns_twice);
-        let jumped = setjmp_call
-            .try_as_basic_value()
-            .basic()
-            .unwrap()
-            .into_int_value();
+        let jumped = self.build_setjmp_call(buf, "outer_setjmp")?;
         let is_exception = self.builder.build_int_compare(
             IntPredicate::NE,
             jumped,

@@ -486,11 +486,21 @@ impl<'ctx> JITModule<'ctx> {
                                     AirBinOp::Add => bd.build_int_add(x, y, "air_add")?,
                                     AirBinOp::Sub => bd.build_int_sub(x, y, "air_sub")?,
                                     AirBinOp::Mul => bd.build_int_mul(x, y, "air_mul")?,
-                                    AirBinOp::Shl => bd.build_left_shift(x, y, "air_shl")?,
+                                    // A shift count of a different width from
+                                    // the value, or at or past that width, is
+                                    // ordinary HL. `shift_operands` fits it and
+                                    // masks it, because an LLVM shift is poison
+                                    // from the value's width up.
+                                    AirBinOp::Shl => {
+                                        let (x, y) = Self::shift_operands(bd, x, y)?;
+                                        bd.build_left_shift(x, y, "air_shl")?
+                                    }
                                     AirBinOp::SShr => {
+                                        let (x, y) = Self::shift_operands(bd, x, y)?;
                                         bd.build_right_shift(x, y, true, "air_sshr")?
                                     }
                                     AirBinOp::UShr => {
+                                        let (x, y) = Self::shift_operands(bd, x, y)?;
                                         bd.build_right_shift(x, y, false, "air_ushr")?
                                     }
                                     AirBinOp::And => bd.build_and(x, y, "air_and")?,

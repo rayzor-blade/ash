@@ -5111,7 +5111,7 @@ impl<'ctx> JITModule<'ctx> {
     /// arbitrary values whenever the optimizer could see the count. Bring the
     /// count to the value's width first (Int64 shifts carry an I32 count),
     /// then mask it.
-    fn shift_operands(
+    pub(super) fn shift_operands(
         b: &inkwell::builder::Builder<'ctx>,
         x: inkwell::values::IntValue<'ctx>,
         y: inkwell::values::IntValue<'ctx>,

@@ -1111,7 +1111,7 @@ pub fn function_named(bytes: &[u8], want: &str) -> Result<Option<u32>> {
 /// instrumenting it. Such a module has no suspend point, so the rewrite would
 /// cost every function in it to produce a program that can never suspend --
 /// a build worth stopping, not one worth shipping quietly.
-pub fn instrument(bytes: &[u8]) -> Result<(Vec<u8>, Dispatch)> {
+pub fn instrument(bytes: &[u8], host_abi: &[String]) -> Result<(Vec<u8>, Dispatch)> {
     let seeds = imports_named(bytes, &[YIELD_IMPORT])?;
     if seeds.is_empty() {
         bail!(
@@ -1122,8 +1122,26 @@ pub fn instrument(bytes: &[u8]) -> Result<(Vec<u8>, Dispatch)> {
     }
     // Stop the closure at the runtime's barrier, so the scheduler that has to
     // pick the next fiber is still standing when this one suspends.
-    let barriers: std::collections::BTreeSet<u32> =
+    let mut barriers: std::collections::BTreeSet<u32> =
         function_named(bytes, BARRIER)?.into_iter().collect();
+    // And at anything a separately-loaded library calls.
+    //
+    // A side module is never instrumented -- it is linked on its own and
+    // arrives as bytes this transform never sees -- so its frames carry no
+    // ladder and cannot be rewound. Instrumenting a function it calls puts a
+    // suspend point under a caller that cannot honour one: the unwind runs
+    // out through frames that will not be replayed, and what the resume then
+    // rebuilds is not what suspended.
+    //
+    // These are exactly the functions the linker exported for it, which is
+    // why the set grows only when a library sits beside the program -- and
+    // why a program that hosts one behaved differently from the same program
+    // that does not.
+    for name in host_abi {
+        if let Some(f) = function_named(bytes, name)? {
+            barriers.insert(f);
+        }
+    }
     let (module, globals) = add_exported_i32_globals(bytes, &GLOBALS)?;
     // The globals are appended past the GOT block, whose indices the linker
     // has already written into patch sites, so nothing is renumbered and the
@@ -2396,7 +2414,7 @@ mod tests {
     #[test]
     fn a_module_with_no_suspend_point_is_refused_rather_than_instrumented() {
         // The straight-line dispatch module imports `rec`, not the yield.
-        let err = instrument(&straight_line()).expect_err("must refuse");
+        let err = instrument(&straight_line(), &[]).expect_err("must refuse");
         assert!(
             err.to_string().contains(YIELD_IMPORT),
             "the message must name the import that is missing: {err}"
@@ -2437,7 +2455,7 @@ mod tests {
         m.section(&exports);
         m.section(&code);
 
-        let err = instrument(&m.finish()).expect_err("must refuse");
+        let err = instrument(&m.finish(), &[]).expect_err("must refuse");
         assert!(
             err.to_string().contains(GLOBALS[0]),
             "the message must name the export that collides: {err}"

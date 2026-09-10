@@ -1041,6 +1041,35 @@ pub const BARRIER: &str = "ash_fiber_enter";
 /// `None` when the module has no name section or nothing is called that,
 /// which is not an error here: a program that never makes a fiber has no
 /// barrier to find.
+/// The name of the function at `index`, when the module carries a name
+/// section. The inverse of [`function_named`], for reporting a set rather
+/// than finding one function.
+fn function_name_at(bytes: &[u8], index: u32) -> Option<String> {
+    for payload in wasmparser::Parser::new(0).parse_all(bytes) {
+        let wasmparser::Payload::CustomSection(c) = payload.ok()? else {
+            continue;
+        };
+        if c.name() != "name" {
+            continue;
+        }
+        let reader = wasmparser::NameSectionReader::new(wasmparser::BinaryReader::new_features(
+            c.data(),
+            c.data_offset(),
+            wasmparser::WasmFeatures::all(),
+        ));
+        for sub in reader {
+            if let Ok(wasmparser::Name::Function(map)) = sub {
+                for entry in map.into_iter().flatten() {
+                    if entry.index == index {
+                        return Some(entry.name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn function_named(bytes: &[u8], want: &str) -> Result<Option<u32>> {
     for payload in wasmparser::Parser::new(0).parse_all(bytes) {
         let wasmparser::Payload::CustomSection(c) =
@@ -1105,6 +1134,23 @@ pub fn instrument(bytes: &[u8]) -> Result<(Vec<u8>, Dispatch)> {
         crate::suspend::Policy::TypedTable,
         &barriers,
     );
+    // The set by name, for comparing one build against another. Counts say
+    // the set changed; names say which functions joined it, and whether any
+    // is one a side module or the host calls directly -- such a caller cannot
+    // honour the suspend protocol.
+    if std::env::var("ASH_FIBER_REPORT").as_deref() == Ok("names") {
+        let mut names: Vec<String> = Vec::new();
+        for &f in &set {
+            names.push(match function_name_at(&module, f) {
+                Some(n) => n,
+                None => format!("fun${f}"),
+            });
+        }
+        names.sort();
+        for n in &names {
+            eprintln!("[fiber-set] {n}");
+        }
+    }
     add_rewind_dispatch(
         &module,
         &|f| set.contains(&f),

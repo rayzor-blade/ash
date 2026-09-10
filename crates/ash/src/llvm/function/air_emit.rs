@@ -578,6 +578,40 @@ impl<'ctx> JITModule<'ctx> {
                         let v = self.context.ptr_type(AddressSpace::default()).const_null();
                         self.builder.build_store(registers[dst.idx()], v)?;
                     }
+                    AirInstr::String { dst, idx } => {
+                        // The register holds the ADDRESS of the constant.
+                        let g = self
+                            .ensure_string_global(*idx)
+                            .ok_or_else(|| anyhow!("AIR String: no constant {idx}"))?;
+                        self.builder
+                            .build_store(registers[dst.idx()], g.as_pointer_value())?;
+                    }
+                    AirInstr::TypeConst { dst, ty } => {
+                        let v = self.get_initialized_type(ty.0 as usize)?;
+                        self.builder.build_store(registers[dst.idx()], v)?;
+                    }
+                    AirInstr::GetGlobal { dst, global } => {
+                        let slot = *self
+                            .globals
+                            .get(global)
+                            .ok_or_else(|| anyhow!("AIR GetGlobal: no global {global}"))?;
+                        // Every global is a pointer-sized slot.
+                        let ptr_type = self.context.ptr_type(AddressSpace::default());
+                        let v = self.builder.build_load(ptr_type, slot, "air_global")?;
+                        self.builder.build_store(registers[dst.idx()], v)?;
+                    }
+                    AirInstr::SetGlobal { global, src } => {
+                        let slot = *self
+                            .globals
+                            .get(global)
+                            .ok_or_else(|| anyhow!("AIR SetGlobal: no global {global}"))?;
+                        let v = self.builder.build_load(
+                            reg_types[src.idx()],
+                            registers[src.idx()],
+                            "air_global_src",
+                        )?;
+                        self.builder.build_store(slot, v)?;
+                    }
                     AirInstr::Fma { dst, a, b, c } => {
                         self.emit_air_fma(*dst, *a, *b, *c, &registers, &reg_types)?;
                     }

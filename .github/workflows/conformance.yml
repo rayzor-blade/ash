@@ -108,6 +108,13 @@ jobs:
             || echo "::warning::ash-wasm-run did not build; wasm rows will be skipped"
           ./scripts/build_wasm_runtime.py --sysroot ~/wasi-sysroot \
             || echo "::warning::the wasm runtime object did not build; wasm rows will be skipped"
+          # sqlite as a side module, because the sys suite calls it. Without
+          # one the wasm arms still run: every sqlite primitive is simply
+          # unresolved, so each of its tests throws and lands as an ERROR --
+          # eleven of them, against a native arm that passes. That read as a
+          # wasm defect for as long as this step was missing.
+          ./scripts/build_wasm_hdll.py --only sqlite --sysroot ~/wasi-sysroot \
+            || echo "::warning::sqlite.wasm did not build; the sys suite's sqlite tests will error on the wasm arms"
 
       - uses: krdlab/setup-haxe@v1
         with:

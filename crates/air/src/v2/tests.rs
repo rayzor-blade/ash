@@ -6082,6 +6082,24 @@ fn widen_fixture() -> (Vec<Opcode>, Vec<TypeRef>) {
     (ops, regs)
 }
 
+/// The same loop, but closing the induction with `Incr` rather than `Add` --
+/// which is what Haxe emits for `for (i in 0...n)`.
+fn widen_fixture_incr() -> (Vec<Opcode>, Vec<TypeRef>) {
+    let (ops, regs) = widen_fixture();
+    let ops = ops
+        .into_iter()
+        .map(|op| match op {
+            Opcode::Add {
+                dst: Reg(1),
+                a: Reg(1),
+                b: Reg(3),
+            } => Opcode::Incr { dst: Reg(1) },
+            other => other,
+        })
+        .collect();
+    (ops, regs)
+}
+
 /// The int pool the fixture's `RefInt`s name.
 struct WidenInfo;
 impl ModuleInfo for WidenInfo {
@@ -6153,6 +6171,39 @@ fn widening_emits_vector_instructions_that_verify() {
 }
 
 #[test]
+/// An induction closed by `Incr` must be refused, not widened.
+///
+/// `retime_induction` rescales the step by rewriting the constant operand of
+/// the `BinOp::Add` that closes the cycle. `Incr` carries no such operand, so
+/// the step stayed at one and the widened loop ran VF times too many -- which
+/// for an accumulator is a wrong ANSWER, not a wrong address. `Incr` is also
+/// the form Haxe emits for a range loop, so this is the common shape.
+#[test]
+fn an_induction_closed_by_incr_is_not_widened() {
+    let (ops, regs) = widen_fixture_incr();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert_eq!(
+        stats.replaced, 0,
+        "a loop whose step cannot be rescaled must be refused, not widened"
+    );
+}
+
+/// The `Add` form still widens, so the refusal above is specific rather than a
+/// blanket disabling of the pass.
+#[test]
+fn an_induction_closed_by_add_still_widens() {
+    let (ops, regs) = widen_fixture();
+    let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");
+    let pass = super::passes::widen::Widen { info: &WidenInfo };
+    let stats = pass.run(&mut f, &PassOptions::default()).expect("widen");
+    assert!(
+        stats.replaced > 0,
+        "the Add-closed fixture should still be widenable"
+    );
+}
+
 fn a_widened_function_scalarizes_back_to_runnable_bytecode() {
     let (ops, regs) = widen_fixture();
     let mut f = lower_with(&ops, &regs, &WidenInfo).expect("lower");

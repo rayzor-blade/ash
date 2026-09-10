@@ -72,6 +72,13 @@ pub enum Decline {
     /// A scalar operand that changes every iteration and would have to be
     /// broadcast across the lanes, which computes a different thing.
     VaryingBroadcast(ValueId),
+    /// The induction closes its cycle with a form `retime_induction` cannot
+    /// rescale. The analysis accepts `Incr`/`Decr` as a stride of one, but the
+    /// transform only rewrites the constant of a `BinOp::Add`, so anything
+    /// else leaves the step at one and the widened loop runs VF times too
+    /// many -- silently, and for a reduction that is a wrong answer rather
+    /// than a wrong address.
+    UnscalableInductionStep(ValueId),
     /// An element so wide that VF of them exceed the widest vector the
     /// weakest tier lowers. A 64-bit lane by four is 256 bits; Cranelift's
     /// backends -- every ISA, not just aarch64 -- accept a vector only when
@@ -302,6 +309,15 @@ fn check(
     // refusal, but it does require the step to be 1: the epilogue's entry
     // index is `start + (n & ~(VF-1))`, and that arithmetic is only this
     // simple for a unit step.
+    // `retime_induction` multiplies the step by VF by rewriting the constant
+    // operand of the `BinOp::Add` that closes the induction cycle. It has no
+    // case for `UnOp::Incr`/`Decr`, which the analysis does accept, so refuse
+    // here rather than widen a loop whose step will not move.
+    if let Some((iv, _)) = plan.induction {
+        if !step_is_scalable(f, plan, iv) {
+            return Err(Decline::UnscalableInductionStep(iv));
+        }
+    }
     match const_trip_count(f, plan, info) {
         Some(t) => {
             if t % VF as i64 != 0 {
@@ -1191,6 +1207,31 @@ fn is_loop_invariant(f: &Function, body: &HashSet<BlockId>, v: ValueId) -> bool 
     }
     // No definition found: a parameter, which is invariant.
     true
+}
+
+/// Whether [`retime_induction`] can rescale this induction's step.
+///
+/// Deliberately mirrors that function's own matching: it rewrites the constant
+/// operand of the `BinOp::Add` closing the cycle, so a cycle closed any other
+/// way is not rescalable and the loop must be refused. Keep the two in step --
+/// a form accepted here and not handled there widens a loop whose step stays
+/// at one.
+fn step_is_scalable(f: &Function, plan: &LoopPlan, iv: ValueId) -> bool {
+    let Some(phi) = f.blocks[plan.header.idx()]
+        .phis
+        .iter()
+        .find(|p| p.dst == iv)
+    else {
+        return false;
+    };
+    let body = loop_blocks(f, plan.header);
+    let Some(&(_, back)) = phi.incoming.iter().find(|(p, _)| body.contains(p)) else {
+        return false;
+    };
+    f.blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .any(|ins| ins.dst() == Some(back) && matches!(ins, Instr::BinOp { op: BinOp::Add, .. }))
 }
 
 /// Advance the induction by a whole vector per iteration.

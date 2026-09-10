@@ -613,8 +613,12 @@ normalize = "default"
 # HUI8 and HUI16 are unsigned. The Cranelift tier holds them at their narrow
 # width, so widening, division, remainder and the ordering comparisons all had
 # to be told there is no sign to read. The case checks its own answers and
-# exits non-zero on a mismatch; eval cannot be the oracle here because it
-# refuses the `hl` package outright.
+# exits non-zero on a mismatch.
+#
+# Eval cannot be the oracle: it refuses the `hl` package outright, so it never
+# runs and its failure would be recorded as the expected exit status. The
+# property this case defends is that every engine agrees with the interpreter,
+# which is what `oracle_is_interp` states.
 [[case]]
 name = "TestNarrowUnsigned"
 main = "TestNarrowUnsigned"
@@ -624,3 +628,4 @@ timeout_secs = 180
 expectation = "exact"
 normalize = "default"
 sanity_interp = false
+oracle_is_interp = true

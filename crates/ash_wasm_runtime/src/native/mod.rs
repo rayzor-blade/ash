@@ -386,6 +386,17 @@ fn wasi_context(
     let mut wasi = WasiCtxBuilder::new();
     wasi.monotonic_clock(control::Clock(control));
     wasi.inherit_stdout().inherit_stderr();
+    // ash's own switches, and only those. A guest reads its diagnostics out
+    // of the environment -- ASH_GC_STRESS, ASH_AIR_LEVEL and the rest -- and
+    // with nothing forwarded every one of them is silently inert inside a
+    // module: the run answers as if the switch had been off. The host's whole
+    // environment is not forwarded, because a sandbox has no business seeing
+    // PATH or HOME.
+    for (k, v) in std::env::vars() {
+        if k.starts_with("ASH_") {
+            wasi.env(&k, &v);
+        }
+    }
     // The working directory, as the program's own. A native ash program
     // can write a file beside itself; a wasm one can only reach what the
     // host preopens, and with nothing preopened every `File.write` failed

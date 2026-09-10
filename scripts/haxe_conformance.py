@@ -471,8 +471,17 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
         named = utest_failures(out)
         if named:
             return "FAIL", f"exit {res.returncode}: {named[:400]}"
-        tail = [l for l in out.splitlines() if l.strip()][-1:] or [""]
-        return "FAIL", f"exit {res.returncode}: {tail[0][:140]}"
+        # The last line of an ash diagnostic is a stack FRAME; the message
+        # that names what went wrong is above it. Reporting one line turns
+        # "uncaught exception: <what>" into "at fun$857(?:1)", which says
+        # only that something failed somewhere.
+        tail = [l.strip() for l in out.splitlines() if l.strip()][-5:]
+        said = next((l for l in reversed(tail)
+                     if "exception" in l.lower() or "error" in l.lower()), None)
+        detail = said or (tail[-1] if tail else "")
+        if said and tail and tail[-1] != said:
+            detail += "  (" + tail[-1] + ")"
+        return "FAIL", f"exit {res.returncode}: {detail[:280]}"
     if RE_FAIL.search(out) and not RE_OK.search(out):
         line = next((l for l in out.splitlines() if RE_FAIL.search(l)), "")
         return "FAIL", line.strip()[:160]

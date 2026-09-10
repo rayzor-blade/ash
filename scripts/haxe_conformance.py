@@ -449,8 +449,18 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
     if timed_out:
         return "TIMEOUT", f"no exit within the limit ({elapsed_ms:.0f}ms elapsed)"
     if "=== CRASH:" in out:
-        line = next((l for l in out.splitlines() if "=== CRASH:" in l), "")
-        return "CRASH", line.strip()[:160]
+        lines = out.splitlines()
+        i = next(i for i, l in enumerate(lines) if "=== CRASH:" in l)
+        # What the process said on its way down, which the banner does not
+        # carry. A SIGABRT is raised BY something -- glibc's "free(): invalid
+        # pointer", a failed assertion, a panic -- and it prints its reason
+        # immediately before aborting. Reporting the signal alone turns every
+        # one of those into the same unactionable line.
+        before = [l.strip() for l in lines[max(0, i - 4):i] if l.strip()]
+        detail = lines[i].strip()[:160]
+        if before:
+            detail += "  <- " + " | ".join(before)[:240]
+        return "CRASH", detail
     if "panicked at" in out:
         line = next((l for l in out.splitlines() if "panicked at" in l), "")
         return "PANIC", line.strip()[:160]

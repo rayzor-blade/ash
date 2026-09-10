@@ -393,7 +393,25 @@ pub fn link(mut objects: Vec<Object>, opts: &LinkOptions) -> Result<Vec<u8>> {
     // of `apply_relocations` would leave every later patch landing across an
     // opcode boundary in a module that still validates. By this point every
     // relocation has been spent and nothing reads an offset again.
-    Ok(crate::fiber::instrument(&module)?.0)
+    let (module, dispatch) = crate::fiber::instrument(&module)?;
+    // What the transform actually did, which was computed and then dropped.
+    // `refused` and `unsavable` are the numbers that matter: a function the
+    // transform declined cannot suspend, so a fiber that tries to suspend
+    // inside one behaves differently from one that can -- and the counts move
+    // with what tree shaking kept, which is decided by what the module
+    // exports, which is decided by whether a library sits beside it.
+    if std::env::var("ASH_FIBER_REPORT").is_ok() {
+        eprintln!(
+            "[fiber] instrumented {} function(s), refused {} ({} holding an \
+             unsavable value), {} ladder(s), {} trap(s)",
+            dispatch.functions,
+            dispatch.refused,
+            dispatch.unsavable,
+            dispatch.ladders,
+            dispatch.traps,
+        );
+    }
+    Ok(module)
 }
 
 /// Say no to what has not been implemented, rather than producing a module

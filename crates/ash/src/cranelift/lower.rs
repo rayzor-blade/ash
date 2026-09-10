@@ -35,7 +35,8 @@ use cranelift_frontend::{FunctionBuilder, Variable};
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext};
 use super::{
-    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode, AbiClass,
+    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode, widen_of,
+    AbiClass, Widen,
 };
 use crate::hl_bindings as hl;
 use crate::llvm::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
@@ -431,7 +432,8 @@ impl Lowerer<'_, '_> {
             // signature, but coerce defensively rather than tripping
             // cranelift's type assertion on malformed bytecode.
             let want = self.reg_ty[i];
-            let v = self.coerce(p, want)?;
+            let widen = widen_of(self.ctx.type_kind(self.regs[i].0)?);
+            let v = self.coerce(p, want, widen)?;
             self.b.def_var(self.vars[i], v);
         }
         for i in nargs..self.vars.len() {
@@ -575,15 +577,24 @@ impl Lowerer<'_, '_> {
 
     fn set_reg(&mut self, r: Reg, v: Value) -> Result<()> {
         let want = self.reg_ty[r.0 as usize];
-        let v = self.coerce(v, want)?;
+        let v = self.coerce(v, want, Widen::Signed)?;
         self.b.def_var(self.vars[r.0 as usize], v);
         Ok(())
     }
 
-    /// Coerce a value to `want`. Only width/representation changes that are
-    /// well defined for HashLink values are accepted; anything else declines
-    /// the function.
-    fn coerce(&mut self, v: Value, want: Type) -> Result<Value> {
+    /// `r = v`, where `v` was produced by something of `kind` and widens the
+    /// way that kind does rather than the way `r` does.
+    fn set_reg_from(&mut self, r: Reg, v: Value, kind: hl::hl_type_kind) -> Result<()> {
+        let want = self.reg_ty[r.0 as usize];
+        let v = self.coerce(v, want, widen_of(kind))?;
+        self.b.def_var(self.vars[r.0 as usize], v);
+        Ok(())
+    }
+
+    /// Coerce a value to `want`, reading it as `widen` says when it has to
+    /// grow. Only width/representation changes that are well defined for
+    /// HashLink values are accepted; anything else declines the function.
+    fn coerce(&mut self, v: Value, want: Type, widen: Widen) -> Result<Value> {
         let have = self.b.func.dfg.value_type(v);
         if have == want {
             return Ok(v);
@@ -591,8 +602,9 @@ impl Lowerer<'_, '_> {
         if have.is_int() && want.is_int() {
             return Ok(if have.bits() > want.bits() {
                 self.b.ins().ireduce(want, v)
+            } else if widen == Widen::Unsigned {
+                self.b.ins().uextend(want, v)
             } else {
-                // HashLink integers are signed; widening preserves the value.
                 self.b.ins().sextend(want, v)
             });
         }
@@ -612,7 +624,7 @@ impl Lowerer<'_, '_> {
     /// `dst = obj.field`, loading exactly as many bytes as the field holds and
     /// then widening to whatever the destination register is.
     fn lower_field_load(&mut self, dst: Reg, obj: Reg, field_index: usize) -> Result<()> {
-        let (off, field_ty) = self.static_field_offset(obj, field_index)?;
+        let (off, field_ty, field_kind) = self.static_field_offset(obj, field_index)?;
         let base = self.reg_val(obj);
         let raw = self
             .b
@@ -622,7 +634,7 @@ impl Lowerer<'_, '_> {
         let v = if field_ty == want {
             raw
         } else {
-            self.coerce(raw, want)?
+            self.coerce(raw, want, widen_of(field_kind))?
         };
         self.set_reg(dst, v)
     }
@@ -630,13 +642,14 @@ impl Lowerer<'_, '_> {
     /// `obj.field = src`, narrowing to the field's width first so the store
     /// cannot spill into the neighbouring field.
     fn lower_field_store(&mut self, obj: Reg, field_index: usize, src: Reg) -> Result<()> {
-        let (off, field_ty) = self.static_field_offset(obj, field_index)?;
+        let (off, field_ty, _) = self.static_field_offset(obj, field_index)?;
         let base = self.reg_val(obj);
         let raw = self.reg_val(src);
+        let src_kind = self.reg_kind(src)?;
         let v = if self.b.func.dfg.value_type(raw) == field_ty {
             raw
         } else {
-            self.coerce(raw, field_ty)?
+            self.coerce(raw, field_ty, widen_of(src_kind))?
         };
         self.b.ins().store(MemFlagsData::trusted(), v, base, off);
         Ok(())
@@ -649,7 +662,11 @@ impl Lowerer<'_, '_> {
     /// lookup: this tier exists to be cheap, and the cases that need one
     /// (`HVIRTUAL`, `HDYNOBJ`, packed fields) are exactly the cases the LLVM
     /// tier is there to handle.
-    fn static_field_offset(&self, obj: Reg, field_index: usize) -> Result<(i32, Type)> {
+    fn static_field_offset(
+        &self,
+        obj: Reg,
+        field_index: usize,
+    ) -> Result<(i32, Type, hl::hl_type_kind)> {
         let type_index = self
             .regs
             .get(obj.0 as usize)
@@ -675,7 +692,7 @@ impl Lowerer<'_, '_> {
         let ty = abi_class(field_kind)
             .clif_type()
             .ok_or_else(|| anyhow!("field of kind {field_kind} has no machine type"))?;
-        Ok((offset, ty))
+        Ok((offset, ty, field_kind))
     }
 
     /// The declared HL type kind of a register.
@@ -732,7 +749,7 @@ impl Lowerer<'_, '_> {
         let v = if ty == want {
             raw
         } else {
-            self.coerce(raw, want)?
+            self.coerce(raw, want, widen_of(kind))?
         };
         self.set_reg(dst, v)
     }
@@ -753,7 +770,7 @@ impl Lowerer<'_, '_> {
         let v = if self.b.func.dfg.value_type(raw) == ty {
             raw
         } else {
-            self.coerce(raw, ty)?
+            self.coerce(raw, ty, widen_of(kind))?
         };
         self.b.ins().store(
             MemFlagsData::trusted(),
@@ -777,7 +794,7 @@ impl Lowerer<'_, '_> {
         let v = if want == types::I32 {
             raw
         } else {
-            self.coerce(raw, want)?
+            self.coerce(raw, want, Widen::Signed)?
         };
         self.set_reg(dst, v)
     }
@@ -850,7 +867,8 @@ impl Lowerer<'_, '_> {
 
             Opcode::Mov { dst, src } | Opcode::UnsafeCast { dst, src } => {
                 let v = self.reg_val(*src);
-                self.set_reg(*dst, v)?;
+                let kind = self.reg_kind(*src)?;
+                self.set_reg_from(*dst, v, kind)?;
             }
 
             Opcode::Int { dst, ptr } => {
@@ -1002,7 +1020,8 @@ impl Lowerer<'_, '_> {
                     // LLVM's fptosi is merely undefined.
                     self.b.ins().fcvt_to_sint_sat(types::I32, v)
                 } else {
-                    self.coerce(v, types::I32)?
+                    let widen = widen_of(self.reg_kind(*src)?);
+                    self.coerce(v, types::I32, widen)?
                 };
                 self.set_reg(*dst, r)?;
             }
@@ -1010,7 +1029,9 @@ impl Lowerer<'_, '_> {
                 let v = self.reg_val(*src);
                 let ty = self.b.func.dfg.value_type(v);
                 let r = if ty.is_float() {
-                    self.coerce(v, types::F64)?
+                    self.coerce(v, types::F64, Widen::Signed)?
+                } else if widen_of(self.reg_kind(*src)?) == Widen::Unsigned {
+                    self.b.ins().fcvt_from_uint(types::F64, v)
                 } else {
                     self.b.ins().fcvt_from_sint(types::F64, v)
                 };
@@ -1020,7 +1041,7 @@ impl Lowerer<'_, '_> {
                 let v = self.reg_val(*src);
                 let ty = self.b.func.dfg.value_type(v);
                 let r = if ty.is_float() {
-                    self.coerce(v, types::F64)?
+                    self.coerce(v, types::F64, Widen::Signed)?
                 } else {
                     self.b.ins().fcvt_from_uint(types::F64, v)
                 };
@@ -1050,10 +1071,11 @@ impl Lowerer<'_, '_> {
                         if have.bits() < want.bits() {
                             self.b.ins().uextend(want, v)
                         } else {
-                            self.coerce(v, want)?
+                            self.coerce(v, want, Widen::Unsigned)?
                         }
                     } else {
-                        self.coerce(v, want)?
+                        let widen = widen_of(self.reg_kind(*ret)?);
+                        self.coerce(v, want, widen)?
                     };
                     self.b.ins().return_(&[v]);
                 }
@@ -1147,7 +1169,8 @@ impl Lowerer<'_, '_> {
 
             Opcode::Switch { reg, offsets, .. } => {
                 let v = self.reg_val(*reg);
-                let idx = self.coerce(v, types::I32)?;
+                let widen = widen_of(self.reg_kind(*reg)?);
+                let idx = self.coerce(v, types::I32, widen)?;
                 // Out-of-range values fall through to the next opcode — NOT
                 // to the switch's `end` label (a bug the LLVM tier already
                 // paid for once).
@@ -1448,7 +1471,8 @@ impl Lowerer<'_, '_> {
             .iter()
             .map(|a| abi_class(bytecode.types[a.0].kind))
             .collect();
-        let ret_class = abi_class(bytecode.types[tf.ret.0].kind);
+        let ret_kind = bytecode.types[tf.ret.0].kind;
+        let ret_class = abi_class(ret_kind);
         let ret_ty = ret_class.clif_type();
 
         let mut arg_vals = Vec::with_capacity(args.len());
@@ -1457,7 +1481,8 @@ impl Lowerer<'_, '_> {
                 .clif_type()
                 .ok_or_else(|| anyhow!("void parameter"))?;
             let v = self.reg_val(*r);
-            arg_vals.push(self.coerce(v, want)?);
+            let widen = widen_of(self.reg_kind(*r)?);
+            arg_vals.push(self.coerce(v, want, widen)?);
         }
 
         // Primitives that are single instructions here rather than calls into
@@ -1498,7 +1523,7 @@ impl Lowerer<'_, '_> {
                 v
             };
             if self.class_of(dst) != AbiClass::Void {
-                self.set_reg(dst, v)?;
+                self.set_reg_from(dst, v, ret_kind)?;
             }
         }
         Ok(())

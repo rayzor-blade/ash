@@ -609,3 +609,18 @@ slow = false
 timeout_secs = 180
 expectation = "exact"
 normalize = "default"
+
+# HUI8 and HUI16 are unsigned. The Cranelift tier holds them at their narrow
+# width, so widening, division, remainder and the ordering comparisons all had
+# to be told there is no sign to read. The case checks its own answers and
+# exits non-zero on a mismatch; eval cannot be the oracle here because it
+# refuses the `hl` package outright.
+[[case]]
+name = "TestNarrowUnsigned"
+main = "TestNarrowUnsigned"
+hl = "test_narrow_unsigned.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false

@@ -115,6 +115,24 @@ impl AbiClass {
 /// Mirrors `JITModule::convert_hl_type_to_llvm_type` + `create_function_type`:
 /// scalars keep their declared width, everything heap-allocated or boxed
 /// becomes a machine pointer.
+/// How a value grows when it is widened. HashLink's HUI8 and HUI16 are
+/// unsigned -- it widens them with a zero-extending load -- and every other
+/// integer kind is signed, so only these two zero-extend.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Widen {
+    Signed,
+    Unsigned,
+}
+
+/// The extension a value of `kind` takes when it widens.
+pub fn widen_of(kind: hl::hl_type_kind) -> Widen {
+    if kind == hl::hl_type_kind_HUI8 || kind == hl::hl_type_kind_HUI16 {
+        Widen::Unsigned
+    } else {
+        Widen::Signed
+    }
+}
+
 pub fn abi_class(kind: hl::hl_type_kind) -> AbiClass {
     match kind {
         hl::hl_type_kind_HVOID => AbiClass::Void,

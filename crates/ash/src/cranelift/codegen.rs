@@ -46,7 +46,7 @@ use air::v2::ir::{
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext, DynShape};
 use super::lower::LoweredFunction;
-use super::{abi_class, argument_abi_class, entry_return_class, AbiClass};
+use super::{abi_class, argument_abi_class, entry_return_class, widen_of, AbiClass, Widen};
 use crate::hl_bindings as hl;
 use crate::llvm::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 
@@ -1054,7 +1054,7 @@ impl AirCodegen<'_, '_> {
             .b
             .ins()
             .load(types::I64, MemFlagsData::trusted(), buf, off);
-        self.coerce(wide, ty)
+        self.coerce(wide, ty, Widen::Signed)
     }
 
     /// Blocks reachable from the entry, in reverse postorder.
@@ -1115,7 +1115,8 @@ impl AirCodegen<'_, '_> {
             self.cells.push(slot);
             let init = if (cell.reg as usize) < self.nargs {
                 let p = params[cell.reg as usize];
-                self.coerce(p, ty)?
+                let widen = widen_of(self.ctx.type_kind(cell.ty.0 as usize)?);
+                self.coerce(p, ty, widen)?
             } else if ty.is_float() {
                 self.b.ins().f64const(0.0)
             } else {
@@ -1205,19 +1206,36 @@ impl AirCodegen<'_, '_> {
     /// Define `dst`, coercing to its declared machine type. Used HVOID
     /// bookkeeping destinations receive their canonical zero word.
     fn def(&mut self, dst: ValueId, v: Value) -> Result<()> {
+        self.def_widened(dst, v, Widen::Signed)
+    }
+
+    /// `dst = v`, where `v` came from `src` and so widens the way `src` does
+    /// rather than the way `dst` does.
+    fn def_from(&mut self, dst: ValueId, src: ValueId, v: Value) -> Result<()> {
+        let widen = self.widen_of_value(src)?;
+        self.def_widened(dst, v, widen)
+    }
+
+    fn def_widened(&mut self, dst: ValueId, v: Value, widen: Widen) -> Result<()> {
         if self.is_void(dst) {
             self.define_void_word_if_used(dst);
             return Ok(());
         }
         let want = self.value_clif_ty(dst)?;
-        let v = self.coerce(v, want)?;
+        let v = self.coerce(v, want, widen)?;
         self.vals[dst.idx()] = Some(v);
         Ok(())
     }
 
+    /// The extension an AIR value takes when it widens, from its HL kind.
+    fn widen_of_value(&self, v: ValueId) -> Result<Widen> {
+        Ok(widen_of(self.ctx.type_kind(self.f.value_ty(v).0 as usize)?))
+    }
+
     /// Width / representation change, restricted to the ones that are well
-    /// defined for HashLink values. Anything else declines the function.
-    fn coerce(&mut self, v: Value, want: Type) -> Result<Value> {
+    /// defined for HashLink values, reading `v` as `widen` says when it has to
+    /// grow. Anything else declines the function.
+    fn coerce(&mut self, v: Value, want: Type, widen: Widen) -> Result<Value> {
         let have = self.b.func.dfg.value_type(v);
         if have == want {
             return Ok(v);
@@ -1225,6 +1243,8 @@ impl AirCodegen<'_, '_> {
         if have.is_int() && want.is_int() {
             return Ok(if have.bits() > want.bits() {
                 self.b.ins().ireduce(want, v)
+            } else if widen == Widen::Unsigned {
+                self.b.ins().uextend(want, v)
             } else {
                 self.b.ins().sextend(want, v)
             });
@@ -1611,10 +1631,11 @@ impl AirCodegen<'_, '_> {
                 for (j, a) in args.iter().enumerate() {
                     let (off, pty) = self.enum_param(ty, *construct, j)?;
                     let raw = self.get(*a)?;
+                    let widen = self.widen_of_value(*a)?;
                     // Narrowed to the parameter's own width for the reason
                     // `FieldSet` narrows: the next parameter is laid out
                     // immediately after this one.
-                    let v = self.coerce(raw, pty)?;
+                    let v = self.coerce(raw, pty, widen)?;
                     self.b.ins().store(MemFlagsData::trusted(), v, e, off);
                 }
                 self.def(*dst, e)?;
@@ -1648,7 +1669,8 @@ impl AirCodegen<'_, '_> {
                 let (off, pty) = self.enum_param(self.f.value_ty(*value), *construct, *field)?;
                 let e = self.get(*value)?;
                 let raw = self.get(*src)?;
-                let v = self.coerce(raw, pty)?;
+                let widen = self.widen_of_value(*src)?;
+                let v = self.coerce(raw, pty, widen)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, e, off);
             }
 
@@ -1675,7 +1697,8 @@ impl AirCodegen<'_, '_> {
                 let slot = self.cell_slot(*cell)?;
                 let ty = self.cell_clif_ty(self.f.cells[cell.idx()].ty)?;
                 let raw = self.get(*src)?;
-                let v = self.coerce(raw, ty)?;
+                let widen = self.widen_of_value(*src)?;
+                let v = self.coerce(raw, ty, widen)?;
                 self.b.ins().stack_store(types::I64, v, slot, 0);
             }
             Instr::CellIncr { cell } => self.emit_cell_step(*cell, 1)?,
@@ -1712,7 +1735,7 @@ impl AirCodegen<'_, '_> {
             // the only common cases where a factor of eight exposed it.
             Instr::RefOffset { dst, base, offset } => {
                 let raw = self.get(*base)?;
-                let p = self.coerce(raw, types::I64)?;
+                let p = self.coerce(raw, types::I64, Widen::Signed)?;
                 let index = self.index_as_addr(*offset)?;
                 let dst_ty = self.f.value_ty(*dst).0 as usize;
                 let href =
@@ -1741,7 +1764,7 @@ impl AirCodegen<'_, '_> {
             // It does not dereference offset 8 (the former LLVM behavior),
             // which is part of the header and corrupted pointer atomics.
             Instr::RefData { dst, src } => {
-                let base = self.coerce(self.get(*src)?, types::I64)?;
+                let base = self.coerce(self.get(*src)?, types::I64, Widen::Signed)?;
                 let data = self
                     .b
                     .ins()
@@ -1885,7 +1908,7 @@ impl AirCodegen<'_, '_> {
                 // declared narrow width. Block parameters require exact CLIF
                 // types, so narrow before joining the two paths.
                 let fallback = self.emit_dyn_get_value(dst, wrapped, hash)?;
-                let fallback = self.coerce(fallback, result_ty)?;
+                let fallback = self.coerce(fallback, result_ty, Widen::Signed)?;
                 self.b.ins().jump(join_bb, &[BlockArg::Value(fallback)]);
 
                 self.b.switch_to_block(join_bb);
@@ -1909,9 +1932,10 @@ impl AirCodegen<'_, '_> {
                 let (off, fty) = self.field_offset(obj_ty, field)?;
                 let base = self.get(obj)?;
                 let raw = self.get(src)?;
+                let widen = self.widen_of_value(src)?;
                 // Narrow to the field's own width first, so the store cannot
                 // spill into whatever is laid out next to it.
-                let v = self.coerce(raw, fty)?;
+                let v = self.coerce(raw, fty, widen)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, base, off);
                 Ok(())
             }
@@ -2146,7 +2170,7 @@ impl AirCodegen<'_, '_> {
                 let v = if want.bits() > ty.bits() {
                     self.b.ins().uextend(want, raw)
                 } else {
-                    self.coerce(raw, want)?
+                    self.coerce(raw, want, Widen::Signed)?
                 };
                 self.def(dst, v)
             }
@@ -2177,7 +2201,7 @@ impl AirCodegen<'_, '_> {
                 let stride = crate::layout::array_elem_size(hl_kind) as i64;
                 let byte_off = self.b.ins().imul_imm(idx, stride);
                 let addr = self.b.ins().iadd(vbase, byte_off);
-                let v = self.coerce(raw, ty)?;
+                let v = self.coerce(raw, ty, widen_of(hl_kind))?;
                 self.b.ins().store(
                     MemFlagsData::trusted(),
                     v,
@@ -2193,7 +2217,8 @@ impl AirCodegen<'_, '_> {
                     types::I16
                 };
                 let addr = self.b.ins().iadd(vbase, idx);
-                let v = self.coerce(raw, ty)?;
+                let widen = self.widen_of_value(src)?;
+                let v = self.coerce(raw, ty, widen)?;
                 self.b.ins().store(MemFlagsData::trusted(), v, addr, 0);
                 Ok(())
             }
@@ -2273,7 +2298,7 @@ impl AirCodegen<'_, '_> {
         let src_val = if have.is_int() && want.is_int() && have.bits() < want.bits() {
             self.b.ins().uextend(want, raw)
         } else {
-            self.coerce(raw, want)?
+            self.coerce(raw, want, Widen::Signed)?
         };
 
         let mut args = vec![obj_val, hash];
@@ -2318,7 +2343,7 @@ impl AirCodegen<'_, '_> {
         let ty = self.f.value_ty(value);
         let kind = self.ctx.type_kind(ty.0 as usize)?;
         if is_dynamically_self_describing(kind) {
-            return self.coerce(raw, types::I64);
+            return self.coerce(raw, types::I64, Widen::Signed);
         }
 
         let slot =
@@ -2410,19 +2435,22 @@ impl AirCodegen<'_, '_> {
                 if t.is_float() {
                     self.b.ins().fcvt_to_sint_sat(types::I32, v)
                 } else {
-                    self.coerce(v, types::I32)?
+                    let widen = self.widen_of_value(src)?;
+                    self.coerce(v, types::I32, widen)?
                 }
             }
             CastKind::ToSFloat => {
                 if t.is_float() {
-                    self.coerce(v, types::F64)?
+                    self.coerce(v, types::F64, Widen::Signed)?
+                } else if self.widen_of_value(src)? == Widen::Unsigned {
+                    self.b.ins().fcvt_from_uint(types::F64, v)
                 } else {
                     self.b.ins().fcvt_from_sint(types::F64, v)
                 }
             }
             CastKind::ToUFloat => {
                 if t.is_float() {
-                    self.coerce(v, types::F64)?
+                    self.coerce(v, types::F64, Widen::Signed)?
                 } else {
                     self.b.ins().fcvt_from_uint(types::F64, v)
                 }
@@ -2509,7 +2537,7 @@ impl AirCodegen<'_, '_> {
             CastKind::ToVirtual => {
                 let dp = self.ctx.type_ptr(self.f.value_ty(dst).0 as usize)?;
                 let vt = self.b.ins().iconst(types::I64, dp as i64);
-                let obj = self.coerce(v, types::I64)?;
+                let obj = self.coerce(v, types::I64, Widen::Signed)?;
                 let callee = self
                     .b
                     .ins()
@@ -2519,7 +2547,7 @@ impl AirCodegen<'_, '_> {
                 self.b.inst_results(call)[0]
             }
         };
-        self.def(dst, r)
+        self.def_from(dst, src, r)
     }
 
     /// Read word 0 of `p`, answering `fallback` when `p` is null.
@@ -2584,6 +2612,20 @@ impl AirCodegen<'_, '_> {
         if ta != tb {
             bail!("mismatched operand types {ta}/{tb}");
         }
+        // HUI8 and HUI16 operands keep their narrow width here, and they are
+        // unsigned: read at that width, the signed forms answer for a
+        // different number. The other tiers hold these in an i32 that is
+        // already zero-extended, which is why only this one has to say so.
+        let op = if self.widen_of_value(a)? == Widen::Unsigned {
+            match op {
+                BinOp::SDiv => BinOp::UDiv,
+                BinOp::SMod => BinOp::UMod,
+                BinOp::SShr => BinOp::UShr,
+                other => other,
+            }
+        } else {
+            op
+        };
         let r = if ta.lane_type().is_float() {
             match op {
                 BinOp::Add => self.b.ins().fadd(va, vb),
@@ -2627,7 +2669,7 @@ impl AirCodegen<'_, '_> {
                 }
             }
         };
-        self.def(dst, r)
+        self.def_from(dst, a, r)
     }
 
     /// The literal behind `v` when its definition is `Instr::Int`. Divisions
@@ -2940,7 +2982,7 @@ impl AirCodegen<'_, '_> {
         let mut params = vec![types::I64, types::I64];
         if let Some(v) = value {
             let raw = self.get(v)?;
-            args.push(self.coerce(raw, types::I64)?);
+            args.push(self.coerce(raw, types::I64, Widen::Signed)?);
             params.push(types::I64);
         }
         let sig = self.helper_sigref(&params, Some(types::I64));
@@ -2979,7 +3021,7 @@ impl AirCodegen<'_, '_> {
             })?
         };
 
-        let receiver = self.coerce(self.get(obj)?, types::I64)?;
+        let receiver = self.coerce(self.get(obj)?, types::I64, Widen::Signed)?;
         let runtime_type = self
             .b
             .ins()
@@ -3030,7 +3072,7 @@ impl AirCodegen<'_, '_> {
             return self.emit_dynamic_call_closure(dst, fun, args);
         }
 
-        let closure = self.coerce(self.get(fun)?, types::I64)?;
+        let closure = self.coerce(self.get(fun)?, types::I64, Widen::Signed)?;
         let runtime_type = self
             .b
             .ins()
@@ -3129,7 +3171,8 @@ impl AirCodegen<'_, '_> {
                 .clif_type()
                 .ok_or_else(|| anyhow!("void argument to closure call"))?;
             let raw = self.get(*a)?;
-            arg_vals.push(self.coerce(raw, want)?);
+            let widen = self.widen_of_value(*a)?;
+            arg_vals.push(self.coerce(raw, want, widen)?);
             classes.push(c);
         }
         let ret_class = if self.is_void(dst) {
@@ -3183,7 +3226,7 @@ impl AirCodegen<'_, '_> {
         fun: ValueId,
         args: &[ValueId],
     ) -> Result<()> {
-        let closure = self.coerce(self.get(fun)?, types::I64)?;
+        let closure = self.coerce(self.get(fun)?, types::I64, Widen::Signed)?;
         let value = self.emit_dynamic_call_closure_value(dst, closure, args)?;
         if let Some(value) = value {
             self.def(dst, value)
@@ -3228,7 +3271,9 @@ impl AirCodegen<'_, '_> {
         }
 
         let value = self.unbox_dynamic_result(dst, boxed)?;
-        Ok(Some(self.coerce(value, self.value_clif_ty(dst)?)?))
+        let want = self.value_clif_ty(dst)?;
+        let widen = self.widen_of_value(dst)?;
+        Ok(Some(self.coerce(value, want, widen)?))
     }
 
     fn emit_call(&mut self, dst: ValueId, target: usize, args: &[ValueId]) -> Result<()> {
@@ -3273,7 +3318,8 @@ impl AirCodegen<'_, '_> {
                 .clif_type()
                 .ok_or_else(|| anyhow!("void parameter"))?;
             let raw = self.get(*v)?;
-            arg_vals.push(self.coerce(raw, want)?);
+            let widen = self.widen_of_value(*v)?;
+            arg_vals.push(self.coerce(raw, want, widen)?);
         }
 
         // Primitives that are single instructions rather than calls into
@@ -3615,7 +3661,8 @@ impl AirCodegen<'_, '_> {
 
         let value = self.unbox_dynamic_result(dst, boxed)?;
         let want = self.value_clif_ty(dst)?;
-        let value = self.coerce(value, want)?;
+        let widen = self.widen_of_value(dst)?;
+        let value = self.coerce(value, want, widen)?;
         self.def(dst, value)
     }
 
@@ -3687,7 +3734,8 @@ impl AirCodegen<'_, '_> {
                 .clif_type()
                 .ok_or_else(|| anyhow!("void parameter"))?;
             let raw = self.get(*v)?;
-            arg_vals.push(self.coerce(raw, want)?);
+            let widen = self.widen_of_value(*v)?;
+            arg_vals.push(self.coerce(raw, want, widen)?);
         }
 
         let obj = self.get(recv)?;
@@ -3749,7 +3797,8 @@ impl AirCodegen<'_, '_> {
                 })?;
             let want = self.value_clif_ty(dst)?;
             let raw = self.get(src)?;
-            let v = self.coerce(raw, want)?;
+            let widen = self.widen_of_value(src)?;
+            let v = self.coerce(raw, want, widen)?;
             out.push(BlockArg::Value(v));
         }
         Ok(out)
@@ -3774,7 +3823,7 @@ impl AirCodegen<'_, '_> {
             Terminator::Throw { exc } | Terminator::Rethrow { exc } => {
                 let is_rethrow = matches!(term, Terminator::Rethrow { .. });
                 let v = self.get(*exc)?;
-                let v = self.coerce(v, types::I64)?;
+                let v = self.coerce(v, types::I64, Widen::Signed)?;
                 let callee = self
                     .b
                     .ins()
@@ -3903,15 +3952,16 @@ impl AirCodegen<'_, '_> {
         // Sub-word results are zero-extended, not sign-extended: the
         // interpreter reads the raw word and tests `!= 0` (HBOOL) or
         // truncates (HUI8/HUI16).
+        let widen = self.widen_of_value(value)?;
         let v = if matches!(src_class, AbiClass::Bool | AbiClass::I8 | AbiClass::I16) {
             let have = self.b.func.dfg.value_type(v);
             if have.bits() < want.bits() {
                 self.b.ins().uextend(want, v)
             } else {
-                self.coerce(v, want)?
+                self.coerce(v, want, Widen::Unsigned)?
             }
         } else {
-            self.coerce(v, want)?
+            self.coerce(v, want, widen)?
         };
         self.b.ins().return_(&[v]);
         Ok(())
@@ -3925,7 +3975,8 @@ impl AirCodegen<'_, '_> {
         default: BlockId,
     ) -> Result<()> {
         let raw = self.get(value)?;
-        let idx = self.coerce(raw, types::I32)?;
+        let widen = self.widen_of_value(value)?;
+        let idx = self.coerce(raw, types::I32, widen)?;
 
         // Jump-table entries carry no arguments, so any target with phis gets
         // a trampoline that jumps on with them. The arguments are computed
@@ -4026,6 +4077,20 @@ impl AirCodegen<'_, '_> {
             CondKind::Eq => (IntCC::Equal, FloatCC::Equal),
             CondKind::NotEq => (IntCC::NotEqual, FloatCC::NotEqual),
             _ => unreachable!("unary conditions returned above"),
+        };
+
+        // Narrow unsigned operands keep their width here, so the signed
+        // predicates would order 0x8000..0xFFFF below zero.
+        let icc = if self.widen_of_value(a)? == Widen::Unsigned {
+            match icc {
+                IntCC::SignedLessThan => IntCC::UnsignedLessThan,
+                IntCC::SignedLessThanOrEqual => IntCC::UnsignedLessThanOrEqual,
+                IntCC::SignedGreaterThan => IntCC::UnsignedGreaterThan,
+                IntCC::SignedGreaterThanOrEqual => IntCC::UnsignedGreaterThanOrEqual,
+                other => other,
+            }
+        } else {
+            icc
         };
 
         let cond = if ta.is_float() {

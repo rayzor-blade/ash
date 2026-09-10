@@ -661,9 +661,18 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     // surfaced as a bare `unreachable` trap with no message, which is how the
     // conformance suite ended rather than reporting a failure and continuing.
     let Some(sig) = (*(*cl).t).__bindgen_anon_1.fun.as_ref() else {
-        hlp_error(str_to_uchar_ptr(
-            "Can't call closure whose type is not a function",
-        ));
+        // Say WHICH of the three it is. A kind outside the enum means the
+        // type pointer is not a type at all; a valid kind that is not HFUN
+        // means a non-closure reached a closure slot; and the closure's own
+        // address says whether it is even plausibly a heap object.
+        hlp_error(str_to_uchar_ptr(&format!(
+            "Can't call closure whose type is not a function              (closure={:#x} type={:#x} kind={} fun_ptr={:#x} hasValue={})",
+            cl as usize,
+            (*cl).t as usize,
+            (*(*cl).t).kind,
+            (*cl).fun as usize,
+            (*cl).hasValue,
+        )));
         unreachable!("hlp_error does not return")
     };
     if (*args).size < sig.nargs {

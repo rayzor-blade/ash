@@ -6171,6 +6171,32 @@ fn widening_emits_vector_instructions_that_verify() {
 }
 
 #[test]
+/// A byte element must not be widened at VF 4: `i8x4` is 32 bits, and a
+/// backend names the widths its ISA has -- on aarch64 the 128-bit set. The
+/// lane count has to come from the element width (rayzor's Cranelift backend
+/// maps I8 to 16 lanes, I16 to 8, I32 to 4, I64 to 2, every one 128 bits),
+/// which ash does not do yet, so the only sound answer for now is to refuse.
+#[test]
+fn an_element_that_does_not_fill_a_machine_vector_is_refused() {
+    use super::passes::widen::{lanes_fit_for_test, Decline};
+    // 4-byte element, VF 4: exactly 128 bits.
+    assert!(lanes_fit_for_test(TypeRef(3), Some(4)).is_ok());
+    // 1- and 2-byte elements underfill it.
+    assert!(matches!(
+        lanes_fit_for_test(TypeRef(3), Some(1)),
+        Err(Decline::LanesBelowMachineVector(_))
+    ));
+    assert!(matches!(
+        lanes_fit_for_test(TypeRef(3), Some(2)),
+        Err(Decline::LanesBelowMachineVector(_))
+    ));
+    // 8 bytes overflows it, as before.
+    assert!(matches!(
+        lanes_fit_for_test(TypeRef(3), Some(8)),
+        Err(Decline::LaneTooWide(_))
+    ));
+}
+
 /// An induction closed by `Incr` must be refused, not widened.
 ///
 /// `retime_induction` rescales the step by rewriting the constant operand of

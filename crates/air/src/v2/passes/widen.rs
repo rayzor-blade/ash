@@ -72,6 +72,11 @@ pub enum Decline {
     /// A scalar operand that changes every iteration and would have to be
     /// broadcast across the lanes, which computes a different thing.
     VaryingBroadcast(ValueId),
+    /// An element so narrow that VF of them do not fill a machine vector. A
+    /// backend lowers the vector widths its ISA names; a 32- or 64-bit vector
+    /// is not one of them on aarch64, and reaches the backend as an ISLE
+    /// "no rule matched" or a splat whose destination is not a vector.
+    LanesBelowMachineVector(TypeRef),
     /// The induction closes its cycle with a form `retime_induction` cannot
     /// rescale. The analysis accepts `Incr`/`Decr` as a stride of one, but the
     /// transform only rewrites the constant of a `BinOp::Add`, so anything
@@ -505,10 +510,27 @@ const MACHINE_VECTOR_BYTES: u32 = 16;
 
 /// Refuse an element that VF lanes of would overflow a machine vector, or
 /// whose width nobody can state.
+/// `lanes_fit` under a name the tests can reach.
+#[cfg(test)]
+pub fn lanes_fit_for_test(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
+    lanes_fit(ty, size)
+}
+
 fn lanes_fit(ty: TypeRef, size: Option<u32>) -> Result<(), Decline> {
     match size {
-        Some(bytes) if u64::from(bytes) * (VF as u64) <= u64::from(MACHINE_VECTOR_BYTES) => Ok(()),
-        Some(_) => Err(Decline::LaneTooWide(ty)),
+        // Exactly one machine vector, not merely no more than one. A backend
+        // lowers the widths its ISA names and nothing else: on aarch64 that is
+        // the 128-bit set, so `i8x4` (4 bytes) and `i16x4` (8) are as
+        // unlowerable as `i64x4` (32) is oversized. Cranelift answers a
+        // 32-bit vector with "no rule matched for term vector_size" from
+        // inside ISLE, and the LLVM own-module path reports the splat's
+        // destination as not a vector. At VF 4 this admits 4-byte elements
+        // alone; a per-width VF would admit the rest and is its own change.
+        Some(bytes) if u64::from(bytes) * (VF as u64) == u64::from(MACHINE_VECTOR_BYTES) => Ok(()),
+        Some(bytes) if u64::from(bytes) * (VF as u64) > u64::from(MACHINE_VECTOR_BYTES) => {
+            Err(Decline::LaneTooWide(ty))
+        }
+        Some(_) => Err(Decline::LanesBelowMachineVector(ty)),
         None => Err(Decline::UnknownElementSize(ty)),
     }
 }

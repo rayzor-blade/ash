@@ -519,9 +519,24 @@
         if (data.hl2_version) bits.push('hl2-ir ' + data.hl2_version);
         if (data.java_version) bits.push(data.java_version);
         if (data.commit) bits.push('ash@' + data.commit);
-        if (data.generated_iso) bits.push(data.generated_iso.slice(0, 10));
+        // The date and run are the SWEEP's, carried in the file itself. A
+        // republish for fresh conformance data reuses the newest sweep's
+        // numbers verbatim, so a number that did not change between two
+        // deploys is one measurement shown twice, and this line says so:
+        // same sweep, same date.
+        if (data.generated_iso) bits.push('measured ' + data.generated_iso.slice(0, 10));
         bits.push(data.source === 'ci' ? 'GitHub Actions' : 'local run');
         prov.textContent = bits.join(' · ');
+        if (data.run_id) {
+          prov.appendChild(document.createTextNode(' · sweep '));
+          var run = document.createElement(data.run_url ? 'a' : 'span');
+          run.textContent = '#' + data.run_id;
+          if (data.run_url) {
+            run.href = data.run_url;
+            run.style.color = 'inherit';
+          }
+          prov.appendChild(run);
+        }
       }
 
       fetch('bench/results.json', { cache: 'no-cache' })

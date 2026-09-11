@@ -510,16 +510,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # workflow_run republishes do not build or upload benchmark-results,
-          # so selecting the newest success without an event filter can pick
-          # a deploy-only run whose artifact cannot exist.
-          RID=$(gh run list --workflow=benchmarks --event=push --status=success \
-                  --limit 1 --json databaseId --jq '.[0].databaseId')
-          if [ -z "$RID" ]; then
+          # so the newest success is only a sweep once those are excluded.
+          # Sweeps arrive by schedule or by hand; filtering on one event
+          # name would pin the reuse to whichever trigger last ran and keep
+          # republishing that sweep after newer ones had superseded it.
+          RID=$(gh run list --workflow=benchmarks --status=success --limit 100 \
+                  --json databaseId,event \
+                  --jq '[.[] | select(.event != "workflow_run")][0].databaseId')
+          if [ -z "$RID" ] || [ "$RID" = "null" ]; then
             echo "::error::no successful benchmarks run to reuse"; exit 1
           fi
           mkdir -p site-data
           gh run download "$RID" -n benchmark-results -D site-data
-          echo "benchmark numbers reused from run $RID"
+          echo "benchmark numbers reused from sweep $RID, measured $(
+            python3 -c 'import json;d=json.load(open("site-data/results.json"));print(d.get("generated_iso"), "at", d.get("commit"))')"
 
       # Conformance is produced by a separate workflow on its own cadence, so
       # it is fetched rather than rebuilt here — one Pages deployment, two

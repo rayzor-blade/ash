@@ -8,6 +8,11 @@ files come from `hl_bench.py` and carry both HashLink lanes (JIT and HL/C).
 Output is one compact `results.json`:
 
   { schema_version, generated_iso, source, commit, branch, hl_version, java_version,
+    run_id, run_url,
+      -- the sweep that measured every row. A republish for fresh conformance
+      -- data carries this file forward verbatim, so these, and generated_iso,
+      -- stay the sweep's own: the page shows them so the same numbers under a
+      -- later deploy read as the same measurement, not a reproduced one.
     system: {os, arch, cpu_model, cpu_count, runners, runner_count},
       -- cpu_model is null unless every leg ran on the same one; `runners`
       -- lists the distinct models the sweep actually used. Per-benchmark
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -183,11 +189,25 @@ def hl_row(doc: dict, bench: str, engine: str) -> dict | None:
     return row
 
 
+def github_run_url() -> str | None:
+    """The Actions page of the run this is executing in, or None outside one."""
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not run_id or not repo:
+        return None
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    return f"{server}/{repo}/actions/runs/{run_id}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--parts", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--source", default="ci")
+    # Defaults come from the GitHub Actions environment of the sweep itself;
+    # a local merge has no run to name and leaves both null.
+    ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID"))
+    ap.add_argument("--run-url", default=github_run_url())
     args = ap.parse_args()
 
     ash_docs: list[dict] = []
@@ -313,6 +333,8 @@ def main() -> int:
         "schema_version": 1,
         "generated_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": args.source,
+        "run_id": args.run_id,
+        "run_url": args.run_url,
         "commit": (git.get("commit") or "")[:12],
         "branch": git.get("branch"),
         "hl_version": hl_version,

@@ -35,6 +35,18 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::rc::Rc;
 
+/// What a constant in the blob is aligned to. A boxed value is a `vdynamic`,
+/// whose i64/f64 union makes the type 8-aligned everywhere, including where a
+/// pointer is only 4; reading one at a pointer-aligned address is a misaligned
+/// dereference, which a debug build aborts on and a release build silently
+/// tolerates.
+const CONSTANT_ALIGN: u32 = 8;
+
+/// `n` rounded up to a multiple of `to`.
+fn round_up(n: u32, to: u32) -> u32 {
+    n.div_ceil(to) * to
+}
+
 use super::module::JITModule;
 use crate::hl::*;
 use crate::types::TypeRef;
@@ -958,11 +970,24 @@ impl<'ctx> JITModule<'ctx> {
                 cursor = off + width;
             }
             if parts.is_empty() && !c.fields.is_empty() {
-                member_types.push(i8_type.array_type(c.layout.size.max(0) as u32).into());
+                let size = round_up(c.layout.size.max(0) as u32, CONSTANT_ALIGN);
+                member_types.push(i8_type.array_type(size).into());
                 continue;
             }
             if c.layout.size > cursor {
                 parts.push(i8_type.array_type((c.layout.size - cursor) as u32).into());
+            }
+            // Every member starts where the previous one ended, so each is
+            // padded to the alignment a boxed value needs and the blob is
+            // aligned the same way: a `vdynamic` holds an i64/f64 union and
+            // is read through a pointer to the whole type, which on wasm32
+            // is a stronger requirement than pointer alignment (8 against 4).
+            // Padding stays INSIDE the member so its index in the blob, which
+            // is how it is addressed, does not move.
+            let end = c.layout.size.max(cursor) as u32;
+            let pad = round_up(end, CONSTANT_ALIGN) - end;
+            if pad > 0 {
+                parts.push(i8_type.array_type(pad).into());
             }
             member_types.push(self.context.struct_type(&parts, true).into());
         }
@@ -970,7 +995,7 @@ impl<'ctx> JITModule<'ctx> {
         let blob_ty = self.context.struct_type(&member_types, true);
         let blob = self.module.add_global(blob_ty, None, "ash_constants");
         blob.set_linkage(Linkage::Internal);
-        blob.set_alignment(self.target_abi.pointer_align());
+        blob.set_alignment(self.target_abi.pointer_align().max(CONSTANT_ALIGN));
 
         // Pass 2: the values.
         let mut member_values: Vec<BasicValueEnum<'ctx>> = Vec::new();
@@ -999,6 +1024,9 @@ impl<'ctx> JITModule<'ctx> {
                 }
                 let fk = bytecode.types[obj_data.fields[j].type_.0].kind;
                 let width = match fk {
+                    // Pointer width, as pass 1 measured it: the two passes
+                    // walk the same fields and have to land on the same
+                    // offsets, and a pointer is not 8 bytes on every target.
                     hl_type_kind_HBYTES => {
                         let v = self
                             .string_globals
@@ -1007,7 +1035,7 @@ impl<'ctx> JITModule<'ctx> {
                             .map(|g| g.as_pointer_value())
                             .unwrap_or_else(|| ptr_type.const_null());
                         vals.push(v.into());
-                        8
+                        self.target_abi.pointer_bytes() as i32
                     }
                     hl_type_kind_HTYPE => {
                         let v = type_globals
@@ -1015,7 +1043,7 @@ impl<'ctx> JITModule<'ctx> {
                             .copied()
                             .unwrap_or_else(|| ptr_type.const_null());
                         vals.push(v.into());
-                        8
+                        self.target_abi.pointer_bytes() as i32
                     }
                     _ => {
                         let value = bytecode
@@ -1036,6 +1064,11 @@ impl<'ctx> JITModule<'ctx> {
                         .const_zero()
                         .into(),
                 );
+            }
+            let end = c.layout.size.max(cursor) as u32;
+            let pad = round_up(end, CONSTANT_ALIGN) - end;
+            if pad > 0 {
+                vals.push(i8_type.array_type(pad).const_zero().into());
             }
             member_values.push(member_ty.const_named_struct(&vals).into());
         }

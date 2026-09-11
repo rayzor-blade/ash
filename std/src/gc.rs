@@ -163,6 +163,13 @@ const WORD: usize = std::mem::size_of::<usize>();
 const fn word_align_up(a: usize) -> usize {
     (a + WORD - 1) & !(WORD - 1)
 }
+
+/// Normalize after widening: `top` may be a byte-sized AOT stack anchor.
+/// Aligning only `saved_sp` lets `top - window` undo the alignment, making
+/// every word read miss the real pointer slots on the suspended main stack.
+fn stack_scan_start(saved_sp: usize, top: usize, window: usize) -> usize {
+    word_align_up(saved_sp.min(top.saturating_sub(window)))
+}
 const LINES_PER_BLOCK: usize = BLOCK_SIZE / LINE_SIZE;
 /// 64 line-claim bits to a word.
 const MARK_WORDS: usize = LINES_PER_BLOCK / 64;
@@ -3716,7 +3723,6 @@ impl ImmixAllocator {
                 if Some(f.id) == running_fiber.map(|(id, _)| id) || f.saved_sp == 0 {
                     continue;
                 }
-                let mut start = word_align_up(f.saved_sp);
                 let top = if f.size > 0 {
                     f.base + f.size
                 } else {
@@ -3744,9 +3750,17 @@ impl ImmixAllocator {
                 // worker's is a block in the middle of it -- taking every
                 // address below a worker's stack top would be the whole heap,
                 // per collection.
-                if f.size == 0 && cfg!(target_family = "wasm") {
-                    start = start.min(top.saturating_sub(WASM_STACK_WINDOW));
-                }
+                // wasm only, as before: a native fiber descriptor with no
+                // size is a real main stack whose `saved_sp` is where the
+                // scan should start. Widening it there reads up to a
+                // megabyte of stale stack below the probe, which retains
+                // whatever it happens to look like.
+                let window = if f.size == 0 && cfg!(target_family = "wasm") {
+                    WASM_STACK_WINDOW
+                } else {
+                    0
+                };
+                let start = stack_scan_start(f.saved_sp, top, window);
                 if start < top {
                     all_newly_marked.extend(self.conservative_scan_range(start, top));
                 }
@@ -5141,6 +5155,55 @@ pub(crate) unsafe fn gc_swap_exc_state(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn widened_stack_scan_start_preserves_word_alignment() {
+        // The wasm AOT main's i8 anchor and the observed suspended SP.
+        assert_eq!(stack_scan_start(0x7fddd4, 0x7fffff, 1024 * 1024), 0x700000);
+        // A probe below the window still wins; a zero window is the native
+        // and ordinary fiber-stack case. Widening must not underflow.
+        assert_eq!(
+            stack_scan_start(0x600001, 0x7fffff, 1024 * 1024),
+            word_align_up(0x600001)
+        );
+        assert_eq!(
+            stack_scan_start(0x7fddd4, 0x7fffff, 0),
+            word_align_up(0x7fddd4)
+        );
+        assert_eq!(stack_scan_start(128, 255, 1024 * 1024), 0);
+    }
+
+    #[test]
+    fn widened_main_stack_scan_traces_callback_chain() {
+        // Exercise every possible byte alignment of the stack-top anchor,
+        // using the actual collector and a root below the saved probe.
+        for residue in 0..WORD {
+            let mut gc = ImmixAllocator::with_heap_size(BLOCK_SIZE * 4);
+            let owner = gc.allocate(16).unwrap();
+            let callback = gc.allocate(16).unwrap();
+            let unrelated = gc.allocate(16).unwrap();
+            unsafe {
+                owner
+                    .cast::<usize>()
+                    .as_ptr()
+                    .write(callback.as_ptr() as usize)
+            };
+            let mut stack = [0usize; 16];
+            stack[8] = owner.as_ptr() as usize;
+            let base = stack.as_ptr() as usize;
+            let top = base + 15 * WORD + residue;
+            let start = stack_scan_start(base + 14 * WORD, top, 8 * WORD);
+            // Assert before scanning: the old calculation produces an
+            // unaligned Rust pointer dereference, not a safe negative test.
+            assert_eq!(start % WORD, 0, "stack-top remainder {residue}");
+            assert!((base + 7 * WORD..=base + 8 * WORD).contains(&start));
+            let roots = gc.conservative_scan_range(start, top);
+            gc.conservative_trace(roots);
+            assert!(object_marked(&gc, offset(&gc, owner)));
+            assert!(object_marked(&gc, offset(&gc, callback)));
+            assert!(!object_marked(&gc, offset(&gc, unrelated)));
+        }
+    }
+
     #[test]
     fn tlab_bumps_publish_object_bounds_and_skip_line_tails() {
         if !tlab_enabled() {

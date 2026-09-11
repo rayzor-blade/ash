@@ -63,7 +63,15 @@ Build-side knobs — shard count, AIR level, IR dumps — are in
 
 **`ASH_GC_STRESS=1` does not scale collections with the workload.** For many
 collections over a long run, use `ASH_GC_TRIGGER_MB=1` instead; stress disables
-the TLAB and is the tool for root correctness, not collection frequency.
+the TLAB, so it changes the allocation path as well as collection frequency.
+
+A clean stress run does not rule out a rooting bug exposed by TLAB line reuse.
+Keep TLAB and recycling enabled in a second run. For example, the wasm-fibers
+callback corruption came from widening a suspended-main-stack scan **after**
+aligning its start: a byte-aligned stack-top anchor made the widened scan miss
+every aligned pointer slot. The callback was stored correctly, then collected
+and reused as a boxed float. Checking a root range's bounds is not enough;
+check the alignment of the addresses actually read, too.
 
 ## Profiling
 
@@ -120,8 +128,9 @@ In order, cheapest first:
 3. `ASH_AOT_SHARDS=1` for an AOT binary — the single-module path.
 4. `ASH_LLVM_PASSES=off`, then `ASH_AOT_NO_OPT=1`.
 
-For a suspected GC rooting bug, `ASH_GC_STRESS=1` is the detector, and
-`ASH_GC_NO_RECLAIM=1` separates a rooting fault from a logic one.
+For a suspected GC rooting bug, try `ASH_GC_STRESS=1`, but also test with TLAB
+enabled as described above. `ASH_GC_NO_RECLAIM=1 ASH_GC_RECYCLE=0` disables both
+whole-block reclamation and line reuse for a diagnostic comparison.
 
 The safepoints a collection can stop at: `ReentrantGcLock::acquire`, so every
 allocation slow path; `fiber::park`'s loops and `hlp_fiber_poll`;

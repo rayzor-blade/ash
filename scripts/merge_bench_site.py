@@ -21,6 +21,9 @@ Output is one compact `results.json`:
         { engine: "hashlink-jit"|"hashlink-hl2"|"hashlink-c"|"hxjvm",
           label, status, median_ms, min_ms, max_ms, runs },
         { engine: "ash", label, mode, status, median_ms, compile_ms,
+          modes: {fast: {median_ms, runs}, slow: {median_ms, runs}} when the
+            -- sample split in two (ash_bench.py's split_modes); the median
+            -- is then a mix of the two and the page marks the row,
           gc: {collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
                live_blocks} when the sweep ran with --gc-stats,
           min_ms, max_ms, runs, tiers: {cranelift, llvm}, checksum } ] } ] }
@@ -43,6 +46,9 @@ import sys
 import time
 from pathlib import Path
 
+# Beside this file; the same split the measuring script applies.
+from ash_bench import split_modes
+
 # Display order and titles for the published set. Anything else found in the
 # partials is appended alphabetically — the page renders whatever is present.
 KNOWN = [
@@ -64,15 +70,28 @@ ORDER = {name: i for i, (name, _) in enumerate(KNOWN)}
 PREFERRED_MODE = "hybrid-auto"
 
 
-def wall_fields(wall: dict | None) -> dict:
+def wall_fields(wall: dict | None, samples: list | None = None) -> dict:
     if not wall:
         return {}
-    return {
+    out = {
         "median_ms": round(wall["median_ms"], 2),
         "min_ms": round(wall["min_ms"], 2),
         "max_ms": round(wall["max_ms"], 2),
         "runs": wall.get("runs"),
     }
+    # A sample with two modes publishes both, so the page can say the median
+    # is a mix of them rather than a number the engine produced. ash_bench
+    # records the split itself; the other lanes only keep their samples, and
+    # every engine with a JIT can draw two ways, so split those here.
+    modes = wall.get("modes")
+    if modes is None and samples and all(isinstance(x, (int, float)) for x in samples):
+        modes = split_modes(sorted(samples))
+    if modes:
+        out["modes"] = {
+            side: {"median_ms": round(m["median_ms"], 2), "runs": m["runs"]}
+            for side, m in modes.items()
+        }
+    return out
 
 
 def ash_row(docs: list[dict], bench: str) -> dict | None:
@@ -139,7 +158,7 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
             "bytes_allocated_mb": gc.get("bytes_allocated_mb"),
             "live_blocks": gc.get("live_blocks"),
         }
-    row.update(wall_fields(pick.get("wall_ms")))
+    row.update(wall_fields(pick.get("wall_ms"), pick.get("samples_ms")))
     return row
 
 
@@ -185,7 +204,7 @@ def hl_row(doc: dict, bench: str, engine: str) -> dict | None:
     }
     if rec.get("aot_build_ms") is not None:
         row["aot_build_ms"] = rec["aot_build_ms"]
-    row.update(wall_fields(rec.get("wall_ms")))
+    row.update(wall_fields(rec.get("wall_ms"), rec.get("samples_ms")))
     return row
 
 

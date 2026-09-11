@@ -160,17 +160,57 @@ def load_snapshot() -> dict:
     return {"available": True, "load1": one, "load5": five, "load15": fifteen}
 
 
+# The smallest gap between two clusters of samples, as a fraction of the
+# faster cluster's median, that counts as a second mode rather than spread.
+MODE_GAP = 0.10
+
+
+def split_modes(s: list[float]) -> dict | None:
+    """The two clusters of an already-sorted sample, or None if it has one.
+
+    A tiered run has a race in it: a function that is called once reaches
+    its compiled tier only if the compile lands before its loop ends, so the
+    same binary on the same machine produces one of two times, tens of
+    percent apart, interleaved rather than drifting. The median of such a
+    sample is decided by how many draws fell on each side, and it moves
+    between sweeps with nothing in the engine having changed.
+
+    The split is the widest gap between consecutive sorted samples, taken as
+    a mode when it leaves at least two samples on each side and is wider
+    than MODE_GAP of the faster side's median. Each side reports its own
+    median and count, so a reader compares fast against fast and sees how
+    often the slow one was drawn.
+    """
+    if len(s) < 4:
+        return None
+    cut, gap = None, 0.0
+    for i in range(2, len(s) - 1):
+        g = s[i] - s[i - 1]
+        if g > gap:
+            cut, gap = i, g
+    if cut is None:
+        return None
+    fast, slow = s[:cut], s[cut:]
+    if gap < MODE_GAP * statistics.median(fast):
+        return None
+    return {
+        "fast": {"median_ms": statistics.median(fast), "runs": len(fast)},
+        "slow": {"median_ms": statistics.median(slow), "runs": len(slow)},
+    }
+
+
 def summarize(samples: list[float]) -> dict | None:
     """min/median/mean/max/stddev over the measured wall times.
 
     A median alone cannot tell a noisy machine from a real change, which is
     what makes run-to-run comparison unreadable. Carry the spread so a reader
-    can see when min and max straddle the number they are about to trust.
+    can see when min and max straddle the number they are about to trust,
+    and the mode split when the sample has two of them.
     """
     if not samples:
         return None
     s = sorted(samples)
-    return {
+    out = {
         "min_ms": s[0],
         "median_ms": statistics.median(s),
         "mean_ms": statistics.fmean(s),
@@ -178,6 +218,21 @@ def summarize(samples: list[float]) -> dict | None:
         "stddev_ms": statistics.stdev(s) if len(s) > 1 else 0.0,
         "runs": len(s),
     }
+    modes = split_modes(s)
+    if modes:
+        out["modes"] = modes
+    return out
+
+
+def fmt_modes(wall: dict | None) -> str:
+    """`3x886/4x1187` for a bimodal sample, empty for one mode."""
+    m = (wall or {}).get("modes")
+    if not m:
+        return ""
+    return (
+        f"{m['fast']['runs']}x{fmt_ms(m['fast']['median_ms'])}"
+        f"/{m['slow']['runs']}x{fmt_ms(m['slow']['median_ms'])}"
+    )
 
 
 # ── output parsing ──────────────────────────────────────────────────────────
@@ -985,6 +1040,8 @@ def print_table(results: list[dict]) -> None:
             label = (r.get("checksum") or {}).get("label")
             if r["status"] == STATUS_OK and label:
                 note = f"checksum {label}"
+            if fmt_modes(wm):
+                note = f"bimodal {fmt_modes(wm)} {note}".strip()
             print(
                 f"{bench_name:<{w_bench}}  {r['mode']:<{w_mode}}  {r['status']:<8}  "
                 f"{fmt_ms(median):>9}  {fmt_ms(wm['min_ms'] if wm else None):>9}  "
@@ -1124,6 +1181,18 @@ def compare_baseline(
         nb = (n["wall_ms"] or {}).get("median_ms")
         if not ob or not nb:
             continue
+        # A bimodal sample's median is the mix of its two modes, and the mix
+        # is a draw. Compare fast against fast, where the engine's own
+        # behaviour is, and print both splits so the draw is visible too.
+        bimodal = fmt_modes(o["wall_ms"]) or fmt_modes(n["wall_ms"])
+        if bimodal:
+            ob = ((o["wall_ms"].get("modes") or {}).get("fast") or {}).get("median_ms", ob)
+            nb = ((n["wall_ms"].get("modes") or {}).get("fast") or {}).get("median_ms", nb)
+            notes.append(
+                f"{bench}/{mode}: bimodal, compared on the fast mode: "
+                f"{fmt_modes(o['wall_ms']) or 'one mode'} -> "
+                f"{fmt_modes(n['wall_ms']) or 'one mode'}"
+            )
         delta = (nb - ob) / ob
         abs_delta = nb - ob
         verdict = "ok"
@@ -1148,6 +1217,8 @@ def compare_baseline(
         if oc != nc:
             notes.append(f"{bench}/{mode}: checksum label {oc} -> {nc}")
             verdict += " [checksum label changed]"
+        if bimodal:
+            verdict += " [bimodal; fast modes compared]"
 
         print(
             f"{bench:<18}  {mode:<17}  {fmt_ms(ob):>10}  {fmt_ms(nb):>10}  "

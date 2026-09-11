@@ -466,12 +466,27 @@
             ms.textContent = fmtMs(r.median_ms);
             if (r.median_ms === fastest) ms.style.fontWeight = '700';
             num.appendChild(ms);
+            // Two modes in the sample: the median is a mix of them, decided
+            // by how many draws fell on each side, so the number is marked
+            // and the tooltip gives both modes with their counts.
+            var modes = r.modes && r.modes.fast && r.modes.slow ? r.modes : null;
+            var modesNote = '';
+            if (modes) {
+              var bi = el('span', 'aot-tag');
+              bi.textContent = 'bimodal';
+              modesNote = ' · bimodal: ' + modes.fast.runs + ' runs ~' + fmtMs(modes.fast.median_ms) +
+                ', ' + modes.slow.runs + ' runs ~' + fmtMs(modes.slow.median_ms) +
+                ' — the median is the mix, compare like modes';
+              bi.title = modesNote.slice(3);
+              num.appendChild(bi);
+            }
             if (baseline) {
               var ratio = el('span', 'ratio');
               ratio.textContent = fmtRatio(r.median_ms / baseline);
               num.appendChild(ratio);
             }
             num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
+              modesNote +
               (r.aot_build_ms ? ' · AOT build excluded' : '') +
               (r.gc && r.gc.collections != null
                 ? ' · GC ' + r.gc.collections + ' collections, ' +

@@ -392,6 +392,16 @@ jobs:
                         "the ladder never promoted anything; this leg measured "
                         "the interpreter, and its number should not be read as "
                         "a JIT result")
+              # Two modes in the sample means the compile landed before the
+              # loop ended on some runs and not on others; the median is then
+              # the mix of the two, and a run-to-run change in it is a change
+              # in the draw, not in the engine.
+              m = (r.get("wall_ms") or {}).get("modes")
+              if m:
+                  print(f"::notice title=Bimodal ({r['benchmark']} / {r['mode']})::"
+                        f"{m['fast']['runs']} runs ~{m['fast']['median_ms']:.1f}ms, "
+                        f"{m['slow']['runs']} runs ~{m['slow']['median_ms']:.1f}ms; "
+                        "the median is the mix, so compare like modes across sweeps")
           PY
 
       - name: Report which comparison lanes this leg produced

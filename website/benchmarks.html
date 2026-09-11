@@ -180,6 +180,17 @@
       opacity: 0.75
     }
 
+    /* Head against the base build timed beside it on the same runner: the
+       one number that is comparable across sweeps. */
+    .bench-num .ab {
+      display: block;
+      font-size: 10.5px
+    }
+
+    .ab-faster { color: #3f7a4a }
+    .ab-slower { color: #a8482c }
+    .ab-flat { opacity: 0.6 }
+
     .seg-hl {
       height: 100%;
       background: #c7bdb2
@@ -485,8 +496,22 @@
               ratio.textContent = fmtRatio(r.median_ms / baseline);
               num.appendChild(ratio);
             }
+            // The base build was timed interleaved with this one on the
+            // same runner, so this delta survives the runner lottery that
+            // the milliseconds above do not. Under 2% is within what one
+            // binary shows against itself.
+            var abNote = '';
+            if (r.base && typeof r.base.delta_pct === 'number') {
+              var d = r.base.delta_pct;
+              var ab = el('span', 'ab ' + (d <= -2 ? 'ab-faster' : d >= 2 ? 'ab-slower' : 'ab-flat'));
+              ab.textContent = (d > 0 ? '+' : '') + d.toFixed(1) + '% vs base';
+              abNote = ' · ' + (d > 0 ? '+' : '') + d.toFixed(1) + '% against ash@' + (r.base.commit || 'base') +
+                ' (' + fmtMs(r.base.median_ms) + ', ' + (r.base.runs || '?') + ' runs interleaved on this runner)';
+              ab.title = abNote.slice(3);
+              num.appendChild(ab);
+            }
             num.title = fmtMs(r.median_ms) + ' median of ' + (r.runs || '?') + ' runs' +
-              modesNote +
+              modesNote + abNote +
               (r.aot_build_ms ? ' · AOT build excluded' : '') +
               (r.gc && r.gc.collections != null
                 ? ' · GC ' + r.gc.collections + ' collections, ' +
@@ -534,6 +559,7 @@
         if (data.hl2_version) bits.push('hl2-ir ' + data.hl2_version);
         if (data.java_version) bits.push(data.java_version);
         if (data.commit) bits.push('ash@' + data.commit);
+        if (data.base_commit) bits.push('A/B against ash@' + data.base_commit);
         // The date and run are the SWEEP's, carried in the file itself. A
         // republish for fresh conformance data reuses the newest sweep's
         // numbers verbatim, so a number that did not change between two

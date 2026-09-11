@@ -7,8 +7,8 @@ aggregate job consumes: `ash-<bench>.json` files are full `ash_bench.py
 files come from `hl_bench.py` and carry both HashLink lanes (JIT and HL/C).
 Output is one compact `results.json`:
 
-  { schema_version, generated_iso, source, commit, branch, hl_version, java_version,
-    run_id, run_url,
+  { schema_version, generated_iso, source, commit, base_commit, branch, hl_version,
+    java_version, run_id, run_url,
       -- the sweep that measured every row. A republish for fresh conformance
       -- data carries this file forward verbatim, so these, and generated_iso,
       -- stay the sweep's own: the page shows them so the same numbers under a
@@ -24,6 +24,10 @@ Output is one compact `results.json`:
           modes: {fast: {median_ms, runs}, slow: {median_ms, runs}} when the
             -- sample split in two (ash_bench.py's split_modes); the median
             -- is then a mix of the two and the page marks the row,
+          base: {commit, median_ms, min_ms, max_ms, runs, modes, delta_pct} when
+            -- the sweep timed a base build interleaved with this one on the
+            -- same runner (ash_bench.py --ash-base); delta_pct is head against
+            -- base on like modes, the one cross-commit number that is sound,
           gc: {collections, pause_total_ms, pause_max_ms, bytes_allocated_mb,
                live_blocks} when the sweep ran with --gc-stats,
           min_ms, max_ms, runs, tiers: {cranelift, llvm}, checksum } ] } ] }
@@ -46,8 +50,9 @@ import sys
 import time
 from pathlib import Path
 
-# Beside this file; the same split the measuring script applies.
-from ash_bench import split_modes
+# Beside this file; the same split and the same A/B rule the measuring
+# script applies.
+from ash_bench import ab_delta, split_modes
 
 # Display order and titles for the published set. Anything else found in the
 # partials is appended alphabetically — the page renders whatever is present.
@@ -159,6 +164,18 @@ def ash_row(docs: list[dict], bench: str) -> dict | None:
             "live_blocks": gc.get("live_blocks"),
         }
     row.update(wall_fields(pick.get("wall_ms"), pick.get("samples_ms")))
+    # The base binary's numbers from the same leg, when the sweep timed one
+    # interleaved with the head. This is the one number on the page that is
+    # comparable across commits, because both sides ran on one machine at one
+    # moment; the delta is on like modes, so a bimodal draw does not move it.
+    base = pick.get("base")
+    if base and base.get("status") == "OK":
+        ab = ab_delta(pick)
+        row["base"] = {
+            "commit": (base.get("commit") or "")[:12] or None,
+            **wall_fields(base.get("wall_ms"), base.get("samples_ms")),
+            "delta_pct": round(ab["delta_pct"], 2) if ab else None,
+        }
     return row
 
 
@@ -344,6 +361,10 @@ def main() -> int:
         }
     )
     homogeneous = len(runners) <= 1
+    base_commit = next(
+        (((d.get("base") or {}).get("commit") or "")[:12] for d in ash_docs if d.get("base")),
+        None,
+    )
     hl_version = next((d.get("hl_version") for d in hl_docs if d.get("hl_version")), None)
     hl2_version = next((d.get("hl2_version") for d in hl_docs if d.get("hl2_version")), None)
     java_version = next((d.get("java_version") for d in hl_docs if d.get("java_version")), None)
@@ -355,6 +376,7 @@ def main() -> int:
         "run_id": args.run_id,
         "run_url": args.run_url,
         "commit": (git.get("commit") or "")[:12],
+        "base_commit": base_commit or None,
         "branch": git.get("branch"),
         "hl_version": hl_version,
         "hl2_version": hl2_version,

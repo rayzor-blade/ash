@@ -224,6 +224,33 @@ def summarize(samples: list[float]) -> dict | None:
     return out
 
 
+def like_mode_ms(wall: dict | None) -> float | None:
+    """The number two samples are compared on: the fast mode's median when
+    the sample has two modes, else the median."""
+    if not wall:
+        return None
+    fast = (wall.get("modes") or {}).get("fast")
+    return fast["median_ms"] if fast else wall.get("median_ms")
+
+
+def ab_delta(rec: dict) -> dict | None:
+    """Head against base for one row, both timed interleaved on one machine:
+    `{head_ms, base_ms, delta_pct}`, or None when either side has no OK
+    number. Like modes are compared, so a bimodal draw does not count."""
+    base = rec.get("base")
+    if not base or rec.get("status") != STATUS_OK or base.get("status") != STATUS_OK:
+        return None
+    head_ms = like_mode_ms(rec.get("wall_ms"))
+    base_ms = like_mode_ms(base.get("wall_ms"))
+    if not head_ms or not base_ms:
+        return None
+    return {
+        "head_ms": head_ms,
+        "base_ms": base_ms,
+        "delta_pct": (head_ms - base_ms) / base_ms * 100.0,
+    }
+
+
 def fmt_modes(wall: dict | None) -> str:
     """`3x886/4x1187` for a bimodal sample, empty for one mode."""
     m = (wall or {}).get("modes")
@@ -849,6 +876,24 @@ def run_one(
     timeout = bench.timeout_secs * args.timeout_scale
     env = build_env(args, instrumented=False, bench=bench, mode=mode)
     cmd = command_for(mode, bench, binaries, jit_log=False)
+    # The base binary runs the same command, one run of it after each timed
+    # run of the head, so the two see the same machine in the same minute.
+    # Its numbers are a field of this row rather than a row of their own:
+    # everything downstream keys on (benchmark, mode).
+    base = None
+    base_cmd: list[str] = []
+    if mode.binary == "ash" and "ash-base" in binaries:
+        base_cmd = command_for(mode, bench, {**binaries, "ash": binaries["ash-base"]}, jit_log=False)
+        base = {
+            "binary": str(binaries["ash-base"]),
+            "commit": args.base_commit,
+            "command": " ".join(base_cmd),
+            "status": STATUS_OK,
+            "detail": "",
+            "wall_ms": None,
+            "samples_ms": [],
+            "checksum": None,
+        }
 
     record = {
         "benchmark": bench.name,
@@ -874,6 +919,7 @@ def run_one(
         "tiered": None,
         "tier_installs": [],
         "gc": None,
+        "base": base,
     }
 
     # Warmups: page cache, dyld, CPU frequency. NOT JIT warmup — every ASH run
@@ -885,6 +931,31 @@ def run_one(
             record["status"] = STATUS_TIMEOUT
             record["detail"] = f"warmup timed out after {timeout:.0f}s"
             return record
+        if base:
+            res = exec_run(base_cmd, cwd, env, timeout)
+            if res.timed_out:
+                base["status"] = STATUS_TIMEOUT
+                base["detail"] = f"warmup timed out after {timeout:.0f}s"
+
+    def run_base() -> None:
+        """One timed run of the base, judged like the head's; a base that
+        fails keeps its status and stops being run, and the head's row is
+        unaffected."""
+        if not base or base["status"] != STATUS_OK:
+            return
+        res = exec_run(base_cmd, cwd, env, timeout)
+        st = status_for(res)
+        if st != STATUS_OK:
+            base["status"] = st
+            base["detail"] = failure_detail(res)
+            return
+        ok, detail, checksum = judge(bench, res, ref)
+        if not ok:
+            base["status"] = STATUS_INVALID
+            base["detail"] = detail
+            return
+        base["samples_ms"].append(res.wall_ms)
+        base["checksum"] = checksum or None
 
     # Every iteration is judged, not just the last one. ASH promotes on a
     # background thread, so a JIT mode can legitimately produce a different
@@ -906,15 +977,20 @@ def run_one(
             record["signal"] = res.signal
             record["samples_ms"] = samples
             record["wall_ms"] = summarize(samples)
+            if base:
+                base["wall_ms"] = summarize(base["samples_ms"])
             return record
         samples.append(res.wall_ms)
         verdicts.append(judge(bench, res, ref))
         fingerprints.append(fingerprint(bench, res))
+        run_base()
 
     assert last is not None
     record["exit_code"] = last.returncode
     record["samples_ms"] = samples
     record["wall_ms"] = summarize(samples)
+    if base:
+        base["wall_ms"] = summarize(base["samples_ms"])
 
     failures = [v for v in verdicts if not v[0]]
     record["checksum"] = verdicts[-1][2] or None
@@ -1042,6 +1118,9 @@ def print_table(results: list[dict]) -> None:
                 note = f"checksum {label}"
             if fmt_modes(wm):
                 note = f"bimodal {fmt_modes(wm)} {note}".strip()
+            ab = ab_delta(r)
+            if ab:
+                note = f"vs base {ab['delta_pct']:+.1f}% {note}".strip()
             print(
                 f"{bench_name:<{w_bench}}  {r['mode']:<{w_mode}}  {r['status']:<8}  "
                 f"{fmt_ms(median):>9}  {fmt_ms(wm['min_ms'] if wm else None):>9}  "
@@ -1050,6 +1129,33 @@ def print_table(results: list[dict]) -> None:
                 f"{fmt_tier(r):>10}  {gcs:>4}  {note[:70]}"
             )
         print()
+
+
+def print_ab(results: list[dict]) -> None:
+    """Head against base per row. This is the only comparison in the output
+    that is sound across commits: both binaries ran on this machine, in this
+    sweep, one run after the other, so whatever the machine was doing it did
+    to both."""
+    rows = [r for r in results if r.get("base")]
+    if not rows:
+        return
+    commit = next((r["base"].get("commit") for r in rows if r["base"].get("commit")), None)
+    print()
+    print(f"A/B against base{f' ({commit})' if commit else ''}, interleaved on this machine:")
+    for r in rows:
+        ab = ab_delta(r)
+        if ab is None:
+            b = r["base"]
+            why = b["detail"] if b["status"] != STATUS_OK else r["detail"]
+            print(f"  {r['benchmark']}/{r['mode']}: no comparison "
+                  f"(head {r['status']}, base {b['status']}{': ' + why if why else ''})")
+            continue
+        modes = ""
+        if fmt_modes(r["wall_ms"]) or fmt_modes(r["base"]["wall_ms"]):
+            modes = (f"  [fast modes; head {fmt_modes(r['wall_ms']) or 'one mode'}, "
+                     f"base {fmt_modes(r['base']['wall_ms']) or 'one mode'}]")
+        print(f"  {r['benchmark']}/{r['mode']}: {fmt_ms(ab['head_ms'])}ms vs "
+              f"{fmt_ms(ab['base_ms'])}ms  {ab['delta_pct']:+.1f}%{modes}")
 
 
 def print_summary(results: list[dict]) -> None:
@@ -1331,6 +1437,18 @@ def parse_args(argv=None):
         action="store_true",
         help="report regressions but always exit 0",
     )
+    p.add_argument(
+        "--ash-base",
+        default=None,
+        help="a second ash binary, timed interleaved with the first on every "
+        "run of every benchmark, so the two are compared on one machine at "
+        "one moment; its numbers go under `base` in each row",
+    )
+    p.add_argument(
+        "--base-commit",
+        default=None,
+        help="what --ash-base was built from, recorded beside its numbers",
+    )
     p.add_argument("--list", action="store_true", help="list modes/benches and exit")
     return p.parse_args(argv)
 
@@ -1442,6 +1560,12 @@ def main(argv=None) -> int:
             f"  cargo build -p ash_std && cargo build -p ash"
         )
 
+    if args.ash_base:
+        base = pathlib.Path(args.ash_base).resolve()
+        if not (base.is_file() and os.access(base, os.X_OK)):
+            raise SystemExit(f"--ash-base {base} is not an executable file")
+        binaries["ash-base"] = base
+
     oracle = load_oracle(pathlib.Path(args.oracle).resolve() if args.oracle else None)
 
     sysinfo = system_info()
@@ -1461,6 +1585,12 @@ def main(argv=None) -> int:
             )
 
     eprint(f"[bench] ash: {binaries.get('ash', '-')}")
+    if "ash-base" in binaries:
+        eprint(
+            f"[bench] base: {binaries['ash-base']}"
+            + (f" ({args.base_commit})" if args.base_commit else "")
+            + ", interleaved with every timed run"
+        )
     eprint(
         f"[bench] {len(benches)} benchmark(s) x {len(modes)} mode(s), "
         f"{args.warmups} warmup + {args.iterations} timed run(s) each"
@@ -1539,6 +1669,11 @@ def main(argv=None) -> int:
         "generated_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(started)),
         "sweep_seconds": round(elapsed, 2),
         "git": git_info(repo_root),
+        "base": (
+            {"binary": str(binaries["ash-base"]), "commit": args.base_commit}
+            if "ash-base" in binaries
+            else None
+        ),
         "system": sysinfo,
         "load": {
             "at_start": load_start,
@@ -1568,6 +1703,7 @@ def main(argv=None) -> int:
     }
 
     print_table(results)
+    print_ab(results)
     print_summary(results)
     print()
     print(f"sweep completed in {elapsed:.1f}s")

@@ -265,6 +265,28 @@ carried). `--no-gate` reports everything and still exits 0.
 Baseline files are versioned by `schema_version`; a mismatch is a hard error
 rather than a silent misread.
 
+A sample with two modes — a tiered run whose compile lands before the loop ends
+on some runs and not on others — is split at its widest gap and both modes are
+reported (`bimodal 3x886/4x1187` in the table, `wall_ms.modes` in the JSON). The
+median of such a sample is decided by how many draws fell on each side, so the
+gate compares fast mode against fast mode and says so.
+
+---
+
+## A/B against a second binary
+
+```sh
+./scripts/ash_bench.py --ash-base /path/to/other/ash --base-commit abc1234
+```
+
+Every timed run of the head is followed by one of the base, so the two see the
+same machine in the same minute; a baseline file cannot offer that. The table
+gets a `vs base ±N%` note, an `A/B against base` section follows it, and each
+row's JSON carries the base's numbers under `base`. Like modes are compared.
+This is what the CI sweep does on every leg, against the commit the previous
+sweep measured, and it is the only cross-commit number on the published page
+that means anything: the milliseconds come from whichever runner the leg drew.
+
 ---
 
 ## Environment knobs

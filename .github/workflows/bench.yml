@@ -38,6 +38,14 @@ on:
     types: [completed]
 
   workflow_dispatch:
+    inputs:
+      base:
+        description: >-
+          Commit or ref to A/B against, built beside HEAD and timed
+          interleaved with it on every leg. Empty picks the commit the
+          previous sweep measured.
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -67,6 +75,9 @@ jobs:
       LIBCLANG_PATH: /usr/lib/llvm-21/lib
     steps:
       - uses: actions/checkout@v4
+        with:
+          # HEAD^ is the last-resort base for the A/B below.
+          fetch-depth: 2
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -85,6 +96,52 @@ jobs:
           chmod +x /tmp/llvm.sh
           sudo /tmp/llvm.sh 21 all
           llvm-config-21 --version
+
+      # A number from this sweep is not comparable with one from the last:
+      # every leg runs on a runner drawn from a heterogeneous pool, and a
+      # ratio between two frozen engines still moves by 2x across draws. So
+      # the question "did these commits help?" is answered inside the sweep:
+      # a base build is shipped beside HEAD and each leg times both,
+      # interleaved, on its own runner. The base is what the previous sweep
+      # measured, unless a dispatch names one. Best-effort: a base that will
+      # not build costs the A/B, never the sweep.
+      #
+      # Built BEFORE HEAD, deliberately. The two builds share target/ so the
+      # base reuses every compiled dependency, and each build uplifts its own
+      # `ash` and `libash_std` to target/release; HEAD's must be the ones
+      # left there for packaging.
+      - name: Build the base to A/B against
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_INPUT: ${{ inputs.base }}
+        run: |
+          BASE="$BASE_INPUT"
+          if [ -z "$BASE" ]; then
+            BASE=$(gh run list --workflow=benchmarks --status=success --limit 100 \
+                     --json headSha,event \
+                     --jq '[.[] | select(.event != "workflow_run")][0].headSha' || true)
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "null" ]; then
+            BASE=$(git rev-parse HEAD^)
+          fi
+          git fetch --depth=1 origin "$BASE" 2>/dev/null || true
+          SHA=$(git rev-parse --verify "$BASE^{commit}")
+          echo "base: $SHA"
+          git worktree add --detach "$RUNNER_TEMP/ash-base" "$SHA"
+          (
+            cd "$RUNNER_TEMP/ash-base"
+            export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"
+            cargo build --release -p ash_std
+            cargo build --release -p ash
+          )
+          mkdir -p dist
+          cp target/release/ash dist/ash-base
+          echo "$SHA" > dist/ash-base.commit
+          ./dist/ash-base --help > /dev/null
+          # HEAD's build must put its own binaries here; with these gone it
+          # cannot be judged fresh without doing so.
+          rm -f target/release/ash target/release/libash_std.so target/release/libash_std.a
 
       # Two invocations, not one: ash_std is a cdylib that ash's build.rs
       # embeds via include_bytes!, and cargo has no ordering edge between the
@@ -179,6 +236,11 @@ jobs:
           # Prove the thing we are about to ship actually runs, here rather
           # than in seven downstream legs.
           ./target/release/ash --help > /dev/null
+          # The base build shares target/ and wrote its own `ash` there
+          # first; shipping that as HEAD would make every A/B an A/A.
+          if [ -f dist/ash-base ] && cmp -s dist/ash dist/ash-base; then
+            echo "::error::dist/ash is the base build, not HEAD's"; exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -231,6 +293,13 @@ jobs:
         run: |
           mkdir -p target/release
           cp dist/ash target/release/ && chmod +x target/release/ash
+          # Beside the head so the two are exec'd the same way.
+          if [ -f dist/ash-base ]; then
+            cp dist/ash-base target/release/ && chmod +x target/release/ash-base
+            echo "A/B base: $(cat dist/ash-base.commit)"
+          else
+            echo "::warning::no base build in the toolchain; this sweep has no in-sweep A/B"
+          fi
           cp dist/libash_std.so target/release/ 2>/dev/null || true
           cp dist/libash_std.a target/release/ 2>/dev/null || true
           tar xzf dist/hashlink.tar.gz -C "$HOME" 2>/dev/null || true
@@ -280,6 +349,10 @@ jobs:
       - name: Bench ash (${{ matrix.bench }})
         run: |
           mkdir -p parts
+          AB=()
+          if [ -x target/release/ash-base ]; then
+            AB=(--ash-base target/release/ash-base --base-commit "$(cat dist/ash-base.commit)")
+          fi
           ./scripts/ash_bench.py \
             --benchmarks "${{ matrix.bench }}" \
             --modes hybrid-auto \
@@ -289,6 +362,7 @@ jobs:
             --timeout-scale 3 \
             --ignore-load \
             --gc-stats \
+            "${AB[@]}" \
             --out-json "parts/ash-${{ matrix.bench }}.json"
 
       # NOT profile-guided, deliberately. Marking the fiber poll `cold` gets

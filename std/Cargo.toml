@@ -54,7 +54,11 @@ cc = "1"
 # `set_suspender` is how library code written against `yield_now` reaches the
 # host's suspend operation.
 [dependencies.krio-fiber]
-git = "https://github.com/darmie/krio"
+# One spec string and one rev across ash, wren_lift and caribou: a world
+# holds one krio, and Cargo treats a differently spelled URL as a second
+# source.
+git = "https://github.com/darmie/krio.git"
+rev = "286f5e0710e20772179fc2ca96f6fda8d13e3a70"
 
 # The wasm side of the runtime, linked in rather than imported: see that
 # crate's docs for why only fiber suspension crosses the module boundary.

@@ -314,12 +314,12 @@ fn check(
     // refusal, but it does require the step to be 1: the epilogue's entry
     // index is `start + (n & ~(VF-1))`, and that arithmetic is only this
     // simple for a unit step.
-    // `retime_induction` multiplies the step by VF by rewriting the constant
-    // operand of the `BinOp::Add` that closes the induction cycle. It has no
+    // `retime_induction` multiplies the step by VF by giving the `BinOp::Add`
+    // that closes the induction cycle a fresh constant operand. It has no
     // case for `UnOp::Incr`/`Decr`, which the analysis does accept, so refuse
     // here rather than widen a loop whose step will not move.
-    if let Some((iv, _)) = plan.induction {
-        if !step_is_scalable(f, plan, iv) {
+    if let Some((iv, step)) = plan.induction {
+        if induction_step_site(f, plan, iv, step, info).is_none() {
             return Err(Decline::UnscalableInductionStep(iv));
         }
     }
@@ -584,7 +584,11 @@ fn widen_loop(
         let ct = trips.ok_or(Decline::GuardNeedsConstantTrip)?;
         let last = start + (ct - 1) * step;
         let idx = f.intern_int(last as i32, |i| info.int_value(i));
-        let last_val = f.new_value(f.value_ty(iv), f.value_reg(iv));
+        let last_val = {
+            let ty = f.value_ty(iv);
+            let reg = f.new_reg(ty);
+            f.new_value(ty, reg)
+        };
         // Materialize it in the entry block, after the Params -- the verifier
         // requires those to come first.
         let at = f.blocks[0]
@@ -878,7 +882,10 @@ fn collapse_reduction(
         identity_of(r.op).ok_or(Decline::UnreducibleOp(r.op))?,
         |i| info.int_value(i),
     );
-    let ident_v = f.new_value(ty, reg);
+    let ident_v = {
+        let reg = f.new_reg(ty);
+        f.new_value(ty, reg)
+    };
     let vinit = f.new_vector_value(ty, reg, VF as u16);
     f.blocks[entry_block.idx()].instrs.extend([
         Instr::Int {
@@ -899,8 +906,14 @@ fn collapse_reduction(
     }
 
     // Collapse on the way out, and fold the starting value back in.
-    let reduced = f.new_value(ty, reg);
-    let total = f.new_value(ty, reg);
+    let reduced = {
+        let reg = f.new_reg(ty);
+        f.new_value(ty, reg)
+    };
+    let total = {
+        let reg = f.new_reg(ty);
+        f.new_value(ty, reg)
+    };
     f.blocks[mid.idx()].instrs.extend([
         Instr::VecReduce {
             op: r.op,
@@ -921,9 +934,19 @@ fn collapse_reduction(
     // starts from.
     if finishes_here {
         let cfg = CfgInfo::build(f);
+        let past_loop = |bid: BlockId| bid != mid && !body.contains(&bid) && cfg.dominates(mid, bid);
         for b in 0..f.blocks.len() {
             let bid = BlockId(b as u32);
-            if bid == mid || body.contains(&bid) || !cfg.dominates(mid, bid) {
+            // A phi reads its incoming on the edge from the predecessor, so
+            // the edge is what has to lie past the loop, not the phi's block.
+            for phi in &mut f.blocks[b].phis {
+                for (p, v) in phi.incoming.iter_mut() {
+                    if *v == r.phi && (past_loop(*p) || *p == mid) {
+                        *v = total;
+                    }
+                }
+            }
+            if !past_loop(bid) {
                 continue;
             }
             for ins in &mut f.blocks[b].instrs {
@@ -1044,14 +1067,17 @@ fn wire_epilogue(
     } = epi;
 
     let ity = f.value_ty(iv);
-    let ireg = f.value_reg(iv);
     let mask = f.intern_int(!(VF as i32 - 1), |i| info.int_value(i));
 
     // n = limit - start ; vn = n & ~(VF-1) ; vend = start + vn
-    let n = f.new_value(ity, ireg);
-    let mask_v = f.new_value(ity, ireg);
-    let vn = f.new_value(ity, ireg);
-    let vend = f.new_value(ity, ireg);
+    let mut fresh = || {
+        let reg = f.new_reg(ity);
+        f.new_value(ity, reg)
+    };
+    let n = fresh();
+    let mask_v = fresh();
+    let vn = fresh();
+    let vend = fresh();
     f.blocks[pre.idx()].instrs.extend([
         Instr::BinOp {
             op: BinOp::Sub,
@@ -1168,13 +1194,25 @@ fn wire_epilogue(
         .map(|i| BlockId(i as u32))
         .filter(|b| cfg.dominates(copy_exit, *b))
         .collect();
-    for b in scope {
+    for b in scope.iter().copied() {
         for ins in &mut f.blocks[b.idx()].instrs {
             ins.map_uses(&mut |v| *vmap.get(&v).unwrap_or(&v));
         }
         let mut t = f.blocks[b.idx()].term.clone();
         t.map_uses(&mut |v| *vmap.get(&v).unwrap_or(&v));
         f.blocks[b.idx()].term = t;
+    }
+    // A phi reads its incoming on the edge from the predecessor, so it is
+    // the predecessor that has to lie in the copy's scope, wherever the phi
+    // itself sits.
+    for b in 0..f.blocks.len() {
+        for phi in &mut f.blocks[b].phis {
+            for (p, v) in phi.incoming.iter_mut() {
+                if scope.contains(p) {
+                    *v = *vmap.get(v).unwrap_or(v);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1231,35 +1269,91 @@ fn is_loop_invariant(f: &Function, body: &HashSet<BlockId>, v: ValueId) -> bool 
     true
 }
 
-/// Whether [`retime_induction`] can rescale this induction's step.
+/// Where the induction cycle closes: the block and position of the
+/// `BinOp::Add` that defines the back-edge value, and the operand that is
+/// the step constant.
 ///
-/// Deliberately mirrors that function's own matching: it rewrites the constant
-/// operand of the `BinOp::Add` closing the cycle, so a cycle closed any other
-/// way is not rescalable and the loop must be refused. Keep the two in step --
-/// a form accepted here and not handled there widens a loop whose step stays
-/// at one.
-fn step_is_scalable(f: &Function, plan: &LoopPlan, iv: ValueId) -> bool {
-    let Some(phi) = f.blocks[plan.header.idx()]
+/// The analysis accepts `Incr`/`Decr` as a stride of one, but only an `Add`
+/// of the induction variable and an `Int` holding `step` is rescaled here.
+/// The constant may sit on either side of the `Add`, and after LICM it is
+/// usually defined outside the loop, so it is found by its definition rather
+/// than by its block.
+fn induction_step_site(
+    f: &Function,
+    plan: &LoopPlan,
+    iv: ValueId,
+    step: i64,
+    info: &dyn crate::v2::module::ModuleInfo,
+) -> Option<(BlockId, usize, ValueId)> {
+    let phi = f.blocks[plan.header.idx()]
         .phis
         .iter()
-        .find(|p| p.dst == iv)
-    else {
-        return false;
-    };
+        .find(|p| p.dst == iv)?;
     let body = loop_blocks(f, plan.header);
-    let Some(&(_, back)) = phi.incoming.iter().find(|(p, _)| body.contains(p)) else {
-        return false;
-    };
-    f.blocks
-        .iter()
-        .flat_map(|b| b.instrs.iter())
-        .any(|ins| ins.dst() == Some(back) && matches!(ins, Instr::BinOp { op: BinOp::Add, .. }))
+    let &(_, back) = phi.incoming.iter().find(|(p, _)| body.contains(p))?;
+    for &b in &body {
+        for (at, ins) in f.blocks[b.idx()].instrs.iter().enumerate() {
+            if ins.dst() != Some(back) {
+                continue;
+            }
+            let Instr::BinOp {
+                op: BinOp::Add,
+                a,
+                b: rb,
+                ..
+            } = ins
+            else {
+                return None;
+            };
+            let konst = if *a == iv {
+                *rb
+            } else if *rb == iv {
+                *a
+            } else {
+                return None;
+            };
+            if const_of(f, konst, info) != Some(step) {
+                return None;
+            }
+            // Rescaling changes what `back` is; anything else reading it --
+            // an access index GVN merged with the step, a value carried out
+            // of the loop -- would read the rescaled one.
+            if uses_besides_header_phi(f, plan.header, back) {
+                return None;
+            }
+            return Some((b, at, konst));
+        }
+    }
+    None
+}
+
+/// Whether `v` is read anywhere but as an incoming of `header`'s phis.
+fn uses_besides_header_phi(f: &Function, header: BlockId, v: ValueId) -> bool {
+    for (bi, blk) in f.blocks.iter().enumerate() {
+        if bi != header.idx() {
+            if blk.phis.iter().any(|p| p.incoming.iter().any(|(_, x)| *x == v)) {
+                return true;
+            }
+        }
+        if blk.instrs.iter().any(|i| i.uses().contains(&v)) || blk.term.uses().contains(&v) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Advance the induction by a whole vector per iteration.
 ///
 /// Every address in the body was affine in it, so this is what makes the
 /// widened loop cover the same range in a quarter of the trips.
+///
+/// The `Add` gets a constant of its own, defined just before it: the one it
+/// used may be shared -- by the remainder loop, which must keep stepping by
+/// `step`, or by anything else in the function holding the same literal.
+///
+/// Every scalar this pass mints gets a register of its own. `serialize`
+/// assigns a value back to its register, so two live values on one register
+/// would overwrite each other in the opcode form.
 fn retime_induction(
     f: &mut Function,
     plan: &LoopPlan,
@@ -1267,48 +1361,26 @@ fn retime_induction(
     step: i64,
     info: &dyn crate::v2::module::ModuleInfo,
 ) {
-    let header = plan.header;
-    let Some(phi) = f.blocks[header.idx()]
-        .phis
-        .iter()
-        .find(|p| p.dst == iv)
-        .cloned()
-    else {
+    let Some((blk, at, old)) = induction_step_site(f, plan, iv, step, info) else {
         return;
     };
-    // The back edge is the incoming whose predecessor is inside the loop; the
-    // other one is the entry value.
-    let body = loop_blocks(f, header);
-    let Some(&(_, back)) = phi.incoming.iter().find(|(p, _)| body.contains(p)) else {
-        return;
-    };
-    // `back` is `iv + step`; point its constant operand at `step * VF`.
     let want = (step * VF as i64) as i32;
-    let new_idx = f.intern_int(want, |i| info.int_value(i));
-    for b in 0..f.blocks.len() {
-        let mut target: Option<ValueId> = None;
-        for ins in &f.blocks[b].instrs {
-            if ins.dst() == Some(back) {
-                if let Instr::BinOp {
-                    op: BinOp::Add,
-                    b: rb,
-                    ..
-                } = ins
-                {
-                    target = Some(*rb);
-                }
-            }
+    let idx = f.intern_int(want, |i| info.int_value(i));
+    let fresh = {
+        let ty = f.value_ty(old);
+        let reg = f.new_reg(ty);
+        f.new_value(ty, reg)
+    };
+    if let Instr::BinOp { a, b, .. } = &mut f.blocks[blk.idx()].instrs[at] {
+        if *a == old {
+            *a = fresh;
+        } else {
+            *b = fresh;
         }
-        let Some(t) = target else { continue };
-        for ins in &mut f.blocks[b].instrs {
-            if ins.dst() == Some(t) {
-                if let Instr::Int { idx, .. } = ins {
-                    *idx = new_idx;
-                }
-            }
-        }
-        return;
     }
+    f.blocks[blk.idx()]
+        .instrs
+        .insert(at, Instr::Int { dst: fresh, idx });
 }
 
 /// Copy a loop's blocks, giving every value and block a fresh identity.

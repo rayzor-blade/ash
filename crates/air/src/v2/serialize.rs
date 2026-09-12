@@ -121,10 +121,53 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     let nb = f.blocks.len();
     let mut reg_types = f.reg_types.clone();
 
+    // Scalarization state: one scalar register per lane of each vector value.
+    // HL has no vector opcode, so a widened function is serialized by
+    // unrolling it back to lanes -- the optimizer tool (`--emit-optimized`)
+    // has to keep working on a function the vectorizer touched, and bailing
+    // would have made it fail outright. Allocated up front because a phi
+    // over vector values is copied lane by lane below; the lanes are fresh
+    // registers, so no aliasing question with anything the body already had.
+    let mut lane_regs: BTreeMap<ValueId, Vec<u32>> = BTreeMap::new();
+    for (i, vd) in f.values.iter().enumerate() {
+        if vd.lanes > 1 {
+            let regs = (0..vd.lanes)
+                .map(|_| {
+                    let r = reg_types.len() as u32;
+                    reg_types.push(vd.ty);
+                    r
+                })
+                .collect();
+            lane_regs.insert(ValueId(i as u32), regs);
+        }
+    }
+
     // ---- 1. collect parallel copies per (pred, succ) edge -----------------
+    // A vector value's register names its scalar origin, which every lane of
+    // every vector in the cycle shares, so the copies a vector phi needs are
+    // between lane registers.
     let mut edge_copies: BTreeMap<(usize, usize), Vec<(u32, u32)>> = BTreeMap::new();
     for (bi, blk) in f.blocks.iter().enumerate() {
         for phi in &blk.phis {
+            if let Some(dlanes) = lane_regs.get(&phi.dst) {
+                for &(p, v) in &phi.incoming {
+                    let Some(slanes) = lane_regs.get(&v) else {
+                        bail!(
+                            "phi at b{bi} merges vector {:?} with scalar {v:?}",
+                            phi.dst
+                        );
+                    };
+                    for (d, s) in dlanes.iter().zip(slanes) {
+                        if d != s {
+                            edge_copies
+                                .entry((p.idx(), bi))
+                                .or_default()
+                                .push((*d, *s));
+                        }
+                    }
+                }
+                continue;
+            }
             let dreg = f.value_reg(phi.dst);
             for &(p, v) in &phi.incoming {
                 let sreg = f.value_reg(v);
@@ -328,12 +371,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     // split back into `Mul` + `Add`. Fresh registers are never read by
     // anything else, so the split is correct for every operand aliasing.
     let mut fma_temps: BTreeMap<TypeRef, u32> = BTreeMap::new();
-    // Scalarization state: one scalar register per lane of each vector value,
-    // plus a scratch for lane index arithmetic. HL has no vector opcode, so a
-    // widened function is serialized by unrolling it back to lanes -- the
-    // optimizer tool (`--emit-optimized`) has to keep working on a function
-    // the vectorizer touched, and bailing would have made it fail outright.
-    let mut lane_regs: BTreeMap<ValueId, Vec<u32>> = BTreeMap::new();
+    // A scratch register for lane index arithmetic, allocated on first use.
     let mut lane_idx_tmp: Option<u32> = None;
     // Values scalarization needs as `Opcode::Int` operands. The pool index is
     // assigned by the caller; see `Serialized::new_ints`.

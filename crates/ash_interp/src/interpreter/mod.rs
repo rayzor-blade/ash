@@ -277,7 +277,10 @@ pub(crate) fn ref_elem_size(bytecode: &DecodedBytecode, href: &ash_core::types::
 }
 
 /// The kind a ref of type `href` points at; `HVOID` when it is not a ref.
-pub(crate) fn ref_target_kind(bytecode: &DecodedBytecode, href: &ash_core::types::HLType) -> u32 {
+pub(crate) fn ref_target_kind(
+    bytecode: &DecodedBytecode,
+    href: &ash_core::types::HLType,
+) -> hl::hl_type_kind {
     if href.kind != hl::hl_type_kind_HREF {
         return hl::hl_type_kind_HVOID;
     }
@@ -290,7 +293,7 @@ pub(crate) fn ref_target_kind(bytecode: &DecodedBytecode, href: &ash_core::types
 
 /// Read a value of `kind` from raw HL memory at `p`, at the width HL gives
 /// it there. A register slot is not raw memory; see `ref_targets_register`.
-pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: u32) -> NanBoxedValue {
+pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
     match kind {
         hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(p.read_unaligned() as i32),
         hl::hl_type_kind_HUI16 => {
@@ -312,7 +315,7 @@ pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: u32) -> NanBoxedValue {
 
 /// Write `v` as a value of `kind` to raw HL memory at `p`, at the width HL
 /// gives it there.
-pub(crate) unsafe fn write_raw_kind(p: *mut u8, kind: u32, v: NanBoxedValue) {
+pub(crate) unsafe fn write_raw_kind(p: *mut u8, kind: hl::hl_type_kind, v: NanBoxedValue) {
     match kind {
         hl::hl_type_kind_HUI8 => p.write_unaligned(v.as_i32() as u8),
         hl::hl_type_kind_HUI16 => (p as *mut u16).write_unaligned(v.as_i32() as u16),

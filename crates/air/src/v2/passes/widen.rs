@@ -1330,10 +1330,9 @@ fn induction_step_site(
 /// Whether `v` is read anywhere but as an incoming of `header`'s phis.
 fn uses_besides_header_phi(f: &Function, header: BlockId, v: ValueId) -> bool {
     for (bi, blk) in f.blocks.iter().enumerate() {
-        if bi != header.idx() {
-            if blk.phis.iter().any(|p| p.incoming.iter().any(|(_, x)| *x == v)) {
-                return true;
-            }
+        if bi != header.idx() && blk.phis.iter().any(|p| p.incoming.iter().any(|(_, x)| *x == v))
+        {
+            return true;
         }
         if blk.instrs.iter().any(|i| i.uses().contains(&v)) || blk.term.uses().contains(&v) {
             return true;

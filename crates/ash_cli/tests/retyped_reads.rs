@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use ash_core::bytecode::{BytecodeDecoder, DecodedBytecode};
 use ash_core::hl_bindings::{
-    hl_type_kind_HBOOL, hl_type_kind_HI64, hl_type_kind_HUI16, hl_type_kind_HUI8,
+    hl_type_kind, hl_type_kind_HBOOL, hl_type_kind_HI64, hl_type_kind_HUI16, hl_type_kind_HUI8,
 };
 use ash_core::opcodes::Opcode;
 use common::{ash_cli_bin, run_with_timeout, tests_dir};
@@ -30,7 +30,8 @@ use common::{ash_cli_bin, run_with_timeout, tests_dir};
 /// itself and the conversion becomes a `Nop`. Returns how many pairs changed.
 fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
     let mut changed = 0;
-    let is_narrow = |kind: u32| {
+    // The bindgen alias, not a bare integer: MSVC types the C enum i32.
+    let is_narrow = |kind: hl_type_kind| {
         kind == hl_type_kind_HBOOL || kind == hl_type_kind_HUI8 || kind == hl_type_kind_HUI16
     };
     for f in &mut bc.functions {

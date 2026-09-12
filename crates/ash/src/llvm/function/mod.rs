@@ -38,6 +38,7 @@ use crate::{
 use anyhow::{anyhow, Result};
 
 mod air_emit;
+mod enums;
 mod natives;
 mod opcode;
 

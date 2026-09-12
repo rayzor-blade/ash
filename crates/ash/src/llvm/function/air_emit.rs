@@ -648,28 +648,24 @@ impl<'ctx> JITModule<'ctx> {
                         self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
                         lowering.regs[ri] = saved;
                     }
-                    AirInstr::SetEnumField {
-                        value,
-                        construct,
-                        field,
-                        src,
-                    } => {
-                        // The legacy primitive historically discovered the
-                        // construct by scanning preceding opcodes. AIR carries
-                        // it explicitly, so provide only that local fact.
-                        let alloc = Opcode::EnumAlloc {
-                            dst: Reg(value.0),
-                            construct: RefEnumConstruct(*construct),
-                        };
-                        let set = Opcode::SetEnumField {
-                            value: Reg(value.0),
-                            field: RefField(*field),
-                            src: Reg(src.0),
-                        };
-                        lowering.ops = vec![alloc, set.clone()];
-                        let dummy = [current, current, next];
-                        self.translate_opcode(lowering, &set, registers, reg_types, 1, &dummy)?;
-                        lowering.ops.clear();
+                    AirInstr::EnumAlloc { dst, construct } => {
+                        self.emit_air_enum_alloc(lowering, registers, reg_types, cell_base, *dst, *construct)?;
+                    }
+                    AirInstr::MakeEnum { dst, construct, args } => {
+                        self.emit_air_make_enum(lowering, registers, reg_types, cell_base, *dst, *construct, args)?;
+                    }
+                    AirInstr::EnumIndex { dst, value } => {
+                        self.emit_air_enum_index(lowering, registers, reg_types, cell_base, *dst, *value)?;
+                    }
+                    AirInstr::EnumField { dst, value, construct, field } => {
+                        self.emit_air_enum_field(
+                            lowering, registers, reg_types, cell_base, *dst, *value, *construct, *field,
+                        )?;
+                    }
+                    AirInstr::SetEnumField { value, construct, field, src } => {
+                        self.emit_air_set_enum_field(
+                            lowering, registers, reg_types, cell_base, *value, *construct, *field, *src,
+                        )?;
                     }
                     AirInstr::Pos { file, line } => {
                         // The frame's position, as the runtime reads it back:

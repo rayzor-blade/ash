@@ -1332,7 +1332,15 @@ impl<'ctx> JITModule<'ctx> {
                     self.cast_for_call(value, ptr_type.into())?
                         .into_pointer_value()
                 };
-                let throw = self.declare_native("hlp_throw", &[ptr_type.into()], None);
+                // A rethrow keeps the exception's captured stack; a throw
+                // captures a new one. The runtime tells them apart by entry
+                // point, as the other tiers do.
+                let helper = if matches!(term, AirTerminator::Rethrow { .. }) {
+                    "hlp_rethrow"
+                } else {
+                    "hlp_throw"
+                };
+                let throw = self.declare_native(helper, &[ptr_type.into()], None);
                 self.builder
                     .build_call(throw, &[value.into()], "air_throw_call")?;
                 self.builder.build_unreachable()?;

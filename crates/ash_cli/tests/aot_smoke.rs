@@ -44,6 +44,9 @@ const PROGRAMS: &[&str] = &[
     // correctly. Nothing else in this list touches a virtual.
     "test_feature_typedef_anon.hl",
     "test_safe_cast_virtual.hl",
+    // A virtual-method closure over a receiver whose class inherits the
+    // method: the vtable slot indexed the class's own method list.
+    "test_virtual_closure_inherited.hl",
     "test_gettype_null.hl",
     "test_std_reflect_type.hl",
 ];

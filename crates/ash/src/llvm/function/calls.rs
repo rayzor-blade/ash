@@ -333,6 +333,23 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// The bytecode function behind vtable slot `slot` of class `type_idx`,
+    /// found by walking the super chain for the proto entry with that
+    /// pindex. A class's own proto list holds only the methods it declares,
+    /// so a slot inherited through a subclass-typed receiver is only found
+    /// further up, and its position in any one list means nothing.
+    fn proto_findex_for_slot(&self, type_idx: usize, slot: usize) -> Option<usize> {
+        let mut cur = Some(type_idx);
+        while let Some(ti) = cur {
+            let obj = self.types_[ti].obj.as_ref()?;
+            if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == slot) {
+                return Some(p.findex as usize);
+            }
+            cur = obj.super_.as_ref().map(|t| t.0);
+        }
+        None
+    }
+
     /// Method call through vtable slot `field`; `args[0]` is the receiver.
     /// Compile-time proto resolution for HOBJ/HSTRUCT, runtime vfields for
     /// HVIRTUAL, the runtime methods table otherwise.
@@ -752,27 +769,7 @@ impl<'ctx> JITModule<'ctx> {
 
             // Continue at merge
             self.builder.position_at_end(merge_block);
-        } else if let Some(findex) = {
-            // `field` is the vtable slot index (vobj_proto index). Find
-            // the proto entry whose pindex matches it to get the findex
-            // for the function signature -- walking the SUPER chain: a
-            // subclass's own proto list holds only the methods it
-            // declares, so an inherited method called through a
-            // subclass-typed receiver is only found further up.
-            let mut found: Option<usize> = None;
-            let mut cur = Some(obj_type_idx);
-            while let Some(ti) = cur {
-                let Some(obj) = self.types_[ti].obj.as_ref() else {
-                    break;
-                };
-                if let Some(p) = obj.proto.iter().find(|p| p.pindex as usize == field) {
-                    found = Some(p.findex as usize);
-                    break;
-                }
-                cur = obj.super_.as_ref().map(|t| t.0);
-            }
-            found
-        } {
+        } else if let Some(findex) = self.proto_findex_for_slot(obj_type_idx, field) {
             // Runtime vtable dispatch for HOBJ/HSTRUCT.
             // `field` is the vobj_proto slot index.
             let vtable_slot = field as u64;
@@ -1813,14 +1810,14 @@ impl<'ctx> JITModule<'ctx> {
         let obj_type_idx = lowering.regs[obj.idx()].0;
         let obj_type_info = self.types_[obj_type_idx].clone();
 
-        // Resolve findex from proto table at compile time
-        let findex = if let Some(ref obj_data) = obj_type_info.obj {
-            obj_data.proto[field].findex as usize
-        } else {
-            return Err(anyhow!(
-                "VirtualClosure: obj register type has no proto table"
-            ));
-        };
+        // `field` is the vtable slot; the static type's chain names the
+        // method whose signature the closure carries, and the runtime slot
+        // below supplies the override the receiver actually has.
+        let findex = self
+            .proto_findex_for_slot(obj_type_idx, field)
+            .ok_or_else(|| {
+                anyhow!("VirtualClosure: no method at vtable slot {field} of type {obj_type_idx}")
+            })?;
 
         if !self.lazy_compilation {
             let (_function, is_placeholder) = self.get_or_create_function_value(findex)?;

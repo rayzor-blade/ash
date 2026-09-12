@@ -27,6 +27,7 @@ fn smoke_case_names() -> HashSet<&'static str> {
         "TestFeatureTypedefAnon",
         "TestFeatureNullCasts",
         "TestNarrowUnsigned",
+        "TestVirtualClosureInherited",
         "TestTieredHotLoop",
         "Mandelbrot",
     ]

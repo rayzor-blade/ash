@@ -1278,25 +1278,34 @@ impl HLInterpreter {
             frame.registers.set(dst, NanBoxedValue::null());
         } else {
             let obj_ptr = obj_val.as_ptr() as *const u8;
-            // The virtual field index into the interface's field table
-            // We need to look up the method findex from the object's runtime type.
-            // For now, look up via the object's proto chain by field index.
+            // `field` is the vtable slot. The method behind it is the proto
+            // entry with that pindex, searched from the object's runtime
+            // type up its super chain: a class's own proto list holds only
+            // the methods it declares, so the slot's position in it means
+            // nothing, and starting from the runtime type binds the
+            // override the object actually has.
             let findex_opt: Option<usize> = unsafe {
-                let obj_hl_type = *(obj_ptr as *const *mut hl::hl_type);
-                if !obj_hl_type.is_null()
-                    && ((*obj_hl_type).kind == hl::hl_type_kind_HOBJ
-                        || (*obj_hl_type).kind == hl::hl_type_kind_HSTRUCT)
+                let mut ty = *(obj_ptr as *const *mut hl::hl_type);
+                let mut found = None;
+                while !ty.is_null()
+                    && ((*ty).kind == hl::hl_type_kind_HOBJ || (*ty).kind == hl::hl_type_kind_HSTRUCT)
                 {
-                    let obj_data = (*obj_hl_type).__bindgen_anon_1.obj;
-                    let fi = field as usize;
-                    if fi < (*obj_data).nproto as usize {
-                        Some((*(*obj_data).proto.add(fi)).findex as usize)
-                    } else {
-                        None
+                    let obj_data = (*ty).__bindgen_anon_1.obj;
+                    if obj_data.is_null() {
+                        break;
                     }
-                } else {
-                    None
+                    // A class with no methods of its own has a null table.
+                    let nproto = (*obj_data).nproto.max(0) as usize;
+                    let hit = (0..nproto)
+                        .map(|i| &*(*obj_data).proto.add(i))
+                        .find(|p| p.pindex == field as i32);
+                    if let Some(p) = hit {
+                        found = Some(p.findex as usize);
+                        break;
+                    }
+                    ty = (*obj_data).super_;
                 }
+                found
             };
             if let Some(findex) = findex_opt {
                 // The METHOD's full type, for the same reason

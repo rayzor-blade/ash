@@ -585,6 +585,20 @@ timeout_secs = 180
 expectation = "exact"
 normalize = "default"
 
+# A closure over a virtual method taken from a receiver whose static class
+# neither declares nor overrides it. The vtable slot is not a position in
+# that class's own method list; the LLVM tier indexed it as one and the
+# interpreter read past its table, each dying on the class with no methods.
+# Runs once, so only a whole-program compile executes it compiled.
+[[case]]
+name = "TestVirtualClosureInherited"
+main = "TestVirtualClosureInherited"
+hl = "test_virtual_closure_inherited.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+
 # A null Dynamic's type is the void type (hl_typeof(NULL)). Read by
 # Type.typeof, Reflect.isFunction and the JSON printer; runs once, so only a
 # whole-program compile executes it compiled.

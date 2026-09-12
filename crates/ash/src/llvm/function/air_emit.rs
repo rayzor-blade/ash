@@ -664,6 +664,27 @@ impl<'ctx> JITModule<'ctx> {
                     AirInstr::ArraySize { dst, array } => {
                         self.emit_air_array_size(lowering, registers, reg_types, cell_base, *dst, *array)?;
                     }
+                    AirInstr::Call { dst, fun, args } => {
+                        self.emit_air_call(lowering, registers, reg_types, cell_base, *dst, *fun, args)?;
+                    }
+                    AirInstr::Intrinsic { kind, fun, dst, args } => {
+                        self.emit_air_intrinsic(lowering, registers, reg_types, cell_base, *kind, *fun, *dst, args)?;
+                    }
+                    AirInstr::CallMethod { dst, field, args } => {
+                        self.emit_air_call_method(lowering, registers, reg_types, cell_base, *dst, *field, args)?;
+                    }
+                    AirInstr::CallClosure { dst, fun, args } => {
+                        self.emit_air_call_closure(lowering, registers, reg_types, cell_base, *dst, *fun, args)?;
+                    }
+                    AirInstr::StaticClosure { dst, fun } => {
+                        self.emit_air_static_closure(lowering, registers, reg_types, cell_base, *dst, *fun)?;
+                    }
+                    AirInstr::InstanceClosure { dst, fun, obj } => {
+                        self.emit_air_instance_closure(lowering, registers, reg_types, cell_base, *dst, *fun, *obj)?;
+                    }
+                    AirInstr::VirtualClosure { dst, obj, field } => {
+                        self.emit_air_virtual_closure(lowering, registers, reg_types, cell_base, *dst, *obj, *field)?;
+                    }
                     AirInstr::Cast { kind, dst, src } => {
                         self.emit_air_cast(lowering, registers, reg_types, cell_base, *kind, *dst, *src)?;
                     }

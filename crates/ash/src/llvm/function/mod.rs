@@ -1630,55 +1630,8 @@ impl<'ctx> JITModule<'ctx> {
 
         let entry = self.context.append_basic_block(function, "osr_entry");
         self.builder.position_at_end(entry);
-        let mut lowering = source.clone();
-        lowering.regs = air
-            .values
-            .iter()
-            .map(|v| TypeRef(v.ty.0 as usize))
-            .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
-            .collect();
-        lowering.ops.clear();
-        let (mut registers, mut reg_types) = self.allocate_registers(&lowering)?;
-        // Constants a pass minted have no pool entry, so materialize their
-        // globals before anything asks for one. After this
-        // `ensure_int_global` finds them cached and the rest of lowering
-        // cannot tell them from pooled constants.
-        for (i, v) in air.pending_ints.iter().enumerate() {
-            let idx = air.int_pool_base + i;
-            if self.int_globals.get(idx).copied().flatten().is_some() {
-                continue;
-            }
-            let g = self
-                .module
-                .add_global(self.context.i32_type(), None, &format!("Int_{idx}"));
-            g.set_initializer(&self.context.i32_type().const_int(*v as u64, true));
-            g.set_constant(true);
-            if self.int_globals.len() <= idx {
-                self.int_globals.resize(idx + 1, None);
-            }
-            self.int_globals[idx] = Some(g);
-        }
-        // Vector values need a slot of their real width. `allocate_registers`
-        // works from `TypeRef`, which indexes the bytecode's type table and
-        // has no vector entries, so the lane count on the value is the only
-        // place the width exists -- re-type those slots here.
-        for (i, v) in air.values.iter().enumerate() {
-            if v.lanes < 2 {
-                continue;
-            }
-            let vec_ty: BasicTypeEnum = match reg_types[i] {
-                BasicTypeEnum::IntType(t) => t.vec_type(v.lanes as u32).into(),
-                BasicTypeEnum::FloatType(t) => t.vec_type(v.lanes as u32).into(),
-                other => {
-                    return Err(anyhow!(
-                        "AIR value v{i} is {} lanes of a non-scalar type {other:?}",
-                        v.lanes
-                    ))
-                }
-            };
-            reg_types[i] = vec_ty;
-            registers[i] = self.builder.build_alloca(vec_ty, &format!("vreg_{i}"))?;
-        }
+        let lowering = Self::air_lowering_table(source, air);
+        let (registers, reg_types) = self.allocate_air_registers(air, &lowering)?;
         let cell_base = air.values.len();
 
         // Reconstruct the header state using the selected transfer ABI.
@@ -1913,29 +1866,6 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         Ok(())
-    }
-
-    fn allocate_registers(
-        &mut self,
-        f: &HLFunction,
-    ) -> Result<(Vec<PointerValue<'ctx>>, Vec<BasicTypeEnum<'ctx>>)> {
-        let mut ptrs = Vec::with_capacity(f.regs.len());
-        let mut types = Vec::with_capacity(f.regs.len());
-        for (i, reg) in f.regs.iter().enumerate() {
-            let reg_type = self
-                .get_register_type(reg.0)
-                .expect("expected to get register type");
-            types.push(reg_type);
-            ptrs.push(self.builder.build_alloca(reg_type, &format!("reg_{}", i))?);
-        }
-        if self.target_abi.pointer_registers_in_memory {
-            for (slot, ty) in types.iter().enumerate() {
-                if ty.is_pointer_type() {
-                    self.pin_register(ptrs[slot])?;
-                }
-            }
-        }
-        Ok((ptrs, types))
     }
 
     /// Keep one register in memory, where the collector can see what it holds.

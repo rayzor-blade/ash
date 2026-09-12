@@ -59,16 +59,8 @@ impl<'ctx> JITModule<'ctx> {
         function: FunctionValue<'ctx>,
     ) -> Result<()> {
         self.current_findex = source.findex as usize;
-        let mut lowering = source.clone();
-        lowering.regs = air
-            .values
-            .iter()
-            .map(|v| TypeRef(v.ty.0 as usize))
-            .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
-            .collect();
-        lowering.ops.clear();
-
-        let (registers, reg_types) = self.allocate_registers(&lowering)?;
+        let lowering = Self::air_lowering_table(source, air);
+        let (registers, reg_types) = self.allocate_air_registers(air, &lowering)?;
         let cell_base = air.values.len();
         let nargs = self.bytecode.types[source.type_.0]
             .fun
@@ -117,6 +109,85 @@ impl<'ctx> JITModule<'ctx> {
         self.shadow_slot = None;
         self.audit_register_stores(source.findex as usize, function, &registers, &reg_types);
         Ok(())
+    }
+
+    /// The source function with its register table replaced by one HL type
+    /// per AIR value followed by one per cell: what every emitter indexes a
+    /// value's or a cell's type by. Its opcodes are dropped; nothing reads
+    /// them.
+    pub(super) fn air_lowering_table(source: &HLFunction, air: &AirFunction) -> HLFunction {
+        let mut lowering = source.clone();
+        lowering.regs = air
+            .values
+            .iter()
+            .map(|v| TypeRef(v.ty.0 as usize))
+            .chain(air.cells.iter().map(|c| TypeRef(c.ty.0 as usize)))
+            .collect();
+        lowering.ops.clear();
+        lowering
+    }
+
+    /// One stack slot per AIR value and per cell.
+    ///
+    /// A slot is typed by the value's HL type, except that a widened value
+    /// gets a vector of its lane count: the bytecode's type table has no
+    /// vector entries, so the lane count on the value is the only place that
+    /// width exists. Constants a pass minted have no pool entry either, so
+    /// their globals are materialised first; after that `ensure_int_global`
+    /// cannot tell them from pooled constants. Both entry points -- a whole
+    /// function and an OSR body -- allocate here, so a widened function
+    /// lowers the same way through either.
+    pub(super) fn allocate_air_registers(
+        &mut self,
+        air: &AirFunction,
+        lowering: &HLFunction,
+    ) -> Result<(Vec<PointerValue<'ctx>>, Vec<BasicTypeEnum<'ctx>>)> {
+        for (i, v) in air.pending_ints.iter().enumerate() {
+            let idx = air.int_pool_base + i;
+            if self.int_globals.get(idx).copied().flatten().is_some() {
+                continue;
+            }
+            let g = self
+                .module
+                .add_global(self.context.i32_type(), None, &format!("Int_{idx}"));
+            g.set_initializer(&self.context.i32_type().const_int(*v as u64, true));
+            g.set_constant(true);
+            if self.int_globals.len() <= idx {
+                self.int_globals.resize(idx + 1, None);
+            }
+            self.int_globals[idx] = Some(g);
+        }
+
+        let mut ptrs = Vec::with_capacity(lowering.regs.len());
+        let mut types = Vec::with_capacity(lowering.regs.len());
+        for (i, reg) in lowering.regs.iter().enumerate() {
+            let scalar = self.get_register_type(reg.0)?;
+            let lanes = air.values.get(i).map_or(1, |v| v.lanes);
+            let (ty, name) = if lanes >= 2 {
+                let vec_ty: BasicTypeEnum = match scalar {
+                    BasicTypeEnum::IntType(t) => t.vec_type(lanes as u32).into(),
+                    BasicTypeEnum::FloatType(t) => t.vec_type(lanes as u32).into(),
+                    other => {
+                        return Err(anyhow!(
+                            "AIR value v{i} is {lanes} lanes of a non-scalar type {other:?}"
+                        ))
+                    }
+                };
+                (vec_ty, format!("vreg_{i}"))
+            } else {
+                (scalar, format!("reg_{i}"))
+            };
+            types.push(ty);
+            ptrs.push(self.builder.build_alloca(ty, &name)?);
+        }
+        if self.target_abi.pointer_registers_in_memory {
+            for (slot, ty) in types.iter().enumerate() {
+                if ty.is_pointer_type() {
+                    self.pin_register(ptrs[slot])?;
+                }
+            }
+        }
+        Ok((ptrs, types))
     }
 
     /// Report any store into a register slot whose value is the wrong width.

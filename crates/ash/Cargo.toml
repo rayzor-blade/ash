@@ -59,4 +59,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_Debug",
+    # tests/win_setjmp.rs names the module a CRT entry point lives in.
+    "Win32_System_LibraryLoader",
 ] }

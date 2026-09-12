@@ -1488,6 +1488,26 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     crate::gc::gc_lock_unwind_to(saved_lock_depth);
     // The same frames never reach their shadow-stack pop either.
     shadow::unwind_to(saved_shadow_depth);
+    // Win64's `longjmp` reads the buffer's first word as the frame to unwind
+    // to with SEH, and unwinds whenever it is non-zero. The frames between
+    // the trap and here are abandoned on purpose -- the lock depth and the
+    // shadow stack were just restored by hand -- and compiled frames carry
+    // no unwind tables for it to walk anyway. Every tier arms its traps with
+    // a null frame; an HDLL's `hl_trap` is the C macro, which arms with a
+    // real one, so the word is cleared here for whoever armed it.
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        let words = buf_copy.as_mut_ptr() as *mut u64;
+        if throw_trace_enabled() {
+            eprintln!(
+                "[ash] longjmp: frame={:#x} rsp={:#x} rip={:#x}",
+                *words,
+                *words.add(2),
+                *words.add(10)
+            );
+        }
+        *words = 0;
+    }
     // darwin and glibc export `_longjmp` (the no-signal-mask variant); MSVC's
     // setjmp.h declares only `longjmp`, so the generated bindings differ by
     // exactly this underscore per platform. Windows longjmp never touches
@@ -1590,6 +1610,13 @@ pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     (*trap).has_jmpbuf = true;
     (*trap).saved_lock_depth = outer_depth;
     (*trap).saved_shadow_depth = shadow::depth();
+    if throw_trace_enabled() {
+        eprintln!(
+            "[ash] setup_trap: ctx={trap:p} buf={:p} prev={:p}",
+            (*trap).buf.as_ptr(),
+            (*trap).prev
+        );
+    }
     (*trap).buf.as_mut_ptr().cast()
 }
 

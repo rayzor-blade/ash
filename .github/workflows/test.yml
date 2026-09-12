@@ -159,6 +159,19 @@ jobs:
         with:
           into: target\debug\
 
+      # Win64 is the one platform where ash's trap model rests on an
+      # argument the C header hides: the frame word `_setjmp` stores, which
+      # decides whether `longjmp` unwinds. Pin what the CRT does with it, and
+      # that a jump through the pair lands, before the smoke test relies on
+      # both; a failure here names the contract, the smoke test would only
+      # say the JIT printed less.
+      - name: Win64 setjmp contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\llvmenv\Library\bin;$env:PATH"
+          cargo test -p ash_core --test win_setjmp -- --nocapture
+
       - name: AOT binaries match the JIT
         shell: bash
         run: cargo test -p ash --test aot_smoke -- --nocapture

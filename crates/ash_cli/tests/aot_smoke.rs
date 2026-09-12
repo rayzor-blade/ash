@@ -63,6 +63,21 @@ struct Ran {
     text: String,
     ok: bool,
     hung: bool,
+    /// The raw exit code, kept because on Windows it is the NTSTATUS of
+    /// whatever killed a process that printed nothing on the way out.
+    code: Option<i32>,
+}
+
+impl Ran {
+    /// `ok`, or the exit code in hex: an NTSTATUS reads as one, not as the
+    /// negative decimal `ExitStatus` prints.
+    fn exit(&self) -> String {
+        match (self.ok, self.code) {
+            (true, _) => "ok".to_string(),
+            (false, Some(code)) => format!("code {:#x}", code as u32),
+            (false, None) => "killed".to_string(),
+        }
+    }
 }
 
 /// Run one command, giving up on it after [`limit`].
@@ -104,6 +119,7 @@ fn run(binary: &Path, args: &[&str], label: &str) -> Ran {
         text,
         ok: status.map(|s| s.success()).unwrap_or(false),
         hung: status.is_none(),
+        code: status.and_then(|s| s.code()),
     }
 }
 
@@ -209,12 +225,12 @@ fn every_aot_binary_matches_the_jit() {
                     let short = if an < jn { "the binary" } else { "the jit" };
                     format!(
                         "  {short} stopped early; every line they share agreed\n  \
-                         jit: {jn} lines, exited ok={}\n  \
-                         aot: {an} lines, exited ok={}\n  \
+                         jit: {jn} lines, exited {}\n  \
+                         aot: {an} lines, exited {}\n  \
                          last line both printed: {}\n  \
                          next line the jit printed: {}",
-                        jit.ok,
-                        aot.ok,
+                        jit.exit(),
+                        aot.exit(),
                         jit_out
                             .lines()
                             .zip(aot_out.lines())

@@ -39,6 +39,7 @@ use anyhow::{anyhow, Result};
 
 mod air_emit;
 mod enums;
+mod memory;
 mod natives;
 mod opcode;
 

@@ -648,6 +648,57 @@ impl<'ctx> JITModule<'ctx> {
                         self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
                         lowering.regs[ri] = saved;
                     }
+                    AirInstr::MemGet { kind, dst, base, index } => {
+                        self.emit_air_mem_get(lowering, registers, reg_types, cell_base, *kind, *dst, *base, *index)?;
+                    }
+                    AirInstr::MemSet { kind, base, index, src } => {
+                        self.emit_air_mem_set(lowering, registers, reg_types, cell_base, *kind, *base, *index, *src)?;
+                    }
+                    AirInstr::CellGet { dst, cell } => {
+                        self.emit_air_cell_get(lowering, registers, reg_types, cell_base, *dst, *cell)?;
+                    }
+                    AirInstr::CellSet { cell, src } => {
+                        self.emit_air_cell_set(lowering, registers, reg_types, cell_base, *cell, *src)?;
+                    }
+                    AirInstr::CellIncr { cell } => {
+                        self.emit_air_cell_incr(lowering, registers, reg_types, cell_base, *cell)?;
+                    }
+                    AirInstr::CellDecr { cell } => {
+                        self.emit_air_cell_decr(lowering, registers, reg_types, cell_base, *cell)?;
+                    }
+                    AirInstr::CellRef { dst, cell } => {
+                        self.emit_air_cell_ref(lowering, registers, reg_types, cell_base, *dst, *cell)?;
+                    }
+                    AirInstr::Copy { dst, src } => {
+                        self.emit_air_copy(lowering, registers, reg_types, cell_base, *dst, *src)?;
+                    }
+                    AirInstr::Unref { dst, src } => {
+                        self.emit_air_unref(lowering, registers, reg_types, cell_base, *dst, *src)?;
+                    }
+                    AirInstr::SetRef { r, value } => {
+                        self.emit_air_set_ref(lowering, registers, reg_types, cell_base, *r, *value)?;
+                    }
+                    AirInstr::RefData { dst, src } => {
+                        self.emit_air_ref_data(lowering, registers, reg_types, cell_base, *dst, *src)?;
+                    }
+                    AirInstr::RefOffset { dst, base, offset } => {
+                        self.emit_air_ref_offset(lowering, registers, reg_types, cell_base, *dst, *base, *offset)?;
+                    }
+                    AirInstr::Bytes { dst, idx } => {
+                        self.emit_air_bytes(lowering, registers, reg_types, cell_base, *dst, *idx)?;
+                    }
+                    AirInstr::Assert => {
+                        self.emit_air_assert(lowering, registers, reg_types, cell_base)?;
+                    }
+                    AirInstr::Prefetch { value, field, mode } => {
+                        self.emit_air_prefetch(lowering, registers, reg_types, cell_base, *value, *field, *mode)?;
+                    }
+                    AirInstr::Asm { mode, value, reg } => {
+                        self.emit_air_asm(lowering, registers, reg_types, cell_base, *mode, *value, *reg)?;
+                    }
+                    AirInstr::EndTrap { cell, flag } => {
+                        self.emit_air_end_trap(lowering, registers, reg_types, cell_base, *cell, *flag)?;
+                    }
                     AirInstr::EnumAlloc { dst, construct } => {
                         self.emit_air_enum_alloc(lowering, registers, reg_types, cell_base, *dst, *construct)?;
                     }

@@ -19,7 +19,7 @@ schema_version = 1
 # ── Execution modes ─────────────────────────────────────────────────────────
 #
 # `binary` is "ash" — the unified CLI. Every mode is a flag set on it,
-# including the whole-module JIT (`--mode jit`).
+# including the compiled-only ladder (`--mode jit`).
 #
 # `default = false` keeps a mode out of the sweep unless it is named with
 # --modes. Use it for controls and policy variants that are interesting to
@@ -222,7 +222,7 @@ args = ["--mode", "jit"]
 description = """Compiled only, no interpreter: the tiered runtime with \
 every function installed at its first call. The first tier is Cranelift, \
 installed synchronously on reach, and the LLVM tier follows for functions \
-that prove hot, so this is the same ladder as `hybrid-auto` minus the \
+the ladder re-tiers, so this is the same ladder as `hybrid-auto` minus the \
 interpreter underneath it -- not a whole-module LLVM compile. Choose it to \
 measure the compiled tiers on their own, or to check that a program runs \
 with nothing interpreted; do not choose it for startup, which pays a \
@@ -462,8 +462,7 @@ between ash's interpreter (arm64) and stock HashLink 1.15 (x86_64)."""
 # exposed two calls with the same argument, GVN collapses the tree: 331 million
 # invocations "run" in 1.7ms, which is 0.015 cycles per call -- not a fast call,
 # an absent one. clang and gcc do the same to a C `fib`, so this is a property
-# of the optimizer, not a trick. It is also NOT uniform across our own tiers:
-# whole-module `--mode jit` keeps the calls while hybrid and AOT eliminate them,
+# of the optimizer, not a trick. It is also NOT uniform across our own tiers,
 # because the collapse depends on how much of the module each tier hands the
 # optimizer at once. A row whose meaning changes with promotion scoping cannot
 # be read.
@@ -580,9 +579,9 @@ group = "map"
 name = "heaps_game"
 hl = "../../../../examples/heaps_base2d/bin/game.hl"
 expectation = "exit_only"
-# Measured: the full-JIT binary takes ~156s of whole-module LLVM compilation
-# before it faults. A shorter box records TIMEOUT and hides the crash, which
-# is the one fact this entry exists to capture.
+# Measured on the old whole-module `--mode jit`: ~156s of LLVM compilation
+# before the fault. A shorter box records TIMEOUT and hides the crash, which
+# is the one fact this entry exists to capture; re-measure before shrinking it.
 timeout_secs = 200
 windowed = true
 group = "windowed"

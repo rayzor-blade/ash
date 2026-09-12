@@ -10,7 +10,7 @@ them, because a lane timed by a different routine is not a comparison.
 Lanes:
   ash-aot   a native binary built by `ash --build`, run directly.
             No JIT, no interpreter, no bytecode loading, no warm-up.
-  ash-jit   `ash --mode jit`, which compiles the whole module and then runs.
+  ash-jit   `ash --mode jit`, compiled only: each function at its first call.
   ash       `ash` with its default tiering, which is what CI publishes.
   hlc       `haxe -main M -hl main.c` recompiled against libhl.
 

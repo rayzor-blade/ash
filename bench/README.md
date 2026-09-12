@@ -44,7 +44,7 @@ embedded into `ash` via `include_bytes!`, so building `ash` against a stale
 | `hybrid-auto` | `ash_cli` | `--mode hybrid --jit-tier auto` | Full ladder: interpreter → Cranelift → LLVM. |
 | `hybrid-cranelift` | `ash_cli` | `--mode hybrid --jit-tier cranelift` | Ladder pinned to the Cranelift middle tier. |
 | `hybrid-llvm` | `ash_cli` | `--mode hybrid --jit-tier llvm` | Ladder pinned to the LLVM top tier. |
-| `full-jit` | `ash` | `--mode jit` | Standalone whole-module LLVM JIT, no interpreter. Compiles every function in the module before `main` runs — 17× slower than `hybrid-auto` on deltablue, 9× on fib. For judging codegen without tiering, not for startup. |
+| `full-jit` | `ash` | `--mode jit` | Compiled only, no interpreter: the same ladder as `hybrid-auto` with every function installed at its first call (Cranelift on reach, LLVM for functions the ladder re-tiers). Not a whole-module LLVM compile. |
 | `hybrid-off` | `ash_cli` | `--mode hybrid --jit-tier off` | Control: tiering machinery present, promotion disabled. Not in the default set. |
 | `hybrid-eager` | `ash_cli` | `--jit-threshold 1 …` | The promotion policy the old `run_perf_matrix.py` used, kept so its historical numbers stay comparable. Not in the default set. |
 
@@ -349,9 +349,9 @@ and a frame-rate-bound, vsync-bound, window-manager-dependent number would not
 be comparable run to run even if there were. It is carried under
 `--include-windowed`, restricted to `full-jit`, for exactly one reason: to keep
 a dated, machine-readable record that `target/debug/ash` still **SIGSEGVs** on
-it. Measured here: the fault arrives after ~156 s of whole-module LLVM
-compilation, which is why its time box is 200 s — a shorter one records
-`TIMEOUT` and hides the crash.
+it. Measured on the old whole-module `--mode jit`: the fault arrived after
+~156 s of LLVM compilation, which is why its time box is 200 s — a shorter one
+records `TIMEOUT` and hides the crash.
 
 ---
 
@@ -411,11 +411,13 @@ in it are worth knowing before you read your own run:
 short benchmark goes the other way: at ~16 ms of interpreter time, all the
 hybrid modes land at 0.85–0.95× because promotion never repays its setup.
 
-**`full-jit` carries a ~900 ms fixed cost.** It compiles the whole module before
-running anything, so it is 0.02× on every benchmark that finishes in tens of
-milliseconds and only wins where the compiled code runs long enough to amortize
-that. The `basic` row (881 ms for a program the interpreter finishes in 17 ms)
-is that cost with nothing else in it.
+**`full-jit` carried a ~900 ms fixed cost in this baseline.** That build
+compiled the whole module before running anything -- a path since deleted;
+`--mode jit` now compiles each function at its first call -- so it was 0.02×
+on every benchmark that finishes in tens of milliseconds and only won where
+the compiled code ran long enough to amortize that. The `basic` row (881 ms
+for a program the interpreter finishes in 17 ms) is that cost with nothing
+else in it.
 
 **The LLVM pre-warm is visible and it is not small.** `stdlib` runs 46 ms under
 `interp`, 27.8 ms under `hybrid-cranelift` (1.66×) — and **459 ms** under

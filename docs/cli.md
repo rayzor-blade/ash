@@ -23,8 +23,8 @@ Anything after the `.hl` file is passed to the program.
 | `--quiet` | flag | Suppress non-program output |
 
 `interp` runs everything in the bytecode interpreter. `hybrid` adds tiered
-promotion, which is what a long-running program wants. `jit` compiles the whole
-program up front.
+promotion, which is what a long-running program wants. `jit` is the same
+ladder with no interpreter: every function is compiled at its first call.
 
 ## Compiling
 

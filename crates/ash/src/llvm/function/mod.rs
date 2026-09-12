@@ -152,13 +152,6 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
-    #[inline(always)]
-    fn current_stack_addr() -> usize {
-        // Portable stack probe: address of a local variable approximates current SP.
-        let marker = 0u8;
-        (&marker as *const u8) as usize
-    }
-
     /// The loop safe point's epoch word.
     ///
     /// One word, reached two ways. A JIT asks the runtime for its address and
@@ -354,9 +347,9 @@ impl<'ctx> JITModule<'ctx> {
     ///
     /// `llvm.trap` and not a call to `hlp_error`: building an error path needs
     /// `hlp_error` to resolve, which is no more certain than the helper that
-    /// just did not. The promote path refuses any function reaching one, but
-    /// the whole-module path has no such gate, so the body aborts on a defined
-    /// signal rather than leaving bare `unreachable` for something to execute.
+    /// just did not. The promote path refuses any function reaching one; the
+    /// body still aborts on a defined signal rather than leaving bare
+    /// `unreachable` for something to execute.
     fn trapping_stub(&self, name: &str, fn_type: FunctionType<'ctx>) -> FunctionValue<'ctx> {
         let saved = self.builder.get_insert_block();
         let f = self.module.add_function(name, fn_type, None);
@@ -372,28 +365,6 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.position_at_end(block);
         }
         f
-    }
-
-    /// Get or declare an external native function, avoiding builder position clobber.
-    /// The `_to_llvm` macro functions reposition the builder, so we save/restore it.
-    fn get_or_declare_native(
-        &self,
-        name: &str,
-        declare_fn: impl FnOnce(
-            &'ctx inkwell::context::Context,
-            &inkwell::module::Module<'ctx>,
-            &inkwell::builder::Builder<'ctx>,
-        ) -> Result<FunctionValue<'ctx>>,
-    ) -> Result<FunctionValue<'ctx>> {
-        if let Some(f) = self.module.get_function(name) {
-            return Ok(f);
-        }
-        let saved_block = self.builder.get_insert_block();
-        let func = declare_fn(self.context, &self.module, &self.builder)?;
-        if let Some(block) = saved_block {
-            self.builder.position_at_end(block);
-        }
-        Ok(func)
     }
 
     fn create_function_placeholder(
@@ -431,8 +402,8 @@ impl<'ctx> JITModule<'ctx> {
     /// win. aarch64 never felt it because the base ISA already has fmadd.
     /// Codegen honors per-FUNCTION `target-cpu`/`target-features` attributes
     /// regardless of the engine's machine, so every function gets stamped at
-    /// creation — the one choke point both the whole-module and the tiered
-    /// promote paths pass through.
+    /// creation — the one choke point the promote, reload and AOT paths all
+    /// pass through.
     fn stamp_host_cpu(&self, f: FunctionValue<'ctx>) {
         // Every body keeps a frame pointer. LLVM's default for a raw module
         // is to omit it, and an emitted prologue then saves x29/x30 without
@@ -1284,66 +1255,6 @@ impl<'ctx> JITModule<'ctx> {
         })
     }
 
-    pub(crate) fn create_function_value(&mut self, index: usize) -> Result<FunctionValue<'ctx>> {
-        if let Some(f_v) = self.func_cache.get(&index) {
-            return Ok(*f_v);
-        }
-        let findexes = self.findexes.clone();
-        let fun_ptr = findexes
-            .get(&index)
-            .ok_or_else(|| anyhow!("Function not found at index {}", index))?;
-
-        match fun_ptr {
-            FuncPtr::Fun(f) => {
-                let f = f.clone();
-                let air = crate::llvm::air::prepare_llvm(
-                    &self.bytecode,
-                    &f,
-                    self.hot_reload,
-                    self.lazy_compilation,
-                )
-                .map_err(|e| anyhow!("AIR v2 refused findex {}: {e}", f.findex))?;
-
-                let function = self.create_function_declaration(&f)?;
-                let basic_block = self.context.append_basic_block(function, "entry");
-                self.builder.position_at_end(basic_block);
-
-                self.translate_air_v2(&f, &air, function)?;
-
-                if self
-                    .builder
-                    .get_insert_block()
-                    .unwrap()
-                    .get_terminator()
-                    .is_none()
-                {
-                    let ret_type = function.get_type().get_return_type();
-                    if let Some(ret_type) = ret_type {
-                        self.builder.build_return(Some(&ret_type.const_zero()))?;
-                    } else {
-                        self.builder.build_return(None)?;
-                    }
-                }
-
-                if !function.verify(true) {
-                    function.print_to_stderr();
-                    return Err(anyhow!(
-                        "Function verification failed for findex {}",
-                        f.findex
-                    ));
-                }
-
-                self.func_cache.insert(f.findex as usize, function);
-                Ok(function)
-            }
-            FuncPtr::Native(native) => {
-                let func = self.init_native_func(native)?;
-                self.func_cache.insert(native.findex as usize, func);
-                Ok(func)
-            }
-        }
-    }
-
     /// Compile an entry point that begins at `header_pc` instead of at the
     /// top of the function, taking the live register file as a buffer.
     ///
@@ -1491,7 +1402,7 @@ impl<'ctx> JITModule<'ctx> {
         }
         // The OSR entry is the body the hot loop actually executes, so IR
         // questions about steady-state code are questions about THIS module,
-        // not the ordinary one ASH_DUMP_IR writes.
+        // not the promoted body ASH_DUMP_FN_IR prints.
         if let Ok(dir) = std::env::var("ASH_DUMP_OSR_IR") {
             if !dir.is_empty() && dir != "0" {
                 let path = format!("{dir}/{name}.ll");
@@ -2497,7 +2408,7 @@ impl<'ctx> JITModule<'ctx> {
                 v
             }
             None => {
-                // No runtime handles (whole-module JIT: nothing is ever a
+                // No runtime handles (an AOT module: nothing is ever a
                 // sentinel there anyway). Keep the single-path shape. The
                 // heal block still needs a terminator to satisfy the
                 // verifier, even with zero predecessors.
@@ -3392,61 +3303,6 @@ impl<'ctx> JITModule<'ctx> {
         })
     }
 
-    /// Compile all remaining bytecode functions not yet compiled.
-    /// Functions only reachable through virtual dispatch (CallMethod on HVIRTUAL)
-    /// are not discovered during the main compilation pass, so we compile them here.
-    /// Any function that cannot be compiled gets a stub returning zero/null.
-    fn compile_remaining_functions(&mut self) -> Result<()> {
-        let uncompiled: Vec<usize> = self
-            .findexes
-            .iter()
-            .filter_map(|(&findex, fp)| {
-                if !self.func_cache.contains_key(&findex) {
-                    if let FuncPtr::Fun(_) = fp {
-                        return Some(findex);
-                    }
-                }
-                None
-            })
-            .collect();
-
-        for findex in &uncompiled {
-            if let Err(_e) = self.compile_function(*findex) {
-                // Compilation failure: create a stub so functions_ptrs has a valid address
-                if !self.func_cache.contains_key(findex) {
-                    let saved_block = self.builder.get_insert_block();
-                    // Clone the function data to avoid borrow conflict with self
-                    let f_clone = if let Some(FuncPtr::Fun(f)) = self.findexes.get(findex) {
-                        Some(f.clone())
-                    } else {
-                        None
-                    };
-                    if let Some(f) = f_clone {
-                        if let Ok(decl) = self.create_function_declaration(&f) {
-                            let stub_block = self.context.append_basic_block(decl, "stub");
-                            self.builder.position_at_end(stub_block);
-                            let ret_type = decl.get_type().get_return_type();
-                            if let Some(ret_type) = ret_type {
-                                self.builder.build_return(Some(&ret_type.const_zero())).ok();
-                            } else {
-                                self.builder.build_return(None).ok();
-                            }
-                            self.func_cache.insert(*findex, decl);
-                        }
-                    }
-                    if let Some(block) = saved_block {
-                        self.builder.position_at_end(block);
-                    }
-                }
-            }
-        }
-
-        // Also compile any functions that were discovered during the above compilation
-        self.compile_pending_functions()?;
-
-        Ok(())
-    }
-
     /// Park the functions the middle end has already optimized, so a promotion
     /// pays for the function it is promoting rather than for the whole module.
     ///
@@ -3803,187 +3659,9 @@ impl<'ctx> JITModule<'ctx> {
         Ok(wrapper)
     }
 
-    pub fn execute_main(&mut self) -> Result<()> {
-        // Everything up to `execute` is compilation, grouped so the report
-        // gives one number for it rather than four the reader has to add up --
-        // and so `execute` sits beside it as a sibling instead of being nested
-        // inside a phase named for the thing it is not.
-        let compile_phase = crate::profile::scope("compile");
-        // Compile any pending functions discovered during initialization
-        {
-            let _phase = crate::profile::scope("compile pending");
-            self.compile_pending_functions()?;
-        }
-
-        // Compile remaining bytecode functions (e.g., virtual-dispatch-only methods)
-        {
-            let _phase = crate::profile::scope("compile remaining");
-            self.compile_remaining_functions()?;
-        }
-
-        let index = self.bytecode.entrypoint as usize;
-        let function = *self
-            .func_cache
-            .get(&index)
-            .ok_or_else(|| anyhow!("Entrypoint function not found in cache"))?;
-        let safe_entrypoint = self.build_safe_entry_wrapper(function)?;
-
-        // Optimize before anything asks for an address: requesting one forces
-        // codegen, and a pass run afterwards would be too late.
-        {
-            let _phase = crate::profile::scope("llvm middle-end");
-            let excluded = self.shield_trap_functions_from_optimization();
-            crate::profile::count("middle-end functions excluded (trap)", excluded as u64);
-            super::module::run_middle_end(&self.module)?;
-            // Whole-module by design here — this compiles everything once. A
-            // promotion later in the same process starts from that.
-            self.record_optimized_functions(&[]);
-        }
-
-        // `ASH_DUMP_FN_IR` worked only on the promote path until the map-
-        // iterator investigation needed the whole-module IR to diff against
-        // it; same flag, same post-middle-end vantage, both pipelines.
-        for (findex, fun) in self.func_cache.iter() {
-            if Self::fn_ir_dump_wanted_impl(*findex) {
-                eprintln!(
-                    "=== LLVM IR (whole-module) findex={findex} ===\n{}",
-                    fun.print_to_string().to_string()
-                );
-            }
-        }
-
-        // Off unless asked for. This wrote the whole module to /tmp on every
-        // run -- around 940KB and 13ms of it, inside the region the profiler
-        // reports as compile time, on a binary whose compile time is the thing
-        // most worth measuring. `ASH_DUMP_IR=1` restores the old path,
-        // `ASH_DUMP_IR=<path>` chooses another.
-        if let Ok(spec) = std::env::var("ASH_DUMP_IR") {
-            if !spec.is_empty() && spec != "0" {
-                let _phase = crate::profile::scope("dump ir");
-                let path = if spec == "1" {
-                    "/tmp/ash_jit.ll"
-                } else {
-                    &spec
-                };
-                match self.module.print_to_file(path) {
-                    Ok(()) => eprintln!("[ash] LLVM IR written to {path}"),
-                    Err(e) => eprintln!("[ash] could not write {path}: {e}"),
-                }
-            }
-        }
-
-        // The whole-module verifier, before MCJIT consumes the IR. This was
-        // the one LLVM path with no verification at all: the tiered promote
-        // path verifies per function, the OSR module verifies on build, and
-        // this — the largest module of the three — handed MCJIT whatever the
-        // builder produced. Invalid IR here is undefined behaviour that tends
-        // to surface as an unrelated crash long after the cause.
-        //
-        // An error reports and aborts the run rather than continuing:
-        // executing IR the verifier rejected is not a degraded mode, it is
-        // UB. `ASH_LLVM_VERIFY=0` skips the check (and its one linear pass
-        // over the module) once a measurement needs the old behaviour.
-        if !matches!(
-            std::env::var("ASH_LLVM_VERIFY").as_deref(),
-            Ok("0") | Ok("off")
-        ) {
-            let _phase = crate::profile::scope("llvm verify");
-            if let Err(msg) = self.module.verify() {
-                return Err(anyhow!(
-                    "LLVM module failed verification — an ash codegen bug:\n{}",
-                    msg.to_string()
-                ));
-            }
-        }
-
-        // Populate functions_ptrs with actual function addresses from the JIT.
-        // This must happen after compilation so the execution engine has allocated code.
-        // Requesting every address is what forces MCJIT to emit machine code.
-        {
-            let _phase = crate::profile::scope("mcjit codegen");
-            self.setup_functions_ptrs()?;
-        }
-
-        // Register GC roots BEFORE init_constants (which allocates and might trigger GC)
-        unsafe {
-            type FnSetGlobals = unsafe extern "C" fn(*const *mut std::ffi::c_void, usize);
-            let set_globals: FnSetGlobals = std::mem::transmute(
-                self.native_function_resolver
-                    .resolve_function("std", "hlp_gc_set_globals")
-                    .map_err(|e| anyhow!("Cannot resolve hlp_gc_set_globals: {}", e))?,
-            );
-            set_globals(self.globals_data.as_ptr(), self.globals_data.len());
-
-            type FnSetStackTop = unsafe extern "C" fn(usize);
-            let set_stack_top: FnSetStackTop = std::mem::transmute(
-                self.native_function_resolver
-                    .resolve_function("std", "hlp_gc_set_stack_top")
-                    .map_err(|e| anyhow!("Cannot resolve hlp_gc_set_stack_top: {}", e))?,
-            );
-            set_stack_top(Self::current_stack_addr());
-        }
-
-        // Materialize bytecode constants (pre-initialized globals like string literals)
-        // Compilation ends here; what follows is runtime setup and the run.
-        drop(compile_phase);
-
-        {
-            let _phase = crate::profile::scope("init constants");
-            self.init_constants()?;
-        }
-
-        // Pre-allocate class descriptors for HOBJ globals not populated by init_constants
-        {
-            let _phase = crate::profile::scope("init class descriptors");
-            self.init_class_descriptors()?;
-        }
-
-        {
-            let _phase = crate::profile::scope("execute");
-            let status = unsafe {
-                self.execution_engine
-                    .run_function(safe_entrypoint, &[])
-                    .as_int(false)
-            };
-            if status != 0 {
-                return Err(anyhow!(
-                    "HashLink program terminated with an uncaught exception"
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Populate the functions_ptrs table with actual function addresses.
-    /// The table was pre-allocated in init_indexes and already wired into module contexts.
-    fn setup_functions_ptrs(&mut self) -> Result<()> {
-        // Collect function names and findexes first to avoid borrow conflicts
-        let func_entries: Vec<(usize, String)> = self
-            .func_cache
-            .iter()
-            .map(|(&findex, func_val)| {
-                (
-                    findex,
-                    func_val.get_name().to_str().unwrap_or("").to_string(),
-                )
-            })
-            .collect();
-
-        for (findex, name) in &func_entries {
-            if let Ok(addr) = self.execution_engine.get_function_address(name) {
-                if addr != 0 && *findex < self.functions_ptrs.len() {
-                    self.install_function_address(*findex, addr as *mut c_void);
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub(crate) fn install_function_address(&mut self, findex: usize, addr: *mut c_void) {
-        // Every LLVM-compiled entry point passes through here, in both the
-        // whole-module and the tiered path, so this is the one place the
+        // Every LLVM-compiled entry point passes through here -- promotions
+        // and reload recompiles alike -- so this is the one place the
         // profiler needs to learn about generated code.
         crate::jit_map::register(
             findex as u32,
@@ -4005,45 +3683,6 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
         }
-    }
-}
-
-pub struct FunctionBuilder<'ctx> {
-    pub(crate) builder: Builder<'ctx>,
-    pub(crate) execution_engine: ExecutionEngine<'ctx>,
-    pub(crate) type_: Option<FunctionType<'ctx>>,
-    pub(crate) value: Option<FunctionValue<'ctx>>,
-    fun: HLFunction,
-}
-
-impl<'ctx> FunctionBuilder<'ctx> {
-    pub fn new(
-        fun: HLFunction,
-        builder: Builder<'ctx>,
-        execution_engine: ExecutionEngine<'ctx>,
-    ) -> Self {
-        Self {
-            builder,
-            execution_engine,
-            fun,
-            type_: None,
-            value: None,
-        }
-    }
-
-    pub fn build(&mut self, module: &mut JITModule<'ctx>) -> Result<()> {
-        let regs = &self.fun.regs;
-        // One HLTypeFun, not a deep clone of every type in the module.
-        let fun = module
-            .types_
-            .get(self.fun.type_.0)
-            .expect("Unknown type")
-            .fun
-            .clone()
-            .expect("Expected to get function type");
-        self.type_ = module.create_function_type(&fun).ok();
-        self.value = module.create_function_value(self.fun.findex as usize).ok();
-        Ok(())
     }
 }
 

@@ -573,8 +573,8 @@ expectation = "exact"
 normalize = "default"
 
 # A virtual (interface-typed value) cast back to its class. Runs once per
-# program, so the interpreter always executed it and only a whole-module
-# compile ever runs it compiled -- which is where it read a method pointer as
+# program, so the interpreter always executed it and only the compiled-only
+# mode ever runs it compiled -- which is where it read a method pointer as
 # an object and stored into code. Needs the JIT rows.
 [[case]]
 name = "TestSafeCastVirtual"

@@ -7,8 +7,8 @@
 //! Nothing is *wrong* with compiling the other 320 — they are correct code that
 //! never runs — but two things quietly pay for them:
 //!
-//! * **Whole-module compilation.** The full-JIT seeds from the entrypoint, so
-//!   it is already demand-driven, but any pass that iterates `bc.functions`
+//! * **Whole-program compilation.** AOT seeds from the entrypoint, so it is
+//!   already demand-driven, but any pass that iterates `bc.functions`
 //!   directly is doing ~17x the necessary work.
 //! * **Reports.** [`crate::air_pipeline::osr_report`] and the AIR sweep both
 //!   walk every declared function, so a denominator like "58 of 341 eligible"

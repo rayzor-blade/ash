@@ -155,8 +155,8 @@ unsafe fn describe_exception(v: *mut hl::vdynamic) -> String {
 
 /// Print an exception caught by a VM-level safe-call boundary.
 ///
-/// HashLink runs its bytecode entrypoint through `hl_dyn_call_safe`; Ash's
-/// whole-module JIT uses an equivalent generated wrapper and calls back here
+/// HashLink runs its bytecode entrypoint through `hl_dyn_call_safe`; an Ash
+/// AOT binary uses an equivalent generated wrapper and calls back here
 /// once the longjmp has landed. Keeping the defensive value decoding beside
 /// `hlp_throw` also prevents the JIT runner from dereferencing GC objects.
 #[no_mangle]

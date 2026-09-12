@@ -3,7 +3,7 @@
 // unwrap the wrapper; a tier that copied the pointer instead applied the
 // class's field offsets to the wrapper, read a method pointer where a field
 // should be, and stored through it into code. Every cast below runs once,
-// so only a whole-module compile ever executes it compiled -- which is why
+// so only the compiled-only mode ever executes it compiled -- which is why
 // the parity rows include the JIT and the AOT smoke test includes this file.
 interface Store {
 	function get(key:String):Int;

@@ -28,7 +28,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::slice;
 
-use super::function::{FuncPtr, FunctionBuilder};
+use super::function::FuncPtr;
 
 use ash_macro::load_symbol;
 
@@ -1394,8 +1394,8 @@ impl<'ctx> JITModule<'ctx> {
                                 }
                             }
 
-                            // Note: binding functions will be populated in functions_ptrs
-                            // during setup_functions_ptrs (if compiled).
+                            // A binding's target reaches functions_ptrs through
+                            // install_function_address when it is promoted.
                         }
                     }
 
@@ -1489,7 +1489,6 @@ impl<'ctx> JITModule<'ctx> {
     /// Materialize bytecode constants into globals_data.
     /// Constants are pre-allocated objects (typically String literals) stored in globals.
     /// Each constant specifies a global index and field values to populate.
-    /// Must be called AFTER setup_functions_ptrs (needs native function addresses).
     pub(crate) fn init_constants(&mut self) -> Result<()> {
         if self.bytecode.constants.is_empty() {
             return Ok(());
@@ -1692,19 +1691,6 @@ impl<'ctx> JITModule<'ctx> {
             }
         }
 
-        Ok(())
-    }
-
-    /// Wire up class descriptor global slots.
-    /// The global_value pointers in C type structs are already wired to
-    /// globals_data slots by convert_type_ref_to_c_cached. The bytecode
-    /// init code creates fully-populated Class descriptors (with __name__,
-    /// __constructor__, etc.) and stores them via SetGlobal. We must NOT
-    /// pre-allocate bare descriptors here, as the bytecode init code checks
-    /// if the global is already non-null and skips full initialization.
-    pub(crate) fn init_class_descriptors(&mut self) -> Result<()> {
-        // No-op: global_value pointers are already wired by convert_type_ref_to_c_cached.
-        // The bytecode init code handles class descriptor creation and population.
         Ok(())
     }
 

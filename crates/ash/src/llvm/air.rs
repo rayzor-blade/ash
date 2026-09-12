@@ -11,15 +11,12 @@ use crate::air_pipeline::{self, AirOptLevel, AirPassOptions, AshModule, Pipeline
 use crate::bytecode::DecodedBytecode;
 use crate::types::HLFunction;
 
-/// Lower and optimize one function for the LLVM backend without serializing
-/// AIR back into HashLink opcodes.
+/// Lower and optimize one function for the LLVM backend.
 ///
-/// The serializer is a compatibility boundary for opcode consumers. LLVM is
-/// not one of those consumers: feeding its output to `translate_opcodes`
-/// reconstructs control flow and types that AIR already made explicit and
-/// leaves the legacy bytecode lowering as the actual backend. Keep the
-/// hot-reload restrictions here, at the AIR boundary, but return the verified
-/// SSA function itself.
+/// The serializer (`air::v2::serialize`) exists for opcode consumers such as
+/// `--emit-optimized`; the LLVM backend is not one and takes the verified
+/// SSA function itself. The hot-reload restrictions live here, at the AIR
+/// boundary.
 pub(crate) fn prepare_llvm(
     bc: &DecodedBytecode,
     f: &HLFunction,

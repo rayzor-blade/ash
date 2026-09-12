@@ -44,7 +44,6 @@ mod enums;
 mod memory;
 mod natives;
 mod objects;
-mod opcode;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics
@@ -1732,7 +1731,7 @@ impl<'ctx> JITModule<'ctx> {
             source,
             air,
             function,
-            &mut lowering,
+            &lowering,
             &registers,
             &reg_types,
             cell_base,

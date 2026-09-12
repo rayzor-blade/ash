@@ -32,10 +32,6 @@ use crate::hl::{
     hl_type_kind_HVIRTUAL, hl_type_kind_HVOID, vdynamic, vdynobj, vvirtual,
 };
 use crate::llvm::module::{CompiledFunctionMeta, JITModule};
-use crate::opcodes::{
-    Opcode, RefBytes, RefEnumConstruct, RefField, RefFloat, RefFun, RefGlobal, RefInt, RefString,
-    RefType, Reg,
-};
 use crate::types::{HLNative, HLTypeFun, Str, TypeRef};
 use crate::{
     hl::{hl_type_kind_HFUN, hl_type_kind_HMETHOD},
@@ -50,9 +46,12 @@ impl<'ctx> JITModule<'ctx> {
     ///
     /// Values and pinned cells get distinct stack slots. LLVM's mem2reg pass
     /// promotes the SSA value slots; cells deliberately remain addressable.
-    /// AIR blocks, phi edges and terminators drive the CFG. The small opcode
-    /// emitter below is reused for individual machine operations only -- it
-    /// never sees or walks a serialized HashLink opcode array.
+    /// AIR blocks, phi edges and terminators drive the CFG, and every
+    /// instruction is emitted from its own fields by the per-family emitters
+    /// in the sibling modules; nothing here rebuilds a HashLink opcode. The
+    /// `lowering` table is the source function with its register types
+    /// replaced by one type per AIR value and cell, which is what the
+    /// emitters index.
     pub(super) fn translate_air_v2(
         &mut self,
         source: &HLFunction,
@@ -108,7 +107,7 @@ impl<'ctx> JITModule<'ctx> {
             source,
             air,
             function,
-            &mut lowering,
+            &lowering,
             &registers,
             &reg_types,
             cell_base,
@@ -230,7 +229,7 @@ impl<'ctx> JITModule<'ctx> {
         source: &HLFunction,
         air: &AirFunction,
         function: FunctionValue<'ctx>,
-        lowering: &mut HLFunction,
+        lowering: &HLFunction,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
         cell_base: usize,
@@ -429,7 +428,6 @@ impl<'ctx> JITModule<'ctx> {
                 let current = blocks[bi][ii];
                 let next = blocks[bi][ii + 1];
                 self.builder.position_at_end(current);
-                crate::profile::count("air instrs translated", 1);
 
                 match instr {
                     AirInstr::Param { dst, reg } => {
@@ -772,12 +770,6 @@ impl<'ctx> JITModule<'ctx> {
                                 .build_store(slot, self.context.i64_type().const_int(pos, false))?;
                         }
                     }
-                    _ => {
-                        if let Some(op) = self.air_instr_opcode(instr, cell_base)? {
-                            let dummy = [current, next];
-                            self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
-                        }
-                    }
                 }
 
                 if self
@@ -997,368 +989,31 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// Adapt one non-terminating AIR instruction to the existing primitive
-    /// emitter. The adapter only supplies operands; AIR still owns the CFG,
-    /// SSA joins, and resolved type information.
-    fn air_instr_opcode(&self, instr: &AirInstr, cell_base: usize) -> Result<Option<Opcode>> {
-        // What is left of the round trip: every instruction counted here is
-        // one the backend rebuilt as an HL opcode instead of translating.
-        crate::profile::count("air instrs rebuilt as opcodes", 1);
-        let reg = |v: ValueId| Reg(v.0);
-        let cell = |c: air::v2::ir::CellId| Reg((cell_base + c.idx()) as u32);
-        let call = |dst: ValueId, fun: usize, args: &[ValueId]| -> Result<Opcode> {
-            let dst = reg(dst);
-            let fun = RefFun(fun);
-            let args: Vec<Reg> = args.iter().copied().map(reg).collect();
-            Ok(match args.as_slice() {
-                [] => Opcode::Call0 { dst, fun },
-                [arg0] => Opcode::Call1 {
-                    dst,
-                    fun,
-                    arg0: *arg0,
-                },
-                [arg0, arg1] => Opcode::Call2 {
-                    dst,
-                    fun,
-                    arg0: *arg0,
-                    arg1: *arg1,
-                },
-                [arg0, arg1, arg2] => Opcode::Call3 {
-                    dst,
-                    fun,
-                    arg0: *arg0,
-                    arg1: *arg1,
-                    arg2: *arg2,
-                },
-                [arg0, arg1, arg2, arg3] => Opcode::Call4 {
-                    dst,
-                    fun,
-                    arg0: *arg0,
-                    arg1: *arg1,
-                    arg2: *arg2,
-                    arg3: *arg3,
-                },
-                _ => Opcode::CallN { dst, fun, args },
-            })
+    /// A shift count in HashLink is masked to the operand width (x86 `shl cl`
+    /// and arm64 `lslv` both do; the interpreter does with `wrapping_shl`).
+    /// LLVM's `shl`/`lshr`/`ashr` are POISON for a count >= the width, so
+    /// `1 << 32`, `x << -1` or `Int64 << (i32 count)` constant-folded to
+    /// arbitrary values whenever the optimizer could see the count. Bring the
+    /// count to the value's width first (Int64 shifts carry an I32 count),
+    /// then mask it.
+    pub(super) fn shift_operands(
+        b: &inkwell::builder::Builder<'ctx>,
+        x: inkwell::values::IntValue<'ctx>,
+        y: inkwell::values::IntValue<'ctx>,
+    ) -> Result<(
+        inkwell::values::IntValue<'ctx>,
+        inkwell::values::IntValue<'ctx>,
+    )> {
+        let width = x.get_type().get_bit_width();
+        let y = if y.get_type().get_bit_width() > width {
+            b.build_int_truncate(y, x.get_type(), "shift_count")?
+        } else if y.get_type().get_bit_width() < width {
+            b.build_int_z_extend(y, x.get_type(), "shift_count")?
+        } else {
+            y
         };
-
-        let opcode = match instr {
-            // Emitted directly, like Fma: there is no HL opcode to route
-            // through, which is the whole reason these exist in the IR.
-            AirInstr::Param { .. }
-            | AirInstr::Pos { .. }
-            | AirInstr::Fma { .. }
-            | AirInstr::VecLoad { .. }
-            | AirInstr::VecStore { .. }
-            | AirInstr::VecSplat { .. }
-            | AirInstr::VecBinOp { .. }
-            | AirInstr::VecReduce { .. } => return Ok(None),
-            AirInstr::Copy { dst, src } => Opcode::Mov {
-                dst: reg(*dst),
-                src: reg(*src),
-            },
-            AirInstr::Int { dst, idx } => Opcode::Int {
-                dst: reg(*dst),
-                ptr: RefInt(*idx),
-            },
-            AirInstr::Float { dst, idx } => Opcode::Float {
-                dst: reg(*dst),
-                ptr: RefFloat(*idx),
-            },
-            AirInstr::Bool { dst, value } => Opcode::Bool {
-                dst: reg(*dst),
-                value: *value,
-            },
-            AirInstr::Bytes { dst, idx } => Opcode::Bytes {
-                dst: reg(*dst),
-                ptr: RefBytes(*idx),
-            },
-            AirInstr::String { dst, idx } => Opcode::String {
-                dst: reg(*dst),
-                ptr: RefString(*idx),
-            },
-            AirInstr::Null { dst } => Opcode::Null { dst: reg(*dst) },
-            AirInstr::BinOp { op, dst, a, b } => {
-                let dst = reg(*dst);
-                let a = reg(*a);
-                let b = reg(*b);
-                match op {
-                    AirBinOp::Add => Opcode::Add { dst, a, b },
-                    AirBinOp::Sub => Opcode::Sub { dst, a, b },
-                    AirBinOp::Mul => Opcode::Mul { dst, a, b },
-                    AirBinOp::SDiv => Opcode::SDiv { dst, a, b },
-                    AirBinOp::UDiv => Opcode::UDiv { dst, a, b },
-                    AirBinOp::SMod => Opcode::SMod { dst, a, b },
-                    AirBinOp::UMod => Opcode::UMod { dst, a, b },
-                    AirBinOp::Shl => Opcode::Shl { dst, a, b },
-                    AirBinOp::SShr => Opcode::SShr { dst, a, b },
-                    AirBinOp::UShr => Opcode::UShr { dst, a, b },
-                    AirBinOp::And => Opcode::And { dst, a, b },
-                    AirBinOp::Or => Opcode::Or { dst, a, b },
-                    AirBinOp::Xor => Opcode::Xor { dst, a, b },
-                }
-            }
-            AirInstr::UnOp { op, dst, src } => {
-                let dst = reg(*dst);
-                let src = reg(*src);
-                match op {
-                    AirUnOp::Neg => Opcode::Neg { dst, src },
-                    AirUnOp::Not => Opcode::Not { dst, src },
-                    AirUnOp::Incr => Opcode::Incr { dst },
-                    AirUnOp::Decr => Opcode::Decr { dst },
-                }
-            }
-            AirInstr::Intrinsic { fun, dst, args, .. } => return Ok(Some(call(*dst, *fun, args)?)),
-            AirInstr::Call { dst, fun, args } => {
-                if self.lazy_compilation && matches!(self.findexes.get(fun), Some(FuncPtr::Fun(_)))
-                {
-                    Opcode::IndirectCall {
-                        dst: reg(*dst),
-                        fun: RefFun(*fun),
-                        args: args.iter().copied().map(reg).collect(),
-                    }
-                } else {
-                    return Ok(Some(call(*dst, *fun, args)?));
-                }
-            }
-            AirInstr::CallMethod { dst, field, args } => Opcode::CallMethod {
-                dst: reg(*dst),
-                field: RefField(*field),
-                args: args.iter().copied().map(reg).collect(),
-            },
-            AirInstr::CallClosure { dst, fun, args } => Opcode::CallClosure {
-                dst: reg(*dst),
-                fun: reg(*fun),
-                args: args.iter().copied().map(reg).collect(),
-            },
-            AirInstr::StaticClosure { dst, fun } => Opcode::StaticClosure {
-                dst: reg(*dst),
-                fun: RefFun(*fun),
-            },
-            AirInstr::InstanceClosure { dst, fun, obj } => Opcode::InstanceClosure {
-                dst: reg(*dst),
-                fun: RefFun(*fun),
-                obj: reg(*obj),
-            },
-            AirInstr::VirtualClosure { dst, obj, field } => Opcode::VirtualClosure {
-                dst: reg(*dst),
-                obj: reg(*obj),
-                field: Reg(*field as u32),
-            },
-            AirInstr::GetGlobal { dst, global } => Opcode::GetGlobal {
-                dst: reg(*dst),
-                global: RefGlobal(*global),
-            },
-            AirInstr::SetGlobal { global, src } => Opcode::SetGlobal {
-                global: RefGlobal(*global),
-                src: reg(*src),
-            },
-            AirInstr::FieldGet {
-                dst, obj, field, ..
-            } => Opcode::Field {
-                dst: reg(*dst),
-                obj: reg(*obj),
-                field: RefField(*field),
-            },
-            AirInstr::FieldSet {
-                obj, field, src, ..
-            } => Opcode::SetField {
-                obj: reg(*obj),
-                field: RefField(*field),
-                src: reg(*src),
-            },
-            AirInstr::DynGet { dst, obj, field } => Opcode::DynGet {
-                dst: reg(*dst),
-                obj: reg(*obj),
-                field: RefString(*field),
-            },
-            AirInstr::DynSet { obj, field, src } => Opcode::DynSet {
-                obj: reg(*obj),
-                field: RefString(*field),
-                src: reg(*src),
-            },
-            AirInstr::Cast { kind, dst, src } => {
-                let dst = reg(*dst);
-                let src = reg(*src);
-                match kind {
-                    AirCastKind::ToDyn => Opcode::ToDyn { dst, src },
-                    AirCastKind::ToSFloat => Opcode::ToSFloat { dst, src },
-                    AirCastKind::ToUFloat => Opcode::ToUFloat { dst, src },
-                    AirCastKind::ToInt => Opcode::ToInt { dst, src },
-                    AirCastKind::SafeCast => Opcode::SafeCast { dst, src },
-                    AirCastKind::UnsafeCast => Opcode::UnsafeCast { dst, src },
-                    AirCastKind::ToVirtual => Opcode::ToVirtual { dst, src },
-                }
-            }
-            AirInstr::NullCheck { value } => Opcode::NullCheck { reg: reg(*value) },
-            AirInstr::EndTrap { flag, .. } => Opcode::EndTrap {
-                // OEndTrap's operand is a boolean flag, not the exception cell.
-                exc: Reg(*flag as u32),
-            },
-            AirInstr::MemGet {
-                kind,
-                dst,
-                base,
-                index,
-            } => {
-                let dst = reg(*dst);
-                let base = reg(*base);
-                let index = reg(*index);
-                match kind {
-                    AirMemAccess::I8 => Opcode::GetI8 {
-                        dst,
-                        bytes: base,
-                        index,
-                    },
-                    AirMemAccess::I16 => Opcode::GetI16 {
-                        dst,
-                        bytes: base,
-                        index,
-                    },
-                    AirMemAccess::Mem => Opcode::GetMem {
-                        dst,
-                        bytes: base,
-                        index,
-                    },
-                    AirMemAccess::Array => Opcode::GetArray {
-                        dst,
-                        array: base,
-                        index,
-                    },
-                }
-            }
-            AirInstr::MemSet {
-                kind,
-                base,
-                index,
-                src,
-            } => {
-                let base = reg(*base);
-                let index = reg(*index);
-                let src = reg(*src);
-                match kind {
-                    AirMemAccess::I8 => Opcode::SetI8 {
-                        bytes: base,
-                        index,
-                        src,
-                    },
-                    AirMemAccess::I16 => Opcode::SetI16 {
-                        bytes: base,
-                        index,
-                        src,
-                    },
-                    AirMemAccess::Mem => Opcode::SetMem {
-                        bytes: base,
-                        index,
-                        src,
-                    },
-                    AirMemAccess::Array => Opcode::SetArray {
-                        array: base,
-                        index,
-                        src,
-                    },
-                }
-            }
-            AirInstr::New { dst } => Opcode::New { dst: reg(*dst) },
-            AirInstr::ArraySize { dst, array } => Opcode::ArraySize {
-                dst: reg(*dst),
-                array: reg(*array),
-            },
-            AirInstr::TypeConst { dst, ty } => Opcode::Type {
-                dst: reg(*dst),
-                ty: RefType(ty.0 as usize),
-            },
-            AirInstr::GetType { dst, src } => Opcode::GetType {
-                dst: reg(*dst),
-                src: reg(*src),
-            },
-            AirInstr::GetTID { dst, src } => Opcode::GetTID {
-                dst: reg(*dst),
-                src: reg(*src),
-            },
-            AirInstr::Unref { dst, src } => Opcode::Unref {
-                dst: reg(*dst),
-                src: reg(*src),
-            },
-            AirInstr::SetRef { r, value } => Opcode::Setref {
-                dst: reg(*r),
-                value: reg(*value),
-            },
-            AirInstr::RefData { dst, src } => Opcode::RefData {
-                dst: reg(*dst),
-                src: reg(*src),
-            },
-            AirInstr::RefOffset { dst, base, offset } => Opcode::RefOffset {
-                dst: reg(*dst),
-                reg: reg(*base),
-                offset: reg(*offset),
-            },
-            AirInstr::MakeEnum {
-                dst,
-                construct,
-                args,
-            } => Opcode::MakeEnum {
-                dst: reg(*dst),
-                construct: RefEnumConstruct(*construct),
-                args: args.iter().copied().map(reg).collect(),
-            },
-            AirInstr::EnumAlloc { dst, construct } => Opcode::EnumAlloc {
-                dst: reg(*dst),
-                construct: RefEnumConstruct(*construct),
-            },
-            AirInstr::EnumIndex { dst, value } => Opcode::EnumIndex {
-                dst: reg(*dst),
-                value: reg(*value),
-            },
-            AirInstr::EnumField {
-                dst,
-                value,
-                construct,
-                field,
-            } => Opcode::EnumField {
-                dst: reg(*dst),
-                value: reg(*value),
-                construct: RefEnumConstruct(*construct),
-                field: RefField(*field),
-            },
-            AirInstr::SetEnumField {
-                value, field, src, ..
-            } => Opcode::SetEnumField {
-                value: reg(*value),
-                field: RefField(*field),
-                src: reg(*src),
-            },
-            AirInstr::CellGet { dst, cell: c } => Opcode::Mov {
-                dst: reg(*dst),
-                src: cell(*c),
-            },
-            AirInstr::CellSet { cell: c, src } => Opcode::Mov {
-                dst: cell(*c),
-                src: reg(*src),
-            },
-            AirInstr::CellIncr { cell: c } => Opcode::Incr { dst: cell(*c) },
-            AirInstr::CellDecr { cell: c } => Opcode::Decr { dst: cell(*c) },
-            AirInstr::CellRef { dst, cell: c } => Opcode::Ref {
-                dst: reg(*dst),
-                src: cell(*c),
-            },
-            AirInstr::Assert => Opcode::Assert,
-            AirInstr::Prefetch { value, field, mode } => Opcode::Prefetch {
-                value: reg(*value),
-                field: RefField(*field),
-                mode: *mode,
-            },
-            AirInstr::Asm {
-                mode,
-                value,
-                reg: r,
-            } => Opcode::Asm {
-                mode: *mode,
-                value: *value,
-                reg: Reg(*r),
-            },
-        };
-        Ok(Some(opcode))
+        let mask = x.get_type().const_int(u64::from(width - 1), false);
+        Ok((x, b.build_and(y, mask, "shift_mask")?))
     }
 
     /// Emit copies for one ordinary CFG edge's phi nodes.
@@ -1729,8 +1384,7 @@ impl<'ctx> JITModule<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| anyhow!("hlp_get_exc_value returned void"))?;
-                let exc_reg = Reg((cell_base + exc_cell.idx()) as u32);
-                let exc_index = exc_reg.0 as usize;
+                let exc_index = cell_base + exc_cell.idx();
                 let exc = if exc.get_type() == reg_types[exc_index] {
                     exc
                 } else {

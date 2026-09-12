@@ -686,12 +686,7 @@ impl<'ctx> JITModule<'ctx> {
 
         match type_kind {
             hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
-                let type_ = self
-                    .initialized_type_cache
-                    .get(&type_index)
-                    .expect("Expected to get type");
-                // type_ is already a pointer constant (inttoptr), pass directly
-                let type_ptr = type_.into_pointer_value();
+                let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
 
                 // What `hlp_alloc_obj` re-derives per allocation is
                 // fixed for a type: the size, and whether the class
@@ -738,15 +733,13 @@ impl<'ctx> JITModule<'ctx> {
                         "call",
                     )?
                 } else {
-                    let fun = self
-                        .func_cache
-                        .iter()
-                        .find(|(_, f)| {
-                            f.get_name().to_string_lossy() == "std_hlp_alloc_obj_caller"
-                        })
-                        .expect("Expected to find native function hlp_alloc_obj")
-                        .1;
-                    self.builder.build_call(*fun, &[type_ptr.into()], "call")?
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let fun = self.declare_native(
+                        "hlp_alloc_obj",
+                        &[ptr_type.into()],
+                        Some(ptr_type.into()),
+                    );
+                    self.builder.build_call(fun, &[type_ptr.into()], "call")?
                 };
                 self.builder.build_store(
                     registers[dst.idx()],
@@ -767,18 +760,12 @@ impl<'ctx> JITModule<'ctx> {
                 );
             }
             hl_type_kind_HVIRTUAL => {
-                let type_ = self
-                    .initialized_type_cache
-                    .get(&type_index)
-                    .expect("Expected to get type");
+                let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
                 let fun = self.declare_native(
                     "hlp_alloc_virtual",
                     &[self.context.ptr_type(AddressSpace::default()).into()],
                     Some(self.context.ptr_type(AddressSpace::default()).into()),
                 );
-
-                // type_ is already a pointer constant, pass directly
-                let type_ptr = type_.into_pointer_value();
                 let result = self.builder.build_call(fun, &[type_ptr.into()], "call")?;
                 self.builder.build_store(
                     registers[dst.idx()],

@@ -895,16 +895,6 @@ impl<'ctx> JITModule<'ctx> {
         // here is what made this constructor unsafe to run anywhere but the
         // main thread.
 
-        // The translate path resolves natives lazily through
-        // get_or_create_function_value with ONE exception: Opcode::New for
-        // HOBJ/HSTRUCT looks up "std_hlp_alloc_obj_caller" in func_cache by
-        // name. Pre-create just that caller so object allocation compiles.
-        module
-            .init_required_natives()
-            .expect("Failed to initialize required natives");
-        phase_timer!(timing, "tiered required natives", t);
-        t = std::time::Instant::now();
-
         module
             .init_findexes_only()
             .expect("Failed to initialize findexes");
@@ -957,25 +947,6 @@ impl<'ctx> JITModule<'ctx> {
         // right one.
         resolver.discover_and_load_libraries(search_dir, natives, true)?;
         Self::setup_callbacks_global(resolver);
-        Ok(())
-    }
-
-    /// Pre-create the native callers the translate path expects to find in
-    /// `func_cache` by generated name instead of resolving lazily. Currently
-    /// only std/alloc_obj (Opcode::New emits a call to
-    /// "std_hlp_alloc_obj_caller" fetched from func_cache).
-    pub(crate) fn init_required_natives(&mut self) -> Result<()> {
-        let required: Vec<_> = self
-            .bytecode
-            .natives
-            .iter()
-            .filter(|n| n.lib == "std" && n.name == "alloc_obj")
-            .cloned()
-            .collect();
-        for native_f in &required {
-            let fun_value = self.init_native_func(native_f)?;
-            self.func_cache.insert(native_f.findex as usize, fun_value);
-        }
         Ok(())
     }
 

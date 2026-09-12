@@ -816,7 +816,7 @@ impl<'ctx> JITModule<'ctx> {
         // a raw-opcode scan cannot do once AIR V2 inlines a callee.
         self.create_constant_pool_globals_for(findex);
 
-        let built = self.init_required_natives().and_then(|()| {
+        let built: Result<()> = (|| {
             self.compile_function(findex)?;
             // Callees stay declarations, bound below to the addresses the host
             // already holds. Lowering copies of them here costs as much as the
@@ -824,7 +824,7 @@ impl<'ctx> JITModule<'ctx> {
             // needs them is sent down the shared path instead.
             self.pending_compilations.clear();
             Ok(())
-        });
+        })();
 
         self.builder.clear_insertion_position();
         let promo_module = std::mem::replace(&mut self.module, host_module);
@@ -1455,24 +1455,18 @@ impl<'ctx> JITModule<'ctx> {
         // GlobalOpt in the default<O2> run below cannot drop a single one, and
         // no module is ever removed from the engine.
         self.create_constant_pool_globals_for(findex);
-        // `Opcode::New` fetches a pre-created native caller out of `func_cache`
-        // by generated name, so emptying the cache is not enough on its own --
-        // the new module needs its own copy of those declarations.
-        let natives_ready = self.init_required_natives();
 
         if std::env::var_os("ASH_OSR_LOG").is_some() {
             eprintln!("[osr] LLVM AIR build begin findex={findex} pc={header_pc}");
         }
-        let built = natives_ready.and_then(|()| {
-            self.build_air_osr_body(
-                &source,
-                &optimized.ir,
-                AirBlockId(header as u32),
-                header_pc,
-                &name,
-                snapshot,
-            )
-        });
+        let built = self.build_air_osr_body(
+            &source,
+            &optimized.ir,
+            AirBlockId(header as u32),
+            header_pc,
+            &name,
+            snapshot,
+        );
 
         self.builder.clear_insertion_position();
         let osr_module = std::mem::replace(&mut self.module, host_module);

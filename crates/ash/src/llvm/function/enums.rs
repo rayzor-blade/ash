@@ -7,7 +7,7 @@
 //! Payload offsets come from the loader's `tenum.constructs[c].offsets`.
 
 use air::v2::ir::ValueId;
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::BasicTypeEnum;
 use inkwell::values::PointerValue;
 use inkwell::AddressSpace;
 
@@ -128,10 +128,8 @@ impl<'ctx> JITModule<'ctx> {
             .into_pointer_value();
         // The index of no enum value is 0, as the interpreter answers.
         let (_, load_block, cont_block) = self.null_guard("enumidx", venum_ptr)?;
-        self.builder.build_store(
-            registers[dst.idx()],
-            self.context.i32_type().const_zero(),
-        )?;
+        self.builder
+            .build_store(registers[dst.idx()], self.context.i32_type().const_zero())?;
         self.builder.build_unconditional_branch(cont_block)?;
         self.builder.position_at_end(load_block);
         // venum.index is i32 at offset 8
@@ -233,9 +231,10 @@ impl<'ctx> JITModule<'ctx> {
         )?;
 
         let value_type_idx = lowering.regs[value.idx()].0;
-        let tenum = self.types_[value_type_idx].tenum.as_ref().ok_or_else(|| {
-            anyhow!("SetEnumField: type {} is not an enum", value_type_idx)
-        })?;
+        let tenum = self.types_[value_type_idx]
+            .tenum
+            .as_ref()
+            .ok_or_else(|| anyhow!("SetEnumField: type {} is not an enum", value_type_idx))?;
 
         let construct_info = &tenum.constructs[construct];
         let offset = construct_info.offsets[field] as u64;

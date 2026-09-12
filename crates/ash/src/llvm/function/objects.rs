@@ -7,10 +7,8 @@
 //! from the instruction's `obj_ty`, the type AIR resolved the field against.
 
 use air::v2::ir::{TypeRef as AirTypeRef, ValueId};
-use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{
-    AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
-};
+use inkwell::types::BasicTypeEnum;
+use inkwell::values::{BasicValue, PointerValue};
 use inkwell::{basic_block::BasicBlock, AddressSpace};
 
 use crate::llvm::module::JITModule;
@@ -40,31 +38,20 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<()> {
         let obj_type_idx = obj_ty.0 as usize;
         let obj_type_ = &self.types_[obj_type_idx];
-        let obj_val = self.builder.build_load(
-            reg_types[obj.idx()],
-            registers[obj.idx()],
-            "obj_val",
-        )?;
+        let obj_val =
+            self.builder
+                .build_load(reg_types[obj.idx()], registers[obj.idx()], "obj_val")?;
         match obj_type_.kind {
             hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
-                let field_ptr = self.build_field_ptr(
-                    obj_type_idx,
-                    field,
-                    obj_val.into_pointer_value(),
-                )?;
+                let field_ptr =
+                    self.build_field_ptr(obj_type_idx, field, obj_val.into_pointer_value())?;
 
                 // Load the field value using destination register type
                 let load_type = self.get_register_type(lowering.regs[dst.idx()].0)?;
-                let field_val =
-                    self.builder.build_load(load_type, field_ptr, "field_val")?;
-                self.tbaa_field(
-                    field_val.as_instruction_value(),
-                    obj_type_idx,
-                    field,
-                );
+                let field_val = self.builder.build_load(load_type, field_ptr, "field_val")?;
+                self.tbaa_field(field_val.as_instruction_value(), obj_type_idx, field);
 
-                self.builder
-                    .build_store(registers[dst.idx()], field_val)?;
+                self.builder.build_store(registers[dst.idx()], field_val)?;
             }
             hl_type_kind_HVIRTUAL => {
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -98,10 +85,9 @@ impl<'ctx> JITModule<'ctx> {
                 let field_value_check =
                     self.builder
                         .build_load(ptr_type, field_ptr, "field_value_ptr")?;
-                let field_exists = self.builder.build_is_not_null(
-                    field_value_check.into_pointer_value(),
-                    "field_exists",
-                )?;
+                let field_exists = self
+                    .builder
+                    .build_is_not_null(field_value_check.into_pointer_value(), "field_exists")?;
 
                 let current_fn = self
                     .builder
@@ -109,18 +95,14 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap()
                     .get_parent()
                     .unwrap();
-                let then_block =
-                    self.context.append_basic_block(current_fn, "field_exists");
+                let then_block = self.context.append_basic_block(current_fn, "field_exists");
                 let else_block = self
                     .context
                     .append_basic_block(current_fn, "field_not_exists");
                 let cont_block = self.context.append_basic_block(current_fn, "cont");
 
-                self.builder.build_conditional_branch(
-                    field_exists,
-                    then_block,
-                    else_block,
-                )?;
+                self.builder
+                    .build_conditional_branch(field_exists, then_block, else_block)?;
 
                 // Field exists: r = *hl_vfields(o)[f]
                 self.builder.position_at_end(then_block);
@@ -212,8 +194,7 @@ impl<'ctx> JITModule<'ctx> {
                 // `hlp_dyn_geti` answers every narrow integer kind as
                 // i32, so a HBOOL/HUI8/HUI16 slot still needs the
                 // truncation its width implies.
-                let dyn_field_value =
-                    self.cast_for_call(dyn_field_value, reg_types[dst.idx()])?;
+                let dyn_field_value = self.cast_for_call(dyn_field_value, reg_types[dst.idx()])?;
                 self.builder
                     .build_store(registers[dst.idx()], dyn_field_value)?;
                 self.builder.build_unconditional_branch(cont_block)?;
@@ -242,22 +223,15 @@ impl<'ctx> JITModule<'ctx> {
         let obj_type_ = &self.types_[obj_type_idx];
         let obj_val = self
             .builder
-            .build_load(
-                reg_types[obj.idx()],
-                registers[obj.idx()],
-                "obj_val",
-            )?
+            .build_load(reg_types[obj.idx()], registers[obj.idx()], "obj_val")?
             .into_pointer_value();
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "src_val",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "src_val")?;
 
         match obj_type_.kind {
             hl_type_kind_HSTRUCT | hl_type_kind_HOBJ => {
-                let field_ptr =
-                    self.build_field_ptr(obj_type_idx, field, obj_val)?;
+                let field_ptr = self.build_field_ptr(obj_type_idx, field, obj_val)?;
                 let st = self.builder.build_store(field_ptr, src_val)?;
                 self.tbaa_field(Some(st), obj_type_idx, field);
             }
@@ -293,10 +267,9 @@ impl<'ctx> JITModule<'ctx> {
                 let field_value_ptr =
                     self.builder
                         .build_load(ptr_type, field_ptr, "field_value_ptr")?;
-                let field_exists = self.builder.build_is_not_null(
-                    field_value_ptr.into_pointer_value(),
-                    "field_exists",
-                )?;
+                let field_exists = self
+                    .builder
+                    .build_is_not_null(field_value_ptr.into_pointer_value(), "field_exists")?;
 
                 let current_fn = self
                     .builder
@@ -304,18 +277,14 @@ impl<'ctx> JITModule<'ctx> {
                     .unwrap()
                     .get_parent()
                     .unwrap();
-                let then_block =
-                    self.context.append_basic_block(current_fn, "field_exists");
+                let then_block = self.context.append_basic_block(current_fn, "field_exists");
                 let else_block = self
                     .context
                     .append_basic_block(current_fn, "field_not_exists");
                 let cont_block = self.context.append_basic_block(current_fn, "cont");
 
-                self.builder.build_conditional_branch(
-                    field_exists,
-                    then_block,
-                    else_block,
-                )?;
+                self.builder
+                    .build_conditional_branch(field_exists, then_block, else_block)?;
 
                 // Field exists: *hl_vfields(o)[f] = v
                 self.builder.position_at_end(then_block);
@@ -330,8 +299,7 @@ impl<'ctx> JITModule<'ctx> {
                     .as_ref()
                     .map(|v| v.fields.get(field).map(|f| f.hashed_name).unwrap_or(0))
                     .unwrap_or(0);
-                let field_hash =
-                    self.context.i32_type().const_int(hashed_name as u64, false);
+                let field_hash = self.context.i32_type().const_int(hashed_name as u64, false);
                 let src_type_idx = lowering.regs[src.idx()].0;
                 let src_kind = self.types_[src_type_idx].kind;
 
@@ -356,11 +324,7 @@ impl<'ctx> JITModule<'ctx> {
                         Some(ptr_type.into()),
                     );
                     self.builder
-                        .build_call(
-                            make_dyn,
-                            &[tmp.into(), type_ptr_val.into()],
-                            "boxed_val",
-                        )?
+                        .build_call(make_dyn, &[tmp.into(), type_ptr_val.into()], "boxed_val")?
                         .try_as_basic_value()
                         .basic()
                         .unwrap()
@@ -424,9 +388,9 @@ impl<'ctx> JITModule<'ctx> {
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
 
-        let obj_val =
-            self.builder
-                .build_load(ptr_type, registers[obj.idx()], "dynget_obj")?;
+        let obj_val = self
+            .builder
+            .build_load(ptr_type, registers[obj.idx()], "dynget_obj")?;
         let field_name = &self.bytecode.strings[field].clone();
         let hfield = hl_hash_utf8(field_name);
         let hfield_val = i32_type.const_int(hfield as u64, true);
@@ -483,8 +447,7 @@ impl<'ctx> JITModule<'ctx> {
                     result.try_as_basic_value().basic().unwrap(),
                 )?;
             }
-            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8
-            | hl_type_kind_HUI16 => {
+            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
                 let type_ptr = self
                     .get_initialized_type(dst_type_idx)?
                     .into_pointer_value();
@@ -541,20 +504,18 @@ impl<'ctx> JITModule<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let i32_type = self.context.i32_type();
 
-        let obj_val =
-            self.builder
-                .build_load(ptr_type, registers[obj.idx()], "dynset_obj")?;
+        let obj_val = self
+            .builder
+            .build_load(ptr_type, registers[obj.idx()], "dynset_obj")?;
         let field_name = &self.bytecode.strings[field].clone();
         let hfield = hl_hash_utf8(field_name);
         let hfield_val = i32_type.const_int(hfield as u64, true);
 
         let src_type_idx = lowering.regs[src.idx()].0;
         let src_kind = self.types_[src_type_idx].kind;
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "dynset_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "dynset_src")?;
 
         match src_kind {
             hl_type_kind_HF64 => {
@@ -605,8 +566,7 @@ impl<'ctx> JITModule<'ctx> {
                     "dynset_i64",
                 )?;
             }
-            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8
-            | hl_type_kind_HUI16 => {
+            hl_type_kind_HI32 | hl_type_kind_HBOOL | hl_type_kind_HUI8 | hl_type_kind_HUI16 => {
                 let type_ptr = self
                     .get_initialized_type(src_type_idx)?
                     .into_pointer_value();
@@ -806,11 +766,8 @@ impl<'ctx> JITModule<'ctx> {
                 .get_parent()
                 .unwrap();
             let throw_block = self.context.append_basic_block(function, "null_throw");
-            self.builder.build_conditional_branch(
-                is_null,
-                throw_block,
-                next,
-            )?;
+            self.builder
+                .build_conditional_branch(is_null, throw_block, next)?;
             self.builder.position_at_end(throw_block);
             // A null here is a catchable HashLink exception, "Null
             // access" -- what the interpreter throws and what Haxe
@@ -845,11 +802,9 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<()> {
         // GetType reads the runtime hl_type* from the value's ->t field (offset 0)
         let ptr_type = self.context.ptr_type(AddressSpace::default());
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "gettype_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "gettype_src")?;
         let obj_ptr = src_val.into_pointer_value();
         // `hl_typeof(NULL)` is the void type, and `Type.typeof(null)`,
         // `Reflect.isFunction(null)` and a JSON printer walking an
@@ -873,8 +828,7 @@ impl<'ctx> JITModule<'ctx> {
             .position(|t| t.kind == hl_type_kind_HVOID)
             .ok_or_else(|| anyhow!("GetType: no void type in the type table"))?;
         let void_type = self.get_initialized_type(void_index)?;
-        self.builder
-            .build_store(registers[dst.idx()], void_type)?;
+        self.builder.build_store(registers[dst.idx()], void_type)?;
         self.builder.build_unconditional_branch(cont_block)?;
         self.builder.position_at_end(load_block);
         // obj->t is the first field (offset 0) of vdynamic/vobj, a pointer to hl_type
@@ -899,11 +853,9 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         src: ValueId,
     ) -> Result<()> {
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "gettid_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "gettid_src")?;
         let src_type_kind = self.types_[lowering.regs[src.idx()].0].kind;
         if src_val.is_pointer_value() {
             let obj = src_val.into_pointer_value();
@@ -935,9 +887,9 @@ impl<'ctx> JITModule<'ctx> {
             self.builder.position_at_end(load_block);
             if src_type_kind == hl_type_kind_HTYPE {
                 // Source is hl_type* — kind is directly at offset 0
-                let kind =
-                    self.builder
-                        .build_load(self.context.i32_type(), obj, "gettid_kind")?;
+                let kind = self
+                    .builder
+                    .build_load(self.context.i32_type(), obj, "gettid_kind")?;
                 self.builder.build_store(registers[dst.idx()], kind)?;
             } else {
                 // Source is an object — load obj->t (offset 0), then t->kind (offset 0)
@@ -946,11 +898,9 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(ptr_type, obj, "gettid_type")?
                     .into_pointer_value();
-                let kind = self.builder.build_load(
-                    self.context.i32_type(),
-                    t_ptr,
-                    "gettid_kind",
-                )?;
+                let kind =
+                    self.builder
+                        .build_load(self.context.i32_type(), t_ptr, "gettid_kind")?;
                 self.builder.build_store(registers[dst.idx()], kind)?;
             }
             self.builder.build_unconditional_branch(cont_block)?;
@@ -960,8 +910,7 @@ impl<'ctx> JITModule<'ctx> {
             let type_idx = lowering.regs[src.idx()].0;
             let kind = self.types_[type_idx].kind;
             let kind_val = self.context.i32_type().const_int(kind as u64, false);
-            self.builder
-                .build_store(registers[dst.idx()], kind_val)?;
+            self.builder.build_store(registers[dst.idx()], kind_val)?;
         }
         Ok(())
     }
@@ -996,10 +945,8 @@ impl<'ctx> JITModule<'ctx> {
             .build_conditional_branch(is_null, null_block, load_block)?;
 
         self.builder.position_at_end(null_block);
-        self.builder.build_store(
-            registers[dst.idx()],
-            self.context.i32_type().const_zero(),
-        )?;
+        self.builder
+            .build_store(registers[dst.idx()], self.context.i32_type().const_zero())?;
         self.builder.build_unconditional_branch(cont_block)?;
 
         self.builder.position_at_end(load_block);
@@ -1015,9 +962,9 @@ impl<'ctx> JITModule<'ctx> {
                 "arrsize_gep",
             )?
         };
-        let size =
-            self.builder
-                .build_load(self.context.i32_type(), size_gep, "arrsize_val")?;
+        let size = self
+            .builder
+            .build_load(self.context.i32_type(), size_gep, "arrsize_val")?;
         if let Some(i) = size.as_instruction_value() {
             self.tbaa.tag(i, self.tbaa.array_len());
         }

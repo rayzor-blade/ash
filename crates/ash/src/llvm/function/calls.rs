@@ -8,13 +8,13 @@
 
 use air::v2::ir::{IntrinsicKind, ValueId};
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicMetadataValueEnum, BasicValue, BasicValueEnum, PointerValue};
+use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, PointerValue};
 use inkwell::{AddressSpace, IntPredicate};
 
 use crate::hl::{
     hl_type_kind_HABSTRACT, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32,
-    hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI64, hl_type_kind_HNULL,
-    hl_type_kind_HOBJ, hl_type_kind_HVIRTUAL, hl_type_kind_HVOID,
+    hl_type_kind_HF64, hl_type_kind_HFUN, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
+    hl_type_kind_HVIRTUAL, hl_type_kind_HVOID,
 };
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
@@ -45,9 +45,8 @@ impl<'ctx> JITModule<'ctx> {
         // else is a direct call to its declaration.
         let volatile = self.lazy_compilation || self.hot_reload;
         if volatile && matches!(self.findexes.get(&fun), Some(FuncPtr::Fun(_))) {
-            return self.emit_air_indirect_call(
-                lowering, registers, reg_types, cell_base, dst, fun, args,
-            );
+            return self
+                .emit_air_indirect_call(lowering, registers, reg_types, cell_base, dst, fun, args);
         }
         self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args)
     }
@@ -74,14 +73,30 @@ impl<'ctx> JITModule<'ctx> {
             };
             let i32_type = self.context.i32_type();
             let word = self.target_abi.pointer_int_type(self.context);
-            let a = self.builder.build_load(reg_types[a.idx()], registers[a.idx()], "ptrcmp_a")?;
-            let b = self.builder.build_load(reg_types[b.idx()], registers[b.idx()], "ptrcmp_b")?;
-            let a = self.builder.build_ptr_to_int(a.into_pointer_value(), word, "ptrcmp_a_addr")?;
-            let b = self.builder.build_ptr_to_int(b.into_pointer_value(), word, "ptrcmp_b_addr")?;
-            let gt = self.builder.build_int_compare(IntPredicate::UGT, a, b, "ptrcmp_gt")?;
-            let lt = self.builder.build_int_compare(IntPredicate::ULT, a, b, "ptrcmp_lt")?;
-            let gt = self.builder.build_int_z_extend(gt, i32_type, "ptrcmp_gt32")?;
-            let lt = self.builder.build_int_z_extend(lt, i32_type, "ptrcmp_lt32")?;
+            let a = self
+                .builder
+                .build_load(reg_types[a.idx()], registers[a.idx()], "ptrcmp_a")?;
+            let b = self
+                .builder
+                .build_load(reg_types[b.idx()], registers[b.idx()], "ptrcmp_b")?;
+            let a = self
+                .builder
+                .build_ptr_to_int(a.into_pointer_value(), word, "ptrcmp_a_addr")?;
+            let b = self
+                .builder
+                .build_ptr_to_int(b.into_pointer_value(), word, "ptrcmp_b_addr")?;
+            let gt = self
+                .builder
+                .build_int_compare(IntPredicate::UGT, a, b, "ptrcmp_gt")?;
+            let lt = self
+                .builder
+                .build_int_compare(IntPredicate::ULT, a, b, "ptrcmp_lt")?;
+            let gt = self
+                .builder
+                .build_int_z_extend(gt, i32_type, "ptrcmp_gt32")?;
+            let lt = self
+                .builder
+                .build_int_z_extend(lt, i32_type, "ptrcmp_lt32")?;
             let v = self.builder.build_int_sub(gt, lt, "ptrcmp")?;
             self.builder.build_store(registers[dst.idx()], v)?;
             return Ok(());
@@ -89,17 +104,17 @@ impl<'ctx> JITModule<'ctx> {
         let [arg0] = args else {
             return Err(anyhow!("{kind:?} takes one operand, got {}", args.len()));
         };
-        let arg0_val = self.builder.build_load(
-            reg_types[arg0.idx()],
-            registers[arg0.idx()],
-            "arg0_val",
-        )?;
+        let arg0_val =
+            self.builder
+                .build_load(reg_types[arg0.idx()], registers[arg0.idx()], "arg0_val")?;
         match self.emit_native_intrinsic(native, arg0_val)? {
             Some(v) => {
                 self.builder.build_store(registers[dst.idx()], v)?;
                 Ok(())
             }
-            None => self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args),
+            None => {
+                self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args)
+            }
         }
     }
 
@@ -616,10 +631,8 @@ impl<'ctx> JITModule<'ctx> {
                     // Same boxing rule as ToDyn: pointers are already
                     // dyn-compatible (except HABSTRACT), primitives go
                     // through hlp_make_dyn with their static type.
-                    let src_is_abstract =
-                        self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
-                    let boxed: BasicValueEnum = if loaded.is_pointer_value() && !src_is_abstract
-                    {
+                    let src_is_abstract = self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
+                    let boxed: BasicValueEnum = if loaded.is_pointer_value() && !src_is_abstract {
                         loaded
                     } else {
                         let temp = self.entry_alloca(loaded.get_type(), "vcall_box_slot")?;
@@ -895,7 +908,8 @@ impl<'ctx> JITModule<'ctx> {
                     self.context.i64_type().const_int(type_ptr_c, false),
                     "cm_devirt_guard",
                 )?;
-                self.builder.build_conditional_branch(guard, hit_bb, miss_bb)?;
+                self.builder
+                    .build_conditional_branch(guard, hit_bb, miss_bb)?;
 
                 self.builder.position_at_end(hit_bb);
                 let ret = self
@@ -947,8 +961,8 @@ impl<'ctx> JITModule<'ctx> {
                 self.function_name(lowering.findex as u32)
                     .and_then(|caller| crate::callsite_profile::aot_target_for(&caller))
                     .and_then(|target_name| self.findex_for_name(&target_name))
-                    .and_then(|target| {
-                        match self.get_or_create_function_value(target as usize) {
+                    .and_then(
+                        |target| match self.get_or_create_function_value(target as usize) {
                             Ok((callee, ph)) => {
                                 if ph {
                                     self.add_pending_compilation(target as usize);
@@ -956,8 +970,8 @@ impl<'ctx> JITModule<'ctx> {
                                 (callee.get_type() == fn_type).then_some(callee)
                             }
                             Err(_) => None,
-                        }
-                    })
+                        },
+                    )
             } else {
                 None
             };
@@ -988,7 +1002,8 @@ impl<'ctx> JITModule<'ctx> {
                         .build_ptr_to_int(want, self.context.i64_type(), "cm_aot_want")?,
                     "cm_aot_devirt_guard",
                 )?;
-                self.builder.build_conditional_branch(guard, hit_bb, miss_bb)?;
+                self.builder
+                    .build_conditional_branch(guard, hit_bb, miss_bb)?;
 
                 self.builder.position_at_end(hit_bb);
                 let ret = self
@@ -1084,10 +1099,8 @@ impl<'ctx> JITModule<'ctx> {
                 })
                 .collect();
 
-            let arg_types: Vec<BasicMetadataTypeEnum> = args
-                .iter()
-                .map(|arg| reg_types[arg.idx()].into())
-                .collect();
+            let arg_types: Vec<BasicMetadataTypeEnum> =
+                args.iter().map(|arg| reg_types[arg.idx()].into()).collect();
 
             let dst_kind = self.types_[lowering.regs[dst.idx()].0].kind;
             let fn_type = if dst_kind == hl_type_kind_HVOID {
@@ -1484,7 +1497,8 @@ impl<'ctx> JITModule<'ctx> {
         // moves the stack pointer once per loop iteration and never
         // gives it back. Same for the boxing slots below. The GEP
         // indexes it by pointer, which is what an array of pointers is.
-        let argv = self.entry_alloca(ptr_type.array_type(nargs.max(1) as u32), "closure_dyn_argv")?;
+        let argv =
+            self.entry_alloca(ptr_type.array_type(nargs.max(1) as u32), "closure_dyn_argv")?;
         let make_dyn = self.declare_native(
             "hlp_make_dyn",
             &[ptr_type.into(), ptr_type.into()],
@@ -1516,11 +1530,7 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_store(slot, loaded)?;
                 let type_ptr = self.get_initialized_type(type_index)?.into_pointer_value();
                 self.builder
-                    .build_call(
-                        make_dyn,
-                        &[slot.into(), type_ptr.into()],
-                        "closure_dyn_box",
-                    )?
+                    .build_call(make_dyn, &[slot.into(), type_ptr.into()], "closure_dyn_box")?
                     .try_as_basic_value()
                     .basic()
                     .ok_or_else(|| anyhow!("hlp_make_dyn returned void"))?
@@ -1595,8 +1605,7 @@ impl<'ctx> JITModule<'ctx> {
                     .basic()
                     .ok_or_else(|| anyhow!("hlp_dyn_castp returned void"))?
             } else {
-                let (helper, helper_ret): (&str, BasicTypeEnum) = if dst_kind == hl_type_kind_HF64
-                {
+                let (helper, helper_ret): (&str, BasicTypeEnum) = if dst_kind == hl_type_kind_HF64 {
                     ("hlp_dyn_todouble", self.context.f64_type().into())
                 } else if dst_kind == hl_type_kind_HF32 {
                     ("hlp_dyn_tofloat", self.context.f32_type().into())
@@ -1659,12 +1668,9 @@ impl<'ctx> JITModule<'ctx> {
 
         // --- Call WITHOUT value (hasValue == 0) ---
         self.builder.position_at_end(call_without_value_bb);
-        if let Some(ret_val) = self.build_stub_guarded_indirect_call(
-            base_fn_type,
-            fun_ptr,
-            &arg_vals,
-            "call_closure",
-        )? {
+        if let Some(ret_val) =
+            self.build_stub_guarded_indirect_call(base_fn_type, fun_ptr, &arg_vals, "call_closure")?
+        {
             self.builder.build_store(registers[dst.idx()], ret_val)?;
         }
         self.builder.build_unconditional_branch(call_done_bb)?;

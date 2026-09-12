@@ -11,9 +11,8 @@ use inkwell::{AddressSpace, IntPredicate};
 
 use crate::hl::{
     hl_type_kind_HABSTRACT, hl_type_kind_HBOOL, hl_type_kind_HDYN, hl_type_kind_HF32,
-    hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL,
-    hl_type_kind_HOBJ, hl_type_kind_HSTRUCT, hl_type_kind_HUI16, hl_type_kind_HUI8,
-    hl_type_kind_HVIRTUAL,
+    hl_type_kind_HF64, hl_type_kind_HI32, hl_type_kind_HI64, hl_type_kind_HNULL, hl_type_kind_HOBJ,
+    hl_type_kind_HSTRUCT, hl_type_kind_HUI16, hl_type_kind_HUI8, hl_type_kind_HVIRTUAL,
 };
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
@@ -33,14 +32,18 @@ impl<'ctx> JITModule<'ctx> {
         src: ValueId,
     ) -> Result<()> {
         match kind {
-            AirCastKind::ToDyn => self.emit_air_cast_to_dyn(lowering, registers, reg_types, dst, src),
+            AirCastKind::ToDyn => {
+                self.emit_air_cast_to_dyn(lowering, registers, reg_types, dst, src)
+            }
             AirCastKind::ToSFloat => {
                 self.emit_air_cast_to_sfloat(lowering, registers, reg_types, dst, src)
             }
             AirCastKind::ToUFloat => {
                 self.emit_air_cast_to_ufloat(lowering, registers, reg_types, dst, src)
             }
-            AirCastKind::ToInt => self.emit_air_cast_to_int(lowering, registers, reg_types, dst, src),
+            AirCastKind::ToInt => {
+                self.emit_air_cast_to_int(lowering, registers, reg_types, dst, src)
+            }
             AirCastKind::SafeCast => {
                 self.emit_air_cast_safe(lowering, registers, reg_types, dst, src)
             }
@@ -83,21 +86,15 @@ impl<'ctx> JITModule<'ctx> {
                         .as_basic_value_enum(),
                     _ => return Err(anyhow!("Unsupported type for Neg")),
                 };
-                self.builder
-                    .build_store(registers[dst.idx()], result)?;
+                self.builder.build_store(registers[dst.idx()], result)?;
             }
             AirUnOp::Not => {
                 let src_val = self
                     .builder
-                    .build_load(
-                        reg_types[src.idx()],
-                        registers[src.idx()],
-                        "not_src",
-                    )?
+                    .build_load(reg_types[src.idx()], registers[src.idx()], "not_src")?
                     .into_int_value();
                 let result = self.builder.build_not(src_val, "not")?;
-                self.builder
-                    .build_store(registers[dst.idx()], result)?;
+                self.builder.build_store(registers[dst.idx()], result)?;
             }
             AirUnOp::Incr | AirUnOp::Decr => {
                 bail!("emit_air_un_op: Incr/Decr have their own direct arm")
@@ -115,19 +112,16 @@ impl<'ctx> JITModule<'ctx> {
         src: ValueId,
     ) -> Result<()> {
         let src_type_idx = lowering.regs[src.idx()].0;
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "todyn_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "todyn_src")?;
         // For pointer types (objects, strings, etc.), just copy the pointer.
         // HABSTRACT is excepted: it is a pointer whose target has no
         // hl_type header, so a Dynamic holding it raw makes the
         // hl_dyn_castp on the way back out read the payload as a type.
         let src_is_abstract = self.types_[src_type_idx].kind == hl_type_kind_HABSTRACT;
         if src_val.is_pointer_value() && !src_is_abstract {
-            self.builder
-                .build_store(registers[dst.idx()], src_val)?;
+            self.builder.build_store(registers[dst.idx()], src_val)?;
         } else {
             // Primitives: alloca temp, store value, call hlp_make_dyn(&temp, type_ptr)
             let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -142,11 +136,9 @@ impl<'ctx> JITModule<'ctx> {
                 &[ptr_type.into(), ptr_type.into()],
                 Some(ptr_type.into()),
             );
-            let result = self.builder.build_call(
-                make_dyn,
-                &[temp.into(), type_ptr.into()],
-                "todyn",
-            )?;
+            let result =
+                self.builder
+                    .build_call(make_dyn, &[temp.into(), type_ptr.into()], "todyn")?;
             self.builder.build_store(
                 registers[dst.idx()],
                 result.try_as_basic_value().basic().unwrap(),
@@ -168,8 +160,7 @@ impl<'ctx> JITModule<'ctx> {
             registers[src.idx()],
             "unsafe_cast_src",
         )?;
-        self.builder
-            .build_store(registers[dst.idx()], src_val)?;
+        self.builder.build_store(registers[dst.idx()], src_val)?;
         Ok(())
     }
 
@@ -181,11 +172,9 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         src: ValueId,
     ) -> Result<()> {
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "tosfloat_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "tosfloat_src")?;
         let f64_type = self.context.f64_type();
         let src_kind = self.types_[lowering.regs[src.idx()].0].kind;
         let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
@@ -194,19 +183,11 @@ impl<'ctx> JITModule<'ctx> {
             // before CVTSI2SD), so it converts unsigned.
             if src_unsigned {
                 self.builder
-                    .build_unsigned_int_to_float(
-                        src_val.into_int_value(),
-                        f64_type,
-                        "tosfloat",
-                    )?
+                    .build_unsigned_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
                     .into()
             } else {
                 self.builder
-                    .build_signed_int_to_float(
-                        src_val.into_int_value(),
-                        f64_type,
-                        "tosfloat",
-                    )?
+                    .build_signed_int_to_float(src_val.into_int_value(), f64_type, "tosfloat")?
                     .into()
             }
         } else if src_val.is_float_value() {
@@ -222,12 +203,7 @@ impl<'ctx> JITModule<'ctx> {
         } else {
             return Err(anyhow!("ToSFloat: unexpected source type"));
         };
-        self.store_float_as_reg(
-            registers,
-            reg_types,
-            dst.idx(),
-            result.into_float_value(),
-        )?;
+        self.store_float_as_reg(registers, reg_types, dst.idx(), result.into_float_value())?;
         Ok(())
     }
 
@@ -239,19 +215,13 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         src: ValueId,
     ) -> Result<()> {
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "toufloat_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "toufloat_src")?;
         let f64_type = self.context.f64_type();
         let result: BasicValueEnum = if src_val.is_int_value() {
             self.builder
-                .build_unsigned_int_to_float(
-                    src_val.into_int_value(),
-                    f64_type,
-                    "toufloat",
-                )?
+                .build_unsigned_int_to_float(src_val.into_int_value(), f64_type, "toufloat")?
                 .into()
         } else if src_val.is_float_value() {
             let fv = src_val.into_float_value();
@@ -265,12 +235,7 @@ impl<'ctx> JITModule<'ctx> {
         } else {
             return Err(anyhow!("ToUFloat: unexpected source type"));
         };
-        self.store_float_as_reg(
-            registers,
-            reg_types,
-            dst.idx(),
-            result.into_float_value(),
-        )?;
+        self.store_float_as_reg(registers, reg_types, dst.idx(), result.into_float_value())?;
         Ok(())
     }
 
@@ -282,11 +247,9 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         src: ValueId,
     ) -> Result<()> {
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "toint_src",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "toint_src")?;
         // Convert straight to the destination register's width, as
         // HashLink does (MOVSXD / CVTTSD2SI at that width): a signed source
         // widens with sign extension and a float saturates at the
@@ -301,12 +264,8 @@ impl<'ctx> JITModule<'ctx> {
         let src_kind = self.types_[lowering.regs[src.idx()].0].kind;
         let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
         let result: BasicValueEnum = if src_val.is_float_value() {
-            self.build_float_to_int_saturating(
-                src_val.into_float_value(),
-                dst_int,
-                "toint",
-            )?
-            .into()
+            self.build_float_to_int_saturating(src_val.into_float_value(), dst_int, "toint")?
+                .into()
         } else if src_val.is_int_value() {
             let iv = src_val.into_int_value();
             let sw = iv.get_type().get_bit_width();
@@ -332,8 +291,7 @@ impl<'ctx> JITModule<'ctx> {
             return Err(anyhow!("ToInt: unexpected source type"));
         };
         let result = self.cast_for_call(result, reg_types[dst.idx()])?;
-        self.builder
-            .build_store(registers[dst.idx()], result)?;
+        self.builder.build_store(registers[dst.idx()], result)?;
         Ok(())
     }
 
@@ -393,18 +351,16 @@ impl<'ctx> JITModule<'ctx> {
             // box's own runtime type and match the interpreter and upstream.
             self.builder.position_at_end(unbox_bb);
             let dst_llvm_type = reg_types[dst.idx()];
-            let (helper, helper_ret): (&str, BasicTypeEnum) =
-                if dst_kind == hl_type_kind_HF64 {
-                    ("hlp_dyn_todouble", self.context.f64_type().into())
-                } else if dst_kind == hl_type_kind_HF32 {
-                    ("hlp_dyn_tofloat", self.context.f32_type().into())
-                } else if dst_kind == hl_type_kind_HI64 {
-                    ("hlp_dyn_toi64", self.context.i64_type().into())
-                } else {
-                    ("hlp_dyn_toint", self.context.i32_type().into())
-                };
-            let unbox_fn =
-                self.declare_native(helper, &[ptr_type.into()], Some(helper_ret));
+            let (helper, helper_ret): (&str, BasicTypeEnum) = if dst_kind == hl_type_kind_HF64 {
+                ("hlp_dyn_todouble", self.context.f64_type().into())
+            } else if dst_kind == hl_type_kind_HF32 {
+                ("hlp_dyn_tofloat", self.context.f32_type().into())
+            } else if dst_kind == hl_type_kind_HI64 {
+                ("hlp_dyn_toi64", self.context.i64_type().into())
+            } else {
+                ("hlp_dyn_toint", self.context.i32_type().into())
+            };
+            let unbox_fn = self.declare_native(helper, &[ptr_type.into()], Some(helper_ret));
             let raw = self
                 .builder
                 .build_call(unbox_fn, &[src_ptr.into()], "safecast_unbox_call")?
@@ -429,8 +385,7 @@ impl<'ctx> JITModule<'ctx> {
             } else {
                 raw
             };
-            self.builder
-                .build_store(registers[dst.idx()], unboxed)?;
+            self.builder.build_store(registers[dst.idx()], unboxed)?;
             self.builder.build_unconditional_branch(done_bb)?;
 
             // Null path: store default value (0/false/0.0)
@@ -509,11 +464,7 @@ impl<'ctx> JITModule<'ctx> {
                     }
                 }
                 (v, BasicTypeEnum::IntType(t)) if v.is_float_value() => self
-                    .build_float_to_int_saturating(
-                        v.into_float_value(),
-                        t,
-                        "safecast_box_fptosi",
-                    )?
+                    .build_float_to_int_saturating(v.into_float_value(), t, "safecast_box_fptosi")?
                     .into(),
                 (v, BasicTypeEnum::FloatType(t)) if v.is_float_value() => self
                     .builder
@@ -561,20 +512,18 @@ impl<'ctx> JITModule<'ctx> {
                 .get_initialized_type(dst_type_idx)?
                 .into_pointer_value();
             let dst_llvm_type = reg_types[dst.idx()];
-            let (helper, helper_ret): (&str, BasicTypeEnum) =
-                if dst_kind == hl_type_kind_HF64 {
-                    ("hlp_dyn_castd", self.context.f64_type().into())
-                } else if dst_kind == hl_type_kind_HF32 {
-                    ("hlp_dyn_castf", self.context.f32_type().into())
-                } else if dst_kind == hl_type_kind_HI64 {
-                    ("hlp_dyn_casti64", self.context.i64_type().into())
-                } else {
-                    ("hlp_dyn_casti", self.context.i32_type().into())
-                };
+            let (helper, helper_ret): (&str, BasicTypeEnum) = if dst_kind == hl_type_kind_HF64 {
+                ("hlp_dyn_castd", self.context.f64_type().into())
+            } else if dst_kind == hl_type_kind_HF32 {
+                ("hlp_dyn_castf", self.context.f32_type().into())
+            } else if dst_kind == hl_type_kind_HI64 {
+                ("hlp_dyn_casti64", self.context.i64_type().into())
+            } else {
+                ("hlp_dyn_casti", self.context.i32_type().into())
+            };
             // Only the int form takes the destination type; the others
             // have one result width and need only the source.
-            let mut params: Vec<BasicMetadataTypeEnum> =
-                vec![ptr_type.into(), ptr_type.into()];
+            let mut params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into(), ptr_type.into()];
             let mut args: Vec<BasicMetadataValueEnum> =
                 vec![registers[src.idx()].into(), src_type_ptr.into()];
             if helper == "hlp_dyn_casti" {
@@ -681,8 +630,7 @@ impl<'ctx> JITModule<'ctx> {
                 registers[src.idx()],
                 "safecast_src",
             )?;
-            self.builder
-                .build_store(registers[dst.idx()], src_val)?;
+            self.builder.build_store(registers[dst.idx()], src_val)?;
         }
         Ok(())
     }
@@ -731,8 +679,7 @@ impl<'ctx> JITModule<'ctx> {
                 registers[src.idx()],
                 "tovirt_src",
             )?;
-            self.builder
-                .build_store(registers[dst.idx()], src_val)?;
+            self.builder.build_store(registers[dst.idx()], src_val)?;
         }
         Ok(())
     }

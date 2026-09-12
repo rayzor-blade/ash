@@ -42,11 +42,7 @@ impl<'ctx> JITModule<'ctx> {
                     .into_pointer_value();
                 let idx = self
                     .builder
-                    .build_load(
-                        self.context.i32_type(),
-                        registers[index.idx()],
-                        "geti8_idx",
-                    )?
+                    .build_load(self.context.i32_type(), registers[index.idx()], "geti8_idx")?
                     .into_int_value();
                 let addr = unsafe {
                     self.builder
@@ -197,19 +193,11 @@ impl<'ctx> JITModule<'ctx> {
                     .into_pointer_value();
                 let idx = self
                     .builder
-                    .build_load(
-                        self.context.i32_type(),
-                        registers[index.idx()],
-                        "seti8_idx",
-                    )?
+                    .build_load(self.context.i32_type(), registers[index.idx()], "seti8_idx")?
                     .into_int_value();
                 let src_val = self
                     .builder
-                    .build_load(
-                        reg_types[src.idx()],
-                        registers[src.idx()],
-                        "seti8_src",
-                    )?
+                    .build_load(reg_types[src.idx()], registers[src.idx()], "seti8_src")?
                     .into_int_value();
                 let addr = unsafe {
                     self.builder
@@ -238,11 +226,7 @@ impl<'ctx> JITModule<'ctx> {
                     .into_int_value();
                 let src_val = self
                     .builder
-                    .build_load(
-                        reg_types[src.idx()],
-                        registers[src.idx()],
-                        "seti16_src",
-                    )?
+                    .build_load(reg_types[src.idx()], registers[src.idx()], "seti16_src")?
                     .into_int_value();
                 let addr = unsafe {
                     self.builder
@@ -368,11 +352,9 @@ impl<'ctx> JITModule<'ctx> {
         src: ValueId,
     ) -> Result<()> {
         let dst = cell_base + cell.idx();
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "src_val",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "src_val")?;
         self.builder.build_store(registers[dst], src_val);
         Ok(())
     }
@@ -444,11 +426,9 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         src: ValueId,
     ) -> Result<()> {
-        let src_val = self.builder.build_load(
-            reg_types[src.idx()],
-            registers[src.idx()],
-            "src_val",
-        )?;
+        let src_val =
+            self.builder
+                .build_load(reg_types[src.idx()], registers[src.idx()], "src_val")?;
         self.builder.build_store(registers[dst.idx()], src_val);
         Ok(())
     }
@@ -470,10 +450,8 @@ impl<'ctx> JITModule<'ctx> {
         // Dereferencing no reference yields null, as the interpreter
         // answers, rather than faulting.
         let (_, load_block, cont_block) = self.null_guard("unref", ptr)?;
-        self.builder.build_store(
-            registers[dst.idx()],
-            reg_types[dst.idx()].const_zero(),
-        )?;
+        self.builder
+            .build_store(registers[dst.idx()], reg_types[dst.idx()].const_zero())?;
         self.builder.build_unconditional_branch(cont_block)?;
         self.builder.position_at_end(load_block);
         let val = self
@@ -677,12 +655,8 @@ impl<'ctx> JITModule<'ctx> {
                 Some(inkwell::InlineAsmDialect::ATT),
                 false,
             );
-            self.builder.build_indirect_call(
-                fn_type,
-                asm_val,
-                &[base.into()],
-                "prefetch",
-            )?;
+            self.builder
+                .build_indirect_call(fn_type, asm_val, &[base.into()], "prefetch")?;
         }
         Ok(())
     }

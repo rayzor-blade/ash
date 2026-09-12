@@ -1,8 +1,8 @@
-//! Lowering AIR v2 to LLVM: the CFG, phi edges, terminators, conditions,
-//! vectors and the FMA peephole.
-//!
-//! Split out of `function/mod.rs`. Same `impl` block on `JITModule`, moved
-//! verbatim -- the opcode emitter these call into lives in `super::opcode`.
+//! Lowering AIR v2 to LLVM: register allocation, the CFG, phi edges,
+//! terminators, conditions, arithmetic, constants, vectors and the FMA
+//! peephole. Every other instruction is emitted by the per-family sibling
+//! modules (`calls`, `objects`, `casts`, `enums`, `memory`), which the
+//! instruction match here dispatches to.
 
 use std::ffi::c_void;
 
@@ -142,14 +142,18 @@ impl<'ctx> JITModule<'ctx> {
         air: &AirFunction,
         lowering: &HLFunction,
     ) -> Result<(Vec<PointerValue<'ctx>>, Vec<BasicTypeEnum<'ctx>>)> {
+        // A minted constant's index is function-local (the pool size plus
+        // its position in this function's list), and `int_globals` is the
+        // module's, so the slot is overwritten for every function rather
+        // than kept: the previous function's global stays referenced by
+        // its own body, and this one's body reads the slot next.
         for (i, v) in air.pending_ints.iter().enumerate() {
             let idx = air.int_pool_base + i;
-            if self.int_globals.get(idx).copied().flatten().is_some() {
-                continue;
-            }
-            let g = self
-                .module
-                .add_global(self.context.i32_type(), None, &format!("Int_{idx}"));
+            let g = self.module.add_global(
+                self.context.i32_type(),
+                None,
+                &format!("Int_{idx}_f{}", lowering.findex),
+            );
             g.set_initializer(&self.context.i32_type().const_int(*v as u64, true));
             g.set_constant(true);
             if self.int_globals.len() <= idx {
@@ -517,9 +521,8 @@ impl<'ctx> JITModule<'ctx> {
                         if matches!(op, AirUnOp::Incr | AirUnOp::Decr) =>
                     {
                         // AIR models Incr/Decr as an SSA definition from the
-                        // old value. The legacy opcode mutates its destination
-                        // in place, so adapting it directly would read an
-                        // uninitialized destination alloca.
+                        // old value: read `src`, write `dst`. The in-place
+                        // form is `CellIncr`/`CellDecr`, over a cell slot.
                         let value = self.builder.build_load(
                             reg_types[src.idx()],
                             registers[src.idx()],
@@ -874,8 +877,7 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// Emit one of the vector forms. HL has no vector opcode, so these are
-    /// built here rather than routed through `translate_opcode`.
+    /// Emit one of the vector forms.
     ///
     /// Lane width comes from the destination slot, which `translate_air_v2`
     /// already re-typed from the value's lane count -- so the machine width is
@@ -1198,9 +1200,8 @@ impl<'ctx> JITModule<'ctx> {
             AirCondKind::SLte => (IntPredicate::SLE, FloatPredicate::OLE),
             AirCondKind::ULt => (IntPredicate::ULT, FloatPredicate::OLT),
             AirCondKind::UGte => (IntPredicate::UGE, FloatPredicate::OGE),
-            // The AIR path is the one every tier actually takes; the same
-            // rule as the legacy arms: NotLt/NotGte are Haxe's inverted float
-            // tests and must jump on NaN, and `nan != nan` is true.
+            // NotLt/NotGte are Haxe's inverted float tests and must jump on
+            // NaN, and `nan != nan` is true.
             AirCondKind::NotLt => (IntPredicate::SGE, FloatPredicate::UGE),
             AirCondKind::NotGte => (IntPredicate::SLT, FloatPredicate::ULT),
             AirCondKind::Eq => (IntPredicate::EQ, FloatPredicate::OEQ),

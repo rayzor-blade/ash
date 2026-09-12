@@ -171,6 +171,9 @@ pub fn perform_reload(
         crate::bytecode::BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
     let mut jit =
         JITModule::new_with_shared_runtime(context, path, &decoded, shared_runtime.clone());
+    // A body compiled here calls other bytecode through its slot, like every
+    // body the tiers compile under hot reload, so the next reload reaches it.
+    jit.set_hot_reload(true);
 
     for &findex in &diff.changed {
         match jit.promote_function_strict(findex) {

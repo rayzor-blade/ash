@@ -47,6 +47,9 @@ const PROGRAMS: &[&str] = &[
     // A virtual-method closure over a receiver whose class inherits the
     // method: the vtable slot indexed the class's own method list.
     "test_virtual_closure_inherited.hl",
+    // Vector loads over a NativeArray were addressed as bytes from the
+    // header.
+    "test_vec_array_addr.hl",
     "test_gettype_null.hl",
     "test_std_reflect_type.hl",
 ];

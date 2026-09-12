@@ -9,7 +9,7 @@ use air::v2::ir::{
     Instr as AirInstr, Terminator as AirTerminator, UnOp as AirUnOp, ValueId,
 };
 use inkwell::types::{AnyType, AnyTypeEnum, BasicType, BasicTypeEnum};
-use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, PointerValue};
+use inkwell::values::{BasicValue, BasicValueEnum, FunctionValue, IntValue, PointerValue};
 use inkwell::{
     basic_block::BasicBlock, AddressSpace, AtomicOrdering, FloatPredicate, IntPredicate,
 };
@@ -978,31 +978,46 @@ impl<'ctx> JITModule<'ctx> {
                 .build_load(reg_types[v.idx()], registers[v.idx()], name)?)
         };
         match instr {
+            // The memory is only aligned to its element: a varray's data
+            // starts 24 bytes into a 16-byte quantum and a byte index can
+            // be anything, so the access says so or x86 picks an aligned
+            // move and faults.
             AirInstr::VecLoad {
-                dst, base, index, ..
+                kind,
+                dst,
+                base,
+                index,
+                stride,
             } => {
                 let base_ptr = load(*base, "vec_base")?.into_pointer_value();
                 let idx = load(*index, "vec_idx")?.into_int_value();
-                let addr = unsafe {
-                    self.builder
-                        .build_gep(self.context.i8_type(), base_ptr, &[idx], "vec_addr")?
-                };
+                let (addr, lane_bytes) =
+                    self.vec_addr(*kind, base_ptr, idx, reg_types[dst.idx()], *stride)?;
                 let v = self
                     .builder
                     .build_load(reg_types[dst.idx()], addr, "vec_load")?;
+                if let Some(ins) = v.as_instruction_value() {
+                    ins.set_alignment(lane_bytes)
+                        .map_err(|e| anyhow!("vector load alignment: {e}"))?;
+                }
                 self.builder.build_store(registers[dst.idx()], v)?;
             }
             AirInstr::VecStore {
-                base, index, src, ..
+                kind,
+                base,
+                index,
+                src,
+                stride,
             } => {
                 let base_ptr = load(*base, "vec_base")?.into_pointer_value();
                 let idx = load(*index, "vec_idx")?.into_int_value();
-                let addr = unsafe {
-                    self.builder
-                        .build_gep(self.context.i8_type(), base_ptr, &[idx], "vec_addr")?
-                };
+                let (addr, lane_bytes) =
+                    self.vec_addr(*kind, base_ptr, idx, reg_types[src.idx()], *stride)?;
                 let v = load(*src, "vec_val")?;
-                self.builder.build_store(addr, v)?;
+                self.builder
+                    .build_store(addr, v)?
+                    .set_alignment(lane_bytes)
+                    .map_err(|e| anyhow!("vector store alignment: {e}"))?;
             }
             AirInstr::VecSplat { dst, src } => {
                 // insertelement into lane 0, then a zero shuffle to fill.
@@ -1064,48 +1079,136 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
+    /// The address of a vector access's first lane, and the lane width in
+    /// bytes, which is all the alignment the access may assume.
+    ///
+    /// `index` counts whatever `kind` indexes by: bytes for `Mem`/`I8`/`I16`,
+    /// so the lanes sit at `base + index`; elements for `Array`, so they sit
+    /// at `base + varray data offset + index * lane_bytes`. The stride the
+    /// widener recorded has to be the contiguous one for that unit, or one
+    /// wide load would not cover the lanes the scalar loop read.
+    fn vec_addr(
+        &self,
+        kind: air::v2::ir::MemAccess,
+        base: PointerValue<'ctx>,
+        index: IntValue<'ctx>,
+        vec_ty: BasicTypeEnum<'ctx>,
+        stride: u32,
+    ) -> Result<(PointerValue<'ctx>, u32)> {
+        use air::v2::ir::MemAccess;
+        let BasicTypeEnum::VectorType(vt) = vec_ty else {
+            return Err(anyhow!("vector access on a non-vector value"));
+        };
+        let lane_bytes = match vt.get_element_type() {
+            BasicTypeEnum::IntType(t) => t.get_bit_width() / 8,
+            BasicTypeEnum::FloatType(t) => {
+                if t == self.context.f32_type() {
+                    4
+                } else {
+                    8
+                }
+            }
+            BasicTypeEnum::PointerType(_) => self.target_abi.pointer_bytes(),
+            other => return Err(anyhow!("vector lane type {other:?}")),
+        };
+        let i8t = self.context.i8_type();
+        let addr = match kind {
+            MemAccess::Mem | MemAccess::I8 | MemAccess::I16 => {
+                if stride != lane_bytes {
+                    return Err(anyhow!(
+                        "vector access stride {stride} is not contiguous for {lane_bytes}-byte lanes"
+                    ));
+                }
+                unsafe { self.builder.build_gep(i8t, base, &[index], "vec_addr")? }
+            }
+            MemAccess::Array => {
+                if stride != 1 {
+                    return Err(anyhow!("vector array access stride {stride} is not contiguous"));
+                }
+                let idx_ty = index.get_type();
+                let scaled = self.builder.build_int_mul(
+                    index,
+                    idx_ty.const_int(lane_bytes as u64, false),
+                    "vec_elem_off",
+                )?;
+                let data_off = idx_ty.const_int(self.target_abi.varray_data_offset(), false);
+                let off = self.builder.build_int_add(scaled, data_off, "vec_off")?;
+                unsafe { self.builder.build_gep(i8t, base, &[off], "vec_addr")? }
+            }
+        };
+        Ok((addr, lane_bytes))
+    }
+
     /// The elementwise operation behind `VecBinOp` and the reduce's combine.
     /// LLVM applies a scalar opcode lane-wise on vector operands, so this is
-    /// the same dispatch either way.
+    /// the same dispatch either way; only the operand variant differs.
     fn emit_vector_binop(
         &self,
         op: air::v2::ir::BinOp,
         a: BasicValueEnum<'ctx>,
         b: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>> {
+        use inkwell::types::BasicTypeEnum as T;
+        match (a, b) {
+            (BasicValueEnum::VectorValue(x), BasicValueEnum::VectorValue(y)) => {
+                match x.get_type().get_element_type() {
+                    T::FloatType(_) => self.vector_float_binop(op, x, y),
+                    T::IntType(_) => self.vector_int_binop(op, x, y),
+                    other => Err(anyhow!("vector op {op:?} over {other:?} lanes")),
+                }
+            }
+            (BasicValueEnum::FloatValue(x), BasicValueEnum::FloatValue(y)) => {
+                self.vector_float_binop(op, x, y)
+            }
+            (BasicValueEnum::IntValue(x), BasicValueEnum::IntValue(y)) => {
+                self.vector_int_binop(op, x, y)
+            }
+            (x, y) => Err(anyhow!("vector op {op:?} over mismatched operands {x:?} and {y:?}")),
+        }
+    }
+
+    fn vector_float_binop<V: inkwell::values::FloatMathValue<'ctx>>(
+        &self,
+        op: air::v2::ir::BinOp,
+        x: V,
+        y: V,
+    ) -> Result<BasicValueEnum<'ctx>> {
         use air::v2::ir::BinOp as B;
-        let float = a.is_float_value()
-            || a.is_vector_value() && b.is_vector_value() && {
-                matches!(
-                    a.into_vector_value().get_type().get_element_type(),
-                    inkwell::types::BasicTypeEnum::FloatType(_)
-                )
-            };
-        Ok(if float {
-            let (x, y) = (a.into_float_value(), b.into_float_value());
-            match op {
-                B::Add => self.builder.build_float_add(x, y, "vfadd")?.into(),
-                B::Sub => self.builder.build_float_sub(x, y, "vfsub")?.into(),
-                B::Mul => self.builder.build_float_mul(x, y, "vfmul")?.into(),
-                // HL's division is the signed integer opcode reused for
-                // floats; there is no separate float variant.
-                B::SDiv => self.builder.build_float_div(x, y, "vfdiv")?.into(),
-                _ => return Err(anyhow!("unsupported float vector op {op:?}")),
-            }
-        } else {
-            let (x, y) = (a.into_int_value(), b.into_int_value());
-            match op {
-                B::Add => self.builder.build_int_add(x, y, "viadd")?.into(),
-                B::Sub => self.builder.build_int_sub(x, y, "visub")?.into(),
-                B::Mul => self.builder.build_int_mul(x, y, "vimul")?.into(),
-                B::And => self.builder.build_and(x, y, "viand")?.into(),
-                B::Or => self.builder.build_or(x, y, "vior")?.into(),
-                B::Xor => self.builder.build_xor(x, y, "vixor")?.into(),
-                B::Shl => self.builder.build_left_shift(x, y, "vishl")?.into(),
-                B::SShr => self.builder.build_right_shift(x, y, true, "vishr")?.into(),
-                B::UShr => self.builder.build_right_shift(x, y, false, "vushr")?.into(),
-                _ => return Err(anyhow!("unsupported int vector op {op:?}")),
-            }
+        Ok(match op {
+            B::Add => self.builder.build_float_add(x, y, "vfadd")?.as_basic_value_enum(),
+            B::Sub => self.builder.build_float_sub(x, y, "vfsub")?.as_basic_value_enum(),
+            B::Mul => self.builder.build_float_mul(x, y, "vfmul")?.as_basic_value_enum(),
+            // HL's division is the signed integer opcode reused for floats;
+            // there is no separate float variant.
+            B::SDiv => self.builder.build_float_div(x, y, "vfdiv")?.as_basic_value_enum(),
+            _ => return Err(anyhow!("unsupported float vector op {op:?}")),
+        })
+    }
+
+    fn vector_int_binop<V: inkwell::values::IntMathValue<'ctx>>(
+        &self,
+        op: air::v2::ir::BinOp,
+        x: V,
+        y: V,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        use air::v2::ir::BinOp as B;
+        Ok(match op {
+            B::Add => self.builder.build_int_add(x, y, "viadd")?.as_basic_value_enum(),
+            B::Sub => self.builder.build_int_sub(x, y, "visub")?.as_basic_value_enum(),
+            B::Mul => self.builder.build_int_mul(x, y, "vimul")?.as_basic_value_enum(),
+            B::And => self.builder.build_and(x, y, "viand")?.as_basic_value_enum(),
+            B::Or => self.builder.build_or(x, y, "vior")?.as_basic_value_enum(),
+            B::Xor => self.builder.build_xor(x, y, "vixor")?.as_basic_value_enum(),
+            B::Shl => self.builder.build_left_shift(x, y, "vishl")?.as_basic_value_enum(),
+            B::SShr => self
+                .builder
+                .build_right_shift(x, y, true, "vishr")?
+                .as_basic_value_enum(),
+            B::UShr => self
+                .builder
+                .build_right_shift(x, y, false, "vushr")?
+                .as_basic_value_enum(),
+            _ => return Err(anyhow!("unsupported int vector op {op:?}")),
         })
     }
 

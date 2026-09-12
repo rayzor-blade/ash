@@ -1281,8 +1281,7 @@ fn run() -> Result<()> {
     // Hand the program its argv before any mode runs. The runtime side
     // (hlp_sys_init in ash_std) has existed for a while with no caller, so
     // Sys.args() answered from nothing. The linkage choice and init are
-    // idempotent (Once-guarded), so doing them here is safe for the jit
-    // path, which repeats them inside JITModule::new.
+    // idempotent (Once-guarded), so doing them here is safe for every mode.
     {
         ash_core::native_lib::choose_std_linkage(&hl_path);
         init_std_library()?;
@@ -1802,7 +1801,9 @@ fn emit_optimized(
     // dependency of this workspace, and a chunked scope is the same thing for
     // a map over a slice.
     enum Outcome {
-        Optimized(Vec<ash_core::opcodes::Opcode>, Vec<TypeRef>),
+        /// Opcodes, register types, and the i32 constants the serializer had
+        /// to mint, which name pool indices from `ints.len()` up.
+        Optimized(Vec<ash_core::opcodes::Opcode>, Vec<TypeRef>, Vec<i32>),
         /// The pipeline refused this function; its original body stands.
         Refused,
         /// The optimized body cannot be encoded -- see `backward_switch`.
@@ -1838,6 +1839,7 @@ fn emit_optimized(
                                             .iter()
                                             .map(|t| TypeRef(t.0 as usize))
                                             .collect(),
+                                        o.ser.new_ints.clone(),
                                     )
                                 }
                             }
@@ -1854,9 +1856,28 @@ fn emit_optimized(
     });
 
     let (mut done, mut refused, mut unencodable, mut pinned) = (0usize, 0usize, 0usize, 0usize);
+    // Every function mints against the same base, so two functions' minted
+    // constants collide by index; each is re-pointed at one shared extension
+    // of the pool.
+    let int_base = bytecode.ints.len();
+    let mut minted: Vec<i32> = Vec::new();
     for (f, outcome) in optimized_bc.functions.iter_mut().zip(outcomes) {
         match outcome {
-            Outcome::Optimized(ops, regs) => {
+            Outcome::Optimized(mut ops, regs, new_ints) => {
+                if !new_ints.is_empty() {
+                    for op in &mut ops {
+                        if let ash_core::opcodes::Opcode::Int { ptr, .. } = op {
+                            if ptr.0 >= int_base {
+                                let value = new_ints[ptr.0 - int_base];
+                                let at = minted.iter().position(|v| *v == value).unwrap_or_else(|| {
+                                    minted.push(value);
+                                    minted.len() - 1
+                                });
+                                ptr.0 = int_base + at;
+                            }
+                        }
+                    }
+                }
                 f.ops = ops;
                 f.regs = regs;
                 // The mapping the old body carried does not describe the new
@@ -1869,6 +1890,7 @@ fn emit_optimized(
             Outcome::Pinned => pinned += 1,
         }
     }
+    optimized_bc.ints.extend(minted);
     let version = 5;
     let bytes = ash_core::bytecode_encode::encode(&optimized_bc, version)?;
     std::fs::write(out, &bytes)?;

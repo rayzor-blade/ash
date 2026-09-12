@@ -643,3 +643,22 @@ expectation = "exact"
 normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
+
+# The cases from here on use the `hl` package, which eval refuses, so the
+# interpreter is the oracle, as for TestNarrowUnsigned.
+#
+# Loops the widener turns into vector loads and stores over an
+# hl.NativeArray and over hl.Bytes, run enough times for the tiers to
+# promote them. The induction steps are spelled `i = 1 + i` because Haxe
+# compiles `i = i + 1` to OIncr, which the widener does not retime.
+[[case]]
+name = "TestVecArrayAddr"
+main = "TestVecArrayAddr"
+hl = "test_vec_array_addr.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true
+

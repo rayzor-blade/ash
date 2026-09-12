@@ -633,20 +633,36 @@ impl<'ctx> JITModule<'ctx> {
                     | AirInstr::VecReduce { .. } => {
                         self.emit_air_vector(instr, &registers, &reg_types)?;
                     }
-                    AirInstr::FieldGet { obj, obj_ty, .. }
-                    | AirInstr::FieldSet { obj, obj_ty, .. } => {
-                        // AIR resolved the field's declaring object type once.
-                        // Let the reused field primitive see that answer rather
-                        // than re-deriving it from the value's declared type.
-                        let ri = obj.idx();
-                        let saved = lowering.regs[ri].clone();
-                        lowering.regs[ri] = TypeRef(obj_ty.0 as usize);
-                        let op = self
-                            .air_instr_opcode(instr, cell_base)?
-                            .ok_or_else(|| anyhow!("AIR field instruction produced no opcode"))?;
-                        let dummy = [current, next];
-                        self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
-                        lowering.regs[ri] = saved;
+                    AirInstr::FieldGet { dst, obj, obj_ty, field } => {
+                        self.emit_air_field_get(
+                            lowering, registers, reg_types, cell_base, *dst, *obj, *obj_ty, *field,
+                        )?;
+                    }
+                    AirInstr::FieldSet { obj, obj_ty, field, src } => {
+                        self.emit_air_field_set(
+                            lowering, registers, reg_types, cell_base, *obj, *obj_ty, *field, *src,
+                        )?;
+                    }
+                    AirInstr::DynGet { dst, obj, field } => {
+                        self.emit_air_dyn_get(lowering, registers, reg_types, cell_base, *dst, *obj, *field)?;
+                    }
+                    AirInstr::DynSet { obj, field, src } => {
+                        self.emit_air_dyn_set(lowering, registers, reg_types, cell_base, *obj, *field, *src)?;
+                    }
+                    AirInstr::New { dst } => {
+                        self.emit_air_new(lowering, registers, reg_types, cell_base, *dst)?;
+                    }
+                    AirInstr::NullCheck { value } => {
+                        self.emit_air_null_check(lowering, registers, reg_types, cell_base, *value, next)?;
+                    }
+                    AirInstr::GetType { dst, src } => {
+                        self.emit_air_get_type(lowering, registers, reg_types, cell_base, *dst, *src)?;
+                    }
+                    AirInstr::GetTID { dst, src } => {
+                        self.emit_air_get_tid(lowering, registers, reg_types, cell_base, *dst, *src)?;
+                    }
+                    AirInstr::ArraySize { dst, array } => {
+                        self.emit_air_array_size(lowering, registers, reg_types, cell_base, *dst, *array)?;
                     }
                     AirInstr::Cast { kind, dst, src } => {
                         self.emit_air_cast(lowering, registers, reg_types, cell_base, *kind, *dst, *src)?;

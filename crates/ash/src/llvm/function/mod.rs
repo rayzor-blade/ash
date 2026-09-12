@@ -42,6 +42,7 @@ mod casts;
 mod enums;
 mod memory;
 mod natives;
+mod objects;
 mod opcode;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the

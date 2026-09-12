@@ -85,9 +85,13 @@ and leaves `fsqrt` and `fdiv` scalar. One iteration still computes one body
 pair. The unlock is an array-of-structs to struct-of-arrays layout change, or
 gather support — not a better transform.
 
-The Cranelift tier emits no SIMD of its own. A full CLIF dump for nbody has
-eighteen scalar floating-point instructions and zero vector types; it executes
-the vectors AIR hands it and finds none itself.
+The Cranelift tier emits SIMD only for the vector forms AIR hands it: a
+`VecLoad` becomes a load of a CLIF vector type, `VecSplat` a `splat`,
+`VecBinOp` a vector `iadd`/`fadd`, and the backend lowers those to NEON or
+SSE. What it does not do is find vectors in scalar code -- Cranelift has no
+loop vectorizer -- so on a program where the widener refuses every loop, nbody
+among them, its CLIF holds scalar floating-point instructions and no vector
+type at all.
 
 ## Next, in order
 

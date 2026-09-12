@@ -28,6 +28,8 @@
 //! same trap sits behind `wasm32-wasip1`, which is why that one is
 //! normalised on the way in.
 
+#![cfg(feature = "llvm")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

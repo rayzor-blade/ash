@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context as _, Result};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+#[cfg(feature = "llvm")]
 use std::mem::ManuallyDrop;
 use std::path::Path;
 use std::rc::Rc;
@@ -12,10 +13,13 @@ use beadie::{HotnessPolicy, OsrEntry, ThresholdPolicy, TieredAdapter};
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::c_types::CTypeFactory;
 use ash_core::hl_bindings::{self as hl, _vclosure, hl_runtime_obj, hl_type};
-use ash_core::llvm::module::{JITModule, SharedRuntimeHandles};
+#[cfg(feature = "llvm")]
+use ash_core::llvm::module::JITModule;
 use ash_core::native_lib::NativeFunctionResolver;
 use ash_core::opcodes::Opcode;
+use ash_core::runtime_handles::SharedRuntimeHandles;
 use ash_core::types::HLFunction;
+#[cfg(feature = "llvm")]
 use inkwell::context::Context;
 
 use crate::air::Cache as AirCache;
@@ -1067,6 +1071,7 @@ impl HLInterpreter {
         // so it would keep executing stale code. The LLVM tier calls bytecode
         // functions through their functions_ptrs slots under hot reload, so a
         // recompiled callee is picked up by every compiled caller.
+        #[cfg(feature = "llvm")]
         if config.hot_reload && config.tier_mode != TierMode::Llvm {
             eprintln!("[tiered] hot-reload active: forcing --jit-tier=llvm");
             config.tier_mode = TierMode::Llvm;
@@ -1173,6 +1178,7 @@ impl HLInterpreter {
         // finalization) stays on the broker thread, same as before.
         // Startup narration, gated: stderr is compared against an oracle's by
         // the parity harness, and no oracle narrates ash's tiering.
+        #[cfg(feature = "llvm")]
         if config.log_promotions {
             eprintln!("[tiered] pre-warming JIT module on main thread (one-time startup cost)...");
         }
@@ -1182,7 +1188,7 @@ impl HLInterpreter {
         // process-wide and all ordered against the host's own startup.
         // Everything after it is per-module LLVM work with no global effect,
         // which is what lets the build move off the startup path.
-        if let Err(e) = JITModule::prepare_process_globals(
+        if let Err(e) = ash_core::runtime_init::prepare_process_globals(
             &hl_path,
             &bytecode.natives,
             &mut NativeFunctionResolver::new(),
@@ -1208,10 +1214,15 @@ impl HLInterpreter {
         // which allocates through the GC or touches process-global state.
         // Doing it concurrently BEFORE that split raced the global runtime
         // init and truncated programs with no crash to point at.
+        #[cfg(feature = "llvm")]
         let hl_path_bg = hl_path.clone();
+        #[cfg(feature = "llvm")]
         let bytecode_bg = bytecode.clone();
+        #[cfg(feature = "llvm")]
         let shared_bg = shared.clone();
+        #[cfg(feature = "llvm")]
         let compiled_only = config.compiled_only;
+        #[cfg(feature = "llvm")]
         let building = std::thread::Builder::new()
             .name("ash-jit-prewarm".to_string())
             .spawn(move || {
@@ -1258,6 +1269,7 @@ impl HLInterpreter {
         // otherwise.
         // The API value is the source of truth; ASH_TIER1 overrides it so a
         // harness can sweep the rung without rebuilding.
+        #[cfg(feature = "llvm")]
         let tier1 = std::env::var("ASH_TIER1")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
@@ -1270,8 +1282,10 @@ impl HLInterpreter {
         // rung look unreachable and got a speculative compile bolted on beside
         // it. Queueing ahead is the mechanism for that, and it is the reason
         // the ladder can now carry the top tier by itself.
+        #[cfg(feature = "llvm")]
         let tier1_ahead = (tier1 / 5).max(1);
         let policies: Vec<Box<dyn HotnessPolicy>> = match config.tier_mode {
+            #[cfg(feature = "llvm")]
             TierMode::Auto => vec![
                 tier0,
                 Box::new(ThresholdPolicy::new(tier1).queue_ahead(tier1_ahead)),
@@ -1285,6 +1299,7 @@ impl HLInterpreter {
                 config.tier_mode.name(),
                 threshold,
                 match config.tier_mode {
+                    #[cfg(feature = "llvm")]
                     TierMode::Auto => format!("tier1={} (llvm)", tier1),
                     _ => "single tier".to_string(),
                 }
@@ -1313,9 +1328,14 @@ impl HLInterpreter {
             tier_log: log_promotions || std::env::var("ASH_TIER_LOG").is_ok(),
             mode: config.tier_mode,
             compiled_only: config.compiled_only,
-            llvm: Mutex::new(match building {
-                Some(h) => LlvmState::Building(h),
-                None => LlvmState::Unavailable,
+            llvm: Mutex::new({
+                #[cfg(feature = "llvm")]
+                match building {
+                    Some(h) => LlvmState::Building(h),
+                    None => LlvmState::Unavailable,
+                }
+                #[cfg(not(feature = "llvm"))]
+                LlvmState::Unavailable
             }),
             cranelift: Mutex::new(None),
             arrays: SharedArrayHandles {
@@ -2566,7 +2586,7 @@ impl HLInterpreter {
                 eprintln!("[ash] fiber runner: null closure function");
                 return std::ptr::null_mut();
             }
-            if fun >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+            if fun >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT as usize {
                 if ctx.jit_closure_runner.is_null() {
                     eprintln!("[ash] fiber runner: compiled closure bridge unavailable");
                     return std::ptr::null_mut();
@@ -2928,7 +2948,7 @@ impl HLInterpreter {
         // shared functions_ptrs/vtable/closure slots and re-enters the
         // interpreter through this bridge instead of SIGBUSing on them.
         // Args/result are raw i64 words per the callee's declared bytecode
-        // signature (see ash_core::llvm::stub_bridge for the encoding contract).
+        // signature (see ash_core::stub_bridge for the encoding contract).
         // Same raw-pointer-context justification as the closure runner above:
         // JIT code only runs within execute_entrypoint's dynamic extent, on
         // this OS thread.
@@ -3065,8 +3085,8 @@ impl HLInterpreter {
                 Err(e) => HLInterpreter::raise_stub_bridge_failure(resolver, findex, e),
             }
         }
-        ash_core::llvm::stub_bridge::set_stub_resolver(jit_stub_resolver);
-        ash_core::llvm::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
+        ash_core::stub_bridge::set_stub_resolver(jit_stub_resolver);
+        ash_core::stub_bridge::set_stub_call_bridge(jit_stub_call_bridge);
 
         let entry_findex = bytecode.entrypoint as usize;
         let result = self.call_function(bytecode, native_resolver, entry_findex, &[]);
@@ -3092,7 +3112,7 @@ impl HLInterpreter {
                 // The loop function is a vclosure — extract findex from stub pointer
                 let cl = loop_fn as *const hl::_vclosure;
                 let loop_fun = unsafe { (*cl).fun as usize };
-                let findex = if (loop_fun as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT
+                let findex = if (loop_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
                 {
                     loop_fun.wrapping_sub(1)
                 } else {
@@ -3625,27 +3645,34 @@ impl HLInterpreter {
             // header hot long after its promote and runs there for a while.
             return;
         } else {
-            let Ok(mut guard) = ctx.llvm.try_lock() else {
-                // A broker is compiling; blocking the interpreter behind it
-                // was 11.5% of nbody's execute. The header stays in
-                // `hot_loops`... which would stop this from retrying, so put
-                // it back on the retry path by forgetting it was seen.
-                self.hot_loops.remove(&(findex, header_pc));
+            #[cfg(not(feature = "llvm"))]
+            {
                 return;
-            };
-            let LlvmState::Ready(module) = &mut *guard else {
-                return;
-            };
-            match module.0.compile_osr_entry(findex, header_pc, &opt) {
-                Ok(a) if a != 0 => a,
-                Ok(_) => return,
-                Err(e) => {
-                    if osr_logging() {
-                        eprintln!(
-                            "[osr] late entry compile failed findex={findex} pc={header_pc}: {e:#}"
-                        );
-                    }
+            }
+            #[cfg(feature = "llvm")]
+            {
+                let Ok(mut guard) = ctx.llvm.try_lock() else {
+                    // A broker is compiling; blocking the interpreter behind it
+                    // was 11.5% of nbody's execute. The header stays in
+                    // `hot_loops`... which would stop this from retrying, so put
+                    // it back on the retry path by forgetting it was seen.
+                    self.hot_loops.remove(&(findex, header_pc));
                     return;
+                };
+                let LlvmState::Ready(module) = &mut *guard else {
+                    return;
+                };
+                match module.0.compile_osr_entry(findex, header_pc, &opt) {
+                    Ok(a) if a != 0 => a,
+                    Ok(_) => return,
+                    Err(e) => {
+                        if osr_logging() {
+                            eprintln!(
+                                "[osr] late entry compile failed findex={findex} pc={header_pc}: {e:#}"
+                            );
+                        }
+                        return;
+                    }
                 }
             }
         };
@@ -6935,6 +6962,7 @@ impl HLInterpreter {
 static RETIER_ABANDON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether speculative re-tier work should give up now.
+#[cfg(feature = "llvm")]
 pub(crate) fn retier_abandoned() -> bool {
     RETIER_ABANDON.load(std::sync::atomic::Ordering::Relaxed)
 }

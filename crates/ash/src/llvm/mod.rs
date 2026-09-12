@@ -6,11 +6,14 @@ pub mod aot_trampoline;
 pub mod function;
 pub mod module;
 pub mod object;
-pub mod stub_bridge;
 pub mod tbaa;
 pub mod type_utils;
 pub mod types;
-pub mod win_jit_memory;
+
+// Both live outside this module so the interpreter and Cranelift tiers can
+// use them without LLVM; the old paths still resolve here.
+pub use crate::jit_memory as win_jit_memory;
+pub use crate::stub_bridge;
 
 #[cfg(test)]
 mod module_test;

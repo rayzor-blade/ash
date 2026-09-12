@@ -10,6 +10,8 @@
 //! `cargo test -p ash --test aot_smoke -- --nocapture` to watch it work.
 //! `ASH_SMOKE_PROGRAMS="a.hl b.hl"` swaps the corpus.
 
+#![cfg(feature = "llvm")]
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;

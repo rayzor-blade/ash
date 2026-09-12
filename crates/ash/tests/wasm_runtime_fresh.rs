@@ -15,6 +15,8 @@
 //! Skipped, not failed, when the object is absent: a checkout that has never
 //! built the wasm runtime is not broken, and CI builds it before running this.
 
+#![cfg(feature = "llvm")]
+
 use std::path::PathBuf;
 
 /// Names `emit_module_init` calls. Adding a call there without adding it here

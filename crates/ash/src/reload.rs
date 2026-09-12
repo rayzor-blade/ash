@@ -5,7 +5,7 @@
 
 use crate::bytecode::DecodedBytecode;
 use crate::hl;
-use crate::llvm::module::SharedRuntimeHandles;
+use crate::runtime_handles::SharedRuntimeHandles;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -128,11 +128,12 @@ pub fn native_findexes(bytecode: &DecodedBytecode) -> HashSet<usize> {
 /// 4. Patch `functions_ptrs` and flush affected vtable protos
 ///
 /// Returns the diff (for logging) or an error if the reload is unsafe.
+#[cfg(feature = "llvm")]
 pub fn perform_reload(
     path: &std::path::Path,
     old_bytecode: &DecodedBytecode,
     functions_ptrs: &mut Vec<*mut std::ffi::c_void>,
-    shared_runtime: &crate::llvm::module::SharedRuntimeHandles,
+    shared_runtime: &SharedRuntimeHandles,
 ) -> anyhow::Result<ReloadDiff> {
     use crate::bytecode::BytecodeDecoder;
     use crate::llvm::module::JITModule;
@@ -226,7 +227,7 @@ pub fn perform_reload(
 
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
 fn flush_affected_protos(
-    shared: &crate::llvm::module::SharedRuntimeHandles,
+    shared: &SharedRuntimeHandles,
     _changed_findexes: &[usize],
 ) {
     // Resolve hlp_flush_proto dynamically from the std library
@@ -536,6 +537,7 @@ pub fn take_reload_pending() -> bool {
 /// Execute the deferred reload and return the new bytecode (for interpreter update).
 /// Called by the interpreter when `take_reload_pending` returns true.
 /// This runs on the interpreter's thread, outside any native call stack.
+#[cfg(feature = "llvm")]
 pub fn do_reload() -> Option<DecodedBytecode> {
     // The optimized-AIR cache is keyed by findex, and a reload gives the same
     // findex a different body. Without this the cache serves the old one and
@@ -578,4 +580,11 @@ pub fn do_reload() -> Option<DecodedBytecode> {
             None
         }
     }
+}
+
+/// Recompiling a changed body needs the LLVM tier.
+#[cfg(not(feature = "llvm"))]
+pub fn do_reload() -> Option<DecodedBytecode> {
+    eprintln!("[hot-reload] unavailable: this ash was built without the `llvm` feature");
+    None
 }

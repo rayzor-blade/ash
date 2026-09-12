@@ -108,6 +108,7 @@ mod imp {
     use super::{
         region_bytes, OrderedJitMemory, Protect, MIN_REGION_BYTES, PAGE,
     };
+    #[cfg(feature = "llvm")]
     use inkwell::memory_manager::McjitMemoryManager;
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
     use windows_sys::Win32::System::Memory::{
@@ -160,6 +161,7 @@ mod imp {
         }
     }
 
+    #[cfg(feature = "llvm")]
     impl McjitMemoryManager for OrderedJitMemory {
         fn allocate_code_section(
             &mut self,

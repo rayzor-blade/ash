@@ -7,9 +7,15 @@ license = "MIT"
 description = "ASH Virtual Machine for HashLink Bytecode"
 keywords = ["Virtual Machine", "VM", "JIT", "Compiler", "Haxe", "HashLink"]
 
+# `llvm` (default): the LLVM JIT tier and the AOT compiler. Without it the
+# interpreter and Cranelift tier build alone and nothing links LLVM.
+[features]
+default = ["llvm"]
+llvm = ["dep:inkwell", "dep:ash_wasm_link"]
+
 [dependencies]
-inkwell = {workspace=true}
-ash_wasm_link = { path = "../ash_wasm_link" }
+inkwell = { workspace = true, optional = true }
+ash_wasm_link = { path = "../ash_wasm_link", optional = true }
 anyhow = {workspace=true}
 flexstr = {workspace=true}
 num_enum = {workspace=true}
@@ -49,8 +55,20 @@ cranelift-module   = { git = "https://github.com/bytecodealliance/wasmtime", rev
 bindgen = "0.70.1"
 cc = "1"
 
+[[example]]
+name = "aot_spike"
+required-features = ["llvm"]
 
-# The JIT section allocator on Windows x86-64 (llvm/win_jit_memory.rs) needs
+[[example]]
+name = "wasm_spike"
+required-features = ["llvm"]
+
+[[example]]
+name = "middle_end_target"
+required-features = ["llvm"]
+
+
+# The JIT section allocator on Windows x86-64 (jit_memory.rs) needs
 # VirtualAlloc/VirtualProtect directly: LLVM's default manager places sections
 # where the OS chooses, which is what the ADDR32NB relocation cannot survive.
 [target.'cfg(windows)'.dependencies]

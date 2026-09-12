@@ -8,14 +8,21 @@
 
 #![allow(dead_code)]
 
+#[cfg(feature = "llvm")]
 use crate::interpreter::retier_abandoned;
-use anyhow::{anyhow, Result};
+#[cfg(feature = "llvm")]
+use anyhow::anyhow;
+use anyhow::Result;
 use ash_core::bytecode::DecodedBytecode;
 use ash_core::hl_bindings::{self as hl, hl_type};
-use ash_core::llvm::module::{CompiledFunctionMeta, JITModule};
+#[cfg(feature = "llvm")]
+use ash_core::llvm::module::JITModule;
+#[cfg(feature = "llvm")]
+use ash_core::runtime_handles::CompiledFunctionMeta;
 use beadie::{Bead, OsrEntry, TieredAdapter, TieredBound};
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+#[cfg(feature = "llvm")]
 use std::mem::ManuallyDrop;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
@@ -322,17 +329,20 @@ pub(crate) struct CallSignature {
 /// `ManuallyDrop` because LLVM objects may throw foreign exceptions during
 /// drop on some platforms — the module is intentionally leaked at exit (same
 /// as the old worker's `std::mem::forget` on shutdown).
+#[cfg(feature = "llvm")]
 pub(crate) struct LlvmModule(pub(crate) ManuallyDrop<JITModule<'static>>);
 
 // SAFETY: the module is only ever touched while `TieredSharedCtx::llvm` is
 // locked, so exactly one thread dereferences it at a time — the same
 // justification the old single-broker-thread hand-off relied on, now enforced
 // by the mutex instead of by there being only one broker.
+#[cfg(feature = "llvm")]
 unsafe impl Send for LlvmModule {}
 
 // One tier-state cell per process, touched only at promotion time — boxing the
 // large pre-warm variant would add indirection for no measurable gain.
 #[allow(clippy::large_enum_variant)]
+#[cfg(feature = "llvm")]
 pub(crate) enum LlvmState {
     /// Under construction on a background thread, not yet joined.
     ///
@@ -346,6 +356,12 @@ pub(crate) enum LlvmState {
     Pending(PrewarmedJit),
     Ready(LlvmModule),
     /// Pre-warm failed; the LLVM tier is unavailable for this run.
+    Unavailable,
+}
+
+/// Same cell, one state: a build without the `llvm` feature has no top tier.
+#[cfg(not(feature = "llvm"))]
+pub(crate) enum LlvmState {
     Unavailable,
 }
 
@@ -535,7 +551,9 @@ impl TieredSharedCtx {
 /// beadie's broker threads. `Send` is sound the same way `SharedRuntimeHandles`
 /// is: the main thread never touches the module again, and every consumer goes
 /// through `TieredSharedCtx::llvm`.
+#[cfg(feature = "llvm")]
 pub(crate) struct PrewarmedJit(pub(crate) *mut ManuallyDrop<JITModule<'static>>);
+#[cfg(feature = "llvm")]
 unsafe impl Send for PrewarmedJit {}
 
 /// Tiered promotion state built on beadie's `TieredAdapter`.
@@ -583,6 +601,7 @@ pub(crate) struct TieredRuntime {
 /// them -- deltablue's wasted promotion runs at 585 calls/ms against
 /// binary_trees' useful 387/ms -- and elapsed time does not either, since fib
 /// asks at 1.7ms and is right to.
+#[cfg(feature = "llvm")]
 pub(crate) fn llvm_demand(ctx: &Arc<TieredSharedCtx>, findex: usize) -> bool {
     if ctx
         .hot_loop_pcs
@@ -801,6 +820,7 @@ pub(crate) fn tiered_compile_tier(
     code
 }
 
+#[cfg_attr(not(feature = "llvm"), allow(unused_variables))]
 fn tiered_compile_tier_inner(
     ctx: &Arc<TieredSharedCtx>,
     tier: usize,
@@ -819,7 +839,7 @@ fn tiered_compile_tier_inner(
     // (function, tier) pairs, main and beadie-broker each producing one.
     if tier == 0 && ctx.arrays.functions_ptrs != 0 {
         let installed = unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
-        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+        if installed as usize >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             return installed.cast::<()>();
         }
     }
@@ -863,6 +883,7 @@ fn tiered_compile_tier_inner(
         if gate_rejected(findex) {
             return std::ptr::null_mut();
         }
+        #[cfg(feature = "llvm")]
         if ash_core::llvm::air::promotion_gate_enabled() {
             if let Some(bc) = ctx.bytecode_ptr() {
                 if let Some(raw) = bc.functions.iter().find(|f| f.findex as usize == findex) {
@@ -892,6 +913,7 @@ fn tiered_compile_tier_inner(
     }
     let code = match (ctx.mode, tier) {
         (TierMode::Cranelift, 0) => compile_with_cranelift(ctx, findex, bead),
+        #[cfg(feature = "llvm")]
         (TierMode::Llvm, 0) => {
             // Same memo the Auto tier-1 arm keeps, and for the same reason:
             // the compile that declined once declines the same way every
@@ -911,6 +933,7 @@ fn tiered_compile_tier_inner(
             }
             compile_with_llvm(ctx, 0, findex, may_block, Some(bead))
         }
+        #[cfg(feature = "llvm")]
         (TierMode::Auto, 0) => {
             let cl = compile_with_cranelift(ctx, findex, bead);
             if cl.is_null() {
@@ -919,6 +942,9 @@ fn tiered_compile_tier_inner(
                 cl
             }
         }
+        #[cfg(not(feature = "llvm"))]
+        (TierMode::Auto, 0) => compile_with_cranelift(ctx, findex, bead),
+        #[cfg(feature = "llvm")]
         (TierMode::Auto, 1) => {
             if ctx
                 .llvm_failed
@@ -1236,7 +1262,7 @@ pub(crate) fn resolve_worker_stub(
             return std::ptr::null_mut();
         }
         let installed = unsafe { *(ctx.arrays.functions_ptrs as *const *mut c_void).add(findex) };
-        if installed as usize >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT as usize {
+        if installed as usize >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT as usize {
             installed.cast::<()>()
         } else {
             std::ptr::null_mut()
@@ -1713,6 +1739,7 @@ pub(crate) fn osr_plan_for(
     Some((sites, optimized, cfg))
 }
 
+#[cfg(feature = "llvm")]
 fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, findex: usize) {
     let Some(program) = ctx.bytecode_ptr() else {
         return;
@@ -1739,6 +1766,7 @@ fn publish_retier_entries(ctx: &TieredSharedCtx, module: &mut JITModule<'_>, fin
     }
 }
 
+#[cfg(feature = "llvm")]
 pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
     let Some((sites, optimized, cfg)) = osr_plan_for(ctx, findex) else {
         return;
@@ -1807,6 +1835,7 @@ pub(crate) fn produce_osr_entries(ctx: &TieredSharedCtx, findex: usize) {
 /// seconds, so by the time a waiter is served its function may have been
 /// invalidated, blacklisted, or replaced. Compiling it then produces code
 /// nothing will call while every promotion behind it keeps waiting.
+#[cfg(feature = "llvm")]
 pub(crate) fn compile_with_llvm(
     ctx: &TieredSharedCtx,
     tier: usize,

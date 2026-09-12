@@ -5,12 +5,17 @@
 //! the host's pointer width through `size_of` or `offset_of`.
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "llvm")]
 use inkwell::context::Context;
+#[cfg(feature = "llvm")]
 use inkwell::module::Module;
+#[cfg(feature = "llvm")]
 use inkwell::targets::{
     CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
 };
+#[cfg(feature = "llvm")]
 use inkwell::types::IntType;
+#[cfg(feature = "llvm")]
 use inkwell::{AddressSpace, OptimizationLevel};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +79,7 @@ pub struct TargetAbi {
 }
 
 impl TargetAbi {
+    #[cfg(feature = "llvm")]
     pub fn host() -> Result<Self> {
         let triple = TargetMachine::get_default_triple()
             .as_str()
@@ -82,9 +88,23 @@ impl TargetAbi {
         Self::for_triple(&triple)
     }
 
+    /// The ABI as LLVM describes the triple. `for_triple_str` is the same
+    /// answer from the name alone, for a build without LLVM.
+    #[cfg(feature = "llvm")]
     pub fn for_triple(triple: &str) -> Result<Self> {
         let (_, machine) = target_machine(triple, OptimizationLevel::Aggressive)?;
         let pointer_bytes = machine.get_target_data().get_pointer_byte_size(None);
+        Self::from_pointer_bytes(triple, pointer_bytes)
+    }
+
+    /// The ABI from the triple's architecture prefix, with no LLVM.
+    pub fn for_triple_str(triple: &str) -> Result<Self> {
+        let pointer_bytes = pointer_bytes_for_triple(triple)
+            .ok_or_else(|| anyhow!("unknown architecture in target triple {triple}"))?;
+        Self::from_pointer_bytes(triple, pointer_bytes)
+    }
+
+    pub fn from_pointer_bytes(triple: &str, pointer_bytes: u32) -> Result<Self> {
         if pointer_bytes != 4 && pointer_bytes != 8 {
             return Err(anyhow!(
                 "unsupported target pointer width: {pointer_bytes} bytes for {triple}"
@@ -120,12 +140,14 @@ impl TargetAbi {
         self.pointer_bytes
     }
 
+    #[cfg(feature = "llvm")]
     pub fn pointer_int_type<'ctx>(&self, context: &'ctx Context) -> IntType<'ctx> {
         context.custom_width_int_type(self.pointer_bytes * 8)
     }
 
     /// Install the final target before any target-dependent type or body is
     /// emitted into `module`.
+    #[cfg(feature = "llvm")]
     pub fn apply_to_module(&self, module: &Module<'_>) -> Result<()> {
         let (triple, machine) = self.target_machine(OptimizationLevel::Aggressive)?;
         module.set_triple(&triple);
@@ -133,6 +155,7 @@ impl TargetAbi {
         Ok(())
     }
 
+    #[cfg(feature = "llvm")]
     pub fn target_machine(&self, opt: OptimizationLevel) -> Result<(TargetTriple, TargetMachine)> {
         target_machine(&self.triple, opt)
     }
@@ -218,6 +241,42 @@ fn lower_triple(triple: &str) -> String {
     triple.to_ascii_lowercase()
 }
 
+/// Pointer width by architecture prefix, for the triples ash emits for.
+/// `table_agrees_with_llvm` keeps this in step with LLVM's own answer.
+const POINTER_BYTES_BY_ARCH: &[(&str, u32)] = &[
+    ("aarch64", 8),
+    ("arm64", 8),
+    ("x86_64", 8),
+    ("amd64", 8),
+    ("riscv64", 8),
+    ("s390x", 8),
+    ("powerpc64", 8),
+    ("loongarch64", 8),
+    ("mips64", 8),
+    ("wasm64", 8),
+    ("wasm32", 4),
+    ("i686", 4),
+    ("i586", 4),
+    ("i386", 4),
+    ("riscv32", 4),
+    ("armv7", 4),
+    ("thumbv7", 4),
+    ("arm", 4),
+    ("powerpc", 4),
+    ("mips", 4),
+];
+
+fn pointer_bytes_for_triple(triple: &str) -> Option<u32> {
+    let lower = lower_triple(triple);
+    let arch = lower.split('-').next().unwrap_or("");
+    // Longest prefix first, so `powerpc64` is not answered by `powerpc`.
+    POINTER_BYTES_BY_ARCH
+        .iter()
+        .filter(|(name, _)| arch.starts_with(name))
+        .max_by_key(|(name, _)| name.len())
+        .map(|&(_, bytes)| bytes)
+}
+
 /// Turn on the backend's setjmp/longjmp lowering, once per process.
 ///
 /// These are LLVM command-line options rather than target-machine settings,
@@ -231,6 +290,7 @@ fn lower_triple(triple: &str) -> String {
 /// `legacy_exceptions` by name and Chrome dropped them -- while the proposal
 /// as standardised is `try_table` and `exnref`. A module built the default
 /// way is valid to nobody, so ash always asks for the standard one.
+#[cfg(feature = "llvm")]
 fn enable_wasm_sjlj() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -257,6 +317,7 @@ fn enable_wasm_sjlj() {
 /// `crates/ash/cpp/wasm_exception_model.cpp`, which explains why the other
 /// half is unreachable from the C API and what the object looks like without
 /// it -- it links, it runs, and the first throw escapes the program.
+#[cfg(feature = "llvm")]
 #[cfg(not(no_wasm_exception_shim))]
 fn force_wasm_exception_model(machine: &TargetMachine) -> Result<()> {
     extern "C" {
@@ -271,6 +332,7 @@ fn force_wasm_exception_model(machine: &TargetMachine) -> Result<()> {
 }
 
 /// Refuse rather than emit an object whose throws escape the program.
+#[cfg(feature = "llvm")]
 #[cfg(no_wasm_exception_shim)]
 fn force_wasm_exception_model(_machine: &TargetMachine) -> Result<()> {
     Err(anyhow!(
@@ -299,6 +361,7 @@ fn force_wasm_exception_model(_machine: &TargetMachine) -> Result<()> {
 /// `ASH_TARGET_FEATURES` replaces this for a target that wants something
 /// else -- a bare embedded RISC-V, say -- because the right answer there is
 /// the operator's, not a default's.
+#[cfg(feature = "llvm")]
 fn default_features(triple: &str) -> String {
     if let Ok(explicit) = std::env::var("ASH_TARGET_FEATURES") {
         return explicit;
@@ -309,6 +372,7 @@ fn default_features(triple: &str) -> String {
     String::new()
 }
 
+#[cfg(feature = "llvm")]
 pub(crate) fn target_machine(
     triple: &str,
     opt: OptimizationLevel,
@@ -361,7 +425,7 @@ mod tests {
 
     #[test]
     fn wasm32_hashlink_layouts() {
-        let abi = TargetAbi::for_triple("wasm32-wasip1").unwrap();
+        let abi = TargetAbi::for_triple_str("wasm32-wasip1").unwrap();
         assert_eq!(abi.pointer_bytes(), 4);
         assert_eq!(abi.varray_size_offset(), 8);
         assert_eq!(abi.varray_data_offset(), 16);
@@ -384,7 +448,7 @@ mod tests {
 
     #[test]
     fn native_64_hashlink_layouts() {
-        let abi = TargetAbi::for_triple("x86_64-unknown-linux-gnu").unwrap();
+        let abi = TargetAbi::for_triple_str("x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(abi.pointer_bytes(), 8);
         assert_eq!(abi.varray_size_offset(), 16);
         assert_eq!(abi.varray_data_offset(), 24);
@@ -393,5 +457,34 @@ mod tests {
         assert_eq!(abi.vclosure_size(), 32);
         assert_eq!(abi.hl_runtime_obj_fields_indexes_offset(), 40);
         assert_eq!(abi.hl_runtime_obj_size(), 112);
+    }
+
+    #[test]
+    fn unknown_architecture_is_refused() {
+        assert!(TargetAbi::for_triple_str("z80-unknown-none").is_err());
+    }
+
+    /// The hand-written width table must say what LLVM says.
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn table_agrees_with_llvm() {
+        for triple in [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+            "x86_64-pc-windows-msvc",
+            "riscv64-unknown-linux-gnu",
+            "s390x-unknown-linux-gnu",
+            "powerpc64le-unknown-linux-gnu",
+            "wasm32-wasip1",
+            "wasm32-unknown-unknown",
+            "i686-unknown-linux-gnu",
+            "armv7-unknown-linux-gnueabihf",
+            "riscv32-unknown-elf",
+        ] {
+            let llvm = TargetAbi::for_triple(triple).unwrap();
+            let table = TargetAbi::for_triple_str(triple).unwrap();
+            assert_eq!(llvm, table, "{triple}");
+        }
     }
 }

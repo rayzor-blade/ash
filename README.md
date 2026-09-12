@@ -94,6 +94,12 @@ export LLVM_SYS_211_PREFIX=/usr/lib/llvm-21
 cargo build -p ash        # the `ash` binary: interpreter, JIT and AOT compiler
 ```
 
+The LLVM tier and the AOT compiler are behind the `llvm` feature, on by
+default. `cargo build -p ash --no-default-features` builds the interpreter and
+Cranelift tier alone and links no LLVM; that binary refuses `--build`,
+`--emit-aot`, `--hot-reload` and `--jit-tier=llvm`. Either build still needs
+libclang (bindgen reads the runtime headers).
+
 Release builds use `make` (host target with LTO) or `make all` (every installed target).
 
 ### Rebuilding after `std/` changes

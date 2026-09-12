@@ -6,14 +6,21 @@ authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
 description = "ASH HashLink VM CLI - hybrid interpreter/JIT runner"
 
+# `llvm` (default): --build/--emit-aot, --hot-reload and the LLVM JIT tier.
+# `cargo build -p ash --no-default-features` is the interpreter + Cranelift
+# binary, with no LLVM linked.
+[features]
+default = ["llvm"]
+llvm = ["dep:inkwell", "ash_core/llvm", "ash_interp/llvm"]
+
 [dependencies]
 # Reading a wasm module for `ash wasm`: the parser only, no engine.
 ash_wasm_runtime = { path = "../ash_wasm_runtime", default-features = false, features = ["validate"] }
-ash_core = { path = "../ash" }
-ash_interp = { path = "../ash_interp" }
+ash_core = { path = "../ash", default-features = false }
+ash_interp = { path = "../ash_interp", default-features = false }
 ash_trace = { path = "../ash_trace" }
 anyhow = { workspace = true }
-inkwell = { workspace = true }
+inkwell = { workspace = true, optional = true }
 clap = { workspace = true }
 
 # Both deps below serve only the unix crash-handler complex in main.rs

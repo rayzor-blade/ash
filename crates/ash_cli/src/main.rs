@@ -180,6 +180,10 @@ struct Cli {
     /// `auto` (default) runs both JIT tiers; `cranelift` and `llvm` pin a
     /// single tier for testing; `off` disables promotion. Overridden by the
     /// ASH_TIER environment variable when this flag is left at its default.
+    #[cfg_attr(
+        not(feature = "llvm"),
+        doc = "\n\nThis ash was built without the `llvm` feature: `auto` is Cranelift only and `llvm` is refused."
+    )]
     #[arg(long, value_name = "auto|cranelift|llvm|off")]
     jit_tier: Option<String>,
 }
@@ -189,6 +193,10 @@ enum Mode {
     /// Run using the bytecode interpreter
     Interp,
     /// Compile reached functions with Cranelift, then promote them to LLVM
+    #[cfg_attr(
+        not(feature = "llvm"),
+        doc = "(no LLVM in this build: Cranelift only, and a function it cannot compile fails)"
+    )]
     Jit,
     /// Hybrid mode (interpreter with JIT tier promotion)
     Hybrid,
@@ -263,6 +271,7 @@ fn every_preset_is_offered(t: TierPreset) -> Option<Preset> {
 /// and `ash_module_init` and imports the runtime by symbol, so linking it
 /// against libash_std.a produces a binary with no bytecode in it.
 /// What to build, and where to put it.
+#[cfg(feature = "llvm")]
 struct AotRequest<'a> {
     /// The bytecode to compile.
     file: &'a std::path::Path,
@@ -283,6 +292,7 @@ struct AotRequest<'a> {
     quiet: bool,
 }
 
+#[cfg(feature = "llvm")]
 fn emit_aot(request: AotRequest<'_>) -> anyhow::Result<()> {
     let AotRequest {
         file,
@@ -1245,6 +1255,37 @@ fn run_wasm(module: &std::path::Path, validate: bool, _analyse: bool) -> Result<
     Ok(())
 }
 
+/// The flags that need LLVM, refused up front in a build without it.
+#[cfg(not(feature = "llvm"))]
+fn refuse_llvm_flags(cli: &Cli) -> Result<()> {
+    let flag = if cli.build.is_some() {
+        Some("--build")
+    } else if cli.emit_aot.is_some() {
+        Some("--emit-aot")
+    } else if cli.pgo.is_some() {
+        Some("--pgo")
+    } else if cli.runtime.is_some() {
+        Some("--runtime")
+    } else if cli.target.is_some() {
+        Some("--target")
+    } else if cli.allow_refused {
+        Some("--allow-refused")
+    } else if cli.hot_reload {
+        Some("--hot-reload")
+    } else if cli.jit_tier.as_deref().map(TierMode::parse) == Some(Some(TierMode::Llvm)) {
+        Some("--jit-tier=llvm")
+    } else {
+        None
+    };
+    match flag {
+        Some(flag) => anyhow::bail!(
+            "{flag} requires an ash built with the `llvm` feature. \
+             Rebuild: cargo build --release -p ash --features llvm"
+        ),
+        None => Ok(()),
+    }
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
@@ -1256,6 +1297,9 @@ fn run() -> Result<()> {
     {
         return run_wasm(module, *validate, *analyse);
     }
+
+    #[cfg(not(feature = "llvm"))]
+    refuse_llvm_flags(&cli)?;
 
     // Startup diagnostics go to stderr, which the parity harness compares
     // against an oracle's. --quiet has to reach them.
@@ -1374,7 +1418,7 @@ fn run() -> Result<()> {
             .target
             .as_deref()
             .map(|t| {
-                ash_core::target_abi::TargetAbi::for_triple(t)
+                ash_core::target_abi::TargetAbi::for_triple_str(t)
                     .map(|abi| abi.native_dynamic_loading)
                     .unwrap_or(true)
             })
@@ -1544,6 +1588,7 @@ fn run() -> Result<()> {
         }
     }
 
+    #[cfg(feature = "llvm")]
     if cli.emit_aot.is_some() || cli.build.is_some() {
         // With only `--build`, the object is scratch: it is named after the
         // binary, beside it, and removed once linked.
@@ -1607,6 +1652,12 @@ fn run() -> Result<()> {
             };
             if compiled_only && tier_mode == TierMode::Off {
                 anyhow::bail!("--mode jit cannot be combined with --jit-tier=off");
+            }
+            if cfg!(not(feature = "llvm")) && tier_mode == TierMode::Llvm {
+                anyhow::bail!(
+                    "ASH_TIER=llvm requires an ash built with the `llvm` feature. \
+                     Rebuild: cargo build --release -p ash --features llvm"
+                );
             }
             let mut interpreter = HLInterpreter::new(&bytecode, &native_resolver);
             // A preset supplies the thresholds; a flag the operator actually

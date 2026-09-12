@@ -28,7 +28,9 @@ pub mod hl_bindings {
     include!(concat!(env!("OUT_DIR"), "/hl_bindings.rs"));
 }
 pub mod jit_map;
+pub mod jit_memory;
 pub mod layout;
+#[cfg(feature = "llvm")]
 pub mod llvm;
 pub mod native_lib;
 pub mod opcodes;
@@ -37,10 +39,13 @@ pub mod retier;
 pub mod profile;
 pub mod reachable;
 pub mod reload;
+pub mod runtime_handles;
+pub mod runtime_init;
+pub mod stub_bridge;
 pub mod target_abi;
 pub mod types;
 
 use hl_bindings as hl;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "llvm"))]
 mod test_macro;

@@ -39,40 +39,7 @@ extern "C" {
     fn hlp_obj_field_fetch(t: *mut hl_type, fid: i32) -> *mut hl_obj_field;
 }
 
-#[derive(Debug, Clone)]
-pub struct SharedRuntimeHandles {
-    pub globals_data_ptr: *mut *mut c_void,
-    pub nglobals: usize,
-    pub c_types: Vec<*mut hl_type>,
-    pub module_ctx: *mut hl_module_context,
-}
-
-// SharedRuntimeHandles carries runtime pointers that are process-global for an HL module
-// and are read by the background JIT worker. Synchronization remains the caller's responsibility.
-unsafe impl Send for SharedRuntimeHandles {}
-unsafe impl Sync for SharedRuntimeHandles {}
-
-#[derive(Debug, Clone)]
-pub struct CompiledFunctionMeta {
-    pub findex: usize,
-    pub fn_addr: usize,
-    pub arg_kinds: Vec<hl_type_kind>,
-    pub ret_kind: hl_type_kind,
-}
-
-impl CompiledFunctionMeta {
-    /// An AOT lowering has no address: the function is a symbol in the module
-    /// and gets one when the object is linked. `fn_addr == 0` is the marker,
-    /// and nothing in the AOT path dispatches through it.
-    pub fn aot_placeholder(findex: usize) -> Self {
-        CompiledFunctionMeta {
-            findex,
-            fn_addr: 0,
-            arg_kinds: Vec::new(),
-            ret_kind: 0,
-        }
-    }
-}
+pub use crate::runtime_handles::{CompiledFunctionMeta, SharedRuntimeHandles};
 
 pub struct JITModule<'ctx> {
     pub(crate) context: &'ctx Context,
@@ -225,7 +192,7 @@ macro_rules! phase_timer {
 /// Create the MCJIT engine every module is added to.
 ///
 /// On Windows x86-64 it gets a memory manager that keeps sections in one
-/// ascending region; see `win_jit_memory` for what goes wrong without it.
+/// ascending region; see `jit_memory` for what goes wrong without it.
 /// Everywhere else LLVM's default manager is correct and this is the plain
 /// constructor.
 fn create_execution_engine<'ctx>(
@@ -233,7 +200,7 @@ fn create_execution_engine<'ctx>(
 ) -> Result<inkwell::execution_engine::ExecutionEngine<'ctx>, inkwell::support::LLVMString> {
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
-        if let Some(memory) = crate::llvm::win_jit_memory::OrderedJitMemory::reserve() {
+        if let Some(memory) = crate::jit_memory::OrderedJitMemory::reserve() {
             return module.create_mcjit_execution_engine_with_memory_manager(
                 memory,
                 OptimizationLevel::Aggressive,
@@ -950,14 +917,7 @@ impl<'ctx> JITModule<'ctx> {
         natives: &[crate::types::HLNative],
         resolver: &mut NativeFunctionResolver,
     ) -> Result<()> {
-        crate::native_lib::choose_std_linkage(path);
-        init_std_library();
-        let search_dir = path.parent().unwrap_or(Path::new("."));
-        // This path prepares the host process, so the host's answer is the
-        // right one.
-        resolver.discover_and_load_libraries(search_dir, natives, true)?;
-        Self::setup_callbacks_global(resolver);
-        Ok(())
+        crate::runtime_init::prepare_process_globals(path, natives, resolver)
     }
 
     /// Build findexes and func_types tables without initializing HOBJ/HENUM types.
@@ -1086,25 +1046,8 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// The dynamic-call hook `hlp_call_method` needs (Type.createInstance and
-    /// friends), registered once per process.
-    ///
-    /// Deliberately NOT the closure runner that `setup_callbacks` also
-    /// installs: which runner is correct depends on the host. The interpreter
-    /// installs its own; only standalone JIT execution wants the typed native
-    /// bridge. Registering that from a shared startup path would override the
-    /// interpreter's.
     fn setup_callbacks_global(resolver: &NativeFunctionResolver) {
-        if let (Ok(setup_fn_ptr), Ok(static_call_ptr)) = (
-            resolver.resolve_function("std", "hl_setup_callbacks2"),
-            resolver.resolve_function("std", "ash_static_call"),
-        ) {
-            type FnSetupCallbacks2 = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
-            let setup: FnSetupCallbacks2 = unsafe { std::mem::transmute(setup_fn_ptr) };
-            // flags=0: fun arg is the direct function pointer (not double-indirection)
-            // wrapper=null: we don't use the wrapper mechanism
-            unsafe { setup(static_call_ptr, std::ptr::null_mut(), 0) };
-        }
+        crate::runtime_init::setup_callbacks_global(resolver)
     }
 
     fn setup_callbacks(&mut self) {

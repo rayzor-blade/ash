@@ -19,7 +19,7 @@
 //! - **bytecode** targets load `functions_ptrs[findex]` at run time and guard
 //!   the loaded pointer against the interpreter's stub sentinel (`findex + 1`,
 //!   always `< STUB_SENTINEL_LIMIT`), routing sentinels through
-//!   [`crate::llvm::stub_bridge::ash_jit_call_stub`] exactly like the LLVM
+//!   [`crate::stub_bridge::ash_jit_call_stub`] exactly like the LLVM
 //!   tier's `build_stub_guarded_indirect_call`.
 
 use anyhow::{anyhow, bail, Result};
@@ -39,7 +39,7 @@ use super::{
     AbiClass, Widen,
 };
 use crate::hl_bindings as hl;
-use crate::llvm::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
+use crate::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 use crate::opcodes::{Opcode, Reg};
 use crate::types::{HLFunction, HLTypeFun, TypeRef};
 

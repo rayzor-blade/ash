@@ -436,6 +436,10 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
     if let Some(c) = cur.take() {
         out.push(c);
     }
+    // A build without the `llvm` feature refuses that tier.
+    if cfg!(not(feature = "llvm")) {
+        out.retain(|c| c.jit_tier.as_deref() != Some("llvm"));
+    }
 
     for c in &out {
         assert!(

@@ -291,7 +291,12 @@ fn build_wasm_exception_shim() {
 
 fn main() {
     pin_libclang();
-    build_wasm_exception_shim();
+    // The shim is LLVM C++; without the feature nothing links LLVM.
+    if env::var_os("CARGO_FEATURE_LLVM").is_some() {
+        build_wasm_exception_shim();
+    } else {
+        println!("cargo:rustc-check-cfg=cfg(no_wasm_exception_shim)");
+    }
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target = env::var("TARGET").unwrap();
 

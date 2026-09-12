@@ -620,7 +620,7 @@ impl HLInterpreter {
                 // built the closure; compiled code stores the real entry it
                 // loaded from `functions_ptrs`.
                 let stub = (*cl_ptr).fun as usize;
-                let findex = if (stub as u64) < ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
+                let findex = if (stub as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
                     stub.wrapping_sub(1)
                 } else {
                     self.findex_for_code_addr(stub).unwrap_or(usize::MAX)
@@ -1404,7 +1404,7 @@ impl HLInterpreter {
         }
         for findex in 0..self.targets.len() {
             let slot = unsafe { *ptrs.add(findex) } as usize;
-            if slot as u64 >= ash_core::llvm::stub_bridge::STUB_SENTINEL_LIMIT {
+            if slot as u64 >= ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
                 self.code_addr_findex.entry(slot).or_insert(findex);
             }
         }

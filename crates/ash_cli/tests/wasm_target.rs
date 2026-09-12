@@ -21,6 +21,8 @@
 //! missing symbol. When no linker is found the checks it would have enabled
 //! are reported as skipped rather than passing quietly.
 
+#![cfg(feature = "llvm")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

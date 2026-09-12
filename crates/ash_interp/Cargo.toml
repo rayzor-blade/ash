@@ -6,12 +6,17 @@ authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
 license = "MIT"
 description = "HashLink bytecode interpreter for ASH VM"
 
+# `llvm` (default): the LLVM top tier of the ladder; off, Auto is Cranelift only.
+[features]
+default = ["llvm"]
+llvm = ["dep:inkwell", "ash_core/llvm"]
+
 [dependencies]
 ash_native_call = { workspace = true }
-ash_core = { path = "../ash" }
+ash_core = { path = "../ash", default-features = false }
 air = { path = "../air" }
 anyhow = { workspace = true }
-inkwell = { workspace = true }
+inkwell = { workspace = true, optional = true }
 beadie = { workspace = true }
 libc = "0.2"
 

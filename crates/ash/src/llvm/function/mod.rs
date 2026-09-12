@@ -1594,9 +1594,7 @@ impl<'ctx> JITModule<'ctx> {
     ///
     /// Cranelift spills the de-SSA register image described by the shared
     /// optimized AIR cache. Restoring that image directly into AIR values and
-    /// cells keeps the transition in the typed IR; serializing it back into
-    /// HashLink opcodes here would make the legacy bytecode translator the
-    /// real LLVM OSR backend again.
+    /// cells keeps the transition in the typed IR.
     fn build_air_osr_body(
         &mut self,
         source: &HLFunction,

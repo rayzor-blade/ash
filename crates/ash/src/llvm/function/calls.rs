@@ -23,11 +23,12 @@ use anyhow::{anyhow, Result};
 use super::{hl_hash_utf8, FuncPtr};
 
 impl<'ctx> JITModule<'ctx> {
-    /// Direct call by findex.
+    /// Call by findex.
     ///
-    /// A bytecode callee under lazy compilation is reached through its
-    /// functions_ptrs slot instead, so a recompiled body is picked up
-    /// without recompiling the caller. Natives are always called directly.
+    /// A bytecode callee whose body can change after this caller is
+    /// compiled -- lazily compiled in its own module, or replaced by a hot
+    /// reload -- is reached through its functions_ptrs slot; every other
+    /// callee, natives included, is called directly.
     pub(super) fn emit_air_call(
         &mut self,
         lowering: &HLFunction,

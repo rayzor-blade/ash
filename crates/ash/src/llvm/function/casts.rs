@@ -191,7 +191,7 @@ impl<'ctx> JITModule<'ctx> {
         let src_unsigned = src_kind == hl_type_kind_HUI8 || src_kind == hl_type_kind_HUI16;
         let result: BasicValueEnum = if src_val.is_int_value() {
             // A byte or short register is unsigned in HashLink (MOVZX
-            // before CVTSI2SD); sitofp read 200 as -56.
+            // before CVTSI2SD), so it converts unsigned.
             if src_unsigned {
                 self.builder
                     .build_unsigned_int_to_float(
@@ -287,12 +287,11 @@ impl<'ctx> JITModule<'ctx> {
             registers[src.idx()],
             "toint_src",
         )?;
-        // Convert straight to the destination register's width. Going
-        // through i32 first then widening with cast_for_call (a zext)
-        // turned -1 into 4294967295 for I32 -> I64 and truncated any
-        // Float beyond 2^31 for F64 -> I64. HashLink: MOVSXD / CVTTSD2SI
-        // at the destination width. HUI8/HUI16 registers hold unsigned
-        // values (MOVZX), so those widen with zero extension.
+        // Convert straight to the destination register's width, as
+        // HashLink does (MOVSXD / CVTTSD2SI at that width): a signed source
+        // widens with sign extension and a float saturates at the
+        // destination's range. HUI8/HUI16 registers hold unsigned values
+        // (MOVZX), so those widen with zero extension.
         let dst_ty = reg_types[dst.idx()];
         let dst_int = if dst_ty.is_int_type() {
             dst_ty.into_int_type()

@@ -997,8 +997,9 @@ impl HLInterpreter {
         }
         // Hot-reload swaps bytecode bodies underneath the interpreter; the
         // Cranelift tier lowers from a bytecode snapshot it pins for the run,
-        // so it would keep executing stale code. The LLVM tier already has an
-        // indirect-call rewrite for this.
+        // so it would keep executing stale code. The LLVM tier calls bytecode
+        // functions through their functions_ptrs slots under hot reload, so a
+        // recompiled callee is picked up by every compiled caller.
         if config.hot_reload && config.tier_mode != TierMode::Llvm {
             eprintln!("[tiered] hot-reload active: forcing --jit-tier=llvm");
             config.tier_mode = TierMode::Llvm;

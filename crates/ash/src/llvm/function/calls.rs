@@ -38,7 +38,12 @@ impl<'ctx> JITModule<'ctx> {
         fun: usize,
         args: &[ValueId],
     ) -> Result<()> {
-        if self.lazy_compilation && matches!(self.findexes.get(&fun), Some(FuncPtr::Fun(_))) {
+        // A bytecode callee whose body may change after this caller is
+        // compiled -- compiled lazily in its own module, or replaced by a
+        // hot reload -- is reached through its functions_ptrs slot; anything
+        // else is a direct call to its declaration.
+        let volatile = self.lazy_compilation || self.hot_reload;
+        if volatile && matches!(self.findexes.get(&fun), Some(FuncPtr::Fun(_))) {
             return self.emit_air_indirect_call(
                 lowering, registers, reg_types, cell_base, dst, fun, args,
             );

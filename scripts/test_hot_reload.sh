@@ -70,7 +70,10 @@ if [[ -z "$ASH_CLI" ]]; then
     ASH_CLI="$ASH_BIN"
 fi
 echo "[2/5] Starting ash --hot-reload..."
-$ASH_CLI --mode hybrid --hot-reload --quiet "$HL_FILE" > "$OUTPUT" 2>&1 &
+# ASH_ARGS adds flags, e.g. "--jit-threshold 1" to run the reload through
+# compiled code rather than the interpreter.
+# shellcheck disable=SC2086
+$ASH_CLI --mode hybrid --hot-reload --quiet ${ASH_ARGS:-} "$HL_FILE" > "$OUTPUT" 2>&1 &
 ASH_PID=$!
 
 # Step 3: Wait for "start v1"

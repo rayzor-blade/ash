@@ -5380,8 +5380,16 @@ impl HLInterpreter {
                     .air
                     .int_at(bytecode, func_idx, ptr.0)
                     .ok_or_else(|| anyhow!("Int operand {} names no constant", ptr.0))?;
+                // The pool holds i32; an I64 register takes the signed value,
+                // as HashLink's own store_const does.
+                let v = if bytecode.types[func.regs[dst.0 as usize].0].kind == hl::hl_type_kind_HI64
+                {
+                    NanBoxedValue::from_i64(val as i64)
+                } else {
+                    NanBoxedValue::from_i32(val)
+                };
                 let frame = self.stack.last_mut().unwrap();
-                frame.registers.set(dst.0, NanBoxedValue::from_i32(val));
+                frame.registers.set(dst.0, v);
             }
             Opcode::Float { dst, ptr } => {
                 let val = bytecode.floats[ptr.0];
@@ -6193,6 +6201,8 @@ impl HLInterpreter {
                 let val = frame.registers.get(src.0);
                 let f = if val.is_i32() {
                     val.as_i32() as f64
+                } else if val.is_i64() {
+                    val.as_i64_lossy() as f64
                 } else {
                     val.as_f64()
                 };
@@ -6202,6 +6212,8 @@ impl HLInterpreter {
                 let val = frame.registers.get(src.0);
                 let f = if val.is_i32() {
                     (val.as_i32() as u32) as f64
+                } else if val.is_i64() {
+                    (val.as_i64_lossy() as u64) as f64
                 } else {
                     val.as_f64()
                 };

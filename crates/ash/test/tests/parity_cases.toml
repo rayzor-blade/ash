@@ -690,3 +690,15 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# hl.I64 values built from Int literals, negative and at the 32-bit edges.
+# Also the source of the retyped bytecode in ash_cli/tests/retyped_reads.rs.
+[[case]]
+name = "TestIntIntoI64"
+main = "TestIntIntoI64"
+hl = "test_int_into_i64.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true

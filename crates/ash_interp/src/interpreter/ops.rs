@@ -829,10 +829,14 @@ impl HLInterpreter {
         if needs_boxing && !self.fn_make_dyn.is_null() {
             let c_type_ptr = self.c_type_factory.get(src_type_ref.0);
             // Create a stack slot holding the raw value for hlp_make_dyn
+            // The runtime reads the slot at the SOURCE kind's width: an F32
+            // register holds an f64 box, so it gets the f32 bits.
             let mut data: i64 = if val.is_i32() {
                 val.as_i32() as i64
             } else if val.is_i64() {
                 val.as_i64_lossy()
+            } else if val.is_f64() && src_kind == hl::hl_type_kind_HF32 {
+                (val.as_f64() as f32).to_bits() as i64
             } else if val.is_f64() {
                 val.as_f64().to_bits() as i64
             } else if val.is_bool() {

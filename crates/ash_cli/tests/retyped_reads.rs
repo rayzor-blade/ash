@@ -1,14 +1,16 @@
 //! Register shapes HashLink's JIT accepts but Haxe never emits.
 //!
 //! A DynGet, GetI8 or GetI16 whose destination register is Bool, UI8 or
-//! UI16 has to store at that register's width. Haxe reads a Dynamic field
-//! into a Dynamic register and casts, and reads bytes into an Int register
-//! and narrows, so a compiled program never reaches that shape. This test
-//! makes the shape itself: it takes a compiled fixture, retypes the
-//! read-then-convert pairs so the read lands in the final register directly,
-//! writes the result back out as bytecode, and runs it through every engine
-//! with the register store audit on. The engines have to agree with the
-//! unmodified program, and the audit has to stay silent.
+//! UI16 has to store at that register's width; an Int constant whose
+//! destination is an I64 register has to sign-extend. Haxe reads a Dynamic
+//! field into a Dynamic register and casts, reads bytes into an Int register
+//! and narrows, and builds an I64 constant from an Int one with OToInt, so a
+//! compiled program never reaches either shape. These tests make the shapes
+//! themselves: each takes a compiled fixture, retypes the read-then-convert
+//! pairs so the read lands in the final register directly, writes the result
+//! back out as bytecode, and runs it through every engine with the register
+//! store audit on. The engines have to agree with the unmodified program, and
+//! the audit has to stay silent.
 
 mod common;
 
@@ -17,7 +19,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use ash_core::bytecode::{BytecodeDecoder, DecodedBytecode};
-use ash_core::hl_bindings::{hl_type_kind_HBOOL, hl_type_kind_HUI16, hl_type_kind_HUI8};
+use ash_core::hl_bindings::{
+    hl_type_kind_HBOOL, hl_type_kind_HI64, hl_type_kind_HUI16, hl_type_kind_HUI8,
+};
 use ash_core::opcodes::Opcode;
 use common::{ash_cli_bin, run_with_timeout, tests_dir};
 
@@ -54,6 +58,37 @@ fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
                 | Opcode::GetI8 { dst, .. }
                 | Opcode::GetI16 { dst, .. } => *dst = narrow,
                 _ => unreachable!(),
+            }
+            f.ops[i + 1] = Opcode::Nop;
+            changed += 1;
+        }
+    }
+    changed
+}
+
+/// Rewrite every `Int` followed by a `ToInt` into an I64 register so the
+/// constant lands in the I64 register itself and the conversion becomes a
+/// `Nop`. Returns how many pairs changed.
+fn retype_int_into_i64(bc: &mut DecodedBytecode) -> usize {
+    let mut changed = 0;
+    for f in &mut bc.functions {
+        for i in 0..f.ops.len().saturating_sub(1) {
+            let Opcode::Int { dst: int_dst, .. } = &f.ops[i] else {
+                continue;
+            };
+            let int_dst = *int_dst;
+            let Opcode::ToInt { dst: wide, src } = &f.ops[i + 1] else {
+                continue;
+            };
+            let (wide, src) = (*wide, *src);
+            if src != int_dst {
+                continue;
+            }
+            if bc.types[f.regs[wide.0 as usize].0].kind != hl_type_kind_HI64 {
+                continue;
+            }
+            if let Opcode::Int { dst, .. } = &mut f.ops[i] {
+                *dst = wide;
             }
             f.ops[i + 1] = Opcode::Nop;
             changed += 1;
@@ -157,4 +192,9 @@ fn check_retyped(fixture: &str, retype: fn(&mut DecodedBytecode) -> usize, min_c
 #[test]
 fn narrow_reads_store_at_register_width() {
     check_retyped("test_narrow_dynget", retype_narrow_reads, 5);
+}
+
+#[test]
+fn int_into_i64_is_signed() {
+    check_retyped("test_int_into_i64", retype_int_into_i64, 5);
 }

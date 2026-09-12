@@ -480,7 +480,13 @@ impl HLInterpreter {
                     .ir
                     .int_at(*idx, |i| bc.ints.get(i).copied())
                     .ok_or_else(|| anyhow!("int constant {idx} is not in the pool"))?;
-                set!(dst, NanBoxedValue::from_i32(v))
+                // An I64 destination takes the signed value, as HashLink's
+                // own store_const does.
+                if kind!(dst) == hl::hl_type_kind_HI64 {
+                    set!(dst, NanBoxedValue::from_i64(v as i64))
+                } else {
+                    set!(dst, NanBoxedValue::from_i32(v))
+                }
             }
             I::Float { dst, idx } => set!(dst, NanBoxedValue::from_f64(bc.floats[*idx])),
             I::Bool { dst, value } => set!(dst, NanBoxedValue::from_bool(*value)),
@@ -792,6 +798,8 @@ impl HLInterpreter {
                         let v = get!(src);
                         let f = if v.is_i32() {
                             v.as_i32() as f64
+                        } else if v.is_i64() {
+                            v.as_i64_lossy() as f64
                         } else {
                             v.as_f64()
                         };
@@ -801,6 +809,8 @@ impl HLInterpreter {
                         let v = get!(src);
                         let f = if v.is_i32() {
                             (v.as_i32() as u32) as f64
+                        } else if v.is_i64() {
+                            (v.as_i64_lossy() as u64) as f64
                         } else {
                             v.as_f64()
                         };

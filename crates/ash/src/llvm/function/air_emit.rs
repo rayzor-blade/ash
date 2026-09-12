@@ -612,12 +612,23 @@ impl<'ctx> JITModule<'ctx> {
                         let global = self
                             .ensure_int_global(*idx)
                             .ok_or_else(|| anyhow!("AIR Int names no constant: {idx}"))?;
-                        let v = self.builder.build_load(
-                            self.context.i32_type(),
-                            global.as_pointer_value(),
-                            "air_int",
-                        )?;
-                        let v = self.cast_for_call(v, reg_types[dst.idx()])?;
+                        let v = self
+                            .builder
+                            .build_load(
+                                self.context.i32_type(),
+                                global.as_pointer_value(),
+                                "air_int",
+                            )?
+                            .into_int_value();
+                        // The pool holds i32; a wider destination takes the
+                        // signed value, as HashLink's own store_const does.
+                        let v = match reg_types[dst.idx()] {
+                            BasicTypeEnum::IntType(t) if t.get_bit_width() > 32 => self
+                                .builder
+                                .build_int_s_extend(v, t, "air_int_sext")?
+                                .into(),
+                            target => self.cast_for_call(v.into(), target)?,
+                        };
                         self.builder.build_store(registers[dst.idx()], v)?;
                     }
                     AirInstr::Float { dst, idx } => {

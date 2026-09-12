@@ -250,6 +250,9 @@ fn narrow_to_reg(
     match bytecode.types[t.0].kind {
         hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(v.as_i32() & 0xFF),
         hl::hl_type_kind_HUI16 => NanBoxedValue::from_i32(v.as_i32() & 0xFFFF),
+        // A Bool register holds a truth value; anything nonzero is true,
+        // as the compiled tiers and HashLink read it.
+        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(v.as_i32() != 0),
         _ => v,
     }
 }
@@ -6285,7 +6288,9 @@ impl HLInterpreter {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
                     NanBoxedValue::from_i32(unsafe { *addr as i32 })
                 };
-                frame.registers.set(dst.0, val);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, val));
             }
             Opcode::GetI16 { dst, bytes, index } => {
                 let base = frame.registers.get(bytes.0);
@@ -6296,7 +6301,9 @@ impl HLInterpreter {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
                     NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
                 };
-                frame.registers.set(dst.0, val);
+                frame
+                    .registers
+                    .set(dst.0, narrow_to_reg(bytecode, func, dst.0, val));
             }
             Opcode::GetMem { dst, bytes, index } => {
                 let base = frame.registers.get(bytes.0);

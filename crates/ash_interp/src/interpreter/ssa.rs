@@ -24,8 +24,8 @@ use crate::tiering::env_flag;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp};
 
 use super::{
-    read_raw_kind, ref_elem_size, ref_target_kind, write_raw_kind, HLExceptionPropagation,
-    HLInterpreter, StepResult, POOL_CAP,
+    narrow_to_reg, read_raw_kind, ref_elem_size, ref_target_kind, write_raw_kind,
+    HLExceptionPropagation, HLInterpreter, StepResult, POOL_CAP,
 };
 
 impl HLInterpreter {
@@ -882,7 +882,9 @@ impl HLInterpreter {
                             _ => Self::read_value_from_ptr(addr, kind!(dst)),
                         }
                     };
-                    set!(dst, val);
+                    // A byte or half-word can land in a narrower register
+                    // than itself, and a Bool register holds a truth value.
+                    set!(dst, narrow_to_reg(bc, func, dst.0, val));
                 }
             },
             I::MemSet {

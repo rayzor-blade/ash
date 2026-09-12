@@ -30,6 +30,7 @@ fn smoke_case_names() -> HashSet<&'static str> {
         "TestVirtualClosureInherited",
         "TestVecArrayAddr",
         "TestRefOffset",
+        "TestNarrowDynGet",
         "TestTieredHotLoop",
         "Mandelbrot",
     ]

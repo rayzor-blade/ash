@@ -19,9 +19,10 @@ use anyhow::{anyhow, Result};
 impl<'ctx> JITModule<'ctx> {
     /// `dst = base[index]` at the width selected by `kind`.
     ///
-    /// I8/I16 zero-extend to i32; Mem and Array load at the destination
-    /// slot's own type. Array indexes past the varray header and scales the
-    /// index by the destination register's element size.
+    /// I8/I16 load a byte or half-word and shape it for the destination
+    /// slot; Mem and Array load at the destination slot's own type. Array
+    /// indexes past the varray header and scales the index by the
+    /// destination register's element size.
     pub(super) fn emit_air_mem_get(
         &mut self,
         lowering: &HLFunction,
@@ -52,9 +53,9 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(self.context.i8_type(), addr, "geti8_val")?
                     .into_int_value();
-                let ext =
-                    self.builder
-                        .build_int_z_extend(val, self.context.i32_type(), "geti8_zext")?;
+                // Shaped for the destination's own slot, which HL types as
+                // Int but a rewritten program may type narrower or as Bool.
+                let ext = self.int_for_slot(val, lowering, reg_types, dst)?;
                 self.builder.build_store(registers[dst.idx()], ext)?;
             }
             AirMemAccess::I16 => {
@@ -79,9 +80,7 @@ impl<'ctx> JITModule<'ctx> {
                     .builder
                     .build_load(self.context.i16_type(), addr, "geti16_val")?
                     .into_int_value();
-                let ext =
-                    self.builder
-                        .build_int_z_extend(val, self.context.i32_type(), "geti16_zext")?;
+                let ext = self.int_for_slot(val, lowering, reg_types, dst)?;
                 self.builder.build_store(registers[dst.idx()], ext)?;
             }
             AirMemAccess::Mem => {

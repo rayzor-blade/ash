@@ -11,7 +11,8 @@ use inkwell::types::{
     AnyType, AnyTypeEnum, BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType,
 };
 use inkwell::values::{
-    AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, PointerValue,
+    AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, IntValue,
+    PointerValue,
 };
 use inkwell::{
     basic_block::BasicBlock, builder::Builder, AddressSpace, AtomicOrdering, FloatPredicate,
@@ -1979,6 +1980,30 @@ impl<'ctx> JITModule<'ctx> {
     /// declared type. When the bytecode register type differs from the target function's
     /// parameter type (e.g., i32 register passed to a function expecting ptr/Dynamic),
     /// we cast to preserve the bit pattern — matching the C calling convention behavior.
+    /// An integer the runtime or memory handed back, shaped for the slot of
+    /// AIR value `dst`: a Bool slot holds `value != 0` -- any nonzero byte
+    /// is true, as the interpreter, Cranelift and HashLink read it -- and a
+    /// narrower or wider int slot takes the width-converted value.
+    pub(super) fn int_for_slot(
+        &self,
+        value: IntValue<'ctx>,
+        lowering: &HLFunction,
+        reg_types: &[BasicTypeEnum<'ctx>],
+        dst: ValueId,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let slot = reg_types[dst.idx()];
+        if self.types_[lowering.regs[dst.idx()].0].kind == crate::hl::hl_type_kind_HBOOL {
+            let truth = self.builder.build_int_compare(
+                inkwell::IntPredicate::NE,
+                value,
+                value.get_type().const_zero(),
+                "slot_bool",
+            )?;
+            return self.cast_for_call(truth.into(), slot);
+        }
+        self.cast_for_call(value.into(), slot)
+    }
+
     fn cast_for_call(
         &self,
         value: BasicValueEnum<'ctx>,

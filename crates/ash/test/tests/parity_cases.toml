@@ -676,3 +676,17 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# Dynamic field reads into Bool, UI8 and UI16 locals and byte reads from
+# hl.Bytes into UI8 and UI16 locals. Also the source of the retyped
+# bytecode in ash_cli/tests/retyped_reads.rs.
+[[case]]
+name = "TestNarrowDynGet"
+main = "TestNarrowDynGet"
+hl = "test_narrow_dynget.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true
+

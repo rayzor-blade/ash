@@ -1000,7 +1000,9 @@ impl HLInterpreter {
                     func_idx, frame.pc, dst_kind, out
                 );
             }
-            frame.registers.set(dst, out);
+            frame
+                .registers
+                .set(dst, super::narrow_to_reg(bytecode, func, dst, out));
         }
 
         Ok(StepResult::Continue)

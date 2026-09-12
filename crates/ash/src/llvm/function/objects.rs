@@ -461,10 +461,15 @@ impl<'ctx> JITModule<'ctx> {
                     &[obj_val.into(), hfield_val.into(), type_ptr.into()],
                     "dynget_i",
                 )?;
-                self.builder.build_store(
-                    registers[dst.idx()],
-                    result.try_as_basic_value().basic().unwrap(),
+                // The runtime hands back an i32 whatever the field's width;
+                // the slot is the destination's own.
+                let value = self.int_for_slot(
+                    result.try_as_basic_value().basic().unwrap().into_int_value(),
+                    lowering,
+                    reg_types,
+                    dst,
                 )?;
+                self.builder.build_store(registers[dst.idx()], value)?;
             }
             _ => {
                 // Pointer types: hlp_dyn_getp(obj, hfield, dst_type)

@@ -33,6 +33,7 @@ use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
     SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value,
@@ -3898,8 +3899,22 @@ impl AirCodegen<'_, '_> {
                     .b
                     .ins()
                     .iconst(types::I64, crate::hl::_setjmp as usize as i64);
-                let setjmp_sig = self.helper_sigref(&[types::I64], Some(types::I32));
-                let setjmp_call = self.b.ins().call_indirect(setjmp_sig, setjmp, &[buf]);
+                // Win64 spells it `_setjmp(env, frame)`, and its `longjmp`
+                // unwinds with SEH whenever the frame is non-zero. The frames
+                // a throw abandons are abandoned on purpose, and these carry
+                // no unwind tables for it to walk, so the frame passed is the
+                // null one -- Win64's own spelling for "do not unwind". Left
+                // out, the register holds whatever the last call left there.
+                // Everywhere else the buffer is the only argument.
+                let takes_frame = self.ctx.call_conv() == CallConv::WindowsFastcall;
+                let mut params = vec![types::I64];
+                let mut args = vec![buf];
+                if takes_frame {
+                    params.push(types::I64);
+                    args.push(self.b.ins().iconst(types::I64, 0));
+                }
+                let setjmp_sig = self.helper_sigref(&params, Some(types::I32));
+                let setjmp_call = self.b.ins().call_indirect(setjmp_sig, setjmp, &args);
                 let jumped = self.b.inst_results(setjmp_call)[0];
                 let caught = self.b.ins().icmp_imm(IntCC::NotEqual, jumped, 0);
 

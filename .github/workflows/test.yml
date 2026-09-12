@@ -159,23 +159,18 @@ jobs:
         with:
           into: target\debug\
 
-      # The Windows JIT dies without a word at its first caught throw, and
-      # the comparison below only says that it printed less. Record what the
-      # CRT's setjmp pair does when called the JIT's way, and what each JIT
-      # run exits with, so the log names the fault rather than the symptom.
-      - name: Win64 setjmp contract and JIT throw diagnostics
+      # Win64 is the one platform where ash's trap model rests on an
+      # argument the C header hides: the frame word `_setjmp` stores, which
+      # decides whether `longjmp` unwinds. Pin what the CRT does with it, and
+      # that a jump through the pair lands, before the smoke test relies on
+      # both; a failure here names the contract, the smoke test would only
+      # say the JIT printed less.
+      - name: Win64 setjmp contract
         if: runner.os == 'Windows'
-        continue-on-error: true
         shell: pwsh
         run: |
           $env:PATH = "$PWD\llvmenv\Library\bin;$env:PATH"
           cargo test -p ash_core --test win_setjmp -- --nocapture
-          $env:ASH_TRACE_THROW = "1"
-          foreach ($p in "test_safe_cast_virtual.hl", "test_stdlib.hl") {
-            Write-Host "=== --mode jit $p ==="
-            & target\debug\ash.exe --mode jit "crates\ash\test\tests\$p" 2>&1 | Select-Object -Last 60
-            Write-Host ("exit: 0x{0:X8}" -f $LASTEXITCODE)
-          }
 
       - name: AOT binaries match the JIT
         shell: bash

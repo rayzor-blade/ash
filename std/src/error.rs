@@ -1491,9 +1491,10 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     // Win64's `longjmp` reads the buffer's first word as the frame to unwind
     // to with SEH, and unwinds whenever it is non-zero. The frames between
     // the trap and here are abandoned on purpose -- the lock depth and the
-    // shadow stack were just restored by hand -- and the JIT's frames carry
-    // no unwind tables for it to walk anyway, so the word is cleared here,
-    // whatever the `_setjmp` the trap was armed with put in it.
+    // shadow stack were just restored by hand -- and compiled frames carry
+    // no unwind tables for it to walk anyway. Every tier arms its traps with
+    // a null frame; an HDLL's `hl_trap` is the C macro, which arms with a
+    // real one, so the word is cleared here for whoever armed it.
     #[cfg(all(windows, target_arch = "x86_64"))]
     {
         let words = buf_copy.as_mut_ptr() as *mut u64;

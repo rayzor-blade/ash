@@ -1431,7 +1431,9 @@ impl AirCodegen<'_, '_> {
                     self.def(*dst, v)?;
                 } else {
                     let x = self.get(*args.first().ok_or_else(|| anyhow!("intrinsic arity"))?)?;
-                    let v = self.emit_native_intrinsic(intrinsic_to_native(*kind), x);
+                    let native = crate::intrinsics::NativeIntrinsic::of_kind(*kind)
+                        .ok_or_else(|| anyhow!("intrinsic {kind:?} is not unary"))?;
+                    let v = self.emit_native_intrinsic(native, x);
                     self.def(*dst, v)?;
                 }
             }
@@ -4172,24 +4174,6 @@ fn is_dynamically_self_describing(kind: hl::hl_type_kind) -> bool {
             | hl::hl_type_kind_HENUM
             | hl::hl_type_kind_HNULL
     )
-}
-
-fn intrinsic_to_native(k: air::v2::ir::IntrinsicKind) -> crate::intrinsics::NativeIntrinsic {
-    use crate::intrinsics::NativeIntrinsic as NI;
-    use air::v2::ir::IntrinsicKind as K;
-    match k {
-        K::Sqrt => NI::Sqrt,
-        K::Abs => NI::Abs,
-        K::Floor => NI::Floor,
-        K::Ceil => NI::Ceil,
-        K::RoundHalfUp => NI::RoundHalfUp,
-        K::FloorToI32 => NI::FloorToI32,
-        K::CeilToI32 => NI::CeilToI32,
-        K::RoundHalfUpToI32 => NI::RoundHalfUpToI32,
-        K::IsNaN => NI::IsNaN,
-        K::IsFinite => NI::IsFinite,
-        K::PtrCompare => unreachable!("two-arg kinds are emitted inline at the call site"),
-    }
 }
 
 /// A lowered branch condition.

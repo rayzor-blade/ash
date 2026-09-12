@@ -71,6 +71,26 @@ impl NativeIntrinsic {
     pub fn returns_bool(self) -> bool {
         matches!(self, NativeIntrinsic::IsNaN | NativeIntrinsic::IsFinite)
     }
+
+    /// The unary machine primitive AIR classified a call as, or None for a
+    /// kind that is not one (`PtrCompare` is a two-operand compare the
+    /// backends emit inline).
+    pub fn of_kind(kind: air::v2::ir::IntrinsicKind) -> Option<Self> {
+        use air::v2::ir::IntrinsicKind as K;
+        Some(match kind {
+            K::Sqrt => NativeIntrinsic::Sqrt,
+            K::Abs => NativeIntrinsic::Abs,
+            K::Floor => NativeIntrinsic::Floor,
+            K::Ceil => NativeIntrinsic::Ceil,
+            K::RoundHalfUp => NativeIntrinsic::RoundHalfUp,
+            K::FloorToI32 => NativeIntrinsic::FloorToI32,
+            K::CeilToI32 => NativeIntrinsic::CeilToI32,
+            K::RoundHalfUpToI32 => NativeIntrinsic::RoundHalfUpToI32,
+            K::IsNaN => NativeIntrinsic::IsNaN,
+            K::IsFinite => NativeIntrinsic::IsFinite,
+            K::PtrCompare => return None,
+        })
+    }
 }
 
 /// The intrinsic that replaces `lib@name`, if there is an exact one.

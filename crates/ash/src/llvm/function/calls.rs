@@ -51,9 +51,11 @@ impl<'ctx> JITModule<'ctx> {
         self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args)
     }
 
-    /// A recognised stdlib native. `kind` is not consulted: the native is
-    /// called like any other direct call of its arity, and the unary
-    /// machine-instruction primitives are picked up by the arity-1 path.
+    /// A stdlib operation AIR classified: one machine sequence rather than
+    /// a call. `PtrCompare` is the three-way identity compare of two
+    /// addresses, `hlp_ptr_compare` verbatim; every other kind is a unary
+    /// float primitive. A primitive the target cannot express as an
+    /// instruction is called by its findex like any other native.
     pub(super) fn emit_air_intrinsic(
         &mut self,
         lowering: &HLFunction,
@@ -65,7 +67,39 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         args: &[ValueId],
     ) -> Result<()> {
-        self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args)
+        let Some(native) = crate::intrinsics::NativeIntrinsic::of_kind(kind) else {
+            let [a, b] = args else {
+                return Err(anyhow!("PtrCompare takes two operands, got {}", args.len()));
+            };
+            let i32_type = self.context.i32_type();
+            let word = self.target_abi.pointer_int_type(self.context);
+            let a = self.builder.build_load(reg_types[a.idx()], registers[a.idx()], "ptrcmp_a")?;
+            let b = self.builder.build_load(reg_types[b.idx()], registers[b.idx()], "ptrcmp_b")?;
+            let a = self.builder.build_ptr_to_int(a.into_pointer_value(), word, "ptrcmp_a_addr")?;
+            let b = self.builder.build_ptr_to_int(b.into_pointer_value(), word, "ptrcmp_b_addr")?;
+            let gt = self.builder.build_int_compare(IntPredicate::UGT, a, b, "ptrcmp_gt")?;
+            let lt = self.builder.build_int_compare(IntPredicate::ULT, a, b, "ptrcmp_lt")?;
+            let gt = self.builder.build_int_z_extend(gt, i32_type, "ptrcmp_gt32")?;
+            let lt = self.builder.build_int_z_extend(lt, i32_type, "ptrcmp_lt32")?;
+            let v = self.builder.build_int_sub(gt, lt, "ptrcmp")?;
+            self.builder.build_store(registers[dst.idx()], v)?;
+            return Ok(());
+        };
+        let [arg0] = args else {
+            return Err(anyhow!("{kind:?} takes one operand, got {}", args.len()));
+        };
+        let arg0_val = self.builder.build_load(
+            reg_types[arg0.idx()],
+            registers[arg0.idx()],
+            "arg0_val",
+        )?;
+        match self.emit_native_intrinsic(native, arg0_val)? {
+            Some(v) => {
+                self.builder.build_store(registers[dst.idx()], v)?;
+                Ok(())
+            }
+            None => self.emit_air_direct_call(lowering, registers, reg_types, cell_base, dst, fun, args),
+        }
     }
 
     /// Direct call through the callee's declaration. Each arity keeps its

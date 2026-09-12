@@ -66,6 +66,15 @@ impl RegisterFile {
         }
     }
 
+    /// Whether `addr` lies inside this file's slots: a ref made by `Ref`
+    /// points here, one made by `RefData`/`RefOffset` points into HL memory.
+    #[inline]
+    pub fn holds(&self, addr: usize) -> bool {
+        let start = self.registers.as_ptr() as usize;
+        let end = start + self.registers.len() * std::mem::size_of::<NanBoxedValue>();
+        (start..end).contains(&addr)
+    }
+
     /// Get a mutable pointer to a register slot (for Ref opcode).
     #[inline(always)]
     pub fn slot_ptr(&mut self, index: u32) -> *mut NanBoxedValue {

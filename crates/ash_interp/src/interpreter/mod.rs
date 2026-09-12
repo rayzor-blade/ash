@@ -254,6 +254,70 @@ fn narrow_to_reg(
     }
 }
 
+/// Byte stride of `ORefOffset` for a ref of type `href`: the size of its
+/// parameter type, a word when the type is not a ref or names no parameter.
+pub(crate) fn ref_elem_size(bytecode: &DecodedBytecode, href: &ash_core::types::HLType) -> i32 {
+    let kind = if href.kind == hl::hl_type_kind_HREF {
+        href.tparam
+            .as_ref()
+            .and_then(|t| bytecode.types.get(t.0))
+            .map(|t| t.kind)
+            .unwrap_or(hl::hl_type_kind_HVOID)
+    } else {
+        hl::hl_type_kind_HVOID
+    };
+    ash_core::layout::array_elem_size(kind)
+}
+
+/// The kind a ref of type `href` points at; `HVOID` when it is not a ref.
+pub(crate) fn ref_target_kind(bytecode: &DecodedBytecode, href: &ash_core::types::HLType) -> u32 {
+    if href.kind != hl::hl_type_kind_HREF {
+        return hl::hl_type_kind_HVOID;
+    }
+    href.tparam
+        .as_ref()
+        .and_then(|t| bytecode.types.get(t.0))
+        .map(|t| t.kind)
+        .unwrap_or(hl::hl_type_kind_HVOID)
+}
+
+/// Read a value of `kind` from raw HL memory at `p`, at the width HL gives
+/// it there. A register slot is not raw memory; see `ref_targets_register`.
+pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: u32) -> NanBoxedValue {
+    match kind {
+        hl::hl_type_kind_HUI8 => NanBoxedValue::from_i32(p.read_unaligned() as i32),
+        hl::hl_type_kind_HUI16 => {
+            NanBoxedValue::from_i32((p as *const u16).read_unaligned() as i32)
+        }
+        hl::hl_type_kind_HI32 => NanBoxedValue::from_i32((p as *const i32).read_unaligned()),
+        hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(p.read_unaligned() != 0),
+        hl::hl_type_kind_HF32 => {
+            NanBoxedValue::from_f64((p as *const f32).read_unaligned() as f64)
+        }
+        hl::hl_type_kind_HF64 => NanBoxedValue::from_f64((p as *const f64).read_unaligned()),
+        hl::hl_type_kind_HI64 => NanBoxedValue::from_i64((p as *const i64).read_unaligned()),
+        _ => match (p as *const usize).read_unaligned() {
+            0 => NanBoxedValue::null(),
+            raw => NanBoxedValue::from_ptr(raw),
+        },
+    }
+}
+
+/// Write `v` as a value of `kind` to raw HL memory at `p`, at the width HL
+/// gives it there.
+pub(crate) unsafe fn write_raw_kind(p: *mut u8, kind: u32, v: NanBoxedValue) {
+    match kind {
+        hl::hl_type_kind_HUI8 => p.write_unaligned(v.as_i32() as u8),
+        hl::hl_type_kind_HUI16 => (p as *mut u16).write_unaligned(v.as_i32() as u16),
+        hl::hl_type_kind_HI32 => (p as *mut i32).write_unaligned(v.as_i32()),
+        hl::hl_type_kind_HBOOL => p.write_unaligned(v.as_bool() as u8),
+        hl::hl_type_kind_HF32 => (p as *mut f32).write_unaligned(v.as_f64() as f32),
+        hl::hl_type_kind_HF64 => (p as *mut f64).write_unaligned(v.as_f64()),
+        hl::hl_type_kind_HI64 => (p as *mut i64).write_unaligned(v.as_i64_lossy()),
+        _ => (p as *mut usize).write_unaligned(v.as_ptr()),
+    }
+}
+
 fn func_of(targets: &[CallTarget], findex: usize) -> Option<usize> {
     match targets.get(findex) {
         Some(CallTarget::Func(i)) => Some(*i as usize),
@@ -5278,6 +5342,17 @@ impl HLInterpreter {
         }
     }
 
+    /// Whether `addr` is a register slot of a frame on this stack or on a
+    /// suspended Haxe thread's -- the target of a ref made by `Ref`, whose
+    /// memory is a `NanBoxedValue` rather than HL's own layout for the kind.
+    fn ref_targets_register(&self, addr: usize) -> bool {
+        self.stack
+            .iter()
+            .rev()
+            .chain(self.fiber_stacks.values().flatten())
+            .any(|f| f.registers.holds(addr))
+    }
+
     /// Execute a single opcode. Returns what action the loop should take.
     fn execute_opcode(
         &mut self,
@@ -6308,7 +6383,17 @@ impl HLInterpreter {
                         src.0
                     ));
                 }
-                if !ptr.is_null() {
+                let in_regs = !ptr.is_null() && self.ref_targets_register(ptr as usize);
+                let frame = self.stack.last_mut().unwrap();
+                if !ptr.is_null() && !in_regs {
+                    // Raw HL memory, read at the width HL gives the kind.
+                    let src_kind =
+                        ref_target_kind(bytecode, &bytecode.types[func.regs[src.0 as usize].0]);
+                    let result = unsafe { read_raw_kind(ptr as *const u8, src_kind) };
+                    frame
+                        .registers
+                        .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));
+                } else if !ptr.is_null() {
                     let val = unsafe { *ptr };
                     let dst_kind = bytecode.types[func.regs[dst.0 as usize].0].kind;
                     let result = match dst_kind {
@@ -6321,7 +6406,12 @@ impl HLInterpreter {
                         // Read low 32 bits: native writes a c_int (0/1) at byte offset 0.
                         // Must NOT check the full i64 because NAN_TAG bits are always nonzero.
                         hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool((val as i32) != 0),
-                        _ => NanBoxedValue::from_ptr(val as usize),
+                        // The slot's own box when it still is one (an I64, a
+                        // null); a raw pointer a native wrote otherwise.
+                        _ => match NanBoxedValue::from_raw_bits(val as u64) {
+                            b if b.is_boxed() => b,
+                            _ => NanBoxedValue::from_ptr(val as usize),
+                        },
                     };
                     frame
                         .registers
@@ -6336,7 +6426,15 @@ impl HLInterpreter {
                 // Write the full NanBoxedValue so the tag bits are preserved.
                 let ptr_val = frame.registers.get(dst.0);
                 let ptr = ptr_val.as_ptr() as *mut NanBoxedValue;
-                if !ptr.is_null() {
+                let in_regs = !ptr.is_null() && self.ref_targets_register(ptr as usize);
+                let frame = self.stack.last_mut().unwrap();
+                if !ptr.is_null() && !in_regs {
+                    // Raw HL memory, written at the width HL gives the kind.
+                    let kind =
+                        ref_target_kind(bytecode, &bytecode.types[func.regs[dst.0 as usize].0]);
+                    let val = frame.registers.get(value.0);
+                    unsafe { write_raw_kind(ptr as *mut u8, kind, val) };
+                } else if !ptr.is_null() {
                     let val = frame.registers.get(value.0);
                     unsafe { *ptr = val };
                 }
@@ -6524,10 +6622,14 @@ impl HLInterpreter {
                 let data = val.as_ptr() + std::mem::size_of::<hl::varray>();
                 frame.registers.set(dst.0, NanBoxedValue::from_ptr(data));
             }
+            // The offset counts elements of the destination ref's parameter
+            // type, as HashLink's `hl_type_size(dst->t->tparam)` does.
             Opcode::RefOffset { dst, reg, offset } => {
                 let base = frame.registers.get(reg.0);
-                let off = frame.registers.get(offset.0);
-                let result = NanBoxedValue::from_ptr(base.as_ptr() + off.as_i32() as usize);
+                let off = frame.registers.get(offset.0).as_i32() as isize;
+                let stride = ref_elem_size(bytecode, &bytecode.types[func.regs[dst.0 as usize].0]);
+                let result =
+                    NanBoxedValue::from_ptr((base.as_ptr() as isize + off * stride as isize) as usize);
                 frame
                     .registers
                     .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));

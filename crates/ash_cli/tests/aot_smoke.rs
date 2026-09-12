@@ -50,6 +50,8 @@ const PROGRAMS: &[&str] = &[
     // Vector loads over a NativeArray were addressed as bytes from the
     // header.
     "test_vec_array_addr.hl",
+    // A ref offset was scaled in bytes rather than elements.
+    "test_ref_offset.hl",
     "test_gettype_null.hl",
     "test_std_reflect_type.hl",
 ];

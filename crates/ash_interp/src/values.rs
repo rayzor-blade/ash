@@ -146,6 +146,20 @@ impl NanBoxedValue {
         self.0
     }
 
+    /// The value whose NaN-box word is `bits`: the inverse of `raw_bits`,
+    /// for memory that is known to hold a box.
+    #[inline(always)]
+    pub fn from_raw_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// Whether the word carries a tag at all, as opposed to being a plain
+    /// f64 or a raw word something else wrote.
+    #[inline(always)]
+    pub fn is_boxed(&self) -> bool {
+        !self.is_f64()
+    }
+
     pub fn is_f64(&self) -> bool {
         let exp_bits = (self.0 >> 52) & 0x7FF;
         if exp_bits != 0x7FF {

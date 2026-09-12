@@ -23,7 +23,10 @@ use ash_core::native_lib::NativeFunctionResolver;
 use crate::tiering::env_flag;
 use crate::values::{CmpOp, FloatBinOp, IntBinOp};
 
-use super::{HLExceptionPropagation, HLInterpreter, StepResult, POOL_CAP};
+use super::{
+    read_raw_kind, ref_elem_size, ref_target_kind, write_raw_kind, HLExceptionPropagation,
+    HLInterpreter, StepResult, POOL_CAP,
+};
 
 impl HLInterpreter {
     /// Block-at-a-time dispatch over the SSA CFG.
@@ -982,6 +985,10 @@ impl HLInterpreter {
                 let p = get!(src).as_ptr() as *const i64;
                 let r = if p.is_null() {
                     NanBoxedValue::null()
+                } else if !self.ref_targets_register(p as usize) {
+                    // Raw HL memory, read at the width HL gives the kind.
+                    let k = ref_target_kind(bc, &bc.types[func.regs[src.0 as usize].0]);
+                    unsafe { read_raw_kind(p as *const u8, k) }
                 } else {
                     let raw = unsafe { *p };
                     match kind!(dst) {
@@ -994,14 +1001,25 @@ impl HLInterpreter {
                         // Low 32 bits only: a native writes a c_int here, and
                         // the NaN tag bits would make the full i64 always true.
                         hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool((raw as i32) != 0),
-                        _ => NanBoxedValue::from_ptr(raw as usize),
+                        // The slot's own box when it still is one (an I64, a
+                        // null); a raw pointer a native wrote otherwise.
+                        _ => match NanBoxedValue::from_raw_bits(raw as u64) {
+                            b if b.is_boxed() => b,
+                            _ => NanBoxedValue::from_ptr(raw as usize),
+                        },
                     }
                 };
                 set!(dst, r);
             }
             I::SetRef { r, value } => {
                 let p = get!(r).as_ptr() as *mut NanBoxedValue;
-                if !p.is_null() {
+                if p.is_null() {
+                } else if !self.ref_targets_register(p as usize) {
+                    // Raw HL memory, written at the width HL gives the kind.
+                    let k = ref_target_kind(bc, &bc.types[func.regs[r.0 as usize].0]);
+                    let v = get!(value);
+                    unsafe { write_raw_kind(p as *mut u8, k, v) };
+                } else {
                     let v = get!(value);
                     unsafe { *p = v };
                 }
@@ -1011,9 +1029,12 @@ impl HLInterpreter {
                 let data = v.as_ptr() + std::mem::size_of::<hl::varray>();
                 set!(dst, NanBoxedValue::from_ptr(data));
             }
+            // The offset counts elements of the destination ref's parameter
+            // type, as HashLink's `hl_type_size(dst->t->tparam)` does.
             I::RefOffset { dst, base, offset } => {
-                let r =
-                    NanBoxedValue::from_ptr(get!(base).as_ptr() + get!(offset).as_i32() as usize);
+                let stride = ref_elem_size(bc, &bc.types[func.regs[dst.0 as usize].0]);
+                let off = get!(offset).as_i32() as isize * stride as isize;
+                let r = NanBoxedValue::from_ptr((get!(base).as_ptr() as isize + off) as usize);
                 set!(dst, r);
             }
 

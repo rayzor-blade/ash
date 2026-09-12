@@ -662,3 +662,17 @@ normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
 
+# hl.Ref.offset over NativeArray data: the offset counts elements of the
+# ref's parameter type, so every element width gets its own array. Reads
+# and writes through the ref go into raw array memory, not a register slot.
+[[case]]
+name = "TestRefOffset"
+main = "TestRefOffset"
+hl = "test_ref_offset.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true
+

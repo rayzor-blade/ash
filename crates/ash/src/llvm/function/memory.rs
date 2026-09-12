@@ -14,7 +14,7 @@ use inkwell::AddressSpace;
 
 use crate::llvm::module::JITModule;
 use crate::types::HLFunction;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 
 impl<'ctx> JITModule<'ctx> {
     /// `dst = base[index]` at the width selected by `kind`.
@@ -525,7 +525,9 @@ impl<'ctx> JITModule<'ctx> {
         Ok(())
     }
 
-    /// `dst = base + offset` in bytes (the offset slot is read as i32).
+    /// `dst = base + offset * size_of(param)`: the offset counts elements of
+    /// the destination ref's parameter type, as HashLink's
+    /// `hl_type_size(dst->t->tparam)` does.
     pub(super) fn emit_air_ref_offset(
         &mut self,
         lowering: &HLFunction,
@@ -536,19 +538,46 @@ impl<'ctx> JITModule<'ctx> {
         base: ValueId,
         offset: ValueId,
     ) -> Result<()> {
+        let dst_ty = lowering.regs[dst.idx()].0;
+        let href = &self.types_[dst_ty];
+        if href.kind != crate::hl::hl_type_kind_HREF {
+            return Err(anyhow!(
+                "RefOffset destination type kind {} is not HREF",
+                href.kind
+            ));
+        }
+        let inner = href
+            .tparam
+            .as_ref()
+            .ok_or_else(|| anyhow!("RefOffset HREF type {dst_ty} has no parameter"))?;
+        let stride = crate::layout::array_elem_size_for(
+            self.types_[inner.0].kind,
+            self.target_abi.pointer_bytes() as i32,
+        );
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let base = self
             .builder
             .build_load(ptr_type, registers[base.idx()], "refoff_base")?
             .into_pointer_value();
-        let off = self
+        // Scaled at pointer width, so a large index does not wrap in i32.
+        let i32t = self.context.i32_type();
+        let i64t = self.context.i64_type();
+        let index = self
             .builder
-            .build_load(
-                self.context.i32_type(),
-                registers[offset.idx()],
-                "refoff_off",
-            )?
+            .build_load(i32t, registers[offset.idx()], "refoff_off")?
             .into_int_value();
+        let index = self
+            .builder
+            .build_int_s_extend(index, i64t, "refoff_idx")?;
+        let off = if stride == 1 {
+            index
+        } else {
+            self.builder.build_int_mul(
+                index,
+                i64t.const_int(stride as u64, false),
+                "refoff_scaled",
+            )?
+        };
         let result = unsafe {
             self.builder
                 .build_gep(self.context.i8_type(), base, &[off], "refoff_result")?

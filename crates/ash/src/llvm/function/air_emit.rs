@@ -648,6 +648,13 @@ impl<'ctx> JITModule<'ctx> {
                         self.translate_opcode(lowering, &op, registers, reg_types, 0, &dummy)?;
                         lowering.regs[ri] = saved;
                     }
+                    AirInstr::Cast { kind, dst, src } => {
+                        self.emit_air_cast(lowering, registers, reg_types, cell_base, *kind, *dst, *src)?;
+                    }
+                    // After the guarded Incr/Decr arm above: this one refuses those.
+                    AirInstr::UnOp { op, dst, src } => {
+                        self.emit_air_un_op(lowering, registers, reg_types, cell_base, *op, *dst, *src)?;
+                    }
                     AirInstr::MemGet { kind, dst, base, index } => {
                         self.emit_air_mem_get(lowering, registers, reg_types, cell_base, *kind, *dst, *base, *index)?;
                     }

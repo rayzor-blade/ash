@@ -20,6 +20,7 @@
 
 use crate::error::TrapContext;
 use crate::hl::{vclosure, vdynamic};
+use crate::rt::{FiberBody, Waiter, RT_THREAD_COMPILED};
 // Native fibers switch stacks; wasm fibers are driven by the host. Same
 // four operations either way, so the scheduler below does not branch.
 #[cfg(target_family = "wasm")]
@@ -97,7 +98,11 @@ const FIBER_QUANTUM: std::time::Duration = std::time::Duration::from_millis(2);
 #[derive(Clone, Copy)]
 enum SchedulerCommand {
     Wake(Waiter),
-    Spawn { id: u32, closure: usize },
+    Spawn {
+        id: u32,
+        body: FiberBody,
+        ctx: usize,
+    },
 }
 
 struct SchedulerEndpoint {
@@ -140,6 +145,10 @@ pub(crate) fn request_fiber_poll() {
 /// made the safe point itself a hot-path bottleneck on Apple Silicon.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_poll_epoch_address() -> *const u64 {
+    crate::rt::fiber_poll_epoch_address()
+}
+
+pub(crate) unsafe extern "C" fn fiber_poll_epoch_address() -> *const u64 {
     ash_fiber_poll_epoch.as_ptr()
 }
 
@@ -213,6 +222,12 @@ pub unsafe extern "C" fn hlp_set_fiber_switch_hook(hook: FiberSwitchHook) {
     FIBER_SWITCH_HOOK.store(hook as usize, Ordering::Release);
 }
 
+/// The registered switch hook, if any.
+pub(crate) unsafe fn switch_hook() -> Option<FiberSwitchHook> {
+    let hook = FIBER_SWITCH_HOOK.load(Ordering::Acquire);
+    (hook != 0).then(|| std::mem::transmute::<usize, FiberSwitchHook>(hook))
+}
+
 /// The host enables worker dispatch whenever it can resolve a thread body to
 /// compiled AIR V2 without interpreter re-entry. Pure-interpreter closures
 /// still need their owning `HLInterpreter` and remain on its main scheduler.
@@ -273,6 +288,10 @@ pub(crate) unsafe fn resolve_stub_sentinel(address: usize) -> *mut c_void {
 /// single main-thread interpreter through the legacy stub bridge.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_is_worker_lane() -> bool {
+    crate::rt::is_worker_lane()
+}
+
+pub(crate) unsafe extern "C" fn is_worker_lane() -> bool {
     WORKER_LANE.with(Cell::get)
 }
 
@@ -287,7 +306,8 @@ pub(crate) unsafe fn closure_runner() -> Option<ClosureRunner> {
 struct VmFiber {
     fiber: Box<Fiber>,
     id: u32,
-    closure: *mut vclosure,
+    /// What `thread_create` was handed, for `current_ctx`.
+    ctx: *mut c_void,
     run_state: FiberRunState,
     resume_cause: ResumeCause,
     gc_blocking_depth: u32,
@@ -311,13 +331,6 @@ enum ResumeCause {
     TimedOut,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Waiter {
-    scheduler_id: u64,
-    pub(crate) fiber_id: u32,
-    pub(crate) token: u64,
-}
-
 #[derive(Clone, Copy)]
 struct ParkRequest {
     waiter: Waiter,
@@ -330,7 +343,7 @@ struct ParkRequest {
 #[derive(Clone, Copy)]
 struct ActiveFiber {
     id: u32,
-    closure: *mut vclosure,
+    ctx: *mut c_void,
     resume_cause: ResumeCause,
     pending_park: Option<ParkRequest>,
     gc_blocking_depth: u32,
@@ -562,7 +575,7 @@ fn worker_main(
     first: Option<SchedulerCommand>,
 ) {
     WORKER_LANE.with(|worker| worker.set(true));
-    crate::gc::gc_register_current_os_thread();
+    crate::rt::gc_register_current_os_thread();
     let endpoint = SCHEDULER.with(|scheduler| Arc::clone(&scheduler.borrow().endpoint));
     let scheduler_id = SCHEDULER.with(|scheduler| scheduler.borrow().id);
     worker_trace("worker-ready", scheduler_id, 0);
@@ -573,7 +586,7 @@ fn worker_main(
     match sender {
         Some(sender) => {
             if sender.send(Arc::clone(&endpoint)).is_err() {
-                crate::gc::gc_unregister_current_os_thread();
+                crate::rt::gc_unregister_current_os_thread();
                 return;
             }
         }
@@ -596,7 +609,7 @@ fn worker_main(
         // heap fills. `block_yield` already names the shape that feeds it: a
         // resumed-but-still-blocked fiber yields instantly and is counted as
         // progress.
-        crate::gc::gc_safepoint();
+        crate::rt::gc_safepoint();
         unsafe {
             drain_scheduler_commands();
             if schedule_step() {
@@ -626,8 +639,8 @@ fn worker_main(
         if !endpoint.commands.lock().unwrap().is_empty() {
             continue;
         }
-        crate::gc::mark_site(crate::gc::SITE_SCHEDULER_IDLE);
-        crate::gc::gc_set_blocking(true);
+        crate::rt::mark_site(crate::gc::SITE_SCHEDULER_IDLE);
+        crate::rt::gc_set_blocking(true);
         {
             // Re-checked under the lock: the peek above raced with anyone
             // pushing, and a wait entered on a queue that filled meanwhile is
@@ -642,8 +655,8 @@ fn worker_main(
                 }
             }
         }
-        crate::gc::gc_set_blocking(false);
-        crate::gc::mark_site(crate::gc::SITE_RUNNING);
+        crate::rt::gc_set_blocking(false);
+        crate::rt::mark_site(crate::gc::SITE_RUNNING);
     }
 }
 
@@ -670,7 +683,7 @@ fn can_dispatch_to_worker() -> bool {
 /// Rotate the starting point so equal loads do not permanently favour lane
 /// zero, then choose the least-loaded endpoint.
 #[cfg(not(all(target_family = "wasm", target_feature = "atomics")))]
-fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
+fn dispatch_to_worker(id: u32, body: FiberBody, ctx: *mut c_void) -> bool {
     let Some(pool) = worker_pool() else {
         return false;
     };
@@ -689,7 +702,7 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
         })
         .map(|offset| (start + offset) % workers.len())
         .unwrap_or(start);
-    assign(&workers[index], id, index, closure);
+    assign(&workers[index], id, index, body, ctx);
     true
 }
 
@@ -704,7 +717,7 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
 /// more says so by failing to start one, and that thread runs on the main
 /// scheduler.
 #[cfg(all(target_family = "wasm", target_feature = "atomics"))]
-fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
+fn dispatch_to_worker(id: u32, body: FiberBody, ctx: *mut c_void) -> bool {
     let Some(pool) = worker_pool() else {
         return false;
     };
@@ -716,7 +729,7 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
         .iter()
         .position(|worker| worker.assigned.load(Ordering::Acquire) == 0)
     {
-        assign(&workers[index], id, index, closure);
+        assign(&workers[index], id, index, body, ctx);
         return true;
     }
     let at = workers.len();
@@ -736,18 +749,20 @@ fn dispatch_to_worker(id: u32, closure: *mut vclosure) -> bool {
         at,
         Some(SchedulerCommand::Spawn {
             id,
-            closure: closure as usize,
+            body,
+            ctx: ctx as usize,
         }),
     )
 }
 
 /// Hand one fiber to one worker, and count it against that worker.
-fn assign(worker: &SchedulerEndpoint, id: u32, index: usize, closure: *mut vclosure) {
+fn assign(worker: &SchedulerEndpoint, id: u32, index: usize, body: FiberBody, ctx: *mut c_void) {
     worker.assigned.fetch_add(1, Ordering::AcqRel);
     worker_trace("dispatch", id as u64, index as u64);
     worker.push(SchedulerCommand::Spawn {
         id,
-        closure: closure as usize,
+        body,
+        ctx: ctx as usize,
     });
 }
 
@@ -774,6 +789,11 @@ pub(crate) unsafe fn current_handle() -> Option<*mut c_void> {
 /// worker has its own non-zero id independent of the OS worker carrying it.
 pub(crate) unsafe fn current_id() -> u32 {
     ACTIVE_FIBER.with(|active| active.get().map_or(0, |fiber| fiber.id))
+}
+
+/// The context the running fiber was created with; null on the main context.
+pub(crate) unsafe fn current_ctx() -> *mut c_void {
+    ACTIVE_FIBER.with(|active| active.get().map_or(ptr::null_mut(), |fiber| fiber.ctx))
 }
 
 /// The OS thread that runs the program, recorded so threads a native library
@@ -931,7 +951,7 @@ unsafe fn scheduler_idle(deadline: Option<Instant>) {
     // The main scheduler can spend an arbitrary amount of time waiting for a
     // logical thread. It is still a registered GC mutator, so rendezvous with
     // a collection requested by another OS worker before sleeping.
-    crate::gc::gc_safepoint();
+    crate::rt::gc_safepoint();
     let now = Instant::now();
     let own_wait = deadline.map_or(std::time::Duration::from_millis(1), |d| {
         d.saturating_duration_since(now)
@@ -959,7 +979,7 @@ pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
             // stop for as long as it waits. This loop used to sleep without
             // one, so a foreign thread parked on a token was invisible to the
             // collector until its waker arrived.
-            crate::gc::gc_safepoint();
+            crate::rt::gc_safepoint();
             match wait_status(waiter.token) {
                 Some(WaitStatus::Notified) => {
                     finish_wait(waiter.token);
@@ -981,7 +1001,7 @@ pub(crate) unsafe fn park(waiter: Waiter, deadline: Option<Instant>) -> bool {
     if waiter.fiber_id == 0 {
         worker_trace("park-main", waiter.token, deadline.is_some() as u64);
         loop {
-            crate::gc::gc_safepoint();
+            crate::rt::gc_safepoint();
             match wait_status(waiter.token) {
                 Some(WaitStatus::Notified) => {
                     finish_wait(waiter.token);
@@ -1077,7 +1097,8 @@ fn update_blocking_depth(depth: &mut u32, blocking: bool) -> bool {
 /// exception and may terminate the fiber.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_is_root_closure(c: *mut vclosure) -> bool {
-    ACTIVE_FIBER.with(|active| active.get().is_some_and(|fiber| fiber.closure == c))
+    let ctx = crate::rt::current_ctx();
+    !ctx.is_null() && ctx == c as *mut c_void
 }
 
 unsafe fn notify_switch(from: u32, to: u32) {
@@ -1100,7 +1121,7 @@ unsafe fn run_closure(c: *mut vclosure) {
     // this is the refusal at the end of that, a worker that will not run the
     // body it was handed.
     let compiled = fun != 0 && !is_stub_sentinel(fun);
-    if WORKER_LANE.with(Cell::get) {
+    if crate::rt::is_worker_lane() {
         if compiled {
             hlp_jit_closure_runner(c, std::ptr::null_mut(), 0);
         } else {
@@ -1124,6 +1145,20 @@ unsafe fn run_closure(c: *mut vclosure) {
             (*c).hasValue
         );
     }
+}
+
+/// The fiber body handed to the scheduler: run the closure, then drop the
+/// root `thread_create` gave it. A guard, so an erroring body drops it too.
+unsafe extern "C-unwind" fn run_closure_body(ctx: *mut c_void) {
+    struct Unroot(*mut vclosure);
+    impl Drop for Unroot {
+        fn drop(&mut self) {
+            unsafe { crate::rt::gc_remove_persistent(self.0 as *mut vdynamic) };
+        }
+    }
+    let c = ctx as *mut vclosure;
+    let _unroot = Unroot(c);
+    run_closure(c);
 }
 
 /// Run a compiled closure through the same dynamic argument marshaller used
@@ -1196,15 +1231,15 @@ pub unsafe extern "C" fn hlp_jit_closure_runner(
     crate::fun::hlp_call_method(&call_closure as *const vclosure as *mut vdynamic, array)
 }
 
-unsafe fn install_fiber(id: u32, c: *mut vclosure) {
+unsafe fn install_fiber(id: u32, body: FiberBody, ctx: *mut c_void) {
     worker_trace(
         "install",
         id as u64,
         SCHEDULER.with(|scheduler| scheduler.borrow().id),
     );
-    let c_usize = c as usize;
+    let ctx_usize = ctx as usize;
     let fiber = Box::new(Fiber::with_stack_size(FIBER_STACK_SIZE, move || {
-        run_closure(c_usize as *mut vclosure);
+        body(ctx_usize as *mut c_void);
     }));
     // Both backends put a suspended fiber's live values somewhere the
     // collector has to look: a switched-out stack natively, and the side
@@ -1212,17 +1247,17 @@ unsafe fn install_fiber(id: u32, c: *mut vclosure) {
     // an object a suspended fiber alone refers to is only reachable through
     // this range.
     let (base, len) = fiber.stack_range();
-    crate::gc::gc_register_fiber_stack(id, base as usize, len);
+    crate::rt::gc_register_fiber_stack(id, base as usize, len);
     // Charge the off-heap stack as GC allocation pressure so dead fibers'
     // stacks translate into collections (wren_lift core/fiber.rs:189-199).
-    crate::gc::hlp_gc_track_external(len as u64);
+    crate::rt::gc_track_external(len as u64);
 
     SCHEDULER.with(|scheduler| {
         let mut scheduler = scheduler.borrow_mut();
         scheduler.fibers.push(VmFiber {
             fiber,
             id,
-            closure: c,
+            ctx,
             run_state: FiberRunState::Runnable,
             resume_cause: ResumeCause::Scheduled,
             gc_blocking_depth: 0,
@@ -1246,27 +1281,26 @@ unsafe fn drain_scheduler_commands() {
                     scheduler.borrow_mut().wake_claimed(waiter);
                 });
             }
-            SchedulerCommand::Spawn { id, closure } => {
-                install_fiber(id, closure as *mut vclosure);
+            SchedulerCommand::Spawn { id, body, ctx } => {
+                install_fiber(id, body, ctx as *mut c_void);
             }
         }
     }
 }
 
 /// Spawn a Haxe thread as a fiber. Returns an opaque non-null handle.
+///
+/// The closure half: root it, decide whether its body is compiled, and hand
+/// the scheduler a body callback and the closure as its context.
 pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     if c.is_null() {
         return std::ptr::null_mut();
     }
-    let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
 
     // Root the closure while the fiber exists — it is otherwise reachable
-    // only from Rust heap memory the GC cannot see.
-    crate::gc::gc_add_persistent(c as *mut vdynamic);
-    LOGICAL_THREADS.fetch_add(1, Ordering::Release);
-    ensure_preemption_timer();
-    request_fiber_poll();
-    worker_trace("create", id as u64, (*c).fun as usize as u64);
+    // only from Rust heap memory the GC cannot see. `run_closure_body`
+    // drops the root when the body is done.
+    crate::rt::gc_add_persistent(c as *mut vdynamic);
     if std::env::var_os("ASH_DBG_FIBER").is_some() {
         let nargs = (*c)
             .t
@@ -1280,6 +1314,7 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
             (*c).value
         );
     }
+    let mut flags = 0;
     if can_dispatch_to_worker() {
         // A freshly-created closure commonly still carries findex+1. Resolve
         // that sentinel before choosing a lane so the first Haxe thread gets
@@ -1300,15 +1335,28 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
             if !resolved.is_null() {
                 (*c).fun = resolved;
             } else {
-                worker_trace("resolve-failed", id as u64, fun as u64);
+                worker_trace("resolve-failed", c as u64, fun as u64);
             }
         }
         let fun = (*c).fun as usize;
-        if fun != 0 && !is_stub_sentinel(fun) && dispatch_to_worker(id, c) {
-            return ((id as usize) << 4 | 1) as *mut c_void;
+        if fun != 0 && !is_stub_sentinel(fun) {
+            flags |= RT_THREAD_COMPILED;
         }
     }
-    install_fiber(id, c);
+    crate::rt::thread_create(run_closure_body, c as *mut c_void, flags)
+}
+
+/// The scheduler half of `thread_create`: a fiber running `body(ctx)`.
+pub(crate) unsafe fn spawn(body: FiberBody, ctx: *mut c_void, flags: u32) -> *mut c_void {
+    let id = NEXT_FIBER_ID.fetch_add(1, Ordering::Relaxed);
+    LOGICAL_THREADS.fetch_add(1, Ordering::Release);
+    ensure_preemption_timer();
+    request_fiber_poll();
+    worker_trace("create", id as u64, ctx as u64);
+    if flags & RT_THREAD_COMPILED != 0 && dispatch_to_worker(id, body, ctx) {
+        return ((id as usize) << 4 | 1) as *mut c_void;
+    }
+    install_fiber(id, body, ctx);
 
     // Give the new thread a chance to run to its first blocking point,
     // matching the "starts immediately" expectation of real threads.
@@ -1336,8 +1384,7 @@ unsafe fn remove_fiber(fiber: VmFiber, state: FiberState) {
         fiber.id as u64,
         u64::from(matches!(state, FiberState::Errored)),
     );
-    crate::gc::gc_unregister_fiber_stack(fiber.id);
-    crate::gc::gc_remove_persistent(fiber.closure as *mut vdynamic);
+    crate::rt::gc_unregister_fiber_stack(fiber.id);
     LOGICAL_THREADS.fetch_sub(1, Ordering::Release);
     if WORKER_LANE.with(Cell::get) {
         SCHEDULER.with(|scheduler| {
@@ -1394,7 +1441,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
         // Record where the main stack is suspended for the GC, then swap
         // this fiber's exception state into the live cells.
         let probe: usize = 0;
-        crate::gc::gc_update_fiber_sp(0, &probe as *const usize as usize);
+        crate::rt::gc_update_fiber_sp(0, &probe as *const usize as usize);
         let (mut trap, mut exc) = (vm_fiber.trap_head, vm_fiber.exc_value);
         crate::gc::gc_swap_exc_state(&mut trap, &mut exc);
         SCHEDULER.with(|scheduler| {
@@ -1405,7 +1452,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
         vm_fiber.run_state = FiberRunState::Running;
         let active = ActiveFiber {
             id,
-            closure: vm_fiber.closure,
+            ctx: vm_fiber.ctx,
             resume_cause: vm_fiber.resume_cause,
             pending_park: None,
             gc_blocking_depth: vm_fiber.gc_blocking_depth,
@@ -1426,7 +1473,7 @@ pub(crate) unsafe fn schedule_step() -> bool {
         // that collection. Under GC stress this reclaimed values held by a
         // worker loop (for example its linked-list head) before the fiber was
         // resumed.
-        crate::gc::gc_update_fiber_sp(id, vm_fiber.fiber.saved_sp() as usize);
+        crate::rt::gc_update_fiber_sp(id, vm_fiber.fiber.saved_sp() as usize);
         notify_switch(id, 0);
         let active = ACTIVE_FIBER
             .with(|slot| slot.replace(None))
@@ -1482,7 +1529,11 @@ pub(crate) unsafe fn schedule_step() -> bool {
 /// is still runnable and remains responsible for its own frame pacing.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_fiber_poll() {
-    crate::gc::gc_safepoint();
+    crate::rt::fiber_poll();
+}
+
+pub(crate) unsafe extern "C" fn fiber_poll() {
+    crate::rt::gc_safepoint();
     if !fibers_active() {
         return;
     }
@@ -1499,7 +1550,7 @@ pub(crate) unsafe fn block_yield() {
     if ACTIVE_FIBER.with(|active| active.get().is_some()) {
         yield_now_backend();
     } else {
-        crate::gc::gc_safepoint();
+        crate::rt::gc_safepoint();
         schedule_step();
         // Always pace after a pass: a resumed-but-still-blocked fiber yields
         // instantly, and treating that as progress spins main and every

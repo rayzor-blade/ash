@@ -1,14 +1,8 @@
-use crate::array::hlp_alloc_array;
-use crate::fun::hlp_dyn_call;
-use crate::gc::ImmixAllocator;
-use crate::hl::{self, uchar, varray, vbyte, vclosure, vdynamic};
-use crate::strings::str_to_uchar_ptr;
+use crate::hl::{self, uchar, varray, vclosure, vdynamic};
 use crate::types::hl_aptr;
-use anyhow::Result;
 use std::ffi::c_void;
 use std::fmt::{self, Formatter};
 use std::mem;
-use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 type ResolveSymbol = unsafe extern "C" fn(*mut c_void, *mut u8, *mut i32) -> *mut u8;
@@ -280,118 +274,11 @@ impl TrapContext {
     }
 }
 
-impl ImmixAllocator {
-    pub fn setup_trap(&self) -> *mut TrapContext {
-        setup_trap()
-    }
-
-    pub fn remove_trap(&self) {
-        remove_trap()
-    }
-
-    pub fn throw(&self, exception: VDynamicException) -> ! {
-        panic::panic_any(exception);
-    }
-
-    pub fn run_with_trap<F, R>(&self, f: F) -> Result<R, VDynamicException>
-    where
-        F: FnOnce() -> R + panic::UnwindSafe,
-    {
-        let trap = self.setup_trap();
-        let result = panic::catch_unwind(f);
-        unsafe {
-            if (*trap).caught {
-                let exception = (*trap).exception_value.take().unwrap();
-                self.remove_trap();
-                Err(exception)
-            } else {
-                self.remove_trap();
-                match result {
-                    Ok(value) => Ok(value),
-                    Err(e) => {
-                        if let Some(vdynamic_exception) = e.downcast_ref::<VDynamicException>() {
-                            Err(vdynamic_exception.clone())
-                        } else {
-                            // Handle other panic types if needed
-                            panic!("Unexpected panic type")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // pub fn throw_exception(&mut self, exception: HLException) {
-    //     let mut boxed_exception = Box::new(exception);
-    //     if let Some(handler) = &self.exception_handler {
-    //         handler(&mut boxed_exception);
-    //     } else {
-    //         self.current_exception = Some(boxed_exception);
-    //     }
-    // }
-
-    pub fn set_exception_handler(
-        &mut self,
-        handler: Box<dyn Fn(&mut HLException) -> Result<*mut vdynamic, VDynamicException>>,
-    ) {
-        self.exception_handler = Some(handler);
-    }
-
-    pub fn clear_exception(&mut self) {
-        self.current_exception = None;
-    }
-
-    pub fn get_current_exception(&self) -> Option<&HLException> {
-        self.current_exception.as_deref()
-    }
-
-    pub fn mark_exception(&mut self) {
-        if let Some(exception) = self.current_exception.clone() {
-            self.mark_vdynamic(exception.value);
-            self.mark_stack_trace(exception.stack_trace);
-        }
-    }
-
-    fn mark_stack_trace(&mut self, stack_trace: *mut StackTrace) {
-        if !stack_trace.is_null() {
-            unsafe {
-                let trace = &*stack_trace;
-                for frame in &trace.frames {
-                    self.mark_memory(frame.file_name.as_ptr() as *mut u8, frame.file_name.len());
-                    self.mark_memory(
-                        frame.function_name.as_ptr() as *mut u8,
-                        frame.function_name.len(),
-                    );
-                }
-            }
-        }
-    }
-}
-
+/// Nothing records a current `HLException`, so there is never a stack to
+/// return; the NativeStackTrace primitives below are the working path.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_exception_stack() -> *mut varray {
-    let gc = crate::gc::gc_locked();
-
-    if let Some(exception) = gc.get_current_exception() {
-        let stack_trace = &*exception.stack_trace;
-        let frame_count = stack_trace.frames.len();
-
-        // Allocate a varray to hold the stack frames
-        let varray_ptr: *mut varray =
-            hlp_alloc_array(crate::types::hlt_bytes(), frame_count as i32);
-
-        // Fill the array with stack frame information
-        for (i, frame) in stack_trace.frames.iter().enumerate() {
-            *(hl_aptr::<*const vbyte>(varray_ptr).add(i)) = str_to_uchar_ptr(&format!(
-                "{}:{} {}",
-                frame.file_name, frame.line_number, frame.function_name
-            )) as *const vbyte;
-        }
-
-        varray_ptr
-    } else {
-        std::ptr::null_mut()
-    }
+    std::ptr::null_mut()
 }
 
 /// Install the platform/JIT symbolizer and stack unwinder used by HashLink's
@@ -1485,7 +1372,7 @@ unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     // The frames between the setjmp site and this longjmp are abandoned, so
     // any GcGuards they hold never run Drop. Restore the lock depth recorded
     // at trap setup (= the depth held at the setjmp site).
-    crate::gc::gc_lock_unwind_to(saved_lock_depth);
+    crate::rt::gc_lock_unwind_to(saved_lock_depth);
     // The same frames never reach their shadow-stack pop either.
     shadow::unwind_to(saved_shadow_depth);
     // Win64's `longjmp` reads the buffer's first word as the frame to unwind
@@ -1605,7 +1492,7 @@ unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
     // Depth held by this thread OUTSIDE this call — i.e. at the setjmp site
     // the caller (JIT code) is about to establish.
-    let outer_depth = crate::gc::gc_lock_held_depth();
+    let outer_depth = crate::rt::gc_lock_held_depth();
     let trap = setup_trap();
     (*trap).has_jmpbuf = true;
     (*trap).saved_lock_depth = outer_depth;
@@ -1671,7 +1558,7 @@ thread_local! {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
-    let room = crate::gc::gc_locked().allocate(mem::size_of::<hl::vdynamic>());
+    let room = crate::rt::alloc_locked(mem::size_of::<hl::vdynamic>());
     let d = match room {
         Some(value) => value.as_ptr() as *mut vdynamic,
         None => ERROR_RESERVE.with(|reserve| reserve.get()),
@@ -1682,13 +1569,12 @@ pub unsafe extern "C" fn hlp_error(msg: *const uchar, mut _args: ...) {
     hlp_throw(d)
 }
 
+/// The registered error handler. Stored and never invoked: nothing raises an
+/// `HLException` through it, and `hlp_throw` longjmps to the trap instead.
+static ERROR_HANDLER: std::sync::atomic::AtomicPtr<vclosure> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
 #[no_mangle]
 pub unsafe extern "C" fn hlp_set_error_handler(handler: *mut vclosure) {
-    let mut gc = crate::gc::gc_locked();
-
-    gc.set_exception_handler(Box::new(move |exp: &mut HLException| {
-        let gc = crate::gc::gc_locked();
-        let mut value = exp.value;
-        gc.run_with_trap(move || hlp_dyn_call(handler, &mut value, 1))
-    }));
+    ERROR_HANDLER.store(handler, Ordering::Release);
 }

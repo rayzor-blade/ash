@@ -532,8 +532,8 @@ pub unsafe extern "C" fn hlp_alloc_enum(t: *mut hl_type, index: i32) -> *mut ven
     let has_ptr = (*construct).hasptr;
 
     // Allocate memory
-    let ptr = crate::gc::gc_alloc(std::mem::size_of::<hl::venum>() + size)
-        .unwrap_or_else(|| crate::gc::out_of_memory("runtime memory"));
+    let ptr = crate::rt::gc_alloc(std::mem::size_of::<hl::venum>() + size)
+        .unwrap_or_else(|| crate::rt::out_of_memory("runtime memory"));
 
     // Initialize the enum
     let v = ptr.as_ptr() as *mut hl::venum;

@@ -47,7 +47,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
     let kind = (*t).kind;
     match kind {
         hl_type_kind_HUI8 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             v
         }
         hl_type_kind_HUI16 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -63,7 +63,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             v
         }
         hl_type_kind_HI32 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             v
         }
         hl_type_kind_HI64 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             v
         }
         hl_type_kind_HF32 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             v
         }
         hl_type_kind_HF64 => {
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -96,7 +96,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
         }
         hl_type_kind_HBOOL => {
             let b = *(data as *mut bool);
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*t).kind = hl_type_kind_HBOOL;
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn hlp_make_dyn(data: *mut c_void, t: *mut hl_type) -> *mu
             if data.is_null() {
                 return std::ptr::null_mut();
             }
-            let v = crate::gc::gc_alloc(std::mem::size_of::<vdynamic>())
+            let v = crate::rt::gc_alloc(std::mem::size_of::<vdynamic>())
                 .expect("Failed to allocate vdynamic")
                 .as_ptr() as *mut vdynamic;
             (*v).t = t;
@@ -366,7 +366,9 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     let mut t = t;
     let mut data = data;
 
-    let gc = crate::gc::gc_locked();
+    // Held for the whole cast, as it always was; the heap query below is the
+    // only thing here that reaches the allocator.
+    let _gc = crate::gc::gc_guard();
 
     if (*t).kind == hl_type_kind_HDYN || (*t).kind == hl_type_kind_HNULL {
         let v = *(data as *mut *mut vdynamic);
@@ -375,7 +377,7 @@ pub unsafe extern "C" fn hlp_dyn_castp(
         }
         if (*to).kind == hl_type_kind_HNULL
             && (*v).t == (*to).__bindgen_anon_1.tparam
-            && gc.is_gc_ptr(v)
+            && crate::rt::is_gc_ptr(v as *const c_void)
         {
             return v as *mut c_void;
         }
@@ -618,36 +620,36 @@ pub unsafe extern "C" fn hlp_dyn_castp(
     if (*to).kind == hl_type_kind_HREF {
         match (*(*to).__bindgen_anon_1.tparam).kind {
             hl_type_kind_HUI8 | hl_type_kind_HUI16 | hl_type_kind_HI32 | hl_type_kind_HBOOL => {
-                let v = crate::gc::gc_alloc(std::mem::size_of::<i32>())
-                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
+                let v = crate::rt::gc_alloc(std::mem::size_of::<i32>())
+                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
                     .as_ptr() as *mut i32;
                 *v = hlp_dyn_casti(data, t, (*to).__bindgen_anon_1.tparam);
                 return v as *mut c_void;
             }
             hl_type_kind_HI64 => {
-                let d = crate::gc::gc_alloc(std::mem::size_of::<i64>())
-                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
+                let d = crate::rt::gc_alloc(std::mem::size_of::<i64>())
+                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
                     .as_ptr() as *mut i64;
                 *d = hlp_dyn_casti64(data, t);
                 return d as *mut c_void;
             }
             hl_type_kind_HF32 => {
-                let f = crate::gc::gc_alloc(std::mem::size_of::<f32>())
-                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
+                let f = crate::rt::gc_alloc(std::mem::size_of::<f32>())
+                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
                     .as_ptr() as *mut f32;
                 *f = hlp_dyn_castf(data, t);
                 return f as *mut c_void;
             }
             hl_type_kind_HF64 => {
-                let d = crate::gc::gc_alloc(std::mem::size_of::<f64>())
-                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
+                let d = crate::rt::gc_alloc(std::mem::size_of::<f64>())
+                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
                     .as_ptr() as *mut f64;
                 *d = hlp_dyn_castd(data, t);
                 return d as *mut c_void;
             }
             _ => {
-                let p = crate::gc::gc_alloc(std::mem::size_of::<*mut c_void>())
-                    .unwrap_or_else(|| crate::gc::out_of_memory("a boxed value"))
+                let p = crate::rt::gc_alloc(std::mem::size_of::<*mut c_void>())
+                    .unwrap_or_else(|| crate::rt::out_of_memory("a boxed value"))
                     .as_ptr() as *mut *mut c_void;
                 *p = hlp_dyn_castp(data, t, (*to).__bindgen_anon_1.tparam);
                 return p as *mut c_void;

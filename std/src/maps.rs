@@ -4,57 +4,52 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use crate::{
-    gc::ImmixAllocator,
-    hl::{self, hl_hb_map},
-};
+use crate::hl::{self, hl_hb_map};
 
 // pub type HLBytesMap = HashMap<flexstr::SharedStr, HLVDynamic>;
 
-impl ImmixAllocator {
-    fn allocate_map(&mut self, initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
-        let map_size = mem::size_of::<hl::hl_hb_map>();
-        let map_ptr = self.allocate(map_size)?;
+fn allocate_map(initial_capacity: usize) -> Option<NonNull<hl::hl_hb_map>> {
+    let map_size = mem::size_of::<hl::hl_hb_map>();
+    let map_ptr = crate::rt::alloc_locked(map_size)?;
 
-        // Initialize the map struct to zero first
-        unsafe {
-            std::ptr::write_bytes(map_ptr.as_ptr(), 0, map_size);
-            let map = &mut *(map_ptr.as_ptr() as *mut hl::hl_hb_map);
+    // Initialize the map struct to zero first
+    unsafe {
+        std::ptr::write_bytes(map_ptr.as_ptr(), 0, map_size);
+        let map = &mut *(map_ptr.as_ptr() as *mut hl::hl_hb_map);
 
-            // When initial_capacity is 0, leave all pointers null.
-            // hbset checks values.is_null() and goes to the resize path.
-            if initial_capacity > 0 {
-                let cells_size = initial_capacity * mem::size_of::<*mut ::std::os::raw::c_void>();
-                let nexts_size = initial_capacity * mem::size_of::<*mut ::std::os::raw::c_void>();
-                let entries_size = initial_capacity * mem::size_of::<hl::hl_hb_entry>();
-                let values_size = initial_capacity * mem::size_of::<hl::hl_hb_value>();
+        // When initial_capacity is 0, leave all pointers null.
+        // hbset checks values.is_null() and goes to the resize path.
+        if initial_capacity > 0 {
+            let cells_size = initial_capacity * mem::size_of::<*mut ::std::os::raw::c_void>();
+            let nexts_size = initial_capacity * mem::size_of::<*mut ::std::os::raw::c_void>();
+            let entries_size = initial_capacity * mem::size_of::<hl::hl_hb_entry>();
+            let values_size = initial_capacity * mem::size_of::<hl::hl_hb_value>();
 
-                let cells_ptr = self.allocate(cells_size)?;
-                let nexts_ptr = self.allocate(nexts_size)?;
-                let entries_ptr = self.allocate(entries_size)?;
-                let values_ptr = self.allocate(values_size)?;
+            let cells_ptr = crate::rt::alloc_locked(cells_size)?;
+            let nexts_ptr = crate::rt::alloc_locked(nexts_size)?;
+            let entries_ptr = crate::rt::alloc_locked(entries_size)?;
+            let values_ptr = crate::rt::alloc_locked(values_size)?;
 
-                map.cells = cells_ptr.as_ptr() as *mut c_void;
-                map.nexts = nexts_ptr.as_ptr() as *mut c_void;
-                map.entries = entries_ptr.as_ptr() as *mut hl::hl_hb_entry;
-                map.values = values_ptr.as_ptr() as *mut hl::hl_hb_value;
-                map.ncells = initial_capacity as i32;
-                map.maxentries = initial_capacity as i32;
+            map.cells = cells_ptr.as_ptr() as *mut c_void;
+            map.nexts = nexts_ptr.as_ptr() as *mut c_void;
+            map.entries = entries_ptr.as_ptr() as *mut hl::hl_hb_entry;
+            map.values = values_ptr.as_ptr() as *mut hl::hl_hb_value;
+            map.ncells = initial_capacity as i32;
+            map.maxentries = initial_capacity as i32;
 
-                std::ptr::write_bytes(map.cells, 0, cells_size);
-                std::ptr::write_bytes(map.nexts, 0, nexts_size);
-            }
-
-            map.lfree = hl::hl_free_list {
-                buckets: std::ptr::null_mut(),
-                head: 0,
-                nbuckets: 0,
-            };
-            map.nentries = 0;
+            std::ptr::write_bytes(map.cells, 0, cells_size);
+            std::ptr::write_bytes(map.nexts, 0, nexts_size);
         }
 
-        NonNull::new(map_ptr.as_ptr() as *mut hl::hl_hb_map)
+        map.lfree = hl::hl_free_list {
+            buckets: std::ptr::null_mut(),
+            head: 0,
+            nbuckets: 0,
+        };
+        map.nentries = 0;
     }
+
+    NonNull::new(map_ptr.as_ptr() as *mut hl::hl_hb_map)
 }
 
 unsafe fn hl_freelist_add_range(f: *mut hl::hl_free_list, pos: i32, count: i32) {
@@ -171,10 +166,10 @@ unsafe fn hl_freelist_init(f: *mut hl::hl_free_list) {
 }
 
 unsafe fn hl_freelist_resize(f: *mut hl::hl_free_list, new_size: i32) {
-    let new_buckets = crate::gc::gc_locked()
-        .allocate(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
-        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
-        .as_ptr() as *mut hl::hl_free_bucket;
+    let new_buckets =
+        crate::rt::alloc_locked(mem::size_of::<hl::hl_free_bucket>() * new_size as usize)
+            .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
+            .as_ptr() as *mut hl::hl_free_bucket;
 
     ptr::copy_nonoverlapping((*f).buckets, new_buckets, (*f).head as usize);
 
@@ -275,10 +270,7 @@ impl HbMapExt for *mut hl::hl_hb_map {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_hballoc() -> *mut hl::hl_hb_map {
-    let mut allocator = crate::gc::gc_locked();
-    let allocated_map = allocator
-        .allocate_map(0)
-        .expect("could not allocate bytes map");
+    let allocated_map = allocate_map(0).expect("could not allocate bytes map");
     // Deliberately NOT pre-marked. Setting mark bits at allocation time
     // poisoned the first collection after it: the tracer only scans lines
     // whose mark bit it just flipped, so a line marked here was treated as
@@ -391,21 +383,18 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
     } else {
         mem::size_of::<i32>()
     };
-    (*m).entries = crate::gc::gc_locked()
-        .allocate(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
-        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
+    (*m).entries = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_entry>())
+        .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
         .as_ptr() as *mut hl::hl_hb_entry;
-    (*m).values = crate::gc::gc_locked()
-        .allocate(nentries as usize * mem::size_of::<hl::hl_hb_value>())
-        .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
+    (*m).values = crate::rt::alloc_locked(nentries as usize * mem::size_of::<hl::hl_hb_value>())
+        .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
         .as_ptr() as *mut hl::hl_hb_value;
     (*m).maxentries = nentries;
 
     if old.ncells == ncells && (nentries < _MLIMIT || old.maxentries >= _MLIMIT) {
         // simply expand
-        (*m).nexts = crate::gc::gc_locked()
-            .allocate(nentries as usize * ksize)
-            .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
+        (*m).nexts = crate::rt::alloc_locked(nentries as usize * ksize)
+            .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
             .as_ptr() as *mut c_void;
         ptr::copy_nonoverlapping(old.entries, (*m).entries, old.maxentries as usize);
         ptr::copy_nonoverlapping(old.values, (*m).values, old.maxentries as usize);
@@ -422,9 +411,8 @@ unsafe fn hl_hb_resize(m: *mut hl::hl_hb_map) {
         );
     } else {
         // expand and remap
-        (*m).cells = crate::gc::gc_locked()
-            .allocate((ncells + nentries) as usize * ksize)
-            .unwrap_or_else(|| crate::gc::out_of_memory("a hash map"))
+        (*m).cells = crate::rt::alloc_locked((ncells + nentries) as usize * ksize)
+            .unwrap_or_else(|| crate::rt::out_of_memory("a hash map"))
             .as_ptr() as *mut c_void;
         (*m).nexts = (*m).cells.add(ncells as usize * ksize);
         (*m).ncells = ncells;
@@ -679,7 +667,7 @@ impl<K: std::hash::Hash + Eq> SlotIndex<K> {
 /// memset again -- doing so outside the allocator's lock would also leave a
 /// window where a collection could sweep the block before it was written.
 unsafe fn gc_alloc_zeroed(bytes: usize) -> *mut u8 {
-    match crate::gc::gc_alloc(bytes) {
+    match crate::rt::gc_alloc(bytes) {
         Some(nn) => nn.as_ptr(),
         None => ptr::null_mut(),
     }
@@ -1122,14 +1110,14 @@ mod hi64_tests {
             // the TLAB, whose refill takes `gc_locked()` and expects the
             // singleton to already exist.
             unsafe { crate::gc::hlp_gc_init() };
-            crate::gc::gc_register_current_os_thread();
+            crate::rt::gc_register_current_os_thread();
             Mutator
         }
     }
 
     impl Drop for Mutator {
         fn drop(&mut self) {
-            crate::gc::gc_unregister_current_os_thread();
+            crate::rt::gc_unregister_current_os_thread();
         }
     }
 

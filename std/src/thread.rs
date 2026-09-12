@@ -9,12 +9,12 @@ use std::ptr;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::fiber::Waiter;
 use crate::hl::vdynamic;
+use crate::rt::Waiter;
 
 fn wake_one(waiters: &mut VecDeque<Waiter>) -> bool {
     while let Some(waiter) = waiters.pop_front() {
-        if unsafe { crate::fiber::wake(waiter) } {
+        if unsafe { crate::rt::wake(waiter) } {
             return true;
         }
     }
@@ -36,7 +36,7 @@ struct HlMutex {
     /// Word zero: the collector's finalizer slot, and the flag the free
     /// below guards on. Upstream's `hl_mutex` names it `free` and uses it the
     /// same way.
-    free: Option<crate::gc::Finalizer>,
+    free: Option<crate::rt::Finalizer>,
     state: std::sync::Mutex<MutexState>,
 }
 const _: () = assert!(std::mem::offset_of!(HlMutex, free) == 0);
@@ -48,7 +48,7 @@ struct MutexState {
 }
 
 unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
-    let current = crate::fiber::current_owner();
+    let current = crate::rt::current_owner();
     let mut state = (*mutex).state.lock().unwrap();
     match state.owner {
         None => {
@@ -67,7 +67,7 @@ unsafe fn mutex_try_acquire_inner(mutex: *mut HlMutex) -> bool {
 unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
     loop {
         let waiter = {
-            let current = crate::fiber::current_owner();
+            let current = crate::rt::current_owner();
             let mut state = (*mutex).state.lock().unwrap();
             match state.owner {
                 None => {
@@ -80,17 +80,17 @@ unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
                     return;
                 }
                 Some(_) => {
-                    let waiter = crate::fiber::new_waiter();
+                    let waiter = crate::rt::new_waiter();
                     state.waiters.push_back(waiter);
                     waiter
                 }
             }
         };
-        let _ = crate::fiber::park(waiter, None);
+        let _ = crate::rt::park(waiter, None);
         let mut state = (*mutex).state.lock().unwrap();
         remove_waiter(&mut state.waiters, waiter);
         if state.owner.is_none() {
-            state.owner = Some(crate::fiber::current_owner());
+            state.owner = Some(crate::rt::current_owner());
             state.depth = 1;
             return;
         }
@@ -99,7 +99,7 @@ unsafe fn mutex_acquire_inner(mutex: *mut HlMutex) {
 
 unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
     let mut state = (*mutex).state.lock().unwrap();
-    if state.owner != Some(crate::fiber::current_owner()) || state.depth == 0 {
+    if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
         return;
     }
     state.depth -= 1;
@@ -111,7 +111,7 @@ unsafe fn mutex_release_inner(mutex: *mut HlMutex) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_mutex_alloc(_gc_thread: bool) -> *mut c_void {
-    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
+    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlMutex>(), finalize_mutex)
         as *mut HlMutex;
     if p.is_null() {
         return ptr::null_mut();
@@ -204,7 +204,7 @@ struct HlSemaphore {
     /// Word zero: the collector's finalizer slot, and the flag the free
     /// below guards on. Upstream's `hl_semaphore` names it `free` and uses it the
     /// same way.
-    free: Option<crate::gc::Finalizer>,
+    free: Option<crate::rt::Finalizer>,
     state: std::sync::Mutex<SemaphoreState>,
 }
 const _: () = assert!(std::mem::offset_of!(HlSemaphore, free) == 0);
@@ -244,7 +244,7 @@ unsafe fn timeout_deadline(timeout: *mut vdynamic) -> Option<std::time::Instant>
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_semaphore_alloc(value: i32) -> *mut c_void {
-    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
+    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlSemaphore>(), finalize_semaphore)
         as *mut HlSemaphore;
     if p.is_null() {
         return ptr::null_mut();
@@ -272,17 +272,17 @@ unsafe fn semaphore_wait(s: *mut HlSemaphore, deadline: Option<Instant>) -> bool
         // than hanging. A thread the runtime did not create is a different
         // case: something else is running and will release, so it waits.
         if deadline.is_some_and(|limit| Instant::now() >= limit)
-            || (!crate::fiber::fibers_active()
-                && crate::fiber::is_main_thread()
-                && !crate::fiber::foreign_threads_seen())
+            || (!crate::rt::fibers_active()
+                && crate::rt::is_main_thread()
+                && !crate::rt::foreign_threads_seen())
         {
             return false;
         }
-        let waiter = crate::fiber::new_waiter();
+        let waiter = crate::rt::new_waiter();
         state.waiters.push_back(waiter);
         waiter
     };
-    let notified = crate::fiber::park(waiter, deadline);
+    let notified = crate::rt::park(waiter, deadline);
     remove_waiter(&mut (*s).state.lock().unwrap().waiters, waiter);
     notified
 }
@@ -375,7 +375,7 @@ struct HlCondition {
     /// Word zero: the collector's finalizer slot, and the flag the free
     /// below guards on. Upstream's `hl_condition` names it `free` and uses it the
     /// same way.
-    free: Option<crate::gc::Finalizer>,
+    free: Option<crate::rt::Finalizer>,
     state: std::sync::Mutex<ConditionState>,
 }
 const _: () = assert!(std::mem::offset_of!(HlCondition, free) == 0);
@@ -390,7 +390,7 @@ struct ConditionState {
 unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
     loop {
         let waiter = {
-            let current = crate::fiber::current_owner();
+            let current = crate::rt::current_owner();
             let mut state = (*c).state.lock().unwrap();
             match state.owner {
                 None => {
@@ -403,20 +403,20 @@ unsafe fn condition_mutex_acquire(c: *mut HlCondition) {
                     return;
                 }
                 Some(_) => {
-                    let waiter = crate::fiber::new_waiter();
+                    let waiter = crate::rt::new_waiter();
                     state.mutex_waiters.push_back(waiter);
                     waiter
                 }
             }
         };
-        let _ = crate::fiber::park(waiter, None);
+        let _ = crate::rt::park(waiter, None);
         let mut state = (*c).state.lock().unwrap();
         remove_waiter(&mut state.mutex_waiters, waiter);
     }
 }
 
 unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
-    let current = crate::fiber::current_owner();
+    let current = crate::rt::current_owner();
     let mut state = (*c).state.lock().unwrap();
     match state.owner {
         None => {
@@ -434,7 +434,7 @@ unsafe fn condition_mutex_try_acquire(c: *mut HlCondition) -> bool {
 
 unsafe fn condition_mutex_release(c: *mut HlCondition) {
     let mut state = (*c).state.lock().unwrap();
-    if state.owner != Some(crate::fiber::current_owner()) || state.depth == 0 {
+    if state.owner != Some(crate::rt::current_owner()) || state.depth == 0 {
         return;
     }
     state.depth -= 1;
@@ -446,7 +446,7 @@ unsafe fn condition_mutex_release(c: *mut HlCondition) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_condition_alloc() -> *mut c_void {
-    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
+    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlCondition>(), finalize_condition)
         as *mut HlCondition;
     if p.is_null() {
         return ptr::null_mut();
@@ -487,19 +487,19 @@ pub unsafe extern "C" fn hlp_condition_release(c: *mut c_void) {
 }
 
 unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -> bool {
-    if !crate::fiber::fibers_active()
-        && crate::fiber::is_main_thread()
-        && !crate::fiber::foreign_threads_seen()
+    if !crate::rt::fibers_active()
+        && crate::rt::is_main_thread()
+        && !crate::rt::foreign_threads_seen()
     {
         return true;
     }
     let (waiter, depth) = {
-        let current = crate::fiber::current_owner();
+        let current = crate::rt::current_owner();
         let mut state = (*c).state.lock().unwrap();
         if state.owner != Some(current) {
             return false;
         }
-        let waiter = crate::fiber::new_waiter();
+        let waiter = crate::rt::new_waiter();
         state.waiters.push_back(waiter);
         let depth = state.depth;
         state.owner = None;
@@ -507,7 +507,7 @@ unsafe fn condition_wait_inner(c: *mut HlCondition, deadline: Option<Instant>) -
         wake_one(&mut state.mutex_waiters);
         (waiter, depth)
     };
-    let notified = crate::fiber::park(waiter, deadline);
+    let notified = crate::rt::park(waiter, deadline);
     remove_waiter(&mut (*c).state.lock().unwrap().waiters, waiter);
     condition_mutex_acquire(c);
     (*c).state.lock().unwrap().depth = depth;
@@ -626,7 +626,7 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
         return true;
     }
     // No fibers: exact HashLink !HL_THREADS semantics — never block.
-    if !crate::fiber::fibers_active() {
+    if !crate::rt::fibers_active() {
         return false;
     }
     // Fibers exist: HL_THREADS semantics — wait for a release, cooperatively.
@@ -681,14 +681,14 @@ struct DequeState {
 struct HlDeque {
     /// Word zero: the collector's finalizer slot, and the flag
     /// `finalize_deque` guards on. Upstream's `hl_deque` names it `free`.
-    free: Option<crate::gc::Finalizer>,
+    free: Option<crate::rt::Finalizer>,
     state: std::sync::Mutex<DequeState>,
 }
 const _: () = assert!(std::mem::offset_of!(HlDeque, free) == 0);
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_deque_alloc() -> *mut c_void {
-    let p = crate::gc::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
+    let p = crate::rt::alloc_with_finalizer(std::mem::size_of::<HlDeque>(), finalize_deque)
         as *mut HlDeque;
     if p.is_null() {
         return ptr::null_mut();
@@ -724,7 +724,7 @@ unsafe extern "C" fn finalize_deque(block: *mut c_void) {
         Err(_) => HashSet::new(),
     };
     for msg in queued {
-        crate::gc::gc_remove_persistent(msg as *mut vdynamic);
+        crate::rt::gc_remove_persistent(msg as *mut vdynamic);
     }
     ptr::drop_in_place(ptr::addr_of_mut!((*p).state));
 }
@@ -742,7 +742,7 @@ unsafe extern "C" fn finalize_deque(block: *mut c_void) {
 /// no copy remains.
 unsafe fn deque_root(msg: *mut vdynamic) {
     if !msg.is_null() {
-        crate::gc::gc_add_persistent(msg);
+        crate::rt::gc_add_persistent(msg);
     }
 }
 
@@ -794,23 +794,23 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
         // after it, never the other way round.
         if let Some((m, still_queued)) = popped {
             if !still_queued && !m.is_null() {
-                crate::gc::gc_remove_persistent(m);
+                crate::rt::gc_remove_persistent(m);
             }
             return m;
         }
         // Empty: blocking pop waits cooperatively while fibers exist;
         // otherwise keep the non-blocking null return (single-threaded,
         // nothing can ever push).
-        if !block || !crate::fiber::fibers_active() {
+        if !block || !crate::rt::fibers_active() {
             return ptr::null_mut();
         }
-        let waiter = crate::fiber::new_waiter();
+        let waiter = crate::rt::new_waiter();
         if let Ok(mut state) = deque.state.lock() {
             state.waiters.push_back(waiter);
         } else {
             return ptr::null_mut();
         }
-        let _ = crate::fiber::park(waiter, None);
+        let _ = crate::rt::park(waiter, None);
         if let Ok(mut state) = deque.state.lock() {
             remove_waiter(&mut state.waiters, waiter);
         }
@@ -825,7 +825,7 @@ pub unsafe extern "C" fn hlp_deque_pop(d: *mut c_void, block: bool) -> *mut vdyn
 struct HlTls {
     /// Word zero: the collector's finalizer slot, and the flag `hlp_tls_free`
     /// guards on. Upstream's `hl_tls` names it `free`.
-    free: Option<crate::gc::Finalizer>,
+    free: Option<crate::rt::Finalizer>,
     gc_value: bool,
     values: std::sync::Mutex<HashMap<u64, *mut c_void>>,
 }
@@ -834,7 +834,7 @@ const _: () = assert!(std::mem::offset_of!(HlTls, free) == 0);
 #[no_mangle]
 pub unsafe extern "C" fn hlp_tls_alloc(gc_value: bool) -> *mut c_void {
     let p =
-        crate::gc::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls) as *mut HlTls;
+        crate::rt::alloc_with_finalizer(std::mem::size_of::<HlTls>(), finalize_tls) as *mut HlTls;
     if p.is_null() {
         return ptr::null_mut();
     }
@@ -853,9 +853,9 @@ pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
         return;
     }
     let tls = tls as *mut HlTls;
-    let id = crate::fiber::current_owner();
+    let id = crate::rt::current_owner();
     if (*tls).gc_value && !value.is_null() {
-        crate::gc::gc_add_persistent(value as *mut vdynamic);
+        crate::rt::gc_add_persistent(value as *mut vdynamic);
     }
     let mut values = (*tls).values.lock().unwrap();
     let old = if value.is_null() {
@@ -866,7 +866,7 @@ pub unsafe extern "C" fn hlp_tls_set(tls: *mut c_void, value: *mut c_void) {
     if (*tls).gc_value {
         if let Some(old) = old {
             if !old.is_null() && !values.values().any(|candidate| *candidate == old) {
-                crate::gc::gc_remove_persistent(old as *mut vdynamic);
+                crate::rt::gc_remove_persistent(old as *mut vdynamic);
             }
         }
     }
@@ -882,7 +882,7 @@ pub unsafe extern "C" fn hlp_tls_get(tls: *mut c_void) -> *mut c_void {
         .values
         .lock()
         .unwrap()
-        .get(&crate::fiber::current_owner())
+        .get(&crate::rt::current_owner())
         .copied()
         .unwrap_or(ptr::null_mut())
 }
@@ -909,7 +909,7 @@ pub unsafe extern "C" fn hlp_tls_free(tls: *mut c_void) {
             Err(_) => HashSet::new(),
         };
         for value in unique {
-            crate::gc::gc_remove_persistent(value as *mut vdynamic);
+            crate::rt::gc_remove_persistent(value as *mut vdynamic);
         }
     }
     ptr::drop_in_place(ptr::addr_of_mut!((*p).values));
@@ -941,7 +941,8 @@ pub unsafe extern "C" fn hl_tls_free(tls: *mut c_void) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_thread_current() -> *mut c_void {
-    if let Some(handle) = crate::fiber::current_handle() {
+    let handle = crate::rt::current_handle();
+    if !handle.is_null() {
         return handle;
     }
     // Compared, never dereferenced: the identity has only to be stable for
@@ -1029,8 +1030,8 @@ pub unsafe extern "C" fn hl_thread_start(
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_thread_yield() {
-    if crate::fiber::fibers_active() {
-        crate::fiber::hlp_fiber_poll();
+    if crate::rt::fibers_active() {
+        crate::rt::fiber_poll();
     } else {
         std::thread::yield_now();
     }
@@ -1082,8 +1083,8 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange32(
             // A failed CAS is the polling primitive used by Haxe's atomic
             // spin loops. Cooperative threads cannot make progress unless
             // the losing fiber gives the owner a turn.
-            if crate::fiber::fibers_active() {
-                crate::fiber::block_yield();
+            if crate::rt::fibers_active() {
+                crate::rt::block_yield();
             }
             v
         }
@@ -1105,8 +1106,8 @@ pub unsafe extern "C" fn hlp_atomic_compare_exchange_ptr(
     ) {
         Ok(v) => v,
         Err(v) => {
-            if crate::fiber::fibers_active() {
-                crate::fiber::block_yield();
+            if crate::rt::fibers_active() {
+                crate::rt::block_yield();
             }
             v
         }
@@ -1237,16 +1238,16 @@ fn current_os_thread_id() -> usize {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_blocking(b: bool) {
-    if crate::fiber::update_gc_blocking_depth(b) {
-        let _ = crate::gc::gc_set_blocking(b);
+    if crate::rt::update_gc_blocking_depth(b) {
+        let _ = crate::rt::gc_set_blocking(b);
     }
     // Published for anyone holding this thread's record -- see ThreadInfo.
-    (*thread_info()).gc_blocking = i32::from(crate::fiber::is_gc_blocking());
+    (*thread_info()).gc_blocking = i32::from(crate::rt::is_gc_blocking());
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn hl_is_blocking() -> bool {
-    crate::fiber::is_gc_blocking()
+    crate::rt::is_gc_blocking()
 }
 
 /// Upstream `hl_set_thread_flags` (gc.c): a read-modify-write of this
@@ -1305,7 +1306,7 @@ mod foreign_thread_tests {
     #[test]
     fn foreign_threads_exclude_each_other_on_a_mutex() {
         unsafe {
-            crate::fiber::mark_main_thread();
+            crate::rt::mark_main_thread();
             let m = super::hlp_mutex_alloc(false);
             assert!(!m.is_null());
 
@@ -1362,7 +1363,7 @@ mod foreign_thread_tests {
     #[test]
     fn a_blocking_acquire_on_a_foreign_thread_waits_for_its_permit() {
         unsafe {
-            crate::fiber::mark_main_thread();
+            crate::rt::mark_main_thread();
             let sem = super::hlp_semaphore_alloc(0);
             assert!(!sem.is_null());
             let addr = sem as usize;
@@ -1444,7 +1445,7 @@ mod foreign_thread_tests {
         static HEAD: AtomicUsize = AtomicUsize::new(0);
 
         unsafe {
-            crate::fiber::mark_main_thread();
+            crate::rt::mark_main_thread();
             let m = super::hlp_mutex_alloc(false);
             let sem = super::hlp_semaphore_alloc(0);
             let (maddr, saddr) = (m as usize, sem as usize);
@@ -1571,7 +1572,7 @@ mod datachannel_queue_tests {
         const TOTAL: usize = PRODUCERS * PER;
 
         unsafe {
-            crate::fiber::mark_main_thread();
+            crate::rt::mark_main_thread();
             let m = super::hlp_mutex_alloc(false);
             let sem = super::hlp_semaphore_alloc(0);
             let (ma, sa) = (m as usize, sem as usize);

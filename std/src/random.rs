@@ -4,32 +4,21 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::{gc::ImmixAllocator, hl};
+use crate::hl;
 
-impl ImmixAllocator {
-    fn allocate_rnd(&mut self) -> Option<NonNull<hl::rnd>> {
-        let rnd_size = mem::size_of::<hl::rnd>();
-        let rnd_ptr = self.allocate(rnd_size)?;
+fn allocate_rnd() -> Option<NonNull<hl::rnd>> {
+    let rnd_size = mem::size_of::<hl::rnd>();
+    let rnd_ptr = crate::rt::alloc_locked(rnd_size)?;
 
-        // Initialize the rnd struct
-        unsafe {
-            let rnd = &mut *(rnd_ptr.as_ptr() as *mut hl::rnd);
-            rnd.seeds = [0; 25]; // Initialize all seeds to 0
-            rnd.cur = 0; // Initialize cur to 0
-        }
-
-        // Cast the pointer to the correct type and return
-        NonNull::new(rnd_ptr.as_ptr() as *mut hl::rnd)
+    // Initialize the rnd struct
+    unsafe {
+        let rnd = &mut *(rnd_ptr.as_ptr() as *mut hl::rnd);
+        rnd.seeds = [0; 25]; // Initialize all seeds to 0
+        rnd.cur = 0; // Initialize cur to 0
     }
 
-    fn mark_rnd(&mut self, rnd_ptr: *mut hl::rnd) {
-        if rnd_ptr.is_null() {
-            return;
-        }
-
-        // Mark the memory occupied by the rnd struct
-        self.mark_memory(rnd_ptr as *mut u8, mem::size_of::<hl::rnd>());
-    }
+    // Cast the pointer to the correct type and return
+    NonNull::new(rnd_ptr.as_ptr() as *mut hl::rnd)
 }
 
 pub static MAG01: &[::std::os::raw::c_ulong] = &[
@@ -45,12 +34,7 @@ pub static INIT_SEEDS: &[::std::os::raw::c_ulong] = &[
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_rnd_alloc() -> *mut hl::rnd {
-    let mut allocator = crate::gc::gc_locked();
-    let allocated_rnd = allocator
-        .allocate_rnd()
-        .expect("could not allocate hl::rnd");
-    allocator.mark_rnd(allocated_rnd.as_ptr());
-    allocated_rnd.as_ptr()
+    allocate_rnd().expect("could not allocate hl::rnd").as_ptr()
 }
 #[no_mangle]
 pub unsafe extern "C" fn hlp_rnd_init_system() -> *mut hl::rnd {

@@ -38,7 +38,7 @@ const FDESC_MAGIC: u64 = 0x4153_485f_4644_5343;
 struct Fdesc {
     /// Word zero, because that is where the collector looks. Everything else
     /// in this struct follows it.
-    finalize: Option<crate::gc::Finalizer>,
+    finalize: Option<crate::rt::Finalizer>,
     magic: u64,
     state: *mut Mutex<FileState>,
 }
@@ -311,7 +311,7 @@ unsafe extern "C" fn finalize_fdesc(block: *mut c_void) {
 
 unsafe fn alloc_handle(state: FileState) -> *mut c_void {
     let d =
-        crate::gc::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc) as *mut Fdesc;
+        crate::rt::alloc_with_finalizer(std::mem::size_of::<Fdesc>(), finalize_fdesc) as *mut Fdesc;
     if d.is_null() {
         return ptr::null_mut();
     }

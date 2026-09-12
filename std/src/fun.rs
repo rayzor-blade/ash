@@ -544,7 +544,7 @@ pub unsafe extern "C" fn hlp_make_fun_wrapper(v: *mut vclosure, to: *mut hl_type
         return ptr::null_mut();
     }
 
-    let c = crate::gc::gc_alloc(std::mem::size_of::<vclosure_wrapper>())
+    let c = crate::rt::gc_alloc(std::mem::size_of::<vclosure_wrapper>())
         .unwrap()
         .as_ptr() as *mut vclosure_wrapper;
     (*c).cl.t = to;
@@ -575,9 +575,8 @@ unsafe fn resolve_closure_ptr(c: *mut vdynamic) -> *mut vclosure {
         if wrapped_addr >= 0x10000 && wrapped_addr.is_multiple_of(std::mem::align_of::<usize>()) {
             let wrapped = wrapped_addr as *mut vdynamic;
             // Only dereference if it's a valid GC heap pointer, not JIT code
-            let gc = crate::gc::gc_locked();
             if !wrapped.is_null()
-                && gc.is_gc_ptr(wrapped)
+                && crate::rt::is_gc_ptr(wrapped as *const c_void)
                 && !(*wrapped).t.is_null()
                 && (*(*wrapped).t).kind == hl_type_kind_HFUN
             {
@@ -828,8 +827,8 @@ pub unsafe extern "C" fn hlp_alloc_closure_void(
 ) -> *mut vclosure {
     let size = mem::size_of::<vclosure>();
 
-    let c_ptr = crate::gc::gc_alloc(size)
-        .unwrap_or_else(|| crate::gc::out_of_memory("a closure"))
+    let c_ptr = crate::rt::gc_alloc(size)
+        .unwrap_or_else(|| crate::rt::out_of_memory("a closure"))
         .as_ptr() as *mut vclosure;
 
     ptr::write(
@@ -865,9 +864,9 @@ pub unsafe extern "C" fn hlp_alloc_closure_ptr(
             _ => t,
         }
     };
-    let mut gc = crate::gc::gc_locked();
-
-    let c_ptr = gc.allocate_closure_ptr(t, fun, ptr);
+    let c_ptr = crate::rt::alloc_locked(std::mem::size_of::<vclosure>())
+        .unwrap_or_else(|| crate::rt::out_of_memory("a closure"))
+        .as_ptr() as *mut vclosure;
 
     ptr::write(
         c_ptr,

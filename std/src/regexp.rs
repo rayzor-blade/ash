@@ -12,7 +12,7 @@ use crate::{error::hlp_error, hl::vbyte, strings::str_to_uchar_ptr};
 #[repr(C)]
 struct RegexpState {
     /// Word zero, where the collector looks. Upstream names it the same.
-    finalize: Option<crate::gc::Finalizer>,
+    finalize: Option<crate::rt::Finalizer>,
     regex: Regex,
     last_groups: Option<Vec<Option<(i32, i32)>>>,
 }
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn hlp_regexp_new_options(
     let Some(regex) = build_regex(&pattern, &opts) else {
         return std::ptr::null_mut();
     };
-    let state = crate::gc::alloc_with_finalizer(std::mem::size_of::<RegexpState>(), regexp_finalize)
+    let state = crate::rt::alloc_with_finalizer(std::mem::size_of::<RegexpState>(), regexp_finalize)
         as *mut RegexpState;
     if state.is_null() {
         return std::ptr::null_mut();

@@ -36,8 +36,8 @@ pub unsafe extern "C" fn hlp_alloc_bytes(size: c_int) -> *mut hl::vbyte {
     }
     let _size: usize = size as usize;
 
-    crate::gc::gc_alloc(_size)
-        .unwrap_or_else(|| crate::gc::out_of_memory("a byte buffer"))
+    crate::rt::gc_alloc(_size)
+        .unwrap_or_else(|| crate::rt::out_of_memory("a byte buffer"))
         .as_ptr() as *mut hl::vbyte
 }
 
@@ -979,7 +979,7 @@ pub unsafe extern "C" fn hlp_bytes_get_memsize(ptr: *mut hl::vbyte) -> i32 {
     if ptr.is_null() {
         return 0;
     }
-    crate::gc::allocation_size(ptr as *const std::ffi::c_void) as i32
+    crate::rt::allocation_size(ptr as *const std::ffi::c_void) as i32
 }
 
 #[cfg(test)]

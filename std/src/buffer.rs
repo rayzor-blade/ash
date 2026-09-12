@@ -14,11 +14,8 @@ use crate::types::{hl_aptr, hl_is_ptr, hlp_type_size, TSTR};
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
-    // Get the global GC instance
-    let mut gc = crate::gc::gc_locked();
-
     // Allocate memory for the hl_buffer struct
-    let buffer_ptr = match gc.allocate(std::mem::size_of::<hl_buffer>()) {
+    let buffer_ptr = match crate::rt::alloc_locked(std::mem::size_of::<hl_buffer>()) {
         Some(ptr) => ptr.as_ptr() as *mut hl_buffer,
         None => return std::ptr::null_mut(), // Return null if allocation fails
     };
@@ -36,16 +33,13 @@ pub unsafe extern "C" fn hlp_alloc_buffer() -> *mut hl_buffer {
     // which is in the engine's frame rather than linear memory, where the
     // collector cannot see it.
     #[cfg(target_family = "wasm")]
-    gc.register_persistent(buffer_ptr as *mut vdynamic);
+    crate::rt::gc_add_persistent(buffer_ptr as *mut vdynamic);
 
     buffer_ptr
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, len: i32) {
-    // Get the global GC instance
-    let mut gc = crate::gc::gc_locked();
-
     // Adjust buffer length if necessary
     while (*b).totlen >= ((*b).blen << 2) {
         (*b).blen <<= 1;
@@ -55,13 +49,13 @@ pub unsafe extern "C" fn buffer_append_new(b: *mut hl_buffer, s: *const uchar, l
     let size = if len < (*b).blen { (*b).blen } else { len };
 
     // Allocate memory for the _stringitem struct (NOT the pointer typedef)
-    let it: stringitem = match gc.allocate(std::mem::size_of::<_stringitem>()) {
+    let it: stringitem = match crate::rt::alloc_locked(std::mem::size_of::<_stringitem>()) {
         Some(ptr) => ptr.as_ptr() as stringitem,
         None => return, // Return if allocation fails
     };
 
     // Allocate memory for the string data
-    let str_ptr = match gc.allocate((size << 1) as usize) {
+    let str_ptr = match crate::rt::alloc_locked((size << 1) as usize) {
         Some(ptr) => ptr.as_ptr() as *mut uchar,
         None => return, // Return if allocation fails
     };
@@ -196,11 +190,8 @@ unsafe fn call_closure_tostring_or_stub(c: *mut vclosure) -> *const uchar {
 }
 
 pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) -> *mut hl::uchar {
-    // Get the global GC instance
-    let mut gc = crate::gc::gc_locked();
-
     // Allocate memory for the buffer content
-    let buf = match gc.allocate((((*b).totlen + 1) << 1) as usize) {
+    let buf = match crate::rt::alloc_locked((((*b).totlen + 1) << 1) as usize) {
         Some(ptr) => ptr.as_ptr() as *mut hl::uchar,
         None => return ptr::null_mut(), // Return null if allocation fails
     };
@@ -232,7 +223,7 @@ pub unsafe extern "C" fn hlp_buffer_content(b: *mut hl_buffer, len: *mut i32) ->
     // The contents are in `buf` now, so the wasm root has done its job. A
     // buffer abandoned without reaching this call stays rooted.
     #[cfg(target_family = "wasm")]
-    gc.unregister_persistent(b as *mut vdynamic);
+    crate::rt::gc_remove_persistent(b as *mut vdynamic);
 
     buf
 }
@@ -761,9 +752,8 @@ pub unsafe extern "C" fn hlp_buffer_rec(b: *mut hl_buffer, v: *mut vdynamic, sta
             let indexes_ptr = if (*o).nfields <= 128 {
                 indexes.as_mut_ptr()
             } else {
-                let mut gc = crate::gc::gc_locked();
                 let size = ((*o).nfields as usize * std::mem::size_of::<i32>()) as usize;
-                match gc.allocate(size) {
+                match crate::rt::alloc_locked(size) {
                     Some(ptr) => ptr.as_ptr() as *mut i32,
                     None => return, // Handle allocation failure
                 }

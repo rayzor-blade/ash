@@ -48,7 +48,7 @@ const PROC_MAGIC: u64 = 0x4153_485f_5052_4f43;
 struct VProcess {
     /// Word zero, because that is where the collector looks for a
     /// `MEM_KIND_FINALIZER` block's callback.
-    finalize: Option<crate::gc::Finalizer>,
+    finalize: Option<crate::rt::Finalizer>,
     magic: u64,
     state: *mut ProcState,
 }
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn hlp_process_run(
         stdout: Mutex::new(sout),
         stderr: Mutex::new(serr),
     }));
-    let h = crate::gc::alloc_with_finalizer(std::mem::size_of::<VProcess>(), finalize_process)
+    let h = crate::rt::alloc_with_finalizer(std::mem::size_of::<VProcess>(), finalize_process)
         as *mut VProcess;
     if h.is_null() {
         drop(Box::from_raw(state));

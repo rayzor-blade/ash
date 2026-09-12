@@ -60,7 +60,7 @@ impl<'a, T: Sortable> MSort<'a, T> {
             // sharing the main interpreter; a compiled-only resolver failure
             // therefore fails closed instead of calling a sentinel or racing
             // `HLInterpreter`.
-            if crate::fiber::hlp_fiber_is_worker_lane() {
+            if crate::rt::is_worker_lane() {
                 eprintln!(
                     "[ash] sort comparator findex {} could not be compiled for a VM worker",
                     address.wrapping_sub(1)

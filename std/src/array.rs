@@ -26,8 +26,8 @@ pub unsafe extern "C" fn hlp_alloc_array(at: *mut hl_type, size: i32) -> *mut va
     //     MEM_KIND_NOPTR
     // } | MEM_ZERO;
 
-    let a = crate::gc::gc_alloc(total_size)
-        .unwrap_or_else(|| crate::gc::out_of_memory("an array"))
+    let a = crate::rt::gc_alloc(total_size)
+        .unwrap_or_else(|| crate::rt::out_of_memory("an array"))
         .as_ptr() as *mut varray;
 
     (*a).t = crate::types::hlt_array();
@@ -144,7 +144,7 @@ pub unsafe extern "C" fn hlp_alloc_carray(at: *mut hl_type, size: i32) -> *mut s
     let Some(total) = stride.checked_mul(size as usize) else {
         return ptr::null_mut();
     };
-    let Some(arr) = crate::gc::gc_alloc(total) else {
+    let Some(arr) = crate::rt::gc_alloc(total) else {
         return ptr::null_mut();
     };
     let arr = arr.as_ptr();

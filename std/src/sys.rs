@@ -544,8 +544,8 @@ pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
     let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
     // With fibers alive, park the logical thread on a scheduler timer instead
     // of repeatedly making every sleeping fiber runnable.
-    if crate::fiber::fibers_active() {
-        crate::fiber::sleep_until(std::time::Instant::now() + duration);
+    if crate::rt::fibers_active() {
+        crate::rt::sleep_for(duration);
         return;
     }
     std::thread::sleep(duration);
@@ -721,7 +721,7 @@ static HL_FILE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_init(args: *mut *mut vbyte, nargs: i32, hlfile: *mut vbyte) {
     // Before any native library has had a chance to start a thread of its own.
-    crate::fiber::mark_main_thread();
+    crate::rt::mark_main_thread();
     let mut collected = Vec::new();
     if !args.is_null() {
         for i in 0..nargs.max(0) as usize {

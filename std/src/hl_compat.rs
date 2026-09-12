@@ -244,11 +244,20 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
     // it. HashLink treats allocation as an initialization boundary; do the
     // same here instead of aborting an otherwise valid fmt/ssl call with
     // "GC not initialized".
-    let mut gc = crate::gc::gc_locked_init();
-    let Some(ptr) = gc.allocate(size as usize) else {
-        return ptr::null_mut();
+    const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
+    const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
+    const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
+    let p = match flags & PAGE_KIND_MASK {
+        // The kind bits reach no further than this function, so a block that
+        // wants a finalizer has to be recorded here or the collector will
+        // never know it from any other block. The caller writes its callback
+        // into word zero on return.
+        MEM_KIND_FINALIZER => crate::rt::alloc_finalizable(size as usize) as *mut u8,
+        _ => crate::rt::alloc_locked(size as usize).map_or(ptr::null_mut(), |p| p.as_ptr()),
     };
-    let p = ptr.as_ptr();
+    if p.is_null() {
+        return ptr::null_mut();
+    }
 
     // Word zero belongs to the CALLER for every kind but one.
     //
@@ -269,17 +278,8 @@ pub unsafe extern "C" fn hl_gc_alloc_gen(t: *mut hl_type, size: i32, flags: i32)
     // conventionally shaped like a vdynamic. Upstream does not write even
     // there; narrowing it further is a separate change with its own blast
     // radius, and no reported defect turns on it.
-    const PAGE_KIND_MASK: i32 = 3; // gc.c:76-77, (1 << PAGE_KIND_BITS) - 1
-    const MEM_KIND_DYNAMIC: i32 = 0; // hl.h:745
-    const MEM_KIND_FINALIZER: i32 = 3; // hl.h:748
-    match flags & PAGE_KIND_MASK {
-        MEM_KIND_DYNAMIC => (*(p as *mut vdynamic)).t = t,
-        // The kind bits reach no further than this function, so a block that
-        // wants a finalizer has to be recorded here or the collector will
-        // never know it from any other block. The caller writes its callback
-        // into word zero on return.
-        MEM_KIND_FINALIZER => gc.register_finalizable(p),
-        _ => {}
+    if flags & PAGE_KIND_MASK == MEM_KIND_DYNAMIC {
+        (*(p as *mut vdynamic)).t = t;
     }
     p as *mut c_void
 }
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn hl_add_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    crate::gc::gc_locked_init().add_root_slot(ptr as usize);
+    crate::rt::add_root_slot(ptr as usize);
 }
 
 #[no_mangle]
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn hl_remove_root(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
     }
-    crate::gc::gc_locked_init().remove_root_slot(ptr as usize);
+    crate::rt::remove_root_slot(ptr as usize);
 }
 
 // ============================================================================
@@ -555,9 +555,7 @@ pub unsafe extern "C" fn hl_throw_buffer(buf: *mut c_void) {
     let mut len: i32 = 0;
     let content = crate::buffer::hlp_buffer_content(buf as *mut hl_buffer, &mut len);
     if !content.is_null() {
-        let mut gc = crate::gc::gc_locked();
-        let d = gc
-            .allocate(std::mem::size_of::<vdynamic>())
+        let d = crate::rt::alloc_locked(std::mem::size_of::<vdynamic>())
             .expect("alloc")
             .as_ptr() as *mut vdynamic;
         (*d).t = crate::types::hlt_bytes();

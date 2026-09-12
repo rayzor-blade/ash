@@ -1275,35 +1275,137 @@ impl DecodedBytecode {
     /// Compute a hash for every bytecode function, keyed by findex.
     /// Used for hot-reload diffing: functions with identical hashes are unchanged.
     ///
-    /// Incorporates the content of referenced string literals so that functions
-    /// using changed strings (same index, different content) are detected even
-    /// when their opcodes are byte-identical.
+    /// An opcode names a pool entry by index, so the hash folds in the
+    /// CONTENT behind every index the function reaches: literal ints, floats,
+    /// strings and bytes, and the constant object a global is pre-initialised
+    /// with. A change that only edits a pool entry leaves the opcode stream
+    /// byte-identical, and this is what still tells the two versions apart.
     pub fn compute_function_hashes(&self) -> std::collections::HashMap<usize, u32> {
         use crate::opcodes::Opcode;
+
+        let mut global_hashes: std::collections::HashMap<usize, u32> =
+            std::collections::HashMap::new();
+        for c in &self.constants {
+            let mut visiting = Vec::new();
+            let h = self.hash_constant_object(c.global as usize, &mut visiting);
+            global_hashes.insert(c.global as usize, h);
+        }
 
         self.functions
             .iter()
             .map(|f| {
                 let mut h = f.compute_hash();
-                // Mix in the actual content of any string literal this function references
                 for op in &f.ops {
-                    let str_idx = match op {
-                        Opcode::String { ptr, .. } => Some(ptr.0),
-                        _ => None,
-                    };
-                    if let Some(idx) = str_idx {
-                        if let Some(s) = self.strings.get(idx) {
-                            for b in s.as_bytes() {
-                                h = H(h, *b);
+                    match op {
+                        Opcode::Int { ptr, .. } => {
+                            if let Some(v) = self.ints.get(ptr.0) {
+                                h = H32(h, *v as u32);
                             }
-                            h = H(h, 0);
                         }
+                        Opcode::Float { ptr, .. } => {
+                            if let Some(v) = self.floats.get(ptr.0) {
+                                let bits = v.to_bits();
+                                h = H32(h, bits as u32);
+                                h = H32(h, (bits >> 32) as u32);
+                            }
+                        }
+                        Opcode::String { ptr, .. } => {
+                            if let Some(s) = self.strings.get(ptr.0) {
+                                h = hash_bytes(h, s.as_bytes());
+                            }
+                        }
+                        Opcode::Bytes { ptr, .. } => {
+                            h = hash_bytes(h, self.bytes_entry(ptr.0));
+                        }
+                        Opcode::GetGlobal { global, .. } | Opcode::SetGlobal { global, .. } => {
+                            if let Some(gh) = global_hashes.get(&global.0) {
+                                h = H32(h, *gh);
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 (f.findex as usize, h)
             })
             .collect()
     }
+
+    /// The bytes-pool entry at `idx`: from its start offset to the next
+    /// entry's, or to the end of the pool for the last one.
+    fn bytes_entry(&self, idx: usize) -> &[u8] {
+        let Some(&start) = self.bytes_pos.get(idx) else {
+            return &[];
+        };
+        let end = self
+            .bytes_pos
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(self.bytes_data.len());
+        self.bytes_data.get(start..end).unwrap_or(&[])
+    }
+
+    /// Hash of the constant object pre-initialising `global`, by the VALUES
+    /// its fields resolve to: ints, floats and strings through their pools,
+    /// a field holding another constant global through that global's own
+    /// hash, everything else by its raw operand. Fields are resolved the way
+    /// `init_constants` fills them, per the declared field kind.
+    fn hash_constant_object(&self, global: usize, visiting: &mut Vec<usize>) -> u32 {
+        use crate::hl;
+        let mut h = H32(0, global as u32);
+        let Some(c) = self.constants.iter().find(|c| c.global as usize == global) else {
+            return h;
+        };
+        if visiting.contains(&global) {
+            return h;
+        }
+        visiting.push(global);
+        let fields = self
+            .globals
+            .get(global)
+            .and_then(|t| self.types.get(t.0))
+            .and_then(|t| t.obj.as_ref())
+            .map(|o| o.fields.as_slice())
+            .unwrap_or(&[]);
+        for (j, &v) in c.fields.iter().enumerate() {
+            let kind = fields
+                .get(j)
+                .and_then(|f| self.types.get(f.type_.0))
+                .map(|t| t.kind)
+                .unwrap_or(hl::hl_type_kind_HVOID);
+            match kind {
+                hl::hl_type_kind_HI32
+                | hl::hl_type_kind_HBOOL
+                | hl::hl_type_kind_HUI8
+                | hl::hl_type_kind_HUI16
+                | hl::hl_type_kind_HI64 => {
+                    h = H32(h, self.ints.get(v as usize).copied().unwrap_or(v) as u32);
+                }
+                hl::hl_type_kind_HF64 | hl::hl_type_kind_HF32 => {
+                    let bits = self.floats.get(v as usize).copied().unwrap_or(0.0).to_bits();
+                    h = H32(h, bits as u32);
+                    h = H32(h, (bits >> 32) as u32);
+                }
+                hl::hl_type_kind_HBYTES => {
+                    if let Some(s) = self.strings.get(v as usize) {
+                        h = hash_bytes(h, s.as_bytes());
+                    }
+                }
+                hl::hl_type_kind_HOBJ | hl::hl_type_kind_HSTRUCT => {
+                    h = H32(h, self.hash_constant_object(v as usize, visiting));
+                }
+                _ => h = H32(h, v as u32),
+            }
+        }
+        visiting.pop();
+        h
+    }
+}
+
+fn hash_bytes(mut h: u32, bytes: &[u8]) -> u32 {
+    for b in bytes {
+        h = H(h, *b);
+    }
+    H(h, 0)
 }
 
 pub fn str_to_uchar_ptr(s: &str) -> Vec<u16> {

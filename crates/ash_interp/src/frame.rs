@@ -1,3 +1,4 @@
+use ash_core::types::HLFunction;
 use crate::values::NanBoxedValue;
 
 /// Register file for a single function execution frame.
@@ -138,6 +139,11 @@ pub struct InterpreterFrame {
     pub registers: RegisterFile,
     /// Program counter: current opcode index within the function's ops
     pub pc: usize,
+    /// The body `pc` indexes, fixed for the life of the frame: the AIR cache
+    /// can be invalidated (a hot reload does) while this frame is inside an
+    /// optimized body, and the raw body numbers its opcodes differently.
+    /// Null for a frame that has no body of its own (a native call).
+    pub body: *const HLFunction,
     /// Lanes of the vector values this frame holds, by `ValueId`.
     ///
     /// The register file is one `NanBoxedValue` per value and the interpreter
@@ -177,6 +183,7 @@ impl InterpreterFrame {
                 r
             },
             pc: 0,
+            body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,
@@ -198,6 +205,7 @@ impl InterpreterFrame {
                 r
             },
             pc: 0,
+            body: std::ptr::null(),
             vec_lanes: std::collections::HashMap::new(),
             trap_stack: Vec::new(),
             backedges: 0,

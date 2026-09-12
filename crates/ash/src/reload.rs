@@ -163,29 +163,47 @@ pub fn perform_reload(
         return Ok(diff);
     }
 
-    // Step 3: Compile changed functions in a fresh LLVM context
-    // (LLVM modules are immutable post-compilation; we leak the context
-    //  intentionally — old JIT code may still be on active call stacks)
+    // Step 3: Compile each changed function in a module of its own. MCJIT
+    // generates code for a module once, so a second body handed to the same
+    // module after the first was looked up is never compiled. The context
+    // and every module are leaked: old code may still be on a call stack.
     let context = Box::leak(Box::new(Context::create()));
     let decoded =
         crate::bytecode::BytecodeDecoder::decode(path).expect("Failed to decode bytecode");
-    let mut jit =
-        JITModule::new_with_shared_runtime(context, path, &decoded, shared_runtime.clone());
-    // A body compiled here calls other bytecode through its slot, like every
-    // body the tiers compile under hot reload, so the next reload reaches it.
-    jit.set_hot_reload(true);
 
+    // Compiled callers load `module_ctx.functions_ptrs[findex]` at each call
+    // under hot reload, so the new body goes into that table; `functions_ptrs`
+    // is this context's own mirror of it.
+    let live_ptrs = unsafe {
+        if shared_runtime.module_ctx.is_null() {
+            std::ptr::null_mut()
+        } else {
+            (*shared_runtime.module_ctx).functions_ptrs
+        }
+    };
     for &findex in &diff.changed {
+        let mut jit =
+            JITModule::new_with_shared_runtime(context, path, &decoded, shared_runtime.clone());
+        // A body compiled here calls other bytecode through its slot, like
+        // every body the tiers compile under hot reload, so the next reload
+        // reaches it; and it compiles whatever the cost gate says.
+        jit.set_hot_reload(true);
+        jit.set_reload_recompile(true);
         match jit.promote_function_strict(findex) {
             Ok(meta) => {
+                let addr = meta.fn_addr as *mut std::ffi::c_void;
                 if findex < functions_ptrs.len() {
-                    functions_ptrs[findex] = meta.fn_addr as *mut std::ffi::c_void;
+                    functions_ptrs[findex] = addr;
+                    if !live_ptrs.is_null() {
+                        unsafe { *live_ptrs.add(findex) = addr };
+                    }
                 }
             }
             Err(e) => {
                 eprintln!("[reload] failed to compile findex {}: {}", findex, e);
             }
         }
+        std::mem::forget(jit);
     }
 
     // Step 4: Flush vtable protos for types that have changed proto entries
@@ -202,9 +220,6 @@ pub fn perform_reload(
         );
         apply_field_patches(&patches);
     }
-
-    // Leak the JIT module — its native code must stay alive
-    std::mem::forget(jit);
 
     Ok(diff)
 }

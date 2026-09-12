@@ -29,7 +29,7 @@ impl HLInterpreter {
         b: u32,
         op: CmpOp,
     ) -> bool {
-        let func = self.air.body(bytecode, func_idx);
+        let func = self.frame_body(bytecode, func_idx);
         self.compare_regs_in(bytecode, func, func_idx, a, b, op)
     }
 

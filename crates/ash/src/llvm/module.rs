@@ -171,6 +171,10 @@ pub struct JITModule<'ctx> {
     /// through functions_ptrs, so a reloaded function is picked up by its
     /// callers instead of them holding the old address.
     pub(crate) hot_reload: bool,
+    /// A promotion here is a body a reload replaced, not a hot function: it
+    /// compiles whatever the cost heuristics say, because the alternative is
+    /// running the old body.
+    pub(crate) reload_recompile: bool,
     /// Ahead-of-time mode: emit an object file rather than JIT into this
     /// process. Natives become `External` declarations the linker resolves
     /// against `libash_std.a` instead of absolute addresses baked into the
@@ -434,6 +438,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: None,
             hot_reload: false,
+            reload_recompile: false,
             aot,
             lazy_compilation: false,
             current_findex: usize::MAX,
@@ -752,6 +757,10 @@ impl<'ctx> JITModule<'ctx> {
         self.hot_reload = enabled;
     }
 
+    pub fn set_reload_recompile(&mut self, enabled: bool) {
+        self.reload_recompile = enabled;
+    }
+
     pub fn set_lazy_compilation(&mut self, enabled: bool) {
         self.lazy_compilation = enabled;
     }
@@ -868,6 +877,7 @@ impl<'ctx> JITModule<'ctx> {
             functions_ptrs: Vec::new(),
             shared_runtime: Some(shared.clone()),
             hot_reload: false,
+            reload_recompile: false,
             aot: false,
             lazy_compilation: false,
             current_findex: usize::MAX,

@@ -695,6 +695,12 @@ fn has_opcode(f: &HLFunction, pred: impl Fn(&air::opcodes::Opcode) -> bool) -> b
 /// The back edge is read off the raw opcodes on purpose: choosing the
 /// configuration cannot require the AIR that the configuration produces.
 pub fn interpreter_config_for(f: &HLFunction) -> AirConfigKey {
+    // A callee inlined into a body the walker keeps across a reload is the
+    // callee's OLD body for as long as that frame runs. With no inlining
+    // nothing qualifies as an OSR target either, which is the trade.
+    if hot_reload() {
+        return AirConfigKey::interpreter();
+    }
     let has_back_edge = f
         .ops
         .iter()
@@ -725,6 +731,18 @@ pub fn interpreter_config_for(f: &HLFunction) -> AirConfigKey {
     } else {
         AirConfigKey::interpreter()
     }
+}
+
+static HOT_RELOAD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the process runs under `--hot-reload`; read by
+/// [`interpreter_config_for`].
+pub fn set_hot_reload(on: bool) {
+    HOT_RELOAD.store(on, std::sync::atomic::Ordering::Release);
+}
+
+pub fn hot_reload() -> bool {
+    HOT_RELOAD.load(std::sync::atomic::Ordering::Acquire)
 }
 
 type CacheKey = (i32, AirConfigKey);

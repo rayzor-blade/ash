@@ -63,13 +63,14 @@
 //! recorded. That is per function, so an incomplete dispatcher costs coverage,
 //! never correctness.
 //!
-//! # Known gap
+//! # Hot reload
 //!
-//! The opcode loop polls for a pending hot reload after every call; this one
-//! does not, so a reload requested while an SSA frame is on the stack waits
-//! until control is back in an opcode frame. When it does land, the reload path
-//! calls [`Cache::invalidate`] — bodies prepared from the old bytecode describe
-//! functions the new bytecode may not even have at the same findex.
+//! Both walkers poll for a pending reload after every call. When one lands,
+//! the reload path calls [`Cache::invalidate`] — bodies prepared from the old
+//! bytecode describe functions the new bytecode may not even have at the same
+//! findex. A frame already inside a prepared body keeps it: prepared bodies
+//! are leaked, so the frame finishes on the body it started with and the next
+//! call resolves the new one.
 
 use std::sync::OnceLock;
 

@@ -115,9 +115,8 @@ if grep -q "reloaded v2" "$OUTPUT"; then
     echo "PASS: Hot reload detected and code updated (v1 -> v2)"
     exit 0
 elif grep -q "reloaded v1" "$OUTPUT"; then
-    echo "PASS: Hot reload detected (mtime change triggered checkReload=true)"
-    echo "      Code recompilation not yet wired (getMessage still returns v1)"
-    exit 0
+    echo "FAIL: Reload was detected but getMessage still returns v1 (body not swapped)"
+    exit 1
 elif grep -q "no-reload v1" "$OUTPUT"; then
     echo "FAIL: Reload was not detected (still v1)"
     exit 1

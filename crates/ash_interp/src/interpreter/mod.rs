@@ -1071,6 +1071,9 @@ impl HLInterpreter {
             eprintln!("[tiered] hot-reload active: forcing --jit-tier=llvm");
             config.tier_mode = TierMode::Llvm;
         }
+        if config.hot_reload {
+            ash_core::air_pipeline::set_hot_reload(true);
+        }
         config.enabled = true;
 
         let log_promotions = config.log_promotions;
@@ -5026,6 +5029,7 @@ impl HLInterpreter {
         let reg_count = func.regs.len();
         let buf = self.reg_pool.pop().unwrap_or_default();
         let mut frame = InterpreterFrame::with_buffer(func_idx, reg_count, buf);
+        frame.body = func as *const HLFunction;
 
         // Bind arguments to first N registers
         let type_fun = bc.types[func.type_.0]
@@ -5073,7 +5077,7 @@ impl HLInterpreter {
             // calls is invisible to a poll placed at function entry.
             self.report_stall_if_asked(bytecode);
             self.fiber_safe_point(1);
-            let func = self.air.body(bytecode, func_idx);
+            let func = self.frame_body(bytecode, func_idx);
             let frame = self.stack.last().unwrap();
             let pc = frame.pc;
 
@@ -5252,77 +5256,7 @@ impl HLInterpreter {
                                 }
                             }
 
-                            // Check deferred hot-reload flag after native calls
-                            if ash_core::reload::take_reload_pending() {
-                                if let Some(new_bc) = ash_core::reload::do_reload() {
-                                    // Leak the old utf16_strings cache — live NanBoxed registers
-                                    // in the current (old) frame hold raw pointers into those
-                                    // Vec<u16> buffers. Clearing would create dangling pointers.
-                                    let old_cache = std::mem::take(&mut self.utf16_strings);
-                                    Box::leak(Box::new(old_cache));
-
-                                    // Pre-populate the new cache from the new bytecode's string
-                                    // table. This ensures all Opcode::String hits return new
-                                    // strings regardless of which bytecode ref interpret_loop holds.
-                                    for (idx, s) in new_bc.strings.iter().enumerate() {
-                                        let mut buf: Vec<u16> = s.encode_utf16().collect();
-                                        buf.push(0);
-                                        self.utf16_strings.insert(idx, buf);
-                                    }
-
-                                    self.field_hash_cache.clear();
-
-                                    // Invalidate tiered JIT cache — compiled functions still
-                                    // point to old code. Forces fallback to interpreter which
-                                    // uses the new bytecode. Beads reload (Compiled →
-                                    // Interpreted, will recompile); deopt'd beads are cleared
-                                    // so the gate re-registers them fresh.
-                                    if let Some(tiered) = self.tiered_runtime.as_mut() {
-                                        for slot in tiered.entries.iter_mut() {
-                                            *slot = None;
-                                        }
-                                        // Reset every bead to the interpreter
-                                        // and clear all tier-promotion flags.
-                                        for (findex, slot) in tiered.beads.iter_mut().enumerate() {
-                                            let dead = slot
-                                                .as_ref()
-                                                .map(|b| {
-                                                    b.reset_to_interpreter();
-                                                    !b.bead().is_valid()
-                                                })
-                                                .unwrap_or(false);
-                                            if dead {
-                                                *slot = None;
-                                                tiered.gate_checked[findex] = false;
-                                            }
-                                        }
-                                        tiered
-                                            .shared_ctx
-                                            .llvm_done
-                                            .lock()
-                                            .expect("llvm_done mutex poisoned")
-                                            .clear();
-                                    }
-
-                                    // Re-initialize constants from the new bytecode so that
-                                    // globals (string literals, class descriptors) reflect V2.
-                                    if let Err(e) = self.init_constants(&new_bc, native_resolver) {
-                                        eprintln!(
-                                            "[hot-reload] warning: init_constants failed: {}",
-                                            e
-                                        );
-                                    }
-
-                                    // Bodies optimized from V1 describe V1's
-                                    // functions; a findex may not even be the
-                                    // same function in V2.
-                                    self.air.invalidate();
-                                    self.ssa.invalidate();
-
-                                    let leaked: &'static _ = Box::leak(Box::new(new_bc));
-                                    self.reloaded_bytecode = Some(leaked);
-                                }
-                            }
+                            self.apply_pending_reload(native_resolver);
                         }
                         Err(e) => {
                             if let Some(hl_exc) = e.downcast_ref::<HLExceptionPropagation>() {
@@ -5345,6 +5279,94 @@ impl HLInterpreter {
         }
     }
 
+    /// Apply a reload the runtime has flagged: recompile what changed,
+    /// then point every body the interpreter resolves from now on at the
+    /// new bytecode. Polled after a native call returns, on both walkers,
+    /// since `hl.Api.checkReload()` is the native that flags it.
+    fn apply_pending_reload(&mut self, native_resolver: &NativeFunctionResolver) {
+        if ash_core::reload::take_reload_pending() {
+            if let Some(new_bc) = ash_core::reload::do_reload() {
+                // Leak the old utf16_strings cache — live NanBoxed registers
+                // in the current (old) frame hold raw pointers into those
+                // Vec<u16> buffers. Clearing would create dangling pointers.
+                let old_cache = std::mem::take(&mut self.utf16_strings);
+                Box::leak(Box::new(old_cache));
+
+                // Pre-populate the new cache from the new bytecode's string
+                // table. This ensures all Opcode::String hits return new
+                // strings regardless of which bytecode ref interpret_loop holds.
+                for (idx, s) in new_bc.strings.iter().enumerate() {
+                    let mut buf: Vec<u16> = s.encode_utf16().collect();
+                    buf.push(0);
+                    self.utf16_strings.insert(idx, buf);
+                }
+
+                self.field_hash_cache.clear();
+
+                // Invalidate tiered JIT cache — compiled functions still
+                // point to old code. Forces fallback to interpreter which
+                // uses the new bytecode. Beads reload (Compiled →
+                // Interpreted, will recompile); deopt'd beads are cleared
+                // so the gate re-registers them fresh.
+                if let Some(tiered) = self.tiered_runtime.as_mut() {
+                    for slot in tiered.entries.iter_mut() {
+                        *slot = None;
+                    }
+                    // Reset every bead to the interpreter
+                    // and clear all tier-promotion flags.
+                    for (findex, slot) in tiered.beads.iter_mut().enumerate() {
+                        let dead = slot
+                            .as_ref()
+                            .map(|b| {
+                                b.reset_to_interpreter();
+                                !b.bead().is_valid()
+                            })
+                            .unwrap_or(false);
+                        if dead {
+                            *slot = None;
+                            tiered.gate_checked[findex] = false;
+                        }
+                    }
+                    tiered
+                        .shared_ctx
+                        .llvm_done
+                        .lock()
+                        .expect("llvm_done mutex poisoned")
+                        .clear();
+                }
+
+                // Re-initialize constants from the new bytecode so that
+                // globals (string literals, class descriptors) reflect V2.
+                if let Err(e) = self.init_constants(&new_bc, native_resolver) {
+                    eprintln!(
+                        "[hot-reload] warning: init_constants failed: {}",
+                        e
+                    );
+                }
+
+                // Bodies optimized from V1 describe V1's
+                // functions; a findex may not even be the
+                // same function in V2.
+                self.air.invalidate();
+                self.ssa.invalidate();
+
+                let leaked: &'static _ = Box::leak(Box::new(new_bc));
+                self.reloaded_bytecode = Some(leaked);
+            }
+        }
+    }
+
+    /// The body the innermost frame is executing, when it is `func_idx`'s:
+    /// the one it started on, whatever the AIR cache holds now. Any other
+    /// frame's body is resolved through the cache.
+    #[inline]
+    fn frame_body<'b>(&self, bytecode: &'b DecodedBytecode, func_idx: usize) -> &'b HLFunction {
+        match self.stack.last() {
+            Some(f) if f.function_index == func_idx && !f.body.is_null() => unsafe { &*f.body },
+            _ => self.air.body(bytecode, func_idx),
+        }
+    }
+
     /// Whether `addr` is a register slot of a frame on this stack or on a
     /// suspended Haxe thread's -- the target of a ref made by `Ref`, whose
     /// memory is a `NanBoxedValue` rather than HL's own layout for the kind.
@@ -5363,7 +5385,7 @@ impl HLInterpreter {
         op: &Opcode,
         func_idx: usize,
     ) -> Result<StepResult> {
-        let func = self.air.body(bytecode, func_idx);
+        let func = self.frame_body(bytecode, func_idx);
         let frame = self.stack.last_mut().unwrap();
 
         match op {

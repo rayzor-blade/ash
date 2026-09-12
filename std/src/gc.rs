@@ -4551,8 +4551,9 @@ pub unsafe extern "C" fn hlp_gc_walk_heap(
     };
     let heap_base = gc.heap.memory.as_ptr() as usize;
 
-    for &block_addr in &gc.heap.used_blocks {
-        let block_offset = block_addr - heap_base;
+    // `used_blocks` holds byte offsets from the heap base, as every other
+    // reader of it takes them.
+    for &block_offset in &gc.heap.used_blocks {
         let first_line = block_offset / LINE_SIZE;
 
         let mut line = first_line;

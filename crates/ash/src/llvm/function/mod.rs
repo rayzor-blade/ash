@@ -1010,7 +1010,9 @@ impl<'ctx> JITModule<'ctx> {
         // not attempted. The shared path charges for the whole module, and a
         // ceiling below High cannot repay that. Declining leaves the function
         // on its Cranelift code, which is what it was running on already.
-        if !self.aot {
+        // A reload's recompile has no such fallback: the body it replaces is
+        // the wrong one.
+        if !self.aot && !self.reload_recompile {
             if let Some(raw) = self
                 .bytecode
                 .functions

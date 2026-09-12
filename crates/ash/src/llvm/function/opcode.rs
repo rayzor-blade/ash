@@ -61,6 +61,7 @@ impl<'ctx> JITModule<'ctx> {
         i: usize,
         opcode_blocks: &[BasicBlock<'ctx>],
     ) -> Result<()> {
+        crate::profile::count("opcodes translated", 1);
         match op {
             Opcode::Mov { dst, src } => {
                 let src_val = self.builder.build_load(

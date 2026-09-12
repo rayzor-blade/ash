@@ -429,6 +429,7 @@ impl<'ctx> JITModule<'ctx> {
                 let current = blocks[bi][ii];
                 let next = blocks[bi][ii + 1];
                 self.builder.position_at_end(current);
+                crate::profile::count("air instrs translated", 1);
 
                 match instr {
                     AirInstr::Param { dst, reg } => {
@@ -909,6 +910,9 @@ impl<'ctx> JITModule<'ctx> {
     /// emitter. The adapter only supplies operands; AIR still owns the CFG,
     /// SSA joins, and resolved type information.
     fn air_instr_opcode(&self, instr: &AirInstr, cell_base: usize) -> Result<Option<Opcode>> {
+        // What is left of the round trip: every instruction counted here is
+        // one the backend rebuilt as an HL opcode instead of translating.
+        crate::profile::count("air instrs rebuilt as opcodes", 1);
         let reg = |v: ValueId| Reg(v.0);
         let cell = |c: air::v2::ir::CellId| Reg((cell_base + c.idx()) as u32);
         let call = |dst: ValueId, fun: usize, args: &[ValueId]| -> Result<Opcode> {

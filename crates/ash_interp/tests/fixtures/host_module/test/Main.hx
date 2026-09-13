@@ -22,6 +22,12 @@ package test;
 	public inline function bump():Int {
 		return greeter_bump(this);
 	}
+
+	/** A function the host makes: a var-args closure over a C entry, as
+		`Reflect.makeVarArgs` makes, which Haxe calls as any function. */
+	@:hlNative("host", "greeter_adder") public static function adder():Int->Int {
+		return null;
+	}
 }
 
 class Main {
@@ -39,6 +45,7 @@ class Main {
 		var g = Greeter.make();
 		bump(g);
 		bump(g);
-		Sys.println(bump(g));
+		var add = Greeter.adder();
+		Sys.println(bump(g) + add(5));
 	}
 }

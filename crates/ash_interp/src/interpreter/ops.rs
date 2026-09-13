@@ -1574,7 +1574,38 @@ impl HLInterpreter {
                         if func_of(&self.targets, fi).is_none()
                             && native_of(&self.targets, fi).is_none()
                         {
-                            return Err(anyhow!("varargs wrapped closure has invalid findex {fi}"));
+                            // Not a function of the program: a C entry a host
+                            // wrapped with `hlp_make_var_args`, taking its
+                            // bound value and the array, as `hlp_call_method`
+                            // calls it.
+                            if (wrapped_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
+                            {
+                                return Err(anyhow!(
+                                    "varargs wrapped closure has invalid findex {fi}"
+                                ));
+                            }
+                            let array = packed.as_ptr() as *mut hl::varray;
+                            let result = if (*wrapped).hasValue != 0 {
+                                let f: unsafe extern "C" fn(
+                                    *mut c_void,
+                                    *mut hl::varray,
+                                ) -> *mut hl::vdynamic =
+                                    std::mem::transmute(wrapped_fun);
+                                f((*wrapped).value, array)
+                            } else {
+                                let f: unsafe extern "C" fn(*mut hl::varray) -> *mut hl::vdynamic =
+                                    std::mem::transmute(wrapped_fun);
+                                f(array)
+                            };
+                            let ret = if result.is_null() {
+                                NanBoxedValue::null()
+                            } else {
+                                NanBoxedValue::from_ptr(result as usize)
+                            };
+                            let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
+                            let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
+                            self.stack.last_mut().unwrap().registers.set(dst, coerced);
+                            return Ok(StepResult::Continue);
                         }
                         arg_vals.clear();
                         if (*wrapped).hasValue != 0 && !(*wrapped).value.is_null() {

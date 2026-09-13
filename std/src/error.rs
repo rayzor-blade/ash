@@ -251,6 +251,9 @@ pub struct TrapContext {
     /// the frames being jumped over never reach their pop. Always 0 on a
     /// target that walks its machine stack instead (see `shadow`).
     pub saved_shadow_depth: usize,
+    /// Whether the pool owns this context. A context a caller armed in its
+    /// own storage (`hlp_setup_trap_in`) is never retired into the pool.
+    pub pooled: bool,
 }
 
 impl Default for TrapContext {
@@ -270,7 +273,20 @@ impl TrapContext {
             caught: false,
             saved_lock_depth: 0,
             saved_shadow_depth: 0,
+            pooled: true,
         }
+    }
+
+    /// Make `self` the innermost trap after `prev`, ready for the setjmp
+    /// that fills `buf`; every other field is set, and `buf` is left as it
+    /// is, since setjmp writes all of it.
+    fn arm(&mut self, prev: *mut TrapContext, lock_depth: usize) {
+        self.has_jmpbuf = true;
+        self.prev = prev;
+        self.exception_value = None;
+        self.caught = false;
+        self.saved_lock_depth = lock_depth;
+        self.saved_shadow_depth = shadow::depth();
     }
 }
 
@@ -1473,28 +1489,50 @@ pub unsafe extern "C" fn hlp_rethrow(v: *mut vdynamic) {
 /// contexts are pooled. Traps nest strictly, so the pool never grows past the
 /// nesting depth.
 pub(crate) fn setup_trap() -> *mut TrapContext {
+    let lock_depth = unsafe { crate::rt::gc_lock_held_depth() };
     crate::gc::with_exc(|st| {
         let prev = st.current_trap;
         let trap_ptr = match st.trap_pool.pop() {
-            Some(reused) => {
-                // A reused context must look exactly like a fresh one; a stale
-                // `caught` or a leftover exception would be read by the next
-                // throw as though it belonged to this trap.
-                unsafe {
-                    *reused = TrapContext::new();
-                    (*reused).prev = prev;
-                }
-                reused
-            }
-            None => {
-                let mut fresh = Box::new(TrapContext::new());
-                fresh.prev = prev;
-                Box::into_raw(fresh)
-            }
+            // A reused context is armed afresh: a stale `caught` or a
+            // leftover exception would be read by the next throw as though
+            // it belonged to this trap.
+            Some(reused) => reused,
+            None => Box::into_raw(Box::new(TrapContext::new())),
         };
+        unsafe { (*trap_ptr).arm(prev, lock_depth) };
         st.current_trap = trap_ptr;
         trap_ptr
     })
+}
+
+/// Arm a trap whose context the caller keeps, in `storage` of `size`
+/// bytes, so a host that traps around every call into compiled code takes
+/// nothing from the pool and frees nothing. The buffer to `setjmp`. Null
+/// when the storage is too small: `hlp_trap_context_size` says how much.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_setup_trap_in(storage: *mut c_void, size: usize) -> *mut c_void {
+    if size < mem::size_of::<TrapContext>()
+        || storage.align_offset(mem::align_of::<TrapContext>()) != 0
+    {
+        return std::ptr::null_mut();
+    }
+    let trap = storage as *mut TrapContext;
+    let lock_depth = crate::rt::gc_lock_held_depth();
+    crate::gc::with_exc(|st| {
+        let prev = st.current_trap;
+        // Written field by field: the storage holds whatever it held.
+        std::ptr::addr_of_mut!((*trap).pooled).write(false);
+        std::ptr::addr_of_mut!((*trap).exception_value).write(None);
+        (*trap).arm(prev, lock_depth);
+        st.current_trap = trap;
+    });
+    (*trap).buf.as_mut_ptr().cast()
+}
+
+/// The bytes `hlp_setup_trap_in` wants, at pointer alignment.
+#[no_mangle]
+pub extern "C" fn hlp_trap_context_size() -> usize {
+    mem::size_of::<TrapContext>()
 }
 
 /// Pop the innermost trap and retire its context.
@@ -1514,8 +1552,12 @@ pub(crate) fn remove_trap() {
     })
 }
 
-/// Return a context to the pool, or free it if the pool is full.
+/// Return a context to the pool, or free it if the pool is full. One a
+/// caller keeps in its own storage is left to it.
 unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
+    if !(*trap).pooled {
+        return;
+    }
     if st.trap_pool.len() < 64 {
         st.trap_pool.push(trap);
     } else {
@@ -1525,13 +1567,9 @@ unsafe fn retire_trap(st: &mut crate::gc::ExcState, trap: *mut TrapContext) {
 
 #[no_mangle]
 pub unsafe extern "C" fn hlp_setup_trap_jit() -> *mut c_void {
-    // Depth held by this thread OUTSIDE this call — i.e. at the setjmp site
-    // the caller (JIT code) is about to establish.
-    let outer_depth = crate::rt::gc_lock_held_depth();
+    // The depth held by this thread outside this call, at the setjmp site
+    // the caller is about to establish, is what `setup_trap` records.
     let trap = setup_trap();
-    (*trap).has_jmpbuf = true;
-    (*trap).saved_lock_depth = outer_depth;
-    (*trap).saved_shadow_depth = shadow::depth();
     if throw_trace_enabled() {
         eprintln!(
             "[ash] setup_trap: ctx={trap:p} buf={:p} prev={:p}",

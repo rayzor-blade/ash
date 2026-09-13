@@ -902,7 +902,7 @@ fn tiered_compile_tier_inner(
         }
     }
     ctx.attempted.fetch_add(1, Ordering::Relaxed);
-    if std::env::var("ASH_TIER1_PROBE").is_ok() {
+    if env_flag!("ASH_TIER1_PROBE") {
         static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         let t0 = *T0.get_or_init(std::time::Instant::now);
         eprintln!(
@@ -1249,7 +1249,7 @@ pub(crate) fn resolve_worker_stub(
         return std::ptr::null_mut();
     }
 
-    if std::env::var_os("ASH_DBG_STUB").is_some() {
+    if env_flag!("ASH_DBG_STUB") {
         eprintln!("[stub] resolve findex={findex}");
     }
     // Already installed? Answer without the lock. The check used to sit INSIDE

@@ -1300,7 +1300,7 @@ pub(crate) unsafe fn thread_create(c: *mut vclosure) -> *mut c_void {
     // only from Rust heap memory the GC cannot see. `run_closure_body`
     // drops the root when the body is done.
     crate::rt::gc_add_persistent(c as *mut vdynamic);
-    if std::env::var_os("ASH_DBG_FIBER").is_some() {
+    if env_flag!(os "ASH_DBG_FIBER") {
         let nargs = (*c)
             .t
             .as_ref()

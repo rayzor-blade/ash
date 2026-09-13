@@ -3104,7 +3104,7 @@ impl HLInterpreter {
                     } else {
                         v
                     };
-                    if std::env::var_os("ASH_DBG_STUB").is_some() {
+                    if crate::tiering::env_flag!("ASH_DBG_STUB") {
                         eprintln!("[stub] call findex={findex} ret_kind={ret_kind} value={v:?}");
                     }
                     interp.value_to_i64(v, ret_kind)

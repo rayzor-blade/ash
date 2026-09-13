@@ -254,6 +254,10 @@ pub struct TrapContext {
     /// Whether the pool owns this context. A context a caller armed in its
     /// own storage (`hlp_setup_trap_in`) is never retired into the pool.
     pub pooled: bool,
+    /// The thread's exception state this context is chained into, for
+    /// `hlp_remove_trap_in` to unlink it without looking the state up.
+    /// Null for a pooled context.
+    state: *mut crate::gc::ExcState,
 }
 
 impl Default for TrapContext {
@@ -274,6 +278,7 @@ impl TrapContext {
             saved_lock_depth: 0,
             saved_shadow_depth: 0,
             pooled: true,
+            state: std::ptr::null_mut(),
         }
     }
 
@@ -1523,10 +1528,26 @@ pub unsafe extern "C" fn hlp_setup_trap_in(storage: *mut c_void, size: usize) ->
         // Written field by field: the storage holds whatever it held.
         std::ptr::addr_of_mut!((*trap).pooled).write(false);
         std::ptr::addr_of_mut!((*trap).exception_value).write(None);
+        std::ptr::addr_of_mut!((*trap).state).write(st);
         (*trap).arm(prev, lock_depth);
         st.current_trap = trap;
     });
     (*trap).buf.as_mut_ptr().cast()
+}
+
+/// Pop the trap `hlp_setup_trap_in` armed in `storage`, after a normal
+/// return from under it. It must be the innermost trap, on the thread
+/// that armed it; a throw pops it itself.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_remove_trap_in(storage: *mut c_void) {
+    let trap = storage as *mut TrapContext;
+    let st = (*trap).state;
+    if st.is_null() || (*st).current_trap != trap {
+        remove_trap();
+        return;
+    }
+    (*st).current_trap = (*trap).prev;
+    (*trap).exception_value = None;
 }
 
 /// The bytes `hlp_setup_trap_in` wants, at pointer alignment.

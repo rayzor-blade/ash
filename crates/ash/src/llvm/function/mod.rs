@@ -2266,6 +2266,122 @@ impl<'ctx> JITModule<'ctx> {
         Ok(function)
     }
 
+    /// The thunk for a host native called by record
+    /// (`native_lib::HostNative::record`): takes the program's typed
+    /// arguments, writes each as one word into a record on the stack, calls
+    /// `func_addr(context, record)`, and turns the one word that comes back
+    /// into the declared return type. The packing is the stub bridge's:
+    /// floats of either width as `f64` bits, narrow integers zero-extended,
+    /// pointers as they are.
+    fn generate_native_caller_by_record(
+        &self,
+        name: &str,
+        fn_type: FunctionType<'ctx>,
+        func_addr: usize,
+        context: usize,
+    ) -> Result<FunctionValue<'ctx>> {
+        let saved_block = self.builder.get_insert_block();
+
+        let function = self.module.add_function(name, fn_type, None);
+        self.stamp_host_cpu(function);
+        let basic_block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(basic_block);
+
+        self.reject_in_aot("a native caller thunk")?;
+        let i64_type = self.context.i64_type();
+        let f64_type = self.context.f64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+
+        let params: Vec<BasicValueEnum<'ctx>> = function.get_param_iter().collect();
+        let record_type = i64_type.array_type(params.len().max(1) as u32);
+        let record = self.builder.build_alloca(record_type, "record")?;
+        for (i, param) in params.iter().enumerate() {
+            let word = match *param {
+                BasicValueEnum::FloatValue(f) => {
+                    let wide = if f.get_type() == f64_type {
+                        f
+                    } else {
+                        self.builder.build_float_ext(f, f64_type, "record_f64")?
+                    };
+                    self.builder
+                        .build_bit_cast(wide, i64_type, "record_bits")?
+                        .into_int_value()
+                }
+                BasicValueEnum::IntValue(v) => {
+                    if v.get_type().get_bit_width() < 64 {
+                        self.builder.build_int_z_extend(v, i64_type, "record_int")?
+                    } else {
+                        v
+                    }
+                }
+                BasicValueEnum::PointerValue(p) => {
+                    self.builder.build_ptr_to_int(p, i64_type, "record_ptr")?
+                }
+                other => return Err(anyhow!("record native argument of type {other:?}")),
+            };
+            let index = i64_type.const_int(i as u64, false);
+            let at = unsafe {
+                self.builder
+                    .build_gep(i64_type, record, &[index], "record_at")?
+            };
+            self.builder.build_store(at, word)?;
+        }
+
+        let addr_int = i64_type.const_int(func_addr as u64, false);
+        let func_ptr = self.builder.build_int_to_ptr(addr_int, ptr_type, "fptr")?;
+        let word = i64_type.const_int(context as u64, false);
+        let word = self.builder.build_int_to_ptr(word, ptr_type, "context")?;
+        let callee_type = i64_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
+        let call_site = self.builder.build_indirect_call(
+            callee_type,
+            func_ptr,
+            &[word.into(), record.into()],
+            "call",
+        )?;
+        let raw = call_site
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("record native returned nothing"))?
+            .into_int_value();
+
+        match fn_type.get_return_type() {
+            None => {
+                self.builder.build_return(None)?;
+            }
+            Some(BasicTypeEnum::FloatType(t)) => {
+                let wide = self
+                    .builder
+                    .build_bit_cast(raw, f64_type, "result_f64")?
+                    .into_float_value();
+                let out = if t == f64_type {
+                    wide
+                } else {
+                    self.builder.build_float_trunc(wide, t, "result_f32")?
+                };
+                self.builder.build_return(Some(&out))?;
+            }
+            Some(BasicTypeEnum::IntType(t)) => {
+                let out = if t.get_bit_width() < 64 {
+                    self.builder.build_int_truncate(raw, t, "result_int")?
+                } else {
+                    raw
+                };
+                self.builder.build_return(Some(&out))?;
+            }
+            Some(BasicTypeEnum::PointerType(t)) => {
+                let out = self.builder.build_int_to_ptr(raw, t, "result_ptr")?;
+                self.builder.build_return(Some(&out))?;
+            }
+            Some(other) => return Err(anyhow!("record native result of type {other:?}")),
+        }
+
+        if let Some(block) = saved_block {
+            self.builder.position_at_end(block);
+        }
+
+        Ok(function)
+    }
+
     /// Float to integer with a defined result for every input.
     ///
     /// LLVM's `fptosi` is poison when the value does not fit, and O3 is

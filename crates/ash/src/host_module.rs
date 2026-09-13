@@ -64,6 +64,10 @@ pub struct HostMethod {
     /// form.
     #[serde(skip, default = "std::ptr::null")]
     pub context: *const c_void,
+    /// `func` takes its arguments as a record of words
+    /// (`native_lib::HostNative::record`). Not in the JSON form.
+    #[serde(skip)]
+    pub record: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -326,6 +330,7 @@ impl DecodedBytecode {
                     HostNative {
                         addr: method.func as usize,
                         context: method.context as usize,
+                        record: method.record,
                     },
                 );
                 new_natives.push((method.symbol.clone(), fun_type));
@@ -628,6 +633,7 @@ mod tests {
                     ret: HostType::I32,
                     func: stub_bump as *const c_void,
                     context: std::ptr::null(),
+                    record: false,
                 }],
                 statics: vec![HostMethod {
                     name: "make".into(),
@@ -636,6 +642,7 @@ mod tests {
                     ret: HostType::Obj("test.Greeter".into()),
                     func: stub_make as *const c_void,
                     context: std::ptr::null(),
+                    record: false,
                 }],
                 ctor: Some(HostMethod {
                     name: "new".into(),
@@ -644,6 +651,7 @@ mod tests {
                     ret: HostType::Void,
                     func: stub_ctor as *const c_void,
                     context: std::ptr::null(),
+                    record: false,
                 }),
             }],
         }

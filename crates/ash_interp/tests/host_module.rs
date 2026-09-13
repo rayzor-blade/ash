@@ -1,8 +1,8 @@
 //! A host module registered into a decoded program, run the way the CLI
 //! runs one: decode, register, resolver, `HLInterpreter::new`,
 //! `execute_entrypoint`, in `--mode interp`, `--mode hybrid` and `--mode jit`,
-//! and with each compiled tier alone, so a host native with a context word
-//! is reached from every tier's code.
+//! and with each compiled tier alone, so a host native with a context word,
+//! and one called by record, is reached from every tier's code.
 //!
 //! Each mode runs in a child process (this binary re-invoked), because the
 //! runtime is process-global and because a hybrid run has to leave through
@@ -45,7 +45,7 @@ fn main() {
             .output()
             .expect("spawn child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let ok = out.status.success() && stdout.trim() == "45";
+        let ok = out.status.success() && stdout.trim() == "45\n70";
         println!(
             "host_module::{mode} ... {}",
             if ok { "ok" } else { "FAILED" }
@@ -98,6 +98,27 @@ extern "C" fn greeter_bump(step: *const Step, g: *mut c_void) -> i32 {
         .or_insert(0);
     *count += unsafe { (*step).by };
     *count
+}
+
+/// A native called by record: the object, the factor and the flag arrive
+/// as three words, each read by its declared kind, and the result leaves
+/// as `f64` bits. Right only if every tier packs the record the same way.
+extern "C" fn greeter_scale(step: *const Step, args: *const i64) -> i64 {
+    let g = unsafe { *args } as usize;
+    let by = f64::from_bits(unsafe { *args.add(1) } as u64);
+    let on = unsafe { *args.add(2) } as u8 != 0;
+    let count = COUNTS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .get(&g)
+        .copied()
+        .unwrap_or(0);
+    let mut scaled = f64::from(count) * by;
+    if on {
+        scaled += f64::from(unsafe { (*step).by });
+    }
+    scaled.to_bits() as i64
 }
 
 /// `hlp_alloc_closure_ptr` and `hlp_make_var_args`, handed to the native
@@ -178,6 +199,7 @@ fn host_module() -> HostModule {
                     ret: HostType::Obj("test.Greeter".into()),
                     func: greeter_make as *const c_void,
                     context: std::ptr::null(),
+                    record: false,
                 },
                 HostMethod {
                     name: "bump".into(),
@@ -186,6 +208,7 @@ fn host_module() -> HostModule {
                     ret: HostType::I32,
                     func: greeter_bump as *const c_void,
                     context: &STEP as *const Step as *const c_void,
+                    record: false,
                 },
                 HostMethod {
                     name: "adder".into(),
@@ -194,6 +217,20 @@ fn host_module() -> HostModule {
                     ret: HostType::Fun,
                     func: greeter_adder as *const c_void,
                     context: std::ptr::null(),
+                    record: false,
+                },
+                HostMethod {
+                    name: "scale".into(),
+                    symbol: "greeter_scale".into(),
+                    params: vec![
+                        HostType::Obj("test.Greeter".into()),
+                        HostType::F64,
+                        HostType::Bool,
+                    ],
+                    ret: HostType::F64,
+                    func: greeter_scale as *const c_void,
+                    context: &STEP as *const Step as *const c_void,
+                    record: true,
                 },
             ],
             ctor: None,

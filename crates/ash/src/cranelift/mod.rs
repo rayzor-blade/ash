@@ -29,6 +29,9 @@ pub use air::{AirMode, Body};
 pub use backend::{AshCraneliftBackend, CraneliftTierContext};
 pub use lower::{lowering_reject_reason, signature_reject_reason, LoweredFunction};
 
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlagsData, Signature, Type, Value};
+use cranelift_frontend::FunctionBuilder;
+
 use crate::hl_bindings as hl;
 use crate::opcodes::Opcode;
 
@@ -158,6 +161,47 @@ pub fn argument_abi_class(kind: hl::hl_type_kind) -> AbiClass {
         AbiClass::Ptr
     } else {
         abi_class(kind)
+    }
+}
+
+/// The signature of a host native called by record
+/// (`native_lib::HostNative::record`): the context word and the record's
+/// address, and the result as one word.
+pub fn record_native_signature(backend: &backend::AshCraneliftBackend) -> Signature {
+    let mut sig = backend.make_signature();
+    sig.params.push(AbiParam::new(backend.pointer_type()));
+    sig.params.push(AbiParam::new(backend.pointer_type()));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+/// One argument as the word a record native reads: a float as `f64` bits,
+/// a narrow integer in the low bits, anything else as it is.
+pub fn record_word(b: &mut FunctionBuilder, v: Value) -> Value {
+    let ty = b.func.dfg.value_type(v);
+    if ty == types::F64 {
+        b.ins().bitcast(types::I64, MemFlagsData::new(), v)
+    } else if ty == types::F32 {
+        let wide = b.ins().fpromote(types::F64, v);
+        b.ins().bitcast(types::I64, MemFlagsData::new(), wide)
+    } else if ty.bits() < 64 {
+        b.ins().uextend(types::I64, v)
+    } else {
+        v
+    }
+}
+
+/// The word a record native returned, as a value of `ty`.
+pub fn record_result(b: &mut FunctionBuilder, raw: Value, ty: Type) -> Value {
+    if ty == types::F64 {
+        b.ins().bitcast(types::F64, MemFlagsData::new(), raw)
+    } else if ty == types::F32 {
+        let wide = b.ins().bitcast(types::F64, MemFlagsData::new(), raw);
+        b.ins().fdemote(types::F32, wide)
+    } else if ty.bits() < 64 {
+        b.ins().ireduce(ty, raw)
+    } else {
+        raw
     }
 }
 

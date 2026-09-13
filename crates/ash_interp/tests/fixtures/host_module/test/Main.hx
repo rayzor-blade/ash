@@ -28,6 +28,12 @@ package test;
 	@:hlNative("host", "greeter_adder") public static function adder():Int->Int {
 		return null;
 	}
+
+	/** A native the host takes by record: an object, a float and a bool
+		in, a float out, through one C entry that unpacks by kind. */
+	@:hlNative("host", "greeter_scale") public static function scale(g:Greeter, by:Float, on:Bool):Float {
+		return 0.0;
+	}
 }
 
 class Main {
@@ -47,5 +53,7 @@ class Main {
 		bump(g);
 		var add = Greeter.adder();
 		Sys.println(bump(g) + add(5));
+		// 30 * 1.5 + 10, then 30 * 0.5 with nothing added.
+		Sys.println(Greeter.scale(g, 1.5, true) + Greeter.scale(g, 0.5, false));
 	}
 }

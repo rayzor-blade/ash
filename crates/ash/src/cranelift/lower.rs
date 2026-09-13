@@ -35,8 +35,8 @@ use cranelift_frontend::{FunctionBuilder, Variable};
 
 use super::backend::{AshCraneliftBackend, CraneliftTierContext};
 use super::{
-    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode, widen_of,
-    AbiClass, Widen,
+    abi_class, argument_abi_class, entry_return_class, first_unsupported_opcode,
+    record_native_signature, record_result, record_word, widen_of, AbiClass, Widen,
 };
 use crate::hl_bindings as hl;
 use crate::opcodes::{Opcode, Reg};
@@ -384,8 +384,11 @@ fn import_native_targets(
             .fun
             .as_ref()
             .ok_or_else(|| anyhow!("native {} has no function type", native.name))?;
-        let sig =
-            call_signature_with_context(backend, ctx, tf, ctx.native_context(native_idx) != 0)?;
+        let sig = if ctx.native_record(native_idx) {
+            record_native_signature(backend)
+        } else {
+            call_signature_with_context(backend, ctx, tf, ctx.native_context(native_idx) != 0)?
+        };
         let key = ctx
             .native_symbol_key(native_idx)
             .ok_or_else(|| anyhow!("native {}@{} unresolved", native.lib, native.name))?;
@@ -1527,18 +1530,37 @@ impl Lowerer<'_, '_> {
                 .native_refs
                 .get(&target)
                 .ok_or_else(|| anyhow!("native findex {target} not imported"))?;
+            let native_idx = self.ctx.native_index(target);
             // A host native's context word goes first.
-            let context = self
-                .ctx
-                .native_index(target)
-                .map_or(0, |ni| self.ctx.native_context(ni));
-            if context != 0 {
-                let ptr = self.fcfg.pointer_type();
+            let context = native_idx.map_or(0, |ni| self.ctx.native_context(ni));
+            let ptr = self.fcfg.pointer_type();
+            if native_idx.is_some_and(|ni| self.ctx.native_record(ni)) {
+                // By record: the arguments as words in a stack slot, the
+                // result as one word (`native_lib::HostNative::record`).
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    (arg_vals.len().max(1) * 8) as u32,
+                    3,
+                ));
+                for (idx, v) in arg_vals.iter().enumerate() {
+                    let word = record_word(&mut self.b, *v);
+                    self.b
+                        .ins()
+                        .stack_store(types::I64, word, slot, (idx * 8) as i32);
+                }
+                let record = self.b.ins().stack_addr(ptr, slot, 0);
                 let word = self.b.ins().iconst(ptr, context as i64);
-                arg_vals.insert(0, word);
+                let call = self.b.ins().call(fref, &[word, record]);
+                let raw = self.b.inst_results(call)[0];
+                ret_ty.map(|t| record_result(&mut self.b, raw, t))
+            } else {
+                if context != 0 {
+                    let word = self.b.ins().iconst(ptr, context as i64);
+                    arg_vals.insert(0, word);
+                }
+                let call = self.b.ins().call(fref, &arg_vals);
+                ret_ty.map(|_| self.b.inst_results(call)[0])
             }
-            let call = self.b.ins().call(fref, &arg_vals);
-            ret_ty.map(|_| self.b.inst_results(call)[0])
         } else {
             self.stub_guarded_call(target, &arg_vals, &param_classes, ret_class)?
         };

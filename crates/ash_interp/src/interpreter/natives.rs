@@ -166,10 +166,18 @@ impl HLInterpreter {
             if let Some(slot) = self.native_ctx_cache.get_mut(native_idx) {
                 *slot = ash_core::native_lib::host_native_context(&native.lib, &native.name);
             }
+            if let Some(slot) = self.native_record_cache.get_mut(native_idx) {
+                *slot = ash_core::native_lib::host_native_record(&native.lib, &native.name);
+            }
         }
         // A host native's context word goes first, before the declared
         // arguments (`native_lib::HostNative`).
         let context = self.native_ctx_cache.get(native_idx).copied().unwrap_or(0);
+        let record = self
+            .native_record_cache
+            .get(native_idx)
+            .copied()
+            .unwrap_or(false);
 
         // Get the function type signature for type-aware marshaling
         let type_fun = bytecode.types[native.type_.0]
@@ -224,6 +232,33 @@ impl HLInterpreter {
         // throws longjmps straight back here, leaving the frames it pushed
         // behind.
         let stack_depth = self.stack.len();
+
+        if record {
+            // By record: every argument as the word `value_to_i64` gives,
+            // which is the packing `HostNative::record` promises, and the
+            // result read back by kind (`native_lib::HostNative`).
+            let words: Vec<i64> = args
+                .iter()
+                .enumerate()
+                .map(|(i, &a)| self.value_to_i64(a, arg_kinds.get(i).copied().unwrap_or(0)))
+                .collect();
+            let mut raw = None;
+            let jumped = run_with_hl_trap(fn_setup_trap, fn_remove_trap, || {
+                let f: unsafe extern "C" fn(usize, *const i64) -> i64 =
+                    unsafe { std::mem::transmute(func_ptr) };
+                raw = Some(unsafe { f(context, words.as_ptr()) });
+            });
+            if jumped != 0 {
+                return Err(self.longjmp_error(
+                    Some(bytecode),
+                    stack_depth,
+                    format!("Native longjmp without exception value: {func_name}"),
+                ));
+            }
+            let raw =
+                raw.ok_or_else(|| anyhow!("Native trap boundary did not run: {func_name}"))?;
+            return Ok(self.wrap_native_result(raw, ret_kind));
+        }
 
         if ret_is_float || float_mask != 0 {
             let mut raw = None;

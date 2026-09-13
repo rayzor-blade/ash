@@ -452,15 +452,34 @@ fn host_natives() -> &'static Mutex<HashMap<String, HostNative>> {
 /// C function can stand behind many natives and be told which. The
 /// declared arguments then number at most `ash_native_call`'s limit less
 /// one.
+///
+/// A native marked `record` is called as `addr(context, args) -> word`
+/// whatever its signature: `args` points at one word per declared
+/// argument, packed as the stub bridge packs a call, and the result comes
+/// back as one word the caller reads by the declared return kind. So one
+/// C function can stand behind natives of every signature and unpack by
+/// the kinds it knows. The packing, in every word:
+///
+/// - `HF32` and `HF64`: the value as an `f64`, its bits;
+/// - `HUI8`, `HUI16`, `HI32` and `HBOOL`: the value in the low 32 bits,
+///   the rest unspecified;
+/// - `HI64`: the value;
+/// - `HVOID`: zero;
+/// - every other kind: the pointer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostNative {
     pub addr: usize,
     pub context: usize,
+    pub record: bool,
 }
 
 impl HostNative {
     pub fn plain(addr: usize) -> Self {
-        HostNative { addr, context: 0 }
+        HostNative {
+            addr,
+            context: 0,
+            record: false,
+        }
     }
 }
 
@@ -496,6 +515,12 @@ pub fn host_native(library_name: &str, function_name: &str) -> Option<HostNative
 /// zero for a native that takes none.
 pub fn host_native_context(library_name: &str, function_name: &str) -> usize {
     host_native(library_name, function_name).map_or(0, |n| n.context)
+}
+
+/// Whether `(lib, name)` takes its arguments as a record
+/// ([`HostNative::record`]).
+pub fn host_native_record(library_name: &str, function_name: &str) -> bool {
+    host_native(library_name, function_name).is_some_and(|n| n.record)
 }
 
 fn host_native_addr(library_name: &str, function_name: &str) -> Option<usize> {

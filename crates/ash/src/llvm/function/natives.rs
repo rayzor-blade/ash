@@ -178,9 +178,10 @@ impl<'ctx> JITModule<'ctx> {
             .expect("expected to get function type");
         let func_type = self.create_function_type(&type_fun)?;
         let context = crate::native_lib::host_native_context(lib, &native_func.name);
+        let record = crate::native_lib::host_native_record(lib, &native_func.name);
 
         if self.aot {
-            if context != 0 {
+            if context != 0 || record {
                 return Err(anyhow!(
                     "host native {lib}@{name} carries a context word, which cannot be linked ahead of time"
                 ));
@@ -255,8 +256,11 @@ impl<'ctx> JITModule<'ctx> {
         };
 
         let caller_name = format!("{}_{}_caller", lib, name);
-        let native_caller =
-            self.generate_native_caller_with_context(&caller_name, func_type, func_addr, context)?;
+        let native_caller = if record {
+            self.generate_native_caller_by_record(&caller_name, func_type, func_addr, context)?
+        } else {
+            self.generate_native_caller_with_context(&caller_name, func_type, func_addr, context)?
+        };
 
         debug_assert!(native_caller.verify(true));
 

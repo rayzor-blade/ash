@@ -515,6 +515,9 @@ pub struct HLInterpreter {
     native_fn_cache: Vec<*mut c_void>,
     /// Per native: the host's context word, filled beside the pointer.
     native_ctx_cache: Vec<usize>,
+    /// Per native: whether the host takes the arguments as a record
+    /// (`native_lib::HostNative::record`), filled beside the pointer.
+    native_record_cache: Vec<bool>,
     /// C-level type structures for native function interop
     c_type_factory: CTypeFactory,
     /// Resolved stdlib function pointer: hlp_alloc_obj
@@ -983,6 +986,7 @@ impl HLInterpreter {
             ssa: SsaCache::default(),
             native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
             native_ctx_cache: vec![0; bytecode.natives.len()],
+            native_record_cache: vec![false; bytecode.natives.len()],
             c_type_factory,
             fn_alloc_obj,
             fn_get_obj_rt,

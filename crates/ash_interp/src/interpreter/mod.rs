@@ -2327,19 +2327,21 @@ impl HLInterpreter {
         findex: usize,
         err: anyhow::Error,
     ) -> ! {
-        // One line per findex: the exception itself is the report, and the old
-        // unconditional log turned a per-event failure into a stderr flood.
-        static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
-        let first = REPORTED
-            .get_or_init(|| Mutex::new(HashSet::new()))
-            .lock()
-            .map(|mut s| s.insert(findex))
-            .unwrap_or(true);
-        if first {
-            eprintln!(
-                "[ash] stub bridge: findex {} failed, raising into the HL trap chain: {:#}",
-                findex, err
-            );
+        // The exception itself is the report; this is the tier's own trace
+        // of the hand-off, once per findex, under `ASH_TIER_LOG` (`--jit-log`).
+        if env_flag!("ASH_TIER_LOG") {
+            static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+            let first = REPORTED
+                .get_or_init(|| Mutex::new(HashSet::new()))
+                .lock()
+                .map(|mut s| s.insert(findex))
+                .unwrap_or(true);
+            if first {
+                eprintln!(
+                    "[tier] stub bridge: findex {} failed, raising into the HL trap chain: {:#}",
+                    findex, err
+                );
+            }
         }
 
         let throw_fn = resolver

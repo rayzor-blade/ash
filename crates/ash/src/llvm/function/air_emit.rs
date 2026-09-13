@@ -366,13 +366,17 @@ impl<'ctx> JITModule<'ctx> {
         // none, and `ASH_POLL_MEMORY` relaxes what the helper may write; both
         // are for measuring what a poll costs, neither is sound to run with.
         //
-        // The poll sits on the BACK EDGES into the header, not in front of
-        // it: every iteration still passes it, but the header stays the
-        // block that tests the loop's exit, which is what lets LLVM rotate
-        // the loop and then hoist a load the body is guaranteed to reach. A
-        // poll ahead of the header made the header a non-exiting block, no
-        // rotation happened, and every loop-invariant guard on a receiver
-        // or closure was re-evaluated on every iteration.
+        // In a JIT body the poll sits on the BACK EDGES into the header,
+        // not in front of it: every iteration still passes it, but the
+        // header stays the block that tests the loop's exit, which is what
+        // lets LLVM rotate the loop and then hoist a load the body is
+        // guaranteed to reach -- the receiver or closure guard of a
+        // devirtualised call. A poll ahead of the header makes the header a
+        // non-exiting block and no rotation happens. Ahead of time the poll
+        // stays in front of the header: its calls carry no such guard yet,
+        // and the rotated loop's register image around an indirect call
+        // costs more than it returns there.
+        let polls_on_back_edges = !self.aot;
         let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
         let mut poll_entries = vec![None; air.blocks.len()];
@@ -384,16 +388,21 @@ impl<'ctx> JITModule<'ctx> {
             }
             entries[bi] = blocks[bi].first().copied();
             if poll_headers[bi] {
-                poll_entries[bi] = Some(
-                    self.context
-                        .append_basic_block(function, &format!("air_b{bi}_fiber_poll")),
-                );
+                let poll = self
+                    .context
+                    .append_basic_block(function, &format!("air_b{bi}_fiber_poll"));
+                poll_entries[bi] = Some(poll);
+                if !polls_on_back_edges {
+                    entries[bi] = Some(poll);
+                }
             }
         }
-        for lp in &loops.loops {
-            if poll_headers[lp.header.idx()] {
-                for latch in &lp.latches {
-                    back_edges.insert((latch.0, lp.header.0));
+        if polls_on_back_edges {
+            for lp in &loops.loops {
+                if poll_headers[lp.header.idx()] {
+                    for latch in &lp.latches {
+                        back_edges.insert((latch.0, lp.header.0));
+                    }
                 }
             }
         }
@@ -475,21 +484,25 @@ impl<'ctx> JITModule<'ctx> {
             let body = blocks[bi][0];
 
             self.builder.position_at_end(poll_entry);
-            // The handled epoch stays in its stack slot: read once per
-            // iteration, written only when a poll fires. Promoted to a
-            // register it would cost a callee-saved register across every
-            // call in the loop, and a loop with an indirect call spilled the
-            // callee pointer instead.
+            // On the back-edge form the handled epoch stays in its stack
+            // slot: read once per iteration, written only when a poll
+            // fires. Promoted to a register it would cost a callee-saved
+            // register across every call in the loop, and a loop with an
+            // indirect call spilled the callee pointer instead.
             let handled = self.builder.build_load(
                 self.context.i64_type(),
                 handled_slot,
                 "air_fiber_poll_handled_epoch",
             )?;
-            handled
-                .as_instruction_value()
-                .expect("handled epoch load is an instruction")
-                .set_volatile(true)
-                .map_err(|error| anyhow!("failed to mark epoch slot load volatile: {error:?}"))?;
+            if polls_on_back_edges {
+                handled
+                    .as_instruction_value()
+                    .expect("handled epoch load is an instruction")
+                    .set_volatile(true)
+                    .map_err(|error| {
+                        anyhow!("failed to mark epoch slot load volatile: {error:?}")
+                    })?;
+            }
             let handled = handled.into_int_value();
             let current = self.builder.build_load(
                 self.context.i64_type(),
@@ -512,10 +525,12 @@ impl<'ctx> JITModule<'ctx> {
                 .build_conditional_branch(due, poll_call, join)?;
 
             self.builder.position_at_end(poll_call);
-            self.builder
-                .build_store(handled_slot, current)?
-                .set_volatile(true)
-                .map_err(|error| anyhow!("failed to mark epoch slot store volatile: {error:?}"))?;
+            let store = self.builder.build_store(handled_slot, current)?;
+            if polls_on_back_edges {
+                store.set_volatile(true).map_err(|error| {
+                    anyhow!("failed to mark epoch slot store volatile: {error:?}")
+                })?;
+            }
             self.builder.build_call(
                 fiber_poll.expect("poll headers have a helper"),
                 &[],

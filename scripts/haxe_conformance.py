@@ -460,6 +460,12 @@ def classify(res, elapsed_ms, timed_out) -> tuple[str, str]:
         detail = lines[i].strip()[:160]
         if before:
             detail += "  <- " + " | ".join(before)[:240]
+        # A Rust panic that aborts prints its message and then a backtrace
+        # of thirty frames, so the four lines above the banner are the end
+        # of the backtrace; the message is what says where it panicked.
+        panicked = next((l.strip() for l in lines[:i] if "panicked at" in l), None)
+        if panicked:
+            detail += "  <- " + panicked[:240]
         return "CRASH", detail
     if "panicked at" in out:
         line = next((l for l in out.splitlines() if "panicked at" in l), "")

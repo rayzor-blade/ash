@@ -1624,7 +1624,7 @@ pub(crate) fn produce_cranelift_osr_entries(
             &opt,
             pc,
         ) {
-            Ok(addr) => {
+            Ok((addr, positions)) => {
                 // Without this the entry's samples land in the profiler's
                 // `unknown` bucket — 73% of a NUC mandelbrot run was an
                 // unregistered OSR entry.
@@ -1635,6 +1635,9 @@ pub(crate) fn produce_cranelift_osr_entries(
                     addr,
                     0,
                 );
+                // The hot loop runs HERE, so this is the body a trace most
+                // often has to name.
+                ash_core::jit_map::set_positions(addr, positions);
                 entries.push(OsrEntry {
                     site: pc as u64,
                     code: addr as *mut (),

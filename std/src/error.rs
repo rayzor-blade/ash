@@ -1140,13 +1140,28 @@ pub extern "C" fn hlp_call_stack_frame() -> *const usize {
     CALL_STACK_FRAME.with(|frame| frame.get() as *const usize)
 }
 
+thread_local! {
+    /// Set while a throw's trace is being captured, so the capture callback
+    /// can tell that call from one made for `haxe.CallStack.callStack()`.
+    static CAPTURING_EXCEPTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the capture callback is running for a throw rather than for a
+/// call-stack request.
+#[no_mangle]
+pub extern "C" fn hlp_capturing_exception() -> bool {
+    CAPTURING_EXCEPTION.with(|c| c.get())
+}
+
 unsafe fn capture_exception_stack() {
     let callback = CAPTURE_STACK.load(Ordering::Acquire);
     if callback == 0 {
         return;
     }
     let callback: CaptureStack = std::mem::transmute(callback);
+    CAPTURING_EXCEPTION.with(|c| c.set(true));
     let count = callback(std::ptr::null_mut(), 0).max(0) as usize;
+    CAPTURING_EXCEPTION.with(|c| c.set(false));
     let mut frames = vec![std::ptr::null_mut(); count];
     let written = if count == 0 {
         0
@@ -1274,8 +1289,28 @@ unsafe fn note_throw_site_at(pc: usize, v: *mut vdynamic) {
     );
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+extern "C" {
+    fn ash_throw_stack_boundary();
+}
+
+/// [`capture_exception_stack`] with the frame pointer of the C boundary
+/// that called it, for the walker on the one platform whose runtime keeps
+/// no frame pointers of its own; see `stack_boundary.c`.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_capture_exception_stack_from_frame(frame: *mut *mut c_void) {
+    CALL_STACK_FRAME.with(|saved| {
+        let previous = saved.replace(frame as usize);
+        capture_exception_stack();
+        saved.set(previous);
+    });
+}
+
 unsafe fn throw_impl(v: *mut vdynamic, capture_stack: bool) {
     if capture_stack {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        ash_throw_stack_boundary();
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
         capture_exception_stack();
         note_throw_site(v);
     }

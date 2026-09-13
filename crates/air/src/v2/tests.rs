@@ -632,7 +632,7 @@ fn lower_positions_mark_blocks_and_line_changes() {
     let firsts: Vec<(u32, u32)> = f.blocks[1..]
         .iter()
         .map(|b| match b.instrs.first() {
-            Some(Instr::Pos { file, line }) => (*file, *line),
+            Some(Instr::Pos { file, line, .. }) => (*file, *line),
             other => panic!("block starts with {other:?}, not a Pos"),
         })
         .collect();
@@ -657,7 +657,7 @@ fn lower_positions_mark_blocks_and_line_changes() {
         .instrs
         .iter()
         .map(|i| match i {
-            Instr::Pos { file, line } => format!("pos {file}:{line}"),
+            Instr::Pos { file, line, .. } => format!("pos {file}:{line}"),
             Instr::Int { .. } => "int".into(),
             Instr::BinOp { .. } => "add".into(),
             other => panic!("unexpected {other:?}"),
@@ -4532,6 +4532,112 @@ fn inline_replaces_a_direct_call_with_the_callee_body() {
         1,
         "the callee's arithmetic is now the caller's\n{}",
         f.dump()
+    );
+}
+
+/// A marker between a self tail call and its return is not a computation:
+/// the call is still a tail call, and the function still becomes a loop.
+#[test]
+fn tre_sees_past_a_position_marker_before_the_return() {
+    // f9(n, acc): if n == 0 return acc; return f9(n - 1, acc + 1) -- with
+    // the return on its own line, so a marker sits between Call and Ret.
+    let ops = vec![
+        Opcode::Int {
+            dst: Reg(2),
+            ptr: RefInt(0),
+        },
+        Opcode::JEq {
+            a: Reg(0),
+            b: Reg(2),
+            offset: 3,
+        },
+        Opcode::Sub {
+            dst: Reg(2),
+            a: Reg(0),
+            b: Reg(2),
+        },
+        Opcode::Call2 {
+            dst: Reg(3),
+            fun: RefFun(9),
+            arg0: Reg(2),
+            arg1: Reg(1),
+        },
+        Opcode::Ret { ret: Reg(3) },
+        Opcode::Ret { ret: Reg(1) },
+    ];
+    let tys = vec![t(0); 4];
+    let debug: Vec<i32> = vec![0, 1, 0, 1, 0, 2, 0, 2, 0, 3, 0, 4];
+    let mut f = lower_with_positions(&ops, &tys, &ModuleTables::new(), Some(&debug))
+        .expect("lower")
+        .with_findex(9);
+    assert!(
+        f.blocks.iter().any(|b| b
+            .instrs
+            .windows(2)
+            .any(|w| matches!((&w[0], &w[1]), (Instr::Call { .. }, Instr::Pos { .. })))),
+        "the fixture must put a marker right after the call\n{}",
+        f.dump()
+    );
+    let stats = run_pass(&mut f, &TailRecursionElim, PassOptions::default());
+    assert!(stats.replaced > 0, "{}", f.dump());
+    assert_eq!(any_call(&f), 0, "the tail call must be a loop now\n{}", f.dump());
+}
+
+/// Code inlined from a callee keeps the callee's own positions, and the
+/// site it came in through names the call: a frame stopped on the callee's
+/// arithmetic is the callee at its line, then the caller at the call.
+#[test]
+fn inlined_code_keeps_the_callee_position_and_names_the_call() {
+    // Callee f7: file 1, lines 20 and 21. Caller f3: file 0, lines 4, 5, 6.
+    let (cops, ctys) = fix_callee_add();
+    let cdebug: Vec<i32> = vec![1, 20, 1, 21];
+    let callee = lower_with_positions(&cops, &ctys, &ModuleTables::new(), Some(&cdebug))
+        .expect("lower callee")
+        .with_findex(7);
+    let info = ModuleTables::new().with_callee(7, CalleeBody::Air(Box::new(callee)));
+    let (ops, tys) = fix_caller_call2();
+    let debug: Vec<i32> = vec![0, 4, 0, 5, 0, 6];
+    let mut f = lower_with_positions(&ops, &tys, &info, Some(&debug))
+        .expect("lower caller")
+        .with_findex(3);
+    let stats = run_pass(&mut f, &Inlining::new(&info), PassOptions::default());
+    assert_eq!(stats.inlined, 1, "{}", f.dump());
+    assert_eq!(
+        f.inline_sites,
+        vec![InlineSite {
+            callee: 7,
+            file: 0,
+            line: 5,
+            parent: None,
+        }],
+        "{}",
+        f.dump()
+    );
+
+    let ser = serialize(&f).expect("serialize");
+    let pos = super::positions::positions_by_pc(&f, &ser);
+    let add_pc = ser
+        .ops
+        .iter()
+        .position(|o| matches!(o, Opcode::Add { .. }))
+        .expect("the callee's Add survives");
+    assert_eq!(pos[add_pc].file, 1);
+    assert_eq!(pos[add_pc].line, 20);
+    assert_eq!(pos[add_pc].site, Some(0));
+    assert_eq!(
+        super::positions::frames_of(pos[add_pc], &f.inline_sites, 3),
+        vec![(7, 1, 20), (3, 0, 5)]
+    );
+    // The caller's own Ret, after the inlined region, is the caller's again.
+    let ret_pc = ser
+        .ops
+        .iter()
+        .rposition(|o| matches!(o, Opcode::Ret { .. }))
+        .expect("a Ret");
+    assert_eq!((pos[ret_pc].file, pos[ret_pc].line, pos[ret_pc].site), (0, 6, None));
+    assert_eq!(
+        super::positions::frames_of(pos[ret_pc], &f.inline_sites, 3),
+        vec![(3, 0, 6)]
     );
 }
 

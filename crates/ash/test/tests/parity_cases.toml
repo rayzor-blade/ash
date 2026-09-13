@@ -702,3 +702,18 @@ expectation = "exact"
 normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
+
+# Stack traces through inlined code: haxe.CallStack.callStack,
+# exceptionStack and the uncaught report on stderr, with the callees folded
+# into main at O3. Every engine has to print the frames the interpreter
+# prints. Exits 1 by design.
+[[case]]
+name = "TestTraceInlined"
+main = "TestTraceInlined"
+hl = "test_trace_inlined.hl"
+slow = false
+timeout_secs = 180
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+oracle_is_interp = true

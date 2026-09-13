@@ -167,8 +167,9 @@ impl<'a> IntoIterator for &'a NativeTable {
 /// site.
 #[derive(Debug, Clone)]
 pub enum CalleeBody {
-    /// Already lowered to AIR.
-    Air(Function),
+    /// Already lowered to AIR. Boxed: a `Function` is several hundred bytes
+    /// of table headers, the bytecode arm a fraction of that.
+    Air(Box<Function>),
     /// Raw bytecode: the function's opcode array and register-type table.
     Bytecode {
         ops: Vec<Opcode>,
@@ -185,7 +186,7 @@ impl CalleeBody {
     /// caller.
     pub fn into_function(self, findex: usize, info: &dyn ModuleInfo) -> Result<Function> {
         let f = match self {
-            CalleeBody::Air(f) => f,
+            CalleeBody::Air(f) => *f,
             CalleeBody::Bytecode { ops, reg_types } => {
                 super::lower::lower_with(&ops, &reg_types, info)?
             }

@@ -251,19 +251,27 @@ impl<'b> ModuleInfo for AshModule<'b> {
             .expect("callee cache poisoned")
             .get(&findex)
         {
-            return Some(CalleeBody::Air(hit.clone()));
+            return Some(CalleeBody::Air(Box::new(hit.clone())));
         }
         let f = self.function(findex)?;
         // Lowered against a module that offers no callees: this is the callee's
         // own body, and letting it inline its own callees here would expand
         // the same work at every site that asks for it.
+        // With its positions, so the markers the inliner copies still say
+        // which line of the callee a frame is stopped on.
         let bare = self.without_callees_view();
-        let body = air::v2::lower::lower_with(&f.ops, &reg_types_of(f), &bare).ok()?;
+        let body = air::v2::lower::lower_with_positions(
+            &f.ops,
+            &reg_types_of(f),
+            &bare,
+            positions_of(f),
+        )
+        .ok()?;
         self.lowered
             .lock()
             .expect("callee cache poisoned")
             .insert(findex, body.clone());
-        Some(CalleeBody::Air(body))
+        Some(CalleeBody::Air(Box::new(body)))
     }
 }
 
@@ -436,14 +444,22 @@ pub fn shadow_frames() -> bool {
 /// Two consumers want them. A shadow-stack target stores each one into its
 /// frame, which is the only way a wasm module can name a frame. The Cranelift
 /// tier turns them into srclocs, so a compiled frame can report the line it
-/// is stopped on rather than the line its function opens with.
+/// is stopped on -- and the inlined callee it is stopped in -- rather than
+/// the line its function opens with.
 ///
-/// `ASH_TRACE_LINES=1` asks for the second. It is not free: a marker carries
-/// `Effect::WriteMem`, so it is a barrier to the memory passes, and lowering
-/// emits one at every position change.
+/// On by default; `ASH_TRACE_LINES=0` turns the markers off, which leaves a
+/// compiled frame reporting its function's entry line. A marker emits no
+/// code, the walker skips it and the passes that count or reorder
+/// instructions exclude it.
 pub fn trace_positions() -> bool {
     static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    shadow_frames() || *ASKED.get_or_init(|| std::env::var_os("ASH_TRACE_LINES").is_some())
+    shadow_frames()
+        || *ASKED.get_or_init(|| {
+            !matches!(
+                std::env::var("ASH_TRACE_LINES").as_deref(),
+                Ok("0") | Ok("off")
+            )
+        })
 }
 
 /// The per-op positions `f` lowers with: its debug table when something will

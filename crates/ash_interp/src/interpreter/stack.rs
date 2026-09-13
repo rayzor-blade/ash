@@ -137,8 +137,9 @@ impl HLInterpreter {
     /// was always empty and the renderer had nothing to anchor on.
     ///
     /// Compiled frames come from a native walk and carry no pc of their own,
-    /// so they report their function's entry until a tier records positions.
-    /// Interpreter frames carry the pc they are stopped at.
+    /// so they report their function's entry unless the tier recorded
+    /// positions, in which case one native frame may expand to the inlined
+    /// callees it holds. Interpreter frames carry the pc they are stopped at.
     pub(super) fn trace_sites(&self, frame_hint: *const usize) -> Vec<TraceSite> {
         // A recursive chain repeats one function; the walks above answer per
         // native frame, so collapsing adjacent repeats is what keeps a
@@ -174,7 +175,22 @@ impl HLInterpreter {
             if sites.len() >= Self::MAX_TRACE_FRAMES {
                 return sites;
             }
-            push(&mut sites, frame.function_index, frame.pc, true, None);
+            // A walker frame stopped inside inlined code is the callee's
+            // frame at its own line, then the call that reached it, out to
+            // the function the body belongs to -- the frames the stack
+            // would hold had nothing been inlined.
+            let mut visit = |findex: u32, file: i32, line: i32| {
+                if let Some(function_index) = func_of(&self.targets, findex as usize) {
+                    push(&mut sites, function_index, frame.pc, true, Some((file, line)));
+                }
+            };
+            let named = match self.ssa.body(frame.function_index) {
+                Some(prep) => prep.frames_at(frame.pc, &mut visit),
+                None => self.air.frames_at(frame.function_index, frame.pc, &mut visit),
+            };
+            if !named {
+                push(&mut sites, frame.function_index, frame.pc, true, None);
+            }
         }
         sites
     }
@@ -242,6 +258,30 @@ impl HLInterpreter {
             .as_ptr() as usize
     }
 
+    /// This thread's stack, `[low, high)`, asked of pthread once per thread:
+    /// glibc answers for the main thread by parsing /proc/self/maps, which
+    /// is not a per-throw cost.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    fn thread_stack_bounds() -> Option<(usize, usize)> {
+        thread_local! {
+            static BOUNDS: std::cell::OnceCell<Option<(usize, usize)>> =
+                const { std::cell::OnceCell::new() };
+        }
+        BOUNDS.with(|cell| {
+            *cell.get_or_init(|| unsafe {
+                let mut attr: libc::pthread_attr_t = std::mem::zeroed();
+                let mut base = std::ptr::null_mut::<c_void>();
+                let mut size = 0usize;
+                if libc::pthread_getattr_np(libc::pthread_self(), &mut attr) != 0 {
+                    return None;
+                }
+                let ok = libc::pthread_attr_getstack(&attr, &mut base, &mut size) == 0;
+                libc::pthread_attr_destroy(&mut attr);
+                ok.then(|| (base as usize, (base as usize).saturating_add(size)))
+            })
+        })
+    }
+
     /// Return true when the loader owns `pc` as part of the executable or a
     /// shared library. JIT code lives in anonymous executable mappings, so a
     /// loader-owned address must never be fed to the nearest-JIT-entry
@@ -304,20 +344,32 @@ impl HLInterpreter {
 
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         if !_frame_hint.is_null() {
-            unsafe {
-                let mut attr: libc::pthread_attr_t = std::mem::zeroed();
-                let mut stack_base = std::ptr::null_mut::<c_void>();
-                let mut stack_size = 0usize;
-                let have_attr = libc::pthread_getattr_np(libc::pthread_self(), &mut attr) == 0;
-                let have_bounds = have_attr
-                    && libc::pthread_attr_getstack(&attr, &mut stack_base, &mut stack_size) == 0;
-                if have_attr {
-                    libc::pthread_attr_destroy(&mut attr);
+            // The frame the walk below starts from was reached through
+            // runtime frames that keep no frame pointer, so its saved rbp is
+            // the innermost compiled frame's and the chain names that
+            // frame's CALLERS. The unwinder can still name the innermost
+            // frame itself: it steps through the runtime's own frames by
+            // their unwind tables and stops at the first compiled one,
+            // reporting the return address into it.
+            let mut inner = [std::ptr::null_mut::<c_void>(); 64];
+            let count = unsafe { libc::backtrace(inner.as_mut_ptr(), 64).max(0) as usize };
+            let mut innermost_pc = 0usize;
+            for pc in inner.iter().take(count) {
+                if Self::native_image_owns_pc(*pc as usize) {
+                    continue;
                 }
-
-                if have_bounds {
-                    let stack_low = stack_base as usize;
-                    let stack_high = stack_low.saturating_add(stack_size);
+                // Waiting on the map, not trying it: an install on a broker
+                // thread holds the lock briefly, and losing to it here would
+                // drop the throwing frame from the trace.
+                if ash_core::jit_map::lookup_wait(*pc as usize).is_some() {
+                    self.push_jit_frames(&mut functions, *pc as usize);
+                    innermost_pc = *pc as usize;
+                    break;
+                }
+            }
+            unsafe {
+                if let Some((stack_low, stack_high)) = Self::thread_stack_bounds() {
+                    let stack_size = stack_high - stack_low;
                     let mut frame = _frame_hint as usize;
                     for _ in 0..MAX_FRAMES {
                         if frame < stack_low
@@ -329,19 +381,11 @@ impl HLInterpreter {
                         let words = frame as *const usize;
                         let caller = *words;
                         let return_pc = *words.add(1);
-                        if !Self::native_image_owns_pc(return_pc) {
-                            if let Some((findex, _, _)) =
-                                ash_core::profile::describe_jit_pc(return_pc)
-                            {
-                                if let Some(function_index) =
-                                    func_of(&self.targets, findex as usize)
-                                {
-                                    if functions.last().map(|(f, _)| *f) != Some(function_index) {
-                                        functions
-                                            .push((function_index, Self::jit_position(return_pc)));
-                                    }
-                                }
-                            }
+                        // The runtime's own frames keep frame pointers only
+                        // on some builds; when they do, the chain passes
+                        // the throw again, and the unwinder already named it.
+                        if return_pc != innermost_pc && !Self::native_image_owns_pc(return_pc) {
+                            self.push_jit_frames(&mut functions, return_pc);
                         }
                         if caller <= frame
                             || caller >= stack_high
@@ -382,27 +426,39 @@ impl HLInterpreter {
             if Self::native_image_owns_pc(*pc as usize) {
                 continue;
             }
-            let Some((findex, _, _)) = ash_core::profile::describe_jit_pc(*pc as usize) else {
-                continue;
-            };
-            let Some(function_index) = func_of(&self.targets, findex as usize) else {
-                continue;
-            };
-            if functions.last().map(|(f, _)| *f) != Some(function_index) {
-                functions.push((function_index, Self::jit_position(*pc as usize)));
-            }
+            self.push_jit_frames(&mut functions, *pc as usize);
         }
         functions
     }
 
-    /// The `(file, line)` a tier recorded for `pc`, when it recorded any.
+    /// The frames a compiled return address stands for, innermost first.
     ///
-    /// Only Cranelift does, and only when positions were asked for. Without
-    /// one a compiled frame falls back to its function's entry position,
-    /// which names the right function and the line it opens on.
-    fn jit_position(pc: usize) -> Option<(i32, i32)> {
-        let (file, line) = ash_core::jit_map::position_of(pc)?;
-        Some((i32::try_from(file).ok()?, i32::try_from(line).ok()?))
+    /// One native frame can hold several: with the tier's source map a pc
+    /// inside inlined code names the callee at its own line and then the
+    /// call that reached it, out to the function the code belongs to. Only
+    /// Cranelift records a map, and only when positions were asked for;
+    /// without one the frame is its function at the entry position, which
+    /// names the right function and the line it opens on.
+    fn push_jit_frames(&self, functions: &mut Vec<(usize, Option<(i32, i32)>)>, pc: usize) {
+        let mut push = |findex: u32, position: Option<(i32, i32)>| {
+            if let Some(function_index) = func_of(&self.targets, findex as usize) {
+                if functions.last().map(|(f, _)| *f) != Some(function_index) {
+                    functions.push((function_index, position));
+                }
+            }
+        };
+        if let Some(frames) = ash_core::jit_map::position_of(pc) {
+            for frame in frames {
+                let position = i32::try_from(frame.file)
+                    .ok()
+                    .zip(i32::try_from(frame.line).ok());
+                push(frame.findex, position);
+            }
+            return;
+        }
+        if let Some(hit) = ash_core::jit_map::lookup_wait(pc) {
+            push(hit.range.findex, None);
+        }
     }
 
     /// Render the live interpreter and generated-code frames as HashLink

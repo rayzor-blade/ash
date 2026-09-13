@@ -832,7 +832,11 @@ fn convert_ops(
         let is_last = i == end;
         if let Some((file, line)) = pos_of(i) {
             if last_pos != Some((file, line)) {
-                instrs.push(Instr::Pos { file, line });
+                instrs.push(Instr::Pos {
+                    file,
+                    line,
+                    site: None,
+                });
                 last_pos = Some((file, line));
             }
         }

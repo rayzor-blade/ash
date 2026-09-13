@@ -306,27 +306,39 @@ impl<'ctx> JITModule<'ctx> {
         // terminator. NullCheck and Trap need an explicit continuation, and
         // keeping that shape for every instruction makes primitive-emitter
         // reuse exact.
+        // A position marker emits nothing unless the body keeps a shadow
+        // frame, so it shares the block of the instruction after it rather
+        // than costing an empty block and a branch for the middle end to
+        // fold.
+        let marker_emits = self.shadow_slot.is_some();
         let mut blocks: Vec<Vec<BasicBlock<'ctx>>> =
             (0..air.blocks.len()).map(|_| Vec::new()).collect();
         for (bi, block) in air.blocks.iter().enumerate() {
             if !included.get(bi).copied().unwrap_or(false) {
                 continue;
             }
-            let mut seq = Vec::with_capacity(block.instrs.len() + 1);
-            for ii in 0..=block.instrs.len() {
-                seq.push(self.context.append_basic_block(
-                    function,
-                    &format!(
-                        "air_b{bi}_{}",
-                        if ii == block.instrs.len() {
-                            "term".into()
-                        } else {
-                            ii.to_string()
-                        }
-                    ),
-                ));
+            let mut seq = vec![None; block.instrs.len() + 1];
+            for ii in (0..=block.instrs.len()).rev() {
+                let shares_next = ii < block.instrs.len()
+                    && !marker_emits
+                    && matches!(block.instrs[ii], AirInstr::Pos { .. });
+                seq[ii] = if shares_next {
+                    seq[ii + 1]
+                } else {
+                    Some(self.context.append_basic_block(
+                        function,
+                        &format!(
+                            "air_b{bi}_{}",
+                            if ii == block.instrs.len() {
+                                "term".into()
+                            } else {
+                                ii.to_string()
+                            }
+                        ),
+                    ))
+                };
             }
-            blocks[bi] = seq;
+            blocks[bi] = seq.into_iter().map(|b| b.expect("every slot filled")).collect();
         }
 
         // Compiled fibers need safe points even in CPU-only loops. Derive
@@ -480,6 +492,9 @@ impl<'ctx> JITModule<'ctx> {
                 continue;
             }
             for (ii, instr) in block.instrs.iter().enumerate() {
+                if !marker_emits && matches!(instr, AirInstr::Pos { .. }) {
+                    continue;
+                }
                 let current = blocks[bi][ii];
                 let next = blocks[bi][ii + 1];
                 self.builder.position_at_end(current);
@@ -928,12 +943,22 @@ impl<'ctx> JITModule<'ctx> {
                             *src,
                         )?;
                     }
-                    AirInstr::Pos { file, line } => {
+                    AirInstr::Pos { file, line, site } => {
                         // The frame's position, as the runtime reads it back:
                         // `(file << 32) | line`. Only a shadow-stack body has a
-                        // slot; lowering emits the marker for no other target.
+                        // slot. The frame is this function's, so a marker
+                        // inside inlined code stores the call that reached
+                        // it, in this function's own code.
                         if let Some(slot) = self.shadow_slot {
-                            let pos = (u64::from(*file) << 32) | u64::from(*line);
+                            let (mut file, mut line) = (*file, *line);
+                            let mut cur = *site;
+                            while let Some(i) = cur {
+                                let Some(st) = air.inline_sites.get(i as usize) else { break };
+                                file = st.file;
+                                line = st.line;
+                                cur = st.parent;
+                            }
+                            let pos = (u64::from(file) << 32) | u64::from(line);
                             self.builder
                                 .build_store(slot, self.context.i64_type().const_int(pos, false))?;
                         }

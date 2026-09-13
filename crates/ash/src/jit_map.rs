@@ -52,29 +52,19 @@ pub struct CodeRange {
 pub struct SourceRun {
     pub start: u32,
     pub end: u32,
-    /// A position packed by [`pack_position`].
-    pub packed: u32,
+    /// The frames a pc in this run stands for, innermost first: the
+    /// position itself in the function it was written in, then -- when the
+    /// code was inlined -- the call that reached it in each enclosing
+    /// function, ending in this body's own function. Never empty.
+    pub frames: &'static [SourceFrame],
 }
 
-/// Pack `(file, line)` into the 32 bits a Cranelift `SourceLoc` carries.
-///
-/// Cranelift does not interpret those bits, but it reserves the all-ones
-/// pattern for "no location", so a packed position must never be that. Twelve
-/// bits of debug-file index and twenty of line covers every module ash emits;
-/// outside that range this records nothing, because a wrong line is worse
-/// than the function's own.
-pub fn pack_position(file: u32, line: u32) -> Option<u32> {
-    // `file + 1`, so 0 stays available as "no position".
-    if file >= 0xFFE || line >= (1 << 20) {
-        return None;
-    }
-    Some(((file + 1) << 20) | line)
-}
-
-/// The inverse. None for 0, which is what an unlabelled run holds.
-pub fn unpack_position(packed: u32) -> Option<(u32, u32)> {
-    let file = packed >> 20;
-    Some((file.checked_sub(1)?, packed & 0xF_FFFF))
+/// One frame of a [`SourceRun`]: a line of a function.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceFrame {
+    pub findex: u32,
+    pub file: u32,
+    pub line: u32,
 }
 
 /// A lookup result: the range and how far into it the address is.
@@ -168,13 +158,15 @@ pub fn set_positions(start: usize, runs: Vec<SourceRun>) {
     }
 }
 
-/// The `(file, line)` recorded for `pc`, when its tier recorded a map.
+/// The frames recorded for `pc`, innermost first, when its tier recorded a
+/// map: one for the function `pc` is in, preceded by one per inlined callee
+/// the position sits inside.
 ///
 /// `pc` is taken as a RETURN address, which is what a stack walk yields: the
 /// address itself belongs to whatever follows the call, so the byte before it
 /// is what names the call. A frame with no run covering it gets nothing, and
 /// the caller falls back to the function's own entry position.
-pub fn position_of(pc: usize) -> Option<(u32, u32)> {
+pub fn position_of(pc: usize) -> Option<&'static [SourceFrame]> {
     // Blocking, unlike `lookup`. That one answers the crash handler, which
     // cannot afford to wait on a lock a faulting thread may hold; this one
     // runs while an ordinary trace is being built, and a `try_lock` that lost
@@ -196,10 +188,32 @@ pub fn position_of(pc: usize) -> Option<(u32, u32)> {
         .partition_point(|run| run.start <= offset)
         .checked_sub(1)?;
     let run = runs[at];
-    if offset >= run.end {
+    if offset >= run.end || run.frames.is_empty() {
         return None;
     }
-    unpack_position(run.packed)
+    Some(run.frames)
+}
+
+/// [`lookup`], waiting for the map when a compile on another thread holds
+/// it. For a trace being built on a running thread, not for the crash
+/// handler: a `try_lock` that lost to an install would drop the frame.
+pub fn lookup_wait(pc: usize) -> Option<Hit> {
+    const MAX_SLACK: usize = 256 << 10;
+    let m = map().lock().ok()?;
+    let at = m.partition_point(|r| r.start <= pc);
+    let r = *m.get(at.checked_sub(1)?)?;
+    let offset = pc - r.start;
+    let bound = if r.size > 0 {
+        r.size
+    } else {
+        m[at..]
+            .iter()
+            .find(|n| n.start > r.start)
+            .map(|n| n.start - r.start)
+            .unwrap_or(MAX_SLACK)
+            .min(MAX_SLACK)
+    };
+    (offset < bound).then_some(Hit { range: r, offset })
 }
 
 /// The findex whose code starts exactly at `addr`.
@@ -273,24 +287,13 @@ mod tests {
         assert_eq!(hit.range.findex, 2);
     }
 
-    #[test]
-    fn a_packed_position_round_trips_and_never_collides_with_cranelift() {
-        for (file, line) in [(0, 0), (0, 1), (1, 0), (7, 42), (0xFFD, 0xFFFFE)] {
-            let packed = pack_position(file, line).expect("in range");
-            // Zero is "no position" and all-ones is Cranelift's own default,
-            // so a real position must be neither.
-            assert_ne!(packed, 0, "{file}:{line} packed to the empty marker");
-            assert_ne!(
-                packed,
-                u32::MAX,
-                "{file}:{line} packed to SourceLoc's default"
-            );
-            assert_eq!(unpack_position(packed), Some((file, line)));
-        }
-        // Out of range records nothing rather than a wrong line.
-        assert_eq!(pack_position(0xFFE, 1), None);
-        assert_eq!(pack_position(1, 1 << 20), None);
-        assert_eq!(unpack_position(0), None);
+    fn frames(list: &[(u32, u32, u32)]) -> &'static [SourceFrame] {
+        Box::leak(
+            list.iter()
+                .map(|&(findex, file, line)| SourceFrame { findex, file, line })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
     }
 
     #[test]
@@ -303,32 +306,41 @@ mod tests {
                 SourceRun {
                     start: 0,
                     end: 0x20,
-                    packed: pack_position(3, 10).unwrap(),
+                    frames: frames(&[(21, 3, 10)]),
                 },
                 SourceRun {
                     start: 0x20,
                     end: 0x40,
-                    packed: pack_position(3, 11).unwrap(),
+                    frames: frames(&[(21, 3, 11)]),
                 },
                 // A gap at 0x40..0x60 that no run covers.
+                // Code inlined from findex 9: its own line first, then the
+                // call in 21 that reached it.
                 SourceRun {
                     start: 0x60,
                     end: 0x80,
-                    packed: pack_position(4, 99).unwrap(),
+                    frames: frames(&[(9, 4, 99), (21, 3, 12)]),
                 },
             ],
         );
+        let at = |pc: usize| {
+            position_of(pc).map(|fs| {
+                fs.iter()
+                    .map(|f| (f.findex, f.file, f.line))
+                    .collect::<Vec<_>>()
+            })
+        };
         // A return address is taken as belonging to the run BEFORE it, so an
         // address one past a run's end resolves to that run and not the next.
-        assert_eq!(position_of(D + 0x20), Some((3, 10)));
-        assert_eq!(position_of(D + 0x21), Some((3, 11)));
-        assert_eq!(position_of(D + 0x40), Some((3, 11)));
+        assert_eq!(at(D + 0x20), Some(vec![(21, 3, 10)]));
+        assert_eq!(at(D + 0x21), Some(vec![(21, 3, 11)]));
+        assert_eq!(at(D + 0x40), Some(vec![(21, 3, 11)]));
         // Inside the gap: nothing, so the caller falls back to the entry.
-        assert_eq!(position_of(D + 0x55), None);
-        assert_eq!(position_of(D + 0x70), Some((4, 99)));
+        assert_eq!(at(D + 0x55), None);
+        assert_eq!(at(D + 0x70), Some(vec![(9, 4, 99), (21, 3, 12)]));
         // A body with no map at all answers nothing.
         register(22, Tier::Cranelift, CodeKind::Entry, D + 0x1000, 0x100);
-        assert_eq!(position_of(D + 0x1040), None);
+        assert_eq!(at(D + 0x1040), None);
     }
 
     #[test]

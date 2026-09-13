@@ -16,3 +16,12 @@ extern int hlp_call_stack_raw_from_frame(void *array, void **frame);
 __attribute__((noinline)) int ash_call_stack_boundary(void *array) {
     return hlp_call_stack_raw_from_frame(array, __builtin_frame_address(0));
 }
+
+/* The same boundary for a throw: the trace of an exception is captured
+ * where it is raised, and the JIT frames above hlp_throw are only reachable
+ * from a frame pointer here. */
+extern void hlp_capture_exception_stack_from_frame(void **frame);
+
+__attribute__((noinline)) void ash_throw_stack_boundary(void) {
+    hlp_capture_exception_stack_from_frame(__builtin_frame_address(0));
+}

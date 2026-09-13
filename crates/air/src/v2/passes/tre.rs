@@ -206,10 +206,11 @@ fn find_sites(f: &Function, self_findex: usize) -> Vec<Site> {
         };
         let Some(call) = call else { continue };
         // Everything after the call is dropped by the rewrite, so it must be
-        // nothing but copies.
+        // nothing but copies -- and markers, which name lines rather than
+        // compute anything.
         if blk.instrs[call + 1..]
             .iter()
-            .any(|i| !matches!(i, Instr::Copy { .. }))
+            .any(|i| !matches!(i, Instr::Copy { .. } | Instr::Pos { .. }))
         {
             continue;
         }

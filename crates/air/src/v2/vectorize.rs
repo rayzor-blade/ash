@@ -241,10 +241,17 @@ fn analyze_loop(
     let lp = forest.get(l);
     let header = lp.header;
     let in_loop: HashSet<BlockId> = lp.blocks.iter().copied().collect();
+    // Markers emit nothing, so they are not body.
     let body_size: usize = lp
         .blocks
         .iter()
-        .map(|b| f.blocks[b.idx()].instrs.len())
+        .map(|b| {
+            f.blocks[b.idx()]
+                .instrs
+                .iter()
+                .filter(|i| !matches!(i, Instr::Pos { .. }))
+                .count()
+        })
         .sum();
 
     let mut plan = LoopPlan {

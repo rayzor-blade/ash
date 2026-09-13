@@ -251,6 +251,7 @@ pub fn lower_air_function(
 
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();
+    let positions;
     {
         let mut cg = AirCodegen {
             ctx,
@@ -270,8 +271,11 @@ pub fn lower_air_function(
             is_osr: false,
             retier_test_count: None,
             fiber_poll_epoch_slot: None,
+            pos_chains: Vec::new(),
+            pos_index: HashMap::new(),
         };
         cg.run()?;
+        positions = std::mem::take(&mut cg.pos_chains);
         cg.finish();
     }
 
@@ -288,6 +292,7 @@ pub fn lower_air_function(
         arg_kinds,
         ret_kind,
         num_ops: n_instrs,
+        positions,
     })
 }
 
@@ -308,7 +313,7 @@ pub fn compile_osr_entry(
     findex: usize,
     opt: &std::sync::Arc<crate::air_pipeline::Optimized>,
     site: usize,
-) -> Result<usize> {
+) -> Result<(usize, Vec<crate::jit_map::SourceRun>)> {
     let air = &opt.ir;
     let header = opt
         .ser
@@ -356,6 +361,7 @@ pub fn compile_osr_entry(
     let osr_exits = super::air::retier_state_for(findex, ctx.bytecode() as *const _ as usize, opt);
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();
+    let chains;
     {
         let mut cg = AirCodegen {
             ctx,
@@ -375,8 +381,11 @@ pub fn compile_osr_entry(
             is_osr: true,
             retier_test_count: None,
             fiber_poll_epoch_slot: None,
+            pos_chains: Vec::new(),
+            pos_index: HashMap::new(),
         };
         cg.run_osr(header)?;
+        chains = std::mem::take(&mut cg.pos_chains);
         cg.finish();
     }
 
@@ -387,10 +396,10 @@ pub fn compile_osr_entry(
         );
     }
 
-    let code = backend
-        .compile_def(bead, def)
+    let (code, positions) = backend
+        .compile_def_with_positions(bead, def, &chains)
         .map_err(|e| anyhow!("osr entry compile: {e}"))?;
-    Ok(code as usize)
+    Ok((code as usize, positions))
 }
 
 /// Compile a uniform-ABI entry for `findex`: `extern "C" fn(*const i64) -> i64`.
@@ -583,10 +592,18 @@ struct AirCodegen<'a, 'b> {
     retier_test_count: Option<StackSlot>,
     /// Last runtime poll generation handled by this compiled activation.
     fiber_poll_epoch_slot: Option<StackSlot>,
+    /// The frames behind each srcloc this body sets, indexed by srcloc minus
+    /// one: a `Pos` marker becomes `SourceLoc::new(index + 1)`, and the
+    /// emitted runs are mapped back through this table.
+    pos_chains: Vec<&'static [crate::jit_map::SourceFrame]>,
+    /// Chains already built, so a position the body returns to reuses its
+    /// srcloc.
+    pos_index: HashMap<(u32, u32, Option<u32>), u32>,
 }
 
 impl AirCodegen<'_, '_> {
     fn run(&mut self) -> Result<()> {
+        self.open_srclocs();
         let order = self.reverse_postorder();
 
         for &bid in &order {
@@ -801,6 +818,64 @@ impl AirCodegen<'_, '_> {
         self.b.finalize(self.fcfg);
     }
 
+    /// Establish the srcloc base before any instruction is built.
+    ///
+    /// Cranelift stores each instruction's srcloc RELATIVE to the first one
+    /// it sees, and a loc below that base wraps to "no location". Every
+    /// position minted later is above this sentinel, whose own runs carry no
+    /// frames and are dropped when the map is read back.
+    fn open_srclocs(&mut self) {
+        if self.pos_chains.is_empty() {
+            self.pos_chains.push(&[]);
+            self.b.set_srcloc(SourceLoc::new(1));
+        }
+    }
+
+    /// The srcloc for a position, minting its frame chain on first use.
+    ///
+    /// Cranelift reserves all-ones for "no location", and 0 is kept for the
+    /// same meaning on the way back, so the table index is offset by one;
+    /// index 1 is the sentinel base, see [`Self::open_srclocs`]. The chain
+    /// is the position in the function it was written in, then the call
+    /// that inlined it into each enclosing function, out to this body's own;
+    /// see [`Function::inline_sites`](air::v2::ir::Function).
+    fn srcloc_for(&mut self, file: u32, line: u32, site: Option<u32>) -> u32 {
+        if let Some(&loc) = self.pos_index.get(&(file, line, site)) {
+            return loc;
+        }
+        self.open_srclocs();
+        let root = self.findex as u32;
+        let sites = &self.f.inline_sites;
+        let callee_of = |s: Option<u32>| match s {
+            Some(i) => sites
+                .get(i as usize)
+                .map(|st| st.callee)
+                .filter(|c| *c != u32::MAX)
+                .unwrap_or(root),
+            None => root,
+        };
+        let mut frames = vec![crate::jit_map::SourceFrame {
+            findex: callee_of(site),
+            file,
+            line,
+        }];
+        let mut cur = site;
+        while let Some(i) = cur {
+            let Some(st) = sites.get(i as usize) else { break };
+            frames.push(crate::jit_map::SourceFrame {
+                findex: callee_of(st.parent),
+                file: st.file,
+                line: st.line,
+            });
+            cur = st.parent;
+        }
+        let chain: &'static [crate::jit_map::SourceFrame] = Box::leak(frames.into_boxed_slice());
+        self.pos_chains.push(chain);
+        let loc = self.pos_chains.len() as u32;
+        self.pos_index.insert((file, line, site), loc);
+        loc
+    }
+
     /// Emit an ON-STACK-REPLACEMENT entry: `fn(buf: *mut u64) -> ret`.
     ///
     /// `buf` is the interpreter's transfer buffer — one 64-bit slot per HL
@@ -817,6 +892,7 @@ impl AirCodegen<'_, '_> {
     /// dominates everything emitted, which restores the dominance the
     /// original definition provided.
     fn run_osr(&mut self, header: usize) -> Result<()> {
+        self.open_srclocs();
         let order = self.rpo_from(header);
 
         for &bid in &order {
@@ -1802,10 +1878,9 @@ impl AirCodegen<'_, '_> {
             // regalloc and emission and hands back the runs it covers, which
             // is how a compiled frame reports the line it is stopped on
             // rather than the line its function opens with.
-            Instr::Pos { file, line } => {
-                if let Some(packed) = crate::jit_map::pack_position(*file, *line) {
-                    self.b.set_srcloc(SourceLoc::new(packed));
-                }
+            Instr::Pos { file, line, site } => {
+                let loc = self.srcloc_for(*file, *line, *site);
+                self.b.set_srcloc(SourceLoc::new(loc));
             }
 
             // Haxe uses the non-zero OAsm modes as backend register hints;

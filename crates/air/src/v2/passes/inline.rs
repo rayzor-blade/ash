@@ -424,6 +424,52 @@ fn inline_at(f: &mut Function, b: BlockId, k: usize, g: &Function) -> Result<()>
     let map_block = |gb: BlockId| BlockId((base + gb.idx()) as u32);
     let cont = BlockId((base + g.blocks.len()) as u32);
 
+    // The position the call sits at: the marker in force at `k`. Lowering
+    // opens every block with one, so the block holds it whenever positions
+    // were asked for at all; without one there is nothing to attribute the
+    // copied code to and it keeps the caller's position.
+    let call_pos = f.blocks[b.idx()].instrs[..k]
+        .iter()
+        .rev()
+        .find_map(|i| match i {
+            Instr::Pos { file, line, site } => Some((*file, *line, *site)),
+            _ => None,
+        });
+    // The callee's own markers point at sites in its table; each becomes a
+    // site here whose root parent is this call.
+    let site_map: Vec<u32> = if let Some((file, line, parent)) = call_pos {
+        let callee = g.findex.map(|x| x as u32).unwrap_or(u32::MAX);
+        let root = f.inline_sites.len() as u32;
+        f.inline_sites.push(InlineSite {
+            callee,
+            file,
+            line,
+            parent,
+        });
+        let first = f.inline_sites.len() as u32;
+        for gs in &g.inline_sites {
+            f.inline_sites.push(InlineSite {
+                callee: gs.callee,
+                file: gs.file,
+                line: gs.line,
+                parent: Some(gs.parent.map_or(root, |p| first + p)),
+            });
+        }
+        std::iter::once(root)
+            .chain((0..g.inline_sites.len() as u32).map(|p| first + p))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // `site_map[0]` is the call itself; a callee marker at site `p` maps to
+    // `site_map[p + 1]`.
+    let map_site = |site: Option<u32>| -> Option<u32> {
+        if site_map.is_empty() {
+            return None;
+        }
+        Some(site.map_or(site_map[0], |p| site_map[p as usize + 1]))
+    };
+
     // Fresh caller registers for the callee's frame, then fresh caller values
     // carrying them.
     let reg_map: Vec<u32> = g.reg_types.iter().map(|&ty| f.new_reg(ty)).collect();
@@ -481,6 +527,9 @@ fn inline_at(f: &mut Function, b: BlockId, k: usize, g: &Function) -> Result<()>
                 continue;
             }
             let mut ins = ins.clone();
+            if let Instr::Pos { site, .. } = &mut ins {
+                *site = map_site(*site);
+            }
             ins.map_dst(&mut |v| map_val(v));
             ins.map_uses(&mut |v| map_val(v));
             instrs.push(ins);
@@ -532,10 +581,16 @@ fn inline_at(f: &mut Function, b: BlockId, k: usize, g: &Function) -> Result<()>
             pv,
         )
     };
-    let mut cont_instrs = vec![Instr::Copy {
+    // Back in the caller's code: the marker in force at the call again, so
+    // what follows the inlined region is not attributed to the callee.
+    let mut cont_instrs = Vec::with_capacity(tail.len() + 2);
+    if let Some((file, line, site)) = call_pos {
+        cont_instrs.push(Instr::Pos { file, line, site });
+    }
+    cont_instrs.push(Instr::Copy {
         dst,
         src: ret_value,
-    }];
+    });
     cont_instrs.extend(tail);
 
     // Successors of the original terminator now see the continuation, not the

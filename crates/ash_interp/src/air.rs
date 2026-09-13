@@ -128,6 +128,20 @@ fn stack_event(op: &Opcode) -> Option<StackEvent> {
     }
 }
 
+/// The debug table for serialized `ops`: from the markers when the body
+/// carried any (an exact answer, inlined code included), realigned from the
+/// raw table otherwise.
+pub(crate) fn optimized_debug_from(
+    raw: &HLFunction,
+    ops: &[Opcode],
+    positions: &[air::v2::positions::PcPosition],
+) -> Vec<i32> {
+    if positions.len() == ops.len() && positions.iter().any(|p| p.file >= 0) {
+        return positions.iter().flat_map(|p| [p.file, p.line]).collect();
+    }
+    optimized_debug(raw, ops)
+}
+
 pub(crate) fn optimized_debug(raw: &HLFunction, ops: &[Opcode]) -> Vec<i32> {
     let before: Vec<(usize, StackEvent)> = raw
         .ops
@@ -245,6 +259,14 @@ mod tests {
     }
 }
 
+/// Where each serialized pc of an optimized body came from: its marker
+/// position and the inline site it sits in, so a frame stopped in inlined
+/// code can name the callee's frames as well as its own.
+pub(crate) struct InlineInfo {
+    pub positions: Box<[air::v2::positions::PcPosition]>,
+    pub sites: Box<[air::v2::InlineSite]>,
+}
+
 /// What a function executes, decided once on its first call.
 #[derive(Clone, Copy)]
 enum Body {
@@ -262,7 +284,7 @@ enum Body {
     /// A minted constant is named by an index PAST the module's pool, so a
     /// consumer that indexes `bytecode.ints` directly reads out of bounds.
     /// The list is almost always empty; only a widened loop mints.
-    Ready(&'static HLFunction, &'static [i32]),
+    Ready(&'static HLFunction, &'static [i32], &'static InlineInfo),
     /// The pipeline refused this one; its raw opcodes run from here on.
     Raw,
 }
@@ -396,10 +418,18 @@ impl Cache {
         // IR rather than executing: on deltablue that is ~20ms of ~51ms.
         let prepared = {
             let _phase = ash_core::profile::scope("air prepare (main thread)");
-            optimized_with_config(m, raw, cfg).map(|o| o.ser.clone())
+            optimized_with_config(m, raw, cfg).map(|o| {
+                let positions = air::v2::positions::positions_by_pc(&o.ir, &o.ser);
+                let debug = optimized_debug_from(raw, &o.ser.ops, &positions);
+                let info = InlineInfo {
+                    positions: positions.into_boxed_slice(),
+                    sites: o.ir.inline_sites.clone().into_boxed_slice(),
+                };
+                (o.ser.clone(), debug, info)
+            })
         };
         self.bodies[func_idx] = match prepared {
-            Ok(ser) => {
+            Ok((ser, debug, info)) => {
                 let minted: Box<[i32]> = ser.new_ints.clone().into_boxed_slice();
                 let mut opt = raw.clone();
                 opt.ops = ser.ops;
@@ -409,7 +439,7 @@ impl Cache {
                     .iter()
                     .map(|t| TypeRef(t.0 as usize))
                     .collect();
-                opt.debug = optimized_debug(raw, &opt.ops);
+                opt.debug = debug;
                 if logging() {
                     eprintln!(
                         "[air] findex={} {} ops {} -> {} regs {} -> {}",
@@ -438,7 +468,11 @@ impl Cache {
                     }
                 }
                 self.optimized += 1;
-                Body::Ready(Box::leak(Box::new(opt)), Box::leak(minted))
+                Body::Ready(
+                    Box::leak(Box::new(opt)),
+                    Box::leak(minted),
+                    Box::leak(Box::new(info)),
+                )
             }
             Err(e) => {
                 // Silent by default: a refusal is a missed optimization, not a
@@ -461,9 +495,27 @@ impl Cache {
     #[inline]
     pub fn body<'b>(&self, bytecode: &'b DecodedBytecode, func_idx: usize) -> &'b HLFunction {
         match self.bodies.get(func_idx) {
-            Some(&Body::Ready(f, _)) => f,
+            Some(&Body::Ready(f, _, _)) => f,
             _ => &bytecode.functions[func_idx],
         }
+    }
+
+    /// Visit the frames the instruction at serialized `pc` of `func_idx`
+    /// stands for, innermost first as `(findex, file, line)`, when the body
+    /// ran optimized and a marker reached the instruction; see
+    /// [`crate::ssa::Prepared::frames_at`].
+    pub fn frames_at(&self, func_idx: usize, pc: usize, visit: impl FnMut(u32, i32, i32)) -> bool {
+        let Some(&Body::Ready(f, _, info)) = self.bodies.get(func_idx) else {
+            return false;
+        };
+        let Some(&pos) = info.positions.get(pc) else {
+            return false;
+        };
+        if pos.file < 0 && pos.site.is_none() {
+            return false;
+        }
+        air::v2::positions::for_each_frame(pos, &info.sites, f.findex as u32, visit);
+        true
     }
 
     /// An `Opcode::Int` operand, resolved against the module pool and then
@@ -476,7 +528,7 @@ impl Cache {
             return Some(*v);
         }
         match self.bodies.get(func_idx) {
-            Some(&Body::Ready(_, minted)) => minted.get(idx - bytecode.ints.len()).copied(),
+            Some(&Body::Ready(_, minted, _)) => minted.get(idx - bytecode.ints.len()).copied(),
             _ => None,
         }
     }

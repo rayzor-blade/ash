@@ -144,6 +144,30 @@ pub struct Prepared {
     /// transfer would just re-derive the answer both sides were supposed to
     /// have used, which is the assumption under test.
     pub cfg: ash_core::air_pipeline::AirConfigKey,
+    /// The source position of each serialized pc, from the body's markers,
+    /// with the inline site it sits in. Every entry is `NONE` when markers
+    /// were not emitted.
+    pub positions: &'static [air::v2::positions::PcPosition],
+    /// The inline sites `positions` point into.
+    pub inline_sites: &'static [air::v2::InlineSite],
+}
+
+impl Prepared {
+    /// Visit the frames the instruction at serialized `pc` stands for,
+    /// innermost first as `(findex, file, line)`: the position itself, then
+    /// the call that inlined it into each enclosing function. `false` when
+    /// no marker reached the instruction, so the caller names the frame the
+    /// old way.
+    pub fn frames_at(&self, pc: usize, visit: impl FnMut(u32, i32, i32)) -> bool {
+        let Some(&pos) = self.positions.get(pc) else {
+            return false;
+        };
+        if pos.file < 0 && pos.site.is_none() {
+            return false;
+        }
+        air::v2::positions::for_each_frame(pos, self.inline_sites, self.shim.findex as u32, visit);
+        true
+    }
 }
 
 /// What a function executes, decided once on its first call.
@@ -236,7 +260,7 @@ impl Cache {
             match ash_core::air_pipeline::optimized_with_config(view, raw, air_cfg)
                 .map(|o| (o.ir.clone(), o.ser.clone()))
             {
-                Ok((ir, ser_view)) => match unsupported(&ir) {
+                Ok((mut ir, ser_view)) => match unsupported(&ir) {
                     Some(what) => {
                         if logging() {
                             eprintln!(
@@ -256,9 +280,32 @@ impl Cache {
                         // The body itself is still executed from the IR; only the
                         // table is kept.
                         let block_pcs: Vec<usize> = ser_view.block_pcs.clone();
-                        let instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
+                        let mut instr_pcs: Vec<Vec<usize>> = ser_view.instr_pcs.clone();
                         let term_pcs: Vec<usize> = ser_view.term_pcs.clone();
                         let cfg = air::v2::CfgInfo::build(&ir);
+                        // Read off the markers before they go: the position
+                        // table is keyed by serialized pc, which they do not
+                        // occupy.
+                        let positions =
+                            air::v2::positions::positions_by_pc_with(&ir, &ser_view, &cfg);
+                        let inline_sites: Vec<air::v2::InlineSite> = ir.inline_sites.clone();
+                        // This copy of the body is the walker's alone. A
+                        // marker names a line and executes nothing, so it
+                        // leaves, together with its pc entry, and the loop
+                        // below never dispatches one. Values, blocks and the
+                        // serialized pcs are untouched, which is what the OSR
+                        // transfer keys on.
+                        for (b, blk) in ir.blocks.iter_mut().enumerate() {
+                            if let Some(pcs) = instr_pcs.get_mut(b) {
+                                let mut keep = blk
+                                    .instrs
+                                    .iter()
+                                    .map(|i| !matches!(i, air::v2::Instr::Pos { .. }));
+                                pcs.retain(|_| keep.next().unwrap_or(true));
+                            }
+                            blk.instrs
+                                .retain(|i| !matches!(i, air::v2::Instr::Pos { .. }));
+                        }
                         let liveness = air::v2::liveness::Liveness::analyze(&ir, &cfg);
                         let osr_reg_types: Vec<TypeRef> = ser_view
                             .reg_types
@@ -280,8 +327,10 @@ impl Cache {
                         // empty sent a trace to `air.body()`, which under
                         // ASH_AIR=v2 is the raw function, whose numbering the
                         // optimizer has already changed: every reported line was
-                        // off by the drift between them.
-                        shim.debug = crate::air::optimized_debug(raw, &ser_view.ops);
+                        // off by the drift between them. The markers give the
+                        // exact table; without them it is realigned from the
+                        // raw one.
+                        shim.debug = crate::air::optimized_debug_from(raw, &ser_view.ops, &positions);
                         if logging() {
                             eprintln!(
                                 "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",
@@ -304,6 +353,8 @@ impl Cache {
                             liveness: Box::leak(Box::new(liveness)),
                             osr_reg_types: Box::leak(osr_reg_types.into_boxed_slice()),
                             cfg: air_cfg,
+                            positions: Box::leak(positions.into_boxed_slice()),
+                            inline_sites: Box::leak(inline_sites.into_boxed_slice()),
                         })))
                     }
                 },

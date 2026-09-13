@@ -109,6 +109,7 @@ pub mod liveness;
 pub mod lower;
 pub mod module;
 pub mod passes;
+pub mod positions;
 pub mod serialize;
 pub mod vectorize;
 pub mod verify;
@@ -118,8 +119,8 @@ mod tests;
 
 pub use analysis::{AliasClass, CfgInfo, LoopForest, LoopId, NaturalLoop};
 pub use ir::{
-    BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, Instr,
-    MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,
+    BinOp, Block, BlockId, CastKind, CellData, CellId, CondKind, Effect, Function, InlineSite,
+    Instr, MemAccess, Phi, PinReason, Terminator, TypeRef, UnOp, ValueData, ValueId,
 };
 pub use lower::{lower, lower_with, lower_with_positions, ModuleBuilder};
 pub use module::{

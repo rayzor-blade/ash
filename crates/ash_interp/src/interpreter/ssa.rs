@@ -136,19 +136,9 @@ impl HLInterpreter {
 
             let pcs = prep.instr_pcs.get(block);
             for (i, ins) in blk.instrs.iter().enumerate() {
-                // A position marker is read at lowering time by the tiers
-                // that compile this body; executing it is pure dispatch, and
-                // lowering emits one wherever the line changes. Skipped here
-                // rather than stripped from the body, because OSR transfers
-                // between this walker and compiled code BY POSITION, so the
-                // two bodies have to stay identical.
-                //
-                // What the skip is worth, ASH_TRACE_LINES on against off,
-                // interpreter only: mandelbrot_small +10.3% -> +1.4%,
-                // binary_trees +7.2% -> +1.5%.
-                if matches!(ins, air::v2::Instr::Pos { .. }) {
-                    continue;
-                }
+                // Position markers were stripped from this copy of the body
+                // when it was prepared (`ssa::Cache::prepare`); none reaches
+                // the dispatch below.
                 // The raising instruction's own pc, not its block's: a trace
                 // resolves this against the debug table, and every
                 // instruction in a block shares the block's line otherwise.

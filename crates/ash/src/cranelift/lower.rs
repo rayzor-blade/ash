@@ -52,6 +52,9 @@ pub struct LoweredFunction {
     pub ret_kind: hl::hl_type_kind,
     /// Opcode count, for the promotion log.
     pub num_ops: usize,
+    /// The frames behind each srcloc the body sets, indexed by srcloc minus
+    /// one. Empty when positions were not asked for.
+    pub positions: Vec<&'static [crate::jit_map::SourceFrame]>,
 }
 
 /// Static pre-flight check: why this function cannot be lowered by the
@@ -307,6 +310,7 @@ pub fn lower_function(
         // promotion log's `ops=` is there to be read against the compile time
         // next to it.
         num_ops: ops.len(),
+        positions: Vec::new(),
     })
 }
 

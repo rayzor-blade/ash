@@ -288,6 +288,10 @@ pub enum Instr {
     Pos {
         file: u32,
         line: u32,
+        /// The inline site this code was copied in through, when it was:
+        /// an index into [`Function::inline_sites`]. `None` for the
+        /// function's own code.
+        site: Option<u32>,
     },
     /// `dst = src` (HL `Mov`).
     Copy {
@@ -1203,6 +1207,23 @@ pub struct Function {
     /// leaves behind another remainder for the next pass round to try again.
     /// The widener skips these; nothing else reads them.
     pub scalar_remainders: Vec<BlockId>,
+    /// Where the inliner spliced callee bodies in, so a position inside
+    /// inlined code still names the callee and the call that reached it.
+    /// A [`Instr::Pos`] points here through its `site`.
+    pub inline_sites: Vec<InlineSite>,
+}
+
+/// One inlined call: which function's body was copied in, and the position
+/// of the call it replaced. `parent` is the site that call itself sat in,
+/// for a body inlined into inlined code; `None` means the function's own
+/// code. Following `parent` to the root yields the frames a stack walk
+/// would have found had nothing been inlined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineSite {
+    pub callee: u32,
+    pub file: u32,
+    pub line: u32,
+    pub parent: Option<u32>,
 }
 
 impl Function {
@@ -1220,6 +1241,7 @@ impl Function {
             int_pool_base: 0,
             findex: None,
             scalar_remainders: Vec::new(),
+            inline_sites: Vec::new(),
         }
     }
 

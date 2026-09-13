@@ -2572,6 +2572,10 @@ impl HLInterpreter {
             fiber_is_root_closure: *mut c_void,
             fiber_is_worker_lane: *mut c_void,
             jit_closure_runner: *mut c_void,
+            /// `hlp_capturing_exception`: whether a capture callback is for
+            /// a throw, whose trace `haxe.CallStack.exceptionStack()` on a
+            /// walker frame reads back later.
+            capturing_exception: *mut c_void,
             compiled_stub_ctx: Option<Arc<TieredSharedCtx>>,
         }
         static mut CLOSURE_RUN_CTX: Option<ClosureRunCtx> = None;
@@ -2875,7 +2879,18 @@ impl HLInterpreter {
                             std::mem::transmute(address);
                         get_frame()
                     });
-                interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32
+                let count = interp.prepare_call_stack(&*ctx.bytecode, frame_hint) as i32;
+                // A throw's trace is also what `exceptionStack()` answers
+                // with, on a walker frame that catches a compiled callee's
+                // throw; the walker's own throws fill it directly.
+                if !ctx.capturing_exception.is_null() {
+                    let capturing: unsafe extern "C" fn() -> bool =
+                        std::mem::transmute(ctx.capturing_exception);
+                    if capturing() {
+                        interp.exception_stack_symbols = interp.call_stack_symbols.clone();
+                    }
+                }
+                count
             } else {
                 interp.write_call_stack(output, capacity)
             }
@@ -2891,6 +2906,9 @@ impl HLInterpreter {
             let jit_closure_runner = native_resolver
                 .resolve_function("std", "hlp_jit_closure_runner")
                 .unwrap_or(std::ptr::null_mut());
+            let capturing_exception = native_resolver
+                .resolve_function("std", "hlp_capturing_exception")
+                .unwrap_or(std::ptr::null_mut());
             CLOSURE_RUN_CTX = Some(ClosureRunCtx {
                 interp: self as *mut _,
                 bytecode: bytecode as *const _,
@@ -2898,6 +2916,7 @@ impl HLInterpreter {
                 fiber_is_root_closure,
                 fiber_is_worker_lane,
                 jit_closure_runner,
+                capturing_exception,
                 compiled_stub_ctx: self
                     .tiered_runtime
                     .as_ref()
@@ -3729,12 +3748,13 @@ impl HLInterpreter {
                 &opt,
                 header_pc,
             ) {
-                Ok(a) => {
+                Ok((a, positions)) => {
                     ash_core::profile::register_jit_code(
                         findex as u32,
                         ash_core::profile::Tier::Cranelift,
                         a,
                     );
+                    ash_core::jit_map::set_positions(a, positions);
                     a as u64
                 }
                 Err(e) => {

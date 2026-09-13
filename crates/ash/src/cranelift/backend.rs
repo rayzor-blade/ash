@@ -141,6 +141,30 @@ impl AshCraneliftBackend {
     /// Compile an already-lowered definition and return its code pointer.
     /// The OSR-entry path uses this: it builds its own `def` (different
     /// signature, different prologue) and needs only the address back.
+    /// [`compile_def`](Self::compile_def) that also hands back the source
+    /// runs, mapped through `chains` the way the entry compile maps its own.
+    pub fn compile_def_with_positions(
+        &self,
+        bead: &Arc<Bead>,
+        def: CraneliftFunctionDef,
+        chains: &[&'static [crate::jit_map::SourceFrame]],
+    ) -> Result<(*mut (), Vec<crate::jit_map::SourceRun>)> {
+        if !crate::air_pipeline::trace_positions() {
+            return Ok((self.compile_def(bead, def)?, Vec::new()));
+        }
+        let (code, spans) = self
+            .inner
+            .compile_with_source_map(bead, def)
+            .map_err(|e| anyhow!("cranelift compile failed: {e}"))?;
+        if code.is_null() {
+            bail!("cranelift returned a null entry pointer");
+        }
+        Ok((
+            code,
+            source_runs(spans.into_iter().map(|s| (s.start, s.end, s.loc)), chains),
+        ))
+    }
+
     pub fn compile_def(&self, bead: &Arc<Bead>, def: CraneliftFunctionDef) -> Result<*mut ()> {
         let code = self
             .inner
@@ -170,6 +194,7 @@ impl AshCraneliftBackend {
             arg_kinds,
             ret_kind,
             num_ops,
+            positions: chains,
         } = {
             let _phase = crate::profile::scope("clif lower");
             // AIR codegen first, opcode lowering behind it. See
@@ -186,15 +211,10 @@ impl AshCraneliftBackend {
                 self.inner
                     .compile_with_source_map(bead, def)
                     .map(|(code, spans)| {
-                        let runs = spans
-                            .into_iter()
-                            .map(|s| crate::jit_map::SourceRun {
-                                start: s.start,
-                                end: s.end,
-                                packed: s.loc,
-                            })
-                            .collect();
-                        (code, runs)
+                        (
+                            code,
+                            source_runs(spans.into_iter().map(|s| (s.start, s.end, s.loc)), &chains),
+                        )
                     })
             } else {
                 self.inner.compile(bead, def).map(|code| (code, Vec::new()))
@@ -230,6 +250,25 @@ impl AshCraneliftBackend {
             },
         ))
     }
+}
+
+/// The emitted spans as source runs. A span's loc is a table index plus
+/// one; 0 and Cranelift's own default both mean "no position", and the
+/// sentinel base at index 1 carries no frames, so those spans are dropped.
+fn source_runs(
+    spans: impl IntoIterator<Item = (u32, u32, u32)>,
+    chains: &[&'static [crate::jit_map::SourceFrame]],
+) -> Vec<crate::jit_map::SourceRun> {
+    spans
+        .into_iter()
+        .filter_map(|(start, end, loc)| {
+            let frames = *chains.get(loc.checked_sub(1)? as usize)?;
+            if frames.is_empty() {
+                return None;
+            }
+            Some(crate::jit_map::SourceRun { start, end, frames })
+        })
+        .collect()
 }
 
 /// Marshaling metadata produced alongside the compiled code.

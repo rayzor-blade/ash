@@ -46,6 +46,7 @@ HashLink can run, which is how an AIR pass gets checked against another VM.
 | `ASH_TIER` | Same values as `--jit-tier`; used when the flag is absent |
 | `ASH_TIER_LOG` | Log promotions, declines and tier crossings |
 | `ASH_TIERED_TIMING` | Break down tiered JIT startup cost by phase |
+| `ASH_TRACE_LINES` | `0` drops the source markers the compiled tiers and the walker read; a compiled frame then reports its function's entry line and code inlined into it is not named. On by default |
 | `ASH_PROFILE` | `phases`, `sample` or `all` — see below |
 | `ASH_PROFILE_HZ` | Sampling rate, default 997 |
 | `ASH_PROFILE_OUT` | Write the profile to a file instead of stderr |

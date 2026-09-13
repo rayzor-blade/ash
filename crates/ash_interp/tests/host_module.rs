@@ -194,7 +194,6 @@ fn child(mode: &str) -> ! {
     }
     // Leaked, as the CLI leaks them: a compile thread may still hold shares.
     std::mem::forget(interp);
-    std::mem::forget(resolver);
     std::mem::forget(bc);
     use std::io::Write;
     let _ = std::io::stdout().flush();

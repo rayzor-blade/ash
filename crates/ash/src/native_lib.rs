@@ -434,6 +434,58 @@ fn symbol_key(library_name: &str, function_name: &str) -> String {
     format!("{}@{}", clean, function_name)
 }
 
+/// Natives a host registered into the program (`register_host_module`):
+/// `"lib@name"` -> the C entry's address, the primitive itself.
+///
+/// Process-global like the symbol table, because the tiers build their own
+/// resolver instances (`prepare_process_globals`, the LLVM module) and each
+/// must skip the same libraries and reach the same entries.
+static HOST_NATIVES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn host_natives() -> &'static Mutex<HashMap<String, usize>> {
+    HOST_NATIVES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The bare native name behind the `hlp_` spelling consumers ask for.
+fn bare_native_name(function_name: &str) -> &str {
+    function_name.strip_prefix("hlp_").unwrap_or(function_name)
+}
+
+/// Make host-registered natives resolvable process-wide: both the bare name
+/// and the `hlp_`-prefixed spelling the interpreter and tiers ask for land
+/// in the symbol table, so every consumer that reads it gets the C entry.
+pub fn publish_host_natives(natives: &HashMap<(String, String), usize>) {
+    let mut registry = host_natives().lock().expect("host registry poisoned");
+    let mut table = symbol_table().lock().expect("symbol table poisoned");
+    for ((lib, name), &addr) in natives {
+        registry.insert(symbol_key(lib, name), addr);
+        table.insert(symbol_key(lib, name), addr);
+        table.insert(symbol_key(lib, &format!("hlp_{name}")), addr);
+    }
+}
+
+/// The host's entry for `(lib, name)`, under either spelling.
+fn host_native_addr(library_name: &str, function_name: &str) -> Option<usize> {
+    host_natives()
+        .lock()
+        .expect("host registry poisoned")
+        .get(&symbol_key(library_name, bare_native_name(function_name)))
+        .copied()
+}
+
+/// Whether a host registered every native the program declares from `lib`,
+/// in which case there is no library to look for.
+fn host_covers_library(lib: &str, natives: &[HLNative]) -> bool {
+    let registry = host_natives().lock().expect("host registry poisoned");
+    if registry.is_empty() {
+        return false;
+    }
+    natives
+        .iter()
+        .filter(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib) == lib)
+        .all(|n| registry.contains_key(&symbol_key(lib, &n.name)))
+}
+
 #[derive(Debug)]
 pub struct NativeLibraryManager;
 
@@ -657,6 +709,14 @@ impl NativeFunctionResolver {
         NativeFunctionResolver { library_manager }
     }
 
+    /// A resolver that answers host-registered natives from the registration
+    /// (`DecodedBytecode::host_natives`) before any library, and does not
+    /// look on disk for a library the host covers entirely.
+    pub fn with_host_natives(self, natives: &HashMap<(String, String), usize>) -> Self {
+        publish_host_natives(natives);
+        self
+    }
+
     pub fn load_library(&mut self, name: &str, path: &Path) -> Result<()> {
         self.library_manager.load_library(name, path)
     }
@@ -715,6 +775,9 @@ impl NativeFunctionResolver {
                 // Already loaded process-wide (e.g. by the interpreter's
                 // resolver before the tiered JIT pre-warm) — don't re-dlopen
                 // or re-log.
+                continue;
+            }
+            if host_covers_library(lib_name, natives) {
                 continue;
             }
             let mut candidates = vec![search_dir.join(format!("{}.hdll", lib_name))];
@@ -854,6 +917,10 @@ impl NativeFunctionResolver {
         function_name: &str,
     ) -> Result<*mut c_void> {
         let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
+
+        if let Some(addr) = host_native_addr(clean_lib, function_name) {
+            return Ok(addr as *mut c_void);
+        }
 
         if clean_lib == "std" {
             // ash_std uses direct exports (Rust #[no_mangle]), reached either

@@ -28,3 +28,9 @@ windows-sys = { version = "0.59", features = [
 
 [build-dependencies]
 cc = "1"
+
+# Runs each mode in a child process that leaves through `_exit`, as the CLI
+# does; see the file's header.
+[[test]]
+name = "host_module"
+harness = false

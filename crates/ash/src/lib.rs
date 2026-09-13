@@ -10,6 +10,7 @@ pub mod bytecode_encode;
 pub mod c_types;
 pub mod callsite_profile;
 pub mod cranelift;
+pub mod host_module;
 pub mod intrinsics;
 pub mod progress;
 pub mod hl_bindings {

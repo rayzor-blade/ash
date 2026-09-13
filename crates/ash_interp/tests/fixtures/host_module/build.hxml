@@ -1,0 +1,4 @@
+# Rebuild main.hl from this directory: haxe build.hxml
+-cp .
+-main test.Main
+-hl main.hl

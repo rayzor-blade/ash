@@ -2557,6 +2557,7 @@ impl HLInterpreter {
         instrument::arm_stall_watchdog();
         // Initialize constants (pre-populated globals) before running
         self.init_constants(bytecode, native_resolver)?;
+        self.init_host_classes(bytecode)?;
 
         // Register the fiber closure runner: ash_std's thread_create runs
         // Haxe thread bodies on krio fibers, and their vclosure fun pointers
@@ -3183,6 +3184,113 @@ impl HLInterpreter {
     /// Initialize bytecode constants into the globals array.
     /// Constants are pre-allocated global type singletons that must be
     /// initialized before the entrypoint runs.
+    /// The C `hl_type` of type index `ti`, for a host that allocates
+    /// instances of a class it registered (`hlp_alloc_obj` takes it).
+    pub fn c_type_of(&self, ti: usize) -> *mut c_void {
+        self.c_type_factory.get(ti) as *mut c_void
+    }
+
+    /// Give every host-registered class its class object, the way a
+    /// program's static init does for its own: allocate the `$Class`
+    /// companion, store it in the class's global slot (which is where
+    /// `hlp_type_get_global` reads), and fill `__type__` and `__name__`.
+    /// Bound fields -- `__constructor__` when the class has a ctor -- are
+    /// closures `hlp_alloc_obj` creates from the companion's bindings.
+    fn init_host_classes(&mut self, bytecode: &DecodedBytecode) -> Result<()> {
+        if bytecode.host_classes.is_empty() {
+            return Ok(());
+        }
+        if self.fn_alloc_obj.is_null() || self.fn_get_obj_rt.is_null() {
+            return Err(anyhow!(
+                "host classes need hlp_alloc_obj and hlp_get_obj_rt from ash_std"
+            ));
+        }
+        let alloc: FnAllocObj = unsafe { std::mem::transmute(self.fn_alloc_obj) };
+        let get_rt: FnGetObjRt = unsafe { std::mem::transmute(self.fn_get_obj_rt) };
+        // Flat field index -> byte offset, per `hlp_get_obj_rt`, which counts
+        // every ancestor's fields first.
+        let field_offset = |rt: *const hl_runtime_obj, index: usize| -> Option<usize> {
+            if rt.is_null() || index >= unsafe { (*rt).nfields } as usize {
+                return None;
+            }
+            Some(unsafe { *(*rt).fields_indexes.add(index) } as usize)
+        };
+        let flat_field = |ti: usize, name: &str| -> Option<usize> {
+            let mut chain = Vec::new();
+            let mut cur = Some(ti);
+            while let Some(i) = cur {
+                let obj = bytecode.types.get(i)?.obj.as_ref()?;
+                chain.push(obj);
+                cur = obj.super_.as_ref().map(|s| s.0);
+            }
+            let mut base = 0;
+            for obj in chain.iter().rev() {
+                if let Some(p) = obj.fields.iter().position(|f| f.name == name) {
+                    return Some(base + p);
+                }
+                base += obj.fields.len();
+            }
+            None
+        };
+        let string_type = bytecode.type_index_of("String");
+        let (gd, nglobals) = self.c_type_factory.globals_data();
+
+        for entry in &bytecode.host_classes {
+            let class_t = self.c_type_factory.get(entry.type_index) as *mut c_void;
+            let companion_t = self.c_type_factory.get(entry.companion_index) as *mut c_void;
+            if class_t.is_null() || companion_t.is_null() {
+                return Err(anyhow!(
+                    "host class `{}` has no C type; was it registered before the interpreter was built?",
+                    entry.name
+                ));
+            }
+            let class_obj = unsafe { alloc(companion_t) };
+            if class_obj.is_null() {
+                return Err(anyhow!(
+                    "could not allocate the class object of `{}`",
+                    entry.name
+                ));
+            }
+            // Both stores, as `init_constants` does: the Vec the interpreter
+            // reads and the C array the GC scans and `global_value` points at.
+            if entry.global_index < self.globals.len() {
+                self.globals[entry.global_index] = NanBoxedValue::from_ptr(class_obj as usize);
+            }
+            if !gd.is_null() && entry.global_index < nglobals {
+                unsafe { *gd.add(entry.global_index) = class_obj };
+            }
+
+            let rt = unsafe { get_rt(companion_t) } as *const hl_runtime_obj;
+            if let Some(off) =
+                flat_field(entry.companion_index, "__type__").and_then(|i| field_offset(rt, i))
+            {
+                unsafe { *((class_obj as *mut u8).add(off) as *mut *mut c_void) = class_t };
+            }
+            let name_slot =
+                flat_field(entry.companion_index, "__name__").and_then(|i| field_offset(rt, i));
+            if let (Some(off), Some(st)) = (name_slot, string_type) {
+                let string_t = self.c_type_factory.get(st) as *mut c_void;
+                let string_rt = unsafe { get_rt(string_t) } as *const hl_runtime_obj;
+                let name_obj = unsafe { alloc(string_t) };
+                let bytes_off = flat_field(st, "bytes").and_then(|i| field_offset(string_rt, i));
+                let length_off = flat_field(st, "length").and_then(|i| field_offset(string_rt, i));
+                if let (false, Some(b), Some(l)) = (name_obj.is_null(), bytes_off, length_off) {
+                    let mut utf16: Vec<u16> = entry.name.encode_utf16().collect();
+                    let length = utf16.len() as i32;
+                    utf16.push(0);
+                    let bytes = utf16.as_ptr();
+                    std::mem::forget(utf16);
+                    unsafe {
+                        *((name_obj as *mut u8).add(b) as *mut *const u16) = bytes;
+                        *((name_obj as *mut u8).add(l) as *mut i32) = length;
+                        *((class_obj as *mut u8).add(off) as *mut *mut c_void) = name_obj;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn init_constants(
         &mut self,
         bytecode: &DecodedBytecode,

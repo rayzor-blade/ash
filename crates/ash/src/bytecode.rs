@@ -1269,6 +1269,20 @@ pub struct DecodedBytecode {
     pub debug_files: Vec<String>,
     pub has_debug: bool,
     pub entrypoint: u32,
+    /// Natives a host registered (`register_host_module`): `(lib, name)` to
+    /// the C entry's address. An address rather than a pointer so the decode
+    /// can still be shared across the tier threads.
+    pub host_natives: std::collections::HashMap<(String, String), usize>,
+    /// Classes a host registered, in registration order.
+    pub host_classes: Vec<crate::host_module::HostClassEntry>,
+}
+
+/// HashLink's field hash of `name`, the one the decoder stores for every
+/// field and proto and the one compiled code looks fields up by.
+pub fn field_hash(name: &str) -> i32 {
+    let mut utf16 = str_to_uchar_ptr(name);
+    utf16.push(0);
+    unsafe { __hlp_hash_gen(utf16.as_ptr(), true) }
 }
 
 impl DecodedBytecode {

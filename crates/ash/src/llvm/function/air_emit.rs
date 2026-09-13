@@ -362,20 +362,37 @@ impl<'ctx> JITModule<'ctx> {
         // fiber spinning in that loop never yields. `ASH_FIBER_POLLS=0` emits
         // none, and `ASH_POLL_MEMORY` relaxes what the helper may write; both
         // are for measuring what a poll costs, neither is sound to run with.
+        //
+        // The poll sits on the BACK EDGES into the header, not in front of
+        // it: every iteration still passes it, but the header stays the
+        // block that tests the loop's exit, which is what lets LLVM rotate
+        // the loop and then hoist a load the body is guaranteed to reach. A
+        // poll ahead of the header made the header a non-exiting block, no
+        // rotation happened, and every loop-invariant guard on a receiver
+        // or closure was re-evaluated on every iteration.
         let has_polls = poll_headers.iter().any(|poll| *poll);
         let mut entries = vec![None; air.blocks.len()];
+        let mut poll_entries = vec![None; air.blocks.len()];
+        let mut back_edges: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
         for bi in 0..air.blocks.len() {
             if blocks[bi].is_empty() {
                 continue;
             }
-            entries[bi] = if poll_headers[bi] {
-                Some(
+            entries[bi] = blocks[bi].first().copied();
+            if poll_headers[bi] {
+                poll_entries[bi] = Some(
                     self.context
                         .append_basic_block(function, &format!("air_b{bi}_fiber_poll")),
-                )
-            } else {
-                blocks[bi].first().copied()
-            };
+                );
+            }
+        }
+        for lp in &loops.loops {
+            if poll_headers[lp.header.idx()] {
+                for latch in &lp.latches {
+                    back_edges.insert((latch.0, lp.header.0));
+                }
+            }
         }
 
         // `cold`: the poll fires when a fiber is due to yield, which on a hot
@@ -439,24 +456,38 @@ impl<'ctx> JITModule<'ctx> {
         self.builder.build_unconditional_branch(first)?;
 
         for bi in 0..air.blocks.len() {
-            let Some(poll_entry) = entries[bi].filter(|_| poll_headers[bi]) else {
+            let Some(poll_entry) = poll_entries[bi] else {
                 continue;
             };
             let (handled_slot, epoch_pointer) = poll_epoch.expect("poll headers have an epoch");
             let poll_call = self
                 .context
                 .append_basic_block(function, &format!("air_b{bi}_fiber_poll_call"));
+            // Both poll outcomes rejoin before the branch into the header,
+            // so the loop has ONE latch and it does not exit: LLVM's loop
+            // rotation asks for exactly that.
+            let join = self
+                .context
+                .append_basic_block(function, &format!("air_b{bi}_fiber_poll_join"));
             let body = blocks[bi][0];
 
             self.builder.position_at_end(poll_entry);
-            let handled = self
-                .builder
-                .build_load(
-                    self.context.i64_type(),
-                    handled_slot,
-                    "air_fiber_poll_handled_epoch",
-                )?
-                .into_int_value();
+            // The handled epoch stays in its stack slot: read once per
+            // iteration, written only when a poll fires. Promoted to a
+            // register it would cost a callee-saved register across every
+            // call in the loop, and a loop with an indirect call spilled the
+            // callee pointer instead.
+            let handled = self.builder.build_load(
+                self.context.i64_type(),
+                handled_slot,
+                "air_fiber_poll_handled_epoch",
+            )?;
+            handled
+                .as_instruction_value()
+                .expect("handled epoch load is an instruction")
+                .set_volatile(true)
+                .map_err(|error| anyhow!("failed to mark epoch slot load volatile: {error:?}"))?;
+            let handled = handled.into_int_value();
             let current = self.builder.build_load(
                 self.context.i64_type(),
                 epoch_pointer,
@@ -475,15 +506,21 @@ impl<'ctx> JITModule<'ctx> {
                 "air_fiber_poll_due",
             )?;
             self.builder
-                .build_conditional_branch(due, poll_call, body)?;
+                .build_conditional_branch(due, poll_call, join)?;
 
             self.builder.position_at_end(poll_call);
-            self.builder.build_store(handled_slot, current)?;
+            self.builder
+                .build_store(handled_slot, current)?
+                .set_volatile(true)
+                .map_err(|error| anyhow!("failed to mark epoch slot store volatile: {error:?}"))?;
             self.builder.build_call(
                 fiber_poll.expect("poll headers have a helper"),
                 &[],
                 "air_fiber_poll",
             )?;
+            self.builder.build_unconditional_branch(join)?;
+
+            self.builder.position_at_end(join);
             self.builder.build_unconditional_branch(body)?;
         }
 
@@ -982,6 +1019,8 @@ impl<'ctx> JITModule<'ctx> {
                 AirBlockId(bi as u32),
                 &block.term,
                 &entries,
+                &poll_entries,
+                &back_edges,
                 lowering,
                 registers,
                 reg_types,
@@ -1497,16 +1536,22 @@ impl<'ctx> JITModule<'ctx> {
         bid: AirBlockId,
         term: &AirTerminator,
         entries: &[Option<BasicBlock<'ctx>>],
+        poll_entries: &[Option<BasicBlock<'ctx>>],
+        back_edges: &std::collections::HashSet<(u32, u32)>,
         lowering: &HLFunction,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
         cell_base: usize,
     ) -> Result<()> {
+        // A back edge enters its header through the fiber poll; every other
+        // edge goes straight in.
         let block = |id: AirBlockId| -> Result<BasicBlock<'ctx>> {
-            entries
-                .get(id.idx())
-                .copied()
-                .flatten()
+            let polled = back_edges
+                .contains(&(bid.0, id.0))
+                .then(|| poll_entries.get(id.idx()).copied().flatten())
+                .flatten();
+            polled
+                .or_else(|| entries.get(id.idx()).copied().flatten())
                 .ok_or_else(|| anyhow!("AIR branch to missing block b{}", id.0))
         };
         match term {

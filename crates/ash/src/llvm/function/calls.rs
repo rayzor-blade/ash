@@ -1166,6 +1166,187 @@ impl<'ctx> JITModule<'ctx> {
             i32_type.const_int(2, false),
             "closure_is_wrapper",
         )?;
+        // Load all explicit args
+        let arg_vals: Vec<BasicMetadataValueEnum> = args
+            .iter()
+            .map(|arg| {
+                self.builder
+                    .build_load(reg_types[arg.idx()], registers[arg.idx()], "arg_val")
+                    .unwrap()
+                    .into()
+            })
+            .collect();
+
+        // Determine function type from the closure value's type info
+        let fun_type_idx = lowering.regs[fun.idx()].0;
+        let base_fn_type = if let Some(fun_type) = self.types_[fun_type_idx].fun.clone() {
+            self.create_function_type(&fun_type)?
+        } else {
+            // Dynamic-typed closure: infer from args (all ptrs) with ptr return
+            let dyn_params: Vec<BasicMetadataTypeEnum> =
+                args.iter().map(|_| ptr_type.into()).collect();
+            // Determine return type from dst
+            let dst_type = reg_types[dst.idx()];
+            match dst_type {
+                BasicTypeEnum::IntType(t) => t.fn_type(&dyn_params, false),
+                BasicTypeEnum::FloatType(t) => t.fn_type(&dyn_params, false),
+                _ => ptr_type.fn_type(&dyn_params, false),
+            }
+        };
+
+        // Build extended function type (with value prepended as first arg)
+        let mut extended_params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
+        extended_params.extend(base_fn_type.get_param_types().iter().map(|t| {
+            let bmt: BasicMetadataTypeEnum = (*t).into();
+            bmt
+        }));
+        let extended_fn_type = if base_fn_type.get_return_type().is_some() {
+            let ret = base_fn_type.get_return_type().unwrap();
+            match ret {
+                BasicTypeEnum::FloatType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::IntType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::PointerType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::ArrayType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::StructType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::VectorType(t) => t.fn_type(&extended_params, false),
+                BasicTypeEnum::ScalableVectorType(t) => t.fn_type(&extended_params, false),
+            }
+        } else {
+            self.context.void_type().fn_type(&extended_params, false)
+        };
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .unwrap()
+            .get_parent()
+            .unwrap();
+        let call_done_bb = self.context.append_basic_block(function, "call_done");
+
+        // Guarded devirtualisation, on the RAW closure and ahead of the
+        // wrapper unwrap: `fun` and `hasValue` exist on every vclosure, a
+        // wrapper's own `fun` is its adapter and its `hasValue` is 2, so a
+        // wrapper misses the guard and takes the generic path below. Both
+        // loads are invariant and unconditional, which is what lets LICM
+        // lift the whole guard out of a loop whose closure does not change,
+        // leaving the inlined target and one predictable branch. The
+        // per-site key is pc 0 on this path; the caller-wide lookup is
+        // what fires.
+        let devirt = if self.hot_reload {
+            None
+        } else {
+            let caller = lowering.findex as u32;
+            crate::callsite_profile::closure_target(caller, 0)
+                .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
+                .and_then(|(target, exp_hv)| {
+                    let expected_ty = if exp_hv {
+                        extended_fn_type
+                    } else {
+                        base_fn_type
+                    };
+                    match self.get_or_create_function_value(target as usize) {
+                        Ok((callee, is_placeholder)) => {
+                            if is_placeholder {
+                                self.add_pending_compilation(target as usize);
+                            }
+                            (callee.get_type() == expected_ty).then_some((callee, target, exp_hv))
+                        }
+                        Err(_) => None,
+                    }
+                })
+        };
+        if let Some((callee, target, exp_hv)) = devirt {
+            crate::profile::count("devirt closure fast-arm", 1);
+            let raw_fun_gep = unsafe {
+                self.builder.build_gep(
+                    i8_type,
+                    raw_closure_ptr,
+                    &[self
+                        .context
+                        .i64_type()
+                        .const_int(self.target_abi.vclosure_fun_offset(), false)],
+                    "closure_raw_fun_gep",
+                )?
+            };
+            let raw_fun = self
+                .builder
+                .build_load(ptr_type, raw_fun_gep, "closure_raw_fun")?
+                .into_pointer_value();
+            // Closure header fields are immutable after allocation.
+            for lv in [raw_has_value.as_instruction(), raw_fun.as_instruction()]
+                .into_iter()
+                .flatten()
+            {
+                let _ = lv.set_metadata(
+                    self.context.metadata_node(&[]),
+                    self.context.get_kind_id("invariant.load"),
+                );
+            }
+            let devirt_bb = self.context.append_basic_block(function, "devirt_hit");
+            let generic_bb = self.context.append_basic_block(function, "devirt_miss");
+            // The profiled target is the interpreter's stub sentinel
+            // (findex + 1), which is what a closure the interpreter
+            // allocated holds in `fun`.
+            let fun_int =
+                self.builder
+                    .build_ptr_to_int(raw_fun, self.context.i64_type(), "closure_fun_int")?;
+            let is_target = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                fun_int,
+                self.context.i64_type().const_int(target as u64 + 1, false),
+                "devirt_is_target",
+            )?;
+            let hv_matches = self.builder.build_int_compare(
+                IntPredicate::EQ,
+                raw_has_value,
+                i32_type.const_int(u64::from(exp_hv), false),
+                "devirt_hv",
+            )?;
+            let guard = self
+                .builder
+                .build_and(is_target, hv_matches, "devirt_guard")?;
+            self.builder
+                .build_conditional_branch(guard, devirt_bb, generic_bb)?;
+
+            self.builder.position_at_end(devirt_bb);
+            let direct_args: Vec<BasicMetadataValueEnum> = if exp_hv {
+                let value_gep = unsafe {
+                    self.builder.build_gep(
+                        i8_type,
+                        raw_closure_ptr,
+                        &[self
+                            .context
+                            .i64_type()
+                            .const_int(self.target_abi.vclosure_value_offset(), false)],
+                        "closure_raw_value_gep",
+                    )?
+                };
+                let value = self
+                    .builder
+                    .build_load(ptr_type, value_gep, "closure_raw_value")?
+                    .into_pointer_value();
+                if let Some(lv) = value.as_instruction() {
+                    let _ = lv.set_metadata(
+                        self.context.metadata_node(&[]),
+                        self.context.get_kind_id("invariant.load"),
+                    );
+                }
+                let mut values: Vec<BasicMetadataValueEnum> = vec![value.into()];
+                values.extend(arg_vals.iter().cloned());
+                values
+            } else {
+                arg_vals.clone()
+            };
+            let ret = self
+                .builder
+                .build_call(callee, &direct_args, "devirt_call")?
+                .try_as_basic_value();
+            if let Some(value) = ret.basic() {
+                self.builder.build_store(registers[dst.idx()], value)?;
+            }
+            self.builder.build_unconditional_branch(call_done_bb)?;
+            self.builder.position_at_end(generic_bb);
+        }
         // Branch rather than load-then-select. `wrappedFun` exists only
         // on a `vclosure_wrapper`; a plain `vclosure` is shorter, and
         // that is what `hlp_alloc_closure_void`/`_ptr` allocate. Loading
@@ -1266,169 +1447,7 @@ impl<'ctx> JITModule<'ctx> {
             .build_load(ptr_type, value_gep, "closure_value")?
             .into_pointer_value();
 
-        // Load all explicit args
-        let arg_vals: Vec<BasicMetadataValueEnum> = args
-            .iter()
-            .map(|arg| {
-                self.builder
-                    .build_load(reg_types[arg.idx()], registers[arg.idx()], "arg_val")
-                    .unwrap()
-                    .into()
-            })
-            .collect();
 
-        // Determine function type from the closure value's type info
-        let fun_type_idx = lowering.regs[fun.idx()].0;
-        let base_fn_type = if let Some(fun_type) = self.types_[fun_type_idx].fun.clone() {
-            self.create_function_type(&fun_type)?
-        } else {
-            // Dynamic-typed closure: infer from args (all ptrs) with ptr return
-            let dyn_params: Vec<BasicMetadataTypeEnum> =
-                args.iter().map(|_| ptr_type.into()).collect();
-            // Determine return type from dst
-            let dst_type = reg_types[dst.idx()];
-            match dst_type {
-                BasicTypeEnum::IntType(t) => t.fn_type(&dyn_params, false),
-                BasicTypeEnum::FloatType(t) => t.fn_type(&dyn_params, false),
-                _ => ptr_type.fn_type(&dyn_params, false),
-            }
-        };
-
-        // Build extended function type (with value prepended as first arg)
-        let mut extended_params: Vec<BasicMetadataTypeEnum> = vec![ptr_type.into()];
-        extended_params.extend(base_fn_type.get_param_types().iter().map(|t| {
-            let bmt: BasicMetadataTypeEnum = (*t).into();
-            bmt
-        }));
-        let extended_fn_type = if base_fn_type.get_return_type().is_some() {
-            let ret = base_fn_type.get_return_type().unwrap();
-            match ret {
-                BasicTypeEnum::FloatType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::IntType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::PointerType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::ArrayType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::StructType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::VectorType(t) => t.fn_type(&extended_params, false),
-                BasicTypeEnum::ScalableVectorType(t) => t.fn_type(&extended_params, false),
-            }
-        } else {
-            self.context.void_type().fn_type(&extended_params, false)
-        };
-
-        let function = self
-            .builder
-            .get_insert_block()
-            .unwrap()
-            .get_parent()
-            .unwrap();
-        let call_done_bb = self.context.append_basic_block(function, "call_done");
-
-        // Guarded devirtualisation comes before the generic runtime
-        // signature check. The target's real LLVM signature was
-        // checked while constructing `devirt`, so a guard hit is
-        // already ABI-safe. Signature-adapted closures whose target
-        // does not have this call site's ABI cannot enter this arm;
-        // they continue to the dynamic marshaller below. Keeping the
-        // common monomorphic arm first keeps the safety branch out of
-        // the hot loop. The per-site key is pc 0 on this path; the
-        // caller-wide lookup is what fires.
-        let devirt = if self.hot_reload {
-            None
-        } else {
-            let caller = lowering.findex as u32;
-            crate::callsite_profile::closure_target(caller, 0)
-                .or_else(|| crate::callsite_profile::uniform_closure_target(caller))
-                .and_then(|(target, exp_hv)| {
-                    let expected_ty = if exp_hv {
-                        extended_fn_type
-                    } else {
-                        base_fn_type
-                    };
-                    match self.get_or_create_function_value(target as usize) {
-                        Ok((callee, is_placeholder)) => {
-                            if is_placeholder {
-                                self.add_pending_compilation(target as usize);
-                            }
-                            (callee.get_type() == expected_ty).then_some((callee, target, exp_hv))
-                        }
-                        Err(_) => None,
-                    }
-                })
-        };
-
-        if let Some((callee, target, exp_hv)) = devirt {
-            crate::profile::count("devirt closure fast-arm", 1);
-            // Closure header fields are immutable after allocation.
-            // This lets LICM hoist the target guard when the closure
-            // value itself is loop invariant.
-            for lv in [
-                raw_has_value.as_instruction(),
-                wrapped_fun.as_instruction(),
-                fun_ptr.as_instruction(),
-                has_value.as_instruction(),
-                closure_value.as_instruction(),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let _ = lv.set_metadata(
-                    self.context.metadata_node(&[]),
-                    self.context.get_kind_id("invariant.load"),
-                );
-            }
-
-            let devirt_bb = self.context.append_basic_block(function, "devirt_hit");
-            let signature_bb = self
-                .context
-                .append_basic_block(function, "devirt_miss_signature");
-            // The profiled target is the interpreter's stub sentinel
-            // (findex + 1), which is what a closure the interpreter
-            // allocated holds in `fun`.
-            let fun_int = self.builder.build_ptr_to_int(
-                fun_ptr,
-                self.context.i64_type(),
-                "closure_fun_int",
-            )?;
-            let is_target = self.builder.build_int_compare(
-                IntPredicate::EQ,
-                fun_int,
-                self.context.i64_type().const_int(target as u64 + 1, false),
-                "devirt_is_target",
-            )?;
-            let hv_matches = self.builder.build_int_compare(
-                if exp_hv {
-                    IntPredicate::NE
-                } else {
-                    IntPredicate::EQ
-                },
-                has_value,
-                i32_type.const_zero(),
-                "devirt_hv",
-            )?;
-            let guard = self
-                .builder
-                .build_and(is_target, hv_matches, "devirt_guard")?;
-            self.builder
-                .build_conditional_branch(guard, devirt_bb, signature_bb)?;
-
-            self.builder.position_at_end(devirt_bb);
-            let direct_args: Vec<BasicMetadataValueEnum> = if exp_hv {
-                let mut values: Vec<BasicMetadataValueEnum> = vec![closure_value.into()];
-                values.extend(arg_vals.iter().cloned());
-                values
-            } else {
-                arg_vals.clone()
-            };
-            let ret = self
-                .builder
-                .build_call(callee, &direct_args, "devirt_call")?
-                .try_as_basic_value();
-            if let Some(value) = ret.basic() {
-                self.builder.build_store(registers[dst.idx()], value)?;
-            }
-            self.builder.build_unconditional_branch(call_done_bb)?;
-            self.builder.position_at_end(signature_bb);
-        }
 
         // The value's HFUN is only the call-site contract. A
         // signature-adapted closure can carry a different runtime HFUN

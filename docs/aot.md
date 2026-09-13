@@ -92,6 +92,7 @@ the smallest footprint if you can wait, and leave it alone otherwise.
 | `ASH_AIR_LEVEL=0..3` | how hard the AIR optimizer works before LLVM sees anything. |
 | `ASH_AIR_NO_WIDEN=1` | turn off loop widening, the one AIR pass that rewrites arithmetic. |
 | `ASH_MIDDLE_END_LOG=1` | report how many functions were shielded from the optimizer. |
+| `ASH_AOT_NO_STATIC_DEVIRT=1` | do not guess a method call's target from the classes the program allocates; only a `--pgo` profile devirtualises. Safe, slower on monomorphic dispatch. |
 
 Command-line flags that matter here:
 

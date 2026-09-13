@@ -60,6 +60,9 @@ pub struct JITModule<'ctx> {
     pub(crate) execution_engine: ExecutionEngine<'ctx>,
     pub(crate) bytecode: DecodedBytecode,
     pub(crate) types_: Vec<HLType>,
+    /// Which classes the program allocates, for the ahead-of-time
+    /// devirtualisation guess; built on first use.
+    pub(crate) reachable_targets: std::cell::OnceCell<crate::devirt::ReachableTargets>,
     pub(crate) type_cache: HashMap<usize, AnyTypeEnum<'ctx>>,
     pub(crate) initialized_type_cache: HashMap<usize, BasicValueEnum<'ctx>>,
     /// `Class.method` -> findex, built once on first use. A loaded
@@ -408,6 +411,7 @@ impl<'ctx> JITModule<'ctx> {
             reload_recompile: false,
             aot,
             lazy_compilation: false,
+            reachable_targets: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
         };
@@ -847,6 +851,7 @@ impl<'ctx> JITModule<'ctx> {
             reload_recompile: false,
             aot: false,
             lazy_compilation: false,
+            reachable_targets: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
         };

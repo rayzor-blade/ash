@@ -255,12 +255,8 @@ impl<'ctx> JITModule<'ctx> {
         };
 
         let caller_name = format!("{}_{}_caller", lib, name);
-        let native_caller = self.generate_native_caller_with_context(
-            &caller_name,
-            func_type,
-            func_addr,
-            context,
-        )?;
+        let native_caller =
+            self.generate_native_caller_with_context(&caller_name, func_type, func_addr, context)?;
 
         debug_assert!(native_caller.verify(true));
 

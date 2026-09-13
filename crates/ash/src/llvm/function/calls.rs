@@ -1011,8 +1011,11 @@ impl<'ctx> JITModule<'ctx> {
                     let guard = self.builder.build_int_compare(
                         IntPredicate::EQ,
                         slot_int,
-                        self.builder
-                            .build_ptr_to_int(want, self.context.i64_type(), "cm_aot_want")?,
+                        self.builder.build_ptr_to_int(
+                            want,
+                            self.context.i64_type(),
+                            "cm_aot_want",
+                        )?,
                         "cm_aot_devirt_guard",
                     )?;
                     self.builder
@@ -1301,9 +1304,11 @@ impl<'ctx> JITModule<'ctx> {
             // The profiled target is the interpreter's stub sentinel
             // (findex + 1), which is what a closure the interpreter
             // allocated holds in `fun`.
-            let fun_int =
-                self.builder
-                    .build_ptr_to_int(raw_fun, self.context.i64_type(), "closure_fun_int")?;
+            let fun_int = self.builder.build_ptr_to_int(
+                raw_fun,
+                self.context.i64_type(),
+                "closure_fun_int",
+            )?;
             let is_target = self.builder.build_int_compare(
                 IntPredicate::EQ,
                 fun_int,
@@ -1460,8 +1465,6 @@ impl<'ctx> JITModule<'ctx> {
             .builder
             .build_load(ptr_type, value_gep, "closure_value")?
             .into_pointer_value();
-
-
 
         // The value's HFUN is only the call-site contract. A
         // signature-adapted closure can carry a different runtime HFUN

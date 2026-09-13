@@ -163,7 +163,8 @@ impl Program {
             anyhow!("the module imports a memory with no maximum, which cannot be shared")
         })?;
         let ty = wasmtime::MemoryType::shared(
-            u32::try_from(ty.minimum()).map_err(|_| anyhow!("the memory's minimum is too large"))?,
+            u32::try_from(ty.minimum())
+                .map_err(|_| anyhow!("the memory's minimum is too large"))?,
             u32::try_from(maximum).map_err(|_| anyhow!("the memory's maximum is too large"))?,
         );
         wasmtime::SharedMemory::new(&self.engine, ty)
@@ -454,7 +455,8 @@ fn wasi_context(
         if key.starts_with("ASH_") || allowed.contains(&key) {
             wasi.env(&key, &value);
         }
-    }    wasi.build_p1()
+    }
+    wasi.build_p1()
 }
 
 /// A store with a fresh host in it.

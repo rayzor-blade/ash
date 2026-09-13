@@ -217,7 +217,9 @@ impl Sdl {
             gl::VENDOR => b"ash\0".as_slice(),
             gl::RENDERER => b"ash headless recorder\0".as_slice(),
             gl::VERSION => b"OpenGL ES 3.0 (WebGL 2.0)\0".as_slice(),
-            gl::SHADING_LANGUAGE_VERSION => b"OpenGL ES GLSL ES 3.00 (WebGL GLSL ES 3.00)\0".as_slice(),
+            gl::SHADING_LANGUAGE_VERSION => {
+                b"OpenGL ES GLSL ES 3.00 (WebGL GLSL ES 3.00)\0".as_slice()
+            }
             _ => return None,
         })
     }
@@ -330,7 +332,11 @@ fn install_manual(linker: &mut wasmtime::Linker<super::Host>) -> anyhow::Result<
         .func_wrap(
             super::fibers::YIELD_MODULE,
             "ash_host_sdl_gl_get_string",
-            |mut caller: wasmtime::Caller<'_, super::Host>, name: i32, into: i32, len: i32| -> i32 {
+            |mut caller: wasmtime::Caller<'_, super::Host>,
+             name: i32,
+             into: i32,
+             len: i32|
+             -> i32 {
                 caller
                     .data_mut()
                     .sdl

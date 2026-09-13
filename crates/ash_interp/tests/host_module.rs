@@ -112,7 +112,10 @@ static ALLOC_DYNAMIC: AtomicUsize = AtomicUsize::new(0);
 /// The C entry behind the adder: its bound value is the amount to add,
 /// as a pointer-sized integer, and `args` the array Haxe's call was
 /// packed into.
-extern "C" fn adder_entry(bound: *mut c_void, args: *mut ash_core::hl_bindings::varray) -> *mut ash_core::hl_bindings::vdynamic {
+extern "C" fn adder_entry(
+    bound: *mut c_void,
+    args: *mut ash_core::hl_bindings::varray,
+) -> *mut ash_core::hl_bindings::vdynamic {
     use ash_core::hl_bindings::{hl_type, vdynamic};
     type AllocDynamic = unsafe extern "C" fn(*mut hl_type) -> *mut vdynamic;
     let first = unsafe {
@@ -128,8 +131,11 @@ extern "C" fn adder_entry(bound: *mut c_void, args: *mut ash_core::hl_bindings::
 
 /// The var-args closure over `adder_entry`, adding 10.
 extern "C" fn greeter_adder() -> *mut c_void {
-    use ash_core::hl_bindings::{hl_type, hl_type__bindgen_ty_1, hl_type_fun, hl_type_kind_HFUN, hl_type_kind_HVOID};
-    type AllocClosurePtr = unsafe extern "C" fn(*mut hl_type, *mut c_void, *mut c_void) -> *mut c_void;
+    use ash_core::hl_bindings::{
+        hl_type, hl_type__bindgen_ty_1, hl_type_fun, hl_type_kind_HFUN, hl_type_kind_HVOID,
+    };
+    type AllocClosurePtr =
+        unsafe extern "C" fn(*mut hl_type, *mut c_void, *mut c_void) -> *mut c_void;
     type MakeVarArgs = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
     // The inner closure's full type, `(bound, Array<Dynamic>) -> Dynamic`;
     // ash derives the bound-less type from it on first use.
@@ -149,7 +155,8 @@ extern "C" fn greeter_adder() -> *mut c_void {
         vobj_proto: std::ptr::null_mut(),
         mark_bits: std::ptr::null_mut(),
     }));
-    let alloc: AllocClosurePtr = unsafe { std::mem::transmute(ALLOC_CLOSURE_PTR.load(Ordering::Acquire)) };
+    let alloc: AllocClosurePtr =
+        unsafe { std::mem::transmute(ALLOC_CLOSURE_PTR.load(Ordering::Acquire)) };
     let make: MakeVarArgs = unsafe { std::mem::transmute(MAKE_VAR_ARGS.load(Ordering::Acquire)) };
     let inner = unsafe { alloc(t, adder_entry as *mut c_void, 10usize as *mut c_void) };
     unsafe { make(inner) }
@@ -240,7 +247,11 @@ fn child(mode: &str) -> ! {
         (&ARRAY_TYPE, ash_core::hl_bindings::hl_type_kind_HARRAY),
         (&I32_TYPE, ash_core::hl_bindings::hl_type_kind_HI32),
     ] {
-        let index = bc.types.iter().position(|t| t.kind == kind).expect("a type of the kind");
+        let index = bc
+            .types
+            .iter()
+            .position(|t| t.kind == kind)
+            .expect("a type of the kind");
         slot.store(interp.c_type_of(index) as usize, Ordering::Release);
     }
     if mode != "interp" {

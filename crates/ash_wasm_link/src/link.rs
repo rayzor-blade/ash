@@ -434,7 +434,11 @@ fn refuse_unsupported(objects: &[Object]) -> Result<()> {
                     "{}: symbol {} is {} but segment {segment} ({}) is {}",
                     obj.name,
                     obj.symbol_name(sym),
-                    if sym.is_tls() { "thread-local" } else { "not thread-local" },
+                    if sym.is_tls() {
+                        "thread-local"
+                    } else {
+                        "not thread-local"
+                    },
                     obj.segment_info
                         .get(segment as usize)
                         .map(|s| s.name.as_str())
@@ -912,10 +916,7 @@ fn plan(
         else {
             continue;
         };
-        let Some(base) = segment_addr
-            .get(doi)
-            .and_then(|s| s.get(segment as usize))
-        else {
+        let Some(base) = segment_addr.get(doi).and_then(|s| s.get(segment as usize)) else {
             continue;
         };
         let index = first_got + got_init.len() as u32;
@@ -944,9 +945,9 @@ fn plan(
             let Some(local) = undefined_function_index(sym) else {
                 continue;
             };
-            let import = func_imports.get(local as usize).ok_or_else(|| {
-                anyhow!("{}: weak symbol {name} has no import entry", obj.name)
-            })?;
+            let import = func_imports
+                .get(local as usize)
+                .ok_or_else(|| anyhow!("{}: weak symbol {name} has no import entry", obj.name))?;
             let ImportKind::Function { type_index } = import.kind else {
                 bail!("{}: weak symbol {name} does not name a function", obj.name);
             };
@@ -2003,7 +2004,11 @@ fn emit(
         // a thread-local. Starting them all at the main block instead would
         // have a thread that touched one too early read main's copy and get
         // an answer, rather than trap.
-        let start_at = if opts.shared_memory { 0 } else { tls.main as i32 };
+        let start_at = if opts.shared_memory {
+            0
+        } else {
+            tls.main as i32
+        };
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -2045,7 +2050,11 @@ fn emit(
         // where the loader placed its data and its table entries. The stack
         // pointer goes with them because a side module's own frames use it.
         exports.export("__indirect_function_table", ExportKind::Table, 0);
-        exports.export("__memory_base", ExportKind::Global, layout.memory_base_global);
+        exports.export(
+            "__memory_base",
+            ExportKind::Global,
+            layout.memory_base_global,
+        );
         exports.export("__table_base", ExportKind::Global, layout.table_base_global);
         for (name, index) in &layout.hdll_data_globals {
             exports.export(name, ExportKind::Global, *index);

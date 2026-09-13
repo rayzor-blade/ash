@@ -330,7 +330,8 @@ impl Cache {
                         // off by the drift between them. The markers give the
                         // exact table; without them it is realigned from the
                         // raw one.
-                        shim.debug = crate::air::optimized_debug_from(raw, &ser_view.ops, &positions);
+                        shim.debug =
+                            crate::air::optimized_debug_from(raw, &ser_view.ops, &positions);
                         if logging() {
                             eprintln!(
                                 "[ssa] findex={} {} ops {} -> {} values {} cells {} blocks",

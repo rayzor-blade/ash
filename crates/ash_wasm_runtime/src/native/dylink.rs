@@ -445,7 +445,12 @@ pub(crate) fn install(linker: &mut wasmtime::Linker<Host>) -> Result<()> {
         .func_wrap(
             super::fibers::YIELD_MODULE,
             "ash_host_dlsym",
-            |mut caller: wasmtime::Caller<'_, Host>, lib: i32, lib_len: i32, sym: i32, sym_len: i32| -> i32 {
+            |mut caller: wasmtime::Caller<'_, Host>,
+             lib: i32,
+             lib_len: i32,
+             sym: i32,
+             sym_len: i32|
+             -> i32 {
                 let Some(lib) = super::guest_slice(&mut caller, lib, lib_len) else {
                     return 0;
                 };

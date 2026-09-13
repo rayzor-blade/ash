@@ -226,10 +226,7 @@ pub fn perform_reload(
 }
 
 /// Flush vtable protos for all HOBJ/HSTRUCT types that might reference changed functions.
-fn flush_affected_protos(
-    shared: &SharedRuntimeHandles,
-    _changed_findexes: &[usize],
-) {
+fn flush_affected_protos(shared: &SharedRuntimeHandles, _changed_findexes: &[usize]) {
     // Resolve hlp_flush_proto dynamically from the std library
     let flush_fn = crate::native_lib::NativeFunctionResolver::new()
         .resolve_function("std", "hlp_flush_proto")

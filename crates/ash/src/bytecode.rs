@@ -1395,7 +1395,12 @@ impl DecodedBytecode {
                     h = H32(h, self.ints.get(v as usize).copied().unwrap_or(v) as u32);
                 }
                 hl::hl_type_kind_HF64 | hl::hl_type_kind_HF32 => {
-                    let bits = self.floats.get(v as usize).copied().unwrap_or(0.0).to_bits();
+                    let bits = self
+                        .floats
+                        .get(v as usize)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .to_bits();
                     h = H32(h, bits as u32);
                     h = H32(h, (bits >> 32) as u32);
                 }

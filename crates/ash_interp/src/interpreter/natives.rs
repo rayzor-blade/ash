@@ -377,35 +377,17 @@ impl HLInterpreter {
                     4 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                        )
+                        f(word(0), word(1), word(2), word(3))
                     }
                     5 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                        )
+                        f(word(0), word(1), word(2), word(3), word(4))
                     }
                     6 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(
-                            word(0),
-                            word(1),
-                            word(2),
-                            word(3),
-                            word(4),
-                            word(5),
-                        )
+                        f(word(0), word(1), word(2), word(3), word(4), word(5))
                     }
                     7 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =

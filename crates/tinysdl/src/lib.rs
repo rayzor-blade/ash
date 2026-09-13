@@ -31,5 +31,5 @@
 static ALLOCATOR: hl_abi::ProgramAllocator = hl_abi::ProgramAllocator;
 
 mod generated;
-mod manual;
 mod generated_ui;
+mod manual;

@@ -615,8 +615,7 @@ fn read_symbol_table(obj: &mut Object, mut bytes: &[u8]) -> Result<()> {
             ),
             SYMTAB_FUNCTION | SYMTAB_GLOBAL | SYMTAB_TAG | SYMTAB_TABLE => {
                 let index = read_uleb(&mut bytes)?;
-                let undefined =
-                    flagged_undefined || (kind == SYMTAB_FUNCTION && index < imported);
+                let undefined = flagged_undefined || (kind == SYMTAB_FUNCTION && index < imported);
                 if undefined {
                     flags.insert(SymbolFlags::UNDEFINED);
                 }

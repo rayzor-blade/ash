@@ -565,9 +565,7 @@ impl<'ctx> JITModule<'ctx> {
             .builder
             .build_load(i32t, registers[offset.idx()], "refoff_off")?
             .into_int_value();
-        let index = self
-            .builder
-            .build_int_s_extend(index, i64t, "refoff_idx")?;
+        let index = self.builder.build_int_s_extend(index, i64t, "refoff_idx")?;
         let off = if stride == 1 {
             index
         } else {

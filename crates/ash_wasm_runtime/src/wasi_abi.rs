@@ -79,7 +79,10 @@ pub fn parse_iovecs(region: &[u8], count: u32) -> Option<Vec<IoVec>> {
 /// makes a line of output a line rather than several. `read` fetches one
 /// range out of the guest and answers `None` if it is not inside it, which is
 /// the guest's mistake and reported as `EFAULT`.
-pub fn gather(vecs: &[IoVec], mut read: impl FnMut(u32, u32) -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+pub fn gather(
+    vecs: &[IoVec],
+    mut read: impl FnMut(u32, u32) -> Option<Vec<u8>>,
+) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     for v in vecs {
         out.extend_from_slice(&read(v.ptr, v.len)?);

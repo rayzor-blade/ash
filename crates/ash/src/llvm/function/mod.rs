@@ -1601,15 +1601,7 @@ impl<'ctx> JITModule<'ctx> {
         }
 
         self.emit_air_v2_cfg(
-            source,
-            air,
-            function,
-            &lowering,
-            &registers,
-            &reg_types,
-            cell_base,
-            &included,
-            header,
+            source, air, function, &lowering, &registers, &reg_types, cell_base, &included, header,
         )?;
         if std::env::var_os("ASH_OSR_LOG").is_some() {
             eprintln!(
@@ -1754,7 +1746,11 @@ impl<'ctx> JITModule<'ctx> {
                     .ok_or_else(|| anyhow!("AIR Int names no constant: {idx}"))?;
                 let v = self
                     .builder
-                    .build_load(self.context.i32_type(), global.as_pointer_value(), "air_int")?
+                    .build_load(
+                        self.context.i32_type(),
+                        global.as_pointer_value(),
+                        "air_int",
+                    )?
                     .into_int_value();
                 let v = match reg_types[dst.idx()] {
                     BasicTypeEnum::IntType(t) if t.get_bit_width() > 32 => self
@@ -2640,10 +2636,7 @@ impl<'ctx> JITModule<'ctx> {
             false,
         );
         let stub_fn_ptr = i64_type
-            .const_int(
-                crate::stub_bridge::ash_jit_call_stub as usize as u64,
-                false,
-            )
+            .const_int(crate::stub_bridge::ash_jit_call_stub as usize as u64, false)
             .const_to_pointer(ptr_type);
         let raw = self
             .builder
@@ -2856,12 +2849,12 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<inkwell::values::IntValue<'ctx>> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let setjmp_ptr = self.setjmp_ptr()?;
-        let args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> =
-            if self.emits_setjmp_frame() {
-                vec![buf.into(), ptr_type.const_null().into()]
-            } else {
-                vec![buf.into()]
-            };
+        let args: Vec<inkwell::values::BasicMetadataValueEnum<'ctx>> = if self.emits_setjmp_frame()
+        {
+            vec![buf.into(), ptr_type.const_null().into()]
+        } else {
+            vec![buf.into()]
+        };
         let call =
             self.builder
                 .build_indirect_call(self.setjmp_signature(), setjmp_ptr, &args, name)?;
@@ -2886,9 +2879,11 @@ impl<'ctx> JITModule<'ctx> {
             const SYMBOL: &str = "_setjmp";
             let signature = self.setjmp_signature();
             let function = self.module.get_function(SYMBOL).unwrap_or_else(|| {
-                let declared =
-                    self.module
-                        .add_function(SYMBOL, signature, Some(inkwell::module::Linkage::External));
+                let declared = self.module.add_function(
+                    SYMBOL,
+                    signature,
+                    Some(inkwell::module::Linkage::External),
+                );
                 // The same attribute a C header gives `setjmp`. Call sites
                 // carry it too, but the declaration is what makes every pass
                 // that asks "does this function call something that returns

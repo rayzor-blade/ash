@@ -50,9 +50,7 @@ const WASM_DYLINK_MEM_INFO: u8 = 1;
 /// wasm-ld writes, so its name appears within the first few bytes of a side
 /// module and nowhere near the front of anything else.
 pub fn looks_like_side_module(prefix: &[u8]) -> bool {
-    prefix
-        .windows(b"dylink.0".len())
-        .any(|w| w == b"dylink.0")
+    prefix.windows(b"dylink.0".len()).any(|w| w == b"dylink.0")
 }
 
 /// How much of a file [`looks_like_side_module`] needs.

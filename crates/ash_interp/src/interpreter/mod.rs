@@ -301,9 +301,7 @@ pub(crate) unsafe fn read_raw_kind(p: *const u8, kind: hl::hl_type_kind) -> NanB
         }
         hl::hl_type_kind_HI32 => NanBoxedValue::from_i32((p as *const i32).read_unaligned()),
         hl::hl_type_kind_HBOOL => NanBoxedValue::from_bool(p.read_unaligned() != 0),
-        hl::hl_type_kind_HF32 => {
-            NanBoxedValue::from_f64((p as *const f32).read_unaligned() as f64)
-        }
+        hl::hl_type_kind_HF32 => NanBoxedValue::from_f64((p as *const f32).read_unaligned() as f64),
         hl::hl_type_kind_HF64 => NanBoxedValue::from_f64((p as *const f64).read_unaligned()),
         hl::hl_type_kind_HI64 => NanBoxedValue::from_i64((p as *const i64).read_unaligned()),
         _ => match (p as *const usize).read_unaligned() {
@@ -3140,8 +3138,7 @@ impl HLInterpreter {
                 // The loop function is a vclosure — extract findex from stub pointer
                 let cl = loop_fn as *const hl::_vclosure;
                 let loop_fun = unsafe { (*cl).fun as usize };
-                let findex = if (loop_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
-                {
+                let findex = if (loop_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
                     loop_fun.wrapping_sub(1)
                 } else {
                     // `hlp_sys_set_loop` was called from compiled code, so
@@ -5503,10 +5500,7 @@ impl HLInterpreter {
                 // Re-initialize constants from the new bytecode so that
                 // globals (string literals, class descriptors) reflect V2.
                 if let Err(e) = self.init_constants(&new_bc, native_resolver) {
-                    eprintln!(
-                        "[hot-reload] warning: init_constants failed: {}",
-                        e
-                    );
+                    eprintln!("[hot-reload] warning: init_constants failed: {}", e);
                 }
 
                 // Bodies optimized from V1 describe V1's
@@ -6834,8 +6828,9 @@ impl HLInterpreter {
                 let base = frame.registers.get(reg.0);
                 let off = frame.registers.get(offset.0).as_i32() as isize;
                 let stride = ref_elem_size(bytecode, &bytecode.types[func.regs[dst.0 as usize].0]);
-                let result =
-                    NanBoxedValue::from_ptr((base.as_ptr() as isize + off * stride as isize) as usize);
+                let result = NanBoxedValue::from_ptr(
+                    (base.as_ptr() as isize + off * stride as isize) as usize,
+                );
                 frame
                     .registers
                     .set(dst.0, narrow_to_reg(bytecode, func, dst.0, result));

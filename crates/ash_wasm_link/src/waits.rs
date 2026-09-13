@@ -77,7 +77,6 @@ pub fn instrument(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(module.finish())
 }
 
-
 struct Waits {
     imports: u32,
     types: u32,
@@ -167,7 +166,6 @@ impl Reencode for Waits {
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {

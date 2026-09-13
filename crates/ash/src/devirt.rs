@@ -7,8 +7,8 @@
 //! an object a native allocated outside the analysis costs a miss, never a
 //! wrong call.
 
-use crate::types::{HLType, TypeRef};
 use crate::bytecode::DecodedBytecode;
+use crate::types::{HLType, TypeRef};
 use air::opcodes::Opcode;
 
 pub struct ReachableTargets {

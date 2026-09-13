@@ -16,7 +16,6 @@ use std::ffi::c_void;
 #[allow(unused_imports)]
 use hl_abi::*;
 
-
 #[link(wasm_import_module = "env")]
 extern "C" {
     fn ash_host_ui_ui_button_new(a0: i32, a1: i32, a2: i32) -> i32;
@@ -28,10 +27,18 @@ extern "C" {
 /// Called by the VM through the resolver below, with the arguments the
 /// signature above declares.
 #[no_mangle]
-pub unsafe extern "C" fn sdl_ui_button_new(a0: *mut c_void, a1: *mut vbyte, a2: *mut c_void) -> *mut c_void {
+pub unsafe extern "C" fn sdl_ui_button_new(
+    a0: *mut c_void,
+    a1: *mut vbyte,
+    a2: *mut c_void,
+) -> *mut c_void {
     ash_host_ui_ui_button_new(a0 as i32, a1 as i32, a2 as i32) as *mut c_void
 }
-define_prim!(hlp_ui_button_new, sdl_ui_button_new, "PXui_window_BP_v_Xui_window_");
+define_prim!(
+    hlp_ui_button_new,
+    sdl_ui_button_new,
+    "PXui_window_BP_v_Xui_window_"
+);
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -111,7 +118,11 @@ extern "C" {
 pub unsafe extern "C" fn sdl_ui_sentinel_is_paused(a0: *mut c_void) -> bool {
     ash_host_ui_ui_sentinel_is_paused(a0 as i32) != 0
 }
-define_prim!(hlp_ui_sentinel_is_paused, sdl_ui_sentinel_is_paused, "PXui_sentinel__b");
+define_prim!(
+    hlp_ui_sentinel_is_paused,
+    sdl_ui_sentinel_is_paused,
+    "PXui_sentinel__b"
+);
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -127,7 +138,11 @@ extern "C" {
 pub unsafe extern "C" fn sdl_ui_sentinel_pause(a0: *mut c_void, a1: bool) {
     ash_host_ui_ui_sentinel_pause(a0 as i32, a1 as i32);
 }
-define_prim!(hlp_ui_sentinel_pause, sdl_ui_sentinel_pause, "PXui_sentinel_b_v");
+define_prim!(
+    hlp_ui_sentinel_pause,
+    sdl_ui_sentinel_pause,
+    "PXui_sentinel_b_v"
+);
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -143,7 +158,11 @@ extern "C" {
 pub unsafe extern "C" fn sdl_ui_sentinel_tick(a0: *mut c_void) {
     ash_host_ui_ui_sentinel_tick(a0 as i32);
 }
-define_prim!(hlp_ui_sentinel_tick, sdl_ui_sentinel_tick, "PXui_sentinel__v");
+define_prim!(
+    hlp_ui_sentinel_tick,
+    sdl_ui_sentinel_tick,
+    "PXui_sentinel__v"
+);
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -159,7 +178,11 @@ extern "C" {
 pub unsafe extern "C" fn sdl_ui_start_sentinel(a0: f64, a1: *mut c_void) -> *mut c_void {
     ash_host_ui_ui_start_sentinel(a0, a1 as i32) as *mut c_void
 }
-define_prim!(hlp_ui_start_sentinel, sdl_ui_start_sentinel, "PdP_v_Xui_sentinel_");
+define_prim!(
+    hlp_ui_start_sentinel,
+    sdl_ui_start_sentinel,
+    "PdP_v_Xui_sentinel_"
+);
 
 #[link(wasm_import_module = "env")]
 extern "C" {
@@ -223,4 +246,8 @@ extern "C" {
 pub unsafe extern "C" fn sdl_ui_winlog_set_text(a0: *mut c_void, a1: *mut vbyte, a2: bool) {
     ash_host_ui_ui_winlog_set_text(a0 as i32, a1 as i32, a2 as i32);
 }
-define_prim!(hlp_ui_winlog_set_text, sdl_ui_winlog_set_text, "PXui_window_Bb_v");
+define_prim!(
+    hlp_ui_winlog_set_text,
+    sdl_ui_winlog_set_text,
+    "PXui_window_Bb_v"
+);

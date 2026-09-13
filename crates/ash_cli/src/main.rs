@@ -1920,10 +1920,11 @@ fn emit_optimized(
                         if let ash_core::opcodes::Opcode::Int { ptr, .. } = op {
                             if ptr.0 >= int_base {
                                 let value = new_ints[ptr.0 - int_base];
-                                let at = minted.iter().position(|v| *v == value).unwrap_or_else(|| {
-                                    minted.push(value);
-                                    minted.len() - 1
-                                });
+                                let at =
+                                    minted.iter().position(|v| *v == value).unwrap_or_else(|| {
+                                        minted.push(value);
+                                        minted.len() - 1
+                                    });
                                 ptr.0 = int_base + at;
                             }
                         }

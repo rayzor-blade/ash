@@ -31,9 +31,6 @@
 //! costs memory on a large result and buys a `result_get_length` that does
 //! not have to drain the cursor to answer.
 
-
-
-
 /// This library allocates through the program. See [`hl_abi::ProgramAllocator`].
 #[global_allocator]
 static ALLOCATOR: hl_abi::ProgramAllocator = hl_abi::ProgramAllocator;

@@ -1294,7 +1294,8 @@ impl HLInterpreter {
                 let mut ty = *(obj_ptr as *const *mut hl::hl_type);
                 let mut found = None;
                 while !ty.is_null()
-                    && ((*ty).kind == hl::hl_type_kind_HOBJ || (*ty).kind == hl::hl_type_kind_HSTRUCT)
+                    && ((*ty).kind == hl::hl_type_kind_HOBJ
+                        || (*ty).kind == hl::hl_type_kind_HSTRUCT)
                 {
                     let obj_data = (*ty).__bindgen_anon_1.obj;
                     if obj_data.is_null() {
@@ -1564,13 +1565,12 @@ impl HLInterpreter {
                         }
                         let packed = self.pack_varargs_array(func, args, &arg_vals)?;
                         let wrapped_fun = (*wrapped).fun as usize;
-                        let fi = if (wrapped_fun as u64)
-                            < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
-                        {
-                            wrapped_fun.wrapping_sub(1)
-                        } else {
-                            self.findex_for_code_addr(wrapped_fun).unwrap_or(usize::MAX)
-                        };
+                        let fi =
+                            if (wrapped_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
+                                wrapped_fun.wrapping_sub(1)
+                            } else {
+                                self.findex_for_code_addr(wrapped_fun).unwrap_or(usize::MAX)
+                            };
                         if func_of(&self.targets, fi).is_none()
                             && native_of(&self.targets, fi).is_none()
                         {
@@ -1578,8 +1578,7 @@ impl HLInterpreter {
                             // wrapped with `hlp_make_var_args`, taking its
                             // bound value and the array, as `hlp_call_method`
                             // calls it.
-                            if (wrapped_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
-                            {
+                            if (wrapped_fun as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
                                 return Err(anyhow!(
                                     "varargs wrapped closure has invalid findex {fi}"
                                 ));
@@ -1589,8 +1588,8 @@ impl HLInterpreter {
                                 let f: unsafe extern "C" fn(
                                     *mut c_void,
                                     *mut hl::varray,
-                                ) -> *mut hl::vdynamic =
-                                    std::mem::transmute(wrapped_fun);
+                                )
+                                    -> *mut hl::vdynamic = std::mem::transmute(wrapped_fun);
                                 f((*wrapped).value, array)
                             } else {
                                 let f: unsafe extern "C" fn(*mut hl::varray) -> *mut hl::vdynamic =
@@ -1622,8 +1621,7 @@ impl HLInterpreter {
                     // `fun` holds either the interpreter's `findex + 1` stub
                     // sentinel or, when compiled code allocated this closure
                     // from `functions_ptrs`, a real entry address.
-                    let fi = if (fun_ptr as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT
-                    {
+                    let fi = if (fun_ptr as u64) < ash_core::stub_bridge::STUB_SENTINEL_LIMIT {
                         (fun_ptr as usize).wrapping_sub(1)
                     } else {
                         self.findex_for_code_addr(fun_ptr as usize).ok_or_else(|| {

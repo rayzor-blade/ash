@@ -8,8 +8,8 @@
 //! tables, resolved from the registration rather than from a library on disk.
 
 use crate::bytecode::{field_hash, DecodedBytecode};
-use crate::native_lib::HostNative;
 use crate::hl;
+use crate::native_lib::HostNative;
 use crate::types::{HLNative, HLObjField, HLObjProto, HLType, HLTypeFun, HLTypeObj, TypeRef};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;

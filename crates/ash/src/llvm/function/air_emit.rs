@@ -338,7 +338,10 @@ impl<'ctx> JITModule<'ctx> {
                     ))
                 };
             }
-            blocks[bi] = seq.into_iter().map(|b| b.expect("every slot filled")).collect();
+            blocks[bi] = seq
+                .into_iter()
+                .map(|b| b.expect("every slot filled"))
+                .collect();
         }
 
         // Compiled fibers need safe points even in CPU-only loops. Derive
@@ -990,7 +993,9 @@ impl<'ctx> JITModule<'ctx> {
                             let (mut file, mut line) = (*file, *line);
                             let mut cur = *site;
                             while let Some(i) = cur {
-                                let Some(st) = air.inline_sites.get(i as usize) else { break };
+                                let Some(st) = air.inline_sites.get(i as usize) else {
+                                    break;
+                                };
                                 file = st.file;
                                 line = st.line;
                                 cur = st.parent;
@@ -1198,7 +1203,9 @@ impl<'ctx> JITModule<'ctx> {
             }
             MemAccess::Array => {
                 if stride != 1 {
-                    return Err(anyhow!("vector array access stride {stride} is not contiguous"));
+                    return Err(anyhow!(
+                        "vector array access stride {stride} is not contiguous"
+                    ));
                 }
                 let idx_ty = index.get_type();
                 let scaled = self.builder.build_int_mul(
@@ -1238,7 +1245,9 @@ impl<'ctx> JITModule<'ctx> {
             (BasicValueEnum::IntValue(x), BasicValueEnum::IntValue(y)) => {
                 self.vector_int_binop(op, x, y)
             }
-            (x, y) => Err(anyhow!("vector op {op:?} over mismatched operands {x:?} and {y:?}")),
+            (x, y) => Err(anyhow!(
+                "vector op {op:?} over mismatched operands {x:?} and {y:?}"
+            )),
         }
     }
 
@@ -1250,12 +1259,24 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>> {
         use air::v2::ir::BinOp as B;
         Ok(match op {
-            B::Add => self.builder.build_float_add(x, y, "vfadd")?.as_basic_value_enum(),
-            B::Sub => self.builder.build_float_sub(x, y, "vfsub")?.as_basic_value_enum(),
-            B::Mul => self.builder.build_float_mul(x, y, "vfmul")?.as_basic_value_enum(),
+            B::Add => self
+                .builder
+                .build_float_add(x, y, "vfadd")?
+                .as_basic_value_enum(),
+            B::Sub => self
+                .builder
+                .build_float_sub(x, y, "vfsub")?
+                .as_basic_value_enum(),
+            B::Mul => self
+                .builder
+                .build_float_mul(x, y, "vfmul")?
+                .as_basic_value_enum(),
             // HL's division is the signed integer opcode reused for floats;
             // there is no separate float variant.
-            B::SDiv => self.builder.build_float_div(x, y, "vfdiv")?.as_basic_value_enum(),
+            B::SDiv => self
+                .builder
+                .build_float_div(x, y, "vfdiv")?
+                .as_basic_value_enum(),
             _ => return Err(anyhow!("unsupported float vector op {op:?}")),
         })
     }
@@ -1268,13 +1289,25 @@ impl<'ctx> JITModule<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>> {
         use air::v2::ir::BinOp as B;
         Ok(match op {
-            B::Add => self.builder.build_int_add(x, y, "viadd")?.as_basic_value_enum(),
-            B::Sub => self.builder.build_int_sub(x, y, "visub")?.as_basic_value_enum(),
-            B::Mul => self.builder.build_int_mul(x, y, "vimul")?.as_basic_value_enum(),
+            B::Add => self
+                .builder
+                .build_int_add(x, y, "viadd")?
+                .as_basic_value_enum(),
+            B::Sub => self
+                .builder
+                .build_int_sub(x, y, "visub")?
+                .as_basic_value_enum(),
+            B::Mul => self
+                .builder
+                .build_int_mul(x, y, "vimul")?
+                .as_basic_value_enum(),
             B::And => self.builder.build_and(x, y, "viand")?.as_basic_value_enum(),
             B::Or => self.builder.build_or(x, y, "vior")?.as_basic_value_enum(),
             B::Xor => self.builder.build_xor(x, y, "vixor")?.as_basic_value_enum(),
-            B::Shl => self.builder.build_left_shift(x, y, "vishl")?.as_basic_value_enum(),
+            B::Shl => self
+                .builder
+                .build_left_shift(x, y, "vishl")?
+                .as_basic_value_enum(),
             B::SShr => self
                 .builder
                 .build_right_shift(x, y, true, "vishr")?

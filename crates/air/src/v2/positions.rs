@@ -98,13 +98,11 @@ pub fn positions_by_pc_with(f: &Function, ser: &Serialized, cfg: &CfgInfo) -> Ve
 /// the call that inlined it into each enclosing function. `root` is the
 /// function the body belongs to. A position outside inlined code is one
 /// frame.
-pub fn frames_of(
-    pos: PcPosition,
-    sites: &[InlineSite],
-    root: u32,
-) -> Vec<(u32, i32, i32)> {
+pub fn frames_of(pos: PcPosition, sites: &[InlineSite], root: u32) -> Vec<(u32, i32, i32)> {
     let mut frames = Vec::new();
-    for_each_frame(pos, sites, root, |findex, file, line| frames.push((findex, file, line)));
+    for_each_frame(pos, sites, root, |findex, file, line| {
+        frames.push((findex, file, line))
+    });
     frames
 }
 
@@ -128,7 +126,9 @@ pub fn for_each_frame(
     visit(callee_of(pos.site), pos.file, pos.line);
     let mut cur = pos.site;
     while let Some(i) = cur {
-        let Some(st) = sites.get(i as usize) else { break };
+        let Some(st) = sites.get(i as usize) else {
+            break;
+        };
         visit(
             callee_of(st.parent),
             i32::try_from(st.file).unwrap_or(-1),

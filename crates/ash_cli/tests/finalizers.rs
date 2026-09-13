@@ -27,10 +27,8 @@ fn run_under_fd_limit(mode: &[&str], label: &str) -> (String, String) {
     // one probe let whichever finished first delete the file the other was
     // still reopening -- an Eof or a SysError rather than the descriptor
     // exhaustion this is looking for.
-    let probe = std::env::temp_dir().join(format!(
-        "ash_finalizers_{}_{label}.txt",
-        std::process::id()
-    ));
+    let probe =
+        std::env::temp_dir().join(format!("ash_finalizers_{}_{label}.txt", std::process::id()));
 
     // `ulimit` rather than a `pre_exec` setrlimit, so the limit is visible in
     // the command if this ever has to be reproduced by hand.

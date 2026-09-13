@@ -205,13 +205,21 @@ macro_rules! guest {
 
 fn install_wasi(wasi: &Object, host: &Rc<Host>) {
     let h = host.clone();
-    bind!(wasi, "fd_write", move |fd: i32, iovs: u32, len: u32, out: u32| -> i32 {
+    bind!(wasi, "fd_write", move |fd: i32,
+                                  iovs: u32,
+                                  len: u32,
+                                  out: u32|
+          -> i32 {
         let g = guest!(h);
         h.wasi.borrow_mut().fd_write(&g, fd, iovs, len, out)
     });
 
     let h = host.clone();
-    bind!(wasi, "fd_read", move |fd: i32, iovs: u32, len: u32, out: u32| -> i32 {
+    bind!(wasi, "fd_read", move |fd: i32,
+                                 iovs: u32,
+                                 len: u32,
+                                 out: u32|
+          -> i32 {
         let g = guest!(h);
         h.wasi.borrow_mut().fd_read(&g, fd, iovs, len, out)
     });
@@ -244,7 +252,10 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(wasi, "clock_time_get", move |id: u32, _precision: i64, out: u32| -> i32 {
+    bind!(wasi, "clock_time_get", move |id: u32,
+                                        _precision: i64,
+                                        out: u32|
+          -> i32 {
         // `precision` is an i64 and has to be declared as one: a wasm i64
         // reaches JavaScript as a BigInt, and a binding that reads it as two
         // i32 halves takes the wrong number of arguments and leaves `out`
@@ -290,7 +301,11 @@ fn install_wasi(wasi: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(wasi, "poll_oneoff", move |s: u32, e: u32, n: u32, out: u32| -> i32 {
+    bind!(wasi, "poll_oneoff", move |s: u32,
+                                     e: u32,
+                                     n: u32,
+                                     out: u32|
+          -> i32 {
         let g = guest!(h);
         h.wasi.borrow().poll_oneoff(&g, s, e, n, out)
     });
@@ -419,17 +434,25 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_connect", move |fd: i32, ip: i32, port: i32| -> i32 {
+    bind!(env, "ash_host_socket_connect", move |fd: i32,
+                                                ip: i32,
+                                                port: i32|
+          -> i32 {
         h.sockets.borrow_mut().connect(fd, ip, port)
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_bind", move |fd: i32, ip: i32, port: i32| -> i32 {
+    bind!(env, "ash_host_socket_bind", move |fd: i32,
+                                             ip: i32,
+                                             port: i32|
+          -> i32 {
         h.sockets.borrow_mut().bind(fd, ip, port)
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_listen", move |fd: i32, backlog: i32| -> i32 {
+    bind!(env, "ash_host_socket_listen", move |fd: i32,
+                                               backlog: i32|
+          -> i32 {
         h.sockets.borrow_mut().listen(fd, backlog)
     });
 
@@ -439,7 +462,10 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_send", move |fd: i32, ptr: u32, len: u32| -> i32 {
+    bind!(env, "ash_host_socket_send", move |fd: i32,
+                                             ptr: u32,
+                                             len: u32|
+          -> i32 {
         let g = guest!(h);
         let Some(bytes) = g.read(ptr, len) else {
             return -errno::FAULT;
@@ -448,7 +474,10 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_recv", move |fd: i32, ptr: u32, len: u32| -> i32 {
+    bind!(env, "ash_host_socket_recv", move |fd: i32,
+                                             ptr: u32,
+                                             len: u32|
+          -> i32 {
         let g = guest!(h);
         let mut buffer = vec![0u8; len as usize];
         let got = h.sockets.borrow_mut().recv(fd, &mut buffer);
@@ -459,7 +488,9 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_shutdown", move |fd: i32, how: i32| -> i32 {
+    bind!(env, "ash_host_socket_shutdown", move |fd: i32,
+                                                 how: i32|
+          -> i32 {
         h.sockets.borrow_mut().shutdown(fd, how)
     });
 
@@ -469,7 +500,10 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_name", move |fd: i32, which: i32, out: u32| -> i32 {
+    bind!(env, "ash_host_socket_name", move |fd: i32,
+                                             which: i32,
+                                             out: u32|
+          -> i32 {
         let g = guest!(h);
         match h.sockets.borrow().name(fd, which) {
             Ok((ip, port)) => {
@@ -483,12 +517,18 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_set", move |fd: i32, opt: i32, value: i32| -> i32 {
+    bind!(env, "ash_host_socket_set", move |fd: i32,
+                                            opt: i32,
+                                            value: i32|
+          -> i32 {
         h.sockets.borrow_mut().set(fd, opt, value)
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_socket_poll", move |fds: u32, n: u32, timeout: i32| -> i32 {
+    bind!(env, "ash_host_socket_poll", move |fds: u32,
+                                             n: u32,
+                                             timeout: i32|
+          -> i32 {
         let g = guest!(h);
         poll_through(&h, &g, fds, n, timeout)
     });
@@ -509,7 +549,10 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     });
 
     let h = host.clone();
-    bind!(env, "ash_host_fiber_arm", move |data: i32, rewind: i32, sp: i32| -> i32 {
+    bind!(env, "ash_host_fiber_arm", move |data: i32,
+                                           rewind: i32,
+                                           sp: i32|
+          -> i32 {
         h.fibers.borrow().arm(data, rewind, sp)
     });
 
@@ -531,7 +574,11 @@ fn install_env(env: &Object, host: &Rc<Host>) {
     // reads it back out of a process, so setting one changes only the guest's
     // own view -- which `hlp_sys_put_env` has already done by the time this
     // is called.
-    bind!(env, "ash_host_put_env", move |_n: u32, _nl: i32, _v: u32, _vl: i32| {});
+    bind!(
+        env,
+        "ash_host_put_env",
+        move |_n: u32, _nl: i32, _v: u32, _vl: i32| {}
+    );
 
     // Loading a native library in a page is the same steps against
     // `WebAssembly.instantiate`, and is not written yet: see

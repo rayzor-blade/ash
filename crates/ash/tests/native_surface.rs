@@ -36,7 +36,11 @@ fn report_the_native_surface() {
             .push(native.name.as_str());
     }
 
-    println!("{} references {} natives:", path.display(), code.natives.len());
+    println!(
+        "{} references {} natives:",
+        path.display(),
+        code.natives.len()
+    );
     for (lib, mut names) in by_lib {
         names.sort_unstable();
         println!("\n  {lib}: {}", names.len());

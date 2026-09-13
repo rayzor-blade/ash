@@ -181,12 +181,20 @@ impl HLInterpreter {
             // would hold had nothing been inlined.
             let mut visit = |findex: u32, file: i32, line: i32| {
                 if let Some(function_index) = func_of(&self.targets, findex as usize) {
-                    push(&mut sites, function_index, frame.pc, true, Some((file, line)));
+                    push(
+                        &mut sites,
+                        function_index,
+                        frame.pc,
+                        true,
+                        Some((file, line)),
+                    );
                 }
             };
             let named = match self.ssa.body(frame.function_index) {
                 Some(prep) => prep.frames_at(frame.pc, &mut visit),
-                None => self.air.frames_at(frame.function_index, frame.pc, &mut visit),
+                None => self
+                    .air
+                    .frames_at(frame.function_index, frame.pc, &mut visit),
             };
             if !named {
                 push(&mut sites, frame.function_index, frame.pc, true, None);

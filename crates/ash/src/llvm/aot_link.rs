@@ -552,7 +552,11 @@ fn link_wasm_module(
             "[ash] {} native {} beside the output will be loaded at run time, so this \
              module exports the memory, table and {} runtime {} they import.",
             hdlls.len(),
-            if hdlls.len() == 1 { "library" } else { "libraries" },
+            if hdlls.len() == 1 {
+                "library"
+            } else {
+                "libraries"
+            },
             hdlls.iter().map(|(_, s)| s.functions.len()).sum::<usize>(),
             if hdlls.iter().map(|(_, s)| s.functions.len()).sum::<usize>() == 1 {
                 "function"

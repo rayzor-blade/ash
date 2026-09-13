@@ -807,7 +807,10 @@ pub(crate) const SITE_TLAB_REFILL: u64 = 6;
 /// Written by `fiber::worker_main`, which is compiled only where the pool has
 /// OS threads to run on. The name stays in `SITE_NAMES` either way, so the
 /// numbering matches on every target.
-#[cfg_attr(not(any(not(target_family = "wasm"), target_feature = "atomics")), allow(dead_code))]
+#[cfg_attr(
+    not(any(not(target_family = "wasm"), target_feature = "atomics")),
+    allow(dead_code)
+)]
 pub(crate) const SITE_SCHEDULER_IDLE: u64 = 7;
 pub(crate) const SITE_RUNNING: u64 = 0;
 
@@ -937,7 +940,11 @@ fn stop_mutator_world() -> StoppedWorld {
                             "{} {:#x}{}{}{}",
                             m.role,
                             m.thread,
-                            if m.thread == collector { " collector" } else { "" },
+                            if m.thread == collector {
+                                " collector"
+                            } else {
+                                ""
+                            },
                             if m.parked { " parked" } else { "" },
                             if m.blocking_depth != 0 {
                                 format!(" blocking={}", m.blocking_depth)

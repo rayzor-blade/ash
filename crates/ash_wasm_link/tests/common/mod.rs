@@ -52,10 +52,7 @@ pub fn object(segment_name: &str, segment_flags: u32) -> Object {
     let whole_body = 0..BODY.len();
     Object {
         name: "tls.o".into(),
-        types: vec![
-            FuncType::new([], []),
-            FuncType::new([ValType::I32], []),
-        ],
+        types: vec![FuncType::new([], []), FuncType::new([ValType::I32], [])],
         imports: Vec::<ash_wasm_link::object::ObjImport>::new(),
         functions: vec![0],
         tables: Vec::new(),
@@ -189,4 +186,3 @@ pub fn read(bytes: &[u8]) -> Module {
     }
     out
 }
-

@@ -124,9 +124,7 @@ mod wasi_cwd {
         START
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_or_insert_with(|| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-            })
+            .get_or_insert_with(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")))
             .clone()
     }
 

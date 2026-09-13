@@ -165,7 +165,9 @@ fn report_the_signatures() {
             println!("{name}: resolver answered nothing");
             continue;
         }
-        let sig = unsafe { CStr::from_ptr(sig) }.to_string_lossy().into_owned();
+        let sig = unsafe { CStr::from_ptr(sig) }
+            .to_string_lossy()
+            .into_owned();
         println!("{name}\t{sig}\t{}", describe(&sig));
     }
 }

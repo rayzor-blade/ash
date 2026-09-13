@@ -1,5 +1,5 @@
-use ash_core::types::HLFunction;
 use crate::values::NanBoxedValue;
+use ash_core::types::HLFunction;
 
 /// Register file for a single function execution frame.
 /// Uses NaN boxing for efficient value storage (8 bytes per register, Copy semantics).

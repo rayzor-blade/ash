@@ -217,7 +217,10 @@ impl AshCraneliftBackend {
                     .map(|(code, spans)| {
                         (
                             code,
-                            source_runs(spans.into_iter().map(|s| (s.start, s.end, s.loc)), &chains),
+                            source_runs(
+                                spans.into_iter().map(|s| (s.start, s.end, s.loc)),
+                                &chains,
+                            ),
                         )
                     })
             } else {

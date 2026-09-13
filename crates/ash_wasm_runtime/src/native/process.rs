@@ -79,7 +79,10 @@ fn rebase_guest_paths(line: &str) -> String {
     // line cannot have -- the rest of the line may well name a path that is
     // about to be created.
     if let Some(cmd) = line.split_whitespace().next() {
-        if line.starts_with(cmd) && cmd.starts_with('/') && !Path::new(&rebase_guest_arg(cmd)).exists() {
+        if line.starts_with(cmd)
+            && cmd.starts_with('/')
+            && !Path::new(&rebase_guest_arg(cmd)).exists()
+        {
             let (_, rest) = line.split_at(cmd.len());
             return format!("{cmd}{}", rebase_guest_paths_in(rest));
         }

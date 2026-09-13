@@ -934,7 +934,8 @@ fn collapse_reduction(
     // starts from.
     if finishes_here {
         let cfg = CfgInfo::build(f);
-        let past_loop = |bid: BlockId| bid != mid && !body.contains(&bid) && cfg.dominates(mid, bid);
+        let past_loop =
+            |bid: BlockId| bid != mid && !body.contains(&bid) && cfg.dominates(mid, bid);
         for b in 0..f.blocks.len() {
             let bid = BlockId(b as u32);
             // A phi reads its incoming on the edge from the predecessor, so
@@ -1330,7 +1331,11 @@ fn induction_step_site(
 /// Whether `v` is read anywhere but as an incoming of `header`'s phis.
 fn uses_besides_header_phi(f: &Function, header: BlockId, v: ValueId) -> bool {
     for (bi, blk) in f.blocks.iter().enumerate() {
-        if bi != header.idx() && blk.phis.iter().any(|p| p.incoming.iter().any(|(_, x)| *x == v))
+        if bi != header.idx()
+            && blk
+                .phis
+                .iter()
+                .any(|p| p.incoming.iter().any(|(_, x)| *x == v))
         {
             return true;
         }

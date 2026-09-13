@@ -105,9 +105,7 @@ impl OrderedJitMemory {
 
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod imp {
-    use super::{
-        region_bytes, OrderedJitMemory, Protect, MIN_REGION_BYTES, PAGE,
-    };
+    use super::{region_bytes, OrderedJitMemory, Protect, MIN_REGION_BYTES, PAGE};
     #[cfg(feature = "llvm")]
     use inkwell::memory_manager::McjitMemoryManager;
     use windows_sys::Win32::System::Diagnostics::Debug::FlushInstructionCache;
@@ -192,9 +190,8 @@ mod imp {
         fn finalize_memory(&mut self) -> Result<(), String> {
             for (addr, len, protect) in self.pending.drain(..) {
                 let mut previous: PAGE_PROTECTION_FLAGS = 0;
-                let ok = unsafe {
-                    VirtualProtect(addr as *const _, len, flags(protect), &mut previous)
-                };
+                let ok =
+                    unsafe { VirtualProtect(addr as *const _, len, flags(protect), &mut previous) };
                 if ok == 0 {
                     return Err(format!(
                         "VirtualProtect({addr:#x}, {len}, {protect:?}) failed: {}",
@@ -246,7 +243,10 @@ mod tests {
             // relocations, and a writable section.
             for (size, align) in [(4096, 16), (128, 8), (128, 8)] {
                 let (addr, len) = mm.place(size, align).unwrap_or_else(|| {
-                    panic!("section {id} refused with {} bytes left", SIZE - (previous - BASE))
+                    panic!(
+                        "section {id} refused with {} bytes left",
+                        SIZE - (previous - BASE)
+                    )
                 });
                 assert!(addr >= image_base, "section {id} landed below ImageBase");
                 assert!(addr >= previous, "section {id} did not advance");

@@ -40,13 +40,13 @@ fn a_shared_memory_is_imported_and_the_data_is_passive() {
         match payload.expect("parsing") {
             wasmparser::Payload::ImportSection(section) => {
                 for group in section {
-                  for import in group.expect("an import group") {
-                    let (_, import) = import.expect("an import");
-                    if let wasmparser::TypeRef::Memory(ty) = import.ty {
-                        imported_memory =
-                            Some((import.module.to_string(), import.name.to_string(), ty));
+                    for import in group.expect("an import group") {
+                        let (_, import) = import.expect("an import");
+                        if let wasmparser::TypeRef::Memory(ty) = import.ty {
+                            imported_memory =
+                                Some((import.module.to_string(), import.name.to_string(), ty));
+                        }
                     }
-                  }
                 }
             }
             wasmparser::Payload::DataSection(section) => {

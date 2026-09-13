@@ -260,13 +260,9 @@ impl<'b> ModuleInfo for AshModule<'b> {
         // With its positions, so the markers the inliner copies still say
         // which line of the callee a frame is stopped on.
         let bare = self.without_callees_view();
-        let body = air::v2::lower::lower_with_positions(
-            &f.ops,
-            &reg_types_of(f),
-            &bare,
-            positions_of(f),
-        )
-        .ok()?;
+        let body =
+            air::v2::lower::lower_with_positions(&f.ops, &reg_types_of(f), &bare, positions_of(f))
+                .ok()?;
         self.lowered
             .lock()
             .expect("callee cache poisoned")

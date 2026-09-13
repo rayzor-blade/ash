@@ -4580,7 +4580,12 @@ fn tre_sees_past_a_position_marker_before_the_return() {
     );
     let stats = run_pass(&mut f, &TailRecursionElim, PassOptions::default());
     assert!(stats.replaced > 0, "{}", f.dump());
-    assert_eq!(any_call(&f), 0, "the tail call must be a loop now\n{}", f.dump());
+    assert_eq!(
+        any_call(&f),
+        0,
+        "the tail call must be a loop now\n{}",
+        f.dump()
+    );
 }
 
 /// Code inlined from a callee keeps the callee's own positions, and the
@@ -4634,7 +4639,10 @@ fn inlined_code_keeps_the_callee_position_and_names_the_call() {
         .iter()
         .rposition(|o| matches!(o, Opcode::Ret { .. }))
         .expect("a Ret");
-    assert_eq!((pos[ret_pc].file, pos[ret_pc].line, pos[ret_pc].site), (0, 6, None));
+    assert_eq!(
+        (pos[ret_pc].file, pos[ret_pc].line, pos[ret_pc].site),
+        (0, 6, None)
+    );
     assert_eq!(
         super::positions::frames_of(pos[ret_pc], &f.inline_sites, 3),
         vec![(3, 0, 6)]

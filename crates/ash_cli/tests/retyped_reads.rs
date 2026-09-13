@@ -42,9 +42,7 @@ fn retype_narrow_reads(bc: &mut DecodedBytecode) -> usize {
                 _ => continue,
             };
             let narrow = match &f.ops[i + 1] {
-                Opcode::SafeCast { dst, src } | Opcode::ToInt { dst, src }
-                    if *src == read_dst =>
-                {
+                Opcode::SafeCast { dst, src } | Opcode::ToInt { dst, src } if *src == read_dst => {
                     *dst
                 }
                 _ => continue,
@@ -146,7 +144,11 @@ fn check_retyped(fixture: &str, retype: fn(&mut DecodedBytecode) -> usize, min_c
     let retyped = retyped.to_string_lossy().into_owned();
 
     let reference = run(&ash, &["--mode", "interp", &source.to_string_lossy()]);
-    assert!(reference.ok, "the unmodified fixture failed:\n{}", reference.stdout);
+    assert!(
+        reference.ok,
+        "the unmodified fixture failed:\n{}",
+        reference.stdout
+    );
     let want = program_lines(&reference.stdout);
 
     let aot_bin = scratch.join(format!("{fixture}_retyped"));
@@ -174,7 +176,10 @@ fn check_retyped(fixture: &str, retype: fn(&mut DecodedBytecode) -> usize, min_c
             .filter(|l| l.contains("[regstore]"))
             .collect();
         if !audit.is_empty() {
-            failures.push(format!("{name}: register store audit\n{}", audit.join("\n")));
+            failures.push(format!(
+                "{name}: register store audit\n{}",
+                audit.join("\n")
+            ));
         }
         if *name == "aot-build" {
             continue;
@@ -184,7 +189,9 @@ fn check_retyped(fixture: &str, retype: fn(&mut DecodedBytecode) -> usize, min_c
         }
         let got = program_lines(&ran.stdout);
         if got != want {
-            failures.push(format!("{name}: output differs\nwant:\n{want}\ngot:\n{got}"));
+            failures.push(format!(
+                "{name}: output differs\nwant:\n{want}\ngot:\n{got}"
+            ));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

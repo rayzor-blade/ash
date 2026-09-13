@@ -39,8 +39,8 @@ use super::{
     AbiClass, Widen,
 };
 use crate::hl_bindings as hl;
-use crate::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 use crate::opcodes::{Opcode, Reg};
+use crate::stub_bridge::{ash_jit_call_stub, ash_jit_resolve_stub, STUB_SENTINEL_LIMIT};
 use crate::types::{HLFunction, HLTypeFun, TypeRef};
 
 /// A lowered function plus the marshaling metadata the interpreter needs.
@@ -384,7 +384,8 @@ fn import_native_targets(
             .fun
             .as_ref()
             .ok_or_else(|| anyhow!("native {} has no function type", native.name))?;
-        let sig = call_signature_with_context(backend, ctx, tf, ctx.native_context(native_idx) != 0)?;
+        let sig =
+            call_signature_with_context(backend, ctx, tf, ctx.native_context(native_idx) != 0)?;
         let key = ctx
             .native_symbol_key(native_idx)
             .ok_or_else(|| anyhow!("native {}@{} unresolved", native.lib, native.name))?;

@@ -670,8 +670,7 @@ fn can_dispatch_to_worker() -> bool {
     // one that does not gets `EAGAIN` from the first `pthread_create` and
     // falls back to the main scheduler. Nothing is read from an environment,
     // which a page does not have.
-    cfg!(all(target_family = "wasm", target_feature = "atomics"))
-        || configured_worker_count() != 0
+    cfg!(all(target_family = "wasm", target_feature = "atomics")) || configured_worker_count() != 0
 }
 
 /// Hand a fiber to an agent, on a target where an agent is an OS thread and

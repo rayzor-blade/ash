@@ -35,7 +35,10 @@ fn a_thread_local_is_addressed_from_the_block_and_not_from_memory() {
     let (base_mutable, tls_base) = read.globals[3];
     let (_, tls_size) = read.globals[4];
     let (_, tls_align) = read.globals[5];
-    assert!(base_mutable, "__tls_base has to move as each thread arrives");
+    assert!(
+        base_mutable,
+        "__tls_base has to move as each thread arrives"
+    );
     assert_eq!(tls_size, 8, "two i32s");
     assert_eq!(tls_align, 8, "the .tdata segment asked for eight");
 
@@ -79,8 +82,7 @@ fn a_thread_local_is_addressed_from_the_block_and_not_from_memory() {
 #[test]
 fn either_the_name_or_the_flag_makes_a_segment_thread_local() {
     for (name, flags) in [(".tdata.first", 0u32), (".tbss", 0), ("anything", 0x2)] {
-        let module =
-            link(vec![object(name, flags)], &LinkOptions::default()).expect("link");
+        let module = link(vec![object(name, flags)], &LinkOptions::default()).expect("link");
         let read = read(&module);
         assert_eq!(read.globals.len(), 6, "{name} flags={flags:#x}");
         assert_eq!(read.globals[4].1, 8, "__tls_size for {name}");

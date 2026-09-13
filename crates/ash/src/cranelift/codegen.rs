@@ -33,11 +33,11 @@ use std::collections::HashMap;
 
 use beadie::CraneliftFunctionDef;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::ir::{
     types, AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData,
     SigRef, Signature, SourceLoc, StackSlot, StackSlotData, StackSlotKind, Type, Value,
 };
+use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::FunctionBuilder;
 
 use air::v2::ir::{
@@ -716,7 +716,10 @@ impl AirCodegen<'_, '_> {
             .cloned()
             .filter(|site| self.retier_exit_available(site));
         let folded = fiber_poll && self.retier_test_count.is_none();
-        let folded = site.as_ref().filter(|s| folded && s.folds_into_fiber_poll()).cloned();
+        let folded = site
+            .as_ref()
+            .filter(|s| folded && s.folds_into_fiber_poll())
+            .cloned();
         if let Some(site) = site.as_ref().filter(|_| folded.is_none()) {
             self.emit_retier_poll(site)?;
         }
@@ -906,7 +909,9 @@ impl AirCodegen<'_, '_> {
         }];
         let mut cur = site;
         while let Some(i) = cur {
-            let Some(st) = sites.get(i as usize) else { break };
+            let Some(st) = sites.get(i as usize) else {
+                break;
+            };
             frames.push(crate::jit_map::SourceFrame {
                 findex: callee_of(st.parent),
                 file: st.file,
@@ -2820,15 +2825,24 @@ impl AirCodegen<'_, '_> {
             for ins in &blk.instrs {
                 match ins {
                     Instr::Int { dst, idx } if *dst == v => {
-                        found = Some(Instr::Int { dst: *dst, idx: *idx });
+                        found = Some(Instr::Int {
+                            dst: *dst,
+                            idx: *idx,
+                        });
                         break 'scan;
                     }
                     Instr::Float { dst, idx } if *dst == v => {
-                        found = Some(Instr::Float { dst: *dst, idx: *idx });
+                        found = Some(Instr::Float {
+                            dst: *dst,
+                            idx: *idx,
+                        });
                         break 'scan;
                     }
                     Instr::Bool { dst, value } if *dst == v => {
-                        found = Some(Instr::Bool { dst: *dst, value: *value });
+                        found = Some(Instr::Bool {
+                            dst: *dst,
+                            value: *value,
+                        });
                         break 'scan;
                     }
                     Instr::Null { dst } if *dst == v => {
@@ -2857,7 +2871,9 @@ impl AirCodegen<'_, '_> {
                     .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
                 Some(self.b.ins().f64const(val))
             }
-            Some(Instr::Bool { value, .. }) => Some(self.b.ins().iconst(types::I8, i64::from(value))),
+            Some(Instr::Bool { value, .. }) => {
+                Some(self.b.ins().iconst(types::I8, i64::from(value)))
+            }
             Some(Instr::Null { .. }) => {
                 let ty = self.value_clif_ty(v)?;
                 if ty.is_float() {

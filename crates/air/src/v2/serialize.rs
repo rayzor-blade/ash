@@ -152,17 +152,11 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
             if let Some(dlanes) = lane_regs.get(&phi.dst) {
                 for &(p, v) in &phi.incoming {
                     let Some(slanes) = lane_regs.get(&v) else {
-                        bail!(
-                            "phi at b{bi} merges vector {:?} with scalar {v:?}",
-                            phi.dst
-                        );
+                        bail!("phi at b{bi} merges vector {:?} with scalar {v:?}", phi.dst);
                     };
                     for (d, s) in dlanes.iter().zip(slanes) {
                         if d != s {
-                            edge_copies
-                                .entry((p.idx(), bi))
-                                .or_default()
-                                .push((*d, *s));
+                            edge_copies.entry((p.idx(), bi)).or_default().push((*d, *s));
                         }
                     }
                 }

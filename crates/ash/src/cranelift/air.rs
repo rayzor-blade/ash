@@ -249,6 +249,7 @@ pub(super) fn retier_state_for(
     findex: usize,
     program: usize,
     opt: &std::sync::Arc<crate::air_pipeline::Optimized>,
+    poll_epoch: usize,
 ) -> HashMap<u32, std::sync::Arc<crate::retier::Site>> {
     use std::sync::Arc;
     if !retier_enabled() {
@@ -276,7 +277,7 @@ pub(super) fn retier_state_for(
         } else {
             match crate::retier::Layout::new(findex, opt.clone(), air::v2::ir::BlockId(h)) {
                 Ok(layout) => {
-                    let site = Arc::new(crate::retier::Site::new(layout));
+                    let site = Arc::new(crate::retier::Site::new(layout, poll_epoch));
                     sites.push(site.clone());
                     site
                 }
@@ -293,21 +294,14 @@ pub(super) fn retier_state_for(
     exits
 }
 
-/// Whether a loop header should carry a re-tier poll.
+/// Whether a loop header should carry a re-tier exit.
 ///
-/// The poll is a load and a branch per iteration, so its cost is set by what
-/// else the iteration does. In a tight leaf loop it is ruinous: mandelbrot's
-/// escape loop is ~10 instructions running ~180M times, and the poll cost
-/// 249ms of a 391ms run — measured with the exits compiled in but never
-/// fired, so this is the poll itself, not the transfer.
-///
-/// The rule is nesting, not body size: poll a loop unless it is a LEAF loop
-/// that some other loop encloses. An enclosing loop divides the poll's
-/// iteration count by the inner loop's trip count, and its own header
-/// catches the frame soon enough — a frame cannot stay in an inner loop
-/// forever without the outer one advancing. A leaf loop with no parent is
-/// the only loop its frame can be stuck in, so it must carry the poll; that
-/// is the call benches' single loop, and they are what the top tier helps.
+/// The exit's cost is not its check -- that rides the fiber poll's cold
+/// edge -- but the register image it must be able to materialize, which
+/// keeps every dominating definition live at the header. The rule is
+/// nesting, not body size: a leaf loop with no parent is the only loop its
+/// frame can be stuck in, so it carries the exit; that is the call benches'
+/// single loop, and they are what the top tier helps.
 ///
 /// Body size was tried first and is the wrong measure: this IR splits a
 /// loop across many small blocks, so mandelbrot's ~10-instruction escape
@@ -337,32 +331,12 @@ fn retier_worth_polling(f: &air::v2::ir::Function, header: u32) -> bool {
     // measured on mandelbrot as a 50x loss, against a clear win on the
     // single-loop call benchmarks. Where the exit cannot be taken promptly,
     // it should not be placed at all.
+    // Call-free loops too: the site is checked from the fiber poll's cold
+    // edge the header already carries (`emit_header_polls`), so the
+    // iteration pays nothing for it, and a leaf arithmetic loop is exactly
+    // the frame that otherwise never reaches the top tier.
     let lp = forest.get(l);
-    if lp.parent.is_some() || !lp.children.is_empty() {
-        return false;
-    }
-
-    // And only where the iteration already pays for a call.
-    //
-    // The poll is a load and a branch on every iteration — visible in the
-    // CLIF as two instructions ahead of the loop's own guard. Against an
-    // iteration that makes a call, that is noise, and reaching the top tier
-    // is worth far more: method_call 194ms -> 153ms, closure_call 269ms ->
-    // 176ms. Against a call-free arithmetic loop it is pure overhead, and
-    // those loops are already within ~1.3x of hand-written C, so there is
-    // nothing for the top tier to recover: free_call 107ms -> 115ms,
-    // inlined_call 108ms -> 113ms. The benchmarks that lose are exactly the
-    // ones whose callee AIR already inlined away.
-    lp.blocks.iter().any(|b| {
-        f.blocks[b.idx()].instrs.iter().any(|i| {
-            matches!(
-                i,
-                air::v2::ir::Instr::Call { .. }
-                    | air::v2::ir::Instr::CallMethod { .. }
-                    | air::v2::ir::Instr::CallClosure { .. }
-            )
-        })
-    })
+    lp.parent.is_none() && lp.children.is_empty()
 }
 
 /// Exact layouts requested by compiled exits for this program.
@@ -464,7 +438,12 @@ fn lower_air_codegen(
     let opt = air_pipeline::optimized(ctx.air_module(), func)
         .map_err(|e| anyhow::anyhow!("{} failed: {}", e.stage, e.brief()))?;
 
-    let osr_exits = retier_state_for(findex, ctx.bytecode() as *const _ as usize, &opt);
+    let osr_exits = retier_state_for(
+        findex,
+        ctx.bytecode() as *const _ as usize,
+        &opt,
+        ctx.fiber_poll_epoch_address().unwrap_or(0),
+    );
     let result = super::codegen::lower_air_function(backend, ctx, findex, &opt.ir, &osr_exits);
     if let Err(error) = &result {
         if cfg.log {

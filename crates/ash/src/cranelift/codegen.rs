@@ -358,7 +358,12 @@ pub fn compile_osr_entry(
     // The frame that enters here is exactly the one a later LLVM promote
     // wants to lift out, so the entry polls the same re-tier slots the
     // function's ordinary compile allocated.
-    let osr_exits = super::air::retier_state_for(findex, ctx.bytecode() as *const _ as usize, opt);
+    let osr_exits = super::air::retier_state_for(
+        findex,
+        ctx.bytecode() as *const _ as usize,
+        opt,
+        ctx.fiber_poll_epoch_address().unwrap_or(0),
+    );
     // Capture before `builder()` takes a mutable borrow of `def`.
     let fcfg = def.frontend_config();
     let chains;
@@ -653,12 +658,7 @@ impl AirCodegen<'_, '_> {
             if bid.0 != 0 {
                 self.b.switch_to_block(blk);
             }
-            if let Some(site) = self.osr_exits.get(&bid.0).cloned() {
-                self.emit_retier_poll(&site)?;
-            }
-            if poll_headers[bid.idx()] {
-                self.emit_fiber_poll()?;
-            }
+            self.emit_header_polls(bid, poll_headers[bid.idx()])?;
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
                 self.emit(&instr)
@@ -704,14 +704,36 @@ impl AirCodegen<'_, '_> {
         self.retier_test_count = Some(slot);
     }
 
-    fn emit_retier_poll(&mut self, site: &std::sync::Arc<crate::retier::Site>) -> Result<()> {
+    /// The polls a loop header carries: the fiber poll, and the re-tier
+    /// exit when this header has a site. The site is checked from the fiber
+    /// poll's cold edge -- publishing a target bumps the fiber epoch, so the
+    /// loop reaches it once -- and costs the iteration nothing; a header
+    /// with no fiber poll, or a test that counts polls, checks it directly.
+    fn emit_header_polls(&mut self, bid: air::v2::ir::BlockId, fiber_poll: bool) -> Result<()> {
+        let site = self
+            .osr_exits
+            .get(&bid.0)
+            .cloned()
+            .filter(|site| self.retier_exit_available(site));
+        let folded = fiber_poll && self.retier_test_count.is_none();
+        let folded = site.as_ref().filter(|s| folded && s.folds_into_fiber_poll()).cloned();
+        if let Some(site) = site.as_ref().filter(|_| folded.is_none()) {
+            self.emit_retier_poll(site)?;
+        }
+        if fiber_poll {
+            self.emit_fiber_poll(folded.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Whether every slot the exit must write has a value here. Values bound
+    /// by the OSR prologue are legitimate sources; original AIR dominance
+    /// alone does not describe the emitted entry's definitions.
+    fn retier_exit_available(&self, site: &crate::retier::Site) -> bool {
         use crate::retier::Input;
         if !std::ptr::eq(self.f, &site.layout.air.ir) {
-            bail!("re-tier exit and snapshot belong to different AIR versions");
+            return false;
         }
-        // Never silently leave a required slot unwritten. Values bound by
-        // the OSR prologue are legitimate sources; original AIR dominance
-        // alone does not describe the emitted entry's definitions.
         for slot in &site.layout.slots {
             if let Input::Value(v) = slot.input {
                 if !self.is_void(v) && self.vals[v.idx()].is_none() {
@@ -721,13 +743,16 @@ impl AirCodegen<'_, '_> {
                             site.layout.id, v.0
                         );
                     }
-                    return Ok(());
+                    return false;
                 }
             }
         }
+        true
+    }
+
+    /// Check the site on every iteration and leave through its exit.
+    fn emit_retier_poll(&mut self, site: &std::sync::Arc<crate::retier::Site>) -> Result<()> {
         let body = self.b.create_block();
-        let exit = self.b.create_block();
-        self.b.set_cold_block(exit);
         let target = if let Some(counter) = self.retier_test_count {
             let mut sig = Signature::new(self.ctx.call_conv());
             sig.params
@@ -754,7 +779,24 @@ impl AirCodegen<'_, '_> {
                 .ins()
                 .atomic_load(types::I64, MemFlagsData::trusted(), addr)
         };
+        let exit = self.b.create_block();
+        self.b.set_cold_block(exit);
         self.b.ins().brif(target, exit, &[], body, &[]);
+        self.fill_retier_exit(site, target, exit)?;
+        self.b.switch_to_block(body);
+        Ok(())
+    }
+
+    /// Fill `exit`, the cold block that spills the snapshot and tail-calls
+    /// `target`. The block that branches to it must already be filled: the
+    /// frontend refuses to leave a block that has no terminator.
+    fn fill_retier_exit(
+        &mut self,
+        site: &std::sync::Arc<crate::retier::Site>,
+        target: Value,
+        exit: Block,
+    ) -> Result<()> {
+        use crate::retier::Input;
         self.b.switch_to_block(exit);
         let image = self.osr_image_slot();
         for (index, slot) in site.layout.slots.iter().enumerate() {
@@ -812,7 +854,6 @@ impl AirCodegen<'_, '_> {
         let call = self.b.ins().call_indirect(sig, target, &[buf]);
         let results = self.b.inst_results(call).to_vec();
         self.b.ins().return_(&results);
-        self.b.switch_to_block(body);
         Ok(())
     }
 
@@ -1006,6 +1047,13 @@ impl AirCodegen<'_, '_> {
                          header-relative liveness is ambiguous"
                     );
                 }
+                // A constant's definition is its value wherever it is read:
+                // materialize it rather than load the buffer's copy, so the
+                // divisor and multiplier peepholes still see a literal.
+                if let Some(c) = self.emit_constant_def(vid)? {
+                    self.vals[v] = Some(c);
+                    continue;
+                }
                 let ty = self.value_clif_ty(vid)?;
                 let reg = self.f.value_reg(vid);
                 let loaded = self.load_osr_slot(buf, reg, ty)?;
@@ -1030,12 +1078,7 @@ impl AirCodegen<'_, '_> {
         for &bid in &order {
             let blk = self.blocks[bid.idx()].expect("block in order has a CLIF block");
             self.b.switch_to_block(blk);
-            if let Some(site) = self.osr_exits.get(&bid.0).cloned() {
-                self.emit_retier_poll(&site)?;
-            }
-            if poll_headers[bid.idx()] {
-                self.emit_fiber_poll()?;
-            }
+            self.emit_header_polls(bid, poll_headers[bid.idx()])?;
             for ii in 0..self.f.blocks[bid.idx()].instrs.len() {
                 let instr = self.f.blocks[bid.idx()].instrs[ii].clone();
                 self.emit(&instr)?;
@@ -1080,7 +1123,10 @@ impl AirCodegen<'_, '_> {
     /// Event-driven cooperative safe point inserted directly into the AIR V2
     /// CFG. Ordinary iterations only compare the runtime's poll generation;
     /// the cold helper edge runs when work, a timer quantum, or GC asks for it.
-    fn emit_fiber_poll(&mut self) -> Result<()> {
+    fn emit_fiber_poll(
+        &mut self,
+        retier: Option<&std::sync::Arc<crate::retier::Site>>,
+    ) -> Result<()> {
         let slot = self
             .fiber_poll_epoch_slot
             .ok_or_else(|| anyhow!("fiber poll epoch was not initialized"))?;
@@ -1110,7 +1156,19 @@ impl AirCodegen<'_, '_> {
             .ins()
             .iconst(types::I64, self.ctx.fiber_poll_helper()? as i64);
         self.b.ins().call_indirect(sig_ref, target, &[]);
-        self.b.ins().jump(body, &[]);
+        if let Some(site) = retier {
+            let addr = self.b.ins().iconst(types::I64, site.address() as i64);
+            let target = self
+                .b
+                .ins()
+                .atomic_load(types::I64, MemFlagsData::trusted(), addr);
+            let exit = self.b.create_block();
+            self.b.set_cold_block(exit);
+            self.b.ins().brif(target, exit, &[], body, &[]);
+            self.fill_retier_exit(site, target, exit)?;
+        } else {
+            self.b.ins().jump(body, &[]);
+        }
 
         self.b.switch_to_block(body);
         Ok(())
@@ -2752,6 +2810,64 @@ impl AirCodegen<'_, '_> {
             }
         };
         self.def_from(dst, a, r)
+    }
+
+    /// `v` as a fresh constant when an `Int`, `Float`, `Bool` or `Null`
+    /// instruction defines it, else None.
+    fn emit_constant_def(&mut self, v: ValueId) -> Result<Option<Value>> {
+        let mut found = None;
+        'scan: for blk in &self.f.blocks {
+            for ins in &blk.instrs {
+                match ins {
+                    Instr::Int { dst, idx } if *dst == v => {
+                        found = Some(Instr::Int { dst: *dst, idx: *idx });
+                        break 'scan;
+                    }
+                    Instr::Float { dst, idx } if *dst == v => {
+                        found = Some(Instr::Float { dst: *dst, idx: *idx });
+                        break 'scan;
+                    }
+                    Instr::Bool { dst, value } if *dst == v => {
+                        found = Some(Instr::Bool { dst: *dst, value: *value });
+                        break 'scan;
+                    }
+                    Instr::Null { dst } if *dst == v => {
+                        found = Some(Instr::Null { dst: *dst });
+                        break 'scan;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(match found {
+            Some(Instr::Int { idx, .. }) => {
+                let bc = self.ctx.bytecode();
+                let val = self
+                    .f
+                    .int_at(idx, |i| bc.ints.get(i).copied())
+                    .ok_or_else(|| anyhow!("int constant {idx} out of range"))?;
+                Some(self.b.ins().iconst(types::I32, val as i64))
+            }
+            Some(Instr::Float { idx, .. }) => {
+                let val = *self
+                    .ctx
+                    .bytecode()
+                    .floats
+                    .get(idx)
+                    .ok_or_else(|| anyhow!("float constant {idx} out of range"))?;
+                Some(self.b.ins().f64const(val))
+            }
+            Some(Instr::Bool { value, .. }) => Some(self.b.ins().iconst(types::I8, i64::from(value))),
+            Some(Instr::Null { .. }) => {
+                let ty = self.value_clif_ty(v)?;
+                if ty.is_float() {
+                    None
+                } else {
+                    Some(self.b.ins().iconst(ty, 0))
+                }
+            }
+            _ => None,
+        })
     }
 
     /// The literal behind `v` when its definition is `Instr::Int`. Divisions

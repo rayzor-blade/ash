@@ -795,7 +795,7 @@ impl<'ctx> JITModule<'ctx> {
             // shared module and buys nothing measurable -- a function that
             // needs them is sent down the shared path instead.
             self.pending_compilations.clear();
-            Ok(())
+            self.define_table_trampolines()
         })();
 
         self.builder.clear_insertion_position();
@@ -1553,12 +1553,22 @@ impl<'ctx> JITModule<'ctx> {
             .get_nth_param(0)
             .ok_or_else(|| anyhow!("osr entry has no buffer parameter"))?
             .into_pointer_value();
+        // A value the region reads but does not define arrives through the
+        // buffer, and a value defined by a constant instruction is that
+        // constant wherever it is read: re-emitting it here keeps `x % 8`
+        // and `x * 31` as the shifts LLVM makes of them, where a value loaded
+        // from the buffer is an opaque divisor.
+        let constants = Self::air_constant_definitions(air);
         if let Some(layout) = snapshot {
             for (offset, input) in layout.slots.iter().enumerate() {
                 let index = match input.input {
                     crate::retier::Input::Value(v) => v.idx(),
                     crate::retier::Input::Cell(c) => cell_base + c.idx(),
                 };
+                if let Some(instr) = constants.get(&index) {
+                    self.emit_air_constant(&registers, &reg_types, instr)?;
+                    continue;
+                }
                 let restored = self.load_air_osr_slot(buf, offset as u32, reg_types[index])?;
                 self.builder.build_store(registers[index], restored)?;
             }
@@ -1566,6 +1576,10 @@ impl<'ctx> JITModule<'ctx> {
             // Preserve the interpreter ABI. Re-tier entries never read an
             // unspecified slot or seed multiple SSA values from one register.
             for (i, value) in air.values.iter().enumerate() {
+                if let Some(instr) = constants.get(&i) {
+                    self.emit_air_constant(&registers, &reg_types, instr)?;
+                    continue;
+                }
                 let restored = self.load_air_osr_slot(buf, value.reg, reg_types[i])?;
                 self.builder.build_store(registers[i], restored)?;
             }
@@ -1669,6 +1683,7 @@ impl<'ctx> JITModule<'ctx> {
         } else {
             self.clear_pending_compilations();
         }
+        self.define_table_trampolines()?;
         if std::env::var_os("ASH_OSR_LOG").is_some() {
             eprintln!(
                 "[osr] LLVM AIR callees ready findex={} pc={header_pc}",
@@ -1705,6 +1720,75 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Load one typed AIR value from Cranelift's 64-bit de-SSA transfer slot.
+    /// Every value a constant instruction defines, by value index.
+    fn air_constant_definitions(air: &AirFunction) -> std::collections::HashMap<usize, &AirInstr> {
+        let mut out = std::collections::HashMap::new();
+        for block in &air.blocks {
+            for instr in &block.instrs {
+                match instr {
+                    AirInstr::Int { dst, .. }
+                    | AirInstr::Float { dst, .. }
+                    | AirInstr::Bool { dst, .. }
+                    | AirInstr::Null { dst } => {
+                        out.insert(dst.idx(), instr);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// Store one constant instruction's value into its register, as the
+    /// body emitter would.
+    fn emit_air_constant(
+        &mut self,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        instr: &AirInstr,
+    ) -> Result<()> {
+        match instr {
+            AirInstr::Int { dst, idx } => {
+                let global = self
+                    .ensure_int_global(*idx)
+                    .ok_or_else(|| anyhow!("AIR Int names no constant: {idx}"))?;
+                let v = self
+                    .builder
+                    .build_load(self.context.i32_type(), global.as_pointer_value(), "air_int")?
+                    .into_int_value();
+                let v = match reg_types[dst.idx()] {
+                    BasicTypeEnum::IntType(t) if t.get_bit_width() > 32 => self
+                        .builder
+                        .build_int_s_extend(v, t, "air_int_sext")?
+                        .into(),
+                    target => self.cast_for_call(v.into(), target)?,
+                };
+                self.builder.build_store(registers[dst.idx()], v)?;
+            }
+            AirInstr::Float { dst, idx } => {
+                let global = self
+                    .ensure_float_global(*idx)
+                    .ok_or_else(|| anyhow!("AIR Float names no constant: {idx}"))?;
+                let v = self.builder.build_load(
+                    self.context.f64_type(),
+                    global.as_pointer_value(),
+                    "air_float",
+                )?;
+                self.store_float_as_reg(registers, reg_types, dst.idx(), v.into_float_value())?;
+            }
+            AirInstr::Bool { dst, value } => {
+                let v = self.context.bool_type().const_int(*value as u64, false);
+                self.builder.build_store(registers[dst.idx()], v)?;
+            }
+            AirInstr::Null { dst } => {
+                let v = self.context.ptr_type(AddressSpace::default()).const_null();
+                self.builder.build_store(registers[dst.idx()], v)?;
+            }
+            other => return Err(anyhow!("not a constant instruction: {other:?}")),
+        }
+        Ok(())
+    }
+
     fn load_air_osr_slot(
         &self,
         buf: PointerValue<'ctx>,
@@ -3130,6 +3214,55 @@ impl<'ctx> JITModule<'ctx> {
         };
         let addr = addr as usize;
         (addr >= crate::stub_bridge::STUB_SENTINEL_LIMIT as usize).then_some(addr)
+    }
+
+    /// Give every bytecode callee this module declares, does not define, and
+    /// no tier has installed yet a body that calls through its
+    /// `functions_ptrs` slot, stub-guarded like any other indirect call.
+    ///
+    /// `bind_module_declarations` can only bind a declaration to installed
+    /// code, so a call to a still-interpreted function left the whole module
+    /// unbindable: an OSR entry whose loop never calls anything was refused
+    /// for the `println` after the loop, and the loop ran to completion in
+    /// the tier below. The trampoline is private, so nothing outside the
+    /// module can find it by name and no install loop can mistake it for the
+    /// callee's own body; `default<O2>` inlines it at each call site and then
+    /// deletes it, which is why it leaves `func_cache` here: a value that
+    /// map still held would dangle once the middle end has run.
+    fn define_table_trampolines(&mut self) -> Result<()> {
+        let pending: Vec<(usize, FunctionValue<'ctx>)> = self
+            .func_cache
+            .iter()
+            .filter(|(fi, f)| {
+                f.count_basic_blocks() == 0
+                    && matches!(self.findexes.get(fi), Some(FuncPtr::Fun(_)))
+                    && self.live_function_address(**fi).is_none()
+            })
+            .map(|(fi, f)| (*fi, *f))
+            .collect();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        for (findex, f) in pending {
+            f.as_global_value()
+                .set_name(&format!("Fun_{findex}$via_table"));
+            f.set_linkage(inkwell::module::Linkage::Private);
+            let entry = self.context.append_basic_block(f, "entry");
+            self.builder.position_at_end(entry);
+            let slot = self.function_slot_ptr(findex)?;
+            let target = self
+                .builder
+                .build_load(ptr_type, slot, "callee")?
+                .into_pointer_value();
+            let args: Vec<BasicMetadataValueEnum<'ctx>> =
+                f.get_param_iter().map(|p| p.into()).collect();
+            match self.build_stub_guarded_indirect_call(f.get_type(), target, &args, "tramp")? {
+                Some(v) => self.builder.build_return(Some(&v))?,
+                None => self.builder.build_return(None)?,
+            };
+            self.func_cache.remove(&findex);
+            crate::profile::count("table trampolines", 1);
+        }
+        self.builder.clear_insertion_position();
+        Ok(())
     }
 
     /// Bind declarations in an isolated MCJIT module to code already

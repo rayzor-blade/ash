@@ -85,14 +85,23 @@ impl Layout {
 pub struct Site {
     pub layout: Arc<Layout>,
     target: AtomicU64,
+    /// The runtime's fiber poll epoch, bumped by `publish` so a loop that
+    /// checks this site only from its fiber poll's cold edge takes that edge
+    /// once. Zero when the runtime has no epoch; the exit then polls the
+    /// site itself on every iteration.
+    poll_epoch: usize,
 }
 
 impl Site {
-    pub fn new(layout: Layout) -> Self {
+    pub fn new(layout: Layout, poll_epoch: usize) -> Self {
         Self {
             layout: Arc::new(layout),
             target: AtomicU64::new(0),
+            poll_epoch,
         }
+    }
+    pub fn folds_into_fiber_poll(&self) -> bool {
+        self.poll_epoch != 0
     }
     pub fn address(&self) -> u64 {
         &self.target as *const AtomicU64 as u64
@@ -105,6 +114,11 @@ impl Site {
             bail!("re-tier target does not match the exit's snapshot layout");
         }
         self.target.store(code, Ordering::Release);
+        if self.poll_epoch != 0 {
+            // SAFETY: the address is the runtime's `ash_fiber_poll_epoch`,
+            // a static that outlives every compiled body.
+            unsafe { &*(self.poll_epoch as *const AtomicU64) }.fetch_add(1, Ordering::Release);
+        }
         Ok(())
     }
 }
@@ -227,8 +241,8 @@ mod tests {
     #[test]
     fn equal_counts_and_pcs_do_not_authorize_another_layout() {
         let (air, header) = fixture();
-        let a = Site::new(Layout::new(7, air.clone(), header).unwrap());
-        let b = Site::new(Layout::new(7, air, header).unwrap());
+        let a = Site::new(Layout::new(7, air.clone(), header).unwrap(), 0);
+        let b = Site::new(Layout::new(7, air, header).unwrap(), 0);
         assert_eq!(a.layout.pc, b.layout.pc);
         assert_eq!(a.layout.slots, b.layout.slots);
         assert!(a.publish(&b.layout, 123).is_err());

@@ -536,6 +536,10 @@ fn import_natives(
             continue;
         };
         let mut sig = backend.make_signature();
+        // A host native's context word is its first parameter.
+        if ctx.native_context(native_idx) != 0 {
+            sig.params.push(AbiParam::new(backend.pointer_type()));
+        }
         for a in &imp.args {
             let ty = argument_abi_class(ctx.type_kind(a.0 as usize)?)
                 .clif_type()
@@ -3419,6 +3423,16 @@ impl AirCodegen<'_, '_> {
                 .native_refs
                 .get(&target)
                 .ok_or_else(|| anyhow!("native findex {target} not declared by AIR"))?;
+            // A host native's context word goes first.
+            let context = self
+                .ctx
+                .native_index(target)
+                .map_or(0, |ni| self.ctx.native_context(ni));
+            if context != 0 {
+                let ptr = self.fcfg.pointer_type();
+                let word = self.b.ins().iconst(ptr, context as i64);
+                arg_vals.insert(0, word);
+            }
             let call = self.b.ins().call(fref, &arg_vals);
             ret_ty.map(|_| self.b.inst_results(call)[0])
         } else {

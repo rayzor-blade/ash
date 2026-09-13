@@ -515,6 +515,8 @@ pub struct HLInterpreter {
     /// index). Backed by the process-global symbol table on first miss;
     /// kills the per-call format!/table-lock on the native hot path.
     native_fn_cache: Vec<*mut c_void>,
+    /// Per native: the host's context word, filled beside the pointer.
+    native_ctx_cache: Vec<usize>,
     /// C-level type structures for native function interop
     c_type_factory: CTypeFactory,
     /// Resolved stdlib function pointer: hlp_alloc_obj
@@ -982,6 +984,7 @@ impl HLInterpreter {
             air: AirCache::default(),
             ssa: SsaCache::default(),
             native_fn_cache: vec![std::ptr::null_mut(); bytecode.natives.len()],
+            native_ctx_cache: vec![0; bytecode.natives.len()],
             c_type_factory,
             fn_alloc_obj,
             fn_get_obj_rt,
@@ -4952,8 +4955,10 @@ impl HLInterpreter {
                     f(packed_ptr)
                 })
             } else if ret_is_float || float_mask != 0 {
+                // Compiled code, not a host native: no context word.
                 self.dispatch_float_native(
                     func_ptr,
+                    0,
                     args,
                     arg_kinds,
                     ret_is_float,

@@ -1272,7 +1272,7 @@ pub struct DecodedBytecode {
     /// Natives a host registered (`register_host_module`): `(lib, name)` to
     /// the C entry's address. An address rather than a pointer so the decode
     /// can still be shared across the tier threads.
-    pub host_natives: std::collections::HashMap<(String, String), usize>,
+    pub host_natives: std::collections::HashMap<(String, String), crate::native_lib::HostNative>,
     /// Classes a host registered, in registration order.
     pub host_classes: Vec<crate::host_module::HostClassEntry>,
 }

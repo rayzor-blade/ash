@@ -1,6 +1,8 @@
 //! A host module registered into a decoded program, run the way the CLI
 //! runs one: decode, register, resolver, `HLInterpreter::new`,
-//! `execute_entrypoint`, in `--mode interp`, `--mode hybrid` and `--mode jit`.
+//! `execute_entrypoint`, in `--mode interp`, `--mode hybrid` and `--mode jit`,
+//! and with each compiled tier alone, so a host native with a context word
+//! is reached from every tier's code.
 //!
 //! Each mode runs in a child process (this binary re-invoked), because the
 //! runtime is process-global and because a hybrid run has to leave through
@@ -11,7 +13,7 @@
 use ash_core::bytecode::BytecodeDecoder;
 use ash_core::host_module::{HostClass, HostMethod, HostModule, HostType};
 use ash_core::native_lib::{self, NativeFunctionResolver};
-use ash_interp::interpreter::{HLInterpreter, TieredConfig};
+use ash_interp::interpreter::{HLInterpreter, TierMode, TieredConfig};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -37,13 +39,13 @@ fn main() {
     }
     let exe = std::env::current_exe().expect("current exe");
     let mut failed = false;
-    for mode in ["interp", "hybrid", "jit"] {
+    for mode in ["interp", "hybrid", "cranelift", "llvm", "jit"] {
         let out = Command::new(&exe)
             .env(CHILD_MODE, mode)
             .output()
             .expect("spawn child");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let ok = out.status.success() && stdout.trim() == "3";
+        let ok = out.status.success() && stdout.trim() == "30";
         println!(
             "host_module::{mode} ... {}",
             if ok { "ok" } else { "FAILED" }
@@ -81,13 +83,20 @@ extern "C" fn greeter_make() -> *mut c_void {
     obj
 }
 
-extern "C" fn greeter_bump(g: *mut c_void) -> i32 {
+/// What a bump adds, reached through the native's context word: the
+/// answer is right only if every tier passes the word first.
+struct Step {
+    by: i32,
+}
+static STEP: Step = Step { by: 10 };
+
+extern "C" fn greeter_bump(step: *const Step, g: *mut c_void) -> i32 {
     let mut counts = COUNTS.lock().unwrap();
     let count = counts
         .get_or_insert_with(HashMap::new)
         .entry(g as usize)
         .or_insert(0);
-    *count += 1;
+    *count += unsafe { (*step).by };
     *count
 }
 
@@ -106,6 +115,7 @@ fn host_module() -> HostModule {
                     params: vec![],
                     ret: HostType::Obj("test.Greeter".into()),
                     func: greeter_make as *const c_void,
+                    context: std::ptr::null(),
                 },
                 HostMethod {
                     name: "bump".into(),
@@ -113,6 +123,7 @@ fn host_module() -> HostModule {
                     params: vec![HostType::Obj("test.Greeter".into())],
                     ret: HostType::I32,
                     func: greeter_bump as *const c_void,
+                    context: &STEP as *const Step as *const c_void,
                 },
             ],
             ctor: None,
@@ -156,10 +167,16 @@ fn child(mode: &str) -> ! {
         // `jit` is the CLI's `--mode jit`: every reached function compiled
         // before its first call, so the host natives are reached from
         // compiled code for certain rather than when a broker gets to it.
+        let tier_mode = match mode {
+            "cranelift" => TierMode::Cranelift,
+            "llvm" => TierMode::Llvm,
+            _ => TierMode::default(),
+        };
         let cfg = TieredConfig {
             enabled: true,
             compiled_only: mode == "jit",
             jit_threshold: 1,
+            tier_mode,
             ..TieredConfig::default()
         };
         interp

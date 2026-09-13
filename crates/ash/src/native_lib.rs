@@ -440,10 +440,28 @@ fn symbol_key(library_name: &str, function_name: &str) -> String {
 /// Process-global like the symbol table, because the tiers build their own
 /// resolver instances (`prepare_process_globals`, the LLVM module) and each
 /// must skip the same libraries and reach the same entries.
-static HOST_NATIVES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+static HOST_NATIVES: OnceLock<Mutex<HashMap<String, HostNative>>> = OnceLock::new();
 
-fn host_natives() -> &'static Mutex<HashMap<String, usize>> {
+fn host_natives() -> &'static Mutex<HashMap<String, HostNative>> {
     HOST_NATIVES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A host's entry for a native: its C function, and a context word. When
+/// the context is non-zero every tier passes it as the function's leading
+/// argument, before the arguments the program's signature declares, so one
+/// C function can stand behind many natives and be told which. The
+/// declared arguments then number at most `ash_native_call`'s limit less
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostNative {
+    pub addr: usize,
+    pub context: usize,
+}
+
+impl HostNative {
+    pub fn plain(addr: usize) -> Self {
+        HostNative { addr, context: 0 }
+    }
 }
 
 /// The bare native name behind the `hlp_` spelling consumers ask for.
@@ -454,23 +472,34 @@ fn bare_native_name(function_name: &str) -> &str {
 /// Make host-registered natives resolvable process-wide: both the bare name
 /// and the `hlp_`-prefixed spelling the interpreter and tiers ask for land
 /// in the symbol table, so every consumer that reads it gets the C entry.
-pub fn publish_host_natives(natives: &HashMap<(String, String), usize>) {
+pub fn publish_host_natives(natives: &HashMap<(String, String), HostNative>) {
     let mut registry = host_natives().lock().expect("host registry poisoned");
     let mut table = symbol_table().lock().expect("symbol table poisoned");
-    for ((lib, name), &addr) in natives {
-        registry.insert(symbol_key(lib, name), addr);
-        table.insert(symbol_key(lib, name), addr);
-        table.insert(symbol_key(lib, &format!("hlp_{name}")), addr);
+    for ((lib, name), &entry) in natives {
+        registry.insert(symbol_key(lib, name), entry);
+        table.insert(symbol_key(lib, name), entry.addr);
+        table.insert(symbol_key(lib, &format!("hlp_{name}")), entry.addr);
     }
 }
 
 /// The host's entry for `(lib, name)`, under either spelling.
-fn host_native_addr(library_name: &str, function_name: &str) -> Option<usize> {
+pub fn host_native(library_name: &str, function_name: &str) -> Option<HostNative> {
+    let clean_lib = library_name.strip_prefix('?').unwrap_or(library_name);
     host_natives()
         .lock()
         .expect("host registry poisoned")
-        .get(&symbol_key(library_name, bare_native_name(function_name)))
+        .get(&symbol_key(clean_lib, bare_native_name(function_name)))
         .copied()
+}
+
+/// The context word a tier passes first when calling `(lib, name)`, or
+/// zero for a native that takes none.
+pub fn host_native_context(library_name: &str, function_name: &str) -> usize {
+    host_native(library_name, function_name).map_or(0, |n| n.context)
+}
+
+fn host_native_addr(library_name: &str, function_name: &str) -> Option<usize> {
+    host_native(library_name, function_name).map(|n| n.addr)
 }
 
 /// Whether a host registered every native the program declares from `lib`,
@@ -712,7 +741,7 @@ impl NativeFunctionResolver {
     /// A resolver that answers host-registered natives from the registration
     /// (`DecodedBytecode::host_natives`) before any library, and does not
     /// look on disk for a library the host covers entirely.
-    pub fn with_host_natives(self, natives: &HashMap<(String, String), usize>) -> Self {
+    pub fn with_host_natives(self, natives: &HashMap<(String, String), HostNative>) -> Self {
         publish_host_natives(natives);
         self
     }

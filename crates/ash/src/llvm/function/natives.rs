@@ -177,8 +177,14 @@ impl<'ctx> JITModule<'ctx> {
             .clone()
             .expect("expected to get function type");
         let func_type = self.create_function_type(&type_fun)?;
+        let context = crate::native_lib::host_native_context(lib, &native_func.name);
 
         if self.aot {
+            if context != 0 {
+                return Err(anyhow!(
+                    "host native {lib}@{name} carries a context word, which cannot be linked ahead of time"
+                ));
+            }
             // `std` primitives are plain `#[no_mangle]` exports of the runtime
             // this object links against, so the symbol IS the name. An HDLL
             // primitive is not: it is reached through a DEFINE_PRIM resolver
@@ -249,8 +255,12 @@ impl<'ctx> JITModule<'ctx> {
         };
 
         let caller_name = format!("{}_{}_caller", lib, name);
-        let native_caller =
-            self.generate_native_caller_with_addr(&caller_name, func_type, func_addr)?;
+        let native_caller = self.generate_native_caller_with_context(
+            &caller_name,
+            func_type,
+            func_addr,
+            context,
+        )?;
 
         debug_assert!(native_caller.verify(true));
 

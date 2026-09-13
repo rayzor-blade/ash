@@ -2123,6 +2123,18 @@ impl<'ctx> JITModule<'ctx> {
         fn_type: FunctionType<'ctx>,
         func_addr: usize,
     ) -> Result<FunctionValue<'ctx>> {
+        self.generate_native_caller_with_context(name, fn_type, func_addr, 0)
+    }
+
+    /// The thunk for a host native with a context word: the callee takes
+    /// the word before the program's arguments (`native_lib::HostNative`).
+    fn generate_native_caller_with_context(
+        &self,
+        name: &str,
+        fn_type: FunctionType<'ctx>,
+        func_addr: usize,
+        context: usize,
+    ) -> Result<FunctionValue<'ctx>> {
         let saved_block = self.builder.get_insert_block();
 
         let function = self.module.add_function(name, fn_type, None);
@@ -2136,12 +2148,30 @@ impl<'ctx> JITModule<'ctx> {
         let ptr_type = self.context.ptr_type(AddressSpace::default());
         let func_ptr = self.builder.build_int_to_ptr(addr_int, ptr_type, "fptr")?;
 
-        let args: Vec<BasicMetadataValueEnum> =
+        let mut args: Vec<BasicMetadataValueEnum> =
             function.get_param_iter().map(|arg| arg.into()).collect();
+        let callee_type = if context != 0 {
+            let word = self.context.i64_type().const_int(context as u64, false);
+            let word = self.builder.build_int_to_ptr(word, ptr_type, "context")?;
+            args.insert(0, word.into());
+            let mut params: Vec<BasicMetadataTypeEnum<'ctx>> = vec![ptr_type.into()];
+            params.extend(
+                fn_type
+                    .get_param_types()
+                    .into_iter()
+                    .map(BasicMetadataTypeEnum::from),
+            );
+            match fn_type.get_return_type() {
+                Some(ret) => ret.fn_type(&params, false),
+                None => self.context.void_type().fn_type(&params, false),
+            }
+        } else {
+            fn_type
+        };
 
         let call_site = self
             .builder
-            .build_indirect_call(fn_type, func_ptr, &args, "call")?;
+            .build_indirect_call(callee_type, func_ptr, &args, "call")?;
 
         if let Some(result) = call_site.try_as_basic_value().basic() {
             self.builder.build_return(Some(&result))?;

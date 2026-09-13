@@ -8,6 +8,7 @@
 //! tables, resolved from the registration rather than from a library on disk.
 
 use crate::bytecode::{field_hash, DecodedBytecode};
+use crate::native_lib::HostNative;
 use crate::hl;
 use crate::types::{HLNative, HLObjField, HLObjProto, HLType, HLTypeFun, HLTypeObj, TypeRef};
 use anyhow::{anyhow, bail, Result};
@@ -58,6 +59,11 @@ pub struct HostMethod {
     /// DEFINE_PRIM resolver. Not part of the JSON form; `resolve` fills it.
     #[serde(skip, default = "std::ptr::null")]
     pub func: *const c_void,
+    /// Passed to `func` before the HL arguments when non-null, so one entry
+    /// can serve many methods (`native_lib::HostNative`). Not in the JSON
+    /// form.
+    #[serde(skip, default = "std::ptr::null")]
+    pub context: *const c_void,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -315,8 +321,13 @@ impl DecodedBytecode {
                     type_: TypeRef(fun_type),
                     findex,
                 });
-                this.host_natives
-                    .insert((m.lib.clone(), method.symbol.clone()), method.func as usize);
+                this.host_natives.insert(
+                    (m.lib.clone(), method.symbol.clone()),
+                    HostNative {
+                        addr: method.func as usize,
+                        context: method.context as usize,
+                    },
+                );
                 new_natives.push((method.symbol.clone(), fun_type));
                 Ok(findex)
             };
@@ -616,6 +627,7 @@ mod tests {
                     params: vec![],
                     ret: HostType::I32,
                     func: stub_bump as *const c_void,
+                    context: std::ptr::null(),
                 }],
                 statics: vec![HostMethod {
                     name: "make".into(),
@@ -623,6 +635,7 @@ mod tests {
                     params: vec![],
                     ret: HostType::Obj("test.Greeter".into()),
                     func: stub_make as *const c_void,
+                    context: std::ptr::null(),
                 }],
                 ctor: Some(HostMethod {
                     name: "new".into(),
@@ -630,6 +643,7 @@ mod tests {
                     params: vec![],
                     ret: HostType::Void,
                     func: stub_ctor as *const c_void,
+                    context: std::ptr::null(),
                 }),
             }],
         }
@@ -720,7 +734,7 @@ mod tests {
 
         // The host's entries.
         assert_eq!(
-            bc.host_natives[&("host".to_string(), "greeter_bump".to_string())],
+            bc.host_natives[&("host".to_string(), "greeter_bump".to_string())].addr,
             stub_bump as usize
         );
         assert_eq!(bc.host_classes.len(), 1);
@@ -854,7 +868,7 @@ mod tests {
         assert!(ok);
         assert!(bc.type_index_of("test.$Greeter").is_some());
         assert_eq!(
-            bc.host_natives[&("host".to_string(), "greeter_make".to_string())],
+            bc.host_natives[&("host".to_string(), "greeter_make".to_string())].addr,
             stub_make as usize
         );
 

@@ -163,7 +163,13 @@ impl HLInterpreter {
             if let Some(slot) = self.native_fn_cache.get_mut(native_idx) {
                 *slot = func_ptr;
             }
+            if let Some(slot) = self.native_ctx_cache.get_mut(native_idx) {
+                *slot = ash_core::native_lib::host_native_context(&native.lib, &native.name);
+            }
         }
+        // A host native's context word goes first, before the declared
+        // arguments (`native_lib::HostNative`).
+        let context = self.native_ctx_cache.get(native_idx).copied().unwrap_or(0);
 
         // Get the function type signature for type-aware marshaling
         let type_fun = bytecode.types[native.type_.0]
@@ -232,6 +238,7 @@ impl HLInterpreter {
                 }
                 raw = Some(self.dispatch_float_native(
                     func_ptr,
+                    context,
                     args,
                     &arg_kinds,
                     ret_is_float,
@@ -318,10 +325,19 @@ impl HLInterpreter {
             self.value_to_i64(args[idx], kind)
         };
 
-        if args.len() > 12 {
+        // The words the callee takes: the context, when there is one, then
+        // the arguments.
+        let mut words: Vec<i64> = Vec::with_capacity(args.len() + 1);
+        if context != 0 {
+            words.push(context as i64);
+        }
+        words.extend((0..args.len()).map(extract_arg));
+        let word = |i: usize| words[i];
+
+        if words.len() > 12 {
             return Err(anyhow!(
                 "Native call with {} args not yet supported",
-                args.len()
+                words.len()
             ));
         }
 
@@ -339,83 +355,83 @@ impl HLInterpreter {
 
             // Dispatch based on argument count, using type-aware extraction and wrapping.
             raw_result = Some(unsafe {
-                match args.len() {
+                match words.len() {
                     0 => {
                         let f: unsafe extern "C" fn() -> i64 = std::mem::transmute(func_ptr);
                         f()
                     }
                     1 => {
                         let f: unsafe extern "C" fn(i64) -> i64 = std::mem::transmute(func_ptr);
-                        f(extract_arg(0))
+                        f(word(0))
                     }
                     2 => {
                         let f: unsafe extern "C" fn(i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(extract_arg(0), extract_arg(1))
+                        f(word(0), word(1))
                     }
                     3 => {
                         let f: unsafe extern "C" fn(i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
-                        f(extract_arg(0), extract_arg(1), extract_arg(2))
+                        f(word(0), word(1), word(2))
                     }
                     4 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
                         )
                     }
                     5 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
                         )
                     }
                     6 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
                         )
                     }
                     7 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
                         )
                     }
                     8 => {
                         let f: unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
                             std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
+                            word(7),
                         )
                     }
                     9 => {
@@ -431,15 +447,15 @@ impl HLInterpreter {
                             i64,
                         ) -> i64 = std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
-                            extract_arg(8),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
+                            word(7),
+                            word(8),
                         )
                     }
                     10 => {
@@ -456,16 +472,16 @@ impl HLInterpreter {
                             i64,
                         ) -> i64 = std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
-                            extract_arg(8),
-                            extract_arg(9),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
+                            word(7),
+                            word(8),
+                            word(9),
                         )
                     }
                     11 => {
@@ -483,17 +499,17 @@ impl HLInterpreter {
                             i64,
                         ) -> i64 = std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
-                            extract_arg(8),
-                            extract_arg(9),
-                            extract_arg(10),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
+                            word(7),
+                            word(8),
+                            word(9),
+                            word(10),
                         )
                     }
                     12 => {
@@ -512,18 +528,18 @@ impl HLInterpreter {
                             i64,
                         ) -> i64 = std::mem::transmute(func_ptr);
                         f(
-                            extract_arg(0),
-                            extract_arg(1),
-                            extract_arg(2),
-                            extract_arg(3),
-                            extract_arg(4),
-                            extract_arg(5),
-                            extract_arg(6),
-                            extract_arg(7),
-                            extract_arg(8),
-                            extract_arg(9),
-                            extract_arg(10),
-                            extract_arg(11),
+                            word(0),
+                            word(1),
+                            word(2),
+                            word(3),
+                            word(4),
+                            word(5),
+                            word(6),
+                            word(7),
+                            word(8),
+                            word(9),
+                            word(10),
+                            word(11),
                         )
                     }
                     _ => 0i64, // arg count is pre-validated above
@@ -1113,6 +1129,7 @@ impl HLInterpreter {
     pub(super) fn dispatch_float_native(
         &self,
         func_ptr: *mut std::ffi::c_void,
+        context: usize,
         args: &[NanBoxedValue],
         arg_kinds: &[hl::hl_type_kind],
         ret_is_float: bool,
@@ -1128,18 +1145,26 @@ impl HLInterpreter {
                 0
             }
         };
-        let kinds: Vec<u8> = arg_kinds[..args.len()].iter().map(|&k| code(k)).collect();
+        // The context, when there is one, is an integer word ahead of them.
+        let lead = usize::from(context != 0);
+        let mut kinds: Vec<u8> = Vec::with_capacity(lead + args.len());
+        kinds.resize(lead, 0);
+        kinds.extend(arg_kinds[..args.len()].iter().map(|&k| code(k)));
 
         // Each argument is read from the one of these its kind names; the
         // others are filled so the slices stay the same length.
-        let mut ints = vec![0i64; args.len()];
-        let mut f32s = vec![0f32; args.len()];
-        let mut f64s = vec![0f64; args.len()];
-        for (i, &kind) in kinds.iter().enumerate() {
+        let mut ints = vec![0i64; kinds.len()];
+        let mut f32s = vec![0f32; kinds.len()];
+        let mut f64s = vec![0f64; kinds.len()];
+        if lead == 1 {
+            ints[0] = context as i64;
+        }
+        for (i, &kind) in kinds.iter().enumerate().skip(lead) {
+            let a = i - lead;
             match kind {
-                1 => f32s[i] = args[i].as_f64() as f32,
-                2 => f64s[i] = args[i].as_f64(),
-                _ => ints[i] = self.value_to_i64(args[i], arg_kinds[i]),
+                1 => f32s[i] = args[a].as_f64() as f32,
+                2 => f64s[i] = args[a].as_f64(),
+                _ => ints[i] = self.value_to_i64(args[a], arg_kinds[a]),
             }
         }
 

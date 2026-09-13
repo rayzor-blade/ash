@@ -18,7 +18,7 @@ use cranelift_codegen::isa::CallConv;
 use crate::air_pipeline::AshModule;
 use crate::bytecode::DecodedBytecode;
 use crate::hl_bindings as hl;
-use crate::native_lib::NativeFunctionResolver;
+use crate::native_lib::{host_native_context as ash_core_native_context, NativeFunctionResolver};
 use crate::opcodes::Reg;
 use crate::types::TypeRef;
 
@@ -106,6 +106,10 @@ impl AshCraneliftBackend {
 
     pub fn make_signature(&self) -> Signature {
         self.inner.make_signature()
+    }
+
+    pub fn pointer_type(&self) -> cranelift_codegen::ir::Type {
+        self.inner.isa().pointer_type()
     }
 
     pub fn new_def(
@@ -306,6 +310,9 @@ pub struct CraneliftTierContext {
     findex_to_native: HashMap<usize, usize>,
     /// Per native index: the canonical `lib@symbol` key, when resolved.
     native_keys: Vec<Option<String>>,
+    /// Per native index: the host's context word, zero for none
+    /// (`native_lib::HostNative`).
+    native_contexts: Vec<usize>,
     /// Interned NUL-terminated UTF-16 buffers for `Opcode::String`, leaked
     /// (compiled code embeds their addresses), keyed by string index.
     strings: Mutex<HashMap<usize, usize>>,
@@ -437,6 +444,7 @@ impl CraneliftTierContext {
         }
         let mut findex_to_native = HashMap::new();
         let mut native_keys = Vec::with_capacity(bytecode.natives.len());
+        let mut native_contexts = Vec::with_capacity(bytecode.natives.len());
         for (i, n) in bytecode.natives.iter().enumerate() {
             findex_to_native.insert(n.findex as usize, i);
             let clean = n.lib.strip_prefix('?').unwrap_or(&n.lib);
@@ -448,6 +456,7 @@ impl CraneliftTierContext {
                 .filter(|p| !p.is_null())
                 .is_some();
             native_keys.push(if resolved { Some(key) } else { None });
+            native_contexts.push(ash_core_native_context(&n.lib, &n.name));
         }
 
         let resolver = NativeFunctionResolver::new();
@@ -530,6 +539,7 @@ impl CraneliftTierContext {
             findex_to_func,
             findex_to_native,
             native_keys,
+            native_contexts,
             strings: Mutex::new(HashMap::new()),
             bytes: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
@@ -612,6 +622,11 @@ impl CraneliftTierContext {
 
     pub fn native_symbol_key(&self, native_idx: usize) -> Option<String> {
         self.native_keys.get(native_idx).cloned().flatten()
+    }
+
+    /// The context word passed first when calling the native, or zero.
+    pub fn native_context(&self, native_idx: usize) -> usize {
+        self.native_contexts.get(native_idx).copied().unwrap_or(0)
     }
 
     pub fn type_kind(&self, type_idx: usize) -> Result<hl::hl_type_kind> {

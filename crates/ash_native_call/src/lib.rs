@@ -25,6 +25,23 @@ mod tests {
     }
 
     #[test]
+    fn the_word_form_places_each_kind() {
+        unsafe extern "C" fn mix(a: i64, b: f64, c: f32) -> f64 {
+            a as f64 + b + c as f64
+        }
+        let kinds = [0u8, 2, 1];
+        let pattern = super::pattern_of(&kinds);
+        let words = [3u64, 1.5f64.to_bits(), 0.25f32.to_bits() as u64];
+        let out = unsafe { super::dispatch_by_pattern(mix as *mut _, &words, 2, pattern) };
+        assert_eq!(out.map(|bits| f64::from_bits(bits as u64)), Some(4.75));
+        let ints = [3i64, 0, 0];
+        let f32s = [0f32, 0.0, 0.25];
+        let f64s = [0f64, 1.5, 0.0];
+        let same = unsafe { super::dispatch(mix as *mut _, &ints, &f32s, &f64s, &kinds, 2) };
+        assert_eq!(same, out);
+    }
+
+    #[test]
     fn a_signature_that_was_not_generated_is_refused() {
         // Nine arguments is past the end of the table.
         let kinds = [0u8; 9];

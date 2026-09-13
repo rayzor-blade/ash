@@ -146,8 +146,15 @@ jobs:
       # Two invocations, not one: ash_std is a cdylib that ash's build.rs
       # embeds via include_bytes!, and cargo has no ordering edge between the
       # two — a single invocation can race and embed a stale or missing stdlib.
+      #
+      # The touch comes first: cargo judges a path crate fresh when its
+      # sources are older than the fingerprint, and HEAD was checked out
+      # before the base was built into the same target/, so without it
+      # HEAD's workspace crates are the base's. Done here rather than in the
+      # base step so a base that fails part-way cannot skip it.
       - name: Build ash (release)
         run: |
+          git ls-files -z | xargs -0 touch
           cargo build --release -p ash_std
           cargo build --release -p ash
 

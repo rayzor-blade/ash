@@ -50,6 +50,7 @@ HashLink can run, which is how an AIR pass gets checked against another VM.
 | `ASH_PROFILE` | `phases`, `sample` or `all` — see below |
 | `ASH_PROFILE_HZ` | Sampling rate, default 997 |
 | `ASH_PROFILE_OUT` | Write the profile to a file instead of stderr |
+| `ASH_INLINE_ALLOC` | `0` makes compiled code call the runtime for every object allocation instead of bumping the thread's region in place. Safe, slower |
 | `ASH_GC_STATS` | Print collection count, reclaimed blocks, live bytes, pause times |
 | `ASH_GC_HEAP_MB` | Heap reservation (demand-committed, so a ceiling) |
 | `ASH_GC_TRIGGER_MB` | Floor for the adaptive collection threshold |

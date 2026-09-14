@@ -63,6 +63,9 @@ pub struct JITModule<'ctx> {
     /// Which classes the program allocates, for the ahead-of-time
     /// devirtualisation guess; built on first use.
     pub(crate) reachable_targets: std::cell::OnceCell<crate::devirt::ReachableTargets>,
+    /// How compiled code reaches the running thread's bump region, asked of
+    /// the runtime once; `None` keeps every allocation in the runtime.
+    pub(crate) inline_alloc: std::cell::OnceCell<Option<super::function::InlineAllocLayout>>,
     pub(crate) type_cache: HashMap<usize, AnyTypeEnum<'ctx>>,
     pub(crate) initialized_type_cache: HashMap<usize, BasicValueEnum<'ctx>>,
     /// `Class.method` -> findex, built once on first use. A loaded
@@ -412,6 +415,7 @@ impl<'ctx> JITModule<'ctx> {
             aot,
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
+            inline_alloc: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
         };
@@ -852,6 +856,7 @@ impl<'ctx> JITModule<'ctx> {
             aot: false,
             lazy_compilation: false,
             reachable_targets: std::cell::OnceCell::new(),
+            inline_alloc: std::cell::OnceCell::new(),
             current_findex: usize::MAX,
             shadow_slot: None,
         };

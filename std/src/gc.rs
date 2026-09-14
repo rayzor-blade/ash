@@ -317,6 +317,10 @@ thread_local! {
 }
 
 /// This thread's bump region, plus whether it is a registered mutator.
+///
+/// `repr(C)`: compiled code bumps `cur` in place (see
+/// [`hlp_inline_alloc_layout`]), so the field offsets are an ABI.
+#[repr(C)]
 struct Tlab {
     /// Bump cursor and the end of the region.
     cur: Cell<usize>,
@@ -552,6 +556,7 @@ fn register_current_mutator(stack_top: usize, role: &'static str) {
         });
     }
     TLAB.with(|t| t.registered.set(true));
+    publish_tlab_for_inline_alloc();
 }
 
 /// Register the current OS worker using the platform's real stack boundary.
@@ -630,6 +635,7 @@ fn unregister_current_mutator() {
     TLAB.with(|t| t.registered.set(false));
     MUTATOR_WORLD.changed.notify_all();
     drop(world);
+    withdraw_tlab_for_inline_alloc();
 
     // The region goes back to the sweep with the thread that owned it.
     release_tlab_region(&mut gc_locked());
@@ -1109,6 +1115,150 @@ fn set_current_scan_ranges(ranges: &[(usize, usize)]) {
             .scan_ranges
             .extend(ranges.iter().copied().filter(|&(a, s)| a != 0 && s != 0));
     }
+}
+
+/// How compiled code reaches this thread's [`Tlab`] without a call.
+///
+/// `kind` 1: the struct sits at `thread pointer + offset`, the same offset
+/// on every thread (static TLS). `kind` 2: its address is thread-specific
+/// data slot `offset` (macOS, `TPIDRRO_EL0 & !7` indexes the slots). `kind`
+/// 0: not available, compiled code calls the allocator. The remaining
+/// fields are the byte offsets of the words the bump reads and writes, and
+/// the allocator's constants.
+#[repr(C)]
+pub struct InlineAllocLayout {
+    pub kind: u32,
+    pub cur: u32,
+    pub limit: u32,
+    pub objects: u32,
+    pub heap_base: u32,
+    pub line: u32,
+    pub quantum: u32,
+    pub max_obj: u32,
+    pub offset: i64,
+}
+
+/// `ASH_INLINE_ALLOC=0` keeps every allocation in the runtime. Safe.
+fn inline_alloc_enabled() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        !matches!(
+            std::env::var("ASH_INLINE_ALLOC").as_deref(),
+            Ok("0") | Ok("off")
+        )
+    })
+}
+
+/// The thread pointer compiled code can read in one instruction.
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[inline(always)]
+fn thread_pointer() -> usize {
+    let tp: usize;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::asm!("mov {}, qword ptr fs:[0]", out(reg) tp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("mrs {}, TPIDR_EL0", out(reg) tp, options(nomem, nostack, preserves_flags));
+    }
+    tp
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+static TLAB_TSD_KEY: OnceLock<Option<libc::pthread_key_t>> = OnceLock::new();
+
+/// On macOS the struct's address goes into a thread-specific-data slot,
+/// which is what compiled code indexes; on the other platforms the static
+/// TLS offset needs no publishing.
+fn publish_tlab_for_inline_alloc() {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        let key = TLAB_TSD_KEY.get_or_init(|| {
+            let mut key: libc::pthread_key_t = 0;
+            (unsafe { libc::pthread_key_create(&mut key, None) } == 0).then_some(key)
+        });
+        if let Some(key) = key {
+            let addr = TLAB.with(|t| t as *const Tlab as *const c_void);
+            unsafe {
+                libc::pthread_setspecific(*key, addr);
+            }
+        }
+    }
+}
+
+fn withdraw_tlab_for_inline_alloc() {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if let Some(Some(key)) = TLAB_TSD_KEY.get() {
+        unsafe {
+            libc::pthread_setspecific(*key, ptr::null());
+        }
+    }
+}
+
+/// The platform half of the layout: `(kind, offset)`, checked once.
+fn inline_alloc_locator() -> (u32, i64) {
+    static V: OnceLock<(u32, i64)> = OnceLock::new();
+    *V.get_or_init(|| {
+        if !inline_alloc_enabled() || !tlab_enabled() {
+            return (0, 0);
+        }
+        #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let here = TLAB.with(|t| t as *const Tlab as usize) as i64 - thread_pointer() as i64;
+            // Static TLS keeps the same distance from the thread pointer on
+            // every thread; a dynamically allocated block does not.
+            let there = std::thread::spawn(|| {
+                TLAB.with(|t| t as *const Tlab as usize) as i64 - thread_pointer() as i64
+            })
+            .join()
+            .unwrap_or(here + 1);
+            return if here == there { (1, here) } else { (0, 0) };
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            let Some(Some(key)) = TLAB_TSD_KEY.get() else {
+                return (0, 0);
+            };
+            // The slot read the way compiled code reads it must agree with
+            // the library on a thread that published its struct.
+            let ok = std::thread::spawn(move || unsafe {
+                let addr = TLAB.with(|t| t as *const Tlab as *const c_void);
+                libc::pthread_setspecific(*key, addr);
+                let tsd: usize;
+                std::arch::asm!("mrs {}, TPIDRRO_EL0", out(reg) tsd, options(nomem, nostack, preserves_flags));
+                let slot = *(((tsd & !7) as *const *const c_void).add(*key as usize));
+                libc::pthread_setspecific(*key, ptr::null());
+                slot == addr
+            })
+            .join()
+            .unwrap_or(false);
+            return if ok { (2, *key as i64) } else { (0, 0) };
+        }
+        #[allow(unreachable_code)]
+        (0, 0)
+    })
+}
+
+/// Fill `out` with how compiled code may bump-allocate into this thread's
+/// region. `kind` 0 says it may not.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_inline_alloc_layout(out: *mut InlineAllocLayout) {
+    let (kind, offset) = inline_alloc_locator();
+    *out = InlineAllocLayout {
+        kind,
+        cur: std::mem::offset_of!(Tlab, cur) as u32,
+        limit: std::mem::offset_of!(Tlab, limit) as u32,
+        objects: std::mem::offset_of!(Tlab, objects) as u32,
+        heap_base: std::mem::offset_of!(Tlab, heap_base) as u32,
+        line: LINE_SIZE as u32,
+        quantum: ALLOC_QUANTUM as u32,
+        max_obj: TLAB_MAX_OBJ as u32,
+        offset,
+    };
 }
 
 /// TLAB enabled? Off under stress, and via ASH_GC_TLAB=0.

@@ -20,6 +20,22 @@ use inkwell::{
 };
 
 use super::module::{CompiledFunctionMeta, JITModule};
+
+/// Where a thread's bump region lives and how it is laid out, as the
+/// runtime reports it (`ash_std::gc::InlineAllocLayout`, same order).
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct InlineAllocLayout {
+    pub kind: u32,
+    pub cur: u32,
+    pub limit: u32,
+    pub objects: u32,
+    pub heap_base: u32,
+    pub line: u32,
+    pub quantum: u32,
+    pub max_obj: u32,
+    pub offset: i64,
+}
 use crate::hl::{
     hl_obj_field, hl_runtime_obj, hl_type, hl_type_kind_HABSTRACT, hl_type_kind_HBOOL,
     hl_type_kind_HBYTES, hl_type_kind_HDYN, hl_type_kind_HDYNOBJ, hl_type_kind_HF32,
@@ -205,6 +221,27 @@ impl<'ctx> JITModule<'ctx> {
             .i64_type()
             .const_int(self.fiber_poll_epoch_address()? as u64, false)
             .const_to_pointer(ptr_type))
+    }
+
+    /// The runtime's answer to [`Self::inline_alloc_layout`], mirroring
+    /// `ash_std::gc::InlineAllocLayout`.
+    fn inline_alloc_layout(&self) -> Option<&InlineAllocLayout> {
+        self.inline_alloc
+            .get_or_init(|| {
+                if self.aot {
+                    return None;
+                }
+                let getter = self
+                    .native_function_resolver
+                    .resolve_function("std", "hlp_inline_alloc_layout")
+                    .ok()?;
+                let getter: unsafe extern "C" fn(*mut InlineAllocLayout) =
+                    unsafe { std::mem::transmute(getter) };
+                let mut layout = InlineAllocLayout::default();
+                unsafe { getter(&mut layout) };
+                (layout.kind != 0).then_some(layout)
+            })
+            .as_ref()
     }
 
     fn fiber_poll_epoch_address(&self) -> Result<usize> {

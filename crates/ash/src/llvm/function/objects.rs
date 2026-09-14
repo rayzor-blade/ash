@@ -642,6 +642,236 @@ impl<'ctx> JITModule<'ctx> {
     }
 
     /// Allocate an object of `dst`'s type.
+    /// Bump-allocate `size` bytes of an `HOBJ` in the running thread's
+    /// region, with the runtime's allocator as the slow path. `None` when
+    /// this build allocates through the runtime only.
+    ///
+    /// The sequence is the allocator's own fast path: an object never
+    /// crosses a line, its size in quanta goes into the objects map before
+    /// the cursor moves, and the type header is the first word.
+    fn emit_inline_alloc(
+        &mut self,
+        type_index: usize,
+        type_ptr: PointerValue<'ctx>,
+        size: u64,
+        slow: &dyn Fn(&mut Self) -> Result<inkwell::values::CallSiteValue<'ctx>>,
+    ) -> Result<Option<PointerValue<'ctx>>> {
+        let Some(layout) = self.inline_alloc_layout().copied() else {
+            return Ok(None);
+        };
+        let aligned = (size.max(8) + 15) & !15;
+        if aligned > u64::from(layout.max_obj) {
+            return Ok(None);
+        }
+        // The runtime resolves a type's proto the first time it allocates
+        // one; an inlined allocation never reaches that, so resolve it now.
+        if let Some(&raw) = self.type_index_to_c_ptr.get(&type_index) {
+            let resolve = self
+                .native_function_resolver
+                .resolve_function("std", "hl_get_obj_proto")
+                .map_err(|e| anyhow!("hl_get_obj_proto: {e}"))?;
+            let resolve: unsafe extern "C" fn(*mut std::ffi::c_void) -> *mut std::ffi::c_void =
+                unsafe { std::mem::transmute(resolve) };
+            unsafe { resolve(raw as *mut std::ffi::c_void) };
+        } else {
+            return Ok(None);
+        }
+
+        let i64_type = self.context.i64_type();
+        let i8_type = self.context.i8_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .ok_or_else(|| anyhow!("inline alloc outside a function"))?;
+        let check_bb = self.context.append_basic_block(function, "alloc_check");
+        let fast_bb = self.context.append_basic_block(function, "alloc_fast");
+        let slow_bb = self.context.append_basic_block(function, "alloc_slow");
+        let done_bb = self.context.append_basic_block(function, "alloc_done");
+
+        // The region's address: thread pointer plus a fixed offset, or a
+        // thread-specific-data slot that may still be empty.
+        let tp_type = i64_type.fn_type(&[], false);
+        let tlab: PointerValue<'ctx> = match layout.kind {
+            1 => {
+                let (asm, constraints) = if cfg!(target_arch = "x86_64") {
+                    ("mov %fs:0, $0", "=r")
+                } else {
+                    ("mrs $0, TPIDR_EL0", "=r")
+                };
+                let read = self.context.create_inline_asm(
+                    tp_type,
+                    asm.to_string(),
+                    constraints.to_string(),
+                    false,
+                    false,
+                    None,
+                    false,
+                );
+                let tp = self
+                    .builder
+                    .build_indirect_call(tp_type, read, &[], "thread_pointer")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("thread pointer read returned nothing"))?
+                    .into_int_value();
+                let addr = self.builder.build_int_add(
+                    tp,
+                    i64_type.const_int(layout.offset as u64, true),
+                    "tlab_addr",
+                )?;
+                self.builder.build_unconditional_branch(check_bb)?;
+                self.builder.position_at_end(check_bb);
+                self.builder.build_int_to_ptr(addr, ptr_type, "tlab")?
+            }
+            2 => {
+                let read = self.context.create_inline_asm(
+                    tp_type,
+                    "mrs $0, TPIDRRO_EL0".to_string(),
+                    "=r".to_string(),
+                    false,
+                    false,
+                    None,
+                    false,
+                );
+                let tp = self
+                    .builder
+                    .build_indirect_call(tp_type, read, &[], "thread_pointer")?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("thread pointer read returned nothing"))?
+                    .into_int_value();
+                let tsd = self
+                    .builder
+                    .build_and(tp, i64_type.const_int(!7u64, false), "tsd")?;
+                let slot_addr = self.builder.build_int_add(
+                    tsd,
+                    i64_type.const_int((layout.offset as u64) * 8, false),
+                    "tlab_slot_addr",
+                )?;
+                let slot_ptr = self
+                    .builder
+                    .build_int_to_ptr(slot_addr, ptr_type, "tlab_slot")?;
+                let tlab = self
+                    .builder
+                    .build_load(ptr_type, slot_ptr, "tlab")?
+                    .into_pointer_value();
+                let is_null = self.builder.build_is_null(tlab, "tlab_missing")?;
+                self.builder
+                    .build_conditional_branch(is_null, slow_bb, check_bb)?;
+                self.builder.position_at_end(check_bb);
+                tlab
+            }
+            _ => return Ok(None),
+        };
+
+        let field = |this: &Self, off: u32, name: &str| -> Result<PointerValue<'ctx>> {
+            Ok(unsafe {
+                this.builder.build_gep(
+                    i8_type,
+                    tlab,
+                    &[i64_type.const_int(u64::from(off), false)],
+                    name,
+                )?
+            })
+        };
+        let cur_ptr = field(self, layout.cur, "tlab_cur_ptr")?;
+        let cur = self
+            .builder
+            .build_load(i64_type, cur_ptr, "tlab_cur")?
+            .into_int_value();
+        let no_region = self.builder.build_int_compare(
+            inkwell::IntPredicate::EQ,
+            cur,
+            i64_type.const_zero(),
+            "tlab_empty",
+        )?;
+        let line = u64::from(layout.line);
+        let rem = self
+            .builder
+            .build_and(cur, i64_type.const_int(line - 1, false), "line_rem")?;
+        let end_in_line =
+            self.builder
+                .build_int_add(rem, i64_type.const_int(aligned, false), "line_end")?;
+        let crosses = self.builder.build_int_compare(
+            inkwell::IntPredicate::UGT,
+            end_in_line,
+            i64_type.const_int(line, false),
+            "line_crosses",
+        )?;
+        let next_line = self.builder.build_and(
+            self.builder
+                .build_int_add(cur, i64_type.const_int(line - 1, false), "line_up")?,
+            i64_type.const_int(!(line - 1), false),
+            "next_line",
+        )?;
+        let start = self
+            .builder
+            .build_select(crosses, next_line, cur, "obj_start")?
+            .into_int_value();
+        let next =
+            self.builder
+                .build_int_add(start, i64_type.const_int(aligned, false), "obj_end")?;
+        let limit_ptr = field(self, layout.limit, "tlab_limit_ptr")?;
+        let limit = self
+            .builder
+            .build_load(i64_type, limit_ptr, "tlab_limit")?
+            .into_int_value();
+        let fits =
+            self.builder
+                .build_int_compare(inkwell::IntPredicate::ULE, next, limit, "fits")?;
+        let ok = self.builder.build_and(
+            fits,
+            self.builder.build_not(no_region, "has_region")?,
+            "alloc_ok",
+        )?;
+        self.builder
+            .build_conditional_branch(ok, fast_bb, slow_bb)?;
+
+        self.builder.position_at_end(fast_bb);
+        let objects_ptr = field(self, layout.objects, "tlab_objects_ptr")?;
+        let objects = self
+            .builder
+            .build_load(ptr_type, objects_ptr, "tlab_objects")?
+            .into_pointer_value();
+        let base_ptr = field(self, layout.heap_base, "tlab_base_ptr")?;
+        let heap_base = self
+            .builder
+            .build_load(i64_type, base_ptr, "tlab_base")?
+            .into_int_value();
+        let quantum = u64::from(layout.quantum);
+        let index = self.builder.build_right_shift(
+            self.builder.build_int_sub(start, heap_base, "obj_off")?,
+            i64_type.const_int(quantum.trailing_zeros() as u64, false),
+            false,
+            "obj_quantum",
+        )?;
+        let entry = unsafe {
+            self.builder
+                .build_gep(i8_type, objects, &[index], "objects_entry")?
+        };
+        self.builder
+            .build_store(entry, i8_type.const_int(aligned / quantum, false))?;
+        self.builder.build_store(cur_ptr, next)?;
+        let obj = self.builder.build_int_to_ptr(start, ptr_type, "obj")?;
+        self.builder.build_store(obj, type_ptr)?;
+        self.builder.build_unconditional_branch(done_bb)?;
+
+        self.builder.position_at_end(slow_bb);
+        let called = slow(self)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("hlp_alloc_obj_sized returned nothing"))?
+            .into_pointer_value();
+        self.builder.build_unconditional_branch(done_bb)?;
+
+        self.builder.position_at_end(done_bb);
+        let phi = self.builder.build_phi(ptr_type, "alloc")?;
+        phi.add_incoming(&[(&obj, fast_bb), (&called, slow_bb)]);
+        Ok(Some(phi.as_basic_value().into_pointer_value()))
+    }
+
     pub(super) fn emit_air_new(
         &mut self,
         lowering: &HLFunction,
@@ -696,11 +926,20 @@ impl<'ctx> JITModule<'ctx> {
                         ],
                         Some(self.context.ptr_type(AddressSpace::default()).into()),
                     );
-                    self.builder.build_call(
-                        fun,
-                        &[type_ptr.into(), size_type.const_int(size, false).into()],
-                        "call",
-                    )?
+                    let slow = |this: &mut Self| {
+                        Ok(this.builder.build_call(
+                            fun,
+                            &[type_ptr.into(), size_type.const_int(size, false).into()],
+                            "call",
+                        )?)
+                    };
+                    match self.emit_inline_alloc(type_index, type_ptr, size, &slow)? {
+                        Some(obj) => {
+                            self.builder.build_store(registers[dst.idx()], obj)?;
+                            return Ok(());
+                        }
+                        None => slow(self)?,
+                    }
                 } else {
                     let ptr_type = self.context.ptr_type(AddressSpace::default());
                     let fun = self.declare_native(

@@ -1479,6 +1479,21 @@ fn growth_factor() -> usize {
     })
 }
 
+/// The collector's intended share of run time, as a fraction. The interval
+/// between collections widens while pause exceeds it and narrows back while
+/// pause is under half of it. `ASH_GC_SHARE_PCT` sets it (default 5); safe.
+fn gc_share_target() -> f64 {
+    static V: OnceLock<f64> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("ASH_GC_SHARE_PCT")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|n| *n > 0.0 && *n < 100.0)
+            .unwrap_or(5.0)
+            / 100.0
+    })
+}
+
 /// Reuse the unmarked lines inside blocks a sweep kept. `ASH_GC_RECYCLE=0`
 /// falls back to retaining those blocks whole.
 ///
@@ -1888,7 +1903,7 @@ fn print_gc_stats_report() {
     let pm = GC_STATS.pause_ns_max.load(Ordering::Relaxed);
     eprintln!("[gc] ---- GC stats ----");
     eprintln!(
-        "[gc] sizing:           ram {} / ceiling {} / growth x{}",
+        "[gc] sizing:           ram {} / ceiling {} / growth x{} (base)",
         fmt_mb(usable_ram_bytes() as u64),
         fmt_mb(trigger_ceiling_bytes() as u64),
         growth_factor()
@@ -2402,8 +2417,13 @@ struct ImmixHeap {
     /// (fiber stacks, JIT-side structures — wren_lift gc.rs:624-626).
     external_since_gc: usize,
     /// Collect when bytes_since_gc + external_since_gc reaches this.
-    /// Adaptive: live*2 clamped to [floor, ceiling] after each collection.
+    /// Adaptive: live times `growth` clamped to [floor, ceiling] after each
+    /// collection.
     trigger_threshold: usize,
+    /// The live-set multiplier behind `trigger_threshold`. Starts at
+    /// `growth_factor()` and moves within [that, 4x that] so that pause stays
+    /// near `gc_share_target()` of the time between collections.
+    growth: f64,
     /// Wall-clock heartbeat anchor.
     last_collect: Instant,
     /// Throttle anchor for malloc_zone_pressure_relief.
@@ -2906,6 +2926,7 @@ impl ImmixAllocator {
             bytes_since_gc: 0,
             external_since_gc: 0,
             trigger_threshold: INITIAL_TRIGGER_BYTES,
+            growth: growth_factor() as f64,
             last_collect: Instant::now(),
             last_pressure_relief: Instant::now(),
             reusable_blocks: HashSet::new(),
@@ -3638,8 +3659,25 @@ impl ImmixAllocator {
         // where scaling the ceiling with the whole heap instead let a ~1GB
         // live set accumulate 2GB of garbage and pushed the process past 5GB.
         let ceiling = trigger_ceiling_bytes().max(live_bytes).max(floor);
-        self.heap.trigger_threshold =
-            (live_bytes.saturating_mul(growth_factor())).clamp(floor, ceiling);
+        // The multiplier follows the collector's share of time: a pause that
+        // is a large fraction of the mutator time since the last collection
+        // widens the interval, a small one narrows it back toward the base.
+        // Marking costs the live set, not the garbage, so a wider interval
+        // adds sweep and memory, not pause.
+        let mutator = t0.saturating_duration_since(self.heap.last_collect);
+        let share = pause.as_secs_f64() / (pause + mutator).as_secs_f64().max(1e-9);
+        let target = gc_share_target();
+        let base = growth_factor() as f64;
+        let step = if share > target {
+            1.5
+        } else if share < target / 2.0 {
+            0.75
+        } else {
+            1.0
+        };
+        self.heap.growth = (self.heap.growth * step).clamp(base, base * 4.0);
+        let scaled = (live_bytes as f64 * self.heap.growth) as usize;
+        self.heap.trigger_threshold = scaled.clamp(floor, ceiling);
 
         self.heap.bytes_since_gc = 0;
         self.heap.external_since_gc = 0;
@@ -3699,7 +3737,7 @@ impl ImmixAllocator {
         if gc_stats_enabled() || gc_flag(GC_FLAG_PROFILE) {
             eprintln!(
                 "[gc] #{} origin={} pause={:.2}ms freed={} blocks live={} blocks ({}) \
-                 next-trigger={} free={} blocks",
+                 next-trigger={} (x{:.1}) free={} blocks",
                 n,
                 ORIGIN_NAMES[COLLECT_ORIGIN.load(Ordering::Relaxed).min(6) as usize],
                 pause_ns as f64 / 1e6,
@@ -3707,6 +3745,7 @@ impl ImmixAllocator {
                 live_blocks,
                 fmt_mb(live_bytes as u64),
                 fmt_mb(self.heap.trigger_threshold as u64),
+                self.heap.growth,
                 self.heap.free_blocks.len(),
             );
         }

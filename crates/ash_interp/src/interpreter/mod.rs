@@ -532,6 +532,9 @@ pub struct HLInterpreter {
     fn_alloc_array: *mut c_void,
     /// HashLink's sentinel body for closures created by hlp_make_var_args.
     fn_fun_var_args: *mut c_void,
+    /// The `fun` of every closure over a native by record
+    /// (`native_lib::RecordClosure`).
+    fn_fun_record: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_enum
     fn_alloc_enum: *mut c_void,
     /// Resolved stdlib function pointer: hlp_alloc_dynobj
@@ -858,6 +861,9 @@ impl HLInterpreter {
         let fn_fun_var_args = native_resolver
             .resolve_function("std", "_fun_var_args")
             .unwrap_or(std::ptr::null_mut());
+        let fn_fun_record = native_resolver
+            .resolve_function("std", "_fun_record")
+            .unwrap_or(std::ptr::null_mut());
         let fn_alloc_enum = native_resolver
             .resolve_function("std", "hlp_alloc_enum")
             .unwrap_or(std::ptr::null_mut());
@@ -994,6 +1000,7 @@ impl HLInterpreter {
             fn_note_throw_site,
             fn_alloc_array,
             fn_fun_var_args,
+            fn_fun_record,
             fn_alloc_enum,
             fn_alloc_dynobj,
             fn_alloc_virtual,

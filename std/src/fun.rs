@@ -497,6 +497,173 @@ pub unsafe extern "C" fn _fun_var_args() {
 
 pub static mut fun_var_args: unsafe extern "C" fn() = _fun_var_args;
 
+/// What a closure over a host entry called by record is bound to: the
+/// entry and its context, as `native_lib::HostNative` names them for a
+/// native by record, and the signature's shape. The block is the host's,
+/// and its first word the host's own; `fun_record` reads the rest.
+#[repr(C)]
+pub struct RecordClosure {
+    pub host: usize,
+    /// Called with `context` and one word per argument, packed as a native
+    /// by record is (an integer or pointer as is, an `f32` in the low 32
+    /// bits, an `f64` as its bits); answers the result the same way.
+    pub entry: unsafe extern "C" fn(usize, *const i64) -> i64,
+    pub context: usize,
+    /// The arguments' kinds, least significant digit first, 0 an integer or
+    /// pointer, 1 an `f32`, 2 an `f64` (`ash_native_call::pattern_of`).
+    pub pattern: u32,
+    pub arity: u32,
+    /// The result's kind, the same three.
+    pub ret_kind: u8,
+}
+
+/// The most arguments `fun_record` places, and how many of them the
+/// integer registers take beside the bound value.
+pub const RECORD_ARGS: u32 = 8;
+#[cfg(target_arch = "aarch64")]
+const RECORD_INT_REGS: u32 = 7;
+#[cfg(target_arch = "x86_64")]
+const RECORD_INT_REGS: u32 = 5;
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+const RECORD_INT_REGS: u32 = 0;
+
+/// The one function every record closure has as its `fun`: compiled code
+/// calls it as the closure's own signature, with the bound value first.
+/// It keeps the argument registers and hands them to `record_call`, which
+/// places them by the closure's pattern and calls the entry; the result
+/// word goes back in both the integer and the float return register, and
+/// the caller reads the one its signature names.
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn _fun_record() {
+    core::arch::naked_asm!(
+        "sub sp, sp, #160",
+        "stp x29, x30, [sp, #128]",
+        "add x29, sp, #128",
+        "stp x0, x1, [sp]",
+        "stp x2, x3, [sp, #16]",
+        "stp x4, x5, [sp, #32]",
+        "stp x6, x7, [sp, #48]",
+        "stp d0, d1, [sp, #64]",
+        "stp d2, d3, [sp, #80]",
+        "stp d4, d5, [sp, #96]",
+        "stp d6, d7, [sp, #112]",
+        "mov x1, sp",
+        "add x2, sp, #64",
+        "bl {call}",
+        "fmov d0, x0",
+        "ldp x29, x30, [sp, #128]",
+        "add sp, sp, #160",
+        "ret",
+        call = sym record_call,
+    );
+}
+
+#[cfg(all(target_arch = "x86_64", not(windows)))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn _fun_record() {
+    core::arch::naked_asm!(
+        "push rbp",
+        "mov rbp, rsp",
+        "sub rsp, 128",
+        "mov [rsp], rdi",
+        "mov [rsp + 8], rsi",
+        "mov [rsp + 16], rdx",
+        "mov [rsp + 24], rcx",
+        "mov [rsp + 32], r8",
+        "mov [rsp + 40], r9",
+        "movq [rsp + 48], xmm0",
+        "movq [rsp + 56], xmm1",
+        "movq [rsp + 64], xmm2",
+        "movq [rsp + 72], xmm3",
+        "movq [rsp + 80], xmm4",
+        "movq [rsp + 88], xmm5",
+        "movq [rsp + 96], xmm6",
+        "movq [rsp + 104], xmm7",
+        "mov rsi, rsp",
+        "lea rdx, [rsp + 48]",
+        "call {call}",
+        "movq xmm0, rax",
+        "leave",
+        "ret",
+        call = sym record_call,
+    );
+}
+
+#[cfg(not(any(target_arch = "aarch64", all(target_arch = "x86_64", not(windows)))))]
+#[no_mangle]
+pub unsafe extern "C" fn _fun_record() {
+    hlp_error(str_to_uchar_ptr(
+        "A record closure cannot be called on this target",
+    ));
+}
+
+pub static mut fun_record: unsafe extern "C" fn() = _fun_record;
+
+/// `fun_record`'s body: `gps[0]` is the bound value, the record closure;
+/// the arguments follow in `gps` and `fps` by kind, in order.
+unsafe extern "C" fn record_call(
+    rc: *const RecordClosure,
+    gps: *const u64,
+    fps: *const u64,
+) -> i64 {
+    let rc = &*rc;
+    let mut words = [0i64; RECORD_ARGS as usize];
+    let (mut gi, mut fi) = (1usize, 0usize);
+    let mut pattern = rc.pattern;
+    for word in words.iter_mut().take(rc.arity as usize) {
+        *word = match pattern % 3 {
+            0 => {
+                gi += 1;
+                *gps.add(gi - 1) as i64
+            }
+            1 => {
+                fi += 1;
+                (*fps.add(fi - 1) & 0xFFFF_FFFF) as i64
+            }
+            _ => {
+                fi += 1;
+                *fps.add(fi - 1) as i64
+            }
+        };
+        pattern /= 3;
+    }
+    (rc.entry)(rc.context, words.as_ptr())
+}
+
+/// A closure of the full type `t` (its bound value first) over the record
+/// closure `rc`, which the host keeps alive and unmoved for as long as the
+/// closure lives. Null when the signature does not fit the argument
+/// registers, which `fun_record` keeps: more than `RECORD_ARGS` arguments,
+/// or more integers or floats than the registers hold.
+///
+/// # Safety
+/// `t` is a function type whose first argument is the bound value, and
+/// `rc` describes it.
+#[no_mangle]
+pub unsafe extern "C" fn hlp_alloc_record_closure(
+    t: *mut hl_type,
+    rc: *mut RecordClosure,
+) -> *mut vclosure {
+    let shape = &*rc;
+    let mut pattern = shape.pattern;
+    let (mut ints, mut floats) = (0u32, 0u32);
+    for _ in 0..shape.arity {
+        if pattern % 3 == 0 {
+            ints += 1;
+        } else {
+            floats += 1;
+        }
+        pattern /= 3;
+    }
+    if shape.arity > RECORD_ARGS || ints > RECORD_INT_REGS || floats > 8 {
+        return ptr::null_mut();
+    }
+    hlp_alloc_closure_ptr(t, fun_record as *mut c_void, rc as *mut c_void)
+}
+
 // Every closure produced by `hlp_make_var_args` retains this type pointer for
 // its entire lifetime. HashLink's descriptor is static for the same reason;
 // making it a function-local value leaves each closure pointing into a dead
@@ -628,6 +795,16 @@ pub unsafe fn hlp_call_method(c: *mut vdynamic, args: *mut varray) -> *mut vdyna
     }
 
     if (*cl).hasValue != 0 {
+        // A record closure is called as its full type, the record first,
+        // which `hlp_dyn_call` arranges; `fun_record` takes it from there.
+        if (*cl).fun == fun_record as *mut libc::c_void {
+            let call_args = if (*args).size == 0 {
+                ptr::null_mut()
+            } else {
+                hl_aptr::<*mut vdynamic>(args)
+            };
+            return hlp_dyn_call(cl, call_args, (*args).size);
+        }
         if (*cl).fun == fun_var_args as *mut libc::c_void {
             let cl = (*cl).value as *mut vclosure;
             return if (*cl).hasValue != 0 {
@@ -1140,4 +1317,75 @@ pub unsafe extern "C" fn hlp_install_static_call() {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_install_closure_runner() {
     crate::fiber::hlp_set_closure_runner(crate::fiber::hlp_jit_closure_runner);
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    unsafe extern "C" fn sum(context: usize, words: *const i64) -> i64 {
+        let a = f64::from_bits(*words as u64);
+        let b = *words.add(1) as i32;
+        (a + b as f64 + context as f64).to_bits() as i64
+    }
+
+    /// `(bound, Float, Int) -> Float` over an entry by record, called as
+    /// compiled code calls a closure of that type, and through
+    /// `hlp_dyn_call` as a dynamic call does.
+    #[test]
+    fn a_record_closure_is_called_as_its_type() {
+        unsafe { crate::gc::hlp_gc_init() };
+        unsafe { hlp_install_static_call() };
+        let args = Box::leak(Box::new([
+            crate::types::hlt_dyn(),
+            crate::types::hlt_f64(),
+            crate::types::hlt_i32(),
+        ]));
+        let fun = Box::leak(Box::new(hl::hl_type_fun {
+            args: args.as_mut_ptr(),
+            ret: crate::types::hlt_f64(),
+            nargs: 3,
+            parent: ptr::null_mut(),
+            closure_type: hl::hl_type_fun__bindgen_ty_1 {
+                kind: hl_type_kind_HVOID,
+                p: ptr::null_mut(),
+            },
+            closure: hl::hl_type_fun__bindgen_ty_2 {
+                args: ptr::null_mut(),
+                ret: ptr::null_mut(),
+                nargs: 0,
+                parent: ptr::null_mut(),
+            },
+        }));
+        let t = Box::leak(Box::new(hl_type {
+            kind: hl_type_kind_HFUN,
+            __bindgen_anon_1: hl_type__bindgen_ty_1 { fun },
+            vobj_proto: ptr::null_mut(),
+            mark_bits: ptr::null_mut(),
+        }));
+        let rc = Box::leak(Box::new(RecordClosure {
+            host: 0,
+            entry: sum,
+            context: 100,
+            // f64 then i32: digits 2, 0, least significant first.
+            pattern: 2,
+            arity: 2,
+            ret_kind: 2,
+        }));
+        let closure = unsafe { hlp_alloc_record_closure(t, rc) };
+        assert!(!closure.is_null());
+        unsafe {
+            let f: unsafe extern "C" fn(*mut c_void, f64, i32) -> f64 =
+                mem::transmute((*closure).fun);
+            assert_eq!(f((*closure).value, 1.5, 2), 103.5);
+        }
+        let mut a = 2.5f64;
+        let mut b = 3i32;
+        let boxed = [
+            unsafe { hlp_make_dyn(&mut a as *mut f64 as *mut c_void, crate::types::hlt_f64()) },
+            unsafe { hlp_make_dyn(&mut b as *mut i32 as *mut c_void, crate::types::hlt_i32()) },
+        ];
+        let r = unsafe { hlp_dyn_call(closure, boxed.as_ptr() as *mut *mut vdynamic, 2) };
+        assert_eq!(unsafe { (*r).v.d }, 105.5);
+    }
 }

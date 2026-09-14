@@ -1618,6 +1618,58 @@ impl HLInterpreter {
                         });
                     }
 
+                    // A closure over a native by record: the arguments as
+                    // words by the closure type's kinds, the result read
+                    // back by its return kind, under a trap as a native by
+                    // record is called (`native_lib::RecordClosure`).
+                    if !self.fn_fun_record.is_null() && fun_ptr == self.fn_fun_record {
+                        let rc = (*cl_ptr).value as *const ash_core::native_lib::RecordClosure;
+                        if rc.is_null() {
+                            return Err(anyhow!("record closure has no record"));
+                        }
+                        let closure_fun = (*(*cl_ptr).t).__bindgen_anon_1.fun;
+                        if closure_fun.is_null() {
+                            return Err(anyhow!("record closure has no function type"));
+                        }
+                        let nargs = (*closure_fun).nargs.max(0) as usize;
+                        if nargs != arg_vals.len() {
+                            return Err(anyhow!(
+                                "record closure takes {nargs} arguments, called with {}",
+                                arg_vals.len()
+                            ));
+                        }
+                        let words: Vec<i64> = arg_vals
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &a)| {
+                                self.value_to_i64(a, (**(*closure_fun).args.add(i)).kind)
+                            })
+                            .collect();
+                        let ret_kind = (*(*closure_fun).ret).kind;
+                        let stack_depth = self.stack.len();
+                        let mut raw = None;
+                        let jumped = super::run_with_hl_trap(
+                            self.fn_setup_trap_jit,
+                            self.fn_remove_trap_jit,
+                            || {
+                                raw = Some(((*rc).entry)((*rc).context, words.as_ptr()));
+                            },
+                        );
+                        if jumped != 0 {
+                            return Err(self.longjmp_error(
+                                Some(bytecode),
+                                stack_depth,
+                                "Native longjmp without exception value: record closure".to_owned(),
+                            ));
+                        }
+                        let raw = raw.ok_or_else(|| anyhow!("record closure did not run"))?;
+                        let ret = self.wrap_native_result(raw, ret_kind);
+                        let dst_kind = bytecode.types[func.regs[dst as usize].0].kind;
+                        let coerced = Self::coerce_value_for_static_kind(ret, dst_kind);
+                        self.stack.last_mut().unwrap().registers.set(dst, coerced);
+                        return Ok(StepResult::Continue);
+                    }
+
                     // `fun` holds either the interpreter's `findex + 1` stub
                     // sentinel or, when compiled code allocated this closure
                     // from `functions_ptrs`, a real entry address.

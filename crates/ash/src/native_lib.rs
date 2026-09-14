@@ -473,6 +473,12 @@ pub struct HostNative {
     pub record: bool,
 }
 
+/// The closure form of a native by record: a closure whose `fun` is
+/// `fun_record` and whose bound value is one of these. Compiled code calls
+/// it as the closure's own signature; the runtime places the arguments as
+/// the packing above and calls the entry. See `hlp_alloc_record_closure`.
+pub use ash_std::fun::RecordClosure;
+
 impl HostNative {
     pub fn plain(addr: usize) -> Self {
         HostNative {

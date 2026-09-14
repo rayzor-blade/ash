@@ -1512,17 +1512,24 @@ pub(crate) fn setup_trap() -> *mut TrapContext {
 
 /// Arm a trap whose context the caller keeps, in `storage` of `size`
 /// bytes, so a host that traps around every call into compiled code takes
-/// nothing from the pool and frees nothing. The buffer to `setjmp`. Null
-/// when the storage is too small: `hlp_trap_context_size` says how much.
+/// nothing from the pool and frees nothing. `lock_depth` is how deep the
+/// caller holds the GC lock at the setjmp site, which a throw restores;
+/// a host that calls in holding nothing says 0 and saves the lookup. The
+/// buffer to `setjmp`. Null when the storage is too small:
+/// `hlp_trap_context_size` says how much.
 #[no_mangle]
-pub unsafe extern "C" fn hlp_setup_trap_in(storage: *mut c_void, size: usize) -> *mut c_void {
+pub unsafe extern "C" fn hlp_setup_trap_in(
+    storage: *mut c_void,
+    size: usize,
+    lock_depth: usize,
+) -> *mut c_void {
     if size < mem::size_of::<TrapContext>()
         || storage.align_offset(mem::align_of::<TrapContext>()) != 0
     {
         return std::ptr::null_mut();
     }
     let trap = storage as *mut TrapContext;
-    let lock_depth = crate::rt::gc_lock_held_depth();
+    debug_assert_eq!(lock_depth, crate::rt::gc_lock_held_depth());
     crate::gc::with_exc(|st| {
         let prev = st.current_trap;
         // Written field by field: the storage holds whatever it held.

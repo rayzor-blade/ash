@@ -515,6 +515,11 @@ pub struct RecordClosure {
     pub arity: u32,
     /// The result's kind, the same three.
     pub ret_kind: u8,
+    /// The closure's full function type, the bound value first: what a
+    /// dynamic call marshals by. The closure itself carries the type the
+    /// host gave `hlp_alloc_record_closure`, so a call site that declares
+    /// that very type compares pointers and calls directly.
+    pub full: *mut hl_type,
 }
 
 /// The most arguments `fun_record` places, and how many of them the
@@ -633,15 +638,15 @@ unsafe extern "C" fn record_call(
     (rc.entry)(rc.context, words.as_ptr())
 }
 
-/// A closure of the full type `t` (its bound value first) over the record
-/// closure `rc`, which the host keeps alive and unmoved for as long as the
-/// closure lives. Null when the signature does not fit the argument
-/// registers, which `fun_record` keeps: more than `RECORD_ARGS` arguments,
-/// or more integers or floats than the registers hold.
+/// A closure of type `t`, the function type without the bound value, over
+/// the record closure `rc`, which the host keeps alive and unmoved for as
+/// long as the closure lives. Null when the signature does not fit the
+/// argument registers, which `fun_record` keeps: more than `RECORD_ARGS`
+/// arguments, or more integers or floats than the registers hold.
 ///
 /// # Safety
-/// `t` is a function type whose first argument is the bound value, and
-/// `rc` describes it.
+/// `t` is a function type and `rc` describes it, `rc.full` being `t` with
+/// the bound value first.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_alloc_record_closure(
     t: *mut hl_type,
@@ -658,10 +663,23 @@ pub unsafe extern "C" fn hlp_alloc_record_closure(
         }
         pattern /= 3;
     }
-    if shape.arity > RECORD_ARGS || ints > RECORD_INT_REGS || floats > 8 {
+    if shape.arity > RECORD_ARGS || ints > RECORD_INT_REGS || floats > 8 || shape.full.is_null() {
         return ptr::null_mut();
     }
-    hlp_alloc_closure_ptr(t, fun_record as *mut c_void, rc as *mut c_void)
+    let c_ptr = crate::rt::alloc_locked(std::mem::size_of::<vclosure>())
+        .unwrap_or_else(|| crate::rt::out_of_memory("a closure"))
+        .as_ptr() as *mut vclosure;
+    ptr::write(
+        c_ptr,
+        crate::types::vclosure_new_with_stack(
+            t,
+            fun_record as *mut c_void,
+            1,
+            rc as *mut c_void,
+            0,
+        ),
+    );
+    c_ptr
 }
 
 // Every closure produced by `hlp_make_var_args` retains this type pointer for
@@ -1243,7 +1261,13 @@ pub unsafe extern "C" fn hlp_dyn_call(
             hlp_error(str_to_uchar_ptr("Closure has no function type"));
             return ptr::null_mut();
         };
-        ctmp.t = closure_fun.parent;
+        // A record closure says its full type itself; a method's is its
+        // closure type's parent.
+        ctmp.t = if (*c).fun == fun_record as *mut libc::c_void {
+            (*((*c).value as *const RecordClosure)).full
+        } else {
+            closure_fun.parent
+        };
         if ctmp.t.is_null() {
             hlp_error(str_to_uchar_ptr("Bound closure has no parent type"));
             return ptr::null_mut();
@@ -1357,12 +1381,13 @@ mod record_tests {
                 parent: ptr::null_mut(),
             },
         }));
-        let t = Box::leak(Box::new(hl_type {
+        let full = Box::leak(Box::new(hl_type {
             kind: hl_type_kind_HFUN,
             __bindgen_anon_1: hl_type__bindgen_ty_1 { fun },
             vobj_proto: ptr::null_mut(),
             mark_bits: ptr::null_mut(),
         }));
+        let t = unsafe { hlp_get_closure_type(full) };
         let rc = Box::leak(Box::new(RecordClosure {
             host: 0,
             entry: sum,
@@ -1371,8 +1396,10 @@ mod record_tests {
             pattern: 2,
             arity: 2,
             ret_kind: 2,
+            full,
         }));
         let closure = unsafe { hlp_alloc_record_closure(t, rc) };
+        assert_eq!(unsafe { (*closure).t }, t);
         assert!(!closure.is_null());
         unsafe {
             let f: unsafe extern "C" fn(*mut c_void, f64, i32) -> f64 =

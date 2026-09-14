@@ -1,1 +1,1 @@
-{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":4,"timestamp":1789374484,"nonce":"UwLQhHLD7emZbxqmSOYvbVxApHE=","status":2}]}
+{"author":{"id":"609bf866d4a5d716c19faf5d617b3bf3de478230d29602d72aad5aa90a80466f"},"ops":[{"type":3,"timestamp":1789376070,"nonce":"Xr5Oi2CLHUTO0XWQadBU2CGwCu8=","message":"And 8691237: the closure keeps the host's visible type, the record carries the full one.","files":null}]}

@@ -656,7 +656,7 @@ pub unsafe extern "C" fn hlp_alloc_record_closure(
     let mut pattern = shape.pattern;
     let (mut ints, mut floats) = (0u32, 0u32);
     for _ in 0..shape.arity {
-        if pattern % 3 == 0 {
+        if pattern.is_multiple_of(3) {
             ints += 1;
         } else {
             floats += 1;

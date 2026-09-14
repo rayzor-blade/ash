@@ -609,6 +609,7 @@ pub static mut fun_record: unsafe extern "C" fn() = _fun_record;
 
 /// `fun_record`'s body: `gps[0]` is the bound value, the record closure;
 /// the arguments follow in `gps` and `fps` by kind, in order.
+#[cfg(any(target_arch = "aarch64", all(target_arch = "x86_64", not(windows))))]
 unsafe extern "C" fn record_call(
     rc: *const RecordClosure,
     gps: *const u64,

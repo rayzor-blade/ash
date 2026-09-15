@@ -1585,9 +1585,10 @@ mod datachannel_queue_tests {
                 seq_sum: AtomicUsize::new(0),
             });
 
+            let done = Arc::new(AtomicUsize::new(0));
             let mut handles = Vec::new();
             for p in 0..PRODUCERS {
-                let (q, c) = (Arc::clone(&q), Arc::clone(&c));
+                let (q, c, done) = (Arc::clone(&q), Arc::clone(&c), Arc::clone(&done));
                 handles.push(std::thread::spawn(move || {
                     for i in 0..PER {
                         super::hlp_mutex_acquire(ma as *mut std::ffi::c_void);
@@ -1595,13 +1596,24 @@ mod datachannel_queue_tests {
                         super::hlp_semaphore_release(sa as *mut std::ffi::c_void);
                         super::hlp_mutex_release(ma as *mut std::ffi::c_void);
                     }
+                    done.fetch_add(1, Ordering::Release);
                 }));
             }
 
             // `process_events()`: drain while permits last, then reset `end`.
+            // Ends when everything was drained or, in the upstream shape,
+            // when the producers are done and the list is empty: a node
+            // allocated while `end` dangled was never linked in, and the
+            // nodes chained after it are lost with it.
             let mut drained = 0usize;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
             while drained < TOTAL && std::time::Instant::now() < deadline {
+                if done.load(Ordering::Acquire) == PRODUCERS
+                    && q.lock().unwrap().head.is_null()
+                    && c.uaf.load(Ordering::Relaxed) > 0
+                {
+                    break;
+                }
                 let mut looped = false;
                 loop {
                     if q.lock().unwrap().head.is_null()
@@ -1649,13 +1661,18 @@ mod datachannel_queue_tests {
             super::hlp_semaphore_free(sem);
             super::hlp_mutex_free(m);
 
-            assert_eq!(drained, TOTAL, "queue lost callbacks");
-            // 0 + 1 + ... + (TOTAL-1), reached only if each node drained once.
-            assert_eq!(
-                c.seq_sum.load(Ordering::Relaxed),
-                TOTAL * (TOTAL - 1) / 2,
-                "a queued callback was dropped or drained twice"
-            );
+            // Only the fixed shape keeps every callback; the upstream one
+            // loses them exactly when a producer reached a freed `end`.
+            if fixed || c.uaf.load(Ordering::Relaxed) == 0 {
+                assert_eq!(drained, TOTAL, "queue lost callbacks");
+                // 0 + 1 + ... + (TOTAL-1), reached only if each node drained
+                // once.
+                assert_eq!(
+                    c.seq_sum.load(Ordering::Relaxed),
+                    TOTAL * (TOTAL - 1) / 2,
+                    "a queued callback was dropped or drained twice"
+                );
+            }
             (
                 c.dangling.load(Ordering::Relaxed),
                 c.uaf.load(Ordering::Relaxed),

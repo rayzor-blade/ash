@@ -540,13 +540,8 @@ fn filetime_ticks(ft: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn hlp_sys_sleep(seconds: f64) {
     let duration = std::time::Duration::from_secs_f64(seconds.max(0.0));
-    // With fibers alive, park the logical thread on a scheduler timer instead
-    // of repeatedly making every sleeping fiber runnable.
-    if crate::rt::fibers_active() {
-        crate::rt::sleep_for(duration);
-        return;
-    }
-    std::thread::sleep(duration);
+    // The runtime's to spend: its scheduler's when it has one to drive.
+    crate::rt::sleep_for(duration);
 }
 
 /// Upstream installs an LC_TIME locale for `strftime`. ash's date formatting

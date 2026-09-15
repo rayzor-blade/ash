@@ -656,18 +656,8 @@ pub unsafe extern "C" fn hlp_lock_wait(lock: *mut c_void, timeout: *mut vdynamic
 // pacing and never consumes native events itself.
 #[no_mangle]
 pub unsafe extern "C" fn hlp_pump_and_sleep() {
-    let frame = std::time::Duration::from_millis(16);
-    // With fibers alive, the frame's idle time is the scheduler's: park the
-    // logical thread on a timer, as `hlp_sys_sleep` does.
-    if crate::rt::fibers_active() {
-        crate::rt::sleep_for(frame);
-        return;
-    }
-    // Told to the collector: a thread asleep here reaches no safepoint, and a
-    // world stop would otherwise wait out the frame.
-    hlp_blocking(true);
-    std::thread::sleep(frame);
-    hlp_blocking(false);
+    // The frame's idle time is the runtime's to spend, as `Sys.sleep` is.
+    crate::rt::sleep_for(std::time::Duration::from_millis(16));
 }
 
 #[no_mangle]

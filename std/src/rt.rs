@@ -494,8 +494,19 @@ mod ash {
         crate::fiber::park(waiter, deadline_from(timeout_ns))
     }
 
+    /// With fibers alive, park the logical thread on a scheduler timer
+    /// rather than make every sleeping fiber runnable again and again;
+    /// with none, sleep the OS thread, told to the collector so a world
+    /// stop does not wait it out.
     pub unsafe extern "C" fn sleep_ns(ns: u64) {
-        crate::fiber::sleep_until(Instant::now() + Duration::from_nanos(ns));
+        let duration = Duration::from_nanos(ns);
+        if crate::fiber::fibers_active() {
+            crate::fiber::sleep_until(Instant::now() + duration);
+            return;
+        }
+        crate::thread::hlp_blocking(true);
+        std::thread::sleep(duration);
+        crate::thread::hlp_blocking(false);
     }
 
     pub unsafe extern "C" fn block_yield() {

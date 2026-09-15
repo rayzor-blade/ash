@@ -46,6 +46,16 @@ jobs:
           sudo ldconfig
           hl --version
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      # TestSimd runs against stock hl, which loads the primitives from
+      # simd.hdll; HashLink's own HDLLs live in /usr/local/lib, so this one
+      # goes beside them.
+      - name: Build simd.hdll for HashLink
+        run: |
+          cargo build --release -p ash_hdll_simd
+          sudo cp target/release/libash_hdll_simd.so /usr/local/lib/simd.hdll
+
       - name: Generate parity oracle bundle
         run: |
           if [[ "${{ github.event_name }}" == "schedule" ]]; then

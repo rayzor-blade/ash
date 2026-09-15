@@ -1,0 +1,11 @@
+{
+	"name": "ash-simd",
+	"url": "https://github.com/rayzor-blade/ash",
+	"license": "MIT",
+	"tags": ["hashlink", "simd", "ash"],
+	"description": "128-bit vector primitives for HashLink: simd.hdll on stock hl, vector instructions on ash",
+	"version": "0.1.0",
+	"releasenote": "First release: f32x4, f64x2, i32x4, i16x8, i8x16, u8x16 slot primitives and the Float32x4/Int32x4 value types.",
+	"contributors": ["darmie"],
+	"classPath": ""
+}

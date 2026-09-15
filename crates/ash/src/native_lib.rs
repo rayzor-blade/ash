@@ -100,6 +100,13 @@ pub fn choose_std_linkage(program: &Path) -> bool {
     static_ok
 }
 
+/// Whether `lib` is one the runtime itself exports, resolved by the
+/// `hlp_<name>` symbol rather than through a library file: `std`, and `simd`
+/// (the ash-simd primitives, `std/src/simd.rs`).
+pub fn is_runtime_lib(lib: &str) -> bool {
+    matches!(lib.strip_prefix('?').unwrap_or(lib), "std" | "simd")
+}
+
 /// A `std@` native's address, from whichever copy of ash_std is in use.
 ///
 /// This is the single resolution point: the `#[load_symbol]` macro, the
@@ -805,7 +812,7 @@ impl NativeFunctionResolver {
             let named: HashSet<&str> = natives
                 .iter()
                 .map(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib))
-                .filter(|l| *l != "std")
+                .filter(|l| !is_runtime_lib(l))
                 .collect();
             // Said once: the decode path and the module builder both ask.
             static SAID: std::sync::Once = std::sync::Once::new();
@@ -825,7 +832,7 @@ impl NativeFunctionResolver {
         let mut libs: HashSet<String> = HashSet::new();
         for native in natives {
             let clean = native.lib.strip_prefix('?').unwrap_or(&native.lib);
-            if clean != "std" {
+            if !is_runtime_lib(clean) {
                 libs.insert(clean.to_string());
             }
         }
@@ -982,12 +989,12 @@ impl NativeFunctionResolver {
             return Ok(addr as *mut c_void);
         }
 
-        if clean_lib == "std" {
+        if is_runtime_lib(clean_lib) {
             // ash_std uses direct exports (Rust #[no_mangle]), reached either
             // through the linked-in copy or the dylib — see std_symbol_addr.
             return std_symbol_addr(function_name)
                 .map(|a| a as *mut c_void)
-                .ok_or_else(|| anyhow!("std native '{}' not found", function_name));
+                .ok_or_else(|| anyhow!("{} native '{}' not found", clean_lib, function_name));
         }
 
         let library = NativeLibraryManager::get_registered(clean_lib)

@@ -340,15 +340,15 @@ impl<'ctx> JITModule<'ctx> {
 
         let bytecode =
             BytecodeDecoder::decode_for_abi(path, &target_abi).expect("Failed to decode bytecode");
-        // Any non-std native means an HDLL, which brings its own copy of the
-        // runtime unless this object shares one. Known here, before a single
-        // symbol is declared, because declaring them is what commits to a
-        // linkage.
+        // Any native outside the runtime means an HDLL, which brings its own
+        // copy of the runtime unless this object shares one. Known here,
+        // before a single symbol is declared, because declaring them is what
+        // commits to a linkage.
         let aot_shared_runtime = aot
             && bytecode
                 .natives
                 .iter()
-                .any(|n| n.lib.strip_prefix('?').unwrap_or(&n.lib) != "std");
+                .any(|n| !crate::native_lib::is_runtime_lib(&n.lib));
         phase_timer!(timing, "decode", t);
         t = std::time::Instant::now();
 

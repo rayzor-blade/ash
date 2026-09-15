@@ -49,6 +49,13 @@ jobs:
           sudo ldconfig
           hl --version
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build simd.hdll for HashLink
+        run: |
+          cargo build --release -p ash_hdll_simd
+          sudo cp target/release/libash_hdll_simd.so /usr/local/lib/simd.hdll
+
       - name: Generate parity oracle bundle
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then

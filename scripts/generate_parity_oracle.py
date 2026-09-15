@@ -70,18 +70,11 @@ def main():
         hl_path = tests_dir / hl_name
 
         if compile_enabled:
-            code, out, err = run(
-                [
-                    "haxe",
-                    "--cwd",
-                    str(tests_dir),
-                    "-main",
-                    main_name,
-                    "-hl",
-                    hl_name,
-                ],
-                timeout=max(60, timeout_secs),
-            )
+            cmd = ["haxe", "--cwd", str(tests_dir)]
+            for cp in case.get("classpath", []):
+                cmd += ["-cp", str(cp)]
+            cmd += ["-main", main_name, "-hl", hl_name]
+            code, out, err = run(cmd, timeout=max(60, timeout_secs))
             if code != 0:
                 raise SystemExit(
                     f"compile failed for {name} ({hl_name})\nstdout:\n{out}\nstderr:\n{err}"

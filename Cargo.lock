@@ -201,6 +201,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ash_hdll_simd"
+version = "0.1.0"
+dependencies = [
+ "ash_simd",
+]
+
+[[package]]
 name = "ash_hdll_sqlite"
 version = "0.1.0"
 dependencies = [
@@ -237,10 +244,15 @@ name = "ash_native_call"
 version = "0.1.0"
 
 [[package]]
+name = "ash_simd"
+version = "0.1.0"
+
+[[package]]
 name = "ash_std"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash_simd",
  "ash_trace",
  "ash_wasm_runtime",
  "bindgen",

@@ -28,20 +28,22 @@ for c in data.get("case", []):
     hl = c["hl"]
     compile_enabled = "1" if c.get("compile", True) else "0"
     sanity_enabled = "1" if c.get("sanity_interp", True) else "0"
-    print(f"{name}|{main}|{hl}|{compile_enabled}|{sanity_enabled}")
+    classpath = " ".join(f"-cp {cp}" for cp in c.get("classpath", []))
+    print(f"{name}|{main}|{hl}|{compile_enabled}|{sanity_enabled}|{classpath}")
 PY
 )
 
 echo "==> Compiling Haxe tests to .hl"
 compile_fail=0
 for line in "${CASE_LINES[@]}"; do
-  IFS='|' read -r name main hl compile_enabled _ <<< "$line"
+  IFS='|' read -r name main hl compile_enabled _ classpath <<< "$line"
   if [[ "$compile_enabled" != "1" ]]; then
     echo "  - $name -> $hl (precompiled)"
     continue
   fi
   echo "  - $main -> $hl"
-  if ! haxe --cwd "$SCRIPT_DIR" -main "$main" -hl "$hl"; then
+  # shellcheck disable=SC2086
+  if ! haxe --cwd "$SCRIPT_DIR" $classpath -main "$main" -hl "$hl"; then
     echo "    [COMPILE FAIL] $name"
     compile_fail=1
   fi
@@ -51,12 +53,13 @@ echo
 echo "==> Baseline check with Haxe interpreter"
 baseline_fail=0
 for line in "${CASE_LINES[@]}"; do
-  IFS='|' read -r name main _ _ sanity_enabled <<< "$line"
+  IFS='|' read -r name main _ _ sanity_enabled classpath <<< "$line"
   if [[ "$sanity_enabled" != "1" ]]; then
     echo "  [BASELINE SKIP] $name (sanity_interp=false)"
     continue
   fi
-  if haxe --cwd "$SCRIPT_DIR" -main "$main" --interp; then
+  # shellcheck disable=SC2086
+  if haxe --cwd "$SCRIPT_DIR" $classpath -main "$main" --interp; then
     echo "  [BASELINE PASS] $name"
   else
     echo "  [BASELINE FAIL] $name"

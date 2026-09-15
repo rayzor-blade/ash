@@ -151,6 +151,8 @@ profiler in [docs/debugging.md](docs/debugging.md).
 | **air** | Intermediate representation — CFG, dominators, loops, SSA, and the optimization passes |
 | **ash_std** | HashLink standard library in Rust (cdylib, embedded into the binary) |
 | **ash_macro** | Procedural macros for FFI symbol loading |
+| **ash_simd** | The `ash-simd` primitives: 128-bit lane operations over `hl.Bytes` slots, linked into ash_std as lib `simd` |
+| **ash_hdll_simd** | The same primitives as `simd.hdll`, for stock HashLink |
 
 ## Tests
 
@@ -211,6 +213,15 @@ static function nativeAdd(a:Int, b:Int):Int { return 0; }
 ```
 
 ASH discovers `.hdll` files in the same directory as the `.hl` file.
+
+### ash-simd
+
+[haxelib/ash-simd](haxelib/ash-simd) is a Haxe library of 128-bit vector
+primitives (`ash.simd.Vec`, `ash.simd.Float32x4`, `ash.simd.Int32x4`). Its
+natives are lib `simd`: on stock HashLink they come from `simd.hdll`, built
+by `cargo build --release -p ash_hdll_simd` and renamed from the cdylib; on
+ash they are part of the runtime, resolved like `std`, so no file ships with
+the program. Compile with `-cp haxelib/ash-simd` (or `-lib ash-simd`).
 
 ## Heaps.io
 

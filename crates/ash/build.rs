@@ -179,6 +179,25 @@ fn generate_std_symbol_table(out_dir: &Path) {
             }
         }
     }
+    // The `simd` natives are exported by std/src/simd.rs from ash_simd's
+    // primitive table, one `(body, hlp_<name>, shape)` tuple per line.
+    let prims =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../ash_simd/src/prims.rs");
+    println!("cargo:rerun-if-changed={}", prims.display());
+    let text = fs::read_to_string(&prims).expect("ash_simd primitive table not found");
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix('(') else {
+            continue;
+        };
+        let mut fields = rest.split(',').map(str::trim);
+        let (Some(_body), Some(export)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if export.starts_with("hlp_") {
+            names.push(export.to_string());
+        }
+    }
+
     names.sort();
     names.dedup();
 

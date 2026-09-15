@@ -717,3 +717,18 @@ expectation = "exact"
 normalize = "default"
 sanity_interp = false
 oracle_is_interp = true
+
+# The ash-simd primitives (haxelib/ash-simd) against a scalar reference:
+# NaN, signed zero, saturation, wrapping, unaligned slots, aliasing. The
+# oracle is stock hl with simd.hdll on its path, so HashLink and ash are
+# compared on the same program; the eval target cannot call the natives.
+[[case]]
+name = "TestSimd"
+main = "TestSimd"
+hl = "test_simd.hl"
+classpath = ["../../../../haxelib/ash-simd"]
+slow = false
+timeout_secs = 60
+expectation = "exact"
+normalize = "default"
+sanity_interp = false

@@ -23,11 +23,13 @@ run_case() {
     local main="$3"
     local slow="$4"
     local expectation="$5"
+    local classpath="${6:-}"
     local hl_path="$TESTS_DIR/$hl_file"
 
     # Compile if main is set
     if [[ -n "$main" ]]; then
-        if ! haxe --cwd "$TESTS_DIR" -main "$main" -hl "$hl_file" 2>/dev/null; then
+        # shellcheck disable=SC2086
+        if ! haxe --cwd "$TESTS_DIR" $classpath -main "$main" -hl "$hl_file" 2>/dev/null; then
             echo "  COMPILE FAIL: $name"
             FAIL=$((FAIL + 1))
             return
@@ -77,7 +79,7 @@ run_case() {
 parse_cases() {
     local include_slow="$1"
     # Simple TOML parser for parity_cases.toml
-    local name="" hl="" main="" slow="false" expectation="exact"
+    local name="" hl="" main="" slow="false" expectation="exact" classpath=""
 
     while IFS= read -r line; do
         line="${line%%#*}"  # strip comments
@@ -90,10 +92,10 @@ parse_cases() {
                 if [[ "$slow" == "true" && "$include_slow" != "true" ]]; then
                     SKIP=$((SKIP + 1))
                 else
-                    run_case "$name" "$hl" "$main" "$slow" "$expectation"
+                    run_case "$name" "$hl" "$main" "$slow" "$expectation" "$classpath"
                 fi
             fi
-            name="" hl="" main="" slow="false" expectation="exact"
+            name="" hl="" main="" slow="false" expectation="exact" classpath=""
             continue
         fi
 
@@ -103,6 +105,8 @@ parse_cases() {
             main\ =*)    main=$(echo "$line" | sed 's/main = "\(.*\)"/\1/') ;;
             slow\ =*)    slow=$(echo "$line" | sed 's/slow = //') ;;
             expectation\ =*) expectation=$(echo "$line" | sed 's/expectation = "\(.*\)"/\1/') ;;
+            # A single-line array of paths, each becoming a `-cp`.
+            classpath\ =*) classpath=$(echo "$line" | sed 's/classpath = \[\(.*\)\]/\1/; s/"//g; s/,/ /g; s/[^ ][^ ]*/-cp &/g') ;;
         esac
     done < "$CASES_FILE"
 
@@ -111,7 +115,7 @@ parse_cases() {
         if [[ "$slow" == "true" && "$include_slow" != "true" ]]; then
             SKIP=$((SKIP + 1))
         else
-            run_case "$name" "$hl" "$main" "$slow" "$expectation"
+            run_case "$name" "$hl" "$main" "$slow" "$expectation" "$classpath"
         fi
     fi
 }

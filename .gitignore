@@ -30,4 +30,5 @@ examples/browser/demo/entities.hl
 examples/browser/ash_browser.js
 examples/browser/ash_browser.d.ts
 examples/browser/ash_browser_bg.wasm
+examples/simd/dot.hl
 examples/browser/ash_browser_bg.wasm.d.ts

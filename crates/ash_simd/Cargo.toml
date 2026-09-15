@@ -1,0 +1,16 @@
+[package]
+name = "ash_simd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "The ash-simd primitives: 128-bit lane operations over hl.Bytes slots"
+publish = false
+
+# Bodies only, no exports. ash_std wraps each one as a `hlp_<name>` export of
+# the runtime, and ash_hdll_simd as the DEFINE_PRIM resolver of `simd.hdll`;
+# a `#[no_mangle]` here would collide with either.
+[dependencies]
+
+[lib]
+crate-type = ["rlib"]

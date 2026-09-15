@@ -186,12 +186,13 @@ impl<'ctx> JITModule<'ctx> {
                     "host native {lib}@{name} carries a context word, which cannot be linked ahead of time"
                 ));
             }
-            // `std` primitives are plain `#[no_mangle]` exports of the runtime
-            // this object links against, so the symbol IS the name. An HDLL
-            // primitive is not: it is reached through a DEFINE_PRIM resolver
-            // in a shared library, and there is no shared library to load.
+            // The runtime's own primitives are plain `#[no_mangle]` exports
+            // of the library this object links against, so the symbol IS the
+            // name. An HDLL primitive is not: it is reached through a
+            // DEFINE_PRIM resolver in a shared library, and there is no
+            // shared library to load.
             let clean = lib.strip_prefix('?').unwrap_or(lib);
-            if clean != "std" {
+            if !crate::native_lib::is_runtime_lib(clean) {
                 // No symbol to bind: an HDLL primitive lives behind a
                 // DEFINE_PRIM table in a shared library that does not exist
                 // yet. So bind a SLOT instead and let the startup routine fill

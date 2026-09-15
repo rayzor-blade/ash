@@ -1,0 +1,16 @@
+[package]
+name = "ash_hdll_simd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Damilare Akinlaja <dreakinlaja@gmail.com>"]
+license = "MIT"
+description = "simd.hdll: the ash-simd primitives for stock HashLink"
+publish = false
+
+# Not ash_std, and not even hl_abi: the primitives take bytes and offsets and
+# call nothing of the runtime.
+[dependencies]
+ash_simd = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "staticlib"]

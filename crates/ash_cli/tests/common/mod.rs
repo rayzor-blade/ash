@@ -31,6 +31,9 @@ pub struct ParityCase {
     /// reference `hl`, and the oracle generator, or the comparison means
     /// nothing.
     pub program_args: Vec<String>,
+    /// Extra class paths for the compile, relative to the tests directory:
+    /// how a case reaches a library that lives elsewhere in the repository.
+    pub classpath: Vec<String>,
     pub slow: bool,
     pub timeout_secs: u64,
     pub expectation: ExpectationKind,
@@ -210,12 +213,11 @@ pub fn compile_haxe_case(tests_dir: &Path, case: &ParityCase) -> Output {
         return run(cmd);
     }
     let mut cmd = Command::new("haxe");
-    cmd.arg("--cwd")
-        .arg(tests_dir)
-        .arg("-main")
-        .arg(&case.main)
-        .arg("-hl")
-        .arg(&case.hl);
+    cmd.arg("--cwd").arg(tests_dir);
+    for cp in &case.classpath {
+        cmd.arg("-cp").arg(cp);
+    }
+    cmd.arg("-main").arg(&case.main).arg("-hl").arg(&case.hl);
     run(cmd)
 }
 
@@ -225,6 +227,9 @@ pub fn run_haxe_interp(tests_dir: &Path, case: &ParityCase) -> Option<Output> {
     }
     let mut cmd = Command::new("haxe");
     cmd.arg("--cwd").arg(tests_dir);
+    for cp in &case.classpath {
+        cmd.arg("-cp").arg(cp);
+    }
     if case.program_args.is_empty() {
         cmd.arg("-main").arg(&case.main).arg("--interp");
     } else {
@@ -299,12 +304,7 @@ fn parse_string_array(raw: &str, lineno: usize) -> Vec<String> {
     let inner = v
         .strip_prefix('[')
         .and_then(|x| x.strip_suffix(']'))
-        .unwrap_or_else(|| {
-            panic!(
-                "program_args must be a single-line array, line {}",
-                lineno + 1
-            )
-        });
+        .unwrap_or_else(|| panic!("string arrays must be single-line, line {}", lineno + 1));
     inner
         .split(',')
         .map(str::trim)
@@ -350,6 +350,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
                 main: String::new(),
                 hl: String::new(),
                 program_args: Vec::new(),
+                classpath: Vec::new(),
                 slow: false,
                 timeout_secs: 60,
                 expectation: ExpectationKind::Exact,
@@ -379,6 +380,7 @@ pub fn load_parity_cases(path: &Path) -> Vec<ParityCase> {
             "main" => c.main = parse_string(value),
             "hl" => c.hl = parse_string(value),
             "program_args" => c.program_args = parse_string_array(value, lineno),
+            "classpath" => c.classpath = parse_string_array(value, lineno),
             "slow" => c.slow = parse_bool(value),
             "timeout_secs" => c.timeout_secs = parse_u64(value),
             "expectation" => {

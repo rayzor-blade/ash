@@ -342,6 +342,15 @@ pub fn read_class(ins: &Instr) -> Option<AliasClass> {
         | Instr::GetTID { .. }
         | Instr::Unref { .. }
         | Instr::RefData { .. } => Some(AliasClass::Any),
+        // A vector primitive reads its operand slots; the array form reads
+        // the array's elements instead.
+        Instr::Intrinsic {
+            kind: IntrinsicKind::Vec(v),
+            ..
+        } => Some(match v.op {
+            VecOp::LoadArray => AliasClass::ArrayData,
+            _ => AliasClass::RawBytes,
+        }),
         _ => None,
     }
 }
@@ -373,6 +382,16 @@ pub fn write_class(ins: &Instr) -> Option<AliasClass> {
             Some(AliasClass::Cell(*cell))
         }
         Instr::DynSet { .. } => Some(AliasClass::DynBox),
+        // The destination slot, or the array's elements; a reduction writes
+        // nothing.
+        Instr::Intrinsic {
+            kind: IntrinsicKind::Vec(v),
+            ..
+        } => match v.op {
+            VecOp::StoreArray => Some(AliasClass::ArrayData),
+            op if op.is_reduction() => None,
+            _ => Some(AliasClass::RawBytes),
+        },
         Instr::SetRef { .. }
         | Instr::Call { .. }
         | Instr::CallMethod { .. }

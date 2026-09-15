@@ -591,12 +591,7 @@ fn recognize_intrinsics(f: &mut Function, info: &dyn ModuleInfo) {
             };
             let kind = *cache.entry(*fun).or_insert_with(|| info.intrinsic_of(*fun));
             let Some(kind) = kind else { continue };
-            let want = if kind == IntrinsicKind::PtrCompare {
-                2
-            } else {
-                1
-            };
-            if args.len() != want {
+            if args.len() != kind.arity() {
                 continue;
             }
             *ins = Instr::Intrinsic {

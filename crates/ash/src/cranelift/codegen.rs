@@ -1567,7 +1567,9 @@ impl AirCodegen<'_, '_> {
             Instr::Intrinsic {
                 kind, dst, args, ..
             } => {
-                if *kind == air::v2::ir::IntrinsicKind::PtrCompare {
+                if let air::v2::ir::IntrinsicKind::Vec(v) = kind {
+                    self.emit_vec_intrinsic(*v, *dst, args)?;
+                } else if *kind == air::v2::ir::IntrinsicKind::PtrCompare {
                     // Three-way identity compare, ash_std's hlp_ptr_compare
                     // verbatim: (a > b) as i32 - (a < b) as i32, unsigned —
                     // it compares usize addresses, never contents.
@@ -2228,6 +2230,233 @@ impl AirCodegen<'_, '_> {
         let (addr, off) = self.vec_addr(kind, base, index, ty.lane_bits(), stride)?;
         let v = self.get(src)?;
         self.b.ins().store(MemFlagsData::trusted(), v, addr, off);
+        Ok(())
+    }
+
+    /// A `simd` primitive in place of its call: the operand slots loaded as
+    /// one vector each, the lane operation, the result stored to the
+    /// destination slot. Semantics follow `ash_simd`'s bodies lane for lane;
+    /// the parity fixture holds the two together.
+    fn emit_vec_intrinsic(
+        &mut self,
+        v: air::v2::ir::VecIntrinsic,
+        dst: ValueId,
+        args: &[ValueId],
+    ) -> Result<()> {
+        use air::v2::ir::{VecElem, VecOp};
+        let ty = match v.elem {
+            VecElem::F32 => types::F32X4,
+            VecElem::F64 => types::F64X2,
+            VecElem::I32 => types::I32X4,
+            VecElem::I16 => types::I16X8,
+            VecElem::I8 | VecElem::U8 => types::I8X16,
+            VecElem::I64 => types::I64X2,
+        };
+        let signed = v.elem.is_signed();
+        let float = v.elem.is_float();
+        if args.len() != v.op.arity() {
+            bail!(
+                "simd {:?} takes {} operands, got {}",
+                v.op,
+                v.op.arity(),
+                args.len()
+            );
+        }
+        // Slots are unaligned: the bytes come from wherever the program put
+        // them.
+        let flags = MemFlagsData::new().with_notrap();
+        let slot = |this: &mut Self, base: ValueId, off: ValueId| -> Result<Value> {
+            let b = this.get(base)?;
+            let o = this.index_as_addr(off)?;
+            Ok(this.b.ins().iadd(b, o))
+        };
+        let load = |this: &mut Self, base: ValueId, off: ValueId| -> Result<Value> {
+            let addr = slot(this, base, off)?;
+            Ok(this.b.ins().load(ty, flags, addr, 0))
+        };
+        // Everything below the reductions writes `(args[0], args[1])`.
+        let store = |this: &mut Self, args: &[ValueId], r: Value| -> Result<()> {
+            let addr = slot(this, args[0], args[1])?;
+            this.b.ins().store(flags, r, addr, 0);
+            Ok(())
+        };
+        let lanes = v.elem.lanes() as u8;
+        let r = match v.op {
+            VecOp::Add | VecOp::Sub | VecOp::Mul | VecOp::Div | VecOp::Min | VecOp::Max => {
+                let a = load(self, args[2], args[3])?;
+                let b = load(self, args[4], args[5])?;
+                match (v.op, float) {
+                    (VecOp::Add, true) => self.b.ins().fadd(a, b),
+                    (VecOp::Sub, true) => self.b.ins().fsub(a, b),
+                    (VecOp::Mul, true) => self.b.ins().fmul(a, b),
+                    (VecOp::Div, true) => self.b.ins().fdiv(a, b),
+                    (VecOp::Min, true) => self.b.ins().fmin(a, b),
+                    (VecOp::Max, true) => self.b.ins().fmax(a, b),
+                    (VecOp::Add, false) => self.b.ins().iadd(a, b),
+                    (VecOp::Sub, false) => self.b.ins().isub(a, b),
+                    (VecOp::Mul, false) if ty == types::I8X16 => {
+                        // No byte multiply on x64: widen to 16-bit halves,
+                        // multiply, keep the low byte of each product.
+                        let (al, ah) = (self.b.ins().swiden_low(a), self.b.ins().swiden_high(a));
+                        let (bl, bh) = (self.b.ins().swiden_low(b), self.b.ins().swiden_high(b));
+                        let lo = self.b.ins().imul(al, bl);
+                        let hi = self.b.ins().imul(ah, bh);
+                        let byte = self.b.ins().iconst(types::I16, 0xff);
+                        let byte = self.b.ins().splat(types::I16X8, byte);
+                        let lo = self.b.ins().band(lo, byte);
+                        let hi = self.b.ins().band(hi, byte);
+                        self.b.ins().unarrow(lo, hi)
+                    }
+                    (VecOp::Mul, false) => self.b.ins().imul(a, b),
+                    (VecOp::Min, false) if signed => self.b.ins().smin(a, b),
+                    (VecOp::Min, false) => self.b.ins().umin(a, b),
+                    (VecOp::Max, false) if signed => self.b.ins().smax(a, b),
+                    (VecOp::Max, false) => self.b.ins().umax(a, b),
+                    (VecOp::Div, false) => bail!("integer vector division"),
+                    _ => unreachable!(),
+                }
+            }
+            VecOp::Abs | VecOp::Neg | VecOp::Sqrt | VecOp::Not | VecOp::ToI32 | VecOp::ToF32 => {
+                let a = load(self, args[2], args[3])?;
+                match (v.op, float) {
+                    (VecOp::Abs, true) => self.b.ins().fabs(a),
+                    (VecOp::Neg, true) => self.b.ins().fneg(a),
+                    (VecOp::Sqrt, true) => self.b.ins().sqrt(a),
+                    (VecOp::Abs, false) => self.b.ins().iabs(a),
+                    (VecOp::Neg, false) => self.b.ins().ineg(a),
+                    (VecOp::Not, _) => self.b.ins().bnot(a),
+                    // Saturating, NaN to zero: the definition of the native.
+                    (VecOp::ToI32, _) => self.b.ins().fcvt_to_sint_sat(types::I32X4, a),
+                    (VecOp::ToF32, _) => self.b.ins().fcvt_from_sint(types::F32X4, a),
+                    _ => bail!("simd {:?} on {:?} lanes", v.op, v.elem),
+                }
+            }
+            VecOp::Fma => {
+                let a = load(self, args[2], args[3])?;
+                let b = load(self, args[4], args[5])?;
+                let c = load(self, args[6], args[7])?;
+                self.b.ins().fma(a, b, c)
+            }
+            VecOp::Splat => {
+                let x = self.get(args[2])?;
+                let x = match v.elem {
+                    // The scalar arrives as an i32; the lane keeps its low
+                    // bits, as the native's `as` does.
+                    VecElem::I16 => self.b.ins().ireduce(types::I16, x),
+                    VecElem::I8 | VecElem::U8 => self.b.ins().ireduce(types::I8, x),
+                    _ => x,
+                };
+                self.b.ins().splat(ty, x)
+            }
+            VecOp::Shl | VecOp::Shr => {
+                let a = load(self, args[2], args[3])?;
+                let n = self.get(args[4])?;
+                let n = self.b.ins().band_imm(n, (ty.lane_bits() - 1) as i64);
+                match (v.op, signed) {
+                    (VecOp::Shl, _) => self.b.ins().ishl(a, n),
+                    (VecOp::Shr, true) => self.b.ins().sshr(a, n),
+                    (VecOp::Shr, false) => self.b.ins().ushr(a, n),
+                    _ => unreachable!(),
+                }
+            }
+            VecOp::Eq | VecOp::Ne | VecOp::Lt | VecOp::Le | VecOp::Gt | VecOp::Ge => {
+                let a = load(self, args[2], args[3])?;
+                let b = load(self, args[4], args[5])?;
+                if float {
+                    let cc = match v.op {
+                        VecOp::Eq => FloatCC::Equal,
+                        VecOp::Ne => FloatCC::NotEqual,
+                        VecOp::Lt => FloatCC::LessThan,
+                        VecOp::Le => FloatCC::LessThanOrEqual,
+                        VecOp::Gt => FloatCC::GreaterThan,
+                        VecOp::Ge => FloatCC::GreaterThanOrEqual,
+                        _ => unreachable!(),
+                    };
+                    self.b.ins().fcmp(cc, a, b)
+                } else {
+                    let cc = match (v.op, signed) {
+                        (VecOp::Eq, _) => IntCC::Equal,
+                        (VecOp::Ne, _) => IntCC::NotEqual,
+                        (VecOp::Lt, true) => IntCC::SignedLessThan,
+                        (VecOp::Le, true) => IntCC::SignedLessThanOrEqual,
+                        (VecOp::Gt, true) => IntCC::SignedGreaterThan,
+                        (VecOp::Ge, true) => IntCC::SignedGreaterThanOrEqual,
+                        (VecOp::Lt, false) => IntCC::UnsignedLessThan,
+                        (VecOp::Le, false) => IntCC::UnsignedLessThanOrEqual,
+                        (VecOp::Gt, false) => IntCC::UnsignedGreaterThan,
+                        (VecOp::Ge, false) => IntCC::UnsignedGreaterThanOrEqual,
+                        _ => unreachable!(),
+                    };
+                    self.b.ins().icmp(cc, a, b)
+                }
+            }
+            VecOp::Sum | VecOp::MinLane | VecOp::MaxLane => {
+                // In lane order from lane 0, as the native folds.
+                let a = load(self, args[0], args[1])?;
+                let mut acc = self.b.ins().extractlane(a, 0);
+                for lane in 1..lanes {
+                    let e = self.b.ins().extractlane(a, lane);
+                    acc = match (v.op, float, signed) {
+                        (VecOp::Sum, true, _) => self.b.ins().fadd(acc, e),
+                        (VecOp::Sum, false, _) => self.b.ins().iadd(acc, e),
+                        (VecOp::MinLane, true, _) => self.b.ins().fmin(acc, e),
+                        (VecOp::MaxLane, true, _) => self.b.ins().fmax(acc, e),
+                        (VecOp::MinLane, false, true) => self.b.ins().smin(acc, e),
+                        (VecOp::MaxLane, false, true) => self.b.ins().smax(acc, e),
+                        (VecOp::MinLane, false, false) => self.b.ins().umin(acc, e),
+                        (VecOp::MaxLane, false, false) => self.b.ins().umax(acc, e),
+                        _ => unreachable!(),
+                    };
+                }
+                // Integer lanes narrower than `Int` widen after the fold, so
+                // the sum wraps in the lane width.
+                let acc = match v.elem {
+                    VecElem::I16 | VecElem::I8 => self.b.ins().sextend(types::I32, acc),
+                    VecElem::U8 => self.b.ins().uextend(types::I32, acc),
+                    _ => acc,
+                };
+                return self.def(dst, acc);
+            }
+            VecOp::LoadArray => {
+                let arr = self.get(args[2])?;
+                let idx = self.index_as_addr(args[3])?;
+                let byte = self.b.ins().imul_imm(idx, v.elem.bytes() as i64);
+                let addr = self.b.ins().iadd(arr, byte);
+                self.b
+                    .ins()
+                    .load(ty, flags, addr, crate::layout::VARRAY_DATA_OFFSET)
+            }
+            VecOp::StoreArray => {
+                let a = load(self, args[2], args[3])?;
+                let arr = self.get(args[0])?;
+                let idx = self.index_as_addr(args[1])?;
+                let byte = self.b.ins().imul_imm(idx, v.elem.bytes() as i64);
+                let addr = self.b.ins().iadd(arr, byte);
+                self.b
+                    .ins()
+                    .store(flags, a, addr, crate::layout::VARRAY_DATA_OFFSET);
+                self.define_void_word_if_used(dst);
+                return Ok(());
+            }
+            VecOp::And | VecOp::Or | VecOp::Xor => {
+                let a = load(self, args[2], args[3])?;
+                let b = load(self, args[4], args[5])?;
+                match v.op {
+                    VecOp::And => self.b.ins().band(a, b),
+                    VecOp::Or => self.b.ins().bor(a, b),
+                    VecOp::Xor => self.b.ins().bxor(a, b),
+                    _ => unreachable!(),
+                }
+            }
+            VecOp::Select => {
+                let m = load(self, args[2], args[3])?;
+                let a = load(self, args[4], args[5])?;
+                let b = load(self, args[6], args[7])?;
+                self.b.ins().bitselect(m, a, b)
+            }
+        };
+        store(self, args, r)?;
+        self.define_void_word_if_used(dst);
         Ok(())
     }
 

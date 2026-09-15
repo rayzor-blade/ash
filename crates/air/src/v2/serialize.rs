@@ -776,21 +776,11 @@ fn emit_instr(
         // Back to the direct native call the bytecode had — the flat form
         // has no intrinsic opcode, the same round-trip Fma takes.
         Instr::Intrinsic { fun, dst, args, .. } => {
-            let d = rg(*dst);
-            match args.len() {
-                1 => ops.push(Opcode::Call1 {
-                    dst: d,
-                    fun: crate::opcodes::RefFun(*fun),
-                    arg0: rg(args[0]),
-                }),
-                2 => ops.push(Opcode::Call2 {
-                    dst: d,
-                    fun: crate::opcodes::RefFun(*fun),
-                    arg0: rg(args[0]),
-                    arg1: rg(args[1]),
-                }),
-                n => bail!("intrinsic with {n} args has no serialization"),
-            }
+            ops.push(call_opcode(
+                rg(*dst),
+                RefFun(*fun),
+                args.iter().map(|v| rg(*v)).collect(),
+            ));
         }
         Instr::Copy { dst, src } => {
             let (d, s) = (rg(*dst), rg(*src));
@@ -876,39 +866,11 @@ fn emit_instr(
             }
         }
         Instr::Call { dst, fun, args } => {
-            let dst = rg(*dst);
-            let fun = RefFun(*fun);
-            let a: Vec<Reg> = args.iter().map(|v| rg(*v)).collect();
-            ops.push(match a.len() {
-                0 => Opcode::Call0 { dst, fun },
-                1 => Opcode::Call1 {
-                    dst,
-                    fun,
-                    arg0: a[0],
-                },
-                2 => Opcode::Call2 {
-                    dst,
-                    fun,
-                    arg0: a[0],
-                    arg1: a[1],
-                },
-                3 => Opcode::Call3 {
-                    dst,
-                    fun,
-                    arg0: a[0],
-                    arg1: a[1],
-                    arg2: a[2],
-                },
-                4 => Opcode::Call4 {
-                    dst,
-                    fun,
-                    arg0: a[0],
-                    arg1: a[1],
-                    arg2: a[2],
-                    arg3: a[3],
-                },
-                _ => Opcode::CallN { dst, fun, args: a },
-            });
+            ops.push(call_opcode(
+                rg(*dst),
+                RefFun(*fun),
+                args.iter().map(|v| rg(*v)).collect(),
+            ));
         }
         Instr::CallMethod { dst, field, args } => ops.push(Opcode::CallMethod {
             dst: rg(*dst),
@@ -1264,5 +1226,39 @@ fn scalar_binop(op: BinOp, dst: Reg, a: Reg, b: Reg) -> Opcode {
         BinOp::And => Opcode::And { dst, a, b },
         BinOp::Or => Opcode::Or { dst, a, b },
         BinOp::Xor => Opcode::Xor { dst, a, b },
+    }
+}
+
+/// The direct-call opcode for an arity.
+fn call_opcode(dst: Reg, fun: RefFun, a: Vec<Reg>) -> Opcode {
+    match a.len() {
+        0 => Opcode::Call0 { dst, fun },
+        1 => Opcode::Call1 {
+            dst,
+            fun,
+            arg0: a[0],
+        },
+        2 => Opcode::Call2 {
+            dst,
+            fun,
+            arg0: a[0],
+            arg1: a[1],
+        },
+        3 => Opcode::Call3 {
+            dst,
+            fun,
+            arg0: a[0],
+            arg1: a[1],
+            arg2: a[2],
+        },
+        4 => Opcode::Call4 {
+            dst,
+            fun,
+            arg0: a[0],
+            arg1: a[1],
+            arg2: a[2],
+            arg3: a[3],
+        },
+        _ => Opcode::CallN { dst, fun, args: a },
     }
 }

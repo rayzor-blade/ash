@@ -61,6 +61,7 @@ mod enums;
 mod memory;
 mod natives;
 mod objects;
+mod simd;
 
 /// Compile unresolved natives to call-time trap stubs instead of failing the
 /// whole function compile — matching HashLink's disabled_primitive semantics

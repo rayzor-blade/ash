@@ -632,7 +632,50 @@ fn classify_instr(
         | Instr::Float { .. }
         | Instr::Bool { .. }
         | Instr::Null { .. }
-        | Instr::Intrinsic { .. }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::PtrCompare,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::Sqrt,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::Abs,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::Floor,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::Ceil,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::RoundHalfUp,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::FloorToI32,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::CeilToI32,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::RoundHalfUpToI32,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::IsNaN,
+            ..
+        }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::IsFinite,
+            ..
+        }
         | Instr::Param { .. }
         | Instr::NullCheck { .. }
         | Instr::Assert
@@ -704,9 +747,14 @@ fn classify_instr(
             }
         }
 
-        Instr::Call { .. } | Instr::CallMethod { .. } | Instr::CallClosure { .. } => {
-            plan.refusals.push(Refusal::Call)
-        }
+        // A vector primitive is already 128 bits wide and works on memory.
+        Instr::Call { .. }
+        | Instr::CallMethod { .. }
+        | Instr::CallClosure { .. }
+        | Instr::Intrinsic {
+            kind: IntrinsicKind::Vec(_),
+            ..
+        } => plan.refusals.push(Refusal::Call),
         Instr::New { .. } | Instr::EnumAlloc { .. } | Instr::MakeEnum { .. } => {
             plan.refusals.push(Refusal::Allocation)
         }

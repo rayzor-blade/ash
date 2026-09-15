@@ -247,6 +247,149 @@ pub enum IntrinsicKind {
     /// dereferences, which is what makes it pure. (The content-aware
     /// `hlp_dyn_compare` is a different function and stays a call.)
     PtrCompare,
+    /// A 128-bit lane operation of the `simd` library, memory to memory over
+    /// 16-byte slots `(bytes, byte offset)`. Not pure: it reads its operand
+    /// slots and, except for the reductions, writes its destination slot.
+    Vec(VecIntrinsic),
+}
+
+impl IntrinsicKind {
+    /// How many operands the kind takes; a call with any other count stays
+    /// a call.
+    pub fn arity(self) -> usize {
+        match self {
+            IntrinsicKind::PtrCompare => 2,
+            IntrinsicKind::Vec(v) => v.op.arity(),
+            _ => 1,
+        }
+    }
+}
+
+/// One `simd` primitive: the lane type and the operation. The lane count is
+/// whatever fills 16 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VecIntrinsic {
+    pub elem: VecElem,
+    pub op: VecOp,
+}
+
+/// Lane type of a `simd` primitive. `I64` is the shape the bitwise
+/// operations use, which do not care about lanes at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VecElem {
+    F32,
+    F64,
+    I32,
+    I16,
+    I8,
+    U8,
+    I64,
+}
+
+impl VecElem {
+    pub fn bytes(self) -> u32 {
+        match self {
+            VecElem::I8 | VecElem::U8 => 1,
+            VecElem::I16 => 2,
+            VecElem::F32 | VecElem::I32 => 4,
+            VecElem::F64 | VecElem::I64 => 8,
+        }
+    }
+
+    pub fn lanes(self) -> u32 {
+        16 / self.bytes()
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, VecElem::F32 | VecElem::F64)
+    }
+
+    pub fn is_signed(self) -> bool {
+        !matches!(self, VecElem::U8)
+    }
+}
+
+/// The operation of a `simd` primitive. The argument shapes are those of
+/// the natives: `(dst, di, a, ai[, b, bi[, c, ci]])` for the slot forms,
+/// `(dst, di, x)` for splat, `(dst, di, a, ai, n)` for shifts, `(a, ai)` for
+/// reductions, and the array forms take the array and an element index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VecOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    /// IEEE 754-2019 minimum/maximum on floats, plain on integers.
+    Min,
+    Max,
+    Abs,
+    Neg,
+    Sqrt,
+    /// `a * b + c` rounded once.
+    Fma,
+    Splat,
+    /// Shift by a scalar count masked to the lane width; `Shr` is
+    /// arithmetic on signed lanes, logical on unsigned.
+    Shl,
+    Shr,
+    /// Lane masks: all ones where the comparison holds.
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    /// Folds from lane 0 in order; integer sums wrap in the lane width.
+    Sum,
+    MinLane,
+    MaxLane,
+    /// Between a slot and a run of `NativeArray` elements.
+    LoadArray,
+    StoreArray,
+    And,
+    Or,
+    Xor,
+    Not,
+    /// `mask ? a : b` bit by bit: `(dst, di, mask, mi, a, ai, b, bi)`.
+    Select,
+    /// f32 lanes to i32, saturating, NaN to 0.
+    ToI32,
+    /// i32 lanes to f32.
+    ToF32,
+}
+
+impl VecOp {
+    pub fn arity(self) -> usize {
+        match self {
+            VecOp::Add
+            | VecOp::Sub
+            | VecOp::Mul
+            | VecOp::Div
+            | VecOp::Min
+            | VecOp::Max
+            | VecOp::Eq
+            | VecOp::Ne
+            | VecOp::Lt
+            | VecOp::Le
+            | VecOp::Gt
+            | VecOp::Ge
+            | VecOp::And
+            | VecOp::Or
+            | VecOp::Xor => 6,
+            VecOp::Abs | VecOp::Neg | VecOp::Sqrt | VecOp::Not | VecOp::ToI32 | VecOp::ToF32 => 4,
+            VecOp::Fma | VecOp::Select => 8,
+            VecOp::Splat => 3,
+            VecOp::Shl | VecOp::Shr => 5,
+            VecOp::Sum | VecOp::MinLane | VecOp::MaxLane => 2,
+            VecOp::LoadArray | VecOp::StoreArray => 4,
+        }
+    }
+
+    /// Whether the primitive only reads: the reductions return a scalar and
+    /// write no slot.
+    pub fn is_reduction(self) -> bool {
+        matches!(self, VecOp::Sum | VecOp::MinLane | VecOp::MaxLane)
+    }
 }
 
 /// A phi instruction at a block head: `dst = phi[(pred, value), ...]`.
@@ -767,10 +910,54 @@ impl Instr {
             | Instr::VecBinOp { .. }
             | Instr::VecReduce { .. }
             // Pure BY CONSTRUCTION: only operations whose ash_std bodies read
-            // nothing but their argument are admitted to IntrinsicKind. This
-            // is the fact the FFI form discarded — one sqrt in a loop was a
-            // ClobberAll that pinned every loop-invariant load around it.
-            | Instr::Intrinsic { .. }
+            // nothing but their argument are admitted to the scalar kinds.
+            // This is the fact the FFI form discarded — one sqrt in a loop
+            // was a ClobberAll that pinned every loop-invariant load around
+            // it. The vector kinds work on memory and say so below.
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::PtrCompare,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::Sqrt,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::Abs,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::Floor,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::Ceil,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::RoundHalfUp,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::FloorToI32,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::CeilToI32,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::RoundHalfUpToI32,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::IsNaN,
+                ..
+            }
+            | Instr::Intrinsic {
+                kind: IntrinsicKind::IsFinite,
+                ..
+            }
             | Instr::TypeConst { .. }
             | Instr::CellRef { .. }
             | Instr::RefOffset { .. }
@@ -780,6 +967,16 @@ impl Instr {
                     Effect::MayThrow
                 } else {
                     Effect::Pure
+                }
+            }
+            Instr::Intrinsic {
+                kind: IntrinsicKind::Vec(v),
+                ..
+            } => {
+                if v.op.is_reduction() {
+                    Effect::ReadMem
+                } else {
+                    Effect::WriteMem
                 }
             }
             Instr::Cast { kind, .. } => match kind {

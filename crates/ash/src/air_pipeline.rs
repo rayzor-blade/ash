@@ -194,7 +194,11 @@ impl<'b> ModuleInfo for AshModule<'b> {
         use crate::intrinsics::NativeIntrinsic as NI;
         use air::v2::ir::IntrinsicKind as K;
         let n = &self.bc.natives[*self.native_at.get(&findex)?];
-        if n.lib != "std" && n.lib != "?std" {
+        let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib);
+        if lib == "simd" {
+            return crate::intrinsics::lookup_simd(&n.name).map(K::Vec);
+        }
+        if lib != "std" {
             return None;
         }
         // ptr_compare is not in the backend emitter table (it is two-arg);

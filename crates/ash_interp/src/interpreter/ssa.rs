@@ -622,13 +622,27 @@ impl HLInterpreter {
 
             // ---- calls -------------------------------------------------
             I::Intrinsic {
-                kind, dst, args: a, ..
+                kind,
+                dst,
+                args: a,
+                fun,
             } => {
                 // Inline Rust, no FFI dispatch, no marshal. Semantics are
                 // pinned to the ash_std bodies these replaced — RoundHalfUp
                 // is floor(x + 0.5) and the i32 conversions are Rust `as`
-                // (saturating, NaN -> 0).
+                // (saturating, NaN -> 0). A vector primitive is the native
+                // itself here; only the compiled tiers replace it.
                 use air::v2::ir::IntrinsicKind as K;
+                if let K::Vec(_) = kind {
+                    let mut argv = self.arg_pool.pop().unwrap_or_default();
+                    argv.clear();
+                    argv.reserve(a.len());
+                    for v in a.iter() {
+                        let x = get!(v);
+                        argv.push(x);
+                    }
+                    return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);
+                }
                 let r = match kind {
                     K::PtrCompare => {
                         let (pa, pb) = (get!(&a[0]).as_ptr(), get!(&a[1]).as_ptr());
@@ -653,7 +667,7 @@ impl HLInterpreter {
                             }
                             K::IsNaN => NanBoxedValue::from_bool(x.is_nan()),
                             K::IsFinite => NanBoxedValue::from_bool(x.is_finite()),
-                            K::PtrCompare => unreachable!("handled above"),
+                            K::PtrCompare | K::Vec(_) => unreachable!("handled above"),
                         }
                     }
                 };

@@ -1382,20 +1382,24 @@ impl HLInterpreter {
     }
 
     /// Read a value from a raw memory address based on the HL type kind.
+    ///
+    /// Unaligned: `hl.Bytes` accessors take any byte offset, so the address
+    /// is whatever the program computed.
     pub(super) unsafe fn read_value_at(addr: *const u8, kind: hl::hl_type_kind) -> NanBoxedValue {
+        use std::ptr::read_unaligned as rd;
         use ValueTypeKind::*;
         match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
             HVOID => NanBoxedValue::void(),
             HUI8 => NanBoxedValue::from_i32(*addr as i32),
-            HUI16 => NanBoxedValue::from_i32(*(addr as *const u16) as i32),
-            HI32 => NanBoxedValue::from_i32(*(addr as *const i32)),
-            HI64 => NanBoxedValue::from_i64(*(addr as *const i64)),
-            HF32 => NanBoxedValue::from_f64(*(addr as *const f32) as f64),
-            HF64 => NanBoxedValue::from_f64(*(addr as *const f64)),
+            HUI16 => NanBoxedValue::from_i32(rd(addr as *const u16) as i32),
+            HI32 => NanBoxedValue::from_i32(rd(addr as *const i32)),
+            HI64 => NanBoxedValue::from_i64(rd(addr as *const i64)),
+            HF32 => NanBoxedValue::from_f64(rd(addr as *const f32) as f64),
+            HF64 => NanBoxedValue::from_f64(rd(addr as *const f64)),
             HBOOL => NanBoxedValue::from_bool(*addr != 0),
             _ => {
                 // Pointer types (OBJ, DYN, FUN, ARRAY, BYTES, ENUM, etc.)
-                let ptr = *(addr as *const usize);
+                let ptr = rd(addr as *const usize);
                 if ptr == 0 {
                     NanBoxedValue::null()
                 } else {
@@ -1519,27 +1523,28 @@ impl HLInterpreter {
 
     /// Write a value to a raw memory address based on the HL type kind.
     pub(super) unsafe fn write_value_at(addr: *mut u8, kind: hl::hl_type_kind, val: NanBoxedValue) {
+        use std::ptr::write_unaligned as wr;
         use ValueTypeKind::*;
         match ValueTypeKind::try_from(kind_u32(kind)).unwrap_or(HDYN) {
             HVOID => {}
             HUI8 => *addr = val.as_i32() as u8,
-            HUI16 => *(addr as *mut u16) = val.as_i32() as u16,
-            HI32 => *(addr as *mut i32) = val.as_i32(),
-            HI64 => *(addr as *mut i64) = val.as_i64_lossy(),
-            HF32 => *(addr as *mut f32) = val.as_f64() as f32,
-            HF64 => *(addr as *mut f64) = val.as_f64(),
+            HUI16 => wr(addr as *mut u16, val.as_i32() as u16),
+            HI32 => wr(addr as *mut i32, val.as_i32()),
+            HI64 => wr(addr as *mut i64, val.as_i64_lossy()),
+            HF32 => wr(addr as *mut f32, val.as_f64() as f32),
+            HF64 => wr(addr as *mut f64, val.as_f64()),
             HBOOL => *addr = val.as_bool() as u8,
             _ => {
                 // Pointer types — but the NanBoxed value might actually
                 // be a primitive (e.g., HDYN register holding an I32).
                 if val.is_null() || val.is_void() {
-                    *(addr as *mut usize) = 0;
+                    wr(addr as *mut usize, 0);
                 } else if val.is_i32() {
-                    *(addr as *mut i32) = val.as_i32();
+                    wr(addr as *mut i32, val.as_i32());
                 } else if val.is_f64() {
-                    *(addr as *mut f64) = val.as_f64();
+                    wr(addr as *mut f64, val.as_f64());
                 } else {
-                    *(addr as *mut usize) = val.as_ptr();
+                    wr(addr as *mut usize, val.as_ptr());
                 }
             }
         }

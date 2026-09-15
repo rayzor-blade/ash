@@ -977,9 +977,9 @@ impl HLInterpreter {
                             air::v2::MemAccess::I8 => {
                                 NanBoxedValue::from_i32(unsafe { *addr as i32 })
                             }
-                            air::v2::MemAccess::I16 => {
-                                NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
-                            }
+                            air::v2::MemAccess::I16 => NanBoxedValue::from_i32(unsafe {
+                                std::ptr::read_unaligned(addr as *const u16) as i32
+                            }),
                             _ => Self::read_value_from_ptr(addr, kind!(dst)),
                         }
                     };
@@ -1006,7 +1006,7 @@ impl HLInterpreter {
                         match k {
                             air::v2::MemAccess::I8 => unsafe { *addr = v.as_i32() as u8 },
                             air::v2::MemAccess::I16 => unsafe {
-                                *(addr as *mut u16) = v.as_i32() as u16
+                                std::ptr::write_unaligned(addr as *mut u16, v.as_i32() as u16)
                             },
                             _ => {
                                 if (addr as usize) < 0x1000 {
@@ -1546,9 +1546,9 @@ impl HLInterpreter {
         let addr = (b.as_ptr() as *const u8).wrapping_add(idx as usize);
         match k {
             air::v2::MemAccess::I8 => NanBoxedValue::from_i32(unsafe { *addr as i32 }),
-            air::v2::MemAccess::I16 => {
-                NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
-            }
+            air::v2::MemAccess::I16 => NanBoxedValue::from_i32(unsafe {
+                std::ptr::read_unaligned(addr as *const u16) as i32
+            }),
             _ => Self::read_value_from_ptr(addr, bc.types[func.regs[dst as usize].0].kind),
         }
     }
@@ -1569,7 +1569,9 @@ impl HLInterpreter {
         let addr = (b.as_ptr() as *mut u8).wrapping_add(idx as usize);
         match k {
             air::v2::MemAccess::I8 => unsafe { *addr = value.as_i32() as u8 },
-            air::v2::MemAccess::I16 => unsafe { *(addr as *mut u16) = value.as_i32() as u16 },
+            air::v2::MemAccess::I16 => unsafe {
+                std::ptr::write_unaligned(addr as *mut u16, value.as_i32() as u16)
+            },
             _ => unsafe {
                 Self::write_value_at(addr, bc.types[func.regs[src as usize].0].kind, value)
             },

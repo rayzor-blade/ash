@@ -6503,7 +6503,9 @@ impl HLInterpreter {
                     NanBoxedValue::from_i32(0)
                 } else {
                     let addr = (base.as_ptr() as *const u8).wrapping_add(idx as usize);
-                    NanBoxedValue::from_i32(unsafe { *(addr as *const u16) as i32 })
+                    NanBoxedValue::from_i32(unsafe {
+                        std::ptr::read_unaligned(addr as *const u16) as i32
+                    })
                 };
                 frame
                     .registers
@@ -6536,7 +6538,7 @@ impl HLInterpreter {
                 let src_val = frame.registers.get(src.0);
                 if !base.is_null() && !base.is_void() && idx >= 0 {
                     let addr = (base.as_ptr() as *mut u8).wrapping_add(idx as usize);
-                    unsafe { *(addr as *mut u16) = src_val.as_i32() as u16 };
+                    unsafe { std::ptr::write_unaligned(addr as *mut u16, src_val.as_i32() as u16) };
                 }
             }
             Opcode::SetMem { bytes, index, src } => {

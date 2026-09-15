@@ -451,6 +451,8 @@ fn unsupported_instr(i: &Instr) -> Option<&'static str> {
         | Instr::Fma { .. }
         | Instr::Intrinsic { .. }
         | Instr::VecOp { .. }
+        | Instr::VecExtract { .. }
+        | Instr::VecInsert { .. }
         | Instr::UnOp { .. }
         | Instr::Call { .. }
         | Instr::CallMethod { .. }

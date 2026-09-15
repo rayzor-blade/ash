@@ -338,6 +338,25 @@ pub fn verify(f: &Function) -> Result<()> {
                         bail!("b{}: VecReduce element type mismatch", b);
                     }
                 }
+                Instr::VecExtract { dst, src, .. } => {
+                    if f.value_lanes(*src) != 4 || f.value_lanes(*dst) != 1 {
+                        bail!(
+                            "b{}: VecExtract v{} must read a scalar lane of a vector",
+                            b,
+                            dst.0
+                        );
+                    }
+                }
+                Instr::VecInsert {
+                    dst, src, value, ..
+                } => {
+                    if f.value_lanes(*src) != 4 || f.value_lanes(*dst) != 4 {
+                        bail!("b{}: VecInsert v{} must be vector to vector", b, dst.0);
+                    }
+                    if f.value_lanes(*value) != 1 {
+                        bail!("b{}: VecInsert value v{} must be scalar", b, value.0);
+                    }
+                }
                 // A vector value is four lanes wide; everything else a
                 // primitive touches is a scalar.
                 Instr::VecOp {

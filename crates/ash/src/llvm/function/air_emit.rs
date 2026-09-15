@@ -843,6 +843,33 @@ impl<'ctx> JITModule<'ctx> {
                     } => {
                         self.emit_air_vec_op(registers, reg_types, *v, *dst, *out, args)?;
                     }
+                    AirInstr::VecExtract {
+                        elem,
+                        lane,
+                        dst,
+                        src,
+                    } => {
+                        self.emit_air_vec_lane(
+                            registers, reg_types, *elem, *lane, *dst, *src, None,
+                        )?;
+                    }
+                    AirInstr::VecInsert {
+                        elem,
+                        lane,
+                        dst,
+                        src,
+                        value,
+                    } => {
+                        self.emit_air_vec_lane(
+                            registers,
+                            reg_types,
+                            *elem,
+                            *lane,
+                            *dst,
+                            *src,
+                            Some(*value),
+                        )?;
+                    }
                     AirInstr::CallMethod { dst, field, args } => {
                         self.emit_air_call_method(
                             lowering, registers, reg_types, cell_base, *dst, *field, args,

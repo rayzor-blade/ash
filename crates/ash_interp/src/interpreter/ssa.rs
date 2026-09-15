@@ -456,8 +456,17 @@ impl HLInterpreter {
                 set!(dst, v);
             }
             I::Copy { dst, src } => {
-                let v = get!(src);
-                set!(dst, v);
+                // A vector value is its lanes, not its register.
+                if let Some(lanes) = self.stack.last().unwrap().vec_lanes.get(&src.0).cloned() {
+                    self.stack
+                        .last_mut()
+                        .unwrap()
+                        .vec_lanes
+                        .insert(dst.0, lanes);
+                } else {
+                    let v = get!(src);
+                    set!(dst, v);
+                }
             }
             // Through `int_at`, not `bc.ints` directly: a pass may MINT a
             // constant the module's pool does not hold -- the widener's
@@ -621,8 +630,40 @@ impl HLInterpreter {
             }
 
             // ---- calls -------------------------------------------------
-            // A vector primitive on slots is the native itself here; only
-            // the compiled tiers replace it.
+            // A lane of a vector value, through its bytes: the same typed
+            // access the memory instruction it replaced made.
+            I::VecExtract {
+                elem,
+                lane,
+                dst,
+                src,
+            } => {
+                let buf = self.v128_bytes(src.0)?;
+                let at = (*lane as usize) * elem.bytes() as usize;
+                let v = Self::read_value_from_ptr(buf[at..].as_ptr(), kind!(dst));
+                set!(dst, v);
+            }
+            I::VecInsert {
+                elem,
+                lane,
+                dst,
+                src,
+                value,
+            } => {
+                let mut buf = self.v128_bytes(src.0)?;
+                let at = (*lane as usize) * elem.bytes() as usize;
+                let v = get!(value);
+                Self::write_value_to_ptr(buf[at..].as_mut_ptr(), v, kind!(value));
+                let lanes = Self::v128_lanes(&buf);
+                self.stack
+                    .last_mut()
+                    .unwrap()
+                    .vec_lanes
+                    .insert(dst.0, lanes);
+            }
+            // A vector primitive is the native itself here; only the
+            // compiled tiers replace it. A vector value lives in the lane
+            // side-table as four `Int`s and passes through a 16-byte buffer.
             I::VecOp {
                 fun,
                 dst,
@@ -630,20 +671,56 @@ impl HLInterpreter {
                 args: a,
                 ..
             } => {
+                use air::v2::ir::{VecArg, VecOut};
+                let mut bufs: Vec<Box<[u8; 16]>> = Vec::new();
                 let mut argv = self.arg_pool.pop().unwrap_or_default();
                 argv.clear();
-                for id in out.ids() {
-                    argv.push(get!(&id));
-                }
-                for arg in a {
-                    if let air::v2::ir::VecArg::Value(v) = arg {
-                        return Err(anyhow!("VecOp on vector value v{} is not walkable", v.0));
-                    }
-                    for id in arg.ids() {
+                let result_buf = if *out == VecOut::Value {
+                    bufs.push(Box::new([0u8; 16]));
+                    let p = bufs.last().unwrap().as_ptr() as usize;
+                    argv.push(NanBoxedValue::from_ptr(p));
+                    argv.push(NanBoxedValue::from_i32(0));
+                    Some(bufs.len() - 1)
+                } else {
+                    for id in out.ids() {
                         argv.push(get!(&id));
                     }
+                    None
+                };
+                for arg in a {
+                    match arg {
+                        VecArg::Value(v) => {
+                            let buf = Box::new(self.v128_bytes(v.0)?);
+                            let p = buf.as_ptr() as usize;
+                            bufs.push(buf);
+                            argv.push(NanBoxedValue::from_ptr(p));
+                            argv.push(NanBoxedValue::from_i32(0));
+                        }
+                        other => {
+                            for id in other.ids() {
+                                argv.push(get!(&id));
+                            }
+                        }
+                    }
                 }
-                return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);
+                match result_buf {
+                    None => {
+                        return self.ssa_call(bc, native_resolver, func, *fun, argv, dst.0);
+                    }
+                    Some(i) => {
+                        self.call_function(bc, native_resolver, *fun, &argv)?;
+                        if self.arg_pool.len() < POOL_CAP {
+                            argv.clear();
+                            self.arg_pool.push(argv);
+                        }
+                        let lanes = Self::v128_lanes(&bufs[i]);
+                        self.stack
+                            .last_mut()
+                            .unwrap()
+                            .vec_lanes
+                            .insert(dst.0, lanes);
+                    }
+                }
             }
             I::Intrinsic {
                 kind, dst, args: a, ..
@@ -1335,6 +1412,27 @@ impl HLInterpreter {
 }
 
 impl HLInterpreter {
+    /// The 16 bytes of a vector value: its four `Int` lanes, little-endian.
+    fn v128_bytes(&self, v: u32) -> anyhow::Result<[u8; 16]> {
+        let lanes = self.lanes_of(v)?;
+        let mut buf = [0u8; 16];
+        for (k, lane) in lanes.iter().enumerate().take(4) {
+            buf[k * 4..k * 4 + 4].copy_from_slice(&lane.as_i32().to_le_bytes());
+        }
+        Ok(buf)
+    }
+
+    /// The four `Int` lanes of 16 bytes.
+    fn v128_lanes(buf: &[u8; 16]) -> Vec<NanBoxedValue> {
+        (0..4)
+            .map(|k| {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&buf[k * 4..k * 4 + 4]);
+                NanBoxedValue::from_i32(i32::from_le_bytes(b))
+            })
+            .collect()
+    }
+
     /// Lanes of a widened value in the current frame.
     fn lanes_of(&self, v: u32) -> anyhow::Result<Vec<NanBoxedValue>> {
         self.stack

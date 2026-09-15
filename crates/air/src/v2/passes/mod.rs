@@ -375,7 +375,7 @@ impl<'m> PassManager<'m> {
                 // measured with ASH_SROA_WHY, every refusal on this corpus is
                 // "phi merge", and those phis are real loop-carried merges
                 // rather than inliner artifacts the cleanup could remove.
-                Box::new(ScalarReplacement),
+                Box::new(ScalarReplacement::new(info)),
                 Box::new(CellForwarding),
                 Box::new(DeadCellStoreElim),
                 Box::new(NullCheckElim),

@@ -5209,7 +5209,11 @@ fn fix_sroa_in_trap() -> (Vec<Opcode>, Vec<TypeRef>) {
 
 fn sroa_on(ops: &[Opcode], tys: &[TypeRef]) -> (Function, PassStats) {
     let mut f = lower(ops, tys).expect("lower");
-    let stats = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+    let stats = run_pass(
+        &mut f,
+        &ScalarReplacement::without_module(),
+        PassOptions::default(),
+    );
     (f, stats)
 }
 
@@ -5413,7 +5417,11 @@ fn sroa_preserves_semantics_on_the_scalarizable_fixtures() {
         ),
     ] {
         let mut f = lower(&ops, &tys).expect("lower");
-        let stats = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+        let stats = run_pass(
+            &mut f,
+            &ScalarReplacement::without_module(),
+            PassOptions::default(),
+        );
         assert_eq!(stats.allocs_removed, 1, "{}: {}", name, f.dump());
         let out = serialize(&f).expect("serialize");
         assert!(
@@ -5550,7 +5558,11 @@ fn inlining_then_sroa_removes_the_per_iteration_allocation() {
 
     // Escape analysis alone finds nothing: the object is handed to the
     // constructor call.
-    let before = run_pass(&mut f, &ScalarReplacement, PassOptions::default());
+    let before = run_pass(
+        &mut f,
+        &ScalarReplacement::without_module(),
+        PassOptions::default(),
+    );
     assert_eq!(
         before,
         PassStats::default(),

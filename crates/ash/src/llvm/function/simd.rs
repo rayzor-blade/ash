@@ -357,6 +357,56 @@ impl<'ctx> JITModule<'ctx> {
         }
     }
 
+    /// A lane of a vector value read (`value` is `None`) or replaced.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn emit_air_vec_lane(
+        &mut self,
+        registers: &[PointerValue<'ctx>],
+        reg_types: &[BasicTypeEnum<'ctx>],
+        elem: VecElem,
+        lane: u8,
+        dst: ValueId,
+        src: ValueId,
+        value: Option<ValueId>,
+    ) -> Result<()> {
+        let ctx = self.context;
+        let ty: VectorType<'ctx> = match elem {
+            VecElem::F32 => ctx.f32_type().vec_type(4),
+            VecElem::F64 => ctx.f64_type().vec_type(2),
+            VecElem::I32 => ctx.i32_type().vec_type(4),
+            VecElem::I16 => ctx.i16_type().vec_type(8),
+            VecElem::I8 | VecElem::U8 => ctx.i8_type().vec_type(16),
+            VecElem::I64 => ctx.i64_type().vec_type(2),
+        };
+        let x = self
+            .builder
+            .build_load(reg_types[src.idx()], registers[src.idx()], "lane_src")?;
+        let x = self
+            .builder
+            .build_bit_cast(x, ty, "lane_vec")?
+            .into_vector_value();
+        let at = ctx.i32_type().const_int(lane as u64, false);
+        match value {
+            None => {
+                let r = self.builder.build_extract_element(x, at, "lane")?;
+                self.builder.build_store(registers[dst.idx()], r)?;
+            }
+            Some(value) => {
+                let v = self.builder.build_load(
+                    reg_types[value.idx()],
+                    registers[value.idx()],
+                    "lane_value",
+                )?;
+                let r = self.builder.build_insert_element(x, v, at, "lane_set")?;
+                let r =
+                    self.builder
+                        .build_bit_cast(r, ctx.i32_type().vec_type(4), "lane_vec_value")?;
+                self.builder.build_store(registers[dst.idx()], r)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `x` in every lane of `ty`.
     fn splat(&self, ty: VectorType<'ctx>, x: BasicValueEnum<'ctx>) -> Result<VectorValue<'ctx>> {
         let zero = self.context.i32_type().const_zero();

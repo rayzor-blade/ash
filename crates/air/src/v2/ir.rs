@@ -696,6 +696,23 @@ pub enum Instr {
         out: VecOut,
         args: Vec<VecArg>,
     },
+    /// `dst = src[lane]`, the lane read as `elem`: what a `MemGet` of a
+    /// promoted slot becomes. `src` is a vector value.
+    VecExtract {
+        elem: VecElem,
+        lane: u8,
+        dst: ValueId,
+        src: ValueId,
+    },
+    /// `dst = src` with lane `lane` replaced by `value`, written as `elem`:
+    /// what a `MemSet` into a promoted slot becomes.
+    VecInsert {
+        elem: VecElem,
+        lane: u8,
+        dst: ValueId,
+        src: ValueId,
+        value: ValueId,
+    },
     /// Direct call by findex (arity re-derived at serialization).
     Call {
         dst: ValueId,
@@ -923,6 +940,8 @@ impl Instr {
             | Instr::UnOp { dst, .. }
             | Instr::Intrinsic { dst, .. }
             | Instr::VecOp { dst, .. }
+            | Instr::VecExtract { dst, .. }
+            | Instr::VecInsert { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }
@@ -1011,6 +1030,8 @@ impl Instr {
                 }
                 v
             }
+            Instr::VecExtract { src, .. } => vec![*src],
+            Instr::VecInsert { src, value, .. } => vec![*src, *value],
             Instr::CallClosure { fun, args, .. } => {
                 let mut v = vec![*fun];
                 v.extend(args.iter().copied());
@@ -1061,6 +1082,8 @@ impl Instr {
             | Instr::VecSplat { .. }
             | Instr::VecBinOp { .. }
             | Instr::VecReduce { .. }
+            | Instr::VecExtract { .. }
+            | Instr::VecInsert { .. }
             // Pure BY CONSTRUCTION: only operations whose ash_std bodies read
             // nothing but their argument are admitted to IntrinsicKind. This
             // is the fact the FFI form discarded — one sqrt in a loop was a
@@ -1212,6 +1235,11 @@ impl Instr {
                     a.map(&mut one);
                 }
             }
+            Instr::VecExtract { src, .. } => one(src),
+            Instr::VecInsert { src, value, .. } => {
+                one(src);
+                one(value);
+            }
             Instr::CallClosure { fun, args, .. } => {
                 one(fun);
                 args.iter_mut().for_each(one);
@@ -1289,6 +1317,8 @@ impl Instr {
             | Instr::UnOp { dst, .. }
             | Instr::Intrinsic { dst, .. }
             | Instr::VecOp { dst, .. }
+            | Instr::VecExtract { dst, .. }
+            | Instr::VecInsert { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }
@@ -1527,6 +1557,19 @@ pub struct Function {
     /// inlined code still names the callee and the call that reached it.
     /// A [`Instr::Pos`] points here through its `site`.
     pub inline_sites: Vec<InlineSite>,
+    /// Set once slot promotion has turned a 16-byte `hl.Bytes` into vector
+    /// values: what `serialize` needs to give those values scratch slots
+    /// again in the flat form.
+    pub simd_scratch: Option<SimdScratch>,
+}
+
+/// How the flat form gets a 16-byte scratch slot back for a vector value:
+/// the `alloc_bytes` native and the types of a bytes pointer and an `Int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimdScratch {
+    pub alloc_fun: usize,
+    pub bytes_ty: TypeRef,
+    pub int_ty: TypeRef,
 }
 
 /// One inlined call: which function's body was copied in, and the position
@@ -1558,6 +1601,7 @@ impl Function {
             findex: None,
             scalar_remainders: Vec::new(),
             inline_sites: Vec::new(),
+            simd_scratch: None,
         }
     }
 

@@ -6,6 +6,7 @@ use super::{
 };
 use crate::v2::analysis::CfgInfo;
 use crate::v2::ir::*;
+use crate::v2::ModuleInfo;
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -69,7 +70,28 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// * **Register-correct.** A read replaced by the field's current value
 ///   lengthens that value's live range, so it is privatized first
 ///   ([`privatize`]); when that is impossible the web is left alone.
-pub struct ScalarReplacement;
+/// * **A 16-byte `hl.Bytes` is one field.** `alloc_bytes(16)` whose pointer
+///   is only ever a whole-slot operand of a [`Instr::VecOp`] (offset zero)
+///   scalarizes into vector values: the operand becomes
+///   [`VecArg::Value`], a store into the slot becomes the value the
+///   primitive defines. Lane reads and writes through `MemGet`/`MemSet`, a
+///   non-zero offset, or any other use escape. Recognizing the allocation
+///   needs [`ModuleInfo`] for the native's name and the size constant, so
+///   the pass is inert on slots without one.
+pub struct ScalarReplacement<'m> {
+    info: Option<&'m dyn ModuleInfo>,
+}
+
+impl<'m> ScalarReplacement<'m> {
+    pub fn new(info: &'m dyn ModuleInfo) -> Self {
+        Self { info: Some(info) }
+    }
+
+    /// Objects and enums only.
+    pub fn without_module() -> Self {
+        Self { info: None }
+    }
+}
 
 /// The allocation flavour, which decides what counts as a field access.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,20 +100,24 @@ enum Shape {
     Object(TypeRef),
     /// `EnumAlloc`/`MakeEnum`: payload addressed by `(construct, slot)`.
     Enum(usize),
+    /// `alloc_bytes(16)`: one field, the whole slot, as a vector value of
+    /// the given `Int` type. Carries what `serialize` needs to spill it.
+    Slot(SimdScratch),
 }
 
-impl Pass for ScalarReplacement {
+impl Pass for ScalarReplacement<'_> {
     fn name(&self) -> &'static str {
         "sroa"
     }
 
     fn run(&self, f: &mut Function, _opts: &PassOptions) -> Result<PassStats> {
         let mut stats = PassStats::default();
+        let slots = self.info.and_then(|info| slot_allocs(f, info));
         // Each successful plan removes at least one allocation, so the total
         // instruction count bounds the loop.
         let bound: usize = f.blocks.iter().map(|b| b.instrs.len()).sum();
         for _ in 0..bound {
-            let Some(plan) = first_candidate(f) else {
+            let Some(plan) = first_candidate(f, slots.as_ref()) else {
                 break;
             };
             let fields = plan.fields;
@@ -102,6 +128,114 @@ impl Pass for ScalarReplacement {
         }
         Ok(stats)
     }
+}
+
+/// The `alloc_bytes(16)` calls of the function, as
+/// `(alloc findex, size value ids that are the constant 16, scratch record)`,
+/// or `None` when the function makes no such call.
+struct SlotAllocs<'m> {
+    info: &'m dyn ModuleInfo,
+    alloc_fun: usize,
+    sixteen: HashSet<ValueId>,
+    zero: HashSet<ValueId>,
+    /// Every `Int` constant the function defines.
+    consts: HashMap<ValueId, i32>,
+    scratch: SimdScratch,
+}
+
+impl SlotAllocs<'_> {
+    /// The lane type a scalar of `ty` is when read from or written to a
+    /// slot through `MemGet`/`MemSet`: only the widths the flat form can
+    /// address again.
+    fn lane_elem(&self, ty: TypeRef) -> Option<VecElem> {
+        match (self.info.type_size(ty)?, self.info.is_float(ty)) {
+            (4, true) => Some(VecElem::F32),
+            (8, true) => Some(VecElem::F64),
+            (4, false) => Some(VecElem::I32),
+            _ => None,
+        }
+    }
+
+    /// The lane a constant byte offset names for `elem`.
+    fn lane_at(&self, index: ValueId, elem: VecElem) -> Option<u8> {
+        let off = *self.consts.get(&index)?;
+        let size = elem.bytes() as i32;
+        if off < 0 || off % size != 0 || off / size >= elem.lanes() as i32 {
+            return None;
+        }
+        Some((off / size) as u8)
+    }
+}
+
+fn slot_allocs<'m>(f: &Function, info: &'m dyn ModuleInfo) -> Option<SlotAllocs<'m>> {
+    let pool = |i: usize| info.int_value(i);
+    let mut sixteen = HashSet::new();
+    let mut zero = HashSet::new();
+    let mut consts = HashMap::new();
+    for blk in &f.blocks {
+        for ins in &blk.instrs {
+            if let Instr::Int { dst, idx } = ins {
+                if let Some(v) = f.int_at(*idx, pool) {
+                    consts.insert(*dst, v);
+                    match v {
+                        16 => {
+                            sixteen.insert(*dst);
+                        }
+                        0 => {
+                            zero.insert(*dst);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    let mut found: Option<(usize, TypeRef, TypeRef)> = None;
+    for blk in &f.blocks {
+        for ins in &blk.instrs {
+            let Instr::Call { dst, fun, args } = ins else {
+                continue;
+            };
+            if args.len() != 1 || !sixteen.contains(&args[0]) {
+                continue;
+            }
+            let Some(n) = info.native(*fun) else {
+                continue;
+            };
+            if n.lib.strip_prefix('?').unwrap_or(&n.lib) != "std" || n.name != "alloc_bytes" {
+                continue;
+            }
+            found = Some((*fun, f.value_ty(*dst), f.value_ty(args[0])));
+            break;
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let (alloc_fun, bytes_ty, int_ty) = found?;
+    Some(SlotAllocs {
+        info,
+        alloc_fun,
+        sixteen,
+        zero,
+        consts,
+        scratch: SimdScratch {
+            alloc_fun,
+            bytes_ty,
+            int_ty,
+        },
+    })
+}
+
+/// A `MemSet` into a promoted slot: where, which lane of which type, the
+/// slot's value before it and the value it defines.
+#[derive(Clone, Copy)]
+struct LaneWrite {
+    at: (usize, usize),
+    elem: VecElem,
+    lane: u8,
+    src: ValueId,
+    dst: ValueId,
 }
 
 /// What the rewrite has to do, decided before anything is mutated.
@@ -125,9 +259,31 @@ struct Plan {
     fields: usize,
     /// Allocation instructions removed.
     alloc_count: usize,
+    /// Lanes of every value this plan mints: 1, or 4 for a slot web.
+    lanes: u16,
+    /// `((block, instruction), operand index, value)`: a slot operand of a
+    /// `VecOp` that becomes that value.
+    vec_reads: Vec<((usize, usize), usize, ValueId)>,
+    /// `((block, instruction), value)`: a `VecOp` writing a slot that now
+    /// defines this value instead. Ids follow the phis' in the reserved
+    /// range.
+    vec_writes: Vec<((usize, usize), ValueId)>,
+    /// What `serialize` needs once a slot web is gone.
+    scratch: Option<SimdScratch>,
+    /// `((block, instruction), lane type, lane, current value)`: a `MemGet`
+    /// of the slot that becomes `VecExtract`.
+    lane_reads: Vec<((usize, usize), VecElem, u8, ValueId)>,
+    /// A `MemSet` into the slot that becomes `VecInsert`.
+    lane_writes: Vec<LaneWrite>,
+    /// The `Int 0` a slot's initial zeros are splat from: a value the plan
+    /// mints and defines at the head of the entry block, so it dominates
+    /// every allocation site. The splats replace the sites, as
+    /// `(block, instruction, value)`.
+    zero: Option<ValueId>,
+    zero_splats: Vec<(usize, usize, ValueId)>,
 }
 
-fn first_candidate(f: &Function) -> Option<Plan> {
+fn first_candidate(f: &Function, slots: Option<&SlotAllocs>) -> Option<Plan> {
     let mut visited: HashSet<ValueId> = HashSet::new();
     for (b, blk) in f.blocks.iter().enumerate() {
         for (k, ins) in blk.instrs.iter().enumerate() {
@@ -136,6 +292,16 @@ fn first_candidate(f: &Function) -> Option<Plan> {
                 Instr::EnumAlloc { construct, .. } | Instr::MakeEnum { construct, .. } => {
                     Shape::Enum(*construct)
                 }
+                Instr::Call { fun, args, .. } => match slots {
+                    Some(s)
+                        if *fun == s.alloc_fun
+                            && args.len() == 1
+                            && s.sixteen.contains(&args[0]) =>
+                    {
+                        Shape::Slot(s.scratch)
+                    }
+                    _ => continue,
+                },
                 _ => continue,
             };
             let dst = ins.dst().expect("an allocation defines a value");
@@ -143,7 +309,7 @@ fn first_candidate(f: &Function) -> Option<Plan> {
             if !visited.insert(dst) {
                 continue;
             }
-            if let Some(plan) = plan_for(f, BlockId(b as u32), k, dst, shape, &mut visited) {
+            if let Some(plan) = plan_for(f, BlockId(b as u32), k, dst, shape, slots, &mut visited) {
                 return Some(plan);
             }
         }
@@ -177,8 +343,15 @@ struct Web {
     root_of: HashMap<ValueId, usize>,
     /// Defining block of each root.
     root_block: Vec<usize>,
-    /// Accessor and alias-copy instructions, as `(block, index)`.
+    /// Accessor and alias-copy instructions, as `(block, index)`; removed
+    /// by the rewrite.
     touch: HashSet<(usize, usize)>,
+    /// `VecOp`s reading or writing the slot; rewritten in place.
+    vec_touch: HashSet<(usize, usize)>,
+    /// `MemGet`/`MemSet` lane accesses of the slot, as
+    /// `((block, instruction), lane type, lane)`; replaced by lane
+    /// instructions.
+    lane_touch: HashMap<(usize, usize), (VecElem, u8)>,
     /// `(root, block)` of every touch, for the merge-shadow check.
     touch_at: Vec<(usize, usize)>,
     /// Blocks holding a definition of each `(root, field)` variable.
@@ -189,7 +362,7 @@ struct Web {
 
 /// Grow the alias web from `alloc`, classify every use, or `None` when any
 /// part of it escapes.
-fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Web> {
+fn classify(f: &Function, alloc: ValueId, shape: Shape, slots: Option<&SlotAllocs>) -> Option<Web> {
     // ---- definitions -------------------------------------------------------
     let mut defs: HashMap<ValueId, DefSite> = HashMap::new();
     for (b, blk) in f.blocks.iter().enumerate() {
@@ -241,6 +414,8 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Web> {
         root_of: HashMap::new(),
         root_block: Vec::new(),
         touch: HashSet::new(),
+        vec_touch: HashSet::new(),
+        lane_touch: HashMap::new(),
         touch_at: Vec::new(),
         def_blocks: BTreeMap::new(),
         field_ty: BTreeMap::new(),
@@ -265,6 +440,16 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Web> {
                     root_ids.push(v);
                     web.root_block.push(b);
                     web.sites.push((b, k, root_ids.len() - 1, args.clone()));
+                }
+                Instr::Call { fun, args, .. }
+                    if matches!(shape, Shape::Slot(_))
+                        && slots.is_some_and(|s| {
+                            *fun == s.alloc_fun && args.len() == 1 && s.sixteen.contains(&args[0])
+                        }) =>
+                {
+                    root_ids.push(v);
+                    web.root_block.push(b);
+                    web.sites.push((b, k, root_ids.len() - 1, Vec::new()));
                 }
                 Instr::Copy { .. } => {} // resolved to a root below
                 other => {
@@ -410,6 +595,124 @@ fn classify(f: &Function, alloc: ValueId, shape: Shape) -> Option<Web> {
                     web.def_blocks.entry((r, *field)).or_default().insert(b);
                     web.touch_at.push((r, b));
                 }
+                (
+                    Instr::MemGet {
+                        kind: MemAccess::Mem,
+                        dst,
+                        base,
+                        index,
+                    },
+                    Shape::Slot(scratch),
+                ) if aliases.contains(base) => {
+                    let s = slots.expect("a slot web has its allocations");
+                    let Some(elem) = s.lane_elem(f.value_ty(*dst)) else {
+                        why(alloc, "lane read of a width the slot form cannot address");
+                        return None;
+                    };
+                    let Some(lane) = s.lane_at(*index, elem) else {
+                        why(alloc, "lane read at a non-constant or unaligned offset");
+                        return None;
+                    };
+                    if !note(&mut web, 0, scratch.int_ty) {
+                        return None;
+                    }
+                    web.touch_at.push((root(&web, base), b));
+                    web.lane_touch.insert((b, k), (elem, lane));
+                    continue;
+                }
+                (
+                    Instr::MemSet {
+                        kind: MemAccess::Mem,
+                        base,
+                        index,
+                        src,
+                    },
+                    Shape::Slot(scratch),
+                ) if aliases.contains(base) => {
+                    let s = slots.expect("a slot web has its allocations");
+                    if aliases.contains(src) {
+                        why(alloc, "stored into a slot");
+                        return None;
+                    }
+                    let Some(elem) = s.lane_elem(f.value_ty(*src)) else {
+                        why(alloc, "lane write of a width the slot form cannot address");
+                        return None;
+                    };
+                    let Some(lane) = s.lane_at(*index, elem) else {
+                        why(alloc, "lane write at a non-constant or unaligned offset");
+                        return None;
+                    };
+                    if !note(&mut web, 0, scratch.int_ty) {
+                        return None;
+                    }
+                    let r = root(&web, base);
+                    web.def_blocks.entry((r, 0)).or_default().insert(b);
+                    web.touch_at.push((r, b));
+                    web.lane_touch.insert((b, k), (elem, lane));
+                    continue;
+                }
+                (Instr::VecOp { dst, out, args, .. }, Shape::Slot(scratch)) => {
+                    // Whole-slot operands only: the pointer with a zero
+                    // offset, never as an array, a scalar or the base of
+                    // an offset access.
+                    let whole = |base: &ValueId, off: &ValueId| {
+                        aliases.contains(base) && slots.is_some_and(|s| s.zero.contains(off))
+                    };
+                    for a in args {
+                        match a {
+                            VecArg::Slot { base, off } if aliases.contains(base) => {
+                                if !whole(base, off) {
+                                    why(alloc, "slot read at a non-zero offset");
+                                    return None;
+                                }
+                                if !note(&mut web, 0, scratch.int_ty) {
+                                    return None;
+                                }
+                                web.touch_at.push((root(&web, base), b));
+                            }
+                            other if other.ids().iter().any(|u| aliases.contains(u)) => {
+                                why(alloc, "slot used as a scalar or array operand");
+                                return None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    match out {
+                        VecOut::Slot { base, off } if aliases.contains(base) => {
+                            if !whole(base, off) {
+                                why(alloc, "slot written at a non-zero offset");
+                                return None;
+                            }
+                            // The write's void result becomes the vector
+                            // value; a use of the void result would then
+                            // read a vector.
+                            if f.blocks.iter().any(|blk| {
+                                blk.instrs.iter().any(|i| i.uses().contains(dst))
+                                    || blk
+                                        .phis
+                                        .iter()
+                                        .any(|p| p.incoming.iter().any(|(_, v)| v == dst))
+                                    || blk.term.uses().contains(dst)
+                            }) {
+                                why(alloc, "void result of a slot write is used");
+                                return None;
+                            }
+                            if !note(&mut web, 0, scratch.int_ty) {
+                                return None;
+                            }
+                            let r = root(&web, base);
+                            web.def_blocks.entry((r, 0)).or_default().insert(b);
+                            web.touch_at.push((r, b));
+                        }
+                        other if other.ids().iter().any(|u| aliases.contains(u)) => {
+                            why(alloc, "slot used as an array destination");
+                            return None;
+                        }
+                        _ => {}
+                    }
+                    web.vec_touch.insert((b, k));
+                    continue;
+                }
                 _ => {
                     let mut d = format!("{:?}", ins);
                     d.truncate(100);
@@ -429,12 +732,14 @@ fn plan_for(
     _aidx: usize,
     alloc: ValueId,
     shape: Shape,
+    slots: Option<&SlotAllocs>,
     visited: &mut HashSet<ValueId>,
 ) -> Option<Plan> {
     if f.blocks[ablock.idx()].handler.is_some() {
         return None;
     }
-    let mut web = classify(f, alloc, shape)?;
+    let is_slot = matches!(shape, Shape::Slot(_));
+    let mut web = classify(f, alloc, shape, slots)?;
     // The web refuses or fires as a unit; never re-plan it from another member.
     for (b, k, _, _) in &web.sites {
         if let Some(d) = f.blocks[*b].instrs[*k].dst() {
@@ -459,6 +764,11 @@ fn plan_for(
     }
     if web.field_ty.is_empty() {
         return None; // nothing touches it; DCE reclaims a dead web
+    }
+    if is_slot {
+        for (b, _, r, _) in &web.sites {
+            web.def_blocks.entry((*r, 0)).or_default().insert(*b);
+        }
     }
 
     let cfg = CfgInfo::build(f);
@@ -508,6 +818,29 @@ fn plan_for(
                     demanded.insert((web.root_of[value], *field));
                 }
                 _ => {}
+            }
+        }
+        for (k, ins) in blk.instrs.iter().enumerate() {
+            if web.lane_touch.contains_key(&(b, k)) {
+                match ins {
+                    Instr::MemGet { base, .. } | Instr::MemSet { base, .. } => {
+                        demanded.insert((web.root_of[base], 0));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if !web.vec_touch.contains(&(b, k)) {
+                continue;
+            }
+            if let Instr::VecOp { args, .. } = ins {
+                for a in args {
+                    if let VecArg::Slot { base, .. } = a {
+                        if let Some(&r) = web.root_of.get(base) {
+                            demanded.insert((r, 0));
+                        }
+                    }
+                }
             }
         }
     }
@@ -605,6 +938,15 @@ fn plan_for(
         .enumerate()
         .map(|(i, &(b, r, fd, _))| ((b, r, fd), ValueId(base + i as u32)))
         .collect();
+    // Then the slot machinery's values: the zero constant first, then one
+    // per write, in walk order.
+    let mut next_write = base + slots.len() as u32;
+    let slot_zero = if is_slot {
+        next_write += 1;
+        Some(ValueId(next_write - 1))
+    } else {
+        None
+    };
 
     // ---- renaming walk over the dominator tree ----------------------------
     let mut plan = Plan {
@@ -618,9 +960,27 @@ fn plan_for(
         phis: Vec::new(),
         fields: fields.len(),
         alloc_count: web.sites.len(),
+        lanes: if matches!(shape, Shape::Slot(_)) {
+            4
+        } else {
+            1
+        },
+        vec_reads: Vec::new(),
+        vec_writes: Vec::new(),
+        scratch: match shape {
+            Shape::Slot(s) => Some(s),
+            _ => None,
+        },
+        lane_reads: Vec::new(),
+        lane_writes: Vec::new(),
+        zero: slot_zero,
+        zero_splats: Vec::new(),
     };
-    for (b, k, _, _) in &web.sites {
-        plan.remove.push((*b, *k));
+    // A slot's allocation is replaced by its zero splat rather than removed.
+    if !is_slot {
+        for (b, k, _, _) in &web.sites {
+            plan.remove.push((*b, *k));
+        }
     }
     plan.remove.sort_unstable();
     plan.remove.dedup();
@@ -675,6 +1035,63 @@ fn plan_for(
             if let Some((r, init)) = site_at.get(&(b, k)) {
                 for (j, &a) in init.iter().enumerate() {
                     stacks.get_mut(&(*r, j)).expect("known var").push(a);
+                }
+                // A fresh slot is sixteen zero bytes, which the flat form
+                // and the backends can both name: a splat of zero minted
+                // in the allocation's place.
+                if plan.zero.is_some() {
+                    let v = ValueId(next_write);
+                    next_write += 1;
+                    plan.zero_splats.push((b, k, v));
+                    stacks.get_mut(&(*r, 0)).expect("known var").push(v);
+                }
+                continue;
+            }
+            if let Some(&(elem, lane)) = web.lane_touch.get(&(b, k)) {
+                match ins {
+                    Instr::MemGet { base, .. } => {
+                        let r = web.root_of[base];
+                        plan.lane_reads
+                            .push(((b, k), elem, lane, *stacks[&(r, 0)].last()?));
+                    }
+                    Instr::MemSet { base, .. } => {
+                        let r = web.root_of[base];
+                        let cur = *stacks[&(r, 0)].last()?;
+                        let v = ValueId(next_write);
+                        next_write += 1;
+                        plan.lane_writes.push(LaneWrite {
+                            at: (b, k),
+                            elem,
+                            lane,
+                            src: cur,
+                            dst: v,
+                        });
+                        stacks.get_mut(&(r, 0)).expect("known var").push(v);
+                    }
+                    _ => unreachable!("lane touches are memory accesses"),
+                }
+                continue;
+            }
+            if web.vec_touch.contains(&(b, k)) {
+                let Instr::VecOp { out, args, .. } = ins else {
+                    unreachable!("vec touches are VecOps");
+                };
+                // Operands read the value current before the instruction;
+                // the write defines a new one after.
+                for (i, a) in args.iter().enumerate() {
+                    if let VecArg::Slot { base, .. } = a {
+                        if let Some(&r) = web.root_of.get(base) {
+                            plan.vec_reads.push(((b, k), i, *stacks[&(r, 0)].last()?));
+                        }
+                    }
+                }
+                if let VecOut::Slot { base, .. } = out {
+                    if let Some(&r) = web.root_of.get(base) {
+                        let v = ValueId(next_write);
+                        next_write += 1;
+                        plan.vec_writes.push(((b, k), v));
+                        stacks.get_mut(&(r, 0)).expect("known var").push(v);
+                    }
                 }
                 continue;
             }
@@ -758,7 +1175,14 @@ fn plan_for(
     // Every replacement lengthens the live range of the value it forwards.
     let is_param = param_values(f);
     let claims = RegClaims::build(f);
-    for &(_, src) in &plan.rewrites {
+    let forwarded = plan
+        .rewrites
+        .iter()
+        .map(|&(_, src)| src)
+        .chain(plan.vec_reads.iter().map(|&(_, _, src)| src))
+        .chain(plan.lane_reads.iter().map(|&(_, _, _, src)| src))
+        .chain(plan.lane_writes.iter().map(|w| w.src));
+    for src in forwarded {
         // A value the plan mints is a phi with a register of its own.
         if src.idx() >= f.values.len() {
             continue;
@@ -778,12 +1202,83 @@ fn apply(f: &mut Function, plan: Plan) -> Result<()> {
     for (b, phi, ty) in &plan.phis {
         let ty = *ty;
         let reg = f.new_reg(ty);
-        let v = f.new_value(ty, reg);
+        let v = f.new_vector_value(ty, reg, plan.lanes);
         if v != phi.dst {
             anyhow::bail!("sroa: phi value id {} was not reserved densely", phi.dst.0);
         }
         f.blocks[b.idx()].phis.push(phi.clone());
     }
+    // Then every value the slot rewrite mints, in id order, and the
+    // rewrites themselves. A lane access and a zero splat replace their
+    // instruction; a `VecOp` is edited in place.
+    if let Some(scratch) = plan.scratch {
+        f.simd_scratch = Some(scratch);
+        let mut minted: Vec<(ValueId, u16)> = plan
+            .vec_writes
+            .iter()
+            .map(|&(_, v)| (v, plan.lanes))
+            .chain(plan.lane_writes.iter().map(|w| (w.dst, plan.lanes)))
+            .chain(plan.zero_splats.iter().map(|&(_, _, v)| (v, plan.lanes)))
+            .chain(plan.zero.iter().map(|&v| (v, 1)))
+            .collect();
+        minted.sort_unstable();
+        for (v, lanes) in minted {
+            let ty = scratch.int_ty;
+            let reg = f.new_reg(ty);
+            let got = f.new_vector_value(ty, reg, lanes);
+            if got != v {
+                anyhow::bail!("sroa: slot value id {} was not reserved densely", v.0);
+            }
+        }
+        for &((b, k), v) in &plan.vec_writes {
+            let Instr::VecOp { dst, out, .. } = &mut f.blocks[b].instrs[k] else {
+                anyhow::bail!("sroa: slot write is not a VecOp");
+            };
+            *dst = v;
+            *out = VecOut::Value;
+        }
+        for &((b, k), i, v) in &plan.vec_reads {
+            let Instr::VecOp { args, .. } = &mut f.blocks[b].instrs[k] else {
+                anyhow::bail!("sroa: slot read is not a VecOp");
+            };
+            args[i] = VecArg::Value(v);
+        }
+        for &((b, k), elem, lane, src) in &plan.lane_reads {
+            let Instr::MemGet { dst, .. } = f.blocks[b].instrs[k] else {
+                anyhow::bail!("sroa: lane read is not a MemGet");
+            };
+            f.blocks[b].instrs[k] = Instr::VecExtract {
+                elem,
+                lane,
+                dst,
+                src,
+            };
+        }
+        for w in &plan.lane_writes {
+            let (b, k) = w.at;
+            let Instr::MemSet { src: value, .. } = f.blocks[b].instrs[k] else {
+                anyhow::bail!("sroa: lane write is not a MemSet");
+            };
+            f.blocks[b].instrs[k] = Instr::VecInsert {
+                elem: w.elem,
+                lane: w.lane,
+                dst: w.dst,
+                src: w.src,
+                value,
+            };
+        }
+        if let Some(zero) = plan.zero {
+            for &(b, k, dst) in &plan.zero_splats {
+                f.blocks[b].instrs[k] = Instr::VecSplat { dst, src: zero };
+            }
+        }
+    }
+    // Positions are consumed above; the zero constant goes in last, after
+    // the entry block's parameters.
+    let zero_def = plan.zero.map(|dst| {
+        let idx = f.intern_int(0, |_| None);
+        Instr::Int { dst, idx }
+    });
 
     // `obj.a = obj.b` makes one read feed another field, so a replacement's
     // target may itself have been replaced.
@@ -810,6 +1305,14 @@ fn apply(f: &mut Function, plan: Plan) -> Result<()> {
     }
     for &(b, dst) in &plan.remove_phis {
         f.blocks[b].phis.retain(|p| p.dst != dst);
+    }
+    if let Some(def) = zero_def {
+        let at = f.blocks[0]
+            .instrs
+            .iter()
+            .take_while(|i| matches!(i, Instr::Param { .. }))
+            .count();
+        f.blocks[0].instrs.insert(at, def);
     }
     compact_values(f)?;
     Ok(())

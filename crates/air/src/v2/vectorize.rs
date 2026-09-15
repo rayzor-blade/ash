@@ -708,7 +708,9 @@ fn classify_instr(
         Instr::Call { .. }
         | Instr::CallMethod { .. }
         | Instr::CallClosure { .. }
-        | Instr::VecOp { .. } => plan.refusals.push(Refusal::Call),
+        | Instr::VecOp { .. }
+        | Instr::VecExtract { .. }
+        | Instr::VecInsert { .. } => plan.refusals.push(Refusal::Call),
         Instr::New { .. } | Instr::EnumAlloc { .. } | Instr::MakeEnum { .. } => {
             plan.refusals.push(Refusal::Allocation)
         }

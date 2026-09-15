@@ -122,6 +122,8 @@ fn instr_reject(i: &Instr) -> Option<&'static str> {
         | Instr::CallMethod { .. }
         | Instr::Intrinsic { .. }
         | Instr::VecOp { .. }
+        | Instr::VecExtract { .. }
+        | Instr::VecInsert { .. }
         | Instr::Unref { .. }
         | Instr::SetRef { .. }
         | Instr::CellGet { .. }
@@ -1568,6 +1570,37 @@ impl AirCodegen<'_, '_> {
             Instr::VecOp {
                 v, dst, out, args, ..
             } => self.emit_vec_op(*v, *dst, *out, args)?,
+            Instr::VecExtract {
+                elem,
+                lane,
+                dst,
+                src,
+            } => {
+                let ty = Self::vec_lane_ty(*elem);
+                let flags =
+                    MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+                let x = self.get(*src)?;
+                let x = self.b.ins().bitcast(ty, flags, x);
+                let r = self.b.ins().extractlane(x, *lane);
+                self.def(*dst, r)?;
+            }
+            Instr::VecInsert {
+                elem,
+                lane,
+                dst,
+                src,
+                value,
+            } => {
+                let ty = Self::vec_lane_ty(*elem);
+                let flags =
+                    MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+                let x = self.get(*src)?;
+                let x = self.b.ins().bitcast(ty, flags, x);
+                let v = self.get(*value)?;
+                let r = self.b.ins().insertlane(x, v, *lane);
+                let r = self.b.ins().bitcast(types::I32X4, flags, r);
+                self.def(*dst, r)?;
+            }
             Instr::Intrinsic {
                 kind, dst, args, ..
             } => {
@@ -2240,6 +2273,19 @@ impl AirCodegen<'_, '_> {
     /// defined. Semantics follow `ash_simd`'s bodies lane for lane; the
     /// parity fixture holds the two together. A vector value is `I32X4` and
     /// is bitcast to the operation's lane type on the way in and out.
+    /// The CLIF vector type of 16 bytes of `elem` lanes.
+    fn vec_lane_ty(elem: air::v2::ir::VecElem) -> Type {
+        use air::v2::ir::VecElem;
+        match elem {
+            VecElem::F32 => types::F32X4,
+            VecElem::F64 => types::F64X2,
+            VecElem::I32 => types::I32X4,
+            VecElem::I16 => types::I16X8,
+            VecElem::I8 | VecElem::U8 => types::I8X16,
+            VecElem::I64 => types::I64X2,
+        }
+    }
+
     fn emit_vec_op(
         &mut self,
         v: air::v2::ir::VecIntrinsic,
@@ -2248,14 +2294,7 @@ impl AirCodegen<'_, '_> {
         args: &[air::v2::ir::VecArg],
     ) -> Result<()> {
         use air::v2::ir::{VecArg, VecElem, VecOp, VecOut};
-        let ty = match v.elem {
-            VecElem::F32 => types::F32X4,
-            VecElem::F64 => types::F64X2,
-            VecElem::I32 => types::I32X4,
-            VecElem::I16 => types::I16X8,
-            VecElem::I8 | VecElem::U8 => types::I8X16,
-            VecElem::I64 => types::I64X2,
-        };
+        let ty = Self::vec_lane_ty(v.elem);
         let signed = v.elem.is_signed();
         let float = v.elem.is_float();
         let (_, shapes) = v.op.layout();
@@ -2270,12 +2309,16 @@ impl AirCodegen<'_, '_> {
         // Slots are unaligned: the bytes come from wherever the program put
         // them.
         let flags = MemFlagsData::new().with_notrap();
+        // A vector value is four `Int` lanes; reinterpreting it as another
+        // lane shape is a bitcast that must say which way the bytes lie.
+        let lanes_flags =
+            MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
         let elem_bytes = v.elem.bytes() as i64;
         let operand = |this: &mut Self, a: VecArg| -> Result<Value> {
             Ok(match a {
                 VecArg::Value(x) => {
                     let x = this.get(x)?;
-                    this.b.ins().bitcast(ty, MemFlagsData::new(), x)
+                    this.b.ins().bitcast(ty, lanes_flags, x)
                 }
                 VecArg::Slot { base, off } => {
                     let b = this.get(base)?;
@@ -2459,7 +2502,7 @@ impl AirCodegen<'_, '_> {
         };
         match out {
             VecOut::Value => {
-                let r = self.b.ins().bitcast(types::I32X4, MemFlagsData::new(), r);
+                let r = self.b.ins().bitcast(types::I32X4, lanes_flags, r);
                 self.def(dst, r)
             }
             VecOut::Scalar => bail!("simd {:?} does not return a scalar", v.op),

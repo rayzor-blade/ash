@@ -373,6 +373,14 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
     // handed at IR time still name the same values here.
     let mut new_ints: Vec<i32> = f.pending_ints.clone();
 
+    // Vector values need slots again in the flat form: one scratch `Bytes`
+    // per vector operand position, allocated once here, and the lane
+    // offsets as `Int` registers. See `Scratch`.
+    let mut scratch = Scratch::plan(f, &mut reg_types)?;
+    if let Some(sc) = &mut scratch {
+        sc.prologue(f, &mut ops, &mut new_ints, int_base);
+    }
+
     for (pos, entry) in entries.iter().enumerate() {
         starts[pos] = ops.len();
         if need_label[pos] {
@@ -414,6 +422,7 @@ fn serialize_inner(f: &Function, int_base: usize) -> Result<Serialized> {
                         &mut lane_idx_tmp,
                         &mut new_ints,
                         int_base,
+                        scratch.as_ref(),
                     )?;
                 }
                 if let Some(movs) = &inline[*b] {
@@ -680,6 +689,7 @@ fn emit_instr(
     lane_idx_tmp: &mut Option<u32>,
     new_ints: &mut Vec<i32>,
     int_base: usize,
+    scratch: Option<&Scratch>,
 ) -> Result<()> {
     // Lane registers for a vector value, allocated on first use. Fresh
     // registers, so no aliasing question with anything the body already had.
@@ -782,7 +792,65 @@ fn emit_instr(
                 args.iter().map(|v| rg(*v)).collect(),
             ));
         }
-        // The native call it came from, in the native's argument order.
+        // Through a scratch slot: the value's lanes spilled, then the lane
+        // read or written by the memory opcode at its byte offset, which
+        // `Scratch` holds for lanes of four and eight bytes.
+        Instr::VecExtract {
+            elem,
+            lane,
+            dst,
+            src,
+        } => {
+            let sc = scratch
+                .ok_or_else(|| anyhow::anyhow!("vector lane read with no scratch slots planned"))?;
+            let r = sc.slots[0];
+            for (k, lr) in lanes_of!(*src).iter().enumerate() {
+                ops.push(Opcode::SetMem {
+                    bytes: Reg(r),
+                    index: Reg(sc.offset[k]),
+                    src: Reg(*lr),
+                });
+            }
+            ops.push(Opcode::GetMem {
+                dst: rg(*dst),
+                bytes: Reg(r),
+                index: Reg(sc.lane_offset(*elem, *lane)?),
+            });
+        }
+        Instr::VecInsert {
+            elem,
+            lane,
+            dst,
+            src,
+            value,
+        } => {
+            let sc = scratch.ok_or_else(|| {
+                anyhow::anyhow!("vector lane write with no scratch slots planned")
+            })?;
+            let r = sc.slots[0];
+            for (k, lr) in lanes_of!(*src).iter().enumerate() {
+                ops.push(Opcode::SetMem {
+                    bytes: Reg(r),
+                    index: Reg(sc.offset[k]),
+                    src: Reg(*lr),
+                });
+            }
+            ops.push(Opcode::SetMem {
+                bytes: Reg(r),
+                index: Reg(sc.lane_offset(*elem, *lane)?),
+                src: rg(*value),
+            });
+            for (k, lr) in lanes_of!(*dst).iter().enumerate() {
+                ops.push(Opcode::GetMem {
+                    dst: Reg(*lr),
+                    bytes: Reg(r),
+                    index: Reg(sc.offset[k]),
+                });
+            }
+        }
+        // The native call it came from, in the native's argument order. A
+        // vector value is spilled from its lane registers into a scratch slot
+        // before the call, and a vector result read back from one after.
         Instr::VecOp {
             fun,
             dst,
@@ -790,17 +858,65 @@ fn emit_instr(
             args,
             ..
         } => {
-            let mut regs: Vec<Reg> = out.ids().into_iter().map(rg).collect();
-            for a in args {
-                if let VecArg::Value(v) = a {
-                    bail!("vector value {v:?} has no serialization yet");
+            let mut regs: Vec<Reg> = Vec::new();
+            let mut used = 0usize;
+            let mut take_scratch = || -> Result<u32> {
+                let sc = scratch.ok_or_else(|| {
+                    anyhow::anyhow!("vector value operand with no scratch slots planned")
+                })?;
+                let r = *sc
+                    .slots
+                    .get(used)
+                    .ok_or_else(|| anyhow::anyhow!("too few scratch slots planned"))?;
+                used += 1;
+                Ok(r)
+            };
+            let result_slot = match out {
+                VecOut::Value => {
+                    let r = take_scratch()?;
+                    regs.push(Reg(r));
+                    regs.push(Reg(scratch.expect("planned").offset[0]));
+                    Some(r)
                 }
-                regs.extend(a.ids().into_iter().map(rg));
+                _ => {
+                    regs.extend(out.ids().into_iter().map(rg));
+                    None
+                }
+            };
+            for a in args {
+                match a {
+                    VecArg::Value(v) => {
+                        let r = take_scratch()?;
+                        let sc = scratch.expect("planned");
+                        for (k, lr) in lanes_of!(*v).iter().enumerate() {
+                            ops.push(Opcode::SetMem {
+                                bytes: Reg(r),
+                                index: Reg(sc.offset[k]),
+                                src: Reg(*lr),
+                            });
+                        }
+                        regs.push(Reg(r));
+                        regs.push(Reg(sc.offset[0]));
+                    }
+                    other => regs.extend(other.ids().into_iter().map(rg)),
+                }
             }
-            if *out == VecOut::Value {
-                bail!("vector value {dst:?} has no serialization yet");
+            match result_slot {
+                Some(r) => {
+                    // The native's void result lands in a register nothing
+                    // reads; the value is the slot's bytes.
+                    let sc = scratch.expect("planned");
+                    ops.push(call_opcode(Reg(sc.void), RefFun(*fun), regs));
+                    for (k, lr) in lanes_of!(*dst).iter().enumerate() {
+                        ops.push(Opcode::GetMem {
+                            dst: Reg(*lr),
+                            bytes: Reg(r),
+                            index: Reg(sc.offset[k]),
+                        });
+                    }
+                }
+                None => ops.push(call_opcode(rg(*dst), RefFun(*fun), regs)),
             }
-            ops.push(call_opcode(rg(*dst), RefFun(*fun), regs));
         }
         Instr::Copy { dst, src } => {
             let (d, s) = (rg(*dst), rg(*src));
@@ -1280,5 +1396,125 @@ fn call_opcode(dst: Reg, fun: RefFun, a: Vec<Reg>) -> Opcode {
             arg3: a[3],
         },
         _ => Opcode::CallN { dst, fun, args: a },
+    }
+}
+
+/// Scratch slots for vector values in the flat form.
+///
+/// A vector value has no register in HL bytecode: it lives in four `Int` lane
+/// registers, and a primitive that takes it needs a 16-byte slot. The slots
+/// are `alloc_bytes(16)` calls at function entry, one per operand position
+/// of the widest `VecOp`, reused by every instruction; `offset[k]` holds
+/// `4 * k` for the lane moves and `void` receives the natives' void
+/// results.
+struct Scratch {
+    slots: Vec<u32>,
+    offset: [u32; 4],
+    void: u32,
+    sixteen: u32,
+    record: SimdScratch,
+}
+
+impl Scratch {
+    /// Registers for the scratch machinery when the function holds a
+    /// vector value; `None` when it holds none.
+    fn plan(f: &Function, reg_types: &mut Vec<TypeRef>) -> Result<Option<Scratch>> {
+        let mut widest = 0usize;
+        for blk in &f.blocks {
+            for ins in &blk.instrs {
+                match ins {
+                    Instr::VecOp { out, args, .. } => {
+                        let n = usize::from(*out == VecOut::Value)
+                            + args
+                                .iter()
+                                .filter(|a| matches!(a, VecArg::Value(_)))
+                                .count();
+                        widest = widest.max(n);
+                    }
+                    Instr::VecExtract { .. } | Instr::VecInsert { .. } => widest = widest.max(1),
+                    _ => {}
+                }
+            }
+        }
+        if widest == 0 {
+            return Ok(None);
+        }
+        let record = f
+            .simd_scratch
+            .ok_or_else(|| anyhow::anyhow!("vector values without a scratch record"))?;
+        let mut fresh = |ty: TypeRef| {
+            let r = reg_types.len() as u32;
+            reg_types.push(ty);
+            r
+        };
+        let slots = (0..widest).map(|_| fresh(record.bytes_ty)).collect();
+        let offset = [
+            fresh(record.int_ty),
+            fresh(record.int_ty),
+            fresh(record.int_ty),
+            fresh(record.int_ty),
+        ];
+        // The natives return void; their result register only has to exist.
+        let void = fresh(record.int_ty);
+        let sixteen = fresh(record.int_ty);
+        Ok(Some(Scratch {
+            slots,
+            offset,
+            void,
+            sixteen,
+            record,
+        }))
+    }
+
+    /// The offset register for `lane` of `elem`: lanes of four bytes are
+    /// the `Int` lane offsets themselves, lanes of eight bytes every other
+    /// one.
+    fn lane_offset(&self, elem: VecElem, lane: u8) -> Result<u32> {
+        let at = match elem.bytes() {
+            4 => lane as usize,
+            8 => 2 * lane as usize,
+            _ => bail!("lane access on {elem:?} lanes has no serialization"),
+        };
+        self.offset
+            .get(at)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("lane {lane} of {elem:?} is out of range"))
+    }
+
+    /// Allocate the slots and load the offsets, ahead of the first block.
+    fn prologue(
+        &self,
+        _f: &Function,
+        ops: &mut Vec<Opcode>,
+        new_ints: &mut Vec<i32>,
+        int_base: usize,
+    ) {
+        let mut int_index = |want: i32| -> crate::opcodes::RefInt {
+            let at = match new_ints.iter().position(|v| *v == want) {
+                Some(i) => int_base + i,
+                None => {
+                    new_ints.push(want);
+                    int_base + new_ints.len() - 1
+                }
+            };
+            crate::opcodes::RefInt(at)
+        };
+        ops.push(Opcode::Int {
+            dst: Reg(self.sixteen),
+            ptr: int_index(16),
+        });
+        for &r in &self.slots {
+            ops.push(Opcode::Call1 {
+                dst: Reg(r),
+                fun: RefFun(self.record.alloc_fun),
+                arg0: Reg(self.sixteen),
+            });
+        }
+        for (k, &r) in self.offset.iter().enumerate() {
+            ops.push(Opcode::Int {
+                dst: Reg(r),
+                ptr: int_index(4 * k as i32),
+            });
+        }
     }
 }

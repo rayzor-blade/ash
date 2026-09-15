@@ -38,14 +38,14 @@ abstract Float32x4(hl.Bytes) {
 
 	/** The 16 bytes at `offset` of `b`, copied. **/
 	public static function load(b:hl.Bytes, offset:Int):Float32x4 {
-		var r = new hl.Bytes(16);
-		r.blit(0, b, offset, 16);
-		return new Float32x4(r);
+		var r = alloc();
+		Vec.v128Copy(raw(r), 0, b, offset);
+		return r;
 	}
 
 	/** Copies the lanes into the 16 bytes at `offset` of `b`. **/
 	public function store(b:hl.Bytes, offset:Int):Void
-		b.blit(offset, this, 0, 16);
+		Vec.v128Copy(b, offset, this, 0);
 
 	public function get(i:Int):Single
 		return this.getF32(i << 2);

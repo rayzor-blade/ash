@@ -584,11 +584,27 @@ pub fn lower_with_positions(
 fn recognize_intrinsics(f: &mut Function, info: &dyn ModuleInfo) {
     use std::collections::HashMap as Map;
     let mut cache: Map<usize, Option<IntrinsicKind>> = Map::new();
+    let mut vec_cache: Map<usize, Option<VecIntrinsic>> = Map::new();
     for b in &mut f.blocks {
         for ins in &mut b.instrs {
             let Instr::Call { dst, fun, args } = ins else {
                 continue;
             };
+            if let Some(v) = *vec_cache
+                .entry(*fun)
+                .or_insert_with(|| info.vec_intrinsic_of(*fun))
+            {
+                if let Some((out, vargs)) = vec_operands(v.op, args) {
+                    *ins = Instr::VecOp {
+                        v,
+                        fun: *fun,
+                        dst: *dst,
+                        out,
+                        args: vargs,
+                    };
+                }
+                continue;
+            }
             let kind = *cache.entry(*fun).or_insert_with(|| info.intrinsic_of(*fun));
             let Some(kind) = kind else { continue };
             if args.len() != kind.arity() {
@@ -602,6 +618,59 @@ fn recognize_intrinsics(f: &mut Function, info: &dyn ModuleInfo) {
             };
         }
     }
+}
+
+/// A `simd` native's call arguments grouped as the operation's operands, or
+/// `None` when the count does not match the layout.
+fn vec_operands(op: VecOp, args: &[ValueId]) -> Option<(VecOut, Vec<VecArg>)> {
+    let (out_shape, shapes) = op.layout();
+    if args.len() != op.arity() {
+        return None;
+    }
+    let mut at = 0;
+    let mut take = |n: usize| {
+        let s = &args[at..at + n];
+        at += n;
+        s.to_vec()
+    };
+    let out = match out_shape {
+        ArgShape::Slot => {
+            let s = take(2);
+            VecOut::Slot {
+                base: s[0],
+                off: s[1],
+            }
+        }
+        ArgShape::Array => {
+            let s = take(2);
+            VecOut::Array {
+                arr: s[0],
+                index: s[1],
+            }
+        }
+        ArgShape::Scalar => VecOut::Scalar,
+    };
+    let mut vargs = Vec::with_capacity(shapes.len());
+    for shape in shapes {
+        vargs.push(match shape {
+            ArgShape::Slot => {
+                let s = take(2);
+                VecArg::Slot {
+                    base: s[0],
+                    off: s[1],
+                }
+            }
+            ArgShape::Array => {
+                let s = take(2);
+                VecArg::Array {
+                    arr: s[0],
+                    index: s[1],
+                }
+            }
+            ArgShape::Scalar => VecArg::Scalar(take(1)[0]),
+        });
+    }
+    Some((out, vargs))
 }
 
 /// Lowers a whole module's functions against one [`ModuleInfo`], accumulating

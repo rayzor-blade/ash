@@ -67,9 +67,6 @@ impl<'ctx> JITModule<'ctx> {
         dst: ValueId,
         args: &[ValueId],
     ) -> Result<()> {
-        if let IntrinsicKind::Vec(v) = kind {
-            return self.emit_air_vec_intrinsic(registers, reg_types, v, dst, args);
-        }
         let Some(native) = crate::intrinsics::NativeIntrinsic::of_kind(kind) else {
             let [a, b] = args else {
                 return Err(anyhow!("PtrCompare takes two operands, got {}", args.len()));

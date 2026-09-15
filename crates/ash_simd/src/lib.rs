@@ -743,6 +743,10 @@ prim!(
         map1::<u64, 2>(d, di, a, ai, |x| !x)
     }
 );
+// The 16 bytes as they are.
+prim!(fn v128_copy(d: *mut u8, di: i32, a: *const u8, ai: i32) {
+    map1::<u64, 2>(d, di, a, ai, |x| x)
+});
 // `d = mask ? a : b`, bit by bit.
 prim!(
     fn v128_select(

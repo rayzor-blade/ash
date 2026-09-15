@@ -221,6 +221,15 @@ pub trait ModuleInfo {
         None
     }
 
+    /// The `simd` primitive native `findex` is, if it is one: the call
+    /// becomes [`Instr::VecOp`](super::ir::Instr::VecOp). The same vouching
+    /// applies: the runtime body must match the operation's documented lane
+    /// semantics.
+    fn vec_intrinsic_of(&self, findex: usize) -> Option<super::ir::VecIntrinsic> {
+        let _ = findex;
+        None
+    }
+
     /// The value of i32 constant-pool entry `idx`.
     ///
     /// `Instr::Int` names a pool INDEX, not a value, so a pass that needs to

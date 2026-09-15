@@ -247,10 +247,6 @@ pub enum IntrinsicKind {
     /// dereferences, which is what makes it pure. (The content-aware
     /// `hlp_dyn_compare` is a different function and stays a call.)
     PtrCompare,
-    /// A 128-bit lane operation of the `simd` library, memory to memory over
-    /// 16-byte slots `(bytes, byte offset)`. Not pure: it reads its operand
-    /// slots and, except for the reductions, writes its destination slot.
-    Vec(VecIntrinsic),
 }
 
 impl IntrinsicKind {
@@ -259,14 +255,13 @@ impl IntrinsicKind {
     pub fn arity(self) -> usize {
         match self {
             IntrinsicKind::PtrCompare => 2,
-            IntrinsicKind::Vec(v) => v.op.arity(),
             _ => 1,
         }
     }
 }
 
 /// One `simd` primitive: the lane type and the operation. The lane count is
-/// whatever fills 16 bytes.
+/// whatever fills 16 bytes. Carried by [`Instr::VecOp`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VecIntrinsic {
     pub elem: VecElem,
@@ -356,9 +351,140 @@ pub enum VecOp {
     ToI32,
     /// i32 lanes to f32.
     ToF32,
+    /// The 16 bytes, unchanged: a load or a store when one side is a value.
+    Copy,
+}
+
+/// An operand of [`Instr::VecOp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VecArg {
+    /// A vector value: `Int` lanes, four of them, reinterpreted as the
+    /// operation's lanes. What slot promotion makes of a slot.
+    Value(ValueId),
+    /// A 16-byte slot `(bytes, byte offset)`, loaded.
+    Slot { base: ValueId, off: ValueId },
+    /// A `NativeArray` run `(array, element index)`, loaded.
+    Array { arr: ValueId, index: ValueId },
+    /// A scalar: the splat source, a shift count.
+    Scalar(ValueId),
+}
+
+impl VecArg {
+    pub fn ids(self) -> Vec<ValueId> {
+        match self {
+            VecArg::Value(v) | VecArg::Scalar(v) => vec![v],
+            VecArg::Slot { base, off } => vec![base, off],
+            VecArg::Array { arr, index } => vec![arr, index],
+        }
+    }
+
+    pub fn map(&mut self, m: &mut dyn FnMut(&mut ValueId)) {
+        match self {
+            VecArg::Value(v) | VecArg::Scalar(v) => m(v),
+            VecArg::Slot { base, off } => {
+                m(base);
+                m(off);
+            }
+            VecArg::Array { arr, index } => {
+                m(arr);
+                m(index);
+            }
+        }
+    }
+}
+
+/// Where [`Instr::VecOp`] puts its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VecOut {
+    /// `dst` is the vector value.
+    Value,
+    /// `dst` is the scalar a reduction returns.
+    Scalar,
+    /// Stored to a 16-byte slot; `dst` is the native's void result.
+    Slot { base: ValueId, off: ValueId },
+    /// Stored to a `NativeArray` run; `dst` is the native's void result.
+    Array { arr: ValueId, index: ValueId },
+}
+
+impl VecOut {
+    pub fn ids(self) -> Vec<ValueId> {
+        match self {
+            VecOut::Value | VecOut::Scalar => Vec::new(),
+            VecOut::Slot { base, off } => vec![base, off],
+            VecOut::Array { arr, index } => vec![arr, index],
+        }
+    }
+
+    pub fn map(&mut self, m: &mut dyn FnMut(&mut ValueId)) {
+        match self {
+            VecOut::Value | VecOut::Scalar => {}
+            VecOut::Slot { base, off } => {
+                m(base);
+                m(off);
+            }
+            VecOut::Array { arr, index } => {
+                m(arr);
+                m(index);
+            }
+        }
+    }
+
+    /// True when the result is written to memory rather than defined.
+    pub fn is_memory(self) -> bool {
+        matches!(self, VecOut::Slot { .. } | VecOut::Array { .. })
+    }
+}
+
+/// How one operand of a `simd` native is passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgShape {
+    /// `(bytes, byte offset)`: two call arguments.
+    Slot,
+    /// `(array, element index)`: two call arguments.
+    Array,
+    /// One scalar argument.
+    Scalar,
 }
 
 impl VecOp {
+    /// The native's argument list: what it writes (a slot or array run
+    /// passed first, or the scalar it returns) and what it reads, in call
+    /// order.
+    pub fn layout(self) -> (ArgShape, &'static [ArgShape]) {
+        use ArgShape::*;
+        match self {
+            VecOp::Add
+            | VecOp::Sub
+            | VecOp::Mul
+            | VecOp::Div
+            | VecOp::Min
+            | VecOp::Max
+            | VecOp::Eq
+            | VecOp::Ne
+            | VecOp::Lt
+            | VecOp::Le
+            | VecOp::Gt
+            | VecOp::Ge
+            | VecOp::And
+            | VecOp::Or
+            | VecOp::Xor => (Slot, &[Slot, Slot]),
+            VecOp::Abs
+            | VecOp::Neg
+            | VecOp::Sqrt
+            | VecOp::Not
+            | VecOp::ToI32
+            | VecOp::ToF32
+            | VecOp::Copy => (Slot, &[Slot]),
+            VecOp::Fma | VecOp::Select => (Slot, &[Slot, Slot, Slot]),
+            VecOp::Splat => (Slot, &[Scalar]),
+            VecOp::Shl | VecOp::Shr => (Slot, &[Slot, Scalar]),
+            VecOp::Sum | VecOp::MinLane | VecOp::MaxLane => (Scalar, &[Slot]),
+            VecOp::LoadArray => (Slot, &[Array]),
+            VecOp::StoreArray => (Array, &[Slot]),
+        }
+    }
+
+    /// How many call arguments the native takes.
     pub fn arity(self) -> usize {
         match self {
             VecOp::Add
@@ -376,7 +502,13 @@ impl VecOp {
             | VecOp::And
             | VecOp::Or
             | VecOp::Xor => 6,
-            VecOp::Abs | VecOp::Neg | VecOp::Sqrt | VecOp::Not | VecOp::ToI32 | VecOp::ToF32 => 4,
+            VecOp::Abs
+            | VecOp::Neg
+            | VecOp::Sqrt
+            | VecOp::Not
+            | VecOp::ToI32
+            | VecOp::ToF32
+            | VecOp::Copy => 4,
             VecOp::Fma | VecOp::Select => 8,
             VecOp::Splat => 3,
             VecOp::Shl | VecOp::Shr => 5,
@@ -551,6 +683,18 @@ pub enum Instr {
         fun: usize,
         dst: ValueId,
         args: Vec<ValueId>,
+    },
+    /// A `simd` primitive, lowered from the call to native `fun`. Its
+    /// operands are the slots and scalars the native took, or vector values
+    /// once slot promotion has run; `serialize` writes the call back, with
+    /// scratch slots for any values. Semantics are the native's, lane for
+    /// lane.
+    VecOp {
+        v: VecIntrinsic,
+        fun: usize,
+        dst: ValueId,
+        out: VecOut,
+        args: Vec<VecArg>,
     },
     /// Direct call by findex (arity re-derived at serialization).
     Call {
@@ -778,6 +922,7 @@ impl Instr {
             | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
             | Instr::Intrinsic { dst, .. }
+            | Instr::VecOp { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }
@@ -859,6 +1004,13 @@ impl Instr {
             Instr::Call { args, .. }
             | Instr::CallMethod { args, .. }
             | Instr::Intrinsic { args, .. } => args.clone(),
+            Instr::VecOp { out, args, .. } => {
+                let mut v = out.ids();
+                for a in args {
+                    v.extend(a.ids());
+                }
+                v
+            }
             Instr::CallClosure { fun, args, .. } => {
                 let mut v = vec![*fun];
                 v.extend(args.iter().copied());
@@ -910,54 +1062,10 @@ impl Instr {
             | Instr::VecBinOp { .. }
             | Instr::VecReduce { .. }
             // Pure BY CONSTRUCTION: only operations whose ash_std bodies read
-            // nothing but their argument are admitted to the scalar kinds.
-            // This is the fact the FFI form discarded — one sqrt in a loop
-            // was a ClobberAll that pinned every loop-invariant load around
-            // it. The vector kinds work on memory and say so below.
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::PtrCompare,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::Sqrt,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::Abs,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::Floor,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::Ceil,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::RoundHalfUp,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::FloorToI32,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::CeilToI32,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::RoundHalfUpToI32,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::IsNaN,
-                ..
-            }
-            | Instr::Intrinsic {
-                kind: IntrinsicKind::IsFinite,
-                ..
-            }
+            // nothing but their argument are admitted to IntrinsicKind. This
+            // is the fact the FFI form discarded — one sqrt in a loop was a
+            // ClobberAll that pinned every loop-invariant load around it.
+            | Instr::Intrinsic { .. }
             | Instr::TypeConst { .. }
             | Instr::CellRef { .. }
             | Instr::RefOffset { .. }
@@ -969,14 +1077,18 @@ impl Instr {
                     Effect::Pure
                 }
             }
-            Instr::Intrinsic {
-                kind: IntrinsicKind::Vec(v),
-                ..
-            } => {
-                if v.op.is_reduction() {
+            // Reads its slots, writes its slot; on values alone it is
+            // arithmetic.
+            Instr::VecOp { out, args, .. } => {
+                if out.is_memory() {
+                    Effect::WriteMem
+                } else if args
+                    .iter()
+                    .any(|a| matches!(a, VecArg::Slot { .. } | VecArg::Array { .. }))
+                {
                     Effect::ReadMem
                 } else {
-                    Effect::WriteMem
+                    Effect::Pure
                 }
             }
             Instr::Cast { kind, .. } => match kind {
@@ -1094,6 +1206,12 @@ impl Instr {
             Instr::Call { args, .. }
             | Instr::CallMethod { args, .. }
             | Instr::Intrinsic { args, .. } => args.iter_mut().for_each(one),
+            Instr::VecOp { out, args, .. } => {
+                out.map(&mut one);
+                for a in args {
+                    a.map(&mut one);
+                }
+            }
             Instr::CallClosure { fun, args, .. } => {
                 one(fun);
                 args.iter_mut().for_each(one);
@@ -1170,6 +1288,7 @@ impl Instr {
             | Instr::Fma { dst, .. }
             | Instr::UnOp { dst, .. }
             | Instr::Intrinsic { dst, .. }
+            | Instr::VecOp { dst, .. }
             | Instr::Call { dst, .. }
             | Instr::CallMethod { dst, .. }
             | Instr::CallClosure { dst, .. }

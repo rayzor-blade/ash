@@ -838,6 +838,11 @@ impl<'ctx> JITModule<'ctx> {
                             lowering, registers, reg_types, cell_base, *kind, *fun, *dst, args,
                         )?;
                     }
+                    AirInstr::VecOp {
+                        v, dst, out, args, ..
+                    } => {
+                        self.emit_air_vec_op(registers, reg_types, *v, *dst, *out, args)?;
+                    }
                     AirInstr::CallMethod { dst, field, args } => {
                         self.emit_air_call_method(
                             lowering, registers, reg_types, cell_base, *dst, *field, args,

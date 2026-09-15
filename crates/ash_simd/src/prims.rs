@@ -141,6 +141,7 @@ macro_rules! for_each_prim {
             (v128_xor, hlp_v128_xor, slot3),
             (v128_not, hlp_v128_not, slot2),
             (v128_select, hlp_v128_select, slot4),
+            (v128_copy, hlp_v128_copy, slot2),
             (f32x4_to_i32x4, hlp_f32x4_to_i32x4, slot2),
             (i32x4_to_f32x4, hlp_i32x4_to_f32x4, slot2),
         }

@@ -342,15 +342,17 @@ pub fn read_class(ins: &Instr) -> Option<AliasClass> {
         | Instr::GetTID { .. }
         | Instr::Unref { .. }
         | Instr::RefData { .. } => Some(AliasClass::Any),
-        // A vector primitive reads its operand slots; the array form reads
-        // the array's elements instead.
-        Instr::Intrinsic {
-            kind: IntrinsicKind::Vec(v),
-            ..
-        } => Some(match v.op {
-            VecOp::LoadArray => AliasClass::ArrayData,
-            _ => AliasClass::RawBytes,
-        }),
+        // A vector primitive reads its slot operands, or the array run it
+        // loads from; values read nothing.
+        Instr::VecOp { args, .. } => {
+            if args.iter().any(|a| matches!(a, VecArg::Slot { .. })) {
+                Some(AliasClass::RawBytes)
+            } else if args.iter().any(|a| matches!(a, VecArg::Array { .. })) {
+                Some(AliasClass::ArrayData)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }
@@ -382,15 +384,12 @@ pub fn write_class(ins: &Instr) -> Option<AliasClass> {
             Some(AliasClass::Cell(*cell))
         }
         Instr::DynSet { .. } => Some(AliasClass::DynBox),
-        // The destination slot, or the array's elements; a reduction writes
+        // The destination slot or array run; a value or scalar result writes
         // nothing.
-        Instr::Intrinsic {
-            kind: IntrinsicKind::Vec(v),
-            ..
-        } => match v.op {
-            VecOp::StoreArray => Some(AliasClass::ArrayData),
-            op if op.is_reduction() => None,
-            _ => Some(AliasClass::RawBytes),
+        Instr::VecOp { out, .. } => match out {
+            VecOut::Slot { .. } => Some(AliasClass::RawBytes),
+            VecOut::Array { .. } => Some(AliasClass::ArrayData),
+            VecOut::Value | VecOut::Scalar => None,
         },
         Instr::SetRef { .. }
         | Instr::Call { .. }

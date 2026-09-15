@@ -338,6 +338,46 @@ pub fn verify(f: &Function) -> Result<()> {
                         bail!("b{}: VecReduce element type mismatch", b);
                     }
                 }
+                // A vector value is four lanes wide; everything else a
+                // primitive touches is a scalar.
+                Instr::VecOp {
+                    v, dst, out, args, ..
+                } => {
+                    let (_, shapes) = v.op.layout();
+                    if args.len() != shapes.len() {
+                        bail!("b{}: VecOp {:?} takes {} operands", b, v.op, shapes.len());
+                    }
+                    for (a, shape) in args.iter().zip(shapes) {
+                        match (a, shape) {
+                            (VecArg::Value(x), ArgShape::Slot) => {
+                                if f.value_lanes(*x) != 4 {
+                                    bail!("b{}: VecOp vector operand v{} is not 4 lanes", b, x.0);
+                                }
+                            }
+                            (VecArg::Slot { .. }, ArgShape::Slot)
+                            | (VecArg::Array { .. }, ArgShape::Array)
+                            | (VecArg::Scalar(_), ArgShape::Scalar) => {}
+                            _ => bail!("b{}: VecOp {:?} operand does not fit its shape", b, v.op),
+                        }
+                        for x in a.ids() {
+                            if !matches!(a, VecArg::Value(_)) && f.value_lanes(x) != 1 {
+                                bail!("b{}: VecOp address operand v{} must be scalar", b, x.0);
+                            }
+                        }
+                    }
+                    match out {
+                        VecOut::Value => {
+                            if f.value_lanes(*dst) != 4 {
+                                bail!("b{}: VecOp vector result v{} is not 4 lanes", b, dst.0);
+                            }
+                        }
+                        _ => {
+                            if f.value_lanes(*dst) != 1 {
+                                bail!("b{}: VecOp result v{} must be scalar", b, dst.0);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }

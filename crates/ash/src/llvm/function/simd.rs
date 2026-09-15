@@ -1,15 +1,16 @@
 //! The `simd` primitives as vector IR in place of their calls.
 //!
-//! Each primitive loads its operand slots as one vector each, applies the
-//! lane operation and stores to the destination slot. The semantics are
-//! `ash_simd`'s lane for lane -- IEEE 754-2019 minimum/maximum, wrapping
-//! integers, masked shift counts, in-order reductions, saturating
-//! conversion with NaN to zero -- and the parity fixture holds the two
-//! together. The loads and stores stay; LLVM forwards a store to a later
-//! load of the same slot within the function, which is what keeps a chain
-//! of operations through one scratch slot in registers.
+//! Each primitive takes its operands from slots, array runs or vector
+//! values, applies the lane operation and stores or defines the result. The
+//! semantics are `ash_simd`'s lane for lane -- IEEE 754-2019
+//! minimum/maximum, wrapping integers, masked shift counts, in-order
+//! reductions, saturating conversion with NaN to zero -- and the parity
+//! fixture holds the two together. A vector value is `<4 x i32>` and is
+//! bitcast to the operation's lane type on the way in and out; slot loads
+//! and stores stay, and LLVM forwards a store to a later load of the same
+//! slot within the function.
 
-use air::v2::ir::{ValueId, VecElem, VecIntrinsic, VecOp};
+use air::v2::ir::{ValueId, VecArg, VecElem, VecIntrinsic, VecOp, VecOut};
 use anyhow::{anyhow, Result};
 use inkwell::intrinsics::Intrinsic;
 use inkwell::types::{BasicType, BasicTypeEnum, VectorType};
@@ -19,19 +20,21 @@ use inkwell::{FloatPredicate, IntPredicate};
 use crate::llvm::module::JITModule;
 
 impl<'ctx> JITModule<'ctx> {
-    pub(super) fn emit_air_vec_intrinsic(
+    pub(super) fn emit_air_vec_op(
         &mut self,
         registers: &[PointerValue<'ctx>],
         reg_types: &[BasicTypeEnum<'ctx>],
         v: VecIntrinsic,
         dst: ValueId,
-        args: &[ValueId],
+        out: VecOut,
+        args: &[VecArg],
     ) -> Result<()> {
-        if args.len() != v.op.arity() {
+        let (_, shapes) = v.op.layout();
+        if args.len() != shapes.len() {
             return Err(anyhow!(
                 "simd {:?} takes {} operands, got {}",
                 v.op,
-                v.op.arity(),
+                shapes.len(),
                 args.len()
             ));
         }
@@ -47,6 +50,8 @@ impl<'ctx> JITModule<'ctx> {
         };
         let float = v.elem.is_float();
         let signed = v.elem.is_signed();
+        let vty: BasicTypeEnum<'ctx> = ty.into();
+        let value_ty = ctx.i32_type().vec_type(4);
 
         let reg = |this: &Self, a: ValueId| -> Result<BasicValueEnum<'ctx>> {
             Ok(this
@@ -65,26 +70,35 @@ impl<'ctx> JITModule<'ctx> {
                     .build_in_bounds_gep(ctx.i8_type(), b, &[o], "simd_slot")?
             })
         };
+        let run = |this: &Self, arr: ValueId, index: ValueId| -> Result<PointerValue<'ctx>> {
+            this.array_run(reg(this, arr)?, reg(this, index)?, v.elem)
+        };
+        // Slots are wherever the program put them.
         let load_at = |this: &Self, p: PointerValue<'ctx>| -> Result<VectorValue<'ctx>> {
             let l = this.builder.build_load(ty, p, "simd_load")?;
-            // Slots are wherever the program put them.
             if let Some(i) = l.as_instruction_value() {
                 i.set_alignment(1)?;
             }
             Ok(l.into_vector_value())
-        };
-        let load = |this: &Self, base: ValueId, off: ValueId| -> Result<VectorValue<'ctx>> {
-            let p = slot(this, base, off)?;
-            load_at(this, p)
         };
         let store_at = |this: &Self, p: PointerValue<'ctx>, r: VectorValue<'ctx>| -> Result<()> {
             let s = this.builder.build_store(p, r)?;
             s.set_alignment(1)?;
             Ok(())
         };
-        let store_dst = |this: &Self, r: VectorValue<'ctx>| -> Result<()> {
-            let p = slot(this, args[0], args[1])?;
-            store_at(this, p, r)
+        let operand = |this: &Self, a: VecArg| -> Result<BasicValueEnum<'ctx>> {
+            Ok(match a {
+                VecArg::Value(x) => {
+                    this.builder
+                        .build_bit_cast(reg(this, x)?, vty, "simd_lanes")?
+                }
+                VecArg::Slot { base, off } => load_at(this, slot(this, base, off)?)?.into(),
+                VecArg::Array { arr, index } => load_at(this, run(this, arr, index)?)?.into(),
+                VecArg::Scalar(x) => reg(this, x)?,
+            })
+        };
+        let vec = |this: &Self, a: VecArg| -> Result<VectorValue<'ctx>> {
+            Ok(operand(this, a)?.into_vector_value())
         };
         let intrinsic = |this: &Self,
                          name: &str,
@@ -102,12 +116,11 @@ impl<'ctx> JITModule<'ctx> {
                 .basic()
                 .ok_or_else(|| anyhow!("{name} returned void"))
         };
-        let vty: BasicTypeEnum<'ctx> = ty.into();
 
         let r: VectorValue<'ctx> = match v.op {
             VecOp::Add | VecOp::Sub | VecOp::Mul | VecOp::Div | VecOp::Min | VecOp::Max => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = vec(self, args[0])?;
+                let b = vec(self, args[1])?;
                 match (v.op, float) {
                     (VecOp::Add, true) => self.builder.build_float_add(a, b, "vadd")?,
                     (VecOp::Sub, true) => self.builder.build_float_sub(a, b, "vsub")?,
@@ -136,8 +149,14 @@ impl<'ctx> JITModule<'ctx> {
                     _ => unreachable!(),
                 }
             }
-            VecOp::Abs | VecOp::Neg | VecOp::Sqrt | VecOp::Not | VecOp::ToI32 | VecOp::ToF32 => {
-                let a = load(self, args[2], args[3])?;
+            VecOp::Abs
+            | VecOp::Neg
+            | VecOp::Sqrt
+            | VecOp::Not
+            | VecOp::ToI32
+            | VecOp::ToF32
+            | VecOp::Copy => {
+                let a = vec(self, args[0])?;
                 match (v.op, float) {
                     (VecOp::Abs, true) => {
                         intrinsic(self, "llvm.fabs", &[vty], &[a.into()])?.into_vector_value()
@@ -154,6 +173,7 @@ impl<'ctx> JITModule<'ctx> {
                     }
                     (VecOp::Neg, false) => self.builder.build_int_neg(a, "vneg")?,
                     (VecOp::Not, _) => self.builder.build_not(a, "vnot")?,
+                    (VecOp::Copy, _) => a,
                     (VecOp::ToI32, _) => {
                         // Saturating, NaN to zero: the definition of the native.
                         let ity: BasicTypeEnum<'ctx> = ctx.i32_type().vec_type(4).into();
@@ -169,14 +189,14 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
             VecOp::Fma => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
-                let c = load(self, args[6], args[7])?;
+                let a = vec(self, args[0])?;
+                let b = vec(self, args[1])?;
+                let c = vec(self, args[2])?;
                 intrinsic(self, "llvm.fma", &[vty], &[a.into(), b.into(), c.into()])?
                     .into_vector_value()
             }
             VecOp::Splat => {
-                let x = reg(self, args[2])?;
+                let x = operand(self, args[0])?;
                 // The scalar arrives as an i32; a narrow lane keeps its low
                 // bits, as the native's `as` does.
                 let x: BasicValueEnum<'ctx> = match v.elem {
@@ -193,8 +213,8 @@ impl<'ctx> JITModule<'ctx> {
                 self.splat(ty, x)?
             }
             VecOp::Shl | VecOp::Shr => {
-                let a = load(self, args[2], args[3])?;
-                let n = reg(self, args[4])?.into_int_value();
+                let a = vec(self, args[0])?;
+                let n = operand(self, args[1])?.into_int_value();
                 let bits = v.elem.bytes() * 8;
                 let n = self.builder.build_and(
                     n,
@@ -217,8 +237,8 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
             VecOp::Eq | VecOp::Ne | VecOp::Lt | VecOp::Le | VecOp::Gt | VecOp::Ge => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = vec(self, args[0])?;
+                let b = vec(self, args[1])?;
                 let mask = if float {
                     let p = match v.op {
                         VecOp::Eq => FloatPredicate::OEQ,
@@ -252,7 +272,7 @@ impl<'ctx> JITModule<'ctx> {
                     .build_int_s_extend(mask, lane_bits.vec_type(lanes), "vmask")?
             }
             VecOp::Sum | VecOp::MinLane | VecOp::MaxLane => {
-                let a = load(self, args[0], args[1])?;
+                let a = vec(self, args[0])?;
                 let r: BasicValueEnum<'ctx> = match (v.op, float, signed) {
                     // Sequential from lane 0: `-0.0 + lane0` is lane0 for every
                     // lane0, and no reassociation flag is set.
@@ -304,19 +324,10 @@ impl<'ctx> JITModule<'ctx> {
                 self.builder.build_store(registers[dst.idx()], r)?;
                 return Ok(());
             }
-            VecOp::LoadArray => {
-                let p = self.array_run(reg(self, args[2])?, reg(self, args[3])?, v.elem)?;
-                load_at(self, p)?
-            }
-            VecOp::StoreArray => {
-                let a = load(self, args[2], args[3])?;
-                let p = self.array_run(reg(self, args[0])?, reg(self, args[1])?, v.elem)?;
-                store_at(self, p, a)?;
-                return Ok(());
-            }
+            VecOp::LoadArray | VecOp::StoreArray => vec(self, args[0])?,
             VecOp::And | VecOp::Or | VecOp::Xor => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = vec(self, args[0])?;
+                let b = vec(self, args[1])?;
                 match v.op {
                     VecOp::And => self.builder.build_and(a, b, "vand")?,
                     VecOp::Or => self.builder.build_or(a, b, "vor")?,
@@ -325,16 +336,25 @@ impl<'ctx> JITModule<'ctx> {
                 }
             }
             VecOp::Select => {
-                let m = load(self, args[2], args[3])?;
-                let a = load(self, args[4], args[5])?;
-                let b = load(self, args[6], args[7])?;
+                let m = vec(self, args[0])?;
+                let a = vec(self, args[1])?;
+                let b = vec(self, args[2])?;
                 let keep = self.builder.build_and(m, a, "sel_a")?;
                 let nm = self.builder.build_not(m, "sel_nm")?;
                 let drop = self.builder.build_and(nm, b, "sel_b")?;
                 self.builder.build_or(keep, drop, "vselect")?
             }
         };
-        store_dst(self, r)
+        match out {
+            VecOut::Value => {
+                let r = self.builder.build_bit_cast(r, value_ty, "simd_value")?;
+                self.builder.build_store(registers[dst.idx()], r)?;
+                Ok(())
+            }
+            VecOut::Scalar => Err(anyhow!("simd {:?} does not return a scalar", v.op)),
+            VecOut::Slot { base, off } => store_at(self, slot(self, base, off)?, r),
+            VecOut::Array { arr, index } => store_at(self, run(self, arr, index)?, r),
+        }
     }
 
     /// `x` in every lane of `ty`.

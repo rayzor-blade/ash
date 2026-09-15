@@ -88,7 +88,7 @@ impl NativeIntrinsic {
             K::RoundHalfUpToI32 => NativeIntrinsic::RoundHalfUpToI32,
             K::IsNaN => NativeIntrinsic::IsNaN,
             K::IsFinite => NativeIntrinsic::IsFinite,
-            K::PtrCompare | K::Vec(_) => return None,
+            K::PtrCompare => return None,
         })
     }
 }
@@ -167,6 +167,7 @@ pub fn lookup_simd(name: &str) -> Option<air::v2::ir::VecIntrinsic> {
         "select" => VecOp::Select,
         "to_i32x4" if elem == VecElem::F32 => VecOp::ToI32,
         "to_f32x4" if elem == VecElem::I32 => VecOp::ToF32,
+        "copy" if elem == VecElem::I64 => VecOp::Copy,
         _ => return None,
     };
     Some(VecIntrinsic { elem, op })

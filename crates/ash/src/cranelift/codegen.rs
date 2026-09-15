@@ -121,6 +121,7 @@ fn instr_reject(i: &Instr) -> Option<&'static str> {
         | Instr::TypeConst { .. }
         | Instr::CallMethod { .. }
         | Instr::Intrinsic { .. }
+        | Instr::VecOp { .. }
         | Instr::Unref { .. }
         | Instr::SetRef { .. }
         | Instr::CellGet { .. }
@@ -1564,12 +1565,13 @@ impl AirCodegen<'_, '_> {
             // A stdlib operation the IR knows outright — one machine
             // sequence, no FFI, and `Effect::Pure` upstream means LICM was
             // free to move it (and the loads around it).
+            Instr::VecOp {
+                v, dst, out, args, ..
+            } => self.emit_vec_op(*v, *dst, *out, args)?,
             Instr::Intrinsic {
                 kind, dst, args, ..
             } => {
-                if let air::v2::ir::IntrinsicKind::Vec(v) = kind {
-                    self.emit_vec_intrinsic(*v, *dst, args)?;
-                } else if *kind == air::v2::ir::IntrinsicKind::PtrCompare {
+                if *kind == air::v2::ir::IntrinsicKind::PtrCompare {
                     // Three-way identity compare, ash_std's hlp_ptr_compare
                     // verbatim: (a > b) as i32 - (a < b) as i32, unsigned —
                     // it compares usize addresses, never contents.
@@ -2233,17 +2235,19 @@ impl AirCodegen<'_, '_> {
         Ok(())
     }
 
-    /// A `simd` primitive in place of its call: the operand slots loaded as
-    /// one vector each, the lane operation, the result stored to the
-    /// destination slot. Semantics follow `ash_simd`'s bodies lane for lane;
-    /// the parity fixture holds the two together.
-    fn emit_vec_intrinsic(
+    /// A `simd` primitive in place of its call: each operand loaded from its
+    /// slot or taken as a value, the lane operation, the result stored or
+    /// defined. Semantics follow `ash_simd`'s bodies lane for lane; the
+    /// parity fixture holds the two together. A vector value is `I32X4` and
+    /// is bitcast to the operation's lane type on the way in and out.
+    fn emit_vec_op(
         &mut self,
         v: air::v2::ir::VecIntrinsic,
         dst: ValueId,
-        args: &[ValueId],
+        out: air::v2::ir::VecOut,
+        args: &[air::v2::ir::VecArg],
     ) -> Result<()> {
-        use air::v2::ir::{VecElem, VecOp};
+        use air::v2::ir::{VecArg, VecElem, VecOp, VecOut};
         let ty = match v.elem {
             VecElem::F32 => types::F32X4,
             VecElem::F64 => types::F64X2,
@@ -2254,37 +2258,48 @@ impl AirCodegen<'_, '_> {
         };
         let signed = v.elem.is_signed();
         let float = v.elem.is_float();
-        if args.len() != v.op.arity() {
+        let (_, shapes) = v.op.layout();
+        if args.len() != shapes.len() {
             bail!(
                 "simd {:?} takes {} operands, got {}",
                 v.op,
-                v.op.arity(),
+                shapes.len(),
                 args.len()
             );
         }
         // Slots are unaligned: the bytes come from wherever the program put
         // them.
         let flags = MemFlagsData::new().with_notrap();
-        let slot = |this: &mut Self, base: ValueId, off: ValueId| -> Result<Value> {
-            let b = this.get(base)?;
-            let o = this.index_as_addr(off)?;
-            Ok(this.b.ins().iadd(b, o))
-        };
-        let load = |this: &mut Self, base: ValueId, off: ValueId| -> Result<Value> {
-            let addr = slot(this, base, off)?;
-            Ok(this.b.ins().load(ty, flags, addr, 0))
-        };
-        // Everything below the reductions writes `(args[0], args[1])`.
-        let store = |this: &mut Self, args: &[ValueId], r: Value| -> Result<()> {
-            let addr = slot(this, args[0], args[1])?;
-            this.b.ins().store(flags, r, addr, 0);
-            Ok(())
+        let elem_bytes = v.elem.bytes() as i64;
+        let operand = |this: &mut Self, a: VecArg| -> Result<Value> {
+            Ok(match a {
+                VecArg::Value(x) => {
+                    let x = this.get(x)?;
+                    this.b.ins().bitcast(ty, MemFlagsData::new(), x)
+                }
+                VecArg::Slot { base, off } => {
+                    let b = this.get(base)?;
+                    let o = this.index_as_addr(off)?;
+                    let addr = this.b.ins().iadd(b, o);
+                    this.b.ins().load(ty, flags, addr, 0)
+                }
+                VecArg::Array { arr, index } => {
+                    let arr = this.get(arr)?;
+                    let idx = this.index_as_addr(index)?;
+                    let byte = this.b.ins().imul_imm(idx, elem_bytes);
+                    let addr = this.b.ins().iadd(arr, byte);
+                    this.b
+                        .ins()
+                        .load(ty, flags, addr, crate::layout::VARRAY_DATA_OFFSET)
+                }
+                VecArg::Scalar(x) => this.get(x)?,
+            })
         };
         let lanes = v.elem.lanes() as u8;
         let r = match v.op {
             VecOp::Add | VecOp::Sub | VecOp::Mul | VecOp::Div | VecOp::Min | VecOp::Max => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = operand(self, args[0])?;
+                let b = operand(self, args[1])?;
                 match (v.op, float) {
                     (VecOp::Add, true) => self.b.ins().fadd(a, b),
                     (VecOp::Sub, true) => self.b.ins().fsub(a, b),
@@ -2316,8 +2331,14 @@ impl AirCodegen<'_, '_> {
                     _ => unreachable!(),
                 }
             }
-            VecOp::Abs | VecOp::Neg | VecOp::Sqrt | VecOp::Not | VecOp::ToI32 | VecOp::ToF32 => {
-                let a = load(self, args[2], args[3])?;
+            VecOp::Abs
+            | VecOp::Neg
+            | VecOp::Sqrt
+            | VecOp::Not
+            | VecOp::ToI32
+            | VecOp::ToF32
+            | VecOp::Copy => {
+                let a = operand(self, args[0])?;
                 match (v.op, float) {
                     (VecOp::Abs, true) => self.b.ins().fabs(a),
                     (VecOp::Neg, true) => self.b.ins().fneg(a),
@@ -2325,6 +2346,7 @@ impl AirCodegen<'_, '_> {
                     (VecOp::Abs, false) => self.b.ins().iabs(a),
                     (VecOp::Neg, false) => self.b.ins().ineg(a),
                     (VecOp::Not, _) => self.b.ins().bnot(a),
+                    (VecOp::Copy, _) => a,
                     // Saturating, NaN to zero: the definition of the native.
                     (VecOp::ToI32, _) => self.b.ins().fcvt_to_sint_sat(types::I32X4, a),
                     (VecOp::ToF32, _) => self.b.ins().fcvt_from_sint(types::F32X4, a),
@@ -2332,13 +2354,13 @@ impl AirCodegen<'_, '_> {
                 }
             }
             VecOp::Fma => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
-                let c = load(self, args[6], args[7])?;
+                let a = operand(self, args[0])?;
+                let b = operand(self, args[1])?;
+                let c = operand(self, args[2])?;
                 self.b.ins().fma(a, b, c)
             }
             VecOp::Splat => {
-                let x = self.get(args[2])?;
+                let x = operand(self, args[0])?;
                 let x = match v.elem {
                     // The scalar arrives as an i32; the lane keeps its low
                     // bits, as the native's `as` does.
@@ -2349,8 +2371,8 @@ impl AirCodegen<'_, '_> {
                 self.b.ins().splat(ty, x)
             }
             VecOp::Shl | VecOp::Shr => {
-                let a = load(self, args[2], args[3])?;
-                let n = self.get(args[4])?;
+                let a = operand(self, args[0])?;
+                let n = operand(self, args[1])?;
                 let n = self.b.ins().band_imm(n, (ty.lane_bits() - 1) as i64);
                 match (v.op, signed) {
                     (VecOp::Shl, _) => self.b.ins().ishl(a, n),
@@ -2360,8 +2382,8 @@ impl AirCodegen<'_, '_> {
                 }
             }
             VecOp::Eq | VecOp::Ne | VecOp::Lt | VecOp::Le | VecOp::Gt | VecOp::Ge => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = operand(self, args[0])?;
+                let b = operand(self, args[1])?;
                 if float {
                     let cc = match v.op {
                         VecOp::Eq => FloatCC::Equal,
@@ -2392,7 +2414,7 @@ impl AirCodegen<'_, '_> {
             }
             VecOp::Sum | VecOp::MinLane | VecOp::MaxLane => {
                 // In lane order from lane 0, as the native folds.
-                let a = load(self, args[0], args[1])?;
+                let a = operand(self, args[0])?;
                 let mut acc = self.b.ins().extractlane(a, 0);
                 for lane in 1..lanes {
                     let e = self.b.ins().extractlane(a, lane);
@@ -2417,30 +2439,10 @@ impl AirCodegen<'_, '_> {
                 };
                 return self.def(dst, acc);
             }
-            VecOp::LoadArray => {
-                let arr = self.get(args[2])?;
-                let idx = self.index_as_addr(args[3])?;
-                let byte = self.b.ins().imul_imm(idx, v.elem.bytes() as i64);
-                let addr = self.b.ins().iadd(arr, byte);
-                self.b
-                    .ins()
-                    .load(ty, flags, addr, crate::layout::VARRAY_DATA_OFFSET)
-            }
-            VecOp::StoreArray => {
-                let a = load(self, args[2], args[3])?;
-                let arr = self.get(args[0])?;
-                let idx = self.index_as_addr(args[1])?;
-                let byte = self.b.ins().imul_imm(idx, v.elem.bytes() as i64);
-                let addr = self.b.ins().iadd(arr, byte);
-                self.b
-                    .ins()
-                    .store(flags, a, addr, crate::layout::VARRAY_DATA_OFFSET);
-                self.define_void_word_if_used(dst);
-                return Ok(());
-            }
+            VecOp::LoadArray | VecOp::StoreArray => operand(self, args[0])?,
             VecOp::And | VecOp::Or | VecOp::Xor => {
-                let a = load(self, args[2], args[3])?;
-                let b = load(self, args[4], args[5])?;
+                let a = operand(self, args[0])?;
+                let b = operand(self, args[1])?;
                 match v.op {
                     VecOp::And => self.b.ins().band(a, b),
                     VecOp::Or => self.b.ins().bor(a, b),
@@ -2449,15 +2451,38 @@ impl AirCodegen<'_, '_> {
                 }
             }
             VecOp::Select => {
-                let m = load(self, args[2], args[3])?;
-                let a = load(self, args[4], args[5])?;
-                let b = load(self, args[6], args[7])?;
+                let m = operand(self, args[0])?;
+                let a = operand(self, args[1])?;
+                let b = operand(self, args[2])?;
                 self.b.ins().bitselect(m, a, b)
             }
         };
-        store(self, args, r)?;
-        self.define_void_word_if_used(dst);
-        Ok(())
+        match out {
+            VecOut::Value => {
+                let r = self.b.ins().bitcast(types::I32X4, MemFlagsData::new(), r);
+                self.def(dst, r)
+            }
+            VecOut::Scalar => bail!("simd {:?} does not return a scalar", v.op),
+            VecOut::Slot { base, off } => {
+                let b = self.get(base)?;
+                let o = self.index_as_addr(off)?;
+                let addr = self.b.ins().iadd(b, o);
+                self.b.ins().store(flags, r, addr, 0);
+                self.define_void_word_if_used(dst);
+                Ok(())
+            }
+            VecOut::Array { arr, index } => {
+                let arr = self.get(arr)?;
+                let idx = self.index_as_addr(index)?;
+                let byte = self.b.ins().imul_imm(idx, elem_bytes);
+                let addr = self.b.ins().iadd(arr, byte);
+                self.b
+                    .ins()
+                    .store(flags, r, addr, crate::layout::VARRAY_DATA_OFFSET);
+                self.define_void_word_if_used(dst);
+                Ok(())
+            }
+        }
     }
 
     /// Fold a vector's lanes into a scalar by extracting and combining.

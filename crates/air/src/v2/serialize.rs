@@ -782,6 +782,26 @@ fn emit_instr(
                 args.iter().map(|v| rg(*v)).collect(),
             ));
         }
+        // The native call it came from, in the native's argument order.
+        Instr::VecOp {
+            fun,
+            dst,
+            out,
+            args,
+            ..
+        } => {
+            let mut regs: Vec<Reg> = out.ids().into_iter().map(rg).collect();
+            for a in args {
+                if let VecArg::Value(v) = a {
+                    bail!("vector value {v:?} has no serialization yet");
+                }
+                regs.extend(a.ids().into_iter().map(rg));
+            }
+            if *out == VecOut::Value {
+                bail!("vector value {dst:?} has no serialization yet");
+            }
+            ops.push(call_opcode(rg(*dst), RefFun(*fun), regs));
+        }
         Instr::Copy { dst, src } => {
             let (d, s) = (rg(*dst), rg(*src));
             if d != s {

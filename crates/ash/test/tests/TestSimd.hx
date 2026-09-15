@@ -597,6 +597,11 @@ class TestSimd {
 		Vec.v128Select(r, 0, mask, 0, x, 0, y, 0);
 		showI32("select", r, 0);
 		check("v128 select", r.getI32(0) == 1 && r.getI32(4) == 20 && r.getI32(8) == 0x55663344 && r.getI32(12) == 40);
+		var wide = new hl.Bytes(40);
+		Vec.v128Copy(wide, 3, x, 0);
+		Vec.v128Copy(r, 0, wide, 3);
+		showI32("copy", r, 0);
+		check("v128 copy", r.getI32(0) == 1 && r.getI32(12) == 4 && wide.getI32(7) == 2);
 	}
 
 	static function testValues() {

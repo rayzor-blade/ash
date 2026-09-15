@@ -165,6 +165,7 @@ extern class Vec {
 	@:hlNative("simd", "v128_xor") public static function v128Xor(dst:hl.Bytes, di:Int, a:hl.Bytes, ai:Int, b:hl.Bytes, bi:Int):Void;
 	@:hlNative("simd", "v128_not") public static function v128Not(dst:hl.Bytes, di:Int, a:hl.Bytes, ai:Int):Void;
 	@:hlNative("simd", "v128_select") public static function v128Select(dst:hl.Bytes, di:Int, a:hl.Bytes, ai:Int, b:hl.Bytes, bi:Int, c:hl.Bytes, ci:Int):Void;
+	@:hlNative("simd", "v128_copy") public static function v128Copy(dst:hl.Bytes, di:Int, a:hl.Bytes, ai:Int):Void;
 
 	// f32x4
 	@:hlNative("simd", "f32x4_to_i32x4") public static function f32x4ToI32x4(dst:hl.Bytes, di:Int, a:hl.Bytes, ai:Int):Void;

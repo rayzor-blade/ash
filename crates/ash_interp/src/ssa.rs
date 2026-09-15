@@ -450,6 +450,7 @@ fn unsupported_instr(i: &Instr) -> Option<&'static str> {
         | Instr::BinOp { .. }
         | Instr::Fma { .. }
         | Instr::Intrinsic { .. }
+        | Instr::VecOp { .. }
         | Instr::UnOp { .. }
         | Instr::Call { .. }
         | Instr::CallMethod { .. }

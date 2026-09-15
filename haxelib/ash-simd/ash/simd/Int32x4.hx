@@ -32,13 +32,13 @@ abstract Int32x4(hl.Bytes) {
 	}
 
 	public static function load(b:hl.Bytes, offset:Int):Int32x4 {
-		var r = new hl.Bytes(16);
-		r.blit(0, b, offset, 16);
-		return new Int32x4(r);
+		var r = alloc();
+		Vec.v128Copy(raw(r), 0, b, offset);
+		return r;
 	}
 
 	public function store(b:hl.Bytes, offset:Int):Void
-		b.blit(offset, this, 0, 16);
+		Vec.v128Copy(b, offset, this, 0);
 
 	public function get(i:Int):Int
 		return this.getI32(i << 2);

@@ -194,11 +194,7 @@ impl<'b> ModuleInfo for AshModule<'b> {
         use crate::intrinsics::NativeIntrinsic as NI;
         use air::v2::ir::IntrinsicKind as K;
         let n = &self.bc.natives[*self.native_at.get(&findex)?];
-        let lib = n.lib.strip_prefix('?').unwrap_or(&n.lib);
-        if lib == "simd" {
-            return crate::intrinsics::lookup_simd(&n.name).map(K::Vec);
-        }
-        if lib != "std" {
+        if n.lib != "std" && n.lib != "?std" {
             return None;
         }
         // ptr_compare is not in the backend emitter table (it is two-arg);
@@ -218,6 +214,14 @@ impl<'b> ModuleInfo for AshModule<'b> {
             NI::IsNaN => K::IsNaN,
             NI::IsFinite => K::IsFinite,
         })
+    }
+
+    fn vec_intrinsic_of(&self, findex: usize) -> Option<air::v2::ir::VecIntrinsic> {
+        let n = &self.bc.natives[*self.native_at.get(&findex)?];
+        if n.lib.strip_prefix('?').unwrap_or(&n.lib) != "simd" {
+            return None;
+        }
+        crate::intrinsics::lookup_simd(&n.name)
     }
 
     /// Resolve a proto slot against the receiver's STATIC type.

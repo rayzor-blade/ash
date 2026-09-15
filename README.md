@@ -223,6 +223,14 @@ by `cargo build --release -p ash_hdll_simd` and renamed from the cdylib; on
 ash they are part of the runtime, resolved like `std`, so no file ships with
 the program. Compile with `-cp haxelib/ash-simd` (or `-lib ash-simd`).
 
+The compiled tiers emit each primitive as a vector instruction instead of a
+call, and a `Float32x4`/`Int32x4` value whose 16-byte `hl.Bytes` never
+escapes the function is kept in a register: a chain of operators, including
+one carried around a loop, compiles to the same code as the slot form with
+no allocation. A vector stored into a field or array, passed to an ordinary
+function or returned is materialised at that point. `ASH_SROA_WHY=1`
+reports what kept a slot in memory.
+
 ## Heaps.io
 
 `examples/heaps_base2d/` runs a [Heaps](https://heaps.io/) Base2D application — window creation, GL context, shader compilation, the render loop and input events — through a relocatable macOS arm64 build of HashLink's SDL3 `sdl.hdll`:

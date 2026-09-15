@@ -60,13 +60,24 @@ impl BytecodeDecoder {
         Self::decode_with_pointer_size(path, abi.pointer_bytes() as usize)
     }
 
+    /// Decode bytecode held in memory: what a host loads from a bundle.
+    pub fn decode_bytes(bytes: &[u8]) -> Result<DecodedBytecode, io::Error> {
+        Self::decode_reader(bytes, std::mem::size_of::<*const u8>())
+    }
+
     fn decode_with_pointer_size(
         path: &Path,
         pointer_size: usize,
     ) -> Result<DecodedBytecode, io::Error> {
-        let mut decoder = BytecodeDecoder::default();
         let file = std::fs::File::open(path)?;
-        let mut reader = io::BufReader::with_capacity(512 * 1024, file);
+        Self::decode_reader(io::BufReader::with_capacity(512 * 1024, file), pointer_size)
+    }
+
+    fn decode_reader(
+        mut reader: impl BufRead,
+        pointer_size: usize,
+    ) -> Result<DecodedBytecode, io::Error> {
+        let mut decoder = BytecodeDecoder::default();
 
         // Search for the magic header
         let finder = memchr::memmem::Finder::new("HLB");

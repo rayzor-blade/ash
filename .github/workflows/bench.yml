@@ -231,6 +231,15 @@ jobs:
       # static runtime it links against. Best-effort: if the archive is
       # missing the page renders without the row.
 
+      # The simd benchmarks' natives, for the HashLink lanes: an HDLL beside
+      # `hl`, where its own libraries live.
+      - name: Build simd.hdll for HashLink
+        continue-on-error: true
+        run: |
+          cargo build --release -p ash_hdll_simd
+          test -d ~/hashlink && cp target/release/libash_hdll_simd.so ~/hashlink/simd.hdll
+          test -d ~/hashlink-hl2 && cp target/release/libash_hdll_simd.so ~/hashlink-hl2/simd.hdll || true
+
       - name: Package the toolchain
         run: |
           mkdir -p dist

@@ -127,6 +127,14 @@ def time_command(cmd: list[str], bench: dict, iterations: int, warmups: int,
     }
 
 
+def cp_args(bench: dict) -> list[str]:
+    """`-cp` flags for a bench whose case names extra class paths."""
+    out: list[str] = []
+    for cp in bench.get("classpath", []):
+        out += ["-cp", str(cp)]
+    return out
+
+
 def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
               cc: str, workdir: Path) -> tuple[Path | None, str, float]:
     """Compile the bench to native via HL/C. Returns (binary, detail, build_ms)."""
@@ -136,7 +144,7 @@ def build_hlc(bench: dict, tests_dir: Path, hashlink_dir: Path, haxe: str,
     out_c = workdir / "main.c"
     t0 = time.perf_counter()
     p = subprocess.run(
-        [haxe, "--cwd", str(tests_dir), "-main", main, "-hl", str(out_c)],
+        [haxe, "--cwd", str(tests_dir), *cp_args(bench), "-main", main, "-hl", str(out_c)],
         capture_output=True, text=True, timeout=300,
     )
     if p.returncode != 0:
@@ -188,7 +196,7 @@ def build_jvm(bench: dict, tests_dir: Path, haxe: str,
     jar = workdir / f"{main}.jar"
     t0 = time.perf_counter()
     p = subprocess.run(
-        [haxe, "--cwd", str(tests_dir), "-main", main, "--jvm", str(jar)],
+        [haxe, "--cwd", str(tests_dir), *cp_args(bench), "-main", main, "--jvm", str(jar)],
         capture_output=True, text=True, timeout=300,
     )
     if p.returncode != 0:
@@ -242,6 +250,7 @@ def main() -> int:
         b.setdefault("hl", base.get("hl", ""))
         b.setdefault("main", base.get("main", ""))
         b.setdefault("timeout_secs", base.get("timeout_secs", 120))
+        b.setdefault("classpath", base.get("classpath", []))
 
     benches = {b["name"]: b for b in doc["bench"]}
     if args.benchmarks:

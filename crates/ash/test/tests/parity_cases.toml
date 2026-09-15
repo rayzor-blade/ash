@@ -732,3 +732,27 @@ timeout_secs = 60
 expectation = "exact"
 normalize = "default"
 sanity_interp = false
+
+# The ash-simd benchmarks: the value type through a dot product and through
+# object fields. Judged on their printed checksum like the other benches.
+[[case]]
+name = "BenchSimdDot"
+main = "BenchSimdDot"
+hl = "bench_simd_dot.hl"
+classpath = ["../../../../haxelib/ash-simd"]
+slow = true
+timeout_secs = 300
+expectation = "exact"
+normalize = "default"
+sanity_interp = false
+
+[[case]]
+name = "BenchSimdParticles"
+main = "BenchSimdParticles"
+hl = "bench_simd_particles.hl"
+classpath = ["../../../../haxelib/ash-simd"]
+slow = true
+timeout_secs = 300
+expectation = "exact"
+normalize = "default"
+sanity_interp = false

@@ -395,6 +395,33 @@ group = "call"
 description = """Static call. Small and pure, so the inliner is expected to \
 take it: a delta near zero says the call was removed, not that calls are free."""
 
+# ── SIMD ────────────────────────────────────────────────────────────────────
+#
+# The ash-simd library (haxelib/ash-simd). Its natives are `simd.hdll` on
+# HashLink and vector instructions on ash, and the Float32x4 value type
+# allocates per operator on HashLink where ash's slot promotion keeps the
+# chain in a register. Neither HL/C nor the JVM lane can build these: the
+# first needs the HDLL's C symbols linked in, the second has no natives.
+[[bench]]
+name = "simd_dot"
+parity_case = "BenchSimdDot"
+expectation = "checksum"
+checksum_marker = "BenchSimdDot"
+checksums = [{ value = "73726218", label = "reference" }]
+group = "simd"
+description = "Dot product of two 256K-float buffers, 300 rounds, four lanes per step through Float32x4 operators."
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+
+[[bench]]
+name = "simd_particles"
+parity_case = "BenchSimdParticles"
+expectation = "checksum"
+checksum_marker = "BenchSimdParticles"
+checksums = [{ value = "5817", label = "reference" }]
+group = "simd"
+description = "4096 particles, 2000 steps: Float32x4 positions and velocities held in object fields, so each step materialises two vectors."
+modes = ["full-jit", "hybrid-auto", "hybrid-cranelift", "hybrid-llvm"]
+
 [[bench]]
 name = "method_call"
 main = "BenchMethodCall"

@@ -932,18 +932,7 @@ impl HLInterpreter {
                 );
             }
             let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-            Self::dyn_set_field_by_hash(
-                obj_ptr,
-                hfield,
-                src_val,
-                src_kind,
-                src_type_ptr,
-                self.fn_dyn_setd,
-                self.fn_dyn_setf,
-                self.fn_dyn_seti64,
-                self.fn_dyn_seti,
-                self.fn_dyn_setp,
-            );
+            self.dyn_set_field_checked(                bytecode,                obj_ptr,                hfield,                src_val,                src_kind,                src_type_ptr,            )?;
         }
 
         Ok(StepResult::Continue)
@@ -1041,6 +1030,7 @@ impl HLInterpreter {
             self.prim_t_bool,
         );
         let frame = self.stack.last_mut().unwrap();
+        let frame_pc = frame.pc;
         let obj_type_idx = func.regs[obj as usize].0;
         let obj_kind = bytecode.types[obj_type_idx].kind;
         let obj_c_type = self.c_type_factory.get(obj_type_idx) as *mut c_void;
@@ -1052,7 +1042,7 @@ impl HLInterpreter {
             eprintln!(
                 "[SETFIELD] f{} pc={} obj_ty={} obj_kind={} field={} src_ty={} src_kind={} obj={:?} src={:?}",
                 func_idx,
-                frame.pc,
+                frame_pc,
                 obj_type_idx,
                 obj_kind,
                 field,
@@ -1078,7 +1068,7 @@ impl HLInterpreter {
                 if env_flag!("ASH_DBG_FIELD") {
                     eprintln!(
                         "[SETFIELD-OBJ] f{} pc={} obj_ty={} obj_kind={} field={} src_kind={} src={:?}",
-                        func_idx, frame.pc, obj_type_idx, obj_kind, field, src_kind, src_val
+                        func_idx, frame_pc, obj_type_idx, obj_kind, field, src_kind, src_val
                     );
                 }
                 unsafe {
@@ -1099,7 +1089,7 @@ impl HLInterpreter {
                     if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
                             "[SETFIELD-VIRT] f{} pc={} obj_ty={} field={} off={} src_kind={} src={:?}",
-                            func_idx, frame.pc, obj_type_idx, field, offset, src_kind, src_val
+                            func_idx, frame_pc, obj_type_idx, field, offset, src_kind, src_val
                         );
                     }
                     unsafe { Self::write_value_at(addr, src_kind, src_val) };
@@ -1111,23 +1101,12 @@ impl HLInterpreter {
                     {
                         let obj_ptr = obj_val.as_ptr() as *mut c_void;
                         let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                        Self::dyn_set_field_by_hash(
-                            obj_ptr,
-                            hfield,
-                            src_val,
-                            src_kind,
-                            src_type_ptr,
-                            self.fn_dyn_setd,
-                            self.fn_dyn_setf,
-                            self.fn_dyn_seti64,
-                            self.fn_dyn_seti,
-                            self.fn_dyn_setp,
-                        );
+                        self.dyn_set_field_checked(                            bytecode,                            obj_ptr,                            hfield,                            src_val,                            src_kind,                            src_type_ptr,                        )?;
                     }
                     if env_flag!("ASH_DBG_FIELD") {
                         eprintln!(
                             "[SETFIELD-VIRT-FALLBACK] f{} pc={} obj_ty={} field={} src={:?}",
-                            func_idx, frame.pc, obj_type_idx, field, src_val
+                            func_idx, frame_pc, obj_type_idx, field, src_val
                         );
                     }
                 }
@@ -1136,18 +1115,7 @@ impl HLInterpreter {
             {
                 let obj_ptr = obj_val.as_ptr() as *mut c_void;
                 let src_type_ptr = self.c_type_factory.get(src_type_idx) as *mut c_void;
-                Self::dyn_set_field_by_hash(
-                    obj_ptr,
-                    hfield,
-                    src_val,
-                    src_kind,
-                    src_type_ptr,
-                    self.fn_dyn_setd,
-                    self.fn_dyn_setf,
-                    self.fn_dyn_seti64,
-                    self.fn_dyn_seti,
-                    self.fn_dyn_setp,
-                );
+                self.dyn_set_field_checked(                    bytecode,                    obj_ptr,                    hfield,                    src_val,                    src_kind,                    src_type_ptr,                )?;
             }
         }
 

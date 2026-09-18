@@ -7,7 +7,7 @@ use std::alloc::alloc;
 use std::sync::RwLock;
 use std::{
     alloc::Layout,
-    ffi::{CStr, c_int, c_void},
+    ffi::{c_int, c_void},
     mem, ptr,
     sync::{LazyLock, Mutex},
 };
@@ -18,7 +18,7 @@ use crate::{
     error::hlp_error,
     gc::{HL_GLOBAL_LOCK, hlp_mark_size},
     hl::{self, *},
-    strings::str_to_uchar_ptr,
+    strings::{str_to_uchar_ptr, uchar_to_string},
     types::{
         hl_is_ptr, hlp_is_dynamic, hlp_pad_struct, hlp_safe_cast, hlp_same_type, hlp_type_size,
     },
@@ -1402,18 +1402,10 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
             hl::hl_type_kind_HOBJ => {
                 let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
                 if f.is_null() || (*f).field_index < 0 {
-                    let name = CStr::from_ptr(
-                        (*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char,
-                    );
-                    let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
-
+                    let name = uchar_to_string((*(*(*d).t).__bindgen_anon_1.obj).name);
+                    let field = uchar_to_string(hlp_field_name(hfield) as *const u16);
                     hlp_error(str_to_uchar_ptr(
-                        format!(
-                            "{}  not have field {}",
-                            name.to_string_lossy(),
-                            field.to_string_lossy()
-                        )
-                        .as_str(),
+                        format!("{name} does not have field {field}").as_str(),
                     ));
                 }
                 *ft = (*f).t;
@@ -1423,17 +1415,10 @@ pub unsafe extern "C" fn hlp_obj_lookup_set(
                 let f = obj_resolve_field((*(*d).t).__bindgen_anon_1.obj, hfield);
 
                 if f.is_null() || (*f).field_index < 0 {
-                    let name = CStr::from_ptr(
-                        (*(*(*d).t).__bindgen_anon_1.obj).name as *const std::ffi::c_char,
-                    );
-                    let field = CStr::from_ptr(hlp_field_name(hfield) as *const std::ffi::c_char);
+                    let name = uchar_to_string((*(*(*d).t).__bindgen_anon_1.obj).name);
+                    let field = uchar_to_string(hlp_field_name(hfield) as *const u16);
                     hlp_error(str_to_uchar_ptr(
-                        format!(
-                            "{}  not have field {}",
-                            name.to_string_lossy(),
-                            field.to_string_lossy()
-                        )
-                        .as_str(),
+                        format!("{name} does not have field {field}").as_str(),
                     ));
                 }
                 *ft = (*f).t;

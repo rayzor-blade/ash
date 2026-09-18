@@ -2191,6 +2191,53 @@ impl HLInterpreter {
         }
     }
 
+    /// Store into a dynamic field through the runtime, under a trap.
+    ///
+    /// The runtime raises through `hlp_error` when the object has no such
+    /// field, and a raise with no trap armed aborts the process; this is the
+    /// same boundary a native call gets, so the raise becomes an interpreter
+    /// exception the program can catch.
+    fn dyn_set_field_checked(
+        &mut self,
+        bytecode: &DecodedBytecode,
+        obj_ptr: *mut c_void,
+        hfield: i32,
+        src_val: NanBoxedValue,
+        src_kind: hl::hl_type_kind,
+        src_type_ptr: *mut c_void,
+    ) -> Result<()> {
+        let stack_depth = self.stack.len();
+        let (setd, setf, seti64, seti, setp) = (
+            self.fn_dyn_setd,
+            self.fn_dyn_setf,
+            self.fn_dyn_seti64,
+            self.fn_dyn_seti,
+            self.fn_dyn_setp,
+        );
+        let jumped = run_with_hl_trap(self.fn_setup_trap_jit, self.fn_remove_trap_jit, || {
+            Self::dyn_set_field_by_hash(
+                obj_ptr,
+                hfield,
+                src_val,
+                src_kind,
+                src_type_ptr,
+                setd,
+                setf,
+                seti64,
+                seti,
+                setp,
+            );
+        });
+        if jumped != 0 {
+            return Err(self.longjmp_error(
+                Some(bytecode),
+                stack_depth,
+                "Runtime longjmp without exception value: dyn_set".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dyn_set_field_by_hash(
         obj_ptr: *mut c_void,
